@@ -3,6 +3,7 @@
 
 use core::error::Error as StdError;
 use core::fmt::{self, Display, Formatter};
+use std::backtrace::Backtrace;
 use std::io;
 
 /// An engine error with the coordinator-facing classification preserved.
@@ -12,6 +13,15 @@ pub struct Error {
     cause: Option<Box<dyn StdError + Send + Sync>>,
     usage: bool,
     skippable: bool,
+
+    /// Captured at construction, unconditionally.
+    ///
+    /// Every path that produces an `Error` funnels through [`Self::new`], so capturing there
+    /// covers both direct construction and every `From` conversion at its true origin, without a
+    /// second capture point to keep in sync. Whether frames are actually recorded is controlled
+    /// the same way the standard library controls it everywhere else, by
+    /// `RUST_BACKTRACE`/`RUST_LIB_BACKTRACE`, so this costs nothing when they are unset.
+    backtrace: Backtrace,
 }
 
 impl Error {
@@ -22,6 +32,7 @@ impl Error {
             cause: None,
             usage: false,
             skippable: false,
+            backtrace: Backtrace::capture(),
         }
     }
 
@@ -53,10 +64,49 @@ impl Error {
         self
     }
 
-    #[must_use]
-    pub fn into_parts(self) -> (String, Option<Box<dyn StdError + Send + Sync>>, bool, bool) {
-        (self.message, self.cause, self.usage, self.skippable)
+    /// Returns the backtrace captured when this error was constructed.
+    pub const fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
     }
+
+    /// Takes this error apart so that a caller can rebuild it as its own type.
+    ///
+    /// The backtrace goes with the rest. A conversion that captured a fresh one would record the
+    /// conversion rather than the failure, which is the one place a backtrace is no use: every
+    /// engine error crossing into the coordinator would point at the same `From` implementation.
+    #[must_use]
+    pub fn into_parts(self) -> Parts {
+        Parts {
+            message: self.message,
+            cause: self.cause,
+            usage: self.usage,
+            skippable: self.skippable,
+            backtrace: self.backtrace,
+        }
+    }
+}
+
+/// Everything an [`Error`] carries, handed over one field at a time.
+///
+/// A struct rather than a tuple because four of the five fields are `String`, `bool`, `bool` and an
+/// `Option` — a shape in which nothing but position says which is which, and in which swapping the
+/// two flags compiles.
+#[derive(Debug)]
+pub struct Parts {
+    /// What was being attempted, in the words the user will read.
+    pub message: String,
+
+    /// The underlying failure, when there was one.
+    pub cause: Option<Box<dyn StdError + Send + Sync>>,
+
+    /// Whether this is something the user typed rather than something that went wrong.
+    pub usage: bool,
+
+    /// Whether the caller may step over this and finish the rest of the job.
+    pub skippable: bool,
+
+    /// Where the error was constructed, captured there rather than here.
+    pub backtrace: Backtrace,
 }
 
 impl Display for Error {
@@ -92,6 +142,9 @@ pub(crate) use error;
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::process::Command;
+
     use super::*;
 
     /// A freshly built error carries the message given to it and starts out neither a usage error
@@ -137,7 +190,7 @@ mod tests {
         assert_eq!(error.source().expect("a cause was attached").to_string(), "disk exploded");
     }
 
-    /// `into_parts` hands back exactly the state built up on the error, in the documented order.
+    /// `into_parts` hands back exactly the state built up on the error.
     #[test]
     fn into_parts_returns_the_built_up_state() {
         let error = Error::new("partial write")
@@ -145,7 +198,13 @@ mod tests {
             .skippable()
             .caused_by(io::Error::other("truncated"));
 
-        let (message, cause, usage, skippable) = error.into_parts();
+        let Parts {
+            message,
+            cause,
+            usage,
+            skippable,
+            backtrace: _backtrace,
+        } = error.into_parts();
 
         assert_eq!(message, "partial write");
         assert_eq!(cause.expect("a cause was attached").to_string(), "truncated");
@@ -173,5 +232,63 @@ mod tests {
         assert_eq!(built.to_string(), "2 of 3");
         assert!(!built.is_usage());
         assert!(!built.is_skippable());
+    }
+
+    /// Every construction path, direct or via a `From` conversion, records real frames when the
+    /// process asks for them.
+    ///
+    /// Run in a child process rather than in this one, because whether a backtrace is captured is
+    /// decided by the environment the process started with and no test may change that for its
+    /// neighbours.
+    /// The parent re-executes the test binary with `RUST_BACKTRACE` and `RUST_LIB_BACKTRACE` set
+    /// and a marker variable that tells the child it is the child; the child then does the
+    /// asserting. The parent checks both its exit status and that the requested test actually ran.
+    ///
+    /// The child demands [`BacktraceStatus::Captured`], which is the whole point of the isolation:
+    /// asserting only "not `Unsupported`" passed just as happily against a `Backtrace::disabled()`,
+    /// because the default environment reports `Disabled` either way. `Unsupported` is still
+    /// accepted, because a platform with no backtrace support is a fact about the host rather than
+    /// a regression in this file — and `Backtrace::disabled()` never reports it, so the mutant this
+    /// test exists to catch is still caught there.
+    #[test]
+    fn every_construction_path_captures_a_backtrace() {
+        use std::backtrace::BacktraceStatus;
+
+        const CHILD: &str = "CARGO_GAMMA_BACKTRACE_CHILD";
+        const TEST: &str = "error::tests::every_construction_path_captures_a_backtrace";
+
+        if env::var_os(CHILD).is_some() {
+            let direct = Error::new("something went wrong");
+            let converted = Error::from(io::Error::other("disk exploded"));
+
+            for error in [&direct, &converted] {
+                let status = error.backtrace().status();
+
+                assert!(
+                    matches!(status, BacktraceStatus::Captured | BacktraceStatus::Unsupported),
+                    "a backtrace was requested but not taken: {status:?}"
+                );
+            }
+
+            return;
+        }
+
+        let executable = env::current_exe().expect("the test executable is known");
+        let output = Command::new(executable)
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .env("RUST_BACKTRACE", "1")
+            .env("RUST_LIB_BACKTRACE", "1")
+            .output()
+            .expect("re-run this test with backtraces enabled");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            output.status.success(),
+            "the isolated run failed: {}\n{stdout}\n{stderr}",
+            output.status
+        );
+        assert!(stdout.contains(TEST), "the exact filter did not run `{TEST}`\n{stdout}\n{stderr}");
     }
 }

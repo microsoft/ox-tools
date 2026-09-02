@@ -24,8 +24,10 @@ crate's dependency graph and must remain dependency-free.
 - Linux cgroups and Windows job objects provide process-tree memory limits.
 - On Linux, terminal interrupts kill both the process group and the cgroup, so
   descendants that create a new session cannot escape cleanup.
-- Cgroup registration borrows the live `Cgroup`; releasing its watch waits for
-  any signal-handler sweep before the owning kill descriptor can be closed.
+- Cgroup registration is owned by the `Cgroup` it watches and discharged by that
+  cgroup's own `Drop`, wherever it has been moved to; the release waits for any
+  signal-handler sweep still using the kill descriptor before the owning file
+  closes it. A safe caller has no way to release it late, twice, or not at all.
 - Linux controller delegation moves only cargo-gamma itself and refuses a
   cgroup shared with any other process.
 - Policy and limit calculation remain in `cargo-gamma-lib`; this crate only
@@ -34,6 +36,12 @@ crate's dependency graph and must remain dependency-free.
   what the host can enforce and applies the requested value.
 - Unsafe blocks are concentrated here, documented, and hidden behind
   invariants that callers can satisfy safely.
+- Fallible platform boundaries return a structured `PlatformError` carrying a
+  `Situation` — unsupported host, refused operation, or interrupted run — and a
+  captured backtrace, so callers classify failures without parsing messages.
+- Windows containment routes each native call through a private wrapper so a
+  test can fail it in isolation; the failure arms are otherwise unreachable on a
+  healthy machine.
 
 ## Portability
 

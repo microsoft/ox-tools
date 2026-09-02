@@ -51,19 +51,27 @@ fn step(directive: &str) -> Option<i32> {
             let _ = std::fs::write(payload, b"");
             None
         }
-        "spawn" => {
-            let executable = if cfg!(target_os = "linux") {
-                std::path::PathBuf::from("/proc/self/exe")
-            } else {
-                std::env::current_exe().expect("the helper knows its own path")
-            };
-            let mut child = std::process::Command::new(executable);
-
-            for inner in payload.split('|') {
-                let _ = child.arg(format!("--gamma-step={inner}"));
+        "wait" => {
+            if payload.is_empty() {
+                return Some(98);
             }
 
-            let _spawned = child.spawn().expect("the helper can start another copy of itself");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !std::path::Path::new(payload).exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Some(98);
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            None
+        }
+        "spawn" => {
+            launch(payload, false);
+            None
+        }
+        "flee" => {
+            launch(payload, true);
             None
         }
         "eat" => {
@@ -86,12 +94,39 @@ fn step(directive: &str) -> Option<i32> {
         _ => Some(97),
     }
 }
+
+fn launch(payload: &str, own_group: bool) {
+    let executable = if cfg!(target_os = "linux") {
+        std::path::PathBuf::from("/proc/self/exe")
+    } else {
+        std::env::current_exe().expect("the helper knows its own path")
+    };
+    let mut child = std::process::Command::new(executable);
+
+    for inner in payload.split('|') {
+        let _ = child.arg(format!("--gamma-step={inner}"));
+    }
+
+    // The escape a process group has no answer to: one unprivileged call and every later signal to
+    // the group misses this process. A cgroup leaf and a job object are not renounceable this way.
+    #[cfg(unix)]
+    if own_group {
+        use std::os::unix::process::CommandExt as _;
+
+        let _ = child.process_group(0);
+    }
+
+    #[cfg(not(unix))]
+    let _ = own_group;
+
+    let _spawned = child.spawn().expect("the helper can start another copy of itself");
+}
 "#;
 
 pub fn helper_binary_path() -> &'static Utf8Path {
     static BUILT: OnceLock<Utf8PathBuf> = OnceLock::new();
 
-    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-2")).as_path()
+    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-5")).as_path()
 }
 
 /// Builds the helper binary under `name`, or reuses one already there.
@@ -159,22 +194,6 @@ pub fn workdir(prefix: &str) -> tempfile::TempDir {
         .expect("the temporary directory should be creatable")
 }
 
-pub fn without_memory_support(what: &str) -> bool {
-    standing_down_for(what, crate::support())
-}
-
-/// The decision behind [`without_memory_support`], taking the support answer rather than asking
-/// for it, so a test can drive both outcomes without depending on what this host actually offers.
-fn standing_down_for(what: &str, support: Result<(), String>) -> bool {
-    match support {
-        Ok(()) => false,
-        Err(reason) => {
-            eprintln!("standing down: {what} - {reason}");
-            true
-        }
-    }
-}
-
 #[cfg(unix)]
 pub const WATCHDOG: Duration = Duration::from_mins(1);
 
@@ -233,20 +252,20 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_wait_path_is_rejected_instead_of_blocking() {
+        let status = Command::new(helper_binary_path().as_std_path())
+            .arg(directive("wait:"))
+            .status()
+            .expect("the helper should run");
+
+        assert_eq!(status.code(), Some(98));
+    }
+
+    #[test]
     fn a_workdir_is_created_under_the_shared_test_work_directory() {
         let dir = workdir("gamma-testing-workdir-check");
 
         assert!(dir.path().is_dir());
-    }
-
-    #[test]
-    fn standing_down_reports_real_support() {
-        assert!(!standing_down_for("a host that supports metering", Ok(())));
-    }
-
-    #[test]
-    fn standing_down_reports_a_lack_of_support() {
-        assert!(standing_down_for("a host that cannot meter", Err("no cgroups here".to_owned())));
     }
 
     #[cfg(unix)]

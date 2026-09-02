@@ -12,6 +12,7 @@ use super::text::{VERB_WIDTH, continuation, quantity};
 use crate::advise::human;
 use crate::commands::Host;
 use crate::model::Outcome;
+use crate::report::{encode_controls, encode_preserving_color};
 
 /// Shortest interval between redraws.
 ///
@@ -30,6 +31,13 @@ const MIN_ETA_SAMPLES: usize = 3;
 const BAR_WIDTH: usize = 25;
 
 /// The live progress display.
+///
+/// Every subject that reaches this type is control-character encoded on the way in, because the
+/// display writes real escape sequences of its own and a terminal cannot distinguish sequences in
+/// a file name from ours. Encoding on entry rather than at each write is what makes the guarantee hold for
+/// the subject a phase holds open across a build and rewrites later: it is stored encoded, so it
+/// cannot be reintroduced raw by whichever path finally paints it. Labels are exempt because this
+/// tool composes them itself; a tool's relayed output is encoded by the policy that keeps colour.
 #[derive(Debug)]
 pub struct Progress {
     enabled: bool,
@@ -143,7 +151,7 @@ impl Progress {
     pub fn status<H: Host>(&mut self, host: &mut H, verb: &str, subject: &str) {
         let label = self.styler.verb(verb);
 
-        self.line(host, &label, subject);
+        self.line(host, &label, &encode_controls(subject));
     }
 
     /// Opens a status line and leaves it open, so that what the phase found can be added to it once
@@ -162,11 +170,12 @@ impl Progress {
 
         let active = self.styler.verb(active);
         let completed = self.styler.verb(completed);
+        let subject = encode_controls(subject).into_owned();
         paint(host, &format!("{active} {subject}"));
 
         self.open = true;
         self.dirty = true;
-        self.pending = Some((active, completed, subject.to_owned()));
+        self.pending = Some((active, completed, subject));
     }
 
     /// Closes the line [`begin`](Self::begin) opened.
@@ -192,6 +201,8 @@ impl Progress {
             return;
         }
 
+        let encoded = encode_controls(subject);
+        let subject = encoded.as_ref();
         let pending = self.pending.take();
 
         if !self.open {
@@ -320,15 +331,15 @@ impl Progress {
             bar.push(' ');
         }
 
-        let line = format!("{active} [{bar}] {completed}/{total} {unit}");
+        let line = format!("{active} [{bar}] {completed}/{total} {}", encode_controls(unit));
 
-        self.borrowed(host, &line);
+        self.draw_borrowed(host, &line);
     }
 
     /// Writes a status line under a caller-supplied label, which must already be styled and
     /// aligned. Used where the label is not a verb, so that one thing is not given two names.
     pub fn labelled<H: Host>(&mut self, host: &mut H, label: &str, subject: &str) {
-        self.line(host, label, subject);
+        self.line(host, label, &encode_controls(subject));
     }
 
     /// Writes a status line under a caller-supplied label, whether or not the display is on.
@@ -339,6 +350,22 @@ impl Progress {
     /// display's terminal heuristic turns itself off in, so routing it through the display would
     /// let a heuristic overrule an explicit request.
     pub fn insist<H: Host>(&mut self, host: &mut H, label: &str, subject: &str) {
+        self.insist_encoded(host, label, &encode_controls(subject));
+    }
+
+    /// Relays one line of another tool's output, keeping the colour it painted itself with.
+    ///
+    /// Separate from [`insist`](Self::insist) because the two carry different text under different
+    /// rules. This tool's own sentences never contain an escape, so an escape in one is an
+    /// injection; a compiler's output legitimately arrives coloured, and reprinting it with the
+    /// colour spelled out as `\e[31m` would make `--show-build` unreadable. Colour is the only
+    /// thing let through: it repaints text and can do nothing else.
+    pub fn relay<H: Host>(&mut self, host: &mut H, label: &str, line: &str) {
+        self.insist_encoded(host, label, &encode_preserving_color(line));
+    }
+
+    /// Writes an already-encoded line under `label`, with or without the display.
+    fn insist_encoded<H: Host>(&mut self, host: &mut H, label: &str, subject: &str) {
         if self.enabled {
             self.line(host, label, subject);
 
@@ -349,6 +376,9 @@ impl Progress {
     }
 
     /// Writes one line above the bar.
+    ///
+    /// The subject must already be encoded: every caller reaching here has applied one of the two
+    /// policies, and encoding again would turn a relayed `\e[31m` into `\\e[31m`.
     fn line<H: Host>(&mut self, host: &mut H, label: &str, subject: &str) {
         if !self.enabled {
             return;
@@ -423,6 +453,29 @@ impl Progress {
     /// coalesces writes within a frame and a visible flash on one that paints each write as it
     /// arrives, which is the difference between how this looked on Unix and on Windows.
     pub fn borrowed<H: Host>(&mut self, host: &mut H, line: &str) {
+        if !self.enabled {
+            return;
+        }
+
+        // The throttle is checked before encoding as well as after, because cargo redraws its bar
+        // far more often than the interval and most calls have nothing to say: encoding a line that
+        // is about to be dropped is work nobody sees.
+        if self
+            .last_draw
+            .is_some_and(|last| Instant::now().duration_since(last) < REDRAW_INTERVAL)
+        {
+            return;
+        }
+
+        self.draw_borrowed(host, &encode_preserving_color(line));
+    }
+
+    /// Draws an already-encoded borrowed line.
+    ///
+    /// Split from [`borrowed`](Self::borrowed) so the phase bar this type composes itself — whose
+    /// only untrusted part, the unit, is encoded where it enters — is not encoded a second time
+    /// and stripped of the styling its own label carries.
+    fn draw_borrowed<H: Host>(&mut self, host: &mut H, line: &str) {
         if !self.enabled {
             return;
         }
@@ -1277,5 +1330,119 @@ mod tests {
         assert!(host.err().is_empty(), "{}", host.err());
         assert!(!host.is_terminal());
         assert_eq!(host.terminal_width(), None);
+    }
+
+    /// Text a repository controls reaches the display beside escape sequences the display wrote,
+    /// and a terminal obeys both alike.
+    ///
+    /// One crafted path, source fragment, or test name would otherwise erase the survivors printed
+    /// above it, redraw them as killed, or hang a hyperlink of its author's choosing on a line the
+    /// reader believes this tool wrote. Every subject-bearing entry point is checked, because the
+    /// guarantee is worth nothing if one of them is left raw.
+    #[test]
+    fn every_subject_entry_point_encodes_terminal_control_sequences() {
+        /// One named entry point and the call that drives it with a hostile subject.
+        type EntryPoint = (&'static str, fn(&mut Progress, &mut Sink));
+
+        const HOSTILE: &str = "src/\r\u{1b}[2K\u{9b}31mforged\u{1b}]8;;https://evil.test\u{7}link\n.rs";
+
+        let entries: Vec<EntryPoint> = vec![
+            ("status", |progress, host| progress.status(host, "Testing", HOSTILE)),
+            ("begin", |progress, host| progress.begin(host, "Testing", "Tested", HOSTILE)),
+            ("end", |progress, host| {
+                progress.begin(host, "Testing", "Tested", "one file");
+                progress.end(host, HOSTILE);
+            }),
+            ("complete", |progress, host| {
+                progress.begin(host, "Testing", "Tested", "one file");
+                progress.complete(host, HOSTILE);
+            }),
+            ("labelled", |progress, host| progress.labelled(host, "  SURVIVED", HOSTILE)),
+            ("insist", |progress, host| progress.insist(host, "   warning", HOSTILE)),
+            ("relay", |progress, host| progress.relay(host, "          ", HOSTILE)),
+            ("borrowed", |progress, host| {
+                expire(progress);
+                progress.borrowed(host, HOSTILE);
+            }),
+            ("phase_progress", |progress, host| {
+                progress.begin(host, "Testing", "Tested", "one file");
+                expire(progress);
+                progress.phase_progress(host, 1, 2, HOSTILE);
+            }),
+        ];
+
+        for (name, steps) in entries {
+            let text = written(steps);
+            // The display's own erase sequence introduces every redraw, so what is checked is that
+            // nothing else in the line can move a cursor, erase a row, or address the terminal.
+            let subject = text.replace("\r\u{1b}[2K", "");
+
+            assert!(!subject.contains('\r'), "{name} relayed a carriage return: {subject:?}");
+            assert!(!subject.contains("\u{1b}["), "{name} relayed a control sequence: {subject:?}");
+            assert!(
+                !subject.contains("\u{1b}]"),
+                "{name} relayed an operating-system command: {subject:?}"
+            );
+            assert!(
+                !subject.contains('\u{9b}'),
+                "{name} relayed a C1 control sequence introducer: {subject:?}"
+            );
+            assert!(!subject.contains('\u{7}'), "{name} relayed a bell: {subject:?}");
+            assert!(
+                subject.matches('\n').count() <= 1,
+                "{name} let a subject forge a second line: {subject:?}"
+            );
+            assert!(subject.contains("\\r\\e[2K"), "{name} did not show what it refused: {subject:?}");
+        }
+    }
+
+    /// A phase whose subject was captured while it was open is still encoded when it is rewritten.
+    ///
+    /// The open line is stored and repainted later — by `restore` after a build borrowed the row,
+    /// and by `abandon` when the phase never finished — so a policy applied only at the first paint
+    /// would leave the stored copy raw and reintroduce it at the second.
+    #[test]
+    fn a_held_open_subject_is_encoded_in_every_later_repaint() {
+        let restored = written(|progress, host| {
+            progress.begin(host, "Building", "Built", "pkg\r\u{1b}[2Kforged");
+            expire(progress);
+            progress.borrowed(host, "cargo bar");
+            progress.restore(host);
+        });
+
+        let abandoned = written(|progress, host| {
+            progress.begin(host, "Building", "Built", "pkg\r\u{1b}[2Kforged");
+            expire(progress);
+            progress.borrowed(host, "cargo bar");
+            progress.abandon(host);
+        });
+
+        for text in [restored, abandoned] {
+            let subject = text.replace("\r\u{1b}[2K", "");
+
+            assert!(!subject.contains('\r'), "{subject:?}");
+            assert!(subject.contains("pkg\\r\\e[2Kforged"), "{subject:?}");
+        }
+    }
+
+    /// Relayed build output keeps its colour, because that is the whole reason it is shown.
+    #[test]
+    fn relayed_tool_output_keeps_colour_and_loses_everything_else() {
+        let text = written(|progress, host| {
+            progress.relay(host, "          ", "\u{1b}[1;31merror\u{1b}[0m: \u{1b}[2Kwiped");
+        });
+
+        assert!(text.contains("\u{1b}[1;31merror\u{1b}[0m"), "{text:?}");
+        assert!(text.contains("\\e[2Kwiped"), "{text:?}");
+    }
+
+    /// This tool's own status lines are unaffected by the policy that protects them.
+    #[test]
+    fn ordinary_subjects_are_rendered_exactly_as_before() {
+        let screen = visible(&written(|progress, host| {
+            progress.status(host, "Testing", "42 mutants in src/lib.rs");
+        }));
+
+        assert_eq!(screen, "     Testing 42 mutants in src/lib.rs\n");
     }
 }

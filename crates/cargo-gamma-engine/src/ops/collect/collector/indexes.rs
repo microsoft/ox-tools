@@ -5,11 +5,13 @@
 
 use syn::visit::{self, Visit};
 use syn::{
-    BinOp, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, File, ImplItemConst, ItemConst, ItemStatic, ItemStruct, ItemUse,
-    Member, Pat, TraitItemConst, Type, UseTree,
+    BinOp, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, File, ImplItem, ImplItemConst, Item, ItemConst, ItemStatic,
+    ItemStruct, ItemUse, Member, Pat, Stmt, TraitItem, TraitItemConst, Type, UseTree,
 };
 
-use super::predicates::{is_int_literal, is_numeric_binding, is_numeric_receiver};
+use super::super::defaults::{impl_item_attrs, item_attrs, trait_item_attrs};
+use super::predicates::{expr_attrs, is_int_literal, is_numeric_binding, is_numeric_receiver, stmt_attrs};
+use crate::cfg::CfgSet;
 use crate::ops::registry::Selection;
 use crate::{HashMap, HashSet};
 
@@ -50,13 +52,6 @@ pub(in crate::ops::collect) struct Indexes {
     pub(super) constants: HashMap<String, bool>,
 }
 
-/// Builds the indexes a selection actually consults, and skips the walk entirely when it consults
-/// none of them.
-///
-/// Three of the four exist only to decide whether an expression is a number, which only the
-/// perturbation family asks; the fourth exists only to recognise a type that has no `Default`,
-/// which only the `fn_value` family asks. A run narrowed to, say, the relational mutators asks
-/// neither, and paying for the answers anyway is the whole of this cost.
 /// Fills whichever indexes were asked for, ignoring scope.
 pub(super) struct Walk {
     indexes: Indexes,
@@ -66,6 +61,16 @@ pub(super) struct Walk {
 
     /// Whether the import paths are wanted.
     imports: bool,
+
+    /// The configuration predicates that hold for the build this file will be part of.
+    ///
+    /// A field, constant, `use`, or numeric use drawn from code the collector will not mutate —
+    /// because a predicate strips it, or because it is test code — would misinform every active
+    /// site that later consults the index it feeds. The gates below therefore ask
+    /// [`CfgSet::skip_gate`], the one question [`Collector::skipped`](super::Collector::skipped)
+    /// asks, at every place this walk can be entered: items, associated items, struct fields,
+    /// statements, and expressions.
+    cfg: CfgSet,
 }
 
 impl Walk {
@@ -167,25 +172,37 @@ impl Walk {
     ///
     /// Exposed with no continuation of its own so the fused phase-one pass (see
     /// `collector::phase_one`) can drive this exact per-node logic from its own single traversal.
+    ///
+    /// The struct itself is assumed already active — every caller reaches this only through the
+    /// `visit_item` gate below, which excludes a struct the selected build strips before its
+    /// fields are ever read. A field can still carry its own `#[cfg(...)]` distinct from the
+    /// struct's, so each field is checked again here: a field the build does not compile must not
+    /// inform the numeric guess for a same-named field elsewhere that the build does compile.
     pub(super) fn on_item_struct(&mut self, node: &ItemStruct) {
-        if self.numeric {
-            for field in &node.fields {
-                let Some(name) = field.ident.as_ref() else {
-                    continue;
-                };
+        if !self.numeric {
+            return;
+        }
 
-                let numeric = is_numeric_binding(&field.ty);
-
-                // Two structs disagreeing about a name means neither answer can be trusted for
-                // a bare `x.count`, so the name is demoted to unknown rather than won by
-                // whichever was seen last.
-                let _known = self
-                    .indexes
-                    .fields
-                    .entry(name.to_string())
-                    .and_modify(|known| *known = *known && numeric)
-                    .or_insert(numeric);
+        for field in &node.fields {
+            if self.cfg.skip_gate(&field.attrs) {
+                continue;
             }
+
+            let Some(name) = field.ident.as_ref() else {
+                continue;
+            };
+
+            let numeric = is_numeric_binding(&field.ty);
+
+            // Two structs disagreeing about a name means neither answer can be trusted for
+            // a bare `x.count`, so the name is demoted to unknown rather than won by
+            // whichever was seen last.
+            let _known = self
+                .indexes
+                .fields
+                .entry(name.to_string())
+                .and_modify(|known| *known = *known && numeric)
+                .or_insert(numeric);
         }
     }
 
@@ -260,34 +277,69 @@ impl Walk {
     reason = "syn names every visitor parameter `i`, which says nothing about what it is"
 )]
 impl<'ast> Visit<'ast> for Walk {
-    fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
-        if self.numeric {
-            for field in &node.fields {
-                let Some(name) = field.ident.as_ref() else {
-                    continue;
-                };
-
-                let numeric = is_numeric_binding(&field.ty);
-
-                // Two structs disagreeing about a name means neither answer can be trusted for
-                // a bare `x.count`, so the name is demoted to unknown rather than won by
-                // whichever was seen last.
-                let _known = self
-                    .indexes
-                    .fields
-                    .entry(name.to_string())
-                    .and_modify(|known| *known = *known && numeric)
-                    .or_insert(numeric);
-            }
+    /// Gates every item this walk might otherwise index by the same decision the collector reads
+    /// before it ever offers a mutant.
+    ///
+    /// [`CfgSet::skip_gate`] rather than [`CfgSet::holds_for`], because the collector excludes test
+    /// code as well as configured-out code, and an index built from a `#[cfg(test)]` helper informs
+    /// guesses about production code the helper is not part of — a field named there can make an
+    /// active `x.count` look numeric on evidence the measured build never compiles.
+    ///
+    /// `visit_item` is the single dispatch point every top-level and nested item passes through —
+    /// including a local item declared inside a function body — so gating here, rather than
+    /// separately in each of `visit_item_struct`, `visit_item_use`, `visit_item_const`, and
+    /// `visit_item_static`, keeps one skipped item from reaching any of them.
+    fn visit_item(&mut self, node: &'ast Item) {
+        if !self.cfg.skip_gate(item_attrs(node)) {
+            visit::visit_item(self, node);
         }
+    }
+
+    /// Gates every associated item inside an `impl` block, for the same reason [`Self::visit_item`]
+    /// gates top-level items.
+    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
+        if !self.cfg.skip_gate(impl_item_attrs(node)) {
+            visit::visit_impl_item(self, node);
+        }
+    }
+
+    /// Gates every associated item inside a `trait` block, for the same reason [`Self::visit_item`]
+    /// gates top-level items.
+    fn visit_trait_item(&mut self, node: &'ast TraitItem) {
+        if !self.cfg.skip_gate(trait_item_attrs(node)) {
+            visit::visit_trait_item(self, node);
+        }
+    }
+
+    /// Gates every statement, which no item visitor above ever sees.
+    ///
+    /// A `#[cfg(windows)] let n: usize = 0;` inside an active function is discarded by the compiler
+    /// on a Unix build, and the collector skips it for that reason — but the numeric evidence it
+    /// carries would otherwise still be indexed, and would then answer for the `n` the build
+    /// actually has. Statements are the level at which conditional compilation is written inside a
+    /// body, so this is where that evidence has to be refused.
+    fn visit_stmt(&mut self, node: &'ast Stmt) {
+        if !self.cfg.skip_gate(stmt_attrs(node)) {
+            visit::visit_stmt(self, node);
+        }
+    }
+
+    /// Gates every expression, covering the positions `rustc` admits an attribute in today and the
+    /// ones it does not admit yet, exactly as the collector's own `visit_expr` does.
+    fn visit_expr(&mut self, node: &'ast Expr) {
+        if !self.cfg.skip_gate(expr_attrs(node)) {
+            visit::visit_expr(self, node);
+        }
+    }
+
+    fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
+        self.on_item_struct(node);
 
         visit::visit_item_struct(self, node);
     }
 
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
-        if self.imports {
-            self.descend(&mut Vec::new(), &node.tree);
-        }
+        self.on_item_use(node);
 
         visit::visit_item_use(self, node);
     }
@@ -379,8 +431,21 @@ impl<'ast> Visit<'ast> for Walk {
     }
 }
 
-pub(super) fn indexes(file: &File, selection: &Selection) -> Indexes {
-    let mut walk = Walk::new(selection);
+/// Builds the indexes a selection actually consults under a build's active configuration, and
+/// skips the walk entirely when the selection consults none of them.
+///
+/// Three of the four exist only to decide whether an expression is a number, which only the
+/// perturbation family asks; the fourth exists only to recognise a type that has no `Default`,
+/// which only the `fn_value` family asks. A run narrowed to, say, the relational mutators asks
+/// neither, and paying for the answers anyway is the whole of this cost.
+///
+/// `cfg` decides which conditionally compiled code the walk is even allowed to learn from: a
+/// field, constant, `use`, or numeric use the selected build strips must not inform the guesses
+/// made about code the build keeps, any more than the collector would offer a mutant there. Pass
+/// [`CfgSet::unconditional`] where the build's configuration is not known, matching every other
+/// unconditional entry point in this module.
+pub(super) fn indexes_in(file: &File, selection: &Selection, cfg: &CfgSet) -> Indexes {
+    let mut walk = Walk::new(selection, cfg);
 
     if !walk.numeric && !walk.imports {
         return walk.indexes;
@@ -391,12 +456,12 @@ pub(super) fn indexes(file: &File, selection: &Selection) -> Indexes {
 }
 
 impl Walk {
-    /// Builds an empty index set, gated exactly as [`indexes`] gates its own walk.
+    /// Builds an empty index set, gated exactly as [`indexes_in`] gates its own walk.
     ///
     /// Exposed so the fused phase-one pass (`collector::phase_one`) can build the same starting
-    /// state `indexes` would, drive it through one combined traversal instead of `indexes`'s own,
-    /// and read the result back out with [`Walk::into_indexes`].
-    pub(super) fn new(selection: &Selection) -> Self {
+    /// state `indexes_in` would, drive it through one combined traversal instead of
+    /// `indexes_in`'s own, and read the result back out with [`Walk::into_indexes`].
+    pub(super) fn new(selection: &Selection, cfg: &CfgSet) -> Self {
         Self {
             indexes: Indexes {
                 fields: HashMap::default(),
@@ -411,6 +476,7 @@ impl Walk {
             // write could be built at all. Missing the second cost five mutants when this gate was
             // first written, which is what a gate on an index has to be checked against.
             imports: selection.any_in_family("fn_value") || selection.contains("result.ok_to_err"),
+            cfg: cfg.clone(),
         }
     }
 
@@ -434,6 +500,7 @@ mod tests {
             },
             numeric,
             imports,
+            cfg: CfgSet::unconditional(),
         }
     }
 
@@ -491,11 +558,135 @@ mod tests {
         )
         .expect("the file parses");
         let selection = Selection::parse("expr.increment").expect("the numeric selector resolves");
-        let indexes = indexes(&file, &selection);
+        let indexes = indexes_in(&file, &selection, &CfgSet::unconditional());
 
         assert_eq!(indexes.constants.get("STATIC_LIMIT"), Some(&true));
         assert_eq!(indexes.constants.get("TRAIT_LIMIT"), Some(&true));
         assert!(indexes.fields.is_empty());
         assert!(indexes.numeric_uses.names.contains("limit"));
+    }
+
+    /// A field or a constant behind a predicate the active build does not satisfy must not
+    /// inform the numeric guess for an active same-named field or constant elsewhere in the file.
+    ///
+    /// The set has to be an enforced one: [`CfgSet::unconditional`] answers every predicate `true`
+    /// by construction, so nothing is stripped under it and the fixture would prove nothing.
+    #[test]
+    fn inactive_fields_and_constants_do_not_pollute_the_index() {
+        let file = syn::parse_file(
+            r#"
+            struct Active {
+                count: u32,
+            }
+
+            struct Inactive {
+                #[cfg(windows)]
+                count: String,
+            }
+
+            #[cfg(windows)]
+            const COUNT: &str = "not built";
+
+            const COUNT: u32 = 1;
+            "#,
+        )
+        .expect("the file parses");
+        let selection = Selection::parse("expr.increment").expect("the numeric selector resolves");
+        let indexes = indexes_in(&file, &selection, &CfgSet::parse("unix\n"));
+
+        assert_eq!(indexes.fields.get("count"), Some(&true));
+        assert_eq!(indexes.constants.get("COUNT"), Some(&true));
+    }
+
+    /// A misplaced or malformed item nested inside an inactive module must not reach this index
+    /// at all — the module itself never compiles, so nothing inside it should be able to shadow
+    /// or demote evidence the active build actually relies on.
+    #[test]
+    fn items_nested_in_an_inactive_module_are_not_indexed() {
+        let file = syn::parse_file(
+            r#"
+            #[cfg(windows)]
+            mod inactive {
+                struct S {
+                    count: String,
+                }
+
+                const COUNT: &str = "not built";
+            }
+
+            struct S {
+                count: u32,
+            }
+
+            const COUNT: u32 = 1;
+            "#,
+        )
+        .expect("the file parses");
+        let selection = Selection::parse("expr.increment").expect("the numeric selector resolves");
+        let indexes = indexes_in(&file, &selection, &CfgSet::parse("unix\n"));
+
+        assert_eq!(indexes.fields.get("count"), Some(&true));
+        assert_eq!(indexes.constants.get("COUNT"), Some(&true));
+    }
+
+    /// The collector never offers a mutant in test code, so evidence drawn from test code answers
+    /// questions about production code it is not part of. The gate is [`CfgSet::skip_gate`], not
+    /// [`CfgSet::holds_for`], for exactly this: a `#[cfg(test)]` predicate *holds* for the
+    /// instrumented build, and reading `holds_for` alone let the helper below demote the active
+    /// `count` and `COUNT` to unknown.
+    ///
+    /// Unlike the two fixtures above this needs no enforced set, because the test gate is decided
+    /// without consulting whether predicates are enforced at all.
+    #[test]
+    fn test_gated_fields_and_constants_do_not_pollute_the_index() {
+        let file = syn::parse_file(
+            r#"
+            struct Active {
+                count: u32,
+            }
+
+            #[cfg(test)]
+            mod tests {
+                struct Helper {
+                    count: String,
+                }
+
+                const COUNT: &str = "fixture";
+            }
+
+            const COUNT: u32 = 1;
+            "#,
+        )
+        .expect("the file parses");
+        let selection = Selection::parse("expr.increment").expect("the numeric selector resolves");
+        let indexes = indexes_in(&file, &selection, &CfgSet::unconditional());
+
+        assert_eq!(indexes.fields.get("count"), Some(&true));
+        assert_eq!(indexes.constants.get("COUNT"), Some(&true));
+    }
+
+    /// Conditional compilation inside a body is written on statements, which no item visitor ever
+    /// sees. An inactive `let` says nothing about the binding the build actually has, and a
+    /// numeric use inside an inactive statement is evidence about code that is not there.
+    #[test]
+    fn statements_the_build_discards_are_not_indexed() {
+        let file = syn::parse_file(
+            r"
+            fn f(limit: usize) {
+                #[cfg(windows)]
+                let _ = 1 < only_on_windows;
+
+                let _ = limit;
+            }
+            ",
+        )
+        .expect("the file parses");
+        let selection = Selection::parse("expr.increment").expect("the numeric selector resolves");
+        let indexes = indexes_in(&file, &selection, &CfgSet::parse("unix\n"));
+
+        assert!(
+            !indexes.numeric_uses.names.contains("only_on_windows"),
+            "a discarded statement must not leave numeric evidence behind"
+        );
     }
 }

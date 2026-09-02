@@ -492,6 +492,44 @@ struct Entry {
     elapsed_ms: u64,
 }
 
+/// Every recorded verdict in a [`RunRecord`], in file order and then in record order.
+///
+/// Returned by [`RunRecord::iter`], and by `IntoIterator` on `&RunRecord`. Named rather than
+/// returned as `impl Iterator` so that `&RunRecord` can name it as its `IntoIter`, which is what
+/// lets a `for` loop over a record work.
+#[derive(Debug, Clone)]
+pub struct Entries<'a> {
+    files: core::slice::Iter<'a, RecordedFile>,
+
+    /// The file currently being drained, absent before the first file is reached.
+    mutants: Option<core::slice::Iter<'a, Entry>>,
+}
+
+impl<'a> Iterator for Entries<'a> {
+    type Item = (&'a str, Outcome);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(mutants) = self.mutants.as_mut()
+                && let Some(entry) = mutants.next()
+            {
+                return Some((entry.id.as_str(), entry.outcome));
+            }
+
+            self.mutants = Some(self.files.next()?.mutants.iter());
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a RunRecord {
+    type Item = (&'a str, Outcome);
+    type IntoIter = Entries<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// Whether an outcome is safe to reuse without executing the mutant.
 ///
 /// Test outcomes are observations, not proof that the suite is deterministic. Recording only
@@ -554,15 +592,21 @@ impl RunRecord {
 
     /// Every verdict the record holds, paired with the mutant it belongs to.
     ///
+    /// Named `iter` rather than for what it yields, because that is the spelling a caller looks
+    /// for first: this is the record's one iteration entry point, and a domain noun would hide it.
+    /// `&RunRecord` implements [`IntoIterator`] over the same items, so a `for` loop reaches them
+    /// without naming a method at all.
+    ///
     /// Offered without any invalidation of its own, because the callers are the tiers that need
     /// none: the artifact promotion, which admits only what cannot move a score, and the build
     /// order. Anything that *believes* a verdict goes through [`Self::settled`] instead, which
     /// applies both the source digest and the tier's context terms.
-    pub fn entries(&self) -> impl Iterator<Item = (&str, Outcome)> {
-        self.files
-            .iter()
-            .flat_map(|file| file.mutants.iter())
-            .map(|entry| (entry.id.as_str(), entry.outcome))
+    #[must_use]
+    pub fn iter(&self) -> Entries<'_> {
+        Entries {
+            files: self.files.iter(),
+            mutants: None,
+        }
     }
 
     /// Whether this record holds anything that the [`Tier::Unviability`] rules govern.
@@ -587,7 +631,7 @@ impl RunRecord {
     #[must_use]
     pub fn ordering(&self) -> Vec<&str> {
         let mut ids: Vec<&str> = self
-            .entries()
+            .iter()
             .filter(|(_id, outcome)| *outcome == Outcome::CompileError)
             .map(|(id, _outcome)| id)
             .collect();

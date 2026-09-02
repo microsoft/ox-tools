@@ -14,8 +14,11 @@
 //!
 //! [`Report`]: crate::verdict::Report
 
+mod diagnostics;
 pub(crate) mod markdown;
 pub(crate) mod text;
+
+pub(crate) use diagnostics::{MAX_DIAGNOSTIC_LINES, diagnostic_line_count, failure_detail, format_line_ranges};
 
 use crate::threshold::ThresholdSource;
 use crate::verdict::{PackageOutcome, Status};
@@ -171,6 +174,7 @@ mod tests {
             },
             totals: LineTotals { count, covered },
             status: Status::Ok,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -183,6 +187,7 @@ mod tests {
             },
             totals: LineTotals { count, covered },
             status,
+            diagnostics: Vec::new(),
         }
     }
 

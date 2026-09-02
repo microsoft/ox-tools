@@ -33,6 +33,12 @@ pub struct Candidate {
     /// candidates, so one allocation per scope and a pointer per candidate is the whole difference.
     pub item_path: Arc<str>,
 
+    /// Terminal name of the enclosing implemented trait, if any.
+    ///
+    /// Kept separately from `item_path` so project policy can select trait implementations without
+    /// parsing a human-readable identity or caring how the trait path was qualified.
+    pub trait_impl: Option<Arc<str>>,
+
     /// How the site must be guarded.
     pub shape: Shape,
 }

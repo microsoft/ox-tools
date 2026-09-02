@@ -33,6 +33,8 @@
 # only through *other* members (e.g. concurrent-queue), and run
 # single-threaded (loom drives its own scheduling). --release per the
 # loom docs: permutation exploration is wall-clock dominated by the SUT.
+# Anvil does not impose a global exploration bound: each model owns its
+# topology and must remain tractable under exhaustive exploration.
 #
 # Fail-loud guard: a crate that *declares* loom support -- a `loom`
 # feature or a `cfg(loom)`-gated dependency -- but exposes no
@@ -55,7 +57,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
         Write-Host 'anvil-loom: no affected packages; skipping'
         exit 0
     }
-    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    $meta = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1 | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # Optional impact-scoping: recover bare package names from the
@@ -108,7 +110,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $env:RUSTFLAGS = "--cfg loom $($env:RUSTFLAGS)".Trim()
     foreach ($lt in $loomTargets) {
         Write-Host "anvil-loom: $($lt.pkg) :: $($lt.target)"
-        & cargo test -p $lt.pkg --release --all-features --locked --test $lt.target -- --test-threads=1
+        & cargo {{_anvil_stable_toolchain_args}} test -p $lt.pkg --release --all-features --locked --test $lt.target -- --test-threads=1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
@@ -118,7 +120,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
-anvil-loom-setup installer="install": anvil-tool-rustc-validate-prereqs
+anvil-loom-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]

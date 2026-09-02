@@ -47,6 +47,14 @@ const DUPLICATED: &str = "an item may state one value; two would leave which of 
 const BODILESS: &str = "`#[gamma::value(...)]` replaces the body of the function it is written on, and a declaration has none; \
                         a trait method's implementations do not inherit it";
 
+/// What to say about a stated value on a `const fn`.
+const CONSTANT: &str = "`#[gamma::value(...)]` states what a mutant substitutes, and a mutant is spliced in behind a run-time guard \
+                        call that no `const fn` body may make; this value would replace nothing";
+
+/// What to say about a stated value on a function whose body is empty.
+const EMPTY: &str = "`#[gamma::value(...)]` states what a mutant substitutes, and an empty body already evaluates to `()`; \
+                     substituting this value would be the identical program, which no test could detect";
+
 /// Returns the byte range of the expression an item's attributes state, if they state one.
 ///
 /// A range rather than the tokens, because what the mutant substitutes is the text the user wrote:
@@ -75,11 +83,12 @@ pub(super) fn stated_range(attrs: &[Attribute]) -> Option<Range<usize>> {
 /// # Errors
 ///
 /// Returns an error if a stated value is malformed, duplicated, written on something that is not a
-/// function, or written on a function with no body to replace. The proc macro rejects all four at
-/// compile time, so a crate that builds cannot reach them — but this tool reads source rather than
-/// build output, and `gamma list mutants` runs against trees that have never been compiled.
-/// Ignoring one there would leave a hint that reads as if it works and does nothing, which is the
-/// failure mode the whole channel exists to avoid.
+/// function, written on a function with no body to replace, or written on a function collection
+/// never reads a value from — a `const fn`, or one whose body is empty. The proc macro rejects all
+/// of them at compile time, so a crate that builds cannot reach them — but this tool reads source
+/// rather than build output, and `gamma list mutants` runs against trees that have never been
+/// compiled. Ignoring one there would leave a hint that reads as if it works and does nothing,
+/// which is the failure mode the whole channel exists to avoid.
 ///
 /// Fatal rather than a warning, for the same reason a suppression naming no mutator is: the run
 /// that swallows it reports a score computed from a population the author did not ask for.
@@ -138,7 +147,16 @@ pub(super) struct Audit {
 
 impl Audit {
     /// Records what an item's own attributes get wrong, and which of them a function claimed.
-    fn item(&mut self, attrs: &[Attribute]) {
+    ///
+    /// `inert` is what to say when the function is one collection never reads a stated value from
+    /// at all — a `const fn`, or a function whose body is empty. Both return before `stated_range`
+    /// is consulted, so an attribute there produces no mutant and reads as if it does; naming the
+    /// reason is what turns that silence into a diagnostic.
+    ///
+    /// A malformed argument list is reported ahead of an inert position, because it is the more
+    /// specific mistake: an author who wrote `#[gamma::value(1 +)]` on a `const fn` has two things
+    /// to fix, and the expression is the one they can see is wrong.
+    fn item(&mut self, attrs: &[Attribute], inert: Option<&'static str>) {
         let stated: Vec<&Attribute> = attrs.iter().filter(|attribute| is_stated_value(attribute)).collect();
 
         if let Some(second) = stated.get(1) {
@@ -152,6 +170,8 @@ impl Audit {
 
             if malformed {
                 self.faults.push((attribute.span().byte_range(), MALFORMED.to_owned()));
+            } else if let Some(message) = inert {
+                self.faults.push((attribute.span().byte_range(), message.to_owned()));
             }
         }
     }
@@ -165,12 +185,12 @@ impl Audit {
 
     /// The local update `visit_item_fn` makes, without its recursive continuation.
     pub(super) fn on_item_fn(&mut self, node: &ItemFn) {
-        self.item(&node.attrs);
+        self.item(&node.attrs, inert_reason(node.sig.constness.is_some(), node.block.stmts.is_empty()));
     }
 
     /// The local update `visit_impl_item_fn` makes, without its recursive continuation.
     pub(super) fn on_impl_item_fn(&mut self, node: &ImplItemFn) {
-        self.item(&node.attrs);
+        self.item(&node.attrs, inert_reason(node.sig.constness.is_some(), node.block.stmts.is_empty()));
     }
 
     /// The local update `visit_trait_item_fn` makes, without its recursive continuation.
@@ -178,14 +198,33 @@ impl Audit {
         // A declaration has no body to replace, and a stated value is not inherited by the
         // implementations any more than it is inherited from an `impl` block. Left unreported, it
         // would read as a hint that works and generate nothing anywhere.
-        if node.default.is_none() {
+        let Some(default) = node.default.as_ref() else {
             for attribute in node.attrs.iter().filter(|attribute| is_stated_value(attribute)) {
                 self.faults.push((attribute.span().byte_range(), BODILESS.to_owned()));
                 let _claimed = self.on_functions.insert(attribute.span().byte_range().start);
             }
-        } else {
-            self.item(&node.attrs);
-        }
+
+            return;
+        };
+
+        self.item(&node.attrs, inert_reason(node.sig.constness.is_some(), default.stmts.is_empty()));
+    }
+}
+
+/// Returns why a function collection reaches would still never read a stated value from, if it is
+/// one of those.
+///
+/// The two conditions are exactly the early returns collection makes before it consults an item's
+/// stated value, kept as one function so the three function grammars cannot drift apart on which
+/// of them counts. `const` is checked first because a `const fn` with an empty body is inert for
+/// both reasons, and the const one is the one the author must resolve to get a mutant at all.
+const fn inert_reason(constant: bool, empty: bool) -> Option<&'static str> {
+    if constant {
+        Some(CONSTANT)
+    } else if empty {
+        Some(EMPTY)
+    } else {
+        None
     }
 }
 
@@ -395,6 +434,78 @@ mod tests {
 
         assert!(rejected.contains("test.rs:2: "), "{rejected}");
         assert!(rejected.contains("a declaration has none"), "{rejected}");
+    }
+
+    /// A `const fn` body is a const context throughout, and the guard a mutant is spliced in behind
+    /// is a run-time call. Collection returns before it reads the stated value there, so silence
+    /// would leave a hint that reads as working and produces no mutant anywhere.
+    #[test]
+    fn a_value_stated_on_a_const_function_is_reported() {
+        let sources = [
+            "#[gamma::value(0)]\nconst fn f() -> u32 { 1 }",
+            "struct S;\nimpl S {\n#[gamma::value(0)]\nconst fn f(&self) -> u32 { 1 }\n}",
+            "trait T {\n#[gamma::value(0)]\nconst fn f(&self) -> u32 { 1 }\n}",
+        ];
+
+        for source in sources {
+            let rejected = check(&file(source)).expect_err("a const function can carry no mutant").to_string();
+
+            assert!(rejected.contains("no `const fn` body may make"), "`{source}`: {rejected}");
+        }
+    }
+
+    /// An empty body already evaluates to `()`, so a mutant substituting a value for it would be
+    /// the identical program. Collection skips the site for that reason, which makes an attribute
+    /// there another hint that produces nothing.
+    #[test]
+    fn a_value_stated_on_an_empty_bodied_function_is_reported() {
+        let sources = [
+            "#[gamma::value(())]\nfn f() {}",
+            "struct S;\nimpl S {\n#[gamma::value(())]\nfn f(&self) {}\n}",
+            "trait T {\n#[gamma::value(())]\nfn f(&self) {}\n}",
+        ];
+
+        for source in sources {
+            let rejected = check(&file(source)).expect_err("an empty body has nothing to replace").to_string();
+
+            assert!(rejected.contains("already evaluates to `()`"), "`{source}`: {rejected}");
+        }
+    }
+
+    /// A `const fn` with an empty body is inert twice over, and the const reason is the one
+    /// reported: making the function non-`const` is what an author has to do before a mutant is
+    /// possible at all, and only then does the empty body become the remaining problem.
+    #[test]
+    fn a_doubly_inert_function_reports_the_const_reason() {
+        let rejected = rejection("#[gamma::value(())]\nconst fn f() {}");
+
+        assert!(rejected.contains("no `const fn` body may make"), "{rejected}");
+    }
+
+    /// A malformed expression is reported ahead of the inert position it sits on, because it is
+    /// the mistake the author can see — and reporting both would be two diagnostics for one
+    /// attribute.
+    #[test]
+    fn a_malformed_value_on_an_inert_function_reports_the_expression() {
+        let rejected = rejection("#[gamma::value(1 +)]\nconst fn f() -> u32 { 1 }");
+
+        assert!(rejected.contains("states one value"), "{rejected}");
+        assert!(!rejected.contains("no `const fn` body may make"), "{rejected}");
+    }
+
+    /// Neither rule reaches past the function it is about: a `const` *item* inside an ordinary
+    /// body, and an ordinary function whose body is a single expression, both still state values.
+    #[test]
+    fn a_function_that_can_carry_a_mutant_is_still_accepted() {
+        let sources = [
+            "#[gamma::value(0)]\nfn f() -> u32 { const N: u32 = 1; N }",
+            "#[gamma::value(0)]\nasync fn f() -> u32 { 1 }",
+            "struct S;\nimpl S {\n#[gamma::value(0)]\nfn f(&self) -> u32 { 1 }\n}",
+        ];
+
+        for source in sources {
+            check(&file(source)).unwrap_or_else(|error| panic!("`{source}` can carry a mutant: {error}"));
+        }
     }
 
     /// A nested function states its own value, at its own site, and is not the enclosing function

@@ -41,6 +41,15 @@ pub enum RegionPlacement {
     Start,
     /// Place the region after user content.
     End,
+    /// Insert a *new* region at this byte offset. An existing region is still
+    /// updated where it is found, so this only decides where an absent one
+    /// lands.
+    ///
+    /// Needed by hosts whose region order is semantic: appending a newly added
+    /// region at end-of-file would put it after regions it must precede, which
+    /// for a Dockerfile means `FROM` below the layers that depend on it. The
+    /// caller knows the declared order, so it computes the offset.
+    At(usize),
 }
 
 impl CommentSyntax {
@@ -205,6 +214,47 @@ pub fn upsert_region_with_placement(
 
     if placement == RegionPlacement::Start {
         return Ok(prepend_region(text, &rendered));
+    }
+
+    if let RegionPlacement::At(offset) = placement {
+        // Snap to a line boundary only when the offset is not already on one.
+        // Callers point at the start of the line the region should displace
+        // (typically a preceding region's `end_line.end`); advancing
+        // unconditionally would skip that line, landing the region after the
+        // first line of the repository's gap content and splitting it. An
+        // offset that does fall mid-line is rounded forward, because splitting
+        // a line around the sentinels turns one valid instruction into two
+        // invalid halves.
+        //
+        // Everything below indexes the bytes rather than the `str`, because a
+        // caller's offset need not fall on a character boundary and slicing a
+        // `str` at one panics. A `'\n'` byte never occurs inside a multi-byte
+        // character, so rounding forward to just past one always lands on a
+        // character boundary as well as a line boundary, and a mid-character
+        // offset is mid-line by definition and therefore always rounded.
+        let offset = offset.min(text.len());
+        let bytes = text.as_bytes();
+        let on_line_boundary = offset == 0 || bytes[offset - 1] == b'\n';
+        let offset = if on_line_boundary {
+            offset
+        } else {
+            bytes[offset..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(text.len(), |index| offset + index + 1)
+        };
+        let (before, after) = text.split_at(offset);
+        let mut out = String::with_capacity(text.len() + rendered.len() + 2);
+        out.push_str(before);
+        if !before.is_empty() && !before.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str(&rendered);
+        if !after.is_empty() && !after.starts_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(after);
+        return Ok(out);
     }
 
     // No region present — append at the end with one blank line of separation
@@ -445,6 +495,91 @@ mod tests {
     fn upsert_into_empty_file() {
         let new = upsert_region("", "x", "body\n", SYN).unwrap();
         assert_eq!(new, "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
+    }
+
+    /// `At` exists for hosts whose region order is semantic: a region added in a
+    /// later release has to land at its declared position, not at end-of-file.
+    /// The offset the caller computes points at the end of the preceding
+    /// region's sentinel, so the split must fall on the following line boundary.
+    #[test]
+    fn at_placement_on_a_line_boundary_does_not_skip_the_following_line() {
+        // The offset callers actually pass is a line start -- a preceding
+        // region's `end_line.end`. Advancing past the next newline would put
+        // the region after the first line of the gap and split it in two.
+        let host = "# >>> anvil-managed: a\nbody\n# <<< anvil-managed: a\n# my gap line\nRUN later\n";
+        let offset = host.find("# my gap line").unwrap();
+        let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(offset)).unwrap();
+        assert_eq!(
+            new,
+            "# >>> anvil-managed: a\nbody\n# <<< anvil-managed: a\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\n# my gap line\nRUN later\n",
+            "the region belongs above the gap content, not inside it"
+        );
+    }
+
+    #[test]
+    fn at_placement_inserts_after_the_line_containing_the_offset() {
+        let host = "# syntax=docker/dockerfile:1\nFROM base\n";
+        // Offset lands mid-way through line 1; the region must go *after* that
+        // whole line, never inside it.
+        let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(5)).unwrap();
+        assert_eq!(
+            new,
+            "# syntax=docker/dockerfile:1\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nFROM base\n"
+        );
+    }
+
+    #[test]
+    fn at_placement_inside_a_multi_byte_character_rounds_to_the_next_line() {
+        // Nothing in the type says a caller's byte offset falls on a character
+        // boundary, and splitting a `str` at one that does not panics. An
+        // offset inside a character is mid-line by definition, so it rounds
+        // forward to the next line just as any other mid-line offset does.
+        let host = "# rünlevel note\nFROM base\n";
+        let inside = host.find('ü').unwrap() + 1;
+        assert!(!host.is_char_boundary(inside), "the fixture must place the offset mid-character");
+        let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(inside)).unwrap();
+        assert_eq!(
+            new,
+            "# rünlevel note\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nFROM base\n"
+        );
+    }
+
+    #[test]
+    fn at_placement_into_empty_text_adds_no_leading_blank() {
+        let new = upsert_region_with_placement("", "x", "body\n", SYN, RegionPlacement::At(0)).unwrap();
+        assert_eq!(new, "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
+    }
+
+    #[test]
+    fn at_placement_does_not_double_the_separating_blank_line() {
+        // Preceding content already ends with a blank line, so no second one.
+        let host = "FROM base\n\nRUN later\n";
+        let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(10)).unwrap();
+        assert_eq!(
+            new,
+            "FROM base\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nRUN later\n"
+        );
+    }
+
+    #[test]
+    fn at_placement_separates_the_region_from_the_content_that_follows() {
+        // The tail does not start with a newline, so one is inserted -- without
+        // it the closing sentinel and the next instruction would share a line.
+        let host = "FROM base\nRUN later\n";
+        let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(0)).unwrap();
+        assert_eq!(
+            new,
+            "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nFROM base\nRUN later\n"
+        );
+    }
+
+    #[test]
+    fn at_placement_updates_an_existing_region_where_it_already_is() {
+        // The offset only decides where an *absent* region lands. One already
+        // present is replaced in place, so a stale offset cannot move it.
+        let host = "FROM base\n# >>> anvil-managed: x\nold\n# <<< anvil-managed: x\nRUN later\n";
+        let new = upsert_region_with_placement(host, "x", "new\n", SYN, RegionPlacement::At(0)).unwrap();
+        assert_eq!(new, "FROM base\n# >>> anvil-managed: x\nnew\n# <<< anvil-managed: x\nRUN later\n");
     }
 
     #[test]

@@ -137,7 +137,7 @@ mod tests {
 
     use super::*;
 
-    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-runtime-analysis", "pr-mutants"];
+    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-mutants"];
     const SCHEDULED_GROUPS: &[&str] = &[
         "scheduled-test",
         "scheduled-advisories",
@@ -165,6 +165,24 @@ mod tests {
     fn setup_action_takes_group_input_and_dispatches() {
         assert!(SETUP_ACTION.contains("group:"));
         assert!(SETUP_ACTION.contains("just anvil-setup binstall"));
+        assert!(!SETUP_ACTION.contains("_anvil-resolve-stable"));
+        assert!(!SETUP_ACTION.contains("just anvil-toolchain-stable-install"));
+        assert!(!SETUP_ACTION.contains("rustc-version"));
+        assert!(!SETUP_ACTION.contains("hashFiles('Cargo.toml'"));
+        assert!(!SETUP_ACTION.contains("'Cargo.lock'"));
+        assert!(SETUP_ACTION.contains("'rust-toolchain.toml'"));
+        let cache_restore = SETUP_ACTION
+            .find("name: Restore cargo cache")
+            .expect("setup must restore Cargo home");
+        let just_bootstrap = SETUP_ACTION.find("name: Install just").expect("setup must bootstrap Just");
+        let catalog_setup = SETUP_ACTION
+            .find("name: Install anvil toolchains + tools")
+            .expect("setup must dispatch catalog setup");
+        assert!(
+            cache_restore < just_bootstrap,
+            "Cargo home must be restored before Just is bootstrapped"
+        );
+        assert!(just_bootstrap < catalog_setup, "Just must be bootstrapped before catalog setup");
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
@@ -189,8 +207,28 @@ mod tests {
         assert!(RUN_GROUP_ACTION.contains("group: ${{ inputs.group }}"));
         assert!(RUN_GROUP_ACTION.contains("free-disk-space: ${{ inputs.free-disk-space }}"));
         assert!(RUN_GROUP_ACTION.contains("status=${PIPESTATUS[0]}"));
-        assert!(RUN_GROUP_ACTION.contains("Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"));
-        assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-report-status"));
+        assert!(RUN_GROUP_ACTION.contains("exit \"$status\""));
+        assert!(
+            !RUN_GROUP_ACTION.contains("Failed Just recipe:"),
+            "failure propagation must stay in the step containing the recipe output"
+        );
+        let reporter = RUN_GROUP_ACTION
+            .split_once("- name: Publish supplemental Anvil commit status")
+            .expect("run-group action should contain the supplemental reporter step")
+            .1;
+        assert!(
+            reporter.contains("if: always()"),
+            "reporting must run after the authoritative recipe step fails"
+        );
+        assert!(reporter.contains("uses: ./.github/actions/anvil-report-status"));
+        assert!(
+            reporter.contains("exit_code: ${{ steps.run.outputs.exit_code }}"),
+            "the reporter must consume the exit code recorded before failure propagation"
+        );
+        assert!(
+            reporter.contains("failed_recipe: ${{ steps.run.outputs.failed_recipe }}"),
+            "the reporter must consume the recipe recorded before failure propagation"
+        );
         // Impact reaches scoped checks through the downloaded impact cache
         // (read via `_anvil-impact-include`), not threaded --package env vars;
         // the executor only fixes the mode.
@@ -285,7 +323,7 @@ export -f just
 
         assert!(
             status.success(),
-            "the capture script must defer group failure to the named action step"
+            "a successful group must return success after exporting its result"
         );
         assert!(outputs.contains("failed_recipe=anvil-pr-fast"));
         assert!(outputs.contains("exit_code=0"));
@@ -297,10 +335,7 @@ export -f just
         let diagnostic = "error: recipe `anvil-license-headers` failed with exit code 17";
         let (status, outputs) = run_group_step(diagnostic, 17);
 
-        assert!(
-            status.success(),
-            "the capture script must defer group failure to the named action step"
-        );
+        assert_eq!(status.code(), Some(17), "the recipe-running step must return Just's status");
         assert!(outputs.contains("failed_recipe=anvil-license-headers"));
         assert!(outputs.contains("exit_code=17"));
     }
@@ -311,10 +346,7 @@ export -f just
         let diagnostic = "error: recipe `anvil-license-headers` failed on line 42 with exit code 17";
         let (status, outputs) = run_group_step(diagnostic, 17);
 
-        assert!(
-            status.success(),
-            "the capture script must defer group failure to the named action step"
-        );
+        assert_eq!(status.code(), Some(17), "the recipe-running step must return Just's status");
         assert!(outputs.contains("failed_recipe=anvil-license-headers"));
         assert!(outputs.contains("exit_code=17"));
     }
@@ -324,10 +356,7 @@ export -f just
     fn run_group_step_falls_back_to_group_without_terminal_diagnostic() {
         let (status, outputs) = run_group_step("unexpected tool failure", 9);
 
-        assert!(
-            status.success(),
-            "the capture script must defer group failure to the named action step"
-        );
+        assert_eq!(status.code(), Some(9), "the recipe-running step must return Just's status");
         assert!(outputs.contains("failed_recipe=anvil-pr-fast"));
         assert!(outputs.contains("exit_code=9"));
     }
@@ -374,6 +403,7 @@ export -f just
             "impact-windows:",
             "pr-fast:",
             "pr-test:",
+            "pr-msrv:",
             "pr-runtime-analysis:",
             "pr-mutants:",
         ] {
@@ -386,6 +416,10 @@ export -f just
             );
         }
         assert!(PR_IMPL_WORKFLOW.contains("needs: [impact-linux, impact-windows]"));
+        // The matrix is intentionally always present; the generated MSRV
+        // recipe owns the successful no-MSRV no-op.
+        assert!(!PR_IMPL_WORKFLOW.contains("msrv_test_required"));
+        assert!(PR_IMPL_WORKFLOW.contains("Check Group: MSRV Tests (${{ matrix.os }})"));
         assert!(PR_IMPL_WORKFLOW.contains("os: [linux, windows, linux-arm, windows-arm]"));
         assert!(!PR_IMPL_WORKFLOW.contains("fromJSON"));
         assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
@@ -419,7 +453,7 @@ export -f just
             PR_IMPL_WORKFLOW
                 .matches("publish_commit_statuses: ${{ inputs.publish_commit_statuses }}")
                 .count(),
-            4,
+            PR_GROUPS.len(),
             "every PR group job must receive the status opt-in"
         );
         assert_eq!(
@@ -427,7 +461,14 @@ export -f just
             1,
             "Codecov upload step should be declared exactly once (gated per-leg via `if:`)"
         );
-        assert!(PR_IMPL_WORKFLOW.contains("matrix.os != 'windows-arm'"));
+        assert!(
+            PR_IMPL_WORKFLOW.contains(
+                "if: always() && matrix.os != 'windows-arm' && \
+                 hashFiles('target/coverage/lcov-all-features.info') != '' && \
+                 hashFiles('target/coverage/lcov-no-default.info') != ''"
+            ),
+            "`always()` preserves completed reports after failure, and separate predicates require the complete pair"
+        );
         assert!(PR_IMPL_WORKFLOW.contains("flags: ${{ matrix.os }}"));
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("permissions:").count(),
@@ -436,8 +477,8 @@ export -f just
         );
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
-            1,
-            "disk cleanup should be enabled for the PR test group"
+            2,
+            "disk cleanup should be enabled for the PR test and MSRV groups"
         );
     }
 
@@ -456,9 +497,17 @@ export -f just
         }
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("publish-failure:"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("codecov/codecov-action"));
+        assert!(
+            SCHEDULED_IMPL_WORKFLOW.contains(
+                "if: always() && matrix.os != 'windows-arm' && \
+                 hashFiles('target/coverage/lcov-all-features.info') != '' && \
+                 hashFiles('target/coverage/lcov-no-default.info') != ''"
+            ),
+            "`always()` preserves completed reports after failure, and separate predicates require the complete pair"
+        );
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("vars.ANVIL_PUBLISH_FAILURE_ISSUE != 'false'"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("contains(needs.*.result, 'failure')"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.search.issuesAndPullRequests"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.issues.createComment"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.issues.create"));

@@ -12,11 +12,12 @@ use std::path::Path;
 use ohno::{AppError, bail};
 use tracing::info;
 
+use crate::anvil::artifacts;
 use crate::anvil::artifacts::region::DELTA_REGION_ID;
 use crate::backend::{self, Backend};
 use crate::catalog::Catalog;
-use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
-use crate::checksum::checksum_str;
+use crate::catalog::artifact::{Artifact, ComposedHost, HostSelector, RegionSpec};
+use crate::checksum::{checksum_str, normalize_line_endings};
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
 use crate::emit::{ManagedRegionRequest, plan_managed_region, plan_owned_file};
@@ -98,19 +99,24 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
         "anvil"
     );
 
-    let plan = build_plan(&repo_root, &ws, &manifest, &backends, catalog)?;
+    let mut plan = build_plan(&repo_root, &ws, &manifest, &backends, catalog)?;
+    let mut next = plan.projected_manifest(&manifest);
+    next.tool = Some(catalog.cli().subcommand.clone());
+    next.tool_version = Some(catalog.cli().version.clone());
+    next.catalog_checksum = Some(catalog.checksum());
 
-    let applied = if args.dry_run {
-        false
-    } else {
-        let mut next = plan.apply(&repo_root, &manifest)?;
-        // Stamp this tool's provenance on every save.
-        next.tool = Some(catalog.cli().subcommand.clone());
-        next.tool_version = Some(catalog.cli().version.clone());
-        next.catalog_checksum = Some(catalog.checksum());
+    let expected_manifest = next.to_toml();
+    let current_manifest = read_file_if_present(&Manifest::path_for(&repo_root))?;
+    let manifest_is_current = current_manifest
+        .as_deref()
+        .is_some_and(|current| normalize_line_endings(current.as_bytes()) == normalize_line_endings(expected_manifest.as_bytes()));
+    plan.set_manifest_update_required(!manifest_is_current);
+
+    let applied = !args.dry_run;
+    if applied {
+        plan.apply_files(&repo_root)?;
         next.save(&repo_root)?;
-        true
-    };
+    }
 
     Ok(RunOutcome {
         plan,
@@ -159,6 +165,9 @@ fn build_plan(
 ) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
     let mut hosts = HostTextCache::default();
+    // Hosts already reported as unsafe to compose. Every region targeting one
+    // hits the same fault, and four copies of one message is noise.
+    let mut composed = ComposedHosts::default();
 
     for artifact in catalog.artifacts() {
         match artifact {
@@ -170,12 +179,12 @@ fn build_plan(
                 }
             }
             Artifact::Region(spec) => {
-                push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, spec)?;
+                push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, &mut composed, spec)?;
             }
         }
     }
 
-    plan_removals(repo_root, manifest, &mut plan, &mut hosts)?;
+    plan_removals(repo_root, manifest, &mut plan, &mut hosts, &composed)?;
 
     // Region proposals are computed eagerly as each region is visited, so a
     // `Propose` planned before a sibling `Write`/`Remove` on the same host
@@ -303,25 +312,26 @@ fn push_region(
     manifest: &Manifest,
     plan: &mut Plan,
     hosts: &mut HostTextCache,
+    composed: &mut ComposedHosts,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     match &spec.host {
         HostSelector::Path(path) => {
-            push_region_at(repo_root, manifest, plan, hosts, path, spec)?;
+            push_region_at(repo_root, manifest, plan, hosts, composed, path, spec)?;
         }
         HostSelector::WorkspaceCargoToml => {
             if workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, hosts, "Cargo.toml", spec)?;
+                push_region_at(repo_root, manifest, plan, hosts, composed, "Cargo.toml", spec)?;
             }
         }
         HostSelector::SingleCrateCargoToml => {
             if !workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, hosts, "Cargo.toml", spec)?;
+                push_region_at(repo_root, manifest, plan, hosts, composed, "Cargo.toml", spec)?;
             }
         }
         HostSelector::EachMemberManifest => {
             for member in &workspace.members {
-                push_region_at(repo_root, manifest, plan, hosts, &member.manifest_relpath, spec)?;
+                push_region_at(repo_root, manifest, plan, hosts, composed, &member.manifest_relpath, spec)?;
             }
         }
     }
@@ -342,12 +352,90 @@ fn push_region_at(
     manifest: &Manifest,
     plan: &mut Plan,
     hosts: &mut HostTextCache,
+    composed: &mut ComposedHosts,
     host: &str,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     let host = resolve_existing_case_insensitive(repo_root, host);
+    let composed_host = composed_host_spec(&host);
+    if let Some(declared) = composed_host
+        && !composed.states.contains_key(&host)
+    {
+        let state = match hosts.get_or_read(repo_root, &host)? {
+            Some(text) => composed_host_state(declared.order, &host, &text, manifest),
+            // Nothing on disk. The scaffold becomes the base the first region
+            // splices into, carrying the parts of the file that cannot live
+            // inside a region -- the `# syntax=` parser directive above all. It
+            // is written once and never reconciled; everything outside the
+            // sentinels is the repository's from then on.
+            None => ComposedHostState::SeedFromScaffold,
+        };
+        // Resolved through a case variant. Case-insensitive resolution is right
+        // for an ordinary host, whose consumers open it by whatever name it
+        // has, but a composed host is read by something that requires the
+        // declared spelling: the container driver refuses any other, because
+        // `BuildKit` derives the ignore file's name from the Dockerfile's and
+        // there is no flag to point it elsewhere. Keeping the file up to date
+        // would leave the two halves disagreeing about one on-disk state, with
+        // the generator reporting the tree in sync while every recipe that uses
+        // it exits 1. The generator is the component that just wrote the file,
+        // so it is the one positioned to say so.
+        //
+        // A content state that already refuses keeps its own diagnosis: it
+        // describes the deeper problem, and its recovery -- move the file
+        // aside, restore the regions -- resolves the spelling along the way,
+        // whereas renaming first would only surface the same refusal again.
+        let state = if host == declared.path || matches!(state, ComposedHostState::Unsafe(_)) {
+            state
+        } else {
+            ComposedHostState::Unsafe(format!(
+                "it must be named exactly `{}`, and the recipes that consume it refuse any other \
+                 spelling, so anvil would be maintaining a file nothing can use. Rename it",
+                declared.path
+            ))
+        };
+        if matches!(state, ComposedHostState::SeedFromScaffold) {
+            hosts.set(&host, declared.scaffold.to_owned());
+        }
+        composed.states.insert(host.clone(), state);
+    }
+    if let Some(ComposedHostState::Unsafe(reason)) = composed.states.get(&host) {
+        if composed.reported.insert(host.clone()) {
+            plan.refusal(format!(
+                "Refused to manage {host}: {reason}. Nothing was written to it, and other \
+                 artifacts were still planned."
+            ));
+        }
+        plan.push(PlanItem::noop(
+            Target::Region {
+                host,
+                id: spec.id.as_str().to_owned(),
+            },
+            Decision::LeaveAlone,
+        ));
+        return Ok(());
+    }
     let current = hosts.get_or_read(repo_root, &host)?;
-    let placement = region_placement(spec.id.as_str());
+    if let Some(declared) = composed_host
+        && !declared.order.contains(&spec.id.as_str())
+    {
+        // End-of-file is the default placement everywhere else, and it is wrong
+        // here by construction: it lands below the region that closes the file.
+        // A built-in region reaching this is caught by the registry test in
+        // `artifacts::mod`, but a downstream catalog can add one at run time,
+        // and appending it below `CMD` would be silent and would classify the
+        // host as composable on every later run.
+        bail!(
+            "region '{}' targets the composed host '{host}', whose region order is semantic, \
+             but is not declared in that order. Add it to the host's `ComposedHost::order` \
+             at the position it must occupy.",
+            spec.id.as_str()
+        );
+    }
+    let placement = composed_host.map_or_else(
+        || region_placement(spec.id.as_str()),
+        |declared| composed_placement(declared.order, declared.scaffold, spec.id.as_str(), current.as_deref()),
+    );
     let body = match delta_region_body(current.as_deref(), spec) {
         DeltaRegionBody::Managed => spec.body.as_str(),
         DeltaRegionBody::PreserveRepositoryKey => {
@@ -397,11 +485,204 @@ fn push_region_at(
     Ok(())
 }
 
+/// Where a region belongs inside a composed host whose order is semantic.
+///
+/// An existing region is updated where it is found, so this only decides where
+/// an *absent* one lands — which matters whenever anvil adds a region to a
+/// release. Appending it at end-of-file, the default for every other host,
+/// would put it after regions it must precede: a newly added base-image
+/// argument would land below the `FROM` that consumes it. Without this, adding
+/// a region would either corrupt or (with the composition check) refuse every
+/// file that already exists.
+fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&str>) -> RegionPlacement {
+    let Some(text) = text else {
+        return RegionPlacement::End;
+    };
+    if matches!(find_region(text, id, CommentSyntax::Hash), Ok(Some(_))) {
+        // Present: `upsert_region` replaces it where it is, and the offset is
+        // never consulted.
+        return RegionPlacement::End;
+    }
+    let Some(position) = order.iter().position(|candidate| *candidate == id) else {
+        return RegionPlacement::End;
+    };
+    // The nearest declared predecessor that is actually in the file. Anything
+    // after it and before the next present region is the gap this region opens.
+    for earlier in order[..position].iter().rev() {
+        if let Ok(Some(region)) = find_region(text, earlier, CommentSyntax::Hash) {
+            return RegionPlacement::At(region.end_line.end);
+        }
+    }
+    // Nothing precedes it, so it goes to the top -- but below the scaffold's
+    // first line, which for a Dockerfile is the `# syntax=` parser directive
+    // that BuildKit honors only as the very first line.
+    //
+    // Matched a line at a time rather than as one prefix. A whole-scaffold
+    // comparison fails on any later divergence -- a CRLF working tree, or a
+    // scaffold that has since grown a line -- and the fallback is byte 0, which
+    // puts the region *above* the very line the branch exists to protect. The
+    // first line is the one that must not be preceded, so it is the one matched.
+    let opening = scaffold.lines().next().unwrap_or_default();
+    // A parser directive is `# key=value`, and the value may legitimately differ
+    // from the scaffold's -- a repository on a newer frontend carries
+    // `# syntax=docker/dockerfile:1.7`. Match on the key and splice after the
+    // whole line the file actually carries: equality would push the region above
+    // an upgraded directive, and a bare prefix match would cut the file's own
+    // line in half.
+    let first_line_end = text.find('\n').unwrap_or(text.len());
+    let first_line = text[..first_line_end].trim_end_matches('\r');
+    let key = opening.split_once('=').map(|(key, _)| key);
+    let carries_directive =
+        !opening.is_empty() && (first_line == opening || key.is_some_and(|key| opening.starts_with(key) && first_line.starts_with(key)));
+    RegionPlacement::At(if carries_directive { first_line.len() } else { 0 })
+}
+
 fn region_placement(region_id: &str) -> RegionPlacement {
     if region_id == DELTA_REGION_ID {
         RegionPlacement::Start
     } else {
         RegionPlacement::End
+    }
+}
+
+/// The composed-host declaration for a host, when it has one.
+///
+/// Most region hosts are files the repository already has (`Cargo.toml`,
+/// `deny.toml`) or files whose first region can be appended to nothing, and
+/// whose regions are order-independent, such as TOML tables and line sets.
+/// Those are not registered, and their regions append at end-of-file.
+///
+/// The comparison ignores case because the caller has already replaced the
+/// canonical path with the host's real on-disk name. A repository that spelled
+/// the host differently would otherwise miss this lookup entirely, and with it
+/// every guard below: its regions would be appended at end-of-file, under the
+/// content they have to precede.
+fn composed_host_spec(host_relpath: &str) -> Option<ComposedHost> {
+    artifacts::composed_hosts()
+        .into_iter()
+        .find(|host| host_relpath.eq_ignore_ascii_case(host.path))
+}
+
+/// What a composed host's current content allows anvil to do with it.
+enum ComposedHostState {
+    /// Carries every region anvil owns, in the declared order. Update in place.
+    Composable,
+    /// Either absent, or a byte-identical render of a version that owned this
+    /// path as a whole file. Every byte of it is anvil's, so the scaffold
+    /// replaces it and the regions rebuild the file.
+    SeedFromScaffold,
+    /// Anvil cannot reach a valid file from here without either destroying
+    /// repository content or writing something that will not build.
+    Unsafe(String),
+}
+
+/// Per-host bookkeeping for composed hosts, for the length of one pass.
+#[derive(Default)]
+struct ComposedHosts {
+    /// Classification per host, computed once from its on-disk state. Later
+    /// regions targeting the same host see text this pass has already spliced,
+    /// which is partially composed by construction — re-classifying that would
+    /// refuse the file halfway through writing it.
+    states: HashMap<String, ComposedHostState>,
+    /// Hosts whose refusal has already been reported, so one fault produces one
+    /// diagnostic rather than one per region.
+    reported: BTreeSet<String>,
+}
+
+/// Classify a composed host before anything is written to it.
+///
+/// A Dockerfile is the first managed-region host where the file is only valid
+/// in one arrangement, so the states an ordinary region host can ignore all
+/// matter here. Each rejected case is one anvil could "handle" by splicing
+/// regions in anyway, and each would produce a file that is silently wrong:
+/// `upsert_region` appends a missing region at end-of-file, which is the right
+/// answer only when the file is already the composed shape.
+fn composed_host_state(order: &[&str], host_relpath: &str, text: &str, manifest: &Manifest) -> ComposedHostState {
+    // A malformed sentinel is its own diagnosis. Folding it in with "absent"
+    // would report a broken region as a missing one, sending the reader looking
+    // for content that is in fact right there with a mismatched marker.
+    let mut malformed: Option<String> = None;
+    let present: Vec<(&str, usize)> = order
+        .iter()
+        .filter_map(|id| match find_region(text, id, CommentSyntax::Hash) {
+            Ok(Some(region)) => Some((*id, region.start_line.start)),
+            Ok(None) => None,
+            Err(err) => {
+                malformed.get_or_insert_with(|| format!("its '{id}' region cannot be read: {err}"));
+                None
+            }
+        })
+        .collect();
+    if let Some(reason) = malformed {
+        return ComposedHostState::Unsafe(reason);
+    }
+
+    if present.is_empty() {
+        // Nothing of anvil's is in the file. Either it is a whole-file render
+        // anvil produced -- safe to replace, because every byte of it came from
+        // anvil -- or it is content anvil has never owned.
+        //
+        // The checksum comparison is the whole safety property: without it, a
+        // repository that edited such a file would have that edit silently
+        // destroyed. Appending the regions instead is not a kinder answer,
+        // because everything already in the file would then sit above `FROM`.
+        return match manifest.file_checksum(host_relpath) {
+            Some(recorded) if recorded == checksum_str(text) => ComposedHostState::SeedFromScaffold,
+            Some(_) => ComposedHostState::Unsafe(
+                "it was edited after anvil last wrote it, and anvil composes the file from managed \
+                 regions rather than owning it whole. Move the edits you want to keep into the \
+                 gaps of a freshly generated file, or delete it and re-run to have one written"
+                    .to_owned(),
+            ),
+            // A composed host is recorded in `regions` and never in `files`, so
+            // "no file entry" is not the same as "anvil has never seen this".
+            // It is also every composed file that has lost its regions -- a
+            // merge resolved the other way, a revert, a checkout of an older
+            // commit -- and for those the lock still holds the provenance. The
+            // two cases have opposite recoveries, and telling someone to delete
+            // a file anvil rendered would throw away the gap content the
+            // message elsewhere tells them to preserve.
+            None if manifest.has_region_host(host_relpath) => ComposedHostState::Unsafe(
+                "anvil composes it from managed regions and the lock still records them, but none \
+                 of them is in the file: they were dropped by a merge, a revert or an edit. \
+                 Restore the file from version control to recover the regions and your own content \
+                 around them together"
+                    .to_owned(),
+            ),
+            None => ComposedHostState::Unsafe(
+                "it exists but anvil has never owned it, so there is nowhere to splice the managed \
+                 regions that would not put your content above `FROM`. Delete it and re-run to have \
+                 a composed file written, then move your instructions into the gaps"
+                    .to_owned(),
+            ),
+        };
+    }
+
+    // A file carrying some regions but not all is what every adopter has the
+    // first time anvil adds one to the set -- a normal upgrade, not damage.
+    // `composed_placement` inserts each missing region at its declared position
+    // rather than at end-of-file, so the result stays ordered and the gap
+    // content is untouched. Refusing here would make every future region
+    // addition mean "delete your file".
+    //
+    // The same regions, in the order the file carries them. Comparing the two
+    // sequences rather than adjacent offsets keeps the check free of an
+    // ordering operator whose boundary cannot be exercised: two distinct
+    // regions can never share a start offset, so `<` and `<=` over positions
+    // would be indistinguishable by any test.
+    let mut by_position = present.clone();
+    by_position.sort_by_key(|&(_, start)| start);
+    match present
+        .iter()
+        .zip(by_position.iter())
+        .find(|(expected, found)| expected.0 != found.0)
+    {
+        None => ComposedHostState::Composable,
+        Some((expected, found)) => ComposedHostState::Unsafe(format!(
+            "region '{}' appears before '{}', but must follow it. Restore the documented order and \
+             re-run",
+            found.0, expected.0
+        )),
     }
 }
 
@@ -444,7 +725,13 @@ fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionB
 /// This is what removes orphaned cloud-workflow artifacts, dropped catalog entries,
 /// disabled-backend files, and any other previously-tracked item that
 /// is no longer in scope.
-fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: &mut HostTextCache) -> Result<(), AppError> {
+fn plan_removals(
+    repo_root: &Path,
+    previous: &Manifest,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    composed: &ComposedHosts,
+) -> Result<(), AppError> {
     let live_files: BTreeSet<String> = plan
         .items()
         .iter()
@@ -461,12 +748,42 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: 
             Target::File { .. } => None,
         })
         .collect();
+    let live_region_hosts: BTreeSet<String> = live_regions.iter().map(|(host, _)| host.clone()).collect();
 
     for (path, last) in &previous.files {
-        if live_files.contains(path) {
+        // The lock carries the casing the path had when the entry was written,
+        // while every live plan item carries the casing resolved from disk, so
+        // the two are compared through the same resolution. Without it a
+        // case-only rename makes anvil's own file look retired and the removal
+        // below deletes the artifact this very pass just wrote.
+        let resolved = resolve_existing_case_insensitive(repo_root, path);
+        if live_files.contains(&resolved) {
             continue;
         }
-        let disk = read_file_if_present(&repo_root.join(path))?;
+        // A path that is no longer an owned file but *is* the host of a live
+        // managed region has not been retired -- it has changed ownership
+        // model. Deleting it here would erase what the region writes planned
+        // for the same pass just produced, and the user content around them
+        // with it. Drop the stale manifest entry and leave the file alone; the
+        // region entries describe what anvil owns inside it.
+        //
+        // Unless the host was *refused*, in which case anvil declined to touch
+        // it and the lock entry is the provenance the next run reclassifies
+        // from. Dropping it would make a file anvil rendered look like one it
+        // has never owned, flip the diagnostic to the wrong wording, and
+        // destroy the clean recovery -- reverting the edit -- that the refusal
+        // message tells the reader to use. "Nothing was written to it" has to
+        // be true of the lock as well as the file.
+        if live_region_hosts.contains(&resolved) {
+            if !matches!(composed.states.get(&resolved), Some(ComposedHostState::Unsafe(_))) {
+                plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() }));
+            }
+            continue;
+        }
+        // Read under the resolved casing: a lock entry recorded before a
+        // case-only rename would otherwise find nothing on disk, classify a
+        // file that is still present as `AlreadyGone`, and delete it.
+        let disk = read_file_if_present(&repo_root.join(&resolved))?;
         let disk_checksum = disk.as_deref().map(checksum_str);
         match decide_removal(last, disk_checksum.as_deref()) {
             // A file still matching its last render is safe to delete; an
@@ -488,7 +805,39 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: 
         if live_regions.contains(&(key.host.clone(), key.id.clone())) {
             continue;
         }
-        let Some(host_text) = hosts.get_or_read(repo_root, &key.host)? else {
+        // A lock key records the casing its host had when the entry was
+        // written; a live key records the casing the write path resolved from
+        // disk this pass. A case-only rename of the host therefore makes every
+        // one of its regions look orphaned at the very moment the pass has
+        // rewritten all of them under the new name -- and for a composed host
+        // that is the whole file, so removing them would strip this pass's own
+        // writes and leave a Dockerfile with no `FROM`. The regions are still
+        // there under a key the manifest already carries, so the honest answer
+        // is to transfer ownership to the new key and touch nothing on disk.
+        //
+        // No `resolved_host != key.host` guard: the `continue` above has
+        // already established that the recorded key is not live, so when the
+        // resolution changes nothing this lookup repeats it and fails.
+        let resolved_host = resolve_existing_case_insensitive(repo_root, &key.host);
+        // A refused host was not opened, and "nothing was written to it" has to
+        // be true of the lock as well as the file -- the same invariant the
+        // owned-file loop above keeps. A lock entry naming a region the catalog
+        // does not declare would otherwise reach `remove_region` below, so the
+        // run would splice a block out of the very file whose refusal says it
+        // was left alone, and purge the provenance the next run reclassifies
+        // from. Unreachable while every declared id is live; a region rename or
+        // retirement is what exposes it.
+        if matches!(composed.states.get(&resolved_host), Some(ComposedHostState::Unsafe(_))) {
+            continue;
+        }
+        if live_regions.contains(&(resolved_host.clone(), key.id.clone())) {
+            plan.push(PlanItem::orphaned_kept(Target::Region {
+                host: key.host.clone(),
+                id: key.id.clone(),
+            }));
+            continue;
+        }
+        let Some(host_text) = hosts.get_or_read(repo_root, &resolved_host)? else {
             // Host file is gone entirely; just drop the manifest
             // entry. Emit OrphanedKept (no-op apply) so the plan
             // can record the transfer of ownership consistently.
@@ -510,9 +859,12 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: 
                 // Splice against — and update — the accumulated host text
                 // so a removal composes with the writes already planned
                 // for this host this pass instead of clobbering them
-                // (their item is applied earlier; this one, later).
+                // (their item is applied earlier; this one, later). The
+                // cache is keyed by the resolved spelling, which is what
+                // the writes used; reading under the recorded spelling
+                // would miss it and splice into the pre-pass text.
                 let spliced = remove_region(&host_text, &key.id, syntax)?;
-                hosts.set(&key.host, spliced.clone());
+                hosts.set(&resolved_host, spliced.clone());
                 plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
             }
             RemovalDecision::OrphanedKept | RemovalDecision::AlreadyGone => {
@@ -544,6 +896,163 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    /// `composed_placement` decides where an *absent* region lands in a host
+    /// whose order is semantic. Every branch matters: getting it wrong puts a
+    /// newly added region after ones it must precede, which for a Dockerfile
+    /// means `FROM` below the layers that depend on it.
+    mod composed_placement {
+        use super::*;
+
+        const SCAFFOLD: &str = "# syntax=docker/dockerfile:1\n";
+        const ORDER: &[&str] = &["a", "b", "c"];
+
+        fn region(id: &str, body: &str) -> String {
+            format!("# >>> anvil-managed: {id}\n{body}# <<< anvil-managed: {id}\n")
+        }
+
+        #[test]
+        fn a_host_that_does_not_exist_yet_appends() {
+            // Nothing to order against; the regions are written in catalog
+            // order onto the scaffold.
+            assert_eq!(super::super::composed_placement(ORDER, SCAFFOLD, "b", None), RegionPlacement::End);
+        }
+
+        #[test]
+        fn a_region_already_present_is_replaced_where_it_is() {
+            let host = format!("{SCAFFOLD}{}", region("b", "body\n"));
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "b", Some(&host)),
+                RegionPlacement::End,
+                "an existing region is upserted in place, so the offset is never consulted"
+            );
+        }
+
+        #[test]
+        fn a_region_outside_the_declared_order_appends() {
+            let host = format!("{SCAFFOLD}{}", region("a", "body\n"));
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "unknown", Some(&host)),
+                RegionPlacement::End
+            );
+        }
+
+        #[test]
+        fn a_missing_region_lands_after_its_nearest_present_predecessor() {
+            // `c` is absent and both `a` and `b` are present, so it must follow
+            // `b` -- the nearest, not merely the first.
+            let host = format!("{SCAFFOLD}{}{}", region("a", "first\n"), region("b", "second\n"));
+            let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, SCAFFOLD, "c", Some(&host)) else {
+                panic!("a missing region with a present predecessor must be placed by offset");
+            };
+            assert_eq!(offset, host.len(), "it belongs after the close of `b`");
+        }
+
+        #[test]
+        fn a_missing_region_skips_predecessors_that_are_absent_too() {
+            // `c` is missing and so is its nearest predecessor `b`, so the
+            // search has to walk past `b` and anchor on `a`. A fixture where
+            // the first candidate matches would never exercise the skip.
+            let host = format!("{SCAFFOLD}{}", region("a", "first\n"));
+            let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, SCAFFOLD, "c", Some(&host)) else {
+                panic!("expected an offset placement");
+            };
+            assert_eq!(offset, host.len(), "it belongs after the close of `a`, the only one present");
+        }
+
+        #[test]
+        fn the_first_region_lands_below_the_scaffold_never_above_it() {
+            // The scaffold is the parser directive, which BuildKit honors only
+            // as line 1. Placing the first region at byte 0 would push it down.
+            let host = format!("{SCAFFOLD}{}", region("b", "second\n"));
+            let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)) else {
+                panic!("expected an offset placement");
+            };
+            assert_eq!(offset, SCAFFOLD.trim_end_matches('\n').len());
+            assert!(offset > 0, "the directive must keep line 1");
+        }
+
+        #[test]
+        fn a_scaffold_that_grew_still_places_below_its_first_line() {
+            // A scaffold is written once and never reconciled, so a file created
+            // by an earlier release carries only what that release seeded. If a
+            // later scaffold gains a line, a whole-prefix comparison stops
+            // matching every such file at once and drops the region to byte 0,
+            // above the directive. Only the first line is load-bearing.
+            const GROWN: &str = "# syntax=docker/dockerfile:1\n# added later\n";
+            let host = format!("{SCAFFOLD}{}", region("b", "second\n"));
+            let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, GROWN, "a", Some(&host)) else {
+                panic!("expected an offset placement");
+            };
+            assert!(offset > 0, "the directive must keep line 1");
+            assert_eq!(offset, "# syntax=docker/dockerfile:1".len());
+        }
+
+        #[test]
+        fn an_upgraded_parser_directive_keeps_line_one() {
+            // `# syntax=docker/dockerfile:1.7` is an equally valid directive and
+            // a repository may well have upgraded to it. Equality with the
+            // scaffold fails, so the region must still land after the whole
+            // line the file carries: at byte 0 it would sit above the directive
+            // and BuildKit would ignore the frontend pin, and at the scaffold's
+            // own length it would cut the directive in half.
+            const UPGRADED: &str = "# syntax=docker/dockerfile:1.7";
+            let host = format!("{UPGRADED}\n{}", region("b", "second\n"));
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)),
+                RegionPlacement::At(UPGRADED.len()),
+                "the region belongs after the directive the file actually carries"
+            );
+        }
+
+        #[test]
+        fn a_first_line_that_is_not_a_parser_directive_places_at_the_top() {
+            // Only a directive earns the reserved first line. Anything else is
+            // ordinary content the region goes above.
+            let host = format!("FROM scratch\n{}", region("b", "second\n"));
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)),
+                RegionPlacement::At(0)
+            );
+        }
+        #[test]
+        fn a_host_without_the_scaffold_places_the_first_region_at_the_top() {
+            let host = region("b", "second\n");
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)),
+                RegionPlacement::At(0)
+            );
+        }
+
+        #[test]
+        fn a_crlf_host_still_keeps_the_scaffold_on_line_one() {
+            // `text` is read verbatim, while the scaffold is an LF `include_str!`,
+            // so a CRLF working tree must not look like a host that never carried
+            // the scaffold -- which would place the first region at byte 0, above
+            // the parser directive `BuildKit` honors nowhere else.
+            let host = format!("{SCAFFOLD}{}", region("b", "second\n")).replace('\n', "\r\n");
+            let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)) else {
+                panic!("expected an offset placement");
+            };
+            assert!(offset > 0, "the directive must keep line 1 on a CRLF checkout");
+            assert!(
+                host[..offset].starts_with(SCAFFOLD.trim_end_matches('\n')),
+                "the offset must fall after the directive, not inside it"
+            );
+        }
+
+        #[test]
+        fn the_test_scaffold_is_the_one_production_uses() {
+            // Every case above is argued against a real Dockerfile. A stub that
+            // drifted from the emitted scaffold would let them all pass while
+            // production placed a region above the directive.
+            assert_eq!(
+                SCAFFOLD,
+                crate::anvil::artifacts::container::composed_host().scaffold,
+                "the placement tests must exercise the scaffold anvil actually seeds"
+            );
+        }
+    }
+
     fn empty_workspace() -> TempDir {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
@@ -557,6 +1066,35 @@ mod tests {
         );
         write(&root.join("crates/alpha/src/lib.rs"), "");
         tmp
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_fork_region_absent_from_the_composed_order_is_refused() {
+        // A downstream catalog can add a region to a composed host at run time,
+        // where the registry test in `artifacts::mod` cannot see it. Placement
+        // defaults to end-of-file, which for this host is below the region that
+        // closes the file, and the host would still classify as composable on
+        // every later run -- so planning stops instead of appending below `CMD`.
+        let tmp = empty_workspace();
+        let catalog = Catalog::anvil()
+            .into_builder()
+            .with_artifact(Artifact::region(crate::catalog::RegionSpec {
+                host: crate::catalog::HostSelector::Path(".anvil/container/Dockerfile".to_owned()),
+                id: crate::catalog::RegionId::new("fork-invented"),
+                body: "RUN echo fork\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+
+        let err = run_update(&catalog, &local_only(), tmp.path()).unwrap_err();
+
+        let message = format!("{err}");
+        assert!(
+            message.contains("fork-invented") && message.contains("order"),
+            "the refusal must name the region and the contract it breaks, got: {message}"
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -658,6 +1196,89 @@ mod tests {
         assert!(outcome.plan.has_changes());
         assert!(!tmp.path().join("justfiles/anvil/tools.just").exists());
         assert!(!tmp.path().join(".anvil.lock").exists());
+    }
+
+    #[mutants::skip]
+    fn assert_dry_run_detects_manifest_drift(mutate: impl FnOnce(&mut Manifest)) {
+        let tmp = empty_workspace();
+        let catalog = Catalog::anvil();
+        let _ = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+
+        let mut manifest = Manifest::load(tmp.path()).unwrap();
+        mutate(&mut manifest);
+        manifest.save(tmp.path()).unwrap();
+        let stale_lock = fs::read_to_string(Manifest::path_for(tmp.path())).unwrap();
+
+        let mut args = local_only();
+        args.dry_run = true;
+        let outcome = run_update(&catalog, &args, tmp.path()).unwrap();
+
+        assert!(!outcome.applied);
+        assert_eq!(outcome.plan.dry_run_exit_code(), 1);
+        assert!(outcome.plan.summary(Some(&manifest)).contains(".anvil.lock"));
+        assert_eq!(fs::read_to_string(Manifest::path_for(tmp.path())).unwrap(), stale_lock);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn dry_run_detects_stale_manifest_checksum() {
+        assert_dry_run_detects_manifest_drift(|manifest| {
+            let path = manifest.files.keys().next().unwrap().clone();
+            manifest.files.insert(path, "sha256:stale".to_owned());
+        });
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn dry_run_detects_missing_manifest_region() {
+        assert_dry_run_detects_manifest_drift(|manifest| {
+            let key = manifest.regions.keys().next().unwrap().clone();
+            manifest.regions.remove(&key);
+        });
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn dry_run_detects_stale_catalog_checksum() {
+        assert_dry_run_detects_manifest_drift(|manifest| {
+            manifest.catalog_checksum = Some("sha256:stale".to_owned());
+        });
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn dry_run_detects_noncanonical_manifest_text() {
+        let tmp = empty_workspace();
+        let catalog = Catalog::anvil();
+        let _ = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+        let lock_path = Manifest::path_for(tmp.path());
+        let canonical = fs::read_to_string(&lock_path).unwrap();
+        fs::write(&lock_path, format!("{canonical}\n")).unwrap();
+
+        let mut args = local_only();
+        args.dry_run = true;
+        let outcome = run_update(&catalog, &args, tmp.path()).unwrap();
+
+        assert_eq!(outcome.plan.dry_run_exit_code(), 1);
+        assert_eq!(fs::read_to_string(lock_path).unwrap(), format!("{canonical}\n"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn dry_run_accepts_crlf_manifest_text() {
+        let tmp = empty_workspace();
+        let catalog = Catalog::anvil();
+        let _ = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+        let lock_path = Manifest::path_for(tmp.path());
+        let crlf = fs::read_to_string(&lock_path).unwrap().replace('\n', "\r\n");
+        fs::write(&lock_path, &crlf).unwrap();
+
+        let mut args = local_only();
+        args.dry_run = true;
+        let outcome = run_update(&catalog, &args, tmp.path()).unwrap();
+
+        assert_eq!(outcome.plan.dry_run_exit_code(), 0);
+        assert_eq!(fs::read_to_string(lock_path).unwrap(), crlf);
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -1001,6 +1622,7 @@ mod tests {
             ".pipelines/anvil/steps/advisory-comments.yml",
             ".pipelines/anvil/steps/pr-fast.yml",
             ".pipelines/anvil/steps/pr-test.yml",
+            ".pipelines/anvil/steps/pr-msrv.yml",
             ".pipelines/anvil/steps/pr-runtime-analysis.yml",
             ".pipelines/anvil/steps/pr-mutants.yml",
             ".pipelines/anvil/steps/scheduled-test.yml",
@@ -1336,7 +1958,14 @@ mod tests {
         let mut previous = Manifest::default();
         previous.set_region("Justfile", "anvil-r", "sha256:body");
         let mut plan = Plan::default();
-        plan_removals(tmp.path(), &previous, &mut plan, &mut HostTextCache::default()).unwrap();
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
         let orphans: Vec<(&str, &str)> = plan
             .items()
             .iter()
@@ -1367,7 +1996,14 @@ mod tests {
         // decide_removal classifies the region as a customized orphan.
         previous.set_region("Justfile", "anvil-r", "sha256:stored-different");
         let mut plan = Plan::default();
-        plan_removals(tmp.path(), &previous, &mut plan, &mut HostTextCache::default()).unwrap();
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
         let orphans: Vec<(&str, &str)> = plan
             .items()
             .iter()

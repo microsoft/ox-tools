@@ -3,7 +3,7 @@
 
 //! Coordinator adapter for engine-owned schema instrumentation.
 
-use cargo_gamma_engine::schema::AssignedMutant;
+use cargo_gamma_engine::schema::{AssignedMutant, Ordinal};
 pub use cargo_gamma_engine::schema::{EITHER_PATH, GUARD_PATH, Guard, Position};
 
 use crate::model::Mutant;
@@ -24,6 +24,6 @@ pub fn instrument_with_guards(text: &str, mutants: &[&Mutant]) -> Result<(String
 fn sites<'a>(mutants: &[&'a Mutant]) -> Vec<AssignedMutant<'a>> {
     mutants
         .iter()
-        .map(|mutant| AssignedMutant::from_parts(mutant.ordinal, &mutant.span, &mutant.replacement, mutant.shape))
+        .map(|mutant| AssignedMutant::from_parts(Ordinal::new(mutant.ordinal), &mutant.span, &mutant.replacement, mutant.shape))
         .collect()
 }

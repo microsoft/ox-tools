@@ -12,6 +12,7 @@ use crate::commands::Host;
 use crate::discover::Plan;
 use crate::exec::Session;
 use crate::model::{Mutant, Outcome, Summary};
+use crate::report::encode_controls;
 #[cfg(test)]
 use crate::{
     HashMap,
@@ -113,13 +114,19 @@ pub fn skipped<H: Host>(host: &mut H, plan: &Plan, styler: Styler) -> Result<()>
     )?;
 
     for note in &plan.skipped {
-        writeln!(stream, "  {note}")?;
+        writeln!(stream, "  {}", encode_controls(note))?;
     }
 
     Ok(())
 }
 
 /// Writes the end-of-run summary.
+///
+/// # Errors
+///
+/// Returns an error if the host's output stream rejects a write. In practice that is a closed pipe
+/// — the reader on the other end of `| head` went away — and the caller's choice is whether a
+/// summary nobody is reading should end the run.
 pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: Listings) -> Result<()> {
     skipped(host, plan, styler)?;
 
@@ -215,7 +222,7 @@ pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: L
         writeln!(stream)?;
 
         for line in lines {
-            writeln!(stream, "{label} {line}")?;
+            writeln!(stream, "{label} {}", encode_controls(line))?;
         }
     }
 

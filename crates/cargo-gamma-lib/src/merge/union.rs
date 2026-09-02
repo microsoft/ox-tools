@@ -3,8 +3,8 @@
 
 //! The union that turns per-shard reports into one score.
 
-use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::merged::Merged;
 use super::status::{NEVER_RUN, scoring};
@@ -18,23 +18,36 @@ use crate::model::Scoring;
 /// testable and so that re-merging the same inputs twice gives the same answer.
 #[must_use]
 pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Merged {
-    let mut latest: BTreeMap<&str, Verdict<'_>> = BTreeMap::new();
+    // Hashed rather than ordered. Every one of these is a lookup table — is this id withdrawn, what
+    // is this file's selected source, which verdict is currently winning — and none of them decides
+    // what the merged document says, because the document's order is re-established where it is
+    // written: files by the ordered map the report holds them in, mutants by an explicit sort on
+    // line and id, and provenance by the ordered maps it is recorded in. The distinction matters at
+    // the scale this is built for, where thousands of reports each contribute their mutants and
+    // every one of them costs several string comparisons down a tree.
+    //
+    // `std`'s hasher, deliberately, and not the fast one used elsewhere in this crate: these keys
+    // are mutant ids and paths read out of report files this tool did not write, so a hasher chosen
+    // for speed over collision resistance would let whoever wrote them decide how long a merge
+    // takes.
+    let mut latest: HashMap<&str, Verdict<'_>> = HashMap::new();
     let mut out = Merged::default();
-    let current = populations(reports);
-    let sources = sources(reports);
+    let mut lineages = Lineages::default();
+    let current = populations(reports, &mut lineages);
+    let sources = sources(reports, &mut lineages);
 
     // Withdrawal is a fact about a mutant, not about the inputs that mentioned it. Counting a
     // sighting per input made ten nightly reports of the same three withdrawn ids read as thirty,
     // and inflated the one figure whose whole job is to say whether the inputs span commits further
     // apart than the reader thinks — the figure that is also how passing the same file twice would
     // otherwise become visible.
-    let mut withdrawn: BTreeSet<&str> = BTreeSet::new();
+    let mut withdrawn: HashSet<&str> = HashSet::new();
 
     out.unchecked = reports
         .iter()
         .flat_map(|(_, report)| report.files.keys())
         .filter(|path| !current.contains_key(path.as_str()))
-        .collect::<BTreeSet<_>>()
+        .collect::<HashSet<_>>()
         .len();
 
     out.shard_count = rotation(reports);
@@ -54,7 +67,7 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
             let Some(source) = sources.get(path.as_str()) else {
                 continue;
             };
-            let (source_at, source_origin, source_lineage) = source_provenance(input_name, report, path, file);
+            let (source_at, source_origin, source_lineage) = source_provenance(input_name, report, path, file, &mut lineages);
 
             for mutant in &file.mutants {
                 // A file whose current population is known admits exactly the ids in it. When no
@@ -69,7 +82,7 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
                     continue;
                 }
 
-                let (tested_at, origin, lineage) = verdict_provenance(input_name, report, mutant);
+                let (tested_at, origin, lineage) = verdict_provenance(input_name, report, mutant, &mut lineages);
                 let compatible = file.source == source.file.source && file.language == source.file.language;
                 retain(
                     &mut latest,
@@ -87,7 +100,7 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
         }
     }
 
-    let mut files: BTreeMap<&str, Vec<&Verdict<'_>>> = BTreeMap::new();
+    let mut files: HashMap<&str, Vec<&Verdict<'_>>> = HashMap::new();
 
     out.withdrawn = withdrawn.len();
 
@@ -140,7 +153,7 @@ struct Candidate<'report> {
 }
 
 /// Retains the newest verdict and the newest presentation that fits the selected source.
-fn retain<'report>(latest: &mut BTreeMap<&'report str, Verdict<'report>>, candidate: Candidate<'report>) {
+fn retain<'report>(latest: &mut HashMap<&'report str, Verdict<'report>>, candidate: Candidate<'report>) {
     let Candidate {
         mutant,
         path,
@@ -248,7 +261,7 @@ struct Population<'report> {
     started_at: u64,
     origin: &'report str,
     lineage: String,
-    ids: BTreeSet<&'report str>,
+    ids: HashSet<&'report str>,
 }
 
 /// A file's source and language as one presentation unit.
@@ -260,8 +273,11 @@ struct Source<'report> {
     lineage: String,
 }
 
-fn populations(reports: &[(String, Report)]) -> BTreeMap<&str, Population<'_>> {
-    let mut newest: BTreeMap<&str, Population<'_>> = BTreeMap::new();
+fn populations<'report>(
+    reports: &'report [(String, Report)],
+    lineages: &mut Lineages<'report>,
+) -> HashMap<&'report str, Population<'report>> {
+    let mut newest: HashMap<&str, Population<'_>> = HashMap::new();
 
     for (name, report) in reports {
         if report.config.as_ref().is_some_and(|config| config.shard.is_some() || config.merged) {
@@ -271,14 +287,14 @@ fn populations(reports: &[(String, Report)]) -> BTreeMap<&str, Population<'_>> {
         let at = started_at(report);
 
         for (path, file) in &report.files {
-            let ids: BTreeSet<&str> = file.mutants.iter().map(|mutant| mutant.id.as_str()).collect();
+            let ids: HashSet<&str> = file.mutants.iter().map(|mutant| mutant.id.as_str()).collect();
 
             match newest.entry(path.as_str()) {
                 Entry::Vacant(slot) => {
                     let _ = slot.insert(Population {
                         started_at: at,
                         origin: name,
-                        lineage: source_lineage(name, file),
+                        lineage: lineages.source(name, file),
                         ids,
                     });
                 }
@@ -286,7 +302,7 @@ fn populations(reports: &[(String, Report)]) -> BTreeMap<&str, Population<'_>> {
                 Entry::Occupied(mut slot) => {
                     let held = slot.get();
 
-                    let lineage = source_lineage(name, file);
+                    let lineage = lineages.source(name, file);
 
                     if rank(name, at, &lineage) > rank(held.origin, held.started_at, &held.lineage) {
                         let _ = slot.insert(Population {
@@ -336,46 +352,56 @@ fn started_at(report: &Report) -> u64 {
 }
 
 /// Finds the provenance of the source a report renders for one file.
-fn source_provenance<'report>(name: &'report str, report: &'report Report, path: &str, file: &FileResult) -> (u64, &'report str, String) {
-    report
+fn source_provenance<'report>(
+    name: &'report str,
+    report: &'report Report,
+    path: &str,
+    file: &'report FileResult,
+    lineages: &mut Lineages<'report>,
+) -> (u64, &'report str, String) {
+    let provenance = report
         .config
         .as_ref()
         .and_then(|config| config.merge_provenance.as_ref())
-        .and_then(|provenance| provenance.sources.get(path))
-        .map_or_else(
-            || (started_at(report), name, source_lineage(name, file)),
-            |provenance| {
-                let lineage = if provenance.lineage.is_empty() {
-                    source_lineage(provenance.origin.as_str(), file)
-                } else {
-                    provenance.lineage.clone()
-                };
+        .and_then(|provenance| provenance.sources.get(path));
 
-                (provenance.started_at, provenance.origin.as_str(), lineage)
-            },
-        )
+    if let Some(provenance) = provenance {
+        let lineage = if provenance.lineage.is_empty() {
+            lineages.source(provenance.origin.as_str(), file)
+        } else {
+            provenance.lineage.clone()
+        };
+
+        (provenance.started_at, provenance.origin.as_str(), lineage)
+    } else {
+        (started_at(report), name, lineages.source(name, file))
+    }
 }
 
 /// Finds the run that established one verdict.
-fn verdict_provenance<'report>(name: &'report str, report: &'report Report, mutant: &MutantResult) -> (u64, &'report str, String) {
+fn verdict_provenance<'report>(
+    name: &'report str,
+    report: &'report Report,
+    mutant: &MutantResult,
+    lineages: &mut Lineages<'report>,
+) -> (u64, &'report str, String) {
     let provenance = report
         .config
         .as_ref()
         .and_then(|config| config.merge_provenance.as_ref())
         .and_then(|provenance| provenance.verdicts.get(mutant.id.as_str()));
 
-    provenance.map_or_else(
-        || (started_at(report), name, verdict_lineage(name, mutant)),
-        |provenance| {
-            let lineage = if provenance.lineage.is_empty() {
-                verdict_lineage(provenance.origin.as_str(), mutant)
-            } else {
-                provenance.lineage.clone()
-            };
+    if let Some(provenance) = provenance {
+        let lineage = if provenance.lineage.is_empty() {
+            lineages.verdict(provenance.origin.as_str(), mutant)
+        } else {
+            provenance.lineage.clone()
+        };
 
-            (provenance.started_at, provenance.origin.as_str(), lineage)
-        },
-    )
+        (provenance.started_at, provenance.origin.as_str(), lineage)
+    } else {
+        (started_at(report), name, lineages.verdict(name, mutant))
+    }
 }
 
 /// Gives an original source or verdict a stable identity that survives staged merges.
@@ -390,23 +416,68 @@ fn lineage(parts: &[&[u8]]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn source_lineage(name: &str, file: &FileResult) -> String {
-    lineage(&[b"source", name.as_bytes(), file.language.as_bytes(), file.source.as_bytes()])
+/// The lineages computed so far, and the buffer they are computed in.
+///
+/// Both halves exist because the same work was being repeated. A file's source lineage is a hash of
+/// its entire source text, and the merge asks for it three times over — once choosing the current
+/// population, once choosing the source generation, and once per report as the verdicts are walked
+/// — so on a workspace of any size the merge spent most of its time hashing source it had already
+/// hashed. A verdict's lineage is a hash of the mutant's JSON encoding, and every unprovenanced
+/// mutant allocated a fresh vector to hold an encoding that was read once and dropped.
+///
+/// Neither changes what is hashed. Lineage bytes are written into merged reports and compared
+/// against ones written by earlier versions, so the inputs to [`lineage`] are exactly what they
+/// were; only the number of times they are assembled has changed.
+#[derive(Default)]
+struct Lineages<'report> {
+    /// Keyed by the file's address as well as its origin name, because a file's lineage depends on
+    /// both and one `FileResult` is asked about under several names as provenance is followed. The
+    /// address is a key rather than a claim about the file: every `FileResult` here is owned by the
+    /// reports, which outlive the merge, so no two live entries can share an address.
+    sources: HashMap<(usize, &'report str), String>,
+
+    /// Reused for every verdict encoding, so the merge allocates one buffer rather than one per
+    /// mutant.
+    scratch: Vec<u8>,
 }
 
-fn verdict_lineage(name: &str, mutant: &MutantResult) -> String {
-    let encoded = serde_json::to_vec(mutant).unwrap_or_default();
+impl<'report> Lineages<'report> {
+    /// The lineage of a file's source under one origin name, computed at most once.
+    fn source(&mut self, name: &'report str, file: &'report FileResult) -> String {
+        let key = (core::ptr::from_ref(file).addr(), name);
 
-    lineage(&[b"verdict", name.as_bytes(), &encoded])
+        if let Some(known) = self.sources.get(&key) {
+            return known.clone();
+        }
+
+        let computed = lineage(&[b"source", name.as_bytes(), file.language.as_bytes(), file.source.as_bytes()]);
+        let _ = self.sources.insert(key, computed.clone());
+
+        computed
+    }
+
+    /// The lineage of one verdict, encoded through the shared buffer.
+    fn verdict(&mut self, name: &str, mutant: &MutantResult) -> String {
+        self.scratch.clear();
+
+        // An encoding that failed part way through has left bytes in the buffer that are not the
+        // mutant, and hashing them would give a lineage nothing else would ever reproduce. Emptied
+        // instead, which is the same input the owned-vector form hashed when it could not encode.
+        if serde_json::to_writer(&mut self.scratch, mutant).is_err() {
+            self.scratch.clear();
+        }
+
+        lineage(&[b"verdict", name.as_bytes(), &self.scratch])
+    }
 }
 
 /// Selects one source generation per file before choosing verdicts.
-fn sources(reports: &[(String, Report)]) -> BTreeMap<&str, Source<'_>> {
-    let mut newest = BTreeMap::new();
+fn sources<'report>(reports: &'report [(String, Report)], lineages: &mut Lineages<'report>) -> HashMap<&'report str, Source<'report>> {
+    let mut newest = HashMap::new();
 
     for (name, report) in reports {
         for (path, file) in &report.files {
-            let (started_at, origin, lineage) = source_provenance(name, report, path, file);
+            let (started_at, origin, lineage) = source_provenance(name, report, path, file, lineages);
             let candidate = Source {
                 file,
                 started_at,
@@ -441,7 +512,7 @@ fn sources(reports: &[(String, Report)]) -> BTreeMap<&str, Source<'_>> {
 /// recent the winner is settled by [`rank`], the same tie-break the population used, so the source
 /// and the mutants rendered over it come from one coherent choice rather than from opposite ends of
 /// the argument list.
-fn rebuild(reports: &[(String, Report)], sources: &BTreeMap<&str, Source<'_>>, files: BTreeMap<&str, Vec<&Verdict<'_>>>) -> Option<Report> {
+fn rebuild(reports: &[(String, Report)], sources: &HashMap<&str, Source<'_>>, files: HashMap<&str, Vec<&Verdict<'_>>>) -> Option<Report> {
     let base = reports
         .iter()
         .max_by(|left, right| rank(&left.0, started_at(&left.1), "").cmp(&rank(&right.0, started_at(&right.1), "")))
@@ -1133,7 +1204,9 @@ mod tests {
             let left_file = &left.files["src/lib.rs"];
             let right_file = &right.files["src/lib.rs"];
 
-            if source_lineage("inner.json", left_file) > source_lineage("inner.json", right_file) {
+            let mut lineages = Lineages::default();
+
+            if lineages.source("inner.json", left_file) > lineages.source("inner.json", right_file) {
                 left_file.source.clone()
             } else {
                 right_file.source.clone()
@@ -1145,7 +1218,9 @@ mod tests {
             let left_mutant = &left.files["src/lib.rs"].mutants[0];
             let right_mutant = &right.files["src/lib.rs"].mutants[0];
 
-            if verdict_lineage("inner.json", left_mutant) > verdict_lineage("inner.json", right_mutant) {
+            let mut lineages = Lineages::default();
+
+            if lineages.verdict("inner.json", left_mutant) > lineages.verdict("inner.json", right_mutant) {
                 left_mutant.status.clone()
             } else {
                 right_mutant.status.clone()

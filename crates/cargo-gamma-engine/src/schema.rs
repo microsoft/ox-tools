@@ -34,6 +34,7 @@
 //! any of those three would change what the tests prove.
 
 use core::fmt::Write as _;
+use core::num::NonZeroU32;
 use core::ops::Range;
 
 use crate::error::Error;
@@ -51,35 +52,104 @@ pub const GUARD_PATH: &str = "::gamma_rt::a";
 /// agree on a type without it.
 pub const EITHER_PATH: &str = "::gamma_rt::Either";
 
+/// Which of a guard's up to four positions one resolved offset belongs to.
+#[derive(Clone, Copy)]
+enum Slot {
+    SiteStart,
+    SiteEnd,
+    MutatedStart,
+    MutatedEnd,
+}
+
+/// A guard's positions as they are filled in during the sweep in [`positions`], before every field
+/// that the mutant's shape requires is known to be present.
+#[derive(Clone, Copy, Default)]
+struct Slots {
+    site_start: Option<Position>,
+    site_end: Option<Position>,
+    mutated_start: Option<Position>,
+    mutated_end: Option<Position>,
+}
+
 /// Maps each mutant ordinal to where its guard landed in the instrumented text.
 ///
 /// A guard emits both the mutated text and the original, so a multi-line site grows and every
 /// later line shifts. Instrumented text therefore does not line up with its source, and anything
 /// attributing a compiler diagnostic to a mutant has to use these positions rather than the
 /// mutant's source line.
+///
+/// Every guard needs up to four offsets resolved (`site.start`, `site.end`, and, unless the mutant
+/// is a deletion, `mutated.start`/`mutated.end`), and a naive resolver recounts characters from the
+/// start of the enclosing line for each one independently — worst case, work proportional to
+/// mutant count times line length on a single generated long line. Resolving every offset from
+/// every guard in one ascending sweep instead makes the total character-counting work proportional
+/// to the text once, with the sweep never re-reading a byte it has already counted.
 fn positions(text: &str, spans: &HashMap<u32, (Range<usize>, Range<usize>)>) -> HashMap<u32, Guard> {
     let mut starts: Vec<usize> = Vec::with_capacity(text.len() / 32);
 
     starts.push(0);
     starts.extend(text.match_indices('\n').map(|(at, _matched)| at + 1));
 
-    let at = |offset: usize| -> Position {
-        let index = starts.partition_point(|start| *start <= offset).saturating_sub(1);
-        let start = starts.get(index).copied().unwrap_or(0);
-        let column = text.get(start..offset).map_or(0, |prefix| prefix.chars().count());
+    let mut requests: Vec<(usize, u32, Slot)> = Vec::with_capacity(spans.len() * 4);
 
-        Position {
-            line: u32::try_from(index + 1).unwrap_or(u32::MAX),
-            column: u32::try_from(column + 1).unwrap_or(u32::MAX),
+    for (ordinal, (site, mutated)) in spans {
+        requests.push((site.start, *ordinal, Slot::SiteStart));
+        requests.push((site.end, *ordinal, Slot::SiteEnd));
+
+        if !mutated.is_empty() {
+            requests.push((mutated.start, *ordinal, Slot::MutatedStart));
+            requests.push((mutated.end, *ordinal, Slot::MutatedEnd));
         }
-    };
+    }
+
+    // Ascending order lets the sweep below only ever move forward: to a later line, or to a later
+    // byte within the line it is already on.
+    requests.sort_by_key(|(offset, ..)| *offset);
+
+    let mut resolved: HashMap<u32, Slots> = HashMap::default();
+    let mut line = 0_usize;
+    let mut cursor = 0_usize;
+    let mut column = 0_usize;
+
+    for (offset, ordinal, slot) in requests {
+        while starts.get(line + 1).is_some_and(|next_start| *next_start <= offset) {
+            line += 1;
+            cursor = starts[line];
+            column = 0;
+        }
+
+        // `offset` never precedes `cursor`: requests are sorted ascending, so each one is no
+        // earlier than the last, and the line advance above only ever resets the cursor to a line
+        // start no later than the offset that triggered it. Both are byte offsets into valid UTF-8
+        // spans built by `render`, so both land on character boundaries.
+        let prefix = text
+            .get(cursor..offset)
+            .expect("cursor never exceeds offset and both are char-boundary offsets into this text");
+
+        column += prefix.chars().count();
+        cursor = offset;
+
+        let position = Position::from_zero_based(line, column);
+
+        let slots = resolved.entry(ordinal).or_default();
+
+        match slot {
+            Slot::SiteStart => slots.site_start = Some(position),
+            Slot::SiteEnd => slots.site_end = Some(position),
+            Slot::MutatedStart => slots.mutated_start = Some(position),
+            Slot::MutatedEnd => slots.mutated_end = Some(position),
+        }
+    }
 
     spans
-        .iter()
-        .map(|(ordinal, (site, mutated))| {
+        .keys()
+        .map(|ordinal| {
+            let slots = resolved.remove(ordinal).unwrap_or_default();
+
             let guard = Guard {
-                site: at(site.start)..at(site.end),
-                mutated: (!mutated.is_empty()).then(|| at(mutated.start)..at(mutated.end)),
+                site: slots.site_start.expect("every span above requests its own site.start")
+                    ..slots.site_end.expect("every span above requests its own site.end"),
+                mutated: slots.mutated_start.zip(slots.mutated_end).map(|(start, end)| start..end),
             };
 
             (*ordinal, guard)
@@ -88,10 +158,61 @@ fn positions(text: &str, spans: &HashMap<u32, (Range<usize>, Range<usize>)>) -> 
 }
 
 /// A one-based line and column in instrumented text, ordered as the text reads.
+///
+/// The coordinates are private because zero is not a position. Everything that consumes one — a
+/// compiler diagnostic, an editor, the blame that decides which mutant a build error belongs to —
+/// counts from one, so a zero would compare as strictly before the first character of the file and
+/// silently widen every containment test that reaches it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
-    pub line: u32,
-    pub column: u32,
+    line: NonZeroU32,
+    column: NonZeroU32,
+}
+
+impl Position {
+    /// Builds a position from one-based coordinates, rejecting a zero in either.
+    ///
+    /// Returns `None` rather than clamping, because the callers that reach this hold numbers
+    /// copied out of someone else's JSON: a zero there means the producer did not mean a position
+    /// at all, and turning it into line one would attribute a diagnostic to real code.
+    #[must_use]
+    pub const fn new(line: u32, column: u32) -> Option<Self> {
+        match (NonZeroU32::new(line), NonZeroU32::new(column)) {
+            (Some(line), Some(column)) => Some(Self { line, column }),
+            _other => None,
+        }
+    }
+
+    /// Builds a position from zero-based coordinates, as an offset sweep counts them.
+    ///
+    /// Total by construction: adding one to a count that starts at zero cannot produce zero, and a
+    /// count too large for `u32` saturates to the largest representable position rather than
+    /// wrapping into a small one.
+    #[must_use]
+    pub fn from_zero_based(line: usize, column: usize) -> Self {
+        let one_based = |count: usize| {
+            let widened = u32::try_from(count).unwrap_or(u32::MAX - 1);
+
+            NonZeroU32::new(widened.saturating_add(1)).expect("a saturating increment of an unsigned count is never zero")
+        };
+
+        Self {
+            line: one_based(line),
+            column: one_based(column),
+        }
+    }
+
+    /// The one-based line.
+    #[must_use]
+    pub const fn line(self) -> u32 {
+        self.line.get()
+    }
+
+    /// The one-based column.
+    #[must_use]
+    pub const fn column(self) -> u32 {
+        self.column.get()
+    }
 }
 
 /// Where one mutant's guard landed in instrumented text.
@@ -122,10 +243,37 @@ struct Node<'a> {
     children: Vec<Self>,
 }
 
+/// Which guard, of all the guards in one instrumented tree, a mutant is selected by.
+///
+/// A newtype because the number is one of several `u32` counts that travel together and mean
+/// entirely different things: an occurrence counts repeats of a site within an item, a replacement
+/// index counts a mutator's alternatives for one site, and this counts mutants across the whole
+/// run. They are interchangeable to the compiler and to the eye, and swapping two of them produces
+/// a tree that builds, runs, and attributes every verdict to the wrong mutant.
+///
+/// Zero is not a guard. A mutant an earlier run already settled, or that a shard left out, keeps
+/// zero because it was never scheduled, and nothing in the tree ever tests for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Ordinal(u32);
+
+impl Ordinal {
+    /// Names the guard this ordinal selects.
+    #[must_use]
+    pub const fn new(ordinal: u32) -> Self {
+        Self(ordinal)
+    }
+
+    /// The number as the instrumented tree spells it.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// A source-level mutant definition paired with the run-local ordinal that selects its guard.
 #[derive(Clone, Copy, Debug)]
 pub struct AssignedMutant<'a> {
-    ordinal: u32,
+    ordinal: Ordinal,
     span: &'a Range<usize>,
     replacement: &'a str,
     shape: Shape,
@@ -134,13 +282,13 @@ pub struct AssignedMutant<'a> {
 impl<'a> AssignedMutant<'a> {
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn new(ordinal: u32, definition: &'a MutantDefinition) -> Self {
+    pub(crate) fn new(ordinal: Ordinal, definition: &'a MutantDefinition) -> Self {
         Self::from_parts(ordinal, definition.span(), &definition.replacement, definition.shape)
     }
 
     #[doc(hidden)]
     #[must_use]
-    pub const fn from_parts(ordinal: u32, span: &'a Range<usize>, replacement: &'a str, shape: Shape) -> Self {
+    pub const fn from_parts(ordinal: Ordinal, span: &'a Range<usize>, replacement: &'a str, shape: Shape) -> Self {
         Self {
             ordinal,
             span,
@@ -233,8 +381,10 @@ fn copy(text: &str, range: Range<usize>) -> &str {
 
 /// Groups sites into a forest ordered by containment.
 fn build_tree<'a>(sites: &[&'a AssignedMutant<'a>]) -> Result<Vec<Node<'a>>> {
-    let mut roots: Vec<Node<'a>> = Vec::new();
-    let mut stack: Vec<Node<'a>> = Vec::new();
+    // Neither can ever hold more than one node per site: `roots` gains at most one entry per site
+    // that closes out to the top level, and `stack` holds at most one open node per site.
+    let mut roots: Vec<Node<'a>> = Vec::with_capacity(sites.len());
+    let mut stack: Vec<Node<'a>> = Vec::with_capacity(sites.len());
 
     for mutant in sites {
         // Close every open node this site is not inside.
@@ -253,7 +403,7 @@ fn build_tree<'a>(sites: &[&'a AssignedMutant<'a>]) -> Result<Vec<Node<'a>>> {
             // spans with different shapes would be spliced with the wrong wrapper — an expression
             // guard around a statement, say — so they are kept apart and nested instead.
             if top.span == *mutant.span && top.shape == mutant.shape {
-                top.mutants.push((mutant.ordinal, mutant.replacement));
+                top.mutants.push((mutant.ordinal.get(), mutant.replacement));
                 continue;
             }
 
@@ -270,7 +420,7 @@ fn build_tree<'a>(sites: &[&'a AssignedMutant<'a>]) -> Result<Vec<Node<'a>>> {
         stack.push(Node {
             span: (*mutant.span).clone(),
             shape: mutant.shape,
-            mutants: vec![(mutant.ordinal, mutant.replacement)],
+            mutants: vec![(mutant.ordinal.get(), mutant.replacement)],
             children: Vec::new(),
         });
     }
@@ -393,7 +543,7 @@ fn render(text: &str, node: &Node<'_>, out: &mut String, spans: &mut HashMap<u32
 mod tests {
     use core::ops::Range;
 
-    use super::{AssignedMutant, Guard, Shape};
+    use super::{AssignedMutant, Guard, Ordinal, Position, Shape};
     use crate::{HashMap, Result};
 
     #[derive(Debug)]
@@ -402,6 +552,11 @@ mod tests {
         span: Range<usize>,
         replacement: String,
         shape: Shape,
+    }
+
+    /// The one-based position a test states, which is never zero.
+    fn at(line: u32, column: u32) -> Position {
+        Position::new(line, column).expect("a position written into a test is one-based by construction")
     }
 
     fn instrument(text: &str, mutants: &[&Mutant]) -> Result<String> {
@@ -419,7 +574,7 @@ mod tests {
     fn assigned_mutants<'a>(mutants: &[&'a Mutant]) -> Vec<AssignedMutant<'a>> {
         mutants
             .iter()
-            .map(|mutant| AssignedMutant::from_parts(mutant.ordinal, &mutant.span, &mutant.replacement, mutant.shape))
+            .map(|mutant| AssignedMutant::from_parts(Ordinal::new(mutant.ordinal), &mutant.span, &mutant.replacement, mutant.shape))
             .collect()
     }
 
@@ -469,9 +624,77 @@ mod tests {
 
         let (_out, guards) = instrument_with_guards(text, &[&first, &second]).expect("instrumented");
 
-        assert_eq!(guards.get(&3).map(|guard| guard.site.start.line), Some(2));
-        assert_eq!(guards.get(&9).map(|guard| guard.site.start.line), Some(3));
+        assert_eq!(guards.get(&3).map(|guard| guard.site.start.line()), Some(2));
+        assert_eq!(guards.get(&9).map(|guard| guard.site.start.line()), Some(3));
         assert_eq!(guards.len(), 2);
+    }
+
+    /// A byte-counting regression would report the wrong column for anything past a multibyte
+    /// character, and a missing one-based `+ 1` would report one column short — both silent while
+    /// every ASCII-only test in this file stays green. `é` (2 bytes) sits before the mutation site
+    /// and inside it, on the same line, so both the leading-prefix count and the site's own
+    /// character count are exercised; the expected positions are hand-derived from the exact
+    /// guard template `render` emits (`(if `, `GUARD_PATH`, `(1u32) { `, the replacement, `
+    /// } else { `, the original text, ` })`), not from the code under test.
+    #[test]
+    fn guard_positions_count_unicode_characters_not_bytes() {
+        let text = "fn f() -> i32 {\n    let x = 1;\n    é_café + 1\n}\n";
+        let site = span_of(text, "café + 1");
+        let only = mutant(site, 1, "0", Shape::Expr);
+
+        let (_out, guards) = instrument_with_guards(text, &[&only]).expect("instrumented");
+        let guard = guards.get(&1).expect("recorded").clone();
+
+        // "    é_" precedes the site: 6 characters, so the site starts at column 7.
+        // The whole rendered site is `(if ::gamma_rt::a(1u32) { 0 } else { café + 1 })`, which is
+        // 48 characters long, so the site ends at column 7 + 48 = 55.
+        assert_eq!(guard.site, at(3, 7)..at(3, 55));
+
+        // The replacement `0` begins right after the 26-character `(if ::gamma_rt::a(1u32) { `
+        // prefix, so at column 7 + 26 = 33, and is 1 character long, ending at column 34.
+        let mutated = guard.mutated.expect("a replacement was recorded");
+
+        assert_eq!(mutated, at(3, 33)..at(3, 34));
+    }
+
+    /// Zero is not a position, and the constructor that takes one-based numbers has to say so
+    /// rather than accept a value that would compare as before the first character of the file.
+    #[test]
+    fn a_one_based_position_rejects_a_zero_coordinate() {
+        assert_eq!(Position::new(0, 1), None);
+        assert_eq!(Position::new(1, 0), None);
+        assert_eq!(Position::new(0, 0), None);
+
+        let first = Position::new(1, 1).expect("line one column one is a position");
+
+        assert_eq!(first.line(), 1);
+        assert_eq!(first.column(), 1);
+    }
+
+    /// The sweep counts from zero, so the conversion adds one — and a count too large for `u32`
+    /// has to saturate at the top rather than wrap around to the start of the file.
+    #[test]
+    fn a_zero_based_count_becomes_the_position_after_it() {
+        let origin = Position::from_zero_based(0, 0);
+
+        assert_eq!((origin.line(), origin.column()), (1, 1));
+
+        let inside = Position::from_zero_based(4, 11);
+
+        assert_eq!((inside.line(), inside.column()), (5, 12));
+
+        let beyond = Position::from_zero_based(usize::MAX, usize::MAX);
+
+        assert_eq!((beyond.line(), beyond.column()), (u32::MAX, u32::MAX));
+    }
+
+    /// Positions order as the text reads: by line first, and only then by column, which is what
+    /// every containment test in the blame pass relies on.
+    #[test]
+    fn positions_order_by_line_before_column() {
+        assert!(at(1, 99) < at(2, 1));
+        assert!(at(2, 1) < at(2, 2));
+        assert_eq!(at(7, 3), at(7, 3));
     }
 
     #[test]
@@ -484,7 +707,7 @@ mod tests {
 
         assert!(out.lines().count() > text.lines().count(), "the site should have grown");
         assert!(
-            span.site.end.line > span.site.start.line,
+            span.site.end.line() > span.site.start.line(),
             "a multi-line site should span multiple lines"
         );
     }
@@ -529,9 +752,9 @@ mod tests {
             .position(|line| line.contains("a(2u32)"))
             .and_then(|at| u32::try_from(at + 1).ok());
 
-        assert_eq!(guards.get(&2).map(|guard| guard.site.start.line), found);
+        assert_eq!(guards.get(&2).map(|guard| guard.site.start.line()), found);
         assert_ne!(
-            guards.get(&2).map(|guard| guard.site.start.line),
+            guards.get(&2).map(|guard| guard.site.start.line()),
             Some(5),
             "the guard should not be on its source line"
         );

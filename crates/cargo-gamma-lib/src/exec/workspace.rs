@@ -1,17 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use core::hash::{Hash, Hasher};
+use core::error::Error as StdError;
 use core::num::NonZeroUsize;
 use core::sync::atomic::{AtomicBool, Ordering};
-use std::collections::hash_map::DefaultHasher;
 use std::ffi::OsString;
 use std::fs::{self, File, TryLockError};
+use std::io::{Read as _, Write as _};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 use std::{env, io, thread};
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
+use cargo_gamma_process::{MemoryRequest, output as contained_output};
 use walkdir::WalkDir;
 
 use super::cargo_options::CargoOptions;
@@ -21,7 +22,7 @@ use super::events::Events;
 #[cfg(test)]
 use super::faults::{self, Fault};
 use super::loader::{Launch, toolchain_libraries};
-use super::manifest::{CAP_LINTS, Manifest, RUNTIME_CRATE, anchor_cargo_config, cap_lints};
+use super::manifest::{CAP_LINTS, Manifest, RUNTIME_CRATE, RUNTIME_PACKAGE, anchor_cargo_config, cap_lints};
 use super::nextest::Harness;
 use super::sync::sync_or_copy;
 use super::test_binary::{TEST_THREADS_VAR, TestBinary, harness_threads};
@@ -41,7 +42,7 @@ const RUNTIME_SOURCES: [(&str, &str); 3] = [
 /// The workspace package contract inherited by the real runtime crate.
 const WORKSPACE_MANIFEST: &str = include_str!("../../../../Cargo.toml");
 
-/// Identifies the workspace allowed to reuse a redirected cache.
+/// Identifies the workspace allowed to reuse a cache directory.
 const CACHE_OWNER: &str = ".cargo-gamma-owner";
 
 /// A scratch copy of the workspace, instrumented and ready to build.
@@ -234,9 +235,6 @@ impl Workspace {
         #[cfg(feature = "internals")]
         crate::testing::pause_during_workspace_preparation(source);
 
-        migrate_legacy_directory(&base, "tree", "workspace")?;
-        migrate_legacy_directory(&base, "build", "target")?;
-
         events.testing_log(&base)?;
 
         let _outcome = sync_or_copy(
@@ -252,7 +250,7 @@ impl Workspace {
             expose_vcs_metadata(source, &root)?;
         }
         vendor_runtime(&runtime)?;
-        anchor_manifests(source, &root)?;
+        anchor_manifests(source, &root, &runtime)?;
 
         let libraries = toolchain_libraries(&root, &target);
 
@@ -290,7 +288,7 @@ impl Workspace {
 
         let mut manifest = Manifest::read(&path)?;
 
-        manifest.link_runtime(runtime);
+        manifest.link_runtime(runtime)?;
         manifest.save()
     }
 
@@ -574,9 +572,17 @@ impl Workspace {
         self.capture(command, "cargo metadata")
     }
 
-    /// Runs a command that is expected to print something, and returns what it printed.
-    fn capture(&self, mut command: Command, what: &str) -> Result<String> {
-        interpret(command.output().map(Captured::from), what, &self.root)
+    /// Runs a contained command that is expected to print something, and returns what it printed.
+    ///
+    /// Cargo metadata and nextest listing can execute build scripts or other repository-controlled
+    /// helpers. Their stdout and stderr are drained concurrently, and every descendant is swept
+    /// before inherited pipe handles are allowed to keep this capture open.
+    fn capture(&self, command: Command, what: &str) -> Result<String> {
+        interpret(
+            contained_output(command, MemoryRequest::default()).map(Captured::from),
+            what,
+            &self.root,
+        )
     }
 
     /// The gamma base this run's tree sits under, whose size is the run's [`footprint`].
@@ -624,7 +630,10 @@ impl From<Output> for Captured {
 /// Every arm matters because the caller proceeds on this output as fact: a failure read as
 /// empty-but-successful becomes a workspace with no test binaries and a run that cheerfully
 /// reports nothing to do.
-fn interpret(captured: io::Result<Captured>, what: &str, root: &Utf8Path) -> Result<String> {
+fn interpret<E>(captured: core::result::Result<Captured, E>, what: &str, root: &Utf8Path) -> Result<String>
+where
+    E: StdError + Send + Sync + 'static,
+{
     let captured = captured.map_err(|cause| error!("could not run `{what}` in {root}").caused_by(cause))?;
 
     if !captured.succeeded {
@@ -681,69 +690,113 @@ pub fn footprint(base: &Utf8Path) -> u64 {
 /// against the absolute paths it walks, and cargo resolves a path dependency against the manifest
 /// holding it, so a relative base would make the copy descend into its own output and the
 /// instrumented tree point its runtime dependency at itself.
+///
+/// The default directory's name comes from `workspace_identity`, a digest this crate pins rather than
+/// one the standard library is free to change: the lock every source-changing command shares lives
+/// under this path, so two binaries that derive different names for one workspace would rewrite the
+/// same tree at the same time while each believing it held the only lock.
 #[must_use]
 pub fn gamma_base(root: &Utf8Path, cache: Option<&Utf8Path>) -> Utf8PathBuf {
     let base = cache.map_or_else(
-        || {
-            let mut identity = DefaultHasher::new();
-            absolute(root).hash(&mut identity);
-
-            env::var_os("XDG_CACHE_HOME")
-                .or_else(|| env::var_os("LOCALAPPDATA"))
-                .and_then(|path| Utf8PathBuf::from_path_buf(path.into()).ok())
-                .or_else(|| {
-                    env::var_os("HOME")
-                        .and_then(|path| Utf8PathBuf::from_path_buf(path.into()).ok())
-                        .map(|home| home.join(".cache"))
-                })
-                .unwrap_or_else(|| absolute(root).parent().unwrap_or(root).join(".cargo-gamma-cache"))
-                .join("cargo-gamma")
-                .join(format!("{:016x}", identity.finish()))
-        },
+        || default_cache_home(root).join(workspace_identity(&absolute(root))),
         Utf8Path::to_owned,
     );
 
     absolute(&base)
 }
 
-/// Deletes every cached entry for a workspace while preserving its concurrency lock.
+/// The directory every default per-workspace cache is a child of.
+fn default_cache_home(root: &Utf8Path) -> Utf8PathBuf {
+    env::var_os("XDG_CACHE_HOME")
+        .or_else(|| env::var_os("LOCALAPPDATA"))
+        .and_then(|path| Utf8PathBuf::from_path_buf(path.into()).ok())
+        .or_else(|| {
+            env::var_os("HOME")
+                .and_then(|path| Utf8PathBuf::from_path_buf(path.into()).ok())
+                .map(|home| home.join(".cache"))
+        })
+        .unwrap_or_else(|| absolute(root).parent().unwrap_or(root).join(".cargo-gamma-cache"))
+        .join("cargo-gamma")
+}
+
+/// Names the default cache directory of one absolute workspace root.
 ///
-/// Returns whether any cached data existed. The lock file remains so an active run and a clean
-/// cannot race over the workspace or Cargo artifacts.
+/// BLAKE3 rather than `DefaultHasher`: the algorithm behind `DefaultHasher` is explicitly not a
+/// stable contract across standard-library releases, and this name is not a private detail of one
+/// process. It is where the advisory lock that serializes every command able to publish source or
+/// configuration changes for this workspace lives, so two binaries built against different standard
+/// libraries would take two different locks over one tree and copy or rewrite it concurrently while
+/// each of them observed no contention. Pinning the algorithm here is what makes the documented
+/// single lock domain true.
+///
+/// Truncated to 64 bits because this is a directory name a user reads and occasionally types, and
+/// because a collision is caught rather than trusted: the owner marker under the directory records
+/// the root that owns it, and a second root landing on the same name is refused instead of quietly
+/// sharing the tree.
+fn workspace_identity(root: &Utf8Path) -> String {
+    let digest = blake3::hash(root.as_str().as_bytes());
+    let mut identity = [0_u8; 8];
+
+    identity.copy_from_slice(digest.as_bytes().get(..8).expect("a BLAKE3 digest is 32 bytes long"));
+
+    format!("{:016x}", u64::from_be_bytes(identity))
+}
+
+/// Deletes every cached entry for a workspace while preserving its concurrency lock and identity.
+///
+/// Returns whether any cached data was removed. The lock file remains so an active run and a clean
+/// cannot race over the workspace or Cargo artifacts, and the owner marker remains because it says
+/// which workspace this directory is for rather than holding any cached data.
+///
+/// # Errors
+///
+/// Returns an error if the cache is unmarked or belongs to another workspace, if the cache
+/// directory cannot be read, or if an entry cannot be removed — a permission denial, a file held
+/// open by another process on Windows, or a path that changed under the walk.
+///
+/// Only the workspace's own cache is cleaned. A cache redirected elsewhere with `--cache-dir` is
+/// not reachable from the workspace root alone and is the caller's to remove.
 pub fn clean_cache(root: &Utf8Path) -> Result<bool> {
     let base = gamma_base(root, None);
-
-    if !base.exists() {
-        return Ok(false);
-    }
-
-    let _lock = claim(&base)?;
-    let entries =
-        fs::read_dir(base.as_std_path()).map_err(|cause| error!("could not read cargo-gamma's cache at `{base}`").caused_by(cause))?;
     let mut removed = false;
 
-    for entry in entries {
-        let entry = entry.map_err(|cause| error!("could not read an entry in cargo-gamma's cache at `{base}`").caused_by(cause))?;
+    if base.exists() {
+        reject_linked_cache(&base)?;
+        let _lock = claim(&base)?;
+        validate_cache_owner(root, &base, CacheKind::Default)?;
+        let entries =
+            fs::read_dir(base.as_std_path()).map_err(|cause| error!("could not read cargo-gamma's cache at `{base}`").caused_by(cause))?;
+        for entry in entries {
+            let entry = entry.map_err(|cause| error!("could not read an entry in cargo-gamma's cache at `{base}`").caused_by(cause))?;
 
-        if entry.file_name() == "lock" {
-            continue;
+            if entry.file_name() == "lock" || entry.file_name() == CACHE_OWNER {
+                continue;
+            }
+
+            remove_cached(&entry)?;
+            removed = true;
         }
-
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|cause| error!("could not inspect cached data at `{}`", path.display()).caused_by(cause))?;
-        let result = if file_type.is_dir() && !file_type.is_symlink() {
-            fs::remove_dir_all(&path)
-        } else {
-            fs::remove_file(&path)
-        };
-
-        result.map_err(|cause| error!("could not remove cached data at `{}`", path.display()).caused_by(cause))?;
-        removed = true;
     }
 
     Ok(removed)
+}
+
+/// Removes one entry of a cache directory, whatever kind of thing it is.
+///
+/// A symbolic link is unlinked rather than followed, so a link planted in a cache cannot turn a
+/// clean into a recursive delete of whatever it points at.
+fn remove_cached(entry: &fs::DirEntry) -> Result<()> {
+    let path = entry.path();
+    let file_type = entry
+        .file_type()
+        .map_err(|cause| error!("could not inspect cached data at `{}`", path.display()).caused_by(cause))?;
+    let result = if file_type.is_dir() && !file_type.is_symlink() {
+        fs::remove_dir_all(&path)
+    } else {
+        fs::remove_file(&path)
+    };
+
+    result.map_err(|cause| error!("could not remove cached data at `{}`", path.display()).caused_by(cause))
 }
 
 /// Resolves a path against the current directory and removes the components that name nothing.
@@ -977,31 +1030,6 @@ pub fn scratch_tree(root: &Utf8Path, scratch: Option<&Utf8Path>) -> Utf8PathBuf 
     gamma_base(root, scratch).join("workspace")
 }
 
-/// Renames an older cache directory, or removes it when its replacement already exists.
-fn migrate_legacy_directory(base: &Utf8Path, legacy: &str, current: &str) -> Result<()> {
-    let from = base.join(legacy);
-    let to = base.join(current);
-
-    if !from.exists() {
-        return Ok(());
-    }
-
-    if to.exists() {
-        let metadata = fs::symlink_metadata(from.as_std_path())
-            .map_err(|cause| error!("could not inspect the legacy cache directory at `{from}`").caused_by(cause))?;
-        let removed = if metadata.is_dir() {
-            fs::remove_dir_all(from.as_std_path())
-        } else {
-            fs::remove_file(from.as_std_path())
-        };
-
-        return removed.map_err(|cause| error!("could not remove the legacy cache directory at `{from}`").caused_by(cause));
-    }
-
-    fs::rename(from.as_std_path(), to.as_std_path())
-        .map_err(|cause| error!("could not rename the legacy cache directory from `{from}` to `{to}`").caused_by(cause))
-}
-
 /// Takes and validates a cache chosen independently of the workspace.
 ///
 /// The caller has already taken the stable workspace lock. This second lock protects the inverse
@@ -1009,6 +1037,8 @@ fn migrate_legacy_directory(base: &Utf8Path, legacy: &str, current: &str) -> Res
 /// for an empty directory; existing unmarked contents are never adopted as cargo-gamma state.
 fn claim_redirected_cache(source: &Utf8Path, base: &Utf8Path) -> Result<File> {
     if base.exists() {
+        reject_linked_cache(base)?;
+
         match fs::symlink_metadata(base.join(CACHE_OWNER).as_std_path()) {
             Ok(_metadata) => {}
             Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
@@ -1026,37 +1056,211 @@ fn claim_redirected_cache(source: &Utf8Path, base: &Utf8Path) -> Result<File> {
         }
     }
 
-    fs::create_dir_all(base.as_std_path())
+    create_private_dir_all(base)
         .map_err(|cause| error!("could not create the redirected cargo-gamma cache at `{base}`").caused_by(cause))?;
 
+    reject_linked_cache(base)?;
+    reject_foreign_writers(base)?;
+
     let lock = claim(base)?;
-    validate_cache_owner(source, base)?;
+    validate_cache_owner(source, base, CacheKind::Redirected)?;
 
     Ok(lock)
 }
 
-/// Refuses a redirected directory unless it is empty or already belongs to this workspace.
-fn validate_cache_owner(source: &Utf8Path, base: &Utf8Path) -> Result<()> {
+/// Creates a cache directory without granting access beyond the invoking user.
+///
+/// The process umask may be permissive on build agents and in containers. Requesting no group or
+/// other permissions makes the result private under every umask; existing directories are left
+/// unchanged and are still judged by [`reject_foreign_writers`].
+#[cfg(unix)]
+fn create_private_dir_all(path: &Utf8Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path.as_std_path())
+}
+
+#[cfg(not(unix))]
+fn create_private_dir_all(path: &Utf8Path) -> io::Result<()> {
+    fs::create_dir_all(path.as_std_path())
+}
+
+/// Refuses a cache directory that is reached through a link.
+///
+/// A redirected cache is named by the user and everything under it is later handed to cargo as
+/// `CARGO_TARGET_DIR` and executed from. A symbolic link — or, on Windows, any other reparse point
+/// — means the name that was checked and the directory that is used are two different things, and
+/// whoever can rewrite the link chooses the second one after the first has been approved. Only the
+/// final component is checked here; the ancestry above it is covered by
+/// [`reject_foreign_writers`] on the platforms where ownership can be established at all.
+fn reject_linked_cache(base: &Utf8Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(base.as_std_path())
+        .map_err(|cause| error!("could not inspect the redirected cargo-gamma cache at `{base}`").caused_by(cause))?;
+
+    if metadata.file_type().is_symlink() {
+        return Err(error!(
+            "the redirected cache at `{base}` is a link.\n\
+             Pass the directory itself to --cache-dir: a link can be repointed after it has been checked, \
+             at a directory whose contents this tool would then build and run."
+        )
+        .usage());
+    }
+
+    if !metadata.is_dir() {
+        return Err(error!(
+            "the redirected cache at `{base}` is not a directory.\n\
+             Choose an empty directory for --cache-dir."
+        )
+        .usage());
+    }
+
+    Ok(())
+}
+
+/// Refuses a cache whose directory, or any directory above it, another local user can write to.
+///
+/// Everything the run builds is placed here and later executed, so write access to any directory on
+/// the path to it is enough to choose what this tool runs as the invoking user. The check walks the
+/// physical path — the one with every link already resolved — from the cache to the root, and
+/// refuses a directory that is owned by anyone but the invoking user or `root`. The cache itself
+/// must not be writable by group or other. A shared ancestor is accepted only when its sticky bit
+/// stops one user replacing another's entries.
+///
+/// This is an ownership check, not a race-free one. It says the directories are not writable by
+/// another identity now, which is what makes a later substitution require the invoking user's own
+/// credentials; it does not, and cannot, freeze the path for the duration of the run. A user who
+/// can write to their own cache can still change it under a run they started themselves, and no
+/// check here would be about a trust boundary.
+#[cfg(unix)]
+fn reject_foreign_writers(base: &Utf8Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    /// The bits that let a group member or anyone else write to a directory.
+    const SHARED_WRITE: u32 = 0o022;
+
+    /// The bit that stops one user removing or renaming another's entries in a shared directory.
+    /// It is what makes a world-writable `/tmp` an acceptable place to keep a private subdirectory.
+    const STICKY: u32 = 0o1000;
+
+    /// The user id the kernel treats as unrestricted, and so the only foreign owner that could not
+    /// gain anything by substituting a file this run will execute.
+    const ROOT: u32 = 0;
+
+    let user = cargo_gamma_unsafe::identity::effective_user();
+    let physical = physical(base);
+
+    for (index, directory) in physical.ancestors().enumerate() {
+        // A relative cache path whose prefix could not be resolved ends its ancestry at the empty
+        // path, which names no directory and is not a step towards the root.
+        if directory.as_str().is_empty() {
+            break;
+        }
+
+        let metadata = fs::symlink_metadata(directory.as_std_path())
+            .map_err(|cause| error!("could not inspect `{directory}` on the way to the redirected cache").caused_by(cause))?;
+
+        if metadata.uid() != user && metadata.uid() != ROOT {
+            return Err(error!(
+                "`{directory}`, on the way to the redirected cache at `{base}`, belongs to another user.\n\
+                 Choose a directory only you can write to for --cache-dir: this run builds test executables \
+                 there and then runs them as you."
+            )
+            .usage());
+        }
+
+        let mode = metadata.mode();
+
+        if mode & SHARED_WRITE != 0 && (index == 0 || mode & STICKY == 0) {
+            return Err(error!(
+                "`{directory}`, on the way to the redirected cache at `{base}`, is writable by other users.\n\
+                 Choose a directory only you can write to for --cache-dir: this run builds test executables \
+                 there and then runs them as you."
+            )
+            .usage());
+        }
+    }
+
+    Ok(())
+}
+
+/// Ownership of a cache directory cannot be established here.
+///
+/// The check this replaces asks who owns a directory and who may write to it. On Windows those are
+/// answers about a discretionary access-control list, which `std` does not expose and which cannot
+/// be read without the Win32 security interface; the closest thing to it that is reachable, the
+/// read-only attribute, says nothing about other principals. Rather than run a check that would
+/// pass on an unsafe directory and read as if something had been verified, nothing is claimed: a
+/// redirected cache on this platform is trusted to the extent that the directory the user named is
+/// one they control. The link check in [`reject_linked_cache`] still applies, and is the part that
+/// does not depend on identity.
+#[cfg(not(unix))]
+#[expect(clippy::unnecessary_wraps, reason = "matches the Unix signature this stands in for")]
+fn reject_foreign_writers(_base: &Utf8Path) -> Result<()> {
+    Ok(())
+}
+
+/// Which cache directory a marker is being checked for, so the refusal names something the user
+/// can change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CacheKind {
+    /// The per-workspace directory [`gamma_base`] derives when no `--cache-dir` was given.
+    Default,
+
+    /// A directory the user named with `--cache-dir`.
+    Redirected,
+}
+
+impl CacheKind {
+    /// What to tell a user whose cache directory already belongs to another workspace.
+    const fn collision_advice(self) -> &'static str {
+        match self {
+            // The name is derived from the workspace root, so a mismatch is a digest collision
+            // rather than a choice the user made — the only thing they can do is stop sharing it.
+            Self::Default => "Pass --cache-dir to give one of the two workspaces a cache of its own.",
+            Self::Redirected => "Choose a different directory for --cache-dir.",
+        }
+    }
+}
+
+/// Refuses a cache directory unless it is unclaimed or already belongs to this workspace.
+///
+/// The marker is opened once and both inspected and read through that one handle, so the file whose
+/// type is checked is the file whose contents decide the answer. Reopening it by name between the
+/// two would leave an interval in which the checked file could be replaced by another.
+fn validate_cache_owner(source: &Utf8Path, base: &Utf8Path, kind: CacheKind) -> Result<()> {
     let owner = base.join(CACHE_OWNER);
 
-    match fs::symlink_metadata(owner.as_std_path()) {
-        Ok(metadata) => {
+    match open_cache_owner(&owner) {
+        Ok(mut marker) => {
+            let metadata = marker
+                .metadata()
+                .map_err(|cause| error!("could not inspect the cargo-gamma cache owner marker at `{owner}`").caused_by(cause))?;
+
             if !metadata.is_file() {
                 return Err(error!(
                     "the cargo-gamma cache owner marker at `{owner}` is not a regular file.\n\
-                     Choose an empty directory for --cache-dir."
+                     {}",
+                    kind.collision_advice()
                 )
                 .usage());
             }
 
-            let recorded = fs::read_to_string(owner.as_std_path())
+            let mut recorded = String::new();
+
+            marker
+                .read_to_string(&mut recorded)
                 .map_err(|cause| error!("could not read the cargo-gamma cache owner marker at `{owner}`").caused_by(cause))?;
+
             let source = physical(source);
 
             if recorded != source.as_str() {
                 return Err(error!(
-                    "the redirected cache at `{base}` belongs to the workspace at `{recorded}`, not `{source}`.\n\
-                     Choose a different directory for --cache-dir."
+                    "the cargo-gamma cache at `{base}` belongs to the workspace at `{}`, not `{source}`.\n\
+                     {}",
+                    crate::report::encode_controls(&recorded),
+                    kind.collision_advice()
                 )
                 .usage());
             }
@@ -1066,7 +1270,17 @@ fn validate_cache_owner(source: &Utf8Path, base: &Utf8Path) -> Result<()> {
                 return Err(unowned_cache(base));
             }
 
-            fs::write(owner.as_std_path(), physical(source).as_str())
+            // Created rather than truncated, so that this cannot adopt a marker another principal
+            // planted between the check above and this write: a marker that appears in that window
+            // makes the claim fail rather than silently overwriting whatever is there.
+            let mut marker = File::options()
+                .create_new(true)
+                .write(true)
+                .open(owner.as_std_path())
+                .map_err(|cause| error!("could not write the cargo-gamma cache owner marker at `{owner}`").caused_by(cause))?;
+
+            marker
+                .write_all(physical(source).as_str().as_bytes())
                 .map_err(|cause| error!("could not write the cargo-gamma cache owner marker at `{owner}`").caused_by(cause))?;
         }
         Err(cause) => {
@@ -1075,6 +1289,30 @@ fn validate_cache_owner(source: &Utf8Path, base: &Utf8Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn open_cache_owner(owner: &Utf8Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    File::options()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(owner.as_std_path())
+}
+
+#[cfg(not(unix))]
+fn open_cache_owner(owner: &Utf8Path) -> io::Result<File> {
+    let metadata = fs::symlink_metadata(owner.as_std_path())?;
+
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cache owner marker is not a regular file",
+        ));
+    }
+
+    File::open(owner.as_std_path())
 }
 
 /// Says whether a directory already contains anything at all.
@@ -1091,11 +1329,10 @@ fn has_any_entries(base: &Utf8Path) -> Result<bool> {
 
 /// Says whether a directory contains anything cargo-gamma has not just created to lock it.
 fn has_unowned_entries(base: &Utf8Path) -> Result<bool> {
-    let entries =
-        fs::read_dir(base.as_std_path()).map_err(|cause| error!("could not inspect the redirected cache at `{base}`").caused_by(cause))?;
+    let entries = fs::read_dir(base.as_std_path()).map_err(|cause| error!("could not inspect the cache at `{base}`").caused_by(cause))?;
 
     for entry in entries {
-        let entry = entry.map_err(|cause| error!("could not inspect an entry in the redirected cache at `{base}`").caused_by(cause))?;
+        let entry = entry.map_err(|cause| error!("could not inspect an entry in the cache at `{base}`").caused_by(cause))?;
         if entry.file_name() != "lock" {
             return Ok(true);
         }
@@ -1106,8 +1343,8 @@ fn has_unowned_entries(base: &Utf8Path) -> Result<bool> {
 
 fn unowned_cache(base: &Utf8Path) -> crate::error::Error {
     error!(
-        "the redirected cache at `{base}` is not empty and is not marked as cargo-gamma state.\n\
-         Choose an empty directory for --cache-dir; existing contents will not be adopted or removed."
+        "the cache at `{base}` is not empty and is not marked as cargo-gamma state.\n\
+         Existing contents will not be adopted or removed; pass --cache-dir to use an empty directory instead."
     )
     .usage()
 }
@@ -1156,12 +1393,22 @@ fn claim(base: &Utf8Path) -> Result<File> {
 ///
 /// Deliberately ignores `--cache-dir`: separate build caches may run independently, but commands
 /// that can publish source or configuration changes must still agree on one lock domain.
+///
+/// The identity marker is verified under the lock, so a second workspace root that happened to
+/// derive the same directory name is refused rather than handed a lock domain and a scratch tree
+/// belonging to the first. Checking it after the lock is taken is what makes the check meaningful:
+/// before it, two colliding runs could both read an absent marker and both write one.
 pub(crate) fn claim_workspace(root: &Utf8Path) -> Result<File> {
     let base = gamma_base(root, None);
 
     fs::create_dir_all(base.as_std_path())
         .map_err(|cause| error!("could not create cargo-gamma's workspace cache at `{base}`").caused_by(cause))?;
-    claim(&base)
+
+    let lock = claim(&base)?;
+
+    validate_cache_owner(root, &base, CacheKind::Default)?;
+
+    Ok(lock)
 }
 
 /// Takes every lock needed to use one workspace's reusable state.
@@ -1202,7 +1449,7 @@ fn try_lock(file: &File) -> core::result::Result<(), TryLockError> {
 ///
 /// Every manifest is visited, not just the ones belonging to mutated packages: a package nobody
 /// mutates is still built, and a path dependency it cannot resolve fails the build just as surely.
-fn anchor_manifests(source: &Utf8Path, root: &Utf8Path) -> Result<()> {
+fn anchor_manifests(source: &Utf8Path, root: &Utf8Path, runtime: &Utf8Path) -> Result<()> {
     for entry in WalkDir::new(root.as_std_path()).into_iter().filter_map(core::result::Result::ok) {
         if entry.file_name() != "Cargo.toml" {
             continue;
@@ -1220,6 +1467,7 @@ fn anchor_manifests(source: &Utf8Path, root: &Utf8Path) -> Result<()> {
         let mut manifest = Manifest::read(path)?;
 
         manifest.anchor_paths(&source.join(original), original);
+        manifest.redirect_runtime(runtime)?;
         manifest.save()?;
     }
 
@@ -1318,9 +1566,9 @@ fn vendor_runtime(at: &Utf8Path) -> Result<()> {
     let edition = inherited("edition")?;
     let rust_version = inherited("rust-version")?;
     let manifest = format!(
-        "[package]\nname = \"{RUNTIME_CRATE}\"\nversion = \"0.0.0\"\nedition = \"{edition}\"\nrust-version = \"{rust_version}\"\npublish = false\n\n\
-         [features]\nloom = []\n\n[lints.rust]\nunexpected_cfgs = {{ level = \"warn\", check-cfg = ['cfg(loom)'] }}\n\n\
-         [lib]\npath = \"src/lib.rs\"\n\n[workspace]\n"
+        "[package]\nname = \"{RUNTIME_PACKAGE}\"\nversion = \"0.0.0\"\nedition = \"{edition}\"\nrust-version = \"{rust_version}\"\npublish = false\n\n\
+         [features]\nloom = []\n\n[lints.rust]\nunexpected_cfgs = {{ level = \"warn\", check-cfg = ['cfg(coverage_nightly)', 'cfg(loom)'] }}\n\n\
+         [lib]\nname = \"{RUNTIME_CRATE}\"\npath = \"src/lib.rs\"\n\n[workspace]\n"
     );
 
     fs::write(at.join("Cargo.toml").as_std_path(), manifest)
@@ -1343,10 +1591,30 @@ mod tests {
 
     use super::*;
 
+    /// Redirected-cache fixtures must not inherit permissions from the repository checkout:
+    /// containerized build agents may mount that checkout under a non-sticky shared directory,
+    /// which is exactly an unsafe cache ancestry the production check must reject.
+    fn private_system_tempdir(prefix: &str) -> tempfile::TempDir {
+        let mut builder = tempfile::Builder::new();
+
+        builder.prefix(prefix);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            builder.permissions(fs::Permissions::from_mode(0o700));
+        }
+
+        builder
+            .tempdir()
+            .expect("the redirected-cache fixture should be creatable in the system temporary directory")
+    }
+
     /// A capture that succeeded hands back exactly what the command printed.
     #[test]
     fn a_successful_capture_returns_what_the_command_printed() {
-        let captured = Ok(Captured {
+        let captured: io::Result<Captured> = Ok(Captured {
             succeeded: true,
             stdout: b"{\"kind\":\"test\"}".to_vec(),
             stderr: b"warning: ignored".to_vec(),
@@ -1379,7 +1647,7 @@ mod tests {
     /// there and exits non-zero — so dropping it leaves the user with a failure and no cause.
     #[test]
     fn a_capture_that_exited_non_zero_is_reported_with_its_diagnostic() {
-        let captured = Ok(Captured {
+        let captured: io::Result<Captured> = Ok(Captured {
             succeeded: false,
             stdout: b"partial output".to_vec(),
             stderr: b"  error: no such subcommand: `nextest`\n".to_vec(),
@@ -1400,7 +1668,7 @@ mod tests {
     /// successfully parsed document describing a path that is not the path on disk.
     #[test]
     fn a_capture_that_is_not_utf8_is_reported() {
-        let captured = Ok(Captured {
+        let captured: io::Result<Captured> = Ok(Captured {
             succeeded: true,
             stdout: vec![0x7b, 0xff, 0xfe, 0x7d],
             stderr: Vec::new(),
@@ -1414,33 +1682,8 @@ mod tests {
         );
     }
 
-    /// A scratch tree blocked by a plain file is reported rather than silently reused.
-    #[test]
-    fn a_scratch_tree_blocked_by_a_file_is_a_reported_failure() {
-        let directory = crate::testing::workdir("stale-tree");
-        let source = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the scratch path is UTF-8");
-
-        fs::write(source.join("Cargo.toml").as_std_path(), "[workspace]\nmembers = []\n").expect("a manifest");
-
-        // A leftover named `tree` that is a file rather than a directory cannot be copied into.
-        // Reusing it would instrument nothing and report a perfect score, so the run has to stop.
-        let base = gamma_base(&source, None);
-
-        fs::create_dir_all(base.as_std_path()).expect("the scratch base");
-        fs::write(base.join("tree").as_std_path(), "not a directory").expect("the stale entry");
-
-        let config = Config::default();
-        let mut events = crate::testing::Recorder::default();
-        let failure = Workspace::prepare(&source, &config, &mut events).expect_err("the tree must fail to prepare");
-
-        assert!(failure.to_string().contains("could not create the scratch tree"), "{failure}");
-    }
-
-    /// The one existing `prepare` test only exercises the failure path where a stale entry blocks
-    /// the copy; every other step of preparing a scratch tree — creating the base, claiming the
-    /// lock, copying, vendoring the runtime, and anchoring manifests — was otherwise only reachable
-    /// through a real mutation-testing run. If any one of them silently broke, nothing here would
-    /// have caught it before a user's run failed on it instead.
+    /// Exercises every step of preparing a scratch tree — creating the base, claiming the lock,
+    /// copying, vendoring the runtime, and anchoring manifests.
     #[test]
     fn preparing_a_fresh_workspace_produces_a_usable_scratch_tree() {
         let directory = crate::testing::workdir("prepare-happy-");
@@ -1470,30 +1713,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_cache_directories_are_renamed_without_losing_their_contents() {
-        let directory = crate::testing::workdir("legacy-cache-layout-");
-        let base = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the cache path is UTF-8");
-
-        fs::create_dir_all(base.join("tree")).expect("legacy workspace");
-        fs::create_dir_all(base.join("build")).expect("legacy target");
-        fs::write(base.join("tree/source"), "source").expect("workspace marker");
-        fs::write(base.join("build/artifact"), "artifact").expect("target marker");
-
-        migrate_legacy_directory(&base, "tree", "workspace").expect("workspace migration");
-        migrate_legacy_directory(&base, "build", "target").expect("target migration");
-
-        assert_eq!(
-            fs::read_to_string(base.join("workspace/source")).expect("workspace marker"),
-            "source"
-        );
-        assert_eq!(fs::read_to_string(base.join("target/artifact")).expect("target marker"), "artifact");
-        assert!(!base.join("tree").exists());
-        assert!(!base.join("build").exists());
-    }
-
-    #[test]
     fn an_unowned_redirected_cache_is_refused_without_touching_its_contents() {
-        let directory = crate::testing::workdir("unowned-cache-");
+        let directory = private_system_tempdir("unowned-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
         let marker = base.join("build/user-data");
@@ -1515,11 +1736,11 @@ mod tests {
 
     #[test]
     fn a_directory_containing_only_somebody_elses_lock_file_is_not_adopted() {
-        let directory = crate::testing::workdir("foreign-lock-cache-");
+        let directory = private_system_tempdir("foreign-lock-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
-        fs::create_dir_all(&base).expect("the user's directory");
+        create_private_dir_all(&base).expect("the user's directory");
         fs::write(base.join("lock"), "not ours").expect("the user's lock file");
 
         let failure = claim_redirected_cache(&source, &base).expect_err("an existing lock file is user data");
@@ -1531,11 +1752,11 @@ mod tests {
 
     #[test]
     fn an_empty_redirected_cache_is_claimed_for_its_workspace_and_can_be_reused() {
-        let directory = crate::testing::workdir("owned-cache-");
+        let directory = private_system_tempdir("owned-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
-        fs::create_dir_all(&base).expect("the empty cache");
+        create_private_dir_all(&base).expect("the empty cache");
         let first = claim_redirected_cache(&source, &base).expect("an empty cache can be claimed");
 
         assert_eq!(
@@ -1549,7 +1770,7 @@ mod tests {
 
     #[test]
     fn a_redirected_cache_owned_by_another_workspace_is_refused() {
-        let directory = crate::testing::workdir("foreign-cache-");
+        let directory = private_system_tempdir("foreign-cache-");
         let first = Utf8PathBuf::from_path_buf(directory.path().join("first")).expect("the source path is UTF-8");
         let second = Utf8PathBuf::from_path_buf(directory.path().join("second")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
@@ -1561,12 +1782,188 @@ mod tests {
 
         assert!(failure.is_usage());
         assert!(failure.to_string().contains("belongs to the workspace"), "{failure}");
-        assert!(failure.to_string().contains(absolute(&first).as_str()), "{failure}");
+        assert!(failure.to_string().contains(physical(&first).as_str()), "{failure}");
+    }
+
+    /// Cache creation must not inherit a build agent's permissive umask and then reject the
+    /// directory cargo-gamma just created as unsafe.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_redirected_cache_is_private_under_a_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const CHILD: &str = "CARGO_GAMMA_PERMISSIVE_UMASK_CHILD";
+        const TEST: &str = "exec::workspace::tests::a_new_redirected_cache_is_private_under_a_permissive_umask";
+
+        if env::var_os(CHILD).is_none() {
+            let executable = env::current_exe().expect("the current test executable");
+            let output = Command::new("sh")
+                .args(["-c", "umask 000; exec \"$1\" --exact \"$2\" --nocapture", "sh"])
+                .arg(executable)
+                .arg(TEST)
+                .env(CHILD, "1")
+                .output()
+                .expect("the child test process starts");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            assert!(output.status.success(), "child stdout:\n{stdout}\nchild stderr:\n{stderr}");
+            return;
+        }
+        let directory = private_system_tempdir("private-cache-");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
+        let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
+
+        let _held = claim_redirected_cache(&source, &base).expect("a new cache is private under any umask");
+        let mode = fs::metadata(base.as_std_path()).expect("the cache metadata").permissions().mode();
+
+        assert_eq!(mode & 0o077, 0, "the cache mode {mode:o} grants group or other access");
+    }
+
+    /// A cache reached through a link is a cache whose identity can be changed after it has been
+    /// approved, so the name that was checked is not the directory that gets built into and run
+    /// from.
+    #[test]
+    fn a_linked_redirected_cache_is_refused() {
+        let directory = private_system_tempdir("linked-cache-");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
+        let real = Utf8PathBuf::from_path_buf(directory.path().join("real")).expect("the real path is UTF-8");
+        let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
+
+        fs::create_dir_all(&real).expect("the directory the link points at");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(real.as_std_path(), base.as_std_path()).expect("the link");
+
+        // Creating a link needs a privilege or developer mode on Windows, and a runner without it
+        // cannot exercise this at all. Skipped rather than failed: the check being tested is the
+        // same one either way, and a test that demands a privilege reports the runner's
+        // configuration rather than this tool's behaviour.
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(real.as_std_path(), base.as_std_path()).is_err() {
+            return;
+        }
+
+        let failure = claim_redirected_cache(&source, &base).expect_err("a linked cache must be refused");
+
+        assert!(failure.is_usage());
+        assert!(failure.to_string().contains("is a link"), "{failure}");
+        assert!(!real.join(CACHE_OWNER).exists(), "nothing may be written through the link");
+    }
+
+    /// A regular file where a cache directory was named is not a cache, and the marker checks would
+    /// otherwise be asked about a directory that does not exist.
+    #[test]
+    fn a_redirected_cache_that_is_not_a_directory_is_refused() {
+        let directory = private_system_tempdir("file-cache-");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
+        let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
+
+        fs::write(base.as_std_path(), "not a directory").expect("the user's file");
+
+        let failure = claim_redirected_cache(&source, &base).expect_err("a file is not a cache directory");
+
+        assert!(failure.is_usage());
+        assert_eq!(
+            fs::read_to_string(base.as_std_path()).expect("the user's file remains"),
+            "not a directory"
+        );
+    }
+
+    /// Everything a run builds is placed in the cache and then executed, so a directory anywhere
+    /// above it that another local user can write to is a directory from which they choose what
+    /// this tool runs as the invoking user.
+    #[cfg(unix)]
+    #[test]
+    fn a_redirected_cache_under_a_world_writable_directory_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = private_system_tempdir("shared-cache-");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
+        let shared = Utf8PathBuf::from_path_buf(directory.path().join("shared")).expect("the shared path is UTF-8");
+        let base = shared.join("cache");
+
+        create_private_dir_all(&base).expect("the cache directory");
+        fs::set_permissions(shared.as_std_path(), fs::Permissions::from_mode(0o777)).expect("make the parent world-writable");
+
+        let failure = claim_redirected_cache(&source, &base).expect_err("a world-writable ancestor must be refused");
+
+        assert!(failure.is_usage());
+        assert!(failure.to_string().contains("is writable by other users"), "{failure}");
+        assert!(!base.join(CACHE_OWNER).exists());
+        assert!(!base.join("lock").exists(), "refusal must happen before anything is written");
+
+        // Restored so that the temporary directory can be removed by the harness that made it.
+        fs::set_permissions(shared.as_std_path(), fs::Permissions::from_mode(0o755)).expect("restore the parent");
+    }
+
+    /// The sticky bit is what makes a shared directory safe to keep a private one inside: it stops
+    /// one user removing or renaming another's entries, which is the substitution being defended
+    /// against. Refusing it would rule out every cache under `/tmp` for no gain.
+    #[cfg(unix)]
+    #[test]
+    fn a_redirected_cache_under_a_sticky_shared_directory_is_allowed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = private_system_tempdir("sticky-cache-");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
+        let shared = Utf8PathBuf::from_path_buf(directory.path().join("shared")).expect("the shared path is UTF-8");
+        let base = shared.join("cache");
+
+        create_private_dir_all(&base).expect("the cache directory");
+        fs::set_permissions(shared.as_std_path(), fs::Permissions::from_mode(0o1777)).expect("make the parent sticky and shared");
+
+        let claimed = claim_redirected_cache(&source, &base);
+
+        fs::set_permissions(shared.as_std_path(), fs::Permissions::from_mode(0o755)).expect("restore the parent");
+
+        let _lock = claimed.expect("a sticky shared ancestor is not a foreign writer");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sticky_world_writable_cache_itself_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = private_system_tempdir("sticky-base-cache-");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
+        let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
+
+        fs::create_dir_all(&base).expect("the cache directory");
+        fs::set_permissions(base.as_std_path(), fs::Permissions::from_mode(0o1777)).expect("make the cache sticky and shared");
+
+        let failure = claim_redirected_cache(&source, &base).expect_err("a shared cache must be refused even when sticky");
+
+        assert!(failure.is_usage());
+        assert!(failure.to_string().contains("is writable by other users"), "{failure}");
+        assert!(!base.join(CACHE_OWNER).exists());
+        assert!(!base.join("lock").exists());
+
+        fs::set_permissions(base.as_std_path(), fs::Permissions::from_mode(0o755)).expect("restore the cache");
+    }
+
+    /// The owner marker is a path a would-be attacker controls the contents of, and it is read
+    /// back into a message printed to a terminal.
+    #[test]
+    fn a_hostile_owner_marker_cannot_address_the_terminal_it_is_reported_on() {
+        let directory = private_system_tempdir("hostile-marker-cache-");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
+        let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
+
+        create_private_dir_all(&base).expect("the cache directory");
+        fs::write(base.join(CACHE_OWNER).as_std_path(), "/w\r\u{1b}[2Kforged").expect("the planted marker");
+
+        let failure = claim_redirected_cache(&source, &base).expect_err("a foreign marker must be refused");
+        let text = failure.to_string();
+
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(!text.contains('\r'), "{text:?}");
+        assert!(text.contains("\\r\\e[2Kforged"), "{text:?}");
     }
 
     #[test]
     fn two_workspaces_cannot_use_one_redirected_cache_concurrently() {
-        let directory = crate::testing::workdir("contended-cache-");
+        let directory = private_system_tempdir("contended-cache-");
         let first = Utf8PathBuf::from_path_buf(directory.path().join("first")).expect("the source path is UTF-8");
         let second = Utf8PathBuf::from_path_buf(directory.path().join("second")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
@@ -1596,7 +1993,9 @@ mod tests {
         let base = gamma_base(&root, None);
         let report = root.join("target/cargo-gamma/gamma-report.json");
 
-        fs::create_dir_all(base.join("workspace")).expect("cached workspace");
+        fs::create_dir_all(&base).expect("cache");
+        validate_cache_owner(&root, &base, CacheKind::Default).expect("claim cache");
+        fs::create_dir(base.join("workspace")).expect("cached workspace");
         fs::create_dir_all(base.join("target")).expect("cached target");
         fs::write(base.join("last-gamma-run.json"), "{}").expect("run record");
         fs::create_dir_all(report.parent().expect("report directory")).expect("report directory");
@@ -1609,6 +2008,21 @@ mod tests {
         assert!(base.join("lock").exists(), "the concurrency lock remains");
         assert!(report.exists(), "published output is not cache data");
         assert!(!clean_cache(&root).expect("cleaning an empty cache"));
+    }
+
+    #[test]
+    fn cleaning_refuses_an_unmarked_populated_cache() {
+        let directory = crate::testing::workdir("clean-unmarked-cache-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the workspace path is UTF-8");
+        let base = gamma_base(&root, None);
+
+        fs::create_dir_all(base.join("workspace")).expect("unowned contents");
+
+        let failure = clean_cache(&root).expect_err("unowned contents must not be removed");
+
+        assert!(failure.is_usage(), "{failure}");
+        assert!(base.join("workspace").exists(), "unowned contents must survive");
+        assert!(!base.join(CACHE_OWNER).exists(), "the cache must not be adopted");
     }
 
     #[test]
@@ -1646,10 +2060,11 @@ mod tests {
 
         let manifest = fs::read_to_string(at.join("Cargo.toml").as_std_path()).unwrap();
 
-        assert!(manifest.contains("name = \"gamma_rt\""));
+        assert!(manifest.contains("name = \"cargo-gamma-rt\""));
+        assert!(manifest.contains("[lib]\nname = \"gamma_rt\""));
         assert!(manifest.contains("edition = \"2024\""));
         assert!(manifest.contains("rust-version = \"1.95\""));
-        assert!(manifest.contains("check-cfg = ['cfg(loom)']"));
+        assert!(manifest.contains("check-cfg = ['cfg(coverage_nightly)', 'cfg(loom)']"));
 
         // The `[workspace]` table keeps it from being adopted by whatever workspace it lands near.
         assert!(manifest.contains("[workspace]"));
@@ -2391,6 +2806,83 @@ mod tests {
         );
     }
 
+    /// The default cache directory's name is a cross-release contract, not a private detail.
+    ///
+    /// Every command that can publish source or configuration changes for a workspace shares one
+    /// advisory lock, and that lock lives under this name. Two binaries that derived different
+    /// names for one workspace would each take a lock nobody else holds and rewrite the same tree
+    /// at the same time, which is precisely the situation the lock exists to prevent — and nothing
+    /// would report contention, because there is none to report. So the digest is pinned here
+    /// against a literal, and any change to the algorithm has to be a deliberate one made with
+    /// that consequence in view.
+    #[test]
+    fn the_default_cache_directory_name_is_pinned_to_this_crate() {
+        assert_eq!(workspace_identity(Utf8Path::new("/workspace")), "155d8208f4c61a79");
+        assert_eq!(workspace_identity(Utf8Path::new("/workspace/one")), "85dacdefd093e7c1");
+
+        // Distinct roots get distinct directories, which is the whole reason to hash at all.
+        assert_ne!(
+            workspace_identity(Utf8Path::new("/workspace/one")),
+            workspace_identity(Utf8Path::new("/workspace/two"))
+        );
+
+        // And it is the name the default base actually uses.
+        let expected = workspace_identity(&absolute(Utf8Path::new("/workspace")));
+        assert!(
+            gamma_base(Utf8Path::new("/workspace"), None).as_str().ends_with(&expected),
+            "{}",
+            gamma_base(Utf8Path::new("/workspace"), None)
+        );
+    }
+
+    /// A truncated digest can collide, so the directory says which workspace it belongs to and a
+    /// second one is refused rather than handed the first one's lock domain and scratch tree.
+    #[test]
+    fn a_default_cache_directory_claimed_by_another_workspace_is_refused() {
+        let directory = crate::testing::workdir("default-owner");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the scratch path is UTF-8");
+        let base = root.join("cache");
+        let mine = root.join("mine");
+        let theirs = root.join("theirs");
+
+        fs::create_dir_all(base.as_std_path()).expect("an empty cache");
+        fs::create_dir_all(mine.as_std_path()).expect("one workspace root");
+        fs::create_dir_all(theirs.as_std_path()).expect("another workspace root");
+
+        // An unclaimed directory is adopted, and says so afterwards.
+        validate_cache_owner(&mine, &base, CacheKind::Default).expect("an unclaimed default cache is adopted");
+        assert_eq!(
+            fs::read_to_string(base.join(CACHE_OWNER).as_std_path()).expect("the owner marker"),
+            physical(&mine).as_str()
+        );
+
+        // The owner may keep using it.
+        validate_cache_owner(&mine, &base, CacheKind::Default).expect("the owning workspace reuses its cache");
+
+        let failure = validate_cache_owner(&theirs, &base, CacheKind::Default).expect_err("a colliding workspace must be refused");
+
+        assert!(failure.to_string().contains(physical(&mine).as_str()), "{failure}");
+        assert!(failure.to_string().contains("--cache-dir"), "{failure}");
+        assert!(failure.is_usage(), "{failure}");
+    }
+
+    #[test]
+    fn an_unmarked_populated_cache_is_refused_for_default_and_redirected_paths() {
+        let directory = crate::testing::workdir("unmarked-cache");
+        let base = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the scratch path is UTF-8");
+        let source = base.join("source");
+
+        fs::create_dir_all(source.as_std_path()).expect("a workspace root");
+        fs::create_dir_all(base.join("target").as_std_path()).expect("cached build output");
+
+        for kind in [CacheKind::Redirected, CacheKind::Default] {
+            let failure = validate_cache_owner(&source, &base, kind).expect_err("existing contents are unowned");
+
+            assert!(failure.is_usage(), "{failure}");
+            assert!(!base.join(CACHE_OWNER).exists(), "nothing may be claimed on the refused path");
+        }
+    }
+
     #[test]
     fn scratch_tree_is_derived_from_the_same_base_as_prepare() {
         // Callers report this path after deliberately leaking the workspace, so it has to match
@@ -2929,7 +3421,7 @@ mod tests {
         fs::create_dir_all(&bad).unwrap();
         fs::write(bad.join("Cargo.toml"), "[package]\nname = \"bad\"\nversion = \"0.0.0\"\n").unwrap();
 
-        anchor_manifests(&source, &root).unwrap();
+        anchor_manifests(&source, &root, &root.join("rt")).unwrap();
 
         // A path that cannot appear in cargo's UTF-8 JSON is left alone rather than poisoning the
         // whole copied tree repair pass.
@@ -2950,7 +3442,7 @@ mod tests {
         fs::write(root.join("Cargo.lock").as_std_path(), "# not a manifest\n").unwrap();
         fs::write(root.join("lib.rs").as_std_path(), "pub fn f() {}\n").unwrap();
 
-        anchor_manifests(&source, &root).unwrap();
+        anchor_manifests(&source, &root, &root.join("rt")).unwrap();
 
         assert_eq!(
             fs::read_to_string(root.join("Cargo.lock").as_std_path()).unwrap(),
@@ -2972,7 +3464,7 @@ mod tests {
         fs::write(outside.as_std_path(), original).unwrap();
         std::os::unix::fs::symlink(outside.as_std_path(), root.join("Cargo.toml").as_std_path()).unwrap();
 
-        let failure = anchor_manifests(&source, &root).expect_err("an external manifest must not be rewritten");
+        let failure = anchor_manifests(&source, &root, &root.join("rt")).expect_err("an external manifest must not be rewritten");
 
         assert!(failure.to_string().contains("outside"), "{failure}");
         assert_eq!(fs::read_to_string(outside.as_std_path()).unwrap(), original);
@@ -2991,7 +3483,7 @@ mod tests {
         fs::write(outside.as_std_path(), original).unwrap();
         std::os::unix::fs::symlink(outside.as_std_path(), root.join(".cargo/config.toml").as_std_path()).unwrap();
 
-        let failure = anchor_manifests(&source, &root).expect_err("an external config must not be rewritten");
+        let failure = anchor_manifests(&source, &root, &root.join("rt")).expect_err("an external config must not be rewritten");
 
         assert!(failure.to_string().contains("outside"), "{failure}");
         assert_eq!(fs::read_to_string(outside.as_std_path()).unwrap(), original);

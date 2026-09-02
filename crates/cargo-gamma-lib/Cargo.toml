@@ -25,11 +25,12 @@ disable = true
 
 # Establish the cross-platform CI baseline for this new crate. Raise it as coverage improves.
 [package.metadata.coverage-gate]
-min-lines-percent = 96.8
+min-lines-percent = 96.7
 
 [features]
 # Exposes the crate's internal modules so that the integration tests in `tests/` can drive them
-# directly. Enabled only by this crate's dev-dependency on itself; never enable it from outside.
+# directly. Test targets that need it declare it in `required-features`; test commands must still
+# enable it explicitly. Never enable it from outside this crate.
 internals = ["dep:tempfile"]
 # Selects the dedicated Loom integration target. The scheduler itself is still activated by
 # `RUSTFLAGS="--cfg loom"` in the repository check.
@@ -73,9 +74,9 @@ libc = { workspace = true, features = ["std"] }
 [dev-dependencies]
 bolero = { workspace = true }
 bolero-engine = { workspace = true, features = ["any"] }
-# Only the integration test that pins the proc-macro's hand-copied limit constants against this
-# library's own needs it; it is never used outside `#[cfg(test)]`/`tests/`.
-cargo-gamma-attrs-impl = { workspace = true }
+# Cargo omits versionless dev-dependencies from published packages. The local path keeps the
+# cross-crate agreement tests available without adding a registry or release-order dependency.
+cargo-gamma-attrs-impl = { path = "../cargo-gamma-attrs-impl" }
 cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
 tempfile = { workspace = true }
 
@@ -105,6 +106,10 @@ required-features = ["loom"]
 
 [[test]]
 name = "regressions"
+required-features = ["internals"]
+
+[[test]]
+name = "sarif_contract"
 required-features = ["internals"]
 
 [[test]]

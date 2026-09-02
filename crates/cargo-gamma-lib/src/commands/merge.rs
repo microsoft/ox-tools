@@ -12,7 +12,7 @@ use super::dispatch::{EXIT_GATE_FAILED, EXIT_OK};
 use super::host::Host;
 use crate::elements::Report;
 use crate::error::error;
-use crate::report::{Styler, quantity};
+use crate::report::{Styler, encode_controls, quantity};
 
 /// The most independently produced reports one merge retains.
 ///
@@ -55,16 +55,28 @@ fn merge_at<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler, now: Option
     if let Some(report) = merged.report.as_ref() {
         if let Some(path) = args.json_report.as_ref() {
             crate::elements::write_json(report, path)?;
-            writeln!(host.error(), "{} {path}", styler.verb("Wrote"))?;
+            writeln!(host.error(), "{} {}", styler.verb("Wrote"), encode_controls(path.as_str()))?;
         }
 
         if let Some(path) = args.html_report.as_ref() {
-            crate::html::write_page(report, crate::html::Source::Inline, path)?;
-            writeln!(host.error(), "{} {path}", styler.verb("Wrote"))?;
+            crate::html::write_page(report, path)?;
+            writeln!(host.error(), "{} {}", styler.verb("Wrote"), encode_controls(path.as_str()))?;
         }
     }
 
     if let Some(minimum) = args.min_score {
+        if merged.never_tested > 0 {
+            writeln!(
+                host.error(),
+                "{} {} {} still pending, so the `--min-score` gate cannot evaluate the complete merged population",
+                styler.error("error:"),
+                merged.never_tested,
+                if merged.never_tested == 1 { "mutant is" } else { "mutants are" }
+            )?;
+
+            return Ok(EXIT_GATE_FAILED);
+        }
+
         let Some(score) = merged.scored() else {
             // Every mutant was withdrawn, never tested, or otherwise ungradeable, so the merged
             // score is a ratio with nothing in its denominator. That prints as 100%, which is the
@@ -288,14 +300,16 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::elements::{FileResult, RunInfo, ShardInfo};
+    use crate::fixtures;
     use crate::fixtures::mutant_result_at as mutant;
     use crate::testing::{Sink, fails_at_every_line, workdir};
-    use crate::{HashMap, fixtures};
 
     fn report(index: u32, count: u32, status: &str) -> Report {
-        let mut files = HashMap::default();
+        let mut files = BTreeMap::new();
         let _ = files.insert(
             "src/lib.rs".to_owned(),
             FileResult {
@@ -328,7 +342,7 @@ mod tests {
     /// `populations` only trusts an unsharded report to say what currently exists at a path, so a
     /// withdrawn mutant can only be produced from a pair of these.
     fn unsharded_report(started_at: u64, id: &str, line: usize, status: &str) -> Report {
-        let mut files = HashMap::default();
+        let mut files = BTreeMap::new();
         let _ = files.insert(
             "src/lib.rs".to_owned(),
             FileResult {
@@ -690,7 +704,7 @@ mod tests {
             .map(|(index, status)| mutant(&format!("m{index}"), index + 1, status))
             .collect();
 
-        let mut files = HashMap::default();
+        let mut files = BTreeMap::new();
         let _ = files.insert(
             "src/lib.rs".to_owned(),
             FileResult {
@@ -742,6 +756,28 @@ mod tests {
 
         assert_eq!(code, EXIT_GATE_FAILED, "{}", host.err());
         assert!(host.err().contains("no mutant counted toward the merged score"), "{}", host.err());
+    }
+
+    #[test]
+    fn a_merge_with_pending_mutants_fails_the_min_score_gate() {
+        let dir = workdir("merge-pending-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let input = root.join("a.json");
+        write_report(&input, &population(&["Killed", "Pending"]));
+
+        let args = MergeArgs {
+            inputs: vec![input],
+            json_report: None,
+            html_report: None,
+            window: 30,
+            min_score: Some(50.0),
+        };
+        let mut host = Sink::default();
+
+        let code = merge(&mut host, &args, Styler::new(false)).expect("merge");
+
+        assert_eq!(code, EXIT_GATE_FAILED, "{}", host.err());
+        assert!(host.err().contains("1 mutant is still pending"), "{}", host.err());
     }
 
     /// The gate message must never print the required score as already met.

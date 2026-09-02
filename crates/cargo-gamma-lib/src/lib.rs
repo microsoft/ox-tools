@@ -122,31 +122,129 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub(crate) type HashMap<K, V> = FxHashMap<K, V>;
 pub(crate) type HashSet<V> = FxHashSet<V>;
 
+// Every module below is declared twice, under opposite halves of the `internals` feature. Private
+// is the shape that matters: this library has exactly one consumer, the `cargo-gamma` binary, so an
+// item nothing here uses is genuinely dead, and only a private module tree lets rustc see that. The
+// `internals` facade cannot name a private module — a `pub use` of one is a hard error rather than
+// a lint — so the feature that opens the facade is also what widens these declarations, and the
+// facade then re-exports them by name instead of by glob.
+//
+// Written out rather than generated, because rustfmt and every `syn`-based tool (cargo-gamma
+// included) find sources by resolving file-bearing `mod` declarations, and a `mod` produced by a
+// macro is invisible to them.
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod advise;
+#[cfg(not(feature = "internals"))]
 mod advise;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod bounds;
+#[cfg(not(feature = "internals"))]
 mod bounds;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod cfg;
+#[cfg(not(feature = "internals"))]
 mod cfg;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod ci;
+#[cfg(not(feature = "internals"))]
 mod ci;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod commands;
+#[cfg(not(feature = "internals"))]
 mod commands;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod config;
+#[cfg(not(feature = "internals"))]
 mod config;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod diag;
+#[cfg(not(feature = "internals"))]
 mod diag;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod discover;
+#[cfg(not(feature = "internals"))]
 mod discover;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod docs;
+#[cfg(not(feature = "internals"))]
 mod docs;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod elements;
+#[cfg(not(feature = "internals"))]
 mod elements;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod error;
+#[cfg(not(feature = "internals"))]
 mod error;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod estimate;
+#[cfg(not(feature = "internals"))]
 mod estimate;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod exec;
+#[cfg(not(feature = "internals"))]
 mod exec;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod fix;
+#[cfg(not(feature = "internals"))]
 mod fix;
 #[cfg(test)]
 mod fixtures;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod html;
+#[cfg(not(feature = "internals"))]
 mod html;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod merge;
+#[cfg(not(feature = "internals"))]
 mod merge;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod model;
+#[cfg(not(feature = "internals"))]
 mod model;
 mod notes;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod ops;
+#[cfg(not(feature = "internals"))]
 mod ops;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod parse;
+#[cfg(not(feature = "internals"))]
 mod parse;
 mod paths;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod report;
+#[cfg(not(feature = "internals"))]
 mod report;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod schema;
+#[cfg(not(feature = "internals"))]
 mod schema;
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod suppress;
+#[cfg(not(feature = "internals"))]
 mod suppress;
 
 /// Runs the deterministic concurrency models selected by the dedicated Loom test target.
@@ -158,23 +256,27 @@ pub fn run_loom_models() {
 
 /// Re-exports the crate internals for the crate's own integration tests.
 ///
-/// The modules above are declared privately and unconditionally, which is what keeps the dead-code
-/// analysis honest. This library has exactly one consumer, the `cargo-gamma` binary, so an item
-/// nothing here uses is genuinely dead — but a `pub` module makes it look like a deliberate part of
-/// a public API some external crate might call, and the analysis goes quiet. Only a private module
-/// tree lets rustc see the truth.
+/// The modules above are declared privately whenever this feature is off, which is what keeps the
+/// dead-code analysis honest. This library has exactly one consumer, the `cargo-gamma` binary, so
+/// an item nothing here uses is genuinely dead — but a `pub` module makes it look like a deliberate
+/// part of a public API some external crate might call, and the analysis goes quiet. Only a private
+/// module tree lets rustc see the truth.
 ///
 /// Integration tests reach directly into the internals and test them at the level they are designed
 /// at, with no `pub(crate)` escape hatches and no `#[cfg(test)]` re-exports widening the API
 /// surface. They compile as separate crates and so cannot see a private module; this facade opens
 /// exactly the same paths for them, under `internals::`, and nothing else. The `internals` feature
-/// is enabled by this crate's own dev-dependency on itself, so it is on for test builds and off for
-/// everything else.
+/// is a required feature of those test targets, so Cargo skips them unless the test command
+/// explicitly enables it.
 ///
-/// The facade declares only inline modules, which is what lets it stay a macro. rustfmt and every
-/// `syn`-based tool — cargo-mutants among them — find sources by resolving file-bearing `mod`
+/// Each module is named individually rather than glob-re-exported. A glob would take on whatever
+/// the module gains next, silently and without review; naming the module itself re-exports the same
+/// set of paths while keeping the list of what the facade offers readable in one place.
+///
+/// The facade declares no file-bearing modules, which is what lets it stay a macro. rustfmt and
+/// every `syn`-based tool — cargo-gamma among them — find sources by resolving file-bearing `mod`
 /// declarations to a path on disk, and a `mod` produced by a macro is invisible to them. There are
-/// no file-bearing declarations here, so hiding this behind a macro costs those tools nothing.
+/// no such declarations here, so hiding this behind a macro costs those tools nothing.
 ///
 /// It is gated on a feature rather than on `debug_assertions` because `cargo test --release` turns
 /// `debug_assertions` off while still building the integration tests, which then fail to compile.
@@ -184,9 +286,8 @@ macro_rules! expose_internals {
         #[doc(hidden)]
         pub mod internals {
             $(
-                pub mod $name {
-                    pub use crate::$name::*;
-                }
+                #[doc(hidden)]
+                pub use crate::$name;
             )+
         }
     };
@@ -206,4 +307,5 @@ expose_internals!(
 #[doc(hidden)]
 pub mod testing;
 
+#[doc(inline)]
 pub use crate::commands::{Host, run};

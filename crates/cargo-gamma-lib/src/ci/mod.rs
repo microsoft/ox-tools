@@ -18,9 +18,14 @@ pub(crate) mod sarif;
 mod summary;
 mod truncation;
 
+#[doc(inline)]
 pub use annotations::{Annotations, annotations, wanted};
+#[doc(inline)]
 pub use level::Level;
+#[doc(inline)]
 pub use sarif::sarif;
 pub(crate) use summary::append;
+#[doc(inline)]
 pub use summary::summary;
+#[doc(inline)]
 pub use truncation::Truncation;

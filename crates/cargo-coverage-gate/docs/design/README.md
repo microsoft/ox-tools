@@ -309,6 +309,42 @@ columns render `(no lines)` and `—`, since there is no percentage floor.
 Markdown variant uses the same columns and a leading `### coverage-gate`
 header so it renders cleanly in GitHub job summaries and ADO build summaries.
 
+When the verdict is not a pass, both renderers append **failure details**.
+A **coverable line** is a distinct LCOV `DA:` record: a source line for which
+LLVM emitted line-coverage instrumentation, whether or not a test executed it.
+For a package below its numeric threshold, the details show exact
+covered/coverable line counts and the uncovered package-relative source
+locations. For a package that unexpectedly contains coverable lines, they
+show those locations instead. A `NO DATA` package gets an explicit statement
+that no coverage records were attributed to it.
+
+Locations are ordered by package, file, and line, and contiguous lines are
+rendered as ranges. To keep CI logs and summaries bounded, at most the first
+100 relevant line locations are shown per package; the renderer reports how
+many additional locations were omitted. The aggregate counts always describe
+the complete input, not the displayed subset. One hundred locations is large
+enough to show several failure clusters while keeping a pathological package
+to a few kilobytes of diagnostic output; it should be reevaluated if typical
+failures routinely omit the first useful cluster or materially inflate CI
+summaries.
+
+The [implementation guide](../implementation.md) records the parser,
+attribution, status-selection, ordering, and rendering pipeline behind this
+contract.
+
+```text
+Failure details:
+  beta: 60/100 lines covered; 40 uncovered.
+    src/lib.rs: 61-100
+  gamma: 91/100 lines covered; 9 uncovered.
+    src/lib.rs: 12, 24-27, 83-86
+```
+
+The details are part of the gate output rather than delegated to an external
+coverage service or a transient CI artifact. A failed local command and a
+failed CI stage therefore retain enough information to identify what must be
+covered even when a later upload step is skipped.
+
 ### 5.5 Local invocation
 
 ```sh
@@ -349,6 +385,8 @@ For each `SF:` section the tool counts:
 - `lines_total` — number of distinct `DA:` records (executable lines
   the instrumentation knows about).
 - `lines_covered` — number of those with a non-zero hit count.
+- The line numbers of all `DA:` records and of the zero-count subset,
+  retained for failure diagnostics.
 
 Records other than `SF:` / `DA:` / `LF:` / `LH:` (function `FN:`,
 branch `BRDA:`, etc.) are accepted by the parser but not used; the

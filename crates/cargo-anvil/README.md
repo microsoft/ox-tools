@@ -77,6 +77,14 @@ Flags:
 `catalog:` checksum — a `sha256` over the whole compiled-in catalog — so
 two builds at the same version but different catalogs are distinguishable.
 
+Before running ordinary checks, provide a deterministic Rust selection:
+a caller-set `RUSTUP_TOOLCHAIN`, either root `rust-toolchain` file spelling,
+or a root `[workspace.package].rust-version` / `[package].rust-version`.
+Anvil passes no explicit selector for the environment or file cases so
+rustup handles them natively; only the root MSRV becomes `+<version>`.
+Repositories with none of these sources fail instead of inheriting the
+runner’s ambient compiler.
+
 ### Daily driver
 
 After the first run, your daily workflow is plain `just`:
@@ -105,118 +113,155 @@ Repositories can disable this behavior by setting the
 
 ### Containerized local checks
 
-Anvil can run any generated recipe in a content-addressed Linux container.
-The image installs the Rust toolchains and Cargo tools pinned by the
-repository’s generated Anvil configuration, providing a repeatable Linux
-environment without installing those tools directly on the host.
+Any generated recipe can be executed inside a content-addressed Linux
+image. The image installs the Rust toolchain and Cargo tools this
+repository pins by running `just anvil-setup`, the same recipe the checks
+use, reading the same generated pins, so the image and the host agree on
+the toolset by construction, with no second tool list to keep in step.
+
+Execution is opt-in per invocation: `just anvil-pr` and every other recipe
+continue to run natively, and a container is entered only through
+`anvil-container`, whose arguments are the argv executed inside the image.
+Those arguments are whitespace-delimited tokens: `just` joins a variadic
+parameter with spaces before the recipe sees it, so an argument that itself
+contains a space cannot be recovered and does not survive the round trip.
+
+```text
+just anvil-container just anvil-clippy         # one check
+just anvil-container just anvil-pr             # the whole PR tier
+just anvil-container just anvil-setup binstall # a recipe with an argument
+just anvil-container cargo build               # any other command
+just anvil-container                           # interactive shell
+```
+
+The feature is three generated artifacts and one optional hook script, with
+no configuration file: `justfiles/anvil/container.just` drives the engine,
+`.anvil/container/Dockerfile` and its `Dockerfile.dockerignore` define what
+the image contains, and `.anvil/container/hooks.ps1` supplies credentials
+when a repository needs them.
+
+One container is created per invocation, however many checks the requested
+recipe runs. The repository is bind-mounted at `/workspace`, so `target/`
+stays visible from the host. Cargo’s download caches are named volumes,
+keeping that write-heavy path off the host boundary; `CARGO_HOME` and
+`RUSTUP_HOME` themselves are deliberately not mounted, since a volume would
+pin the first image’s tools over every later one.
 
 #### Prerequisites
 
-* Docker Engine 23.0 or newer, installed directly in Linux or WSL and
-  usable by the current user.
-* `git` and `just` on the host.
-* Bash on Linux and WSL; `PowerShell` Core (`pwsh`) and WSL 2 on Windows.
-* `[script]` support enabled in the root `Justfile` (`set unstable` when
-  required by the installed `just` version).
+* A container engine callable from the shell that runs `just`: Docker, or
+  Podman via `ANVIL_CONTAINER_ENGINE=podman`. On Windows that means Docker
+  Desktop, Podman, a Windows `docker` CLI pointed at an engine in WSL, or
+  Docker Engine installed only inside the default WSL distribution. No
+  Windows CLI is needed in that last case, since anvil reaches the engine
+  through `wsl.exe` when it finds none on `PATH` and translates repository
+  paths with `wslpath`.
+* `just` and `PowerShell` Core (`pwsh`) on the host.
 * A repository-owned `rust-toolchain.toml`.
-* On Windows, Docker Engine running in the default WSL distribution:
 
-```powershell
-wsl -e docker version
-```
+Docker is supported; Podman works on a best-effort basis, with two
+documented gaps on Windows. The image is pinned to `linux/amd64`, so on
+ARM64 hosts it is emulated and is substantially slower.
 
-The Windows driver invokes Docker in the default WSL distribution and does
-not call Windows `docker.exe`. Regardless of the installation, the command
-above must succeed. Docker Desktop is not required.
+#### Image identity
 
-On ARM64 hosts, Docker emulates the required `linux/amd64` environment, so
-image builds and checks can be substantially slower than on x86-64 hosts.
+The tag *is* a SHA-256 digest over the inputs that define the image:
+everything under `.anvil/container/`, `rust-toolchain.toml`, and the whole
+generated `justfiles/anvil/` tree. The container directory is walked rather
+than named file by file, because the Dockerfile is composed and a
+repository can `COPY` a certificate or an install script it places there.
+The recipe tree is included in
+full because the image installs its tools by running `just anvil-setup`,
+whose dependency chain runs through the tier, group and check recipes
+before it reaches the install recipes – so the routing decides *whether* a
+tool is installed just as surely as `tools.just` decides *how*.
+A changed tool pin names a tag that cannot already exist, so a build
+follows. There is no staleness check because there is no staleness to
+detect: a locally built image that is present was built from the inputs
+that name it. An image *fetched* by the resolve hook only claims as much,
+since the digest is over source files and cannot be re-derived from layers,
+so that claim is only as strong as the registry it came from, which should
+have immutable tags and restricted push.
 
-#### Run a recipe
-
-```text
-just anvil-container anvil-clippy
-just anvil-container anvil-pr
-just anvil-container
-```
-
-The no-argument form opens an interactive shell. Anvil builds an image the
-first time it encounters a content hash and reuses it on later runs. Changes
-to the Rust toolchain, generated Anvil files, Containerfile, or other static
-image inputs select a new tag and build a new image. Images for earlier
-hashes remain available to older branches. Runtime `customize.*` files do not
-affect image identity.
-Every argument is a recipe name; recipe parameters are not supported by
-this command surface.
-
-Cargo registry and Cargo Git caches use repository-scoped named volumes;
-`target/` is additionally scoped by image ID. The
-repository is mounted at `/workspace`; keeping build output in a named
-volume avoids slow host bind-mount I/O, particularly on Windows.
-
-#### Make tiers use the container
-
-Native execution remains the default. Enable container execution for the
-current shell:
-
-```powershell
-$env:ANVIL_RUNNER = "container"
-just anvil-pr
-```
-
-On Unix:
-
-```sh
-ANVIL_RUNNER=container just anvil-pr
-```
-
-A one-off override is also supported:
-
-```text
-just anvil_runner=container anvil-pr
-```
-
-To make containers the project default, edit `<repository-root>/Justfile`
-and change the default value in the `anvil-runner` region from `"native"`
-to `"container"`. Commit `<repository-root>/Justfile` with that policy
-change. Set `ANVIL_RUNNER=native` to override it for one shell.
+`anvil-container-tag` prints the reference without building it, and is the
+single place the digest is computed, so a publisher can tag an image with
+exactly the reference a consumer will later look up.
 
 #### Controls
 
 |Variable|Effect|
 |--------|------|
-|`ANVIL_CONTAINER_BASE_IMAGE`|Select a compatible digest-pinned Linux base image; the value is included in the content hash.|
-|`ANVIL_CONTAINER_IMAGE`|Override the local image name. The content hash remains the tag.|
-|`ANVIL_CONTAINER_NO_REBUILD=1`|Fail when the matching image is missing instead of building it.|
+|`ANVIL_CONTAINER_ENGINE`|`docker` (default) or `podman`. Read at run time.|
+|`ANVIL_CONTAINER_NO_REBUILD=1`|Fail when the image is missing instead of building it, which distinguishes a cache miss from a build failure.|
+|`ANVIL_CONTAINER_NO_RESOLVE=1`|Skip the resolve hook, so a query never pulls.|
+|`ANVIL_CONTAINER_NO_CACHE=1`|Rebuild a tag that already resolves, ignoring the hook.|
+|`ANVIL_IN_CONTAINER=1`|Set inside the image; makes a nested invocation run natively.|
+|`GITHUB_TOKEN`|Forwarded when set on the host. When it is not, one is derived from `gh auth token` — but only for a target whose plan reads the variable, or for the interactive shell.|
 
-The public driver never pulls `ANVIL_CONTAINER_IMAGE` remotely. Repositories
-and derived catalogs can add trusted `customize.sh` and
-`customize.ps1` files for image-build secrets, dependency preparation,
-APRZ classification, runtime arguments, and cleanup through the documented
-customization contract without changing the public command surface.
+Supporting recipes: `anvil-container-tag`, `anvil-container-status`
+(reports the engine and image without building or pulling), and
+`anvil-container-down` (removes this repository’s cache volumes). To rebuild
+a tag that already resolves, scope `ANVIL_CONTAINER_NO_CACHE` to the one
+invocation — an exported value is read by *every* later container command,
+so a forgotten one rebuilds from scratch each time:
 
-Customization files execute on the host with the developer’s permissions
-before container isolation. Only run them from a repository or catalog you
-trust.
+```text
+$env:ANVIL_CONTAINER_NO_CACHE = '1'
+try { just anvil-container just anvil-fmt } finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
+```
 
-For GitHub API checks, the driver automatically uses an existing host
-`GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
-mounts the token read-only for the command and removes the temporary file
-afterward. If `gh` is installed but not authenticated, an interactive run
-pauses before building the image, explains the unauthenticated API limit,
-and continues after the user completes `gh auth login` and presses Enter.
+#### The hook
 
-#### Troubleshooting
+crates.io needs no credentials, so no hook is emitted by default. A
+repository or a downstream catalog that needs one adds
+`.anvil/container/hooks.ps1`, which the recipe loads by path whenever the
+file is present, whoever wrote it:
 
-* A first-run image build is expected and may take several minutes.
-* `wsl -e docker images anvil-dev` lists locally cached Anvil images from
-  Windows; use `docker images anvil-dev` inside Linux or WSL.
-* `ANVIL_CONTAINER_NO_REBUILD=1` distinguishes a cache miss from a build
-  failure.
-* Non-interactive runs cannot pause for login. Authenticate `gh` or set host
-  `GITHUB_TOKEN` before starting them.
-* Regenerate managed files with `cargo anvil`; do not hand-edit
-  `.anvil/container/`.
+```powershell
+function Anvil-BuildSecrets { @{ Secrets = @{ feed = (mint-a-token) } } }
+function Anvil-RunEnv       { @{ Env     = @{ FEED_TOKEN = (mint-a-token) } } }
+function Anvil-ResolveImage { param($tag) (fetch-a-published-image $tag) }
+```
+
+All three are optional. Build secrets are passed to `BuildKit` by
+environment variable name, so a value never reaches a process argument and
+never reaches an image layer; run-time values are forwarded into the
+container by name for the same reason. An empty value is a hard error,
+because a build that quietly proceeded without its credential would install
+a reduced tool set and then be tagged with the digest a credentialed build
+produces.
+
+`Anvil-ResolveImage` is offered the tag when nothing local matches, and
+returns the reference it made available: a registry reference, used as-is
+rather than re-tagged locally, so the run stays honest about where the
+image came from. Its presence is checked before use – which proves
+something carries that reference, not that the contents match the digest –
+and every failure falls through to a local build: a publisher that has not
+caught up must not block the change it has not caught up with.
+
+The hook executes on the host, with the invoking user’s permissions, before
+any container isolation exists. Only use one from a repository or catalog
+you trust.
+
+#### Customizing the image
+
+`.anvil/container/Dockerfile` is a **user-composed file with managed
+regions**: anvil owns five regions inside it and keeps them current, and the
+gaps between them are the repository’s. Add to the gap that matches when the
+addition is needed – re-declare `ARG BASE_IMAGE` to build on another base,
+a root CA or proxy before the first download, libraries a catalog tool
+compiles against before `anvil-setup`, run-time tools after it. Adding in a
+gap leaves anvil’s content alone, so base and tool-pin bumps keep landing;
+editing inside a region is preserved rather than overwritten, but freezes
+those pins at the moment of the edit, which is why the gaps exist.
+
+A downstream catalog that needs a different base OS for every repository it
+manages replaces the base and tool regions instead, inheriting the catalog
+install and the entry contract. A replacement that copies more of the tree
+must replace the ignore file with it, since the build context admits only
+`justfiles/anvil/`, `.anvil/container/` and `rust-toolchain.toml`. See
+[`artifacts::container`][__link1] and the design document for the full contract, the
+host setup for each engine, and the known limitations.
 
 ### Checks and tiers
 
@@ -229,11 +274,11 @@ the tables below map each check to the group that runs it, link each
 check to its tool’s documentation, and note anything anvil-specific.
 
 **PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped
-both locally and in cloud workflows. Two jobs: `pr-fast`, and `pr-slow` (whose three
-sub-groups run sequentially within the one job per OS leg):
+both locally and in cloud workflows. `pr-fast` is one job, while the
+`pr-slow` groups run as independent parallel jobs per OS leg:
 
 <table>
-  <thead><tr><th>Job</th><th>Sub-group</th><th>Check</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Umbrella</th><th>Group</th><th>Check</th><th>Notes</th></tr></thead>
   <tbody>
     <tr><td rowspan="15"><code>pr-fast</code></td><td rowspan="15">—</td><td><a href="https://rust-lang.github.io/rustfmt/">fmt</a></td><td>predefined configuration with nightly features</td></tr>
     <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td><td>predefined lints</td></tr>
@@ -250,9 +295,10 @@ sub-groups run sequentially within the one job per OS leg):
     <tr><td><a href="https://crates.io/crates/cargo-udeps">udeps</a></td><td>runs twice: with and without <code>--all-targets</code></td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-semver-checks">semver-check</a></td><td>findings and inconclusive comparisons are advisory (posts a PR comment); Anvil preflight failures remain enforcing</td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-check-external-types">external-types</a></td><td></td></tr>
-    <tr><td rowspan="8"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
+    <tr><td rowspan="9"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
     <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td>runs both feature configs</td></tr>
     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td>compile-only</td></tr>
+    <tr><td><code>pr-msrv</code></td><td>msrv-test</td><td>dual feature-config, all-target tests under the declared MSRV</td></tr>
     <tr><td rowspan="4"><code>pr-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td>libtest, not nextest</td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-careful">careful</a></td><td>self-cleans on a toolchain bump</td></tr>
     <tr><td><a href="https://crates.io/crates/loom">loom</a></td><td>opt-in targets only</td></tr>
@@ -318,7 +364,7 @@ own crates — without editing the generated `justfiles/anvil/` tree.
 
 #### Spelling dictionary (`spellcheck`)
 
-The `spellcheck` check ([`cargo-spellcheck`][__link1])
+The `spellcheck` check ([`cargo-spellcheck`][__link2])
 reads a repo-root `.spelling` file — one word per line — as its custom
 dictionary. Add project-specific terms (crate names, acronyms,
 identifiers) there to silence false positives; the `anvil-spellcheck`
@@ -327,7 +373,7 @@ consumes. Keep the file `LF`-terminated.
 
 #### Coverage (`llvm-cov`)
 
-Coverage is gated by [`cargo-coverage-gate`][__link2];
+Coverage is gated by [`cargo-coverage-gate`][__link3];
 per-package and per-workspace thresholds, the coverage-exclusion
 attribute, and opt-out are all configured through its `Cargo.toml`
 metadata conventions — see its documentation.
@@ -394,8 +440,8 @@ fn main() -> ExitCode {
 }
 ```
 
-…plus a [`Catalog`][__link3] value that starts from [`Catalog::anvil`][__link4] and
-customizes the CLI identity ([`CliMeta`][__link5]) and artifact set:
+…plus a [`Catalog`][__link4] value that starts from [`Catalog::anvil`][__link5] and
+customizes the CLI identity ([`CliMeta`][__link6]) and artifact set:
 
 ```rust
 use cargo_anvil::{Artifact, Catalog, artifacts};
@@ -419,8 +465,8 @@ The on-disk vocabulary (`.anvil.lock`, `anvil-managed` sentinels,
 `justfiles/anvil/`, `anvil-` recipes) is the fixed engine format and is
 never rebranded. A fork customizes only its CLI identity and which
 artifacts it emits, via the three uniform builder verbs
-([`CatalogBuilder::with_artifact`][__link6], [`CatalogBuilder::replace_artifact`][__link7],
-[`CatalogBuilder::without_artifact`][__link8]) over the public [`artifacts`][__link9]
+([`CatalogBuilder::with_artifact`][__link7], [`CatalogBuilder::replace_artifact`][__link8],
+[`CatalogBuilder::without_artifact`][__link9]) over the public [`artifacts`][__link10]
 registry. The `tool` field recorded in `.anvil.lock` keeps two
 anvil-family tools from clobbering one another in a shared repo (see `--force`).
 See `docs/design/extensibility.md`.
@@ -445,14 +491,15 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQblcBzF-_WZVYbCN9Rt1pYQLsblkUTM0oENsMbNe4wSAldeq9hZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbLvVGTNtetQUbnp9vX0Ew7_gbkZEyxfXZXyMbltL72AXa-o1hZIGDa2NhcmdvLWFudmlsZTAuNi4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
- [__link1]: https://crates.io/crates/cargo-spellcheck
- [__link2]: https://crates.io/crates/cargo-coverage-gate
- [__link3]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=Catalog
- [__link4]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=Catalog::anvil
- [__link5]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CliMeta
- [__link6]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::with_artifact
- [__link7]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
- [__link8]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::without_artifact
- [__link9]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts
+ [__link1]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=artifacts::container
+ [__link10]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=artifacts
+ [__link2]: https://crates.io/crates/cargo-spellcheck
+ [__link3]: https://crates.io/crates/cargo-coverage-gate
+ [__link4]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=Catalog
+ [__link5]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=Catalog::anvil
+ [__link6]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=CliMeta
+ [__link7]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link8]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link9]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=CatalogBuilder::without_artifact

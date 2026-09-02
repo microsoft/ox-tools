@@ -109,9 +109,10 @@ stages:
           steps:
             - template: steps/pr-fast.yml
 
-  # The PR-tier slow checks are split into three independent stages
-  # (pr_test, pr_runtime_analysis, pr_mutants) so they run in parallel rather
-  # than sequentially in one job. Each stage owns its own dependsOn link to
+  # The PR-tier slow checks are split into four independent stages
+  # (pr_test, pr_msrv, pr_runtime_analysis, pr_mutants) so they run in
+  # parallel rather than sequentially in one job. Each stage owns its own
+  # dependsOn link to
   # the impact stage and downloads the per-OS impact artifact. ADO has no
   # hosted ARM agents, so the matrix stays Linux + Windows x86_64.
 
@@ -162,6 +163,29 @@ stages:
               inputs:
                 summaryFileLocation: target/coverage/cobertura-*.xml
                 failIfCoverageEmpty: false
+
+  - stage: pr_msrv
+    displayName: anvil pr-msrv (MSRV tests)
+    dependsOn: [impact]
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          inputArtifacts:
+            - name: anvil-impact-linux
+              path: target/anvil/impact
+          steps:
+            - template: steps/pr-msrv.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          inputArtifacts:
+            - name: anvil-impact-windows
+              path: target/anvil/impact
+          steps:
+            - template: steps/pr-msrv.yml
 
   - stage: pr_runtime_analysis
     displayName: anvil pr-runtime-analysis (miri + careful)

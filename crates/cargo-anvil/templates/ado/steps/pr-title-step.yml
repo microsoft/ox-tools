@@ -1,0 +1,24 @@
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to literal
+  # macro text. Resolve the title only for pr-fast, which owns anvil-pr-title.
+  # Non-PR builds skip; a known PR whose metadata cannot be retrieved fails
+  # closed.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Error "anvil: could not resolve PR title for PR $prId ($_). Ensure the job can access the repository OAuth token."
+          exit 1
+      }
+    displayName: anvil-pr-fast (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)

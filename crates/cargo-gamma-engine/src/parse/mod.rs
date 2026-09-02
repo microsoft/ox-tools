@@ -29,8 +29,10 @@ mod comment;
 pub mod nesting;
 mod source_file;
 
+#[doc(inline)]
 pub use comment::{Comment, CommentKind};
 pub(crate) use comment::{comment_spans, literal_end};
 #[doc(hidden)]
 pub use source_file::{BOM, strip_bom};
+#[doc(inline)]
 pub use source_file::{SourceFile, exceeds_nesting_limit, without_bom};

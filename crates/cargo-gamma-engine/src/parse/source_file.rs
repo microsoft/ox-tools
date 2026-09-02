@@ -13,24 +13,33 @@ use super::comment::{self, Comment};
 use super::nesting;
 use crate::Result;
 use crate::error::error;
+use crate::text::encode_controls;
 
 /// A parsed source file, with everything downstream stages need to work in byte offsets.
 #[derive(Debug)]
 pub struct SourceFile {
     /// Path as it should appear in reports, relative to the workspace root where possible.
-    pub path: Utf8PathBuf,
+    ///
+    /// `pub(crate)` rather than private: the survey relocates a file read by absolute path to its
+    /// workspace-relative one once it knows it, through the controlled [`Self::set_path`] rather
+    /// than a bare field assignment, but every other read stays inside this crate.
+    pub(crate) path: Utf8PathBuf,
 
     /// The exact bytes that were parsed. All spans index into this.
-    pub text: String,
+    pub(crate) text: String,
 
     /// The syntax tree.
-    pub ast: File,
+    ///
+    /// `pub(crate)` rather than private: this crate's own tests build fixtures by mutating a
+    /// parsed tree directly, which a getter-only encapsulation cannot express. Every other crate
+    /// sees this only through the read-only [`Self::ast`] accessor.
+    pub(crate) ast: File,
 
     /// Byte offset of the start of each line.
     lines: Vec<usize>,
 
     /// Every comment in the file, in source order.
-    pub comments: Vec<Comment>,
+    pub(crate) comments: Vec<Comment>,
 }
 
 /// Whether source text is too deeply nested to hand to a recursive parser.
@@ -72,7 +81,8 @@ impl SourceFile {
             // the whole run over it would make a valid workspace unmeasurable, which is a worse
             // answer than measuring the rest of it and naming what was left out.
             return Err(error!(
-                "{path}:{line}: nests deeper than {} levels of brackets, prefix operators, chained operators or postfix expressions",
+                "{}:{line}: nests deeper than {} levels of brackets, prefix operators, chained operators or postfix expressions",
+                encode_controls(path.as_str()),
                 nesting::NESTING_LIMIT
             )
             .skippable());
@@ -81,7 +91,16 @@ impl SourceFile {
         let ast = syn::parse_file(&text).map_err(|cause| {
             let start = cause.span().start();
 
-            error!("{path}:{}:{}: could not parse: {cause}", start.line, start.column)
+            // The path is repository-controlled and this message is printed to a terminal, so it is
+            // encoded here rather than trusted; `cause` is `syn`'s own prose about a token it read
+            // from that same repository, so it is encoded for the same reason.
+            error!(
+                "{}:{}:{}: could not parse: {}",
+                encode_controls(path.as_str()),
+                start.line,
+                start.column,
+                encode_controls(&cause.to_string())
+            )
         })?;
 
         Ok(Self {
@@ -94,10 +113,16 @@ impl SourceFile {
     }
 
     /// Reads and parses a file from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read from `path`, or any error [`Self::parse`]
+    /// documents for the text once it has been read.
     pub fn read(path: impl AsRef<Utf8Path>) -> Result<Self> {
         let path = path.as_ref();
 
-        let text = fs::read_to_string(path).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
+        let text =
+            fs::read_to_string(path).map_err(|cause| error!("could not read `{}`", encode_controls(path.as_str())).caused_by(cause))?;
 
         Self::parse(path.to_owned(), text)
     }
@@ -131,6 +156,39 @@ impl SourceFile {
     #[must_use]
     pub fn slice(&self, span: &Range<usize>) -> &str {
         self.text.get(span.start..span.end).unwrap_or("")
+    }
+
+    /// Returns the path as it should appear in reports.
+    #[must_use]
+    pub fn path(&self) -> &Utf8Path {
+        &self.path
+    }
+
+    /// Relocates the file to a different reporting path, without re-parsing its text.
+    ///
+    /// A file is often read from an absolute path and then reported relative to the workspace
+    /// root once the caller knows it; this is the one controlled way to update that path after
+    /// parsing, so every other representation field stays untouched and in agreement with `text`.
+    pub fn set_path(&mut self, path: impl Into<Utf8PathBuf>) {
+        self.path = path.into();
+    }
+
+    /// Returns the exact bytes that were parsed. All spans index into this.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Returns the syntax tree.
+    #[must_use]
+    pub fn ast(&self) -> &File {
+        &self.ast
+    }
+
+    /// Returns every comment in the file, in source order.
+    #[must_use]
+    pub fn comments(&self) -> &[Comment] {
+        &self.comments
     }
 }
 

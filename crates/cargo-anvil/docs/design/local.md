@@ -43,34 +43,32 @@ repo/
 │   ├── groups/             one file per group: groups/<group>.just holds the
 │   │                       `anvil-<group>` recipe plus its `*-setup` /
 │   │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
-│   │                       anvil-pr-runtime-analysis, anvil-pr-mutants,
+│   │                       anvil-pr-msrv, anvil-pr-runtime-analysis, anvil-pr-mutants,
 │   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
-│   │                       convenience umbrella over the three pr-slow sub-groups.
-│   ├── container.just      optional container entry recipe (`anvil-container`).
+│   │                       convenience umbrella over the pr-slow groups.
+│   ├── container.just      containerized execution (`anvil-container`). See containers.md.
 │   ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
 │   ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
 │   │                       plus the cargo-spellcheck source-deps check and
 │   │                       anvil-validate-prereqs.
-│   └── versions.just       catalog nightly toolchains and cargo-subcommand minimum versions
-│                           as plain just variables (rust_nightly, cargo_nextest_version, …).
-│                           Read by recipes via `{{ var }}` interpolation. See §3.
+│   └── versions.just       catalog nightly toolchains and cargo-subcommand minimum versions,
+│                           plus the lazy stable-toolchain argument selector, as
+│                           non-exported just variables. See §3.
 │
-└── .anvil/container/                              optional non-recipe container assets
-    ├── Containerfile
-    ├── Containerfile.dockerignore
-    ├── README.md
-    ├── entrypoint.sh
-    ├── image-id.ps1
-    ├── image-id.sh
-    ├── run-in-container.ps1
-    └── run-in-container.sh
+└── .anvil/container/                              the container image definition
+    ├── Dockerfile                                 composed: anvil-managed regions, your content between
+    ├── Dockerfile.dockerignore
+    └── hooks.ps1                                  optional; credentials, not emitted by default
 ```
 
-The Justfile region is the only file anvil adds to that the user co-owns, and it's
-a single `import` line. Generated recipes live inside `justfiles/anvil/`; optional
-non-recipe container assets live inside `.anvil/container/`. Generated files in
+The Justfile region is not the only file anvil adds to that the user co-owns: the
+container `Dockerfile` is composed the same way, from five managed regions with
+the repository's own instructions in the gaps between them (see
+[containers.md](./containers.md)). Generated recipes live inside `justfiles/anvil/`;
+the container image definition lives inside `.anvil/container/`. Generated files in
 both directories are tool-owned (tracked by full-file checksum in the sidecar
-manifest). If the user wants to add project-specific recipes, they add them to
+manifest), except the composed `Dockerfile`, whose regions are tracked
+individually. If the user wants to add project-specific recipes, they add them to
 the top-level `Justfile` outside the managed region, or to their own additional
 imported `.just` files. The alias `anvil := anvil-pr` lives in `mod.just`, not in
 the user's `Justfile`, so renaming or retargeting the alias is a template update
@@ -82,12 +80,13 @@ in `tools.just` (and the per-check/group/tier setup recipes colocated in the sam
 files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore shows
 two clean clusters: one for "run checks", one for "install prereqs".
 
-> **Optional container backend.** When a catalog includes the opt-in container
-> backend, `justfiles/anvil/container.just` adds the
-> `anvil-container <recipe>` command and `.anvil/container/` contains its
-> non-recipe assets. It runs any recipe below inside a pinned Linux image
-> (Linux-on-Windows parity, distro pinning) instead of against the host
-> toolchain. The recipe bodies are unchanged; see [containers.md](./containers.md).
+> **Containerized execution.** `justfiles/anvil/container.just` adds the
+> `anvil-container <command…>` recipe, which runs the given argv inside a pinned
+> Linux image instead of against the host toolchain (Linux-on-Windows parity,
+> toolchain pinning). Anvil recipes are reached by naming `just`
+> (`just anvil-container just anvil-pr`); with no argument it opens a shell. It
+> is explicit: the tiers themselves always run natively.
+> The recipe bodies are unchanged; see [containers.md](./containers.md).
 
 ## 2. Recipe layers
 
@@ -115,6 +114,16 @@ confirm the tool meets the catalog's pin. Missing or below-pin tools fail with a
 one-line install hint pointing at the matching `anvil-tool-<name>-install` recipe.
 The cost is a handful of cheap lookups per check, well under a second on a warm cache.
 
+Setup and validation have separate dependency graphs. Every setup path that
+uses stable Cargo/Rust or installs a Cargo tool reaches
+`anvil-toolchain-stable-install` first. The shared Cargo-tool installer and
+default-toolchain component installers own that prerequisite, while checks
+that need only built-in stable Cargo (bench, doc-build, doc-test, examples,
+and loom) depend on it directly. Just deduplicates the primitive when a group,
+tier, or full setup fans out across many checks. The corresponding
+`*-validate-prereqs` graph never depends on an install recipe and never mutates
+the environment.
+
 ### groups/
 
 One file per cloud-workflow-visible group, `groups/<group>.just`, defining
@@ -123,10 +132,10 @@ namespaces are kept disjoint by naming choice: no check is named `<tier>-<group>
 any tier × group combination (e.g. the coverage-instrumented test check is named
 `llvm-cov`, not `test`, so that group names like `anvil-pr-test` unambiguously refer to a group recipe).
 
-The `pr-slow` work is split into three independent cloud-workflow-visible sub-groups
-(`pr-test`, `pr-runtime-analysis`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
+The `pr-slow` work is split into independent cloud-workflow-visible groups
+(`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
 A convenience umbrella `anvil-pr-slow` recipe is also provided for local
-use; it invokes the three sub-recipes sequentially. `pr-mutants` (mutants) is
+use; it invokes those groups sequentially. `pr-mutants` (mutants) is
 diff-scoped against the PR base; `scheduled-exhaustive` runs the
 full-workspace mutants recipe:
 
@@ -137,8 +146,9 @@ anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
                anvil-deny anvil-audit anvil-udeps anvil-semver-check \
                anvil-external-types anvil-aprz
 
-anvil-pr-slow: anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
 anvil-pr-test: anvil-llvm-cov anvil-doc-test anvil-examples
+anvil-pr-msrv: anvil-msrv-test
 anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom anvil-bolero
 anvil-pr-mutants: anvil-mutants-diff
 
@@ -249,7 +259,9 @@ install recipe (one per atomic resource); composition layers chain those.
 - `anvil-toolchain-<symbolic>-install` — `rustup toolchain install` for a pinned
   nightly (e.g. `nightly-2026-02-10`).
 - `anvil-component-<toolchain>-<component>-install` — `rustup component add`
-  on a specific toolchain. Depends on the matching toolchain-install recipe.
+  on a specific toolchain. Stable components explicitly target the toolchain
+  selected by an override, repository toolchain file, or MSRV fallback. Depends
+  on the matching toolchain-install recipe.
 
 Each has a matching `*-validate-prereqs` recipe that exits 0 when the resource is
 already present at or above its pin and fails with a one-line install hint otherwise.
@@ -328,8 +340,8 @@ install recipe can run:
 Trade-off acknowledged: `cargo install --locked` is slow on a cold cache (several
 minutes for the full catalog). It is also the most reliable mechanism in restricted
 networks. Caching (via the GH cache action and the ADO pipeline workspace cache) is
-configured by the setup action/template to key on `Cargo.lock`, the toolchain
-channel, and `versions.just`. See
+configured by the setup action/template to key on platform, toolchain
+configuration, Cargo configuration, and `versions.just`. See
 [github.md](./github.md#caching) and [ado.md](./ado.md#caching).
 
 #### 3.3.1 System-level prerequisites
@@ -370,21 +382,73 @@ invocations like `just anvil-miri` fail loudly if a required tool is missing or
 predates the catalog minimum, with a one-line hint pointing at the matching
 `anvil-tool-<name>-install` recipe.
 
-### 3.5 The Rust toolchain
+### 3.5 The stable Rust toolchain
 
-`rust-toolchain.toml` is read but never written, and anvil never installs the *project's*
-Rust toolchain itself. Per-backend rationale lives in [github.md](./github.md#rust-toolchain)
-and [ado.md](./ado.md#rust-toolchain); short version: msrustup owns it on ADO/1ESPT, the
-runner image owns it on GH, the user owns it locally.
+Anvil selects one deterministic toolchain for every check that otherwise uses the
+ambient stable toolchain. The selection order is:
 
-`anvil-tool-rustc-validate-prereqs` validates the installed `rustc` against the
-catalog's minimum at recipe time; a below-minimum `rustc` produces a clean failure
-message naming the version mismatch. Per-check toolchain requirements (e.g. miri,
-careful, udeps need nightly) are enforced by the matching
-`anvil-toolchain-<name>-validate-prereqs` recipe, which suggests the
-user-environment-appropriate install command in the failure message
-(`rustup install nightly-YYYY-MM-DD` or "ask your team's pipeline owner to add
-nightly to msrustup").
+1. `RUSTUP_TOOLCHAIN`, when the caller already set it. This is rustup's standard
+   override for selecting an already available toolchain.
+2. A root `rust-toolchain` or `rust-toolchain.toml`, delegated to rustup without
+   Anvil parsing or modifying the file.
+3. The root package or `[workspace.package]` `rust-version`, treated as the
+   repository MSRV.
+
+There is no runner-default fallback. A repository with neither a root toolchain
+file nor a root MSRV fails with an actionable setup error rather than inheriting a
+compiler that can change with the machine image.
+
+Repositories with one compatibility floor should declare root
+`[workspace.package].rust-version` (or package
+`rust-version`) and have every workspace member inherit it or declare an equal
+or lower minimum. Repositories with missing package MSRVs, or a member minimum
+newer than the root, correct the root floor or add a root toolchain file to
+select one compiler for catalog checks. Callers can instead set
+`RUSTUP_TOOLCHAIN` to an already provisioned toolchain.
+
+A caller-provided `RUSTUP_TOOLCHAIN` and the presence of either root
+toolchain-file spelling both produce no explicit `+toolchain` argument. The
+environment value is inherited unchanged. In the file case, rustup owns all
+parsing and applies its native lookup from each Cargo or Rust command's actual
+working directory; Anvil does not parse the root file, replay options from it,
+or promise isolation from nested toolchain files. Only the root MSRV fallback
+produces an explicit `+<version>` argument.
+
+Setup ensures that the selected stable compiler is available before stable
+Cargo or Rust use. Repository toolchain files are processed by rustup; a
+missing root-MSRV toolchain is installed explicitly. Prerequisite validation is
+read-only: before running workspace metadata under the root MSRV, it requires
+rustup and verifies that exact toolchain is already installed. A missing
+toolchain fails with the stable-setup recipe as the corrective action instead
+of allowing Cargo to auto-install it.
+
+When selection falls back to the root MSRV, Anvil reads the root manifest just
+far enough to bootstrap that compiler, then prerequisite validation reads
+`cargo +<root-msrv> metadata`. Cargo performs the authoritative workspace
+resolution; Anvil requires every workspace package to expose a `rust_version`
+no newer than the root floor. Running metadata under that compiler avoids
+depending on an ambient default during the fallback itself.
+Lower member minima are valid because the root compiler satisfies them.
+Workspaces with missing package MSRVs or member minima above the root must
+correct the declarations or choose a single catalog toolchain explicitly with
+a selecting toolchain file. Anvil does not build a per-package toolchain matrix
+for this uncommon case.
+
+Cargo-installed tools and stable analyzers use this same repository-selected
+compiler. Anvil does not provision a separate tooling compiler; checks that
+require nightly continue to use their catalog-pinned nightly.
+
+When the root manifest declares an MSRV, `anvil-msrv-test` runs affected-package
+`cargo test --all-targets` in all-features and default-features configurations
+under that compiler. This includes library and binary unit tests, integration
+tests, examples, and benches as test targets. It does not add a
+`--no-default-features` pass. A root toolchain file does not suppress this
+minimum-version run. Without a root MSRV the recipe is a no-op.
+
+`anvil-tool-rustc-validate-prereqs` verifies that `rustc` is available and
+enforces the workspace MSRV compatibility rule. Per-check toolchain
+requirements (for example, miri, careful, and udeps need nightly) remain
+enforced by their matching prerequisite validation.
 
 ### 3.6 Nightly pinning
 
@@ -489,7 +553,7 @@ Each check requests one cargo-delta **category** — the selector it passes to
 
 | Category   | What recipes do with it                                                                       |
 |------------|------------------------------------------------------------------------------------------------|
-| `modified` | `--skip` → recipe exits 0. Otherwise: run unconditionally (modified-category tools are workspace-wide). |
+| `modified` | `--skip` → recipe exits 0. Otherwise the recipe runs against the input domain defined by its own command; impact-selected package arguments are not forwarded. |
 | `affected` | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when empty. |
 | `required` | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
@@ -513,6 +577,13 @@ name signals a gap in this reverse-mapping — not a scoping decision — so the
 identifier '<name>'` to stderr and exits non-zero rather than guessing (and risking a
 silently under-scoped tier that skips a check). Failing hard surfaces the mapping gap so it
 gets fixed, instead of masking it behind a silently full-workspace run.
+
+Formatting illustrates the modified-tier contract. The tier decides only whether
+the recipe runs. Once admitted, the recipe validates its pinned tools and uses
+`cargo each --workspace` to launch one bounded rustfmt command per workspace
+member. The script propagates the aggregate child status, and unlike
+`cargo fmt --all`, it intentionally does not discover non-member local path
+dependencies.
 
 The mapping from check to bucket is fixed in the catalog (see
 [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)). Unscoped checks —
@@ -538,12 +609,12 @@ Set `ANVIL_IMPACT=off` in the environment to disable scoping entirely: `anvil-im
 affected/required, empty for modified). Because `just` runs a recipe's dependencies in the
 same environment, the guard is honored even when `anvil-impact` fires as a check
 dependency. This is exactly how the **scheduled** and **full** tiers stay full-workspace:
-`anvil-scheduled` / `anvil-full` route through the `_anvil-run` tier router
-(`anvil-scheduled: (_anvil-run "scheduled" anvil_runner "off")`), which exports
+`anvil-scheduled` / `anvil-full` wrap their private recipe in `_anvil-unscoped`
+(`anvil-scheduled: (_anvil-unscoped "scheduled")`), which exports
 `ANVIL_IMPACT=off` before invoking the private `_anvil-<tier>` recipe, so the whole
-dependency tree runs unscoped. The export lives in the router because a
+dependency tree runs unscoped. The export lives in the wrapper because a
 dependency-only tier recipe cannot set env for its own dependencies — they run before its
-body. The four scheduled *groups* (`anvil-scheduled-test`, …) route the same way, so a
+body. The scheduled *groups* (`anvil-scheduled-test`, …) wrap the same way, so a
 scheduled group invoked directly is full-workspace too.
 
 `ANVIL_IMPACT` is a strict tri-state — `off`, `consume`, or unset. Any other value makes

@@ -1084,6 +1084,19 @@ fn a_literal_inside_a_trait_path_survives_compaction() {
     assert_eq!(&*candidates[0].item_path, "<S as Trait<5>>::f");
 }
 
+/// Lifetime and type tokens need a separator even though punctuation around them does not.
+#[test]
+fn an_impl_self_type_preserves_the_boundary_after_a_lifetime() {
+    let source = "trait Trait { fn f(&self) -> i32; }\n\
+                  impl<'a, T> Trait for &'a T { fn f(&self) -> i32 { 1 + 2 } }\n";
+    let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
+    let selection = Selection::parse("arith.add_to_sub").unwrap();
+    let candidates = collect_in(&file, &selection, &CfgSet::unconditional());
+
+    assert_eq!(candidates.len(), 1, "{candidates:?}");
+    assert_eq!(&*candidates[0].item_path, "<&'a T as Trait>::f");
+}
+
 /// A string literal is recognized by the source parser's lexer, not by the whitespace filter, so
 /// its contents -- including a comment-shaped sequence and internal spaces -- pass through
 /// `compact_path` untouched even though everything around it is compacted.
