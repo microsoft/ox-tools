@@ -1594,7 +1594,7 @@ mod tests {
     /// Redirected-cache fixtures must not inherit permissions from the repository checkout:
     /// containerized build agents may mount that checkout under a non-sticky shared directory,
     /// which is exactly an unsafe cache ancestry the production check must reject.
-    fn redirected_cache_dir(prefix: &str) -> tempfile::TempDir {
+    fn private_system_tempdir(prefix: &str) -> tempfile::TempDir {
         let mut builder = tempfile::Builder::new();
 
         builder.prefix(prefix);
@@ -1714,7 +1714,7 @@ mod tests {
 
     #[test]
     fn an_unowned_redirected_cache_is_refused_without_touching_its_contents() {
-        let directory = redirected_cache_dir("unowned-cache-");
+        let directory = private_system_tempdir("unowned-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
         let marker = base.join("build/user-data");
@@ -1736,7 +1736,7 @@ mod tests {
 
     #[test]
     fn a_directory_containing_only_somebody_elses_lock_file_is_not_adopted() {
-        let directory = redirected_cache_dir("foreign-lock-cache-");
+        let directory = private_system_tempdir("foreign-lock-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
@@ -1752,7 +1752,7 @@ mod tests {
 
     #[test]
     fn an_empty_redirected_cache_is_claimed_for_its_workspace_and_can_be_reused() {
-        let directory = redirected_cache_dir("owned-cache-");
+        let directory = private_system_tempdir("owned-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
@@ -1770,7 +1770,7 @@ mod tests {
 
     #[test]
     fn a_redirected_cache_owned_by_another_workspace_is_refused() {
-        let directory = redirected_cache_dir("foreign-cache-");
+        let directory = private_system_tempdir("foreign-cache-");
         let first = Utf8PathBuf::from_path_buf(directory.path().join("first")).expect("the source path is UTF-8");
         let second = Utf8PathBuf::from_path_buf(directory.path().join("second")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
@@ -1810,7 +1810,7 @@ mod tests {
             assert!(output.status.success(), "child stdout:\n{stdout}\nchild stderr:\n{stderr}");
             return;
         }
-        let directory = redirected_cache_dir("private-cache-");
+        let directory = private_system_tempdir("private-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
@@ -1825,7 +1825,7 @@ mod tests {
     /// from.
     #[test]
     fn a_linked_redirected_cache_is_refused() {
-        let directory = redirected_cache_dir("linked-cache-");
+        let directory = private_system_tempdir("linked-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let real = Utf8PathBuf::from_path_buf(directory.path().join("real")).expect("the real path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
@@ -1855,7 +1855,7 @@ mod tests {
     /// otherwise be asked about a directory that does not exist.
     #[test]
     fn a_redirected_cache_that_is_not_a_directory_is_refused() {
-        let directory = redirected_cache_dir("file-cache-");
+        let directory = private_system_tempdir("file-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
@@ -1878,7 +1878,7 @@ mod tests {
     fn a_redirected_cache_under_a_world_writable_directory_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = redirected_cache_dir("shared-cache-");
+        let directory = private_system_tempdir("shared-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let shared = Utf8PathBuf::from_path_buf(directory.path().join("shared")).expect("the shared path is UTF-8");
         let base = shared.join("cache");
@@ -1905,7 +1905,7 @@ mod tests {
     fn a_redirected_cache_under_a_sticky_shared_directory_is_allowed() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = redirected_cache_dir("sticky-cache-");
+        let directory = private_system_tempdir("sticky-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let shared = Utf8PathBuf::from_path_buf(directory.path().join("shared")).expect("the shared path is UTF-8");
         let base = shared.join("cache");
@@ -1925,7 +1925,7 @@ mod tests {
     fn a_sticky_world_writable_cache_itself_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let directory = redirected_cache_dir("sticky-base-cache-");
+        let directory = private_system_tempdir("sticky-base-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
@@ -1946,7 +1946,7 @@ mod tests {
     /// back into a message printed to a terminal.
     #[test]
     fn a_hostile_owner_marker_cannot_address_the_terminal_it_is_reported_on() {
-        let directory = redirected_cache_dir("hostile-marker-cache-");
+        let directory = private_system_tempdir("hostile-marker-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
@@ -1963,7 +1963,7 @@ mod tests {
 
     #[test]
     fn two_workspaces_cannot_use_one_redirected_cache_concurrently() {
-        let directory = redirected_cache_dir("contended-cache-");
+        let directory = private_system_tempdir("contended-cache-");
         let first = Utf8PathBuf::from_path_buf(directory.path().join("first")).expect("the source path is UTF-8");
         let second = Utf8PathBuf::from_path_buf(directory.path().join("second")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
