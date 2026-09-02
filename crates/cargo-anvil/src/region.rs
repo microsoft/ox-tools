@@ -530,6 +530,19 @@ mod tests {
     }
 
     #[test]
+    fn adoption_preserves_an_existing_managed_region() {
+        let text = "[lints]\nworkspace = true\n\n\
+                    # >>> anvil-managed: existing\n\
+                    [lints]\n\
+                    workspace = true\n\
+                    # <<< anvil-managed: existing\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+
+        assert!(adopted.starts_with("# >>> anvil-managed: existing"));
+        assert!(adopted.contains("[lints]\nworkspace = true\n# <<< anvil-managed: existing"));
+    }
+
+    #[test]
     fn finds_region_with_body() {
         let text = "before\n\
                     # >>> anvil-managed: anvil-x\n\
