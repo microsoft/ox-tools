@@ -37,6 +37,7 @@
 [script("pwsh", "-NoProfile")]
 _anvil-readme mode: anvil-readme-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
+    $stableArgs = {{_anvil_stable_toolchain_args}}
     $action = '{{ mode }}'
     if ($action -notin @('generate', 'check')) {
         [Console]::Error.WriteLine("anvil-readme: invalid mode '$action'; expected 'generate' or 'check'")
@@ -55,7 +56,7 @@ _anvil-readme mode: anvil-readme-check-validate-prereqs
     # Unscoped: a change to the workspace-level README template is a repo-level
     # input cargo-delta cannot map to a package, so this check always runs the
     # full eligible-crate set rather than an impact subset.
-    $metadataJson = & cargo metadata --no-deps --format-version 1
+    $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error "${prefix}: cargo metadata failed"
         exit $LASTEXITCODE
@@ -101,7 +102,7 @@ _anvil-readme mode: anvil-readme-check-validate-prereqs
             $args = @('doc2readme', $target)
             if ($check) { $args += '--check' }
             if ($relTemplate) { $args += @('--template', $relTemplate) }
-            & cargo @args
+            & cargo @stableArgs @args
             if ($LASTEXITCODE -ne 0) { $hadFailure = $true }
         } finally {
             Pop-Location

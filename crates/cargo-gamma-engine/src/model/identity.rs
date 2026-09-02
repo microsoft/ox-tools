@@ -3,18 +3,195 @@
 
 //! The stable, content-addressed identity of a mutant and its site.
 
+use core::borrow::Borrow;
+use core::fmt::{self, Display, Formatter};
+use core::ops::Deref;
+
 use blake3::Hasher;
 use camino::Utf8Path;
 use compact_str::CompactString;
+use serde::{Deserialize, Serialize};
 
 /// A mutant's compact, content-addressed identity.
-pub type MutantId = CompactString;
+///
+/// A newtype over the text rather than an alias for it. This is the key that cached verdicts,
+/// shard assignments and configured expectations are all stored under, so a mutator name, a
+/// package name or a file path reaching one of those maps by mistake would attach one mutant's
+/// history to another and nothing downstream could tell the difference. An alias made every one of
+/// those the same type.
+///
+/// The wrapper is transparent to Serde, so every plan, record and report an earlier version wrote
+/// still reads back unchanged, and it dereferences to `str`, so the identity reads as the text it
+/// is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MutantId(CompactString);
+
+impl MutantId {
+    /// Wraps text that is already a rendered identity.
+    ///
+    /// Deliberately not validating that the text is [`MUTANT_ID_HEX_LEN`] hex characters: the
+    /// identities in a record written by a future version, or by a test that wants a readable
+    /// name, are still identities as far as every map keyed on one is concerned, and refusing them
+    /// would turn a forward-compatible read into a hard failure.
+    #[must_use]
+    pub fn new(text: impl AsRef<str>) -> Self {
+        Self(CompactString::new(text))
+    }
+
+    /// The identity as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Whether the identity spilled out of the inline representation onto the heap.
+    ///
+    /// Exposed for the tests that keep an identity within the inline budget, which is the whole
+    /// reason the underlying representation is a compact string rather than a `String`.
+    #[must_use]
+    pub fn is_heap_allocated(&self) -> bool {
+        self.0.is_heap_allocated()
+    }
+}
+
+impl Deref for MutantId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
+    }
+}
+
+impl Borrow<str> for MutantId {
+    fn borrow(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl AsRef<str> for MutantId {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl Display for MutantId {
+    #[expect(clippy::renamed_function_params, reason = "`f` is less clear than `formatter`")]
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self.0, formatter)
+    }
+}
+
+impl From<CompactString> for MutantId {
+    fn from(value: CompactString) -> Self {
+        Self(value)
+    }
+}
+
+impl From<String> for MutantId {
+    fn from(value: String) -> Self {
+        Self(value.into())
+    }
+}
+
+impl From<&str> for MutantId {
+    fn from(value: &str) -> Self {
+        Self(value.into())
+    }
+}
+
+impl From<MutantId> for CompactString {
+    fn from(value: MutantId) -> Self {
+        value.0
+    }
+}
+
+impl PartialEq<str> for MutantId {
+    fn eq(&self, other: &str) -> bool {
+        self.0.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for MutantId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for MutantId {
+    fn eq(&self, other: &String) -> bool {
+        self.0.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<MutantId> for str {
+    fn eq(&self, other: &MutantId) -> bool {
+        self == other.0.as_str()
+    }
+}
+
+impl PartialEq<MutantId> for &str {
+    fn eq(&self, other: &MutantId) -> bool {
+        *self == other.0.as_str()
+    }
+}
+
+impl PartialEq<MutantId> for String {
+    fn eq(&self, other: &MutantId) -> bool {
+        self.as_str() == other.0.as_str()
+    }
+}
+
+/// Which repeat of a mutation site, and which of that site's replacements, an identity names.
+///
+/// A named structure rather than two adjacent `u32` parameters. The two counts are
+/// indistinguishable at a call site, and swapping them yields a different, entirely valid-looking
+/// identity — which silently detaches every cached verdict, shard assignment and configured
+/// expectation belonging to that mutant, with no error anywhere to say so.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SiteIndex {
+    occurrence: u32,
+    replacement_index: u32,
+}
+
+impl SiteIndex {
+    /// Names which repeat of the site, and which of its replacements, this is.
+    ///
+    /// Both counts are zero-based and unbounded: a site can repeat as often as the enclosing item
+    /// contains it, and a mutator may offer any number of replacements, so there is nothing here
+    /// to reject — only two meanings to keep apart.
+    #[must_use]
+    pub const fn new(occurrence: u32, replacement_index: u32) -> Self {
+        Self {
+            occurrence,
+            replacement_index,
+        }
+    }
+
+    /// Which repeat of an otherwise identical site within the enclosing item this is.
+    #[must_use]
+    pub const fn occurrence(self) -> u32 {
+        self.occurrence
+    }
+
+    /// Which of the mutator's replacements for that site this is.
+    #[must_use]
+    pub const fn replacement_index(self) -> u32 {
+        self.replacement_index
+    }
+}
 
 /// The identity normalization contract emitted by this version.
 ///
 /// Version 4 adds caller-supplied error replacement text to those mutants' identities. Every
 /// identity whose replacement comes from the registry remains byte-identical.
-pub const MUTANT_ID_VERSION: u32 = 4;
+///
+/// Version 5 builds the item-path scope of an implementation from the self type's complete source span —
+/// qualification, generic arguments, and reference syntax included — instead of only its final
+/// path segment. `a::S`, `b::S`, `S<u8>`, `S<u16>`, `S`, and `&S` now keep distinct item paths and
+/// therefore distinct identities; under version 4 they shared one path and fell back to
+/// source-order occurrence, which reordering `impl` blocks could reassign to a different type.
+pub const MUTANT_ID_VERSION: u32 = 5;
 
 /// Computes the stable, content-addressed identity of a mutant.
 ///
@@ -26,15 +203,8 @@ pub const MUTANT_ID_VERSION: u32 = 4;
 /// paths include both the self type and the implemented trait, so same-named methods from two
 /// traits never depend on source order for that disambiguation.
 #[must_use]
-pub fn mutant_id(
-    file: &Utf8Path,
-    item_path: &str,
-    mutator: &str,
-    normalized_site_text: &str,
-    occurrence: u32,
-    replacement_index: u32,
-) -> MutantId {
-    mutant_id_with_discriminator(file, item_path, mutator, normalized_site_text, occurrence, replacement_index, None)
+pub fn mutant_id(file: &Utf8Path, item_path: &str, mutator: &str, normalized_site_text: &str, site: SiteIndex) -> MutantId {
+    mutant_id_with_discriminator(file, item_path, mutator, normalized_site_text, site, None)
 }
 
 /// Computes an identity with additional caller-supplied replacement content.
@@ -44,8 +214,7 @@ pub(crate) fn mutant_id_with_discriminator(
     item_path: &str,
     mutator: &str,
     normalized_site_text: &str,
-    occurrence: u32,
-    replacement_index: u32,
+    site: SiteIndex,
     discriminator: Option<&str>,
 ) -> MutantId {
     let mut hasher = Hasher::new();
@@ -56,8 +225,8 @@ pub(crate) fn mutant_id_with_discriminator(
         let _ = hasher.update(field.as_bytes());
     }
 
-    let _ = hasher.update(&occurrence.to_le_bytes());
-    let _ = hasher.update(&replacement_index.to_le_bytes());
+    let _ = hasher.update(&site.occurrence().to_le_bytes());
+    let _ = hasher.update(&site.replacement_index().to_le_bytes());
     if let Some(discriminator) = discriminator {
         let _ = hasher.update(&(discriminator.len() as u64).to_le_bytes());
         let _ = hasher.update(discriminator.as_bytes());
@@ -65,14 +234,14 @@ pub(crate) fn mutant_id_with_discriminator(
 
     let digest = hasher.finalize();
     let bytes = digest.as_bytes();
-    let mut out = MutantId::with_capacity(MUTANT_ID_HEX_LEN);
+    let mut out = CompactString::with_capacity(MUTANT_ID_HEX_LEN);
 
     for byte in bytes.iter().take(MUTANT_ID_BYTES) {
         out.push(HEX[usize::from(byte >> 4)]);
         out.push(HEX[usize::from(byte & 0x0f)]);
     }
 
-    out
+    MutantId(out)
 }
 
 /// How much of the digest a mutant identifier keeps.
@@ -182,8 +351,8 @@ mod tests {
     fn mutant_id_delegates_to_the_discriminated_form_with_no_discriminator() {
         let file = Utf8Path::new("src/lib.rs");
 
-        let direct = mutant_id(file, "subject::f", "arith.add_to_sub", "1 + 1", 0, 0);
-        let via_discriminator = mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", 0, 0, None);
+        let direct = mutant_id(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::default());
+        let via_discriminator = mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::default(), None);
 
         assert_eq!(direct, via_discriminator);
         assert_eq!(direct.len(), MUTANT_ID_HEX_LEN);
@@ -195,15 +364,31 @@ mod tests {
     #[test]
     fn each_field_and_the_discriminator_affect_the_identity() {
         let file = Utf8Path::new("src/lib.rs");
-        let baseline = mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", 0, 0, None);
+        let baseline = mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::default(), None);
 
-        let other_file = mutant_id_with_discriminator(Utf8Path::new("src/other.rs"), "subject::f", "arith.add_to_sub", "1 + 1", 0, 0, None);
-        let other_occurrence = mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", 1, 0, None);
-        let other_replacement_index = mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", 0, 1, None);
-        let with_discriminator = mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", 0, 0, Some("panic"));
-        let with_empty_discriminator = mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", 0, 0, Some(""));
-        let with_other_discriminator =
-            mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", 0, 0, Some("overflow"));
+        let other_file = mutant_id_with_discriminator(
+            Utf8Path::new("src/other.rs"),
+            "subject::f",
+            "arith.add_to_sub",
+            "1 + 1",
+            SiteIndex::default(),
+            None,
+        );
+        let other_occurrence = mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::new(1, 0), None);
+        let other_replacement_index =
+            mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::new(0, 1), None);
+        let with_discriminator =
+            mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::default(), Some("panic"));
+        let with_empty_discriminator =
+            mutant_id_with_discriminator(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::default(), Some(""));
+        let with_other_discriminator = mutant_id_with_discriminator(
+            file,
+            "subject::f",
+            "arith.add_to_sub",
+            "1 + 1",
+            SiteIndex::default(),
+            Some("overflow"),
+        );
 
         for other in [other_file, other_occurrence, other_replacement_index, with_discriminator.clone()] {
             assert_ne!(baseline, other, "a field change must not collide with the baseline identity");
@@ -211,6 +396,49 @@ mod tests {
 
         assert_ne!(with_discriminator, with_other_discriminator);
         assert_ne!(baseline, with_empty_discriminator);
+    }
+
+    /// Swapping the two counts produces a different identity, which is the whole reason they are
+    /// named rather than adjacent: the wrong one is not an error anywhere, only a different mutant.
+    #[test]
+    fn the_two_site_counts_are_not_interchangeable() {
+        let file = Utf8Path::new("src/lib.rs");
+        let one_way = mutant_id(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::new(2, 3));
+        let other_way = mutant_id(file, "subject::f", "arith.add_to_sub", "1 + 1", SiteIndex::new(3, 2));
+
+        assert_ne!(one_way, other_way);
+
+        let site = SiteIndex::new(2, 3);
+
+        assert_eq!(site.occurrence(), 2);
+        assert_eq!(site.replacement_index(), 3);
+        assert_eq!(SiteIndex::default(), SiteIndex::new(0, 0));
+    }
+
+    /// An identity reads, compares and serializes as the text it wraps, so the newtype costs
+    /// nothing at a call site and nothing on the wire.
+    #[test]
+    fn an_identity_behaves_as_the_text_it_wraps() {
+        let id = MutantId::new("deadbeefcafe");
+
+        assert!(<MutantId as PartialEq<str>>::eq(&id, "deadbeefcafe"));
+        assert!(<MutantId as PartialEq<&str>>::eq(&id, &"deadbeefcafe"));
+        assert!(<MutantId as PartialEq<String>>::eq(&id, &String::from("deadbeefcafe")));
+        assert!(<str as PartialEq<MutantId>>::eq("deadbeefcafe", &id));
+        assert!(<&str as PartialEq<MutantId>>::eq(&"deadbeefcafe", &id));
+        assert!(<String as PartialEq<MutantId>>::eq(&String::from("deadbeefcafe"), &id));
+        assert_eq!(id.as_str(), "deadbeefcafe");
+        assert_eq!(id.to_string(), "deadbeefcafe");
+        assert_eq!(id.len(), MUTANT_ID_HEX_LEN);
+        assert!(!id.is_heap_allocated());
+        assert_eq!(MutantId::from("deadbeefcafe"), id);
+        assert_eq!(MutantId::from(String::from("deadbeefcafe")), id);
+        assert_eq!(CompactString::from(id.clone()), CompactString::new("deadbeefcafe"));
+
+        // Borrowed as `str`, so a map keyed on identities can still be probed with plain text.
+        let borrowed: &str = &id;
+
+        assert_eq!(borrowed, "deadbeefcafe");
     }
 
     /// Whitespace runs collapse to one space, and a run entirely at the start of the text

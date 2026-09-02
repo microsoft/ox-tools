@@ -137,7 +137,7 @@ mod tests {
 
     use super::*;
 
-    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-runtime-analysis", "pr-mutants"];
+    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-mutants"];
     const SCHEDULED_GROUPS: &[&str] = &[
         "scheduled-test",
         "scheduled-advisories",
@@ -165,6 +165,24 @@ mod tests {
     fn setup_action_takes_group_input_and_dispatches() {
         assert!(SETUP_ACTION.contains("group:"));
         assert!(SETUP_ACTION.contains("just anvil-setup binstall"));
+        assert!(!SETUP_ACTION.contains("_anvil-resolve-stable"));
+        assert!(!SETUP_ACTION.contains("just anvil-toolchain-stable-install"));
+        assert!(!SETUP_ACTION.contains("rustc-version"));
+        assert!(!SETUP_ACTION.contains("hashFiles('Cargo.toml'"));
+        assert!(!SETUP_ACTION.contains("'Cargo.lock'"));
+        assert!(SETUP_ACTION.contains("'rust-toolchain.toml'"));
+        let cache_restore = SETUP_ACTION
+            .find("name: Restore cargo cache")
+            .expect("setup must restore Cargo home");
+        let just_bootstrap = SETUP_ACTION.find("name: Install just").expect("setup must bootstrap Just");
+        let catalog_setup = SETUP_ACTION
+            .find("name: Install anvil toolchains + tools")
+            .expect("setup must dispatch catalog setup");
+        assert!(
+            cache_restore < just_bootstrap,
+            "Cargo home must be restored before Just is bootstrapped"
+        );
+        assert!(just_bootstrap < catalog_setup, "Just must be bootstrapped before catalog setup");
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
@@ -385,6 +403,7 @@ export -f just
             "impact-windows:",
             "pr-fast:",
             "pr-test:",
+            "pr-msrv:",
             "pr-runtime-analysis:",
             "pr-mutants:",
         ] {
@@ -397,6 +416,10 @@ export -f just
             );
         }
         assert!(PR_IMPL_WORKFLOW.contains("needs: [impact-linux, impact-windows]"));
+        // The matrix is intentionally always present; the generated MSRV
+        // recipe owns the successful no-MSRV no-op.
+        assert!(!PR_IMPL_WORKFLOW.contains("msrv_test_required"));
+        assert!(PR_IMPL_WORKFLOW.contains("Check Group: MSRV Tests (${{ matrix.os }})"));
         assert!(PR_IMPL_WORKFLOW.contains("os: [linux, windows, linux-arm, windows-arm]"));
         assert!(!PR_IMPL_WORKFLOW.contains("fromJSON"));
         assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
@@ -430,7 +453,7 @@ export -f just
             PR_IMPL_WORKFLOW
                 .matches("publish_commit_statuses: ${{ inputs.publish_commit_statuses }}")
                 .count(),
-            4,
+            PR_GROUPS.len(),
             "every PR group job must receive the status opt-in"
         );
         assert_eq!(
@@ -454,8 +477,8 @@ export -f just
         );
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
-            1,
-            "disk cleanup should be enabled for the PR test group"
+            2,
+            "disk cleanup should be enabled for the PR test and MSRV groups"
         );
     }
 

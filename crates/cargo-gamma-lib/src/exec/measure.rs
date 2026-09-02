@@ -30,6 +30,7 @@ use crate::error::error;
 use crate::estimate::project;
 use crate::model::Outcome;
 use crate::ops::registry::Selection;
+use crate::report::encode_controls;
 use crate::{HashMap, HashSet, Result};
 
 /// How many groups a "not run, by …" line names before it starts counting the rest.
@@ -469,6 +470,10 @@ pub fn measure(survey: &Survey, selection: &Selection, config: &Config, events: 
     measure_with_locks(survey, selection, config, events, None)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered pass: admission, copy, build, and baseline share borrowed state"
+)]
 fn measure_with_locks(
     survey: &Survey,
     selection: &Selection,
@@ -479,6 +484,20 @@ fn measure_with_locks(
     let started = Instant::now();
 
     let (memory, unbounded) = admit_memory_control(config)?;
+
+    // Said here, before the tree is copied and long before a build script or a test binary runs.
+    // Containment is what keeps a test's descendants from outliving the run, and on a host that
+    // cannot seal a subtree it reduces to a process group any descendant leaves with one
+    // unprivileged call. That is a fact about the machine rather than about this run, so it is
+    // reported once, up front, rather than discovered when an orphan holds a scratch tree open.
+    if let Err(reason) = cargo_gamma_process::containment() {
+        let reason = reason.to_string();
+
+        events.warn(&format!(
+            "this host cannot fully contain a test's descendants, so cleanup is best-effort: {}",
+            encode_controls(&reason)
+        ));
+    }
 
     // Checked against what the workspace declares, before anything is copied or compiled. A typo
     // here changes which tests get to convict a mutant, so it should cost a second rather than a
@@ -1018,7 +1037,10 @@ fn take_baseline(
 /// invisible until it matters. A user who believes their machine is protected and finds out
 /// otherwise mid-run is worse off than one who was told plainly at the start.
 fn admit_memory_control(config: &Config) -> Result<(MemoryPolicy, Option<String>)> {
-    settle_memory_control(config, memory::support())
+    // Reduced to prose here rather than carried further: the only thing left to do with a host
+    // that cannot meter is to quote its reason at the user, and taking prose lets the decision
+    // below be driven by tests on any machine.
+    settle_memory_control(config, memory::support().map_err(|reason| reason.to_string()))
 }
 
 /// Decides what memory control a run gets, given what the host can deliver.

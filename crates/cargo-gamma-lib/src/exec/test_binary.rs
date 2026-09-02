@@ -968,6 +968,7 @@ mod tests {
                 column: 1,
                 mutator: ("arith.add_to_sub".to_owned()).into(),
                 item_path: ("f".to_owned()).into(),
+                trait_impl: None,
                 occurrence: 0,
                 replacement_index: 0,
                 original: "a + b".to_owned().into(),
@@ -1350,8 +1351,8 @@ mod tests {
 
     /// Without a baseline every duration is zero because nothing was measured, and scaling that
     /// hands every binary the floor as though it had been derived. On a suite slower than the floor
-    /// each mutant then runs out of time, and a timeout scores as a detection — a near-perfect score
-    /// made entirely of mutants no test ever exercised.
+    /// each mutant then runs out of time, and a timeout scores as an undetected mutant — a score of
+    /// nearly zero made entirely of mutants no test ever got the chance to exercise.
     #[test]
     fn an_uncalibrated_run_gets_no_budget_rather_than_the_floor() {
         let mut binaries = vec![binary("a"), binary("b")];

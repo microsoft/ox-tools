@@ -30,8 +30,14 @@ pub struct Comment {
     /// Byte range of the comment including its delimiters.
     pub span: Range<usize>,
 
-    /// The comment text with its delimiters and one leading space removed.
-    pub body: String,
+    /// Byte range of the comment text with its delimiters and surrounding whitespace removed.
+    ///
+    /// Stored as a range into the already-owned source text rather than an owned, trimmed copy:
+    /// discovery scans every comment in a file to classify and locate it, but only ordinary line
+    /// comments ever have their text read again downstream, so allocating a trimmed `String` for
+    /// every documentation and block comment as well would pay for text that is never looked at.
+    /// Use [`SourceFile::slice`](super::SourceFile::slice) to materialize it on demand.
+    pub body: Range<usize>,
 
     /// 1-based line number of the comment's first line.
     pub line: usize,
@@ -132,6 +138,13 @@ fn build_comment(kind: CommentKind, raw: &str, span: Range<usize>, text: &str, l
         .trim_start_matches('!')
         .trim_end_matches('/')
         .trim_end_matches('*');
+    let trimmed = stripped.trim();
+
+    // Every `trim*` call above returns a subslice of `raw` rather than a copy, so the pointer
+    // offset between `trimmed` and `raw` is exactly how many leading bytes were stripped; the
+    // absolute body range is that offset from `span.start`, spanning `trimmed`'s own length.
+    let leading = trimmed.as_ptr() as usize - raw.as_ptr() as usize;
+    let body = span.start + leading..span.start + leading + trimmed.len();
 
     let line_index = match lines.binary_search(&span.start) {
         Ok(exact) => exact,
@@ -144,7 +157,7 @@ fn build_comment(kind: CommentKind, raw: &str, span: Range<usize>, text: &str, l
     Comment {
         kind,
         span,
-        body: stripped.trim().to_owned(),
+        body,
         line: line_index + 1,
         trailing: !before.trim().is_empty(),
     }
@@ -333,6 +346,16 @@ mod tests {
                 "a span is not on a character boundary: {comment:?}"
             );
 
+            assert!(comment.body.start <= comment.body.end, "a body range runs backwards: {comment:?}");
+            assert!(
+                comment.span.start <= comment.body.start && comment.body.end <= comment.span.end,
+                "a body range escapes its own span: {comment:?}"
+            );
+            assert!(
+                text.get(comment.body.clone()).is_some(),
+                "a body range is not on a character boundary: {comment:?}"
+            );
+
             // Comments are found by one forward pass, so they come out in order and cannot
             // overlap. A scanner that failed to advance past one would break this first.
             assert!(comment.span.start >= previous, "spans are out of order: {comment:?}");
@@ -358,7 +381,7 @@ mod tests {
 
         assert_eq!(file.comments.len(), 1);
         assert_eq!(file.comments[0].kind, CommentKind::Line);
-        assert_eq!(file.comments[0].body, "hello");
+        assert_eq!(file.slice(&file.comments[0].body), "hello");
         assert_eq!(file.comments[0].line, 1);
         assert!(!file.comments[0].trailing);
     }
@@ -402,7 +425,7 @@ mod tests {
         let file = parse("fn f() { let _q = '\\''; } // after\n");
 
         assert_eq!(file.comments.len(), 1);
-        assert_eq!(file.comments[0].body, "after");
+        assert_eq!(file.slice(&file.comments[0].body), "after");
     }
 
     #[test]
@@ -431,7 +454,7 @@ mod tests {
         let file = parse("fn f() -> &'static str { \"a\\\"// no\" }\n// yes\n");
 
         assert_eq!(file.comments.len(), 1);
-        assert_eq!(file.comments[0].body, "yes");
+        assert_eq!(file.slice(&file.comments[0].body), "yes");
     }
 
     #[test]
@@ -439,7 +462,7 @@ mod tests {
         let file = parse("fn f<'a>(x: &'a str) -> &'a str { x }\n// found me\n");
 
         assert_eq!(file.comments.len(), 1, "{:?}", file.comments);
-        assert_eq!(file.comments[0].body, "found me");
+        assert_eq!(file.slice(&file.comments[0].body), "found me");
     }
 
     #[test]
@@ -447,7 +470,7 @@ mod tests {
         let file = parse("fn f() -> char { '\\'' }\n// found me\n");
 
         assert_eq!(file.comments.len(), 1, "{:?}", file.comments);
-        assert_eq!(file.comments[0].body, "found me");
+        assert_eq!(file.slice(&file.comments[0].body), "found me");
     }
 
     #[test]
@@ -469,7 +492,7 @@ mod tests {
         let file = parse("/* outer /* inner */ still outer */\nfn f() {}\n");
 
         assert_eq!(file.comments.len(), 1);
-        assert!(file.comments[0].body.contains("still outer"));
+        assert!(file.slice(&file.comments[0].body).contains("still outer"));
     }
 
     #[test]
@@ -539,7 +562,7 @@ mod tests {
     #[test]
     fn comments_come_back_in_source_order() {
         let file = parse("// one\nfn f() {}\n// two\nfn g() {}\n// three\n");
-        let bodies: Vec<&str> = file.comments.iter().map(|c| c.body.as_str()).collect();
+        let bodies: Vec<&str> = file.comments.iter().map(|c| file.slice(&c.body)).collect();
 
         assert_eq!(bodies, vec!["one", "two", "three"]);
     }

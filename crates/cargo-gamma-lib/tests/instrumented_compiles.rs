@@ -39,14 +39,22 @@ fn workdir() -> PathBuf {
 ///
 /// The guard path is `::gamma_rt::a`, which names an external crate rather than anything the
 /// instrumented file could declare for itself, so there has to be a real crate to point at.
-fn guard_crate() -> Option<&'static Path> {
-    static BUILT: OnceLock<Option<PathBuf>> = OnceLock::new();
+///
+/// # Panics
+///
+/// Panics when the stub cannot be built, rather than reporting a skip. Every host that can run
+/// these tests has just compiled this crate with the very `rustc` this reaches for, so a failure
+/// here is a broken invocation rather than an unequipped machine — and a skip would be reported as
+/// a count no assertion in this file can tell from a real one, which is how the whole suite could
+/// pass without a single instrumented fixture reaching a compiler.
+fn guard_crate() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
 
     BUILT
         .get_or_init(|| {
             let directory = workdir();
 
-            std::fs::create_dir_all(&directory).ok()?;
+            std::fs::create_dir_all(&directory).expect("the shared work directory must be creatable");
 
             let source = directory.join("gamma_rt.rs");
             let library = directory.join("libgamma_rt.rlib");
@@ -83,18 +91,29 @@ fn guard_crate() -> Option<&'static Path> {
                 "    std::iter::FusedIterator for Either<A, B> {}\n",
             );
 
-            std::fs::write(&source, stub).ok()?;
+            std::fs::write(&source, stub).expect("the guard stub source must be writable");
 
             let built = Command::new(rustc())
                 .args(["--edition", "2024", "--crate-type", "lib", "--crate-name", "gamma_rt", "-o"])
                 .arg(&library)
                 .arg(&source)
                 .output()
-                .ok()?;
+                .unwrap_or_else(|cause| {
+                    panic!(
+                        "`{}` could not be run to build the guard stub, so no instrumented fixture in this file was compiled: {cause}",
+                        rustc()
+                    )
+                });
 
-            built.status.success().then_some(library)
+            assert!(
+                built.status.success(),
+                "the guard stub did not compile, so no instrumented fixture in this file was compiled\n--- rustc ---\n{}",
+                String::from_utf8_lossy(&built.stderr)
+            );
+
+            library
         })
-        .as_deref()
+        .as_path()
 }
 
 fn rustc() -> String {
@@ -148,13 +167,7 @@ fn attrs_crate() -> Option<&'static Path> {
 /// which is the failure mode a compile check is least able to notice on its own.
 #[track_caller]
 fn compiles(name: &str, source: &str, mutators: &str) -> usize {
-    let Some(guard) = guard_crate() else {
-        // A host without a working `rustc` cannot answer the question. Failing here would report a
-        // problem with the environment as a problem with the tool.
-        eprintln!("skipping {name}: no usable rustc");
-
-        return usize::MAX;
-    };
+    let guard = guard_crate();
 
     let file = SourceFile::parse("subject.rs", source.to_owned()).expect("the subject must parse");
     let selection = Selection::parse(mutators).expect("the selector must resolve");
@@ -162,7 +175,7 @@ fn compiles(name: &str, source: &str, mutators: &str) -> usize {
     let mutants = collect::into_mutants(&file, "subject", candidates);
     let refs: Vec<&_> = mutants.iter().collect();
 
-    let instrumented = schema::instrument(&file.text, &refs).expect("the mutants must splice");
+    let instrumented = schema::instrument(file.text(), &refs).expect("the mutants must splice");
     let directory = workdir();
     let path = directory.join(format!("{name}.rs"));
 
@@ -202,15 +215,9 @@ fn compiles(name: &str, source: &str, mutators: &str) -> usize {
 /// value the source states that its own signature does not accept. The tool never type-checks, so
 /// the only honest account of what happens next is the compiler's, and it is worth having in a
 /// test rather than in prose.
-///
-/// Returns `None` on a host with no usable `rustc`, which cannot answer the question either way.
 #[track_caller]
-fn does_not_compile(name: &str, source: &str, mutators: &str) -> Option<String> {
-    let guard = guard_crate().or_else(|| {
-        eprintln!("skipping {name}: no usable rustc");
-
-        None
-    })?;
+fn does_not_compile(name: &str, source: &str, mutators: &str) -> String {
+    let guard = guard_crate();
 
     let file = SourceFile::parse("subject.rs", source.to_owned()).expect("the subject must parse");
     let selection = Selection::parse(mutators).expect("the selector must resolve");
@@ -223,7 +230,7 @@ fn does_not_compile(name: &str, source: &str, mutators: &str) -> Option<String> 
     );
 
     let refs: Vec<&_> = mutants.iter().collect();
-    let instrumented = schema::instrument(&file.text, &refs).expect("the mutants must splice");
+    let instrumented = schema::instrument(file.text(), &refs).expect("the mutants must splice");
     let directory = workdir();
     let path = directory.join(format!("{name}.rs"));
 
@@ -253,7 +260,7 @@ fn does_not_compile(name: &str, source: &str, mutators: &str) -> Option<String> 
         "the compiler accepted a value the signature cannot return\n--- source ---\n{instrumented}"
     );
 
-    Some(String::from_utf8_lossy(&checked.stderr).into_owned())
+    String::from_utf8_lossy(&checked.stderr).into_owned()
 }
 
 /// Compiles `source` as a program, runs it, and returns what it printed.
@@ -308,11 +315,7 @@ fn output_of(name: &str, source: &str, guard: &Path) -> String {
 /// Returns how many mutants were spliced in, so a fixture that generates nothing cannot pass.
 #[track_caller]
 fn runs_identically(name: &str, source: &str, mutators: &str) -> usize {
-    let Some(guard) = guard_crate() else {
-        eprintln!("skipping {name}: no usable rustc");
-
-        return usize::MAX;
-    };
+    let guard = guard_crate();
 
     let file = SourceFile::parse("subject.rs", source.to_owned()).expect("the subject must parse");
     let selection = Selection::parse(mutators).expect("the selector must resolve");
@@ -327,7 +330,7 @@ fn runs_identically(name: &str, source: &str, mutators: &str) -> usize {
     }
 
     let refs: Vec<&_> = mutants.iter().collect();
-    let instrumented = schema::instrument(&file.text, &refs).expect("the mutants must splice");
+    let instrumented = schema::instrument(file.text(), &refs).expect("the mutants must splice");
 
     assert_ne!(instrumented, source, "nothing was instrumented, so there is nothing to compare");
 
@@ -726,9 +729,7 @@ impl Holder {
 #[test]
 fn a_stated_value_of_the_wrong_type_becomes_an_unviable_mutant() {
     let source = "#[gamma::value(\"seven\")]\npub fn count() -> u32 { 7 }\n";
-    let Some(rejected) = does_not_compile("stated_wrong_type", source, "fn_value") else {
-        return;
-    };
+    let rejected = does_not_compile("stated_wrong_type", source, "fn_value");
 
     assert!(rejected.contains("mismatched types"), "{rejected}");
 }

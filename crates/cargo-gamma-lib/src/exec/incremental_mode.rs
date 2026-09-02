@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 pub enum IncrementalMode {
     /// Re-run everything from scratch with no caching.
-    #[value(alias = "none", alias = "off")]
     No,
 
     /// Reuse compiler unviability and checked execution hints.

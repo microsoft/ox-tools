@@ -69,8 +69,10 @@ mod probe;
 
 pub mod features;
 
+#[doc(inline)]
 pub use build::Build;
+pub use cargo_gamma_engine::cfg::CfgSet;
 pub(crate) use cargo_gamma_engine::cfg::test_gated_for;
-pub use cargo_gamma_engine::cfg::{CfgSet, test_gated};
+#[doc(inline)]
 pub use cfgs::Cfgs;
 pub(crate) use probe::for_build;

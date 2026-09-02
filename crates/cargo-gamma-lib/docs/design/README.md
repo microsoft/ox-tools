@@ -3,6 +3,8 @@
 > Status: **Implemented**.
 > Crate name: `cargo-gamma-lib`.
 
+This is the crate's top-level design document.
+
 ## Purpose
 
 This crate coordinates cargo-gamma campaigns: configuration, discovery,
@@ -14,6 +16,10 @@ verdicts, incremental reuse, reporting, and command dispatch.
 - Rust parsing and instrumentation are delegated to `cargo-gamma-engine`.
 - Process-tree mechanics are delegated to `cargo-gamma-process` and
   `cargo-gamma-unsafe`.
+- Cargo metadata and nextest inventory commands run through the same contained
+  process-output lifecycle as later builds and tests. Their stdout and stderr
+  are drained concurrently, and descendants are swept before inherited pipe
+  handles are allowed to keep capture open.
 - The injected guard protocol is provided by dependency-free
   `cargo-gamma-rt`.
 - The `internals` feature exists only for this crate's integration tests and
@@ -26,6 +32,16 @@ The primary public contract is the `cargo gamma` command surface and its
 configuration, reports, diagnostics, and exit codes. The Rust API is an
 implementation detail used by the thin executable crate. Its rustdoc is hidden,
 and its hand-written README warns downstream users not to depend on it.
+
+### Redirected cache security
+
+On Unix, cargo-gamma creates a previously absent redirected cache with
+permissions limited to the invoking user, independently of the process umask.
+It does not change permissions on a pre-existing directory: the directory and
+its physical ancestry must already be owned by the invoking user or root and
+must not permit another user to replace entries. Sticky shared ancestors such
+as `/tmp` are accepted, but the cache directory itself must not be writable by
+group or other.
 
 ## Concurrency model checking
 

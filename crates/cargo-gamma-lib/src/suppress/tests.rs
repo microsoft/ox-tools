@@ -627,3 +627,44 @@ fn a_reasonable_timeout_multiplier_still_survives_both_directive_forms() {
         assert_eq!(mutants[0].test_timeout_multiplier, Some(2.5), "{source}");
     }
 }
+
+/// A directive may state one multiplier, so a second is refused rather than silently overriding
+/// the first.
+///
+/// Keeping whichever arrived last leaves a directive that reads as though it says two things and
+/// quietly does one, and it also split this channel from the proc-macro validator: the attribute
+/// refused the same text at compile time, so adding or deleting the two `//` characters changed
+/// whether the file built.
+#[test]
+fn a_second_timeout_multiplier_is_refused_in_every_spelling_and_order() {
+    for arguments in [
+        "2.0, 3.0",
+        "2.0, arith, 3.0",
+        "2.0, 3.0, 4.0",
+        "factor = 2.0, multiplier = 3.0",
+        "2.0, factor = 3.0",
+        "factor = 2.0, 3.0",
+        "test_timeout_multiplier = 2.0, arith, 3.0",
+    ] {
+        let source = format!("#[gamma::test_timeout_multiplier({arguments})]\nfn f(a: i32) -> i32 {{ a + 1 }}");
+        let error = directives(&file(&source)).unwrap_err();
+
+        assert!(error.is_usage(), "`{arguments}`: {error}");
+        assert!(
+            error.to_string().contains("a timeout multiplier is stated a second time"),
+            "`{arguments}`: {error}"
+        );
+    }
+}
+
+/// Position carries no meaning: a multiplier written after its selectors states the same thing as
+/// one written before them, and the proc-macro validator accepts exactly the same lists.
+#[test]
+fn a_positional_multiplier_is_read_wherever_in_the_argument_list_it_sits() {
+    for arguments in ["2.5, arith", "arith, 2.5", "arith, 2.5,", "reason = \"slow\", 2.5"] {
+        let source = format!("#[gamma::test_timeout_multiplier({arguments})]\nfn f(a: i32) -> i32 {{ a + 1 }}");
+        let found = directives(&file(&source)).expect("a bounded multiplier is accepted");
+
+        assert_eq!(found[0].test_timeout_multiplier, Some(2.5), "`{arguments}`");
+    }
+}

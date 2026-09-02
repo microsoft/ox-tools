@@ -34,5 +34,7 @@ pub mod model;
 pub mod ops;
 pub mod parse;
 pub mod schema;
+pub mod text;
 
-pub use error::Error;
+#[doc(inline)]
+pub use error::{Error, Parts};

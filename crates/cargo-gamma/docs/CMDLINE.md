@@ -241,7 +241,6 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `--artifact-dir` | `<PATH>` | Write all user-facing artifacts to this directory. |
 | `--show-killed` |  | List the mutants the suite killed, not just the ones that survived. |
 | `--show-unviable` |  | List every mutant that could not be compiled, not just how many there were. |
-| `--html-external` |  | Load the report viewer from a CDN instead of embedding it. |
 | `--sarif-level` | `<LEVEL>` | How loudly a survivor is reported to a SARIF consumer. Defaults to `note`. |
 | `--annotations` | `<WHEN>` | Annotate the diff and write a job summary when running inside a CI system. Defaults to `auto`. |
 | `--diag-names` | `<POLICY>` | What to do with package and binary names in the diagnostics bundle. Defaults to `hashed`. |
@@ -419,7 +418,6 @@ cargo gamma suppress [OPTIONS] [-- <TEST_ARGS>...]
 | `--artifact-dir` | `<PATH>` | Write all user-facing artifacts to this directory. |
 | `--show-killed` |  | List the mutants the suite killed, not just the ones that survived. |
 | `--show-unviable` |  | List every mutant that could not be compiled, not just how many there were. |
-| `--html-external` |  | Load the report viewer from a CDN instead of embedding it. |
 | `--sarif-level` | `<LEVEL>` | How loudly a survivor is reported to a SARIF consumer. Defaults to `note`. |
 | `--annotations` | `<WHEN>` | Annotate the diff and write a job summary when running inside a CI system. Defaults to `auto`. |
 | `--diag-names` | `<POLICY>` | What to do with package and binary names in the diagnostics bundle. Defaults to `hashed`. |

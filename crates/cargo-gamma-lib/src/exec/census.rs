@@ -46,7 +46,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
-use std::{fs, thread};
+use std::{fs, io, thread};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_gamma_process::{MemoryRequest, ProcessTree, prepare};
@@ -350,6 +350,13 @@ pub(super) fn take(
     events.phase_progress(completed, total, &unit);
 
     let mut listed: Vec<(&TestBinary, Vec<Box<str>>)> = Vec::with_capacity(binaries.len());
+    // A proxy for the walk's cost, not a measurement of it: `--list` pays only process startup and
+    // enumeration, while the walk below pays that once per binary and then, per listed test, the
+    // loader setup, containment, output supervision, and execution that `walk` (below) actually
+    // performs. A model closer to the walk's true cost needs a campaign measurement comparing
+    // current, sampled, and census-disabled admission over test count, duration, mutant count, and
+    // reach density; scaling this estimate by a guessed per-test multiplier without that data would
+    // only trade one unmeasured policy for another.
     let mut estimated_cost = Duration::ZERO;
 
     for binary in &binaries {
@@ -399,6 +406,9 @@ pub(super) fn take(
 }
 
 /// Whether the estimated census work is smaller than everything it could possibly save.
+///
+/// `estimated_cost` is the listing-time proxy described where the caller builds it, not a
+/// measurement of the walk it is gating.
 fn can_repay(estimated_cost: Duration, maximum_savings: Duration) -> bool {
     !maximum_savings.is_zero() && estimated_cost < maximum_savings
 }
@@ -440,12 +450,12 @@ const LIST_POLL: Duration = Duration::from_millis(5);
 /// `fn main()` ignores the flags and runs its suite instead. Either way the binary is left without
 /// a census and therefore run in full, which is the answer this had before the census existed.
 fn list(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
-    let mut command = listing_command(work, binary);
+    let command = listing_command(work, binary);
 
     // A successful process with no libtest records may be a custom harness that ignored both
     // flags. Without a positive record there is no evidence that the output was a complete census,
     // so leave the binary uncensused and run it whole.
-    listed(&mut command, LIST_BUDGET).filter(|names| !names.is_empty())
+    listed(command, LIST_BUDGET).filter(|names| !names.is_empty())
 }
 
 /// Builds the direct `--list` invocation for one test binary.
@@ -483,19 +493,21 @@ fn listing_command(work: &Workspace, binary: &TestBinary) -> std::process::Comma
 /// A budget reached is `None` rather than a partial listing: half an enumeration is a census that
 /// believes some tests do not exist, and a test believed not to exist is one no mutant is ever run
 /// against.
-fn listed(command: &mut std::process::Command, budget: Duration) -> Option<Vec<Box<str>>> {
+fn listed(mut command: std::process::Command, budget: Duration) -> Option<Vec<Box<str>>> {
     use std::process::Stdio;
 
     // Nothing is metered — the question is what the binary is, not what it costs — so the request
-    // asks for no boundary and the containment reduces to the group and the interrupt slot.
+    // asks for no measurement and no ceiling. Containment does not follow that request: `prepare`
+    // seals every launch it can, and the listing of a `harness = false` target is exactly the kind
+    // of repository-controlled code that spawns things and leaves the process group behind it.
     let request = MemoryRequest { meter: false, limit: None };
 
     let _ = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
 
-    let guard = prepare(command, request).ok()?;
-    let child = command.spawn().ok()?;
+    let prepared = prepare(command, request).ok()?;
+    let spawned = prepared.spawn().ok()?;
 
-    let mut subtree = match ProcessTree::adopt(child, guard) {
+    let mut subtree = match ProcessTree::adopt(spawned) {
         Ok(subtree) => subtree,
 
         // Adoption already ended and reaped the unwatchable child.
@@ -819,22 +831,20 @@ where
                                 let wanted = targets.get(&binary.path);
                                 let reached = &mut local[binary_at];
 
+                                // The runtime normally writes every set bit once. Deduplicate here
+                                // as a protocol boundary too, so malformed input cannot inflate a
+                                // site's saturation count and prematurely stop the walk.
+                                let mut sites = sites;
+                                sites.sort_unstable();
+                                sites.dedup();
+
                                 for site in sites.into_iter().filter(|site| wanted.is_some_and(|wanted| wanted.contains(site))) {
                                     let tests = reached.entry(site).or_default();
 
-                                    if !tests.contains(&test_index) {
-                                        tests.push(test_index);
+                                    tests.push(test_index);
 
-                                        // `at` is unique to this one worker for this one task, so
-                                        // this `(site, test_index)` observation can never be
-                                        // produced by any other worker: the fetch_add below cannot
-                                        // double-count it. It is also gated on the same
-                                        // `!tests.contains` guard as the push above, so a sampler
-                                        // returning the same site twice for one test counts it once,
-                                        // not twice.
-                                        if let Some(&position) = positions.get(&site) {
-                                            let _previous = counts[position].fetch_add(1, Ordering::Relaxed);
-                                        }
+                                    if let Some(&position) = positions.get(&site) {
+                                        let _previous = counts[position].fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
 
@@ -965,9 +975,47 @@ fn sample(work: &Workspace, binary: &TestBinary, name: &str, path: &Utf8Path, st
     // means the census never finished: the open failed, or the process died before it could seal.
     // That is the binary's problem, not this test's answer, so the sample is spoiled rather than
     // believed empty.
-    let bytes = fs::read(path.as_std_path()).ok()?;
+    let bytes = read_bounded(path).ok()?;
 
     decode(&bytes).map(|sites| (sites, elapsed))
+}
+
+/// The largest census file this will read into memory.
+///
+/// One record per site, plus the [`OVERFLOW`] marker and the [`SEAL`], is the largest whole census
+/// [`gamma_rt::write_reached`](gamma_rt) can ever produce: it serializes each set bit of its
+/// `MAX_CENSUS_SITES`-sized bitmap at most once, in one pass, so no honest file can hold more
+/// records than that. Named from `gamma_rt::MAX_CENSUS_SITES` rather than a second hardcoded
+/// number, so the two cannot silently drift apart.
+const MAX_CENSUS_BYTES: u64 = (gamma_rt::MAX_CENSUS_SITES as u64 + 2) * 4;
+
+/// Reads a census file into memory, refusing anything past [`MAX_CENSUS_BYTES`].
+///
+/// The path this opens is disclosed to the censused test through `GAMMA_CENSUS`, and the
+/// coordinator reading it back is long-lived, judging every mutant after this one — so a test that
+/// replaced the runtime's short record stream with an arbitrarily large or sparse file must not be
+/// able to make this allocate on the test's behalf. The cap is enforced by bounding the read itself
+/// with [`Read::take`], not by trusting `fs::metadata`'s reported length first: a sparse file can
+/// misstate that length, but it cannot make more bytes actually arrive through the pipe this reads.
+fn read_bounded(path: &Utf8Path) -> io::Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let file = fs::File::open(path.as_std_path())?;
+    let mut bytes = Vec::new();
+
+    // One byte past the cap is asked for, not exactly the cap, so a file that is exactly on the
+    // boundary is not confused with one that overruns it: reading the cap's worth successfully
+    // leaves nothing to distinguish "exactly full" from "truncated at the limit" until the extra
+    // byte either arrives (oversized) or the stream ends first (within bounds).
+    let _read = file.take(MAX_CENSUS_BYTES.saturating_add(1)).read_to_end(&mut bytes)?;
+
+    if u64::try_from(bytes.len()).is_ok_and(|len| len > MAX_CENSUS_BYTES) {
+        return Err(io::Error::other(
+            "the census file is larger than any whole census the runtime protocol can produce",
+        ));
+    }
+
+    Ok(bytes)
 }
 
 /// Turns the runtime's records into site ordinals, or `None` if the file is not a whole census.
@@ -978,6 +1026,10 @@ fn sample(work: &Workspace, binary: &TestBinary, name: &str, path: &Utf8Path, st
 /// after the seal (a stale census appended to, or two runs sharing a path), and the [`OVERFLOW`]
 /// marker (the runtime ran out of table) — because each means sites may be missing, and missing is
 /// the one thing this must never guess at.
+///
+/// Callers are expected to bound `bytes` — with [`read_bounded`], in production — before this is
+/// reached: the preallocation below is sized from that length, and only a caller that already
+/// refused an oversized file makes that sizing safe.
 fn decode(bytes: &[u8]) -> Option<Vec<u32>> {
     if !bytes.len().is_multiple_of(4) {
         return None;
@@ -1013,18 +1065,18 @@ mod tests {
     fn listing_output_beyond_the_cap_is_not_authoritative() {
         let (_directory, work) =
             crate::testing::helper_workspace("census-list-cap", &["flood:4194305", "print:meaningful::killer: test", "exit:0"]);
-        let mut command = listing_command(&work, &crate::testing::helper());
+        let command = listing_command(&work, &crate::testing::helper());
 
-        assert!(listed(&mut command, Duration::from_secs(30)).is_none());
+        assert!(listed(command, Duration::from_secs(30)).is_none());
     }
 
     #[test]
     fn listing_reader_thread_failure_degrades_to_no_census() {
         let (_directory, work) = crate::testing::helper_workspace("census-list-thread", &["print:a::test: test", "exit:0"]);
-        let mut command = listing_command(&work, &crate::testing::helper());
+        let command = listing_command(&work, &crate::testing::helper());
         let _refused = faults::arm(Fault::Thread);
 
-        assert!(listed(&mut command, Duration::from_secs(30)).is_none());
+        assert!(listed(command, Duration::from_secs(30)).is_none());
     }
 
     /// Production workspaces hold an exclusive scratch lock; adopted test workspaces do not.
@@ -1064,7 +1116,7 @@ mod tests {
         let _ = command.args(["-c", "sleep 300"]);
 
         let started = Instant::now();
-        let names = listed(&mut command, Duration::from_millis(200));
+        let names = listed(command, Duration::from_millis(200));
 
         assert!(names.is_none(), "a binary that never listed was believed: {names:?}");
         assert!(
@@ -1097,7 +1149,7 @@ mod tests {
         let _ = command.args(["-c", &script]);
 
         let started = Instant::now();
-        let names = listed(&mut command, Duration::from_millis(100));
+        let names = listed(command, Duration::from_millis(100));
 
         for _attempt in 0..20 {
             if marker.as_std_path().exists() {
@@ -1130,7 +1182,7 @@ mod tests {
 
         let _ = command.args(["-c", "printf 'suite::first: test\\nsuite::second: test\\n'"]);
 
-        let names = listed(&mut command, Duration::from_secs(30)).expect("the listing was answered");
+        let names = listed(command, Duration::from_secs(30)).expect("the listing was answered");
 
         assert_eq!(names, vec!["suite::first".into(), "suite::second".into()]);
     }
@@ -1147,7 +1199,7 @@ mod tests {
 
         let _ = command.args(["-c", "printf 'suite::first: test\\n'; exit 1"]);
 
-        assert!(listed(&mut command, Duration::from_secs(30)).is_none());
+        assert!(listed(command, Duration::from_secs(30)).is_none());
     }
 
     /// A listing sees only the tests the user's own filters allow.
@@ -1441,6 +1493,65 @@ mod tests {
         let bytes: Vec<u8> = [3_u32, OVERFLOW, 9, SEAL].iter().flat_map(|record| record.to_le_bytes()).collect();
 
         assert_eq!(decode(&bytes), None);
+    }
+
+    /// A censused test controls the file at the path it was handed and can write more to it than
+    /// any honest run of the runtime protocol ever would. This proves the excess is refused rather
+    /// than read into memory: a file one record past every site plus both markers is definitely
+    /// past the protocol's own maximum, and `read_bounded` must say so without this coordinator
+    /// having trusted the file's own claimed size first.
+    #[test]
+    fn read_bounded_refuses_a_file_past_the_protocol_maximum() {
+        let scratch = crate::testing::workdir("sec2-oversized");
+        let path = Utf8PathBuf::from_path_buf(scratch.path().join("census.bin")).expect("a temp path is valid UTF-8");
+
+        let oversized =
+            usize::try_from(MAX_CENSUS_BYTES.saturating_add(4)).expect("the bound fits in memory on any host that runs this test");
+        fs::write(path.as_std_path(), vec![0_u8; oversized]).expect("the oversized fixture file is writable");
+
+        let error = read_bounded(&path).expect_err("a file past the protocol's maximum size must be refused");
+
+        assert!(error.to_string().contains("protocol"), "{error}");
+    }
+
+    /// A child that replaces the census file with a sparse one can claim an enormous logical size
+    /// while writing almost no real data — the attack this bound exists for. `read_bounded` must not
+    /// allocate anywhere near that claimed size: it is bounded by [`Read::take`], not by trusting
+    /// `fs::metadata`, so this proves the read is refused promptly rather than after the coordinator
+    /// tried to hold the whole claimed length in memory.
+    #[test]
+    fn read_bounded_refuses_a_sparse_file_without_believing_its_claimed_length() {
+        use std::io::Write as _;
+
+        let scratch = crate::testing::workdir("sec2-sparse");
+        let path = Utf8PathBuf::from_path_buf(scratch.path().join("census.bin")).expect("a temp path is valid UTF-8");
+
+        let file = fs::File::create(path.as_std_path()).expect("the sparse fixture file is creatable");
+        // Claims tens of gigabytes without writing them: a real disk write of that size would make
+        // this test itself the resource exhaustion it is trying to prove `read_bounded` refuses.
+        file.set_len(1 << 34)
+            .expect("the filesystem under the test work directory supports sparse files");
+        drop(file);
+
+        let error = read_bounded(&path).expect_err("a sparse file past the protocol's maximum must be refused");
+
+        assert!(error.to_string().contains("protocol"), "{error}");
+
+        // The refusal came from the bytes actually read rather than from the claimed length: had
+        // `read_bounded` trusted `fs::metadata` instead, this would still pass, so the write below
+        // is what tells the two apart. Reopening confirms the file is still exactly as small as it
+        // was left, and rereading it with the same bound still refuses it.
+        let mut confirm = fs::File::options()
+            .append(true)
+            .open(path.as_std_path())
+            .expect("the sparse fixture file remains open-able");
+        confirm
+            .write_all(&sealed(&[1]))
+            .expect("appending a small whole census to the sparse claim succeeds");
+        drop(confirm);
+
+        let _still_refused =
+            read_bounded(&path).expect_err("a sparse claim past the bound is refused regardless of what real data follows it");
     }
 
     /// `walked` counts subprocesses that actually launched, not tests that were listed.

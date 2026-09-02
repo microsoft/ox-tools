@@ -105,8 +105,15 @@ const CENSUS: u32 = u32::MAX - 1;
 /// never paged in unless a census actually runs. A population past this is not silently
 /// half-recorded: a site over the edge records [`OVERFLOW`], which tells the tool to throw
 /// the whole census away rather than mistake an unrecorded site for an unreached one.
+///
+/// Public and unconditional — unlike the table it sizes — so the coordinator in `cargo-gamma-lib`
+/// can derive a census file's protocol-legal maximum size from the same one source of truth this
+/// table is built from, rather than hardcoding a second copy of the limit that could silently drift
+/// from it.
+pub const MAX_CENSUS_SITES: usize = 1 << 20;
+
 #[cfg(any(unix, windows))]
-const SITES: usize = 1 << 20;
+const SITES: usize = MAX_CENSUS_SITES;
 
 #[cfg(any(unix, windows))]
 const WORD_BITS: usize = 32;
@@ -124,9 +131,9 @@ static OVERFLOWED: AtomicBool = AtomicBool::new(false);
 /// `u32::MAX` is not an ordinal — `parse` refuses it — so it cannot collide with a real record.
 pub const OVERFLOW: u32 = u32::MAX;
 
-/// The marker record the runtime writes last, at a clean exit, to vouch that the census is whole.
+/// The marker record written last, at a clean exit, meaning the census is whole.
 ///
-/// A census file is written at process exit, with this record last, so a reader that finds it intact
+/// The runtime writes this record last, at process exit, so a reader that finds it intact
 /// knows the whole buffered bitmap was serialized first. Its absence — a truncated write, a crash
 /// before exit, or a failed open — stops the reader mistaking a missing record for an unreached
 /// site: an unsealed file is discarded whole rather than believed in part.
@@ -152,16 +159,44 @@ const PATH_LIMIT: usize = 4096;
 #[cfg(any(unix, windows))]
 const READ_LIMIT: usize = 32;
 
+/// The pseudo-ordinal meaning "[`install`] has not run on this platform yet".
+///
+/// Distinct from [`NONE`], which is the correct, permanent value on a target with no `unix` or
+/// `windows` constructor mechanism at all — a genuinely non-hosted target that never links
+/// [`install`], documented at the crate root under "`no_std`, and what it does not buy" — and,
+/// for the same reason, under Miri, which cannot execute a real ELF, Mach-O, or PE constructor and
+/// so never runs [`install`] either. This sentinel instead marks the narrow, transient window on a
+/// hosted, non-Miri target between process start and this crate's own constructor running, so a
+/// guard reached in that window is not mistaken for a legitimate unmutated run: see [`selected`].
+///
+/// Refused by [`parse`] alongside [`OVERFLOW`], [`CENSUS`], and [`SEAL`], so the environment cannot
+/// name it either.
+#[cfg(any(unix, windows))]
+const UNINSTALLED: u32 = u32::MAX - 3;
+
 /// The selection captured by [`install`] before user code can start threads.
 ///
-/// `NONE` is the safe fallback for an exotic loader that reaches a guard before this runtime's
-/// constructor. Crucially, that fallback does not try to consult the environment lazily.
+/// On a hosted, non-Miri target this starts at [`UNINSTALLED`]: the only other
+/// constructor-ordering signal available is [`NONE`], which is indistinguishable from a legitimate
+/// request for unmutated behavior and would let a guard reached before [`install`] silently
+/// misreport a mutant or census run as a baseline one. [`selected`] turns an observation of
+/// [`UNINSTALLED`] into a loud failure instead. A target with neither `unix` nor `windows`, or a
+/// Miri execution of either, never links [`install`] at all, so it starts at, and stays at, the
+/// actually-correct [`NONE`] fallback described at the crate root.
+#[cfg(all(any(unix, windows), not(miri)))]
+static ACTIVE: AtomicU32 = AtomicU32::new(UNINSTALLED);
+
+/// The selection on a target — or a Miri execution — with no working [`install`] constructor,
+/// which is documented at the crate root as the permanently safe fallback.
+#[cfg(any(not(any(unix, windows)), miri))]
 static ACTIVE: AtomicU32 = AtomicU32::new(NONE);
 
 /// The captured census path's length, excluding its terminator.
 ///
-/// A zero length means no usable path was captured. The path is written before this is published
-/// with `Release`, and [`open`] acquires it before reading the corresponding static buffer.
+/// A zero length means no usable path was captured. The path and the NUL terminator that follows
+/// it are both written before this is published with `Release`, and [`open`] acquires it before
+/// reading the corresponding static buffer — so a non-zero length is also the promise that a
+/// terminator sits at that offset.
 #[cfg(any(unix, windows))]
 static CENSUS_PATH_LENGTH: AtomicUsize = AtomicUsize::new(0);
 
@@ -215,19 +250,33 @@ static STARTUP_ENVIRONMENT_READS: AtomicUsize = AtomicUsize::new(0);
 /// afterwards.
 #[cfg(any(unix, windows))]
 fn capture_selection() -> u32 {
-    // Census mode wins over an active ordinal, as it did when guards read these variables lazily.
-    // Retain its path now as well: `open` must never have to touch the environment later.
-    if capture_census_path() {
-        CENSUS
-    } else {
-        #[cfg(unix)]
-        match capture_active() {
-            Ok(active) => active,
-            Err(()) => environment_error(),
-        }
+    match selection_from(capture_census_path(), capture_active) {
+        Ok(selection) => selection,
+        Err(()) => environment_error(),
+    }
+}
 
-        #[cfg(windows)]
-        capture_active()
+/// Turns what startup learned about `GAMMA_CENSUS` into a selection, or into a startup failure.
+///
+/// Census mode wins over an active ordinal, as it did when guards read these variables lazily, so
+/// `active` is consulted only when the census variable was genuinely absent.
+///
+/// A census request this process could not read is **not** absence, and must not fall through to
+/// active selection: the process would then execute a mutant, write no census file, and report a
+/// baseline failure the coordinator would read as a fact about that mutant. It is reported as a
+/// startup failure instead, which [`capture_selection`] turns into the environment-error protocol.
+///
+/// Taking the census answer and the active read as parameters — rather than performing them — is
+/// what lets a test drive every combination, including native API failures that cannot be produced
+/// on demand.
+#[cfg(any(unix, windows))]
+fn selection_from(census: CensusRequest, active: impl FnOnce() -> Result<u32, ()>) -> Result<u32, ()> {
+    match census {
+        CensusRequest::Absent => active(),
+        // A path too long to retain still selects census mode: the file simply cannot be opened,
+        // so the census stays unsealed and the reader rejects it, which is the conservative answer.
+        CensusRequest::Path(_) | CensusRequest::Unusable => Ok(CENSUS),
+        CensusRequest::Error => Err(()),
     }
 }
 
@@ -242,6 +291,28 @@ pub const ENVIRONMENT_ERROR_MARKER: &[u8] = b"cargo-gamma: startup environment a
 enum EnvironmentValue {
     Found(usize),
     Absent,
+    Error,
+}
+
+/// What startup learned about `GAMMA_CENSUS`, which is not the same question as what it holds.
+///
+/// Absence and failure were once the same answer, and a failure that reads as absence is the one
+/// that matters: it lets a census process go on to select an active mutant, run it, write no
+/// census, and be reported as a baseline failure. They are separate variants here so that
+/// [`selection_from`] can give them opposite answers.
+#[cfg(any(unix, windows))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CensusRequest {
+    /// `GAMMA_CENSUS` was unset, or set to nothing: this process is not taking a census.
+    Absent,
+
+    /// Census mode, with a NUL-terminated path of this many bytes retained in [`CENSUS_PATH`].
+    Path(usize),
+
+    /// Census mode, with a path too long for [`PATH_LIMIT`] to retain and therefore never opened.
+    Unusable,
+
+    /// The startup environment could not be read, so nothing is known about this variable.
     Error,
 }
 
@@ -294,13 +365,68 @@ fn capture_active() -> Result<u32, ()> {
     Ok(parse(&buffer[..length]))
 }
 
+/// What a raw `GetEnvironmentVariable{A,W}` return means against a buffer of `buffer_len` units.
+///
+/// Isolated from the syscall — see [`environment_read_outcome`] — so the exact-fit and
+/// one-past-it boundaries can be driven directly by a test instead of only by however long a
+/// variable actually set in the test process happens to be. The unit is whatever the caller's
+/// buffer holds — `u8` for the ANSI entry point, `u16` for the wide one — since the boundary
+/// arithmetic does not depend on which.
+#[cfg(any(windows, test))]
+#[derive(Debug, Eq, PartialEq)]
+enum EnvironmentReadOutcome {
+    /// The variable was unset.
+    Absent,
+    /// The API failed for a reason other than the variable being absent.
+    Error,
+    /// The variable was set, but its reported length does not fit the buffer.
+    TooLongToStore,
+    /// The variable was set, fits, and is this many units long.
+    Found(usize),
+}
+
+/// Successful Win32 last-error value, used to distinguish an empty value from API failure.
+#[cfg(any(windows, test))]
+const ERROR_SUCCESS: u32 = 0;
+
+/// The Win32 `ERROR_ENVVAR_NOT_FOUND` value.
+#[cfg(any(windows, test))]
+const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
+
+/// `GetEnvironmentVariable{A,W}` returns zero both for an empty or absent value and for an API
+/// failure. `last_error` is therefore meaningful only when `written` is zero: the caller clears it
+/// immediately before the call and reads it immediately afterwards.
+#[cfg(any(windows, test))]
+fn environment_read_outcome(written: u32, last_error: u32, buffer_len: usize) -> EnvironmentReadOutcome {
+    if written == 0 {
+        return match last_error {
+            ERROR_SUCCESS => EnvironmentReadOutcome::Found(0),
+            ERROR_ENVVAR_NOT_FOUND => EnvironmentReadOutcome::Absent,
+            _ => EnvironmentReadOutcome::Error,
+        };
+    }
+
+    let Ok(length) = usize::try_from(written) else {
+        return EnvironmentReadOutcome::Error;
+    };
+
+    if length >= buffer_len {
+        return EnvironmentReadOutcome::TooLongToStore;
+    }
+
+    EnvironmentReadOutcome::Found(length)
+}
+
 /// Reads `GAMMA_ACTIVE` during startup without allocation.
 #[cfg(windows)]
-fn capture_active() -> u32 {
+fn capture_active() -> Result<u32, ()> {
     #[cfg(test)]
     let _previous = STARTUP_ENVIRONMENT_READS.fetch_add(1, Ordering::Relaxed);
 
     let mut buffer = [0_u8; READ_LIMIT];
+
+    // SAFETY: clearing the calling thread's last-error value has no precondition.
+    unsafe { SetLastError(ERROR_SUCCESS) };
 
     // SAFETY: `ACTIVE_VAR_C` is NUL-terminated and `buffer` is writable for the supplied length.
     let written = unsafe {
@@ -310,51 +436,83 @@ fn capture_active() -> u32 {
             u32::try_from(buffer.len()).unwrap_or(u32::MAX),
         )
     };
-
-    let Ok(length) = usize::try_from(written) else {
-        return NONE;
+    let last_error = if written == 0 {
+        // SAFETY: read immediately after the API call whose zero return needs classifying.
+        unsafe { GetLastError() }
+    } else {
+        ERROR_SUCCESS
     };
 
-    if length == 0 || length >= buffer.len() {
-        return NONE;
+    match environment_read_outcome(written, last_error, buffer.len()) {
+        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::TooLongToStore => Ok(NONE),
+        EnvironmentReadOutcome::Error => Err(()),
+        EnvironmentReadOutcome::Found(length) => Ok(parse(&buffer[..length])),
     }
-
-    parse(&buffer[..length])
 }
 
-/// Captures a non-empty `GAMMA_CENSUS` path and reports whether census mode was requested.
+/// Captures a non-empty `GAMMA_CENSUS` path and reports what the environment said about it.
 ///
 /// A requested path that does not fit static storage still selects census mode; it simply cannot
 /// be opened, and therefore remains unsealed and is rejected by the reader.
 #[cfg(unix)]
-fn capture_census_path() -> bool {
+fn capture_census_path() -> CensusRequest {
     // SAFETY: only this constructor writes the `UnsafeCell`, before the release publication below.
     let path = unsafe { &mut *CENSUS_PATH.bytes.get() };
+    let value = copy_environment(CENSUS_VAR_C, path);
+    let request = terminate_census_path(path, value);
 
-    let length = match copy_environment(CENSUS_VAR_C, path) {
-        EnvironmentValue::Found(length) => length,
-        EnvironmentValue::Absent | EnvironmentValue::Error => return false,
-    };
-
-    if length == 0 {
-        return false;
+    if let CensusRequest::Path(length) = request {
+        CENSUS_PATH_LENGTH.store(length, Ordering::Release);
     }
 
-    if length == path.len() {
-        return true;
-    }
+    request
+}
 
-    CENSUS_PATH_LENGTH.store(length, Ordering::Release);
-    true
+/// Terminates a captured census path in place, and says what was captured.
+///
+/// The terminator is written here rather than assumed, and that is the whole point of this
+/// function. Linux copies value bytes out of `/proc/self/environ` and stops at the value's own
+/// NUL without storing it, so a captured path is followed only by whatever the destination already
+/// held — today the initial zero of a static, which is not a property the code that reads the path
+/// back can check. `fopen` reads until it finds a NUL, so the invariant it depends on is written
+/// explicitly, on the one path that publishes a length for it to trust.
+///
+/// A value that fills the buffer exactly has nowhere to put a terminator, so it is reported as
+/// [`CensusRequest::Unusable`] and no length is published; nothing is written past the buffer, and
+/// [`open`] refuses to open a census with no published length.
+///
+/// Taking the environment answer as a parameter — rather than performing the read — is what lets a
+/// test drive the `PATH_LIMIT - 1` boundary against a buffer it pre-filled with non-zero bytes,
+/// which is the case a zeroed static would otherwise hide.
+#[cfg(unix)]
+fn terminate_census_path(path: &mut [u8; PATH_LIMIT], value: EnvironmentValue) -> CensusRequest {
+    match value {
+        EnvironmentValue::Absent | EnvironmentValue::Found(0) => CensusRequest::Absent,
+        EnvironmentValue::Error => CensusRequest::Error,
+        EnvironmentValue::Found(length) => match path.get_mut(length) {
+            Some(terminator) => {
+                *terminator = 0;
+
+                CensusRequest::Path(length)
+            }
+
+            // The value filled the buffer, so it was truncated and there is no room to terminate
+            // what remains. Census mode still holds; the path does not.
+            None => CensusRequest::Unusable,
+        },
+    }
 }
 
 /// Windows' equivalent of [`capture_census_path`].
 #[cfg(windows)]
-fn capture_census_path() -> bool {
+fn capture_census_path() -> CensusRequest {
     #[cfg(test)]
     let _previous = STARTUP_ENVIRONMENT_READS.fetch_add(1, Ordering::Relaxed);
 
     let mut buffer = [0_u16; PATH_LIMIT];
+
+    // SAFETY: clearing the calling thread's last-error value has no precondition.
+    unsafe { SetLastError(ERROR_SUCCESS) };
 
     // SAFETY: `CENSUS_VAR_W` is NUL-terminated and `buffer` is writable for the supplied length.
     let written = unsafe {
@@ -364,27 +522,28 @@ fn capture_census_path() -> bool {
             u32::try_from(buffer.len()).unwrap_or(u32::MAX),
         )
     };
-
-    let Ok(length) = usize::try_from(written) else {
-        return false;
+    let last_error = if written == 0 {
+        // SAFETY: read immediately after the API call whose zero return needs classifying.
+        unsafe { GetLastError() }
+    } else {
+        ERROR_SUCCESS
     };
 
-    if length == 0 {
-        return false;
-    }
+    match environment_read_outcome(written, last_error, buffer.len()) {
+        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Found(0) => CensusRequest::Absent,
+        EnvironmentReadOutcome::Error => CensusRequest::Error,
+        EnvironmentReadOutcome::TooLongToStore => CensusRequest::Unusable,
+        EnvironmentReadOutcome::Found(length) => {
+            // SAFETY: only this constructor writes the `UnsafeCell`, and `length` bytes plus the
+            // API's terminator all fit in both arrays.
+            unsafe {
+                core::ptr::copy_nonoverlapping(buffer.as_ptr(), CENSUS_PATH.bytes.get().cast(), length + 1);
+            }
+            CENSUS_PATH_LENGTH.store(length, Ordering::Release);
 
-    if length >= buffer.len() {
-        return true;
+            CensusRequest::Path(length)
+        }
     }
-
-    // SAFETY: only this constructor writes the `UnsafeCell`, and `length` bytes plus the API's
-    // terminator all fit in both arrays.
-    unsafe {
-        core::ptr::copy_nonoverlapping(buffer.as_ptr(), CENSUS_PATH.bytes.get().cast(), length + 1);
-    }
-    CENSUS_PATH_LENGTH.store(length, Ordering::Release);
-
-    true
 }
 
 /// Parses an ordinal out of copied bytes, treating anything unexpected as [`NONE`].
@@ -394,9 +553,10 @@ fn capture_census_path() -> bool {
 /// — selects unmutated behavior, which is the answer that cannot turn a mutated program into a
 /// passing one.
 ///
-/// The three reserved words of the encoding — the overflow marker, [`CENSUS`], and the census
-/// file's [`SEAL`] — are refused as one range: a population would have to hold four billion
-/// mutants to reach them, and a mode or a file marker is not something `GAMMA_ACTIVE` may ask for.
+/// The four reserved words of the encoding — [`UNINSTALLED`], the census file's [`SEAL`],
+/// [`CENSUS`], and the overflow marker — are refused as one contiguous range: a population would
+/// have to hold four billion mutants to reach them, and a startup sentinel, a mode, or a file
+/// marker is not something `GAMMA_ACTIVE` may ask for.
 #[cfg(any(unix, windows))]
 fn parse(bytes: &[u8]) -> u32 {
     let trimmed = bytes.trim_ascii();
@@ -419,13 +579,182 @@ fn parse(bytes: &[u8]) -> u32 {
         value = shifted;
     }
 
-    if value >= SEAL { NONE } else { value }
+    if value >= UNINSTALLED { NONE } else { value }
+}
+
+/// One in-progress scan of an environ-format (`NAME=value\0NAME=value\0...`) byte stream for the
+/// entry named by a `target` key, fed one chunk at a time.
+///
+/// Kept separate from the syscalls that supply its bytes — see [`scan_environ`] — so a chunk
+/// boundary landing inside a key, the `=` delimiter, a value, or its terminating NUL can be driven
+/// directly by a test instead of only by whatever one `read` of `/proc/self/environ` happens to
+/// return.
+#[cfg(target_os = "linux")]
+struct EnvironScan {
+    key_at: usize,
+    matching: bool,
+    value_at: Option<usize>,
+    overflowed: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl EnvironScan {
+    const fn new() -> Self {
+        Self {
+            key_at: 0,
+            matching: true,
+            value_at: None,
+            overflowed: false,
+        }
+    }
+
+    /// Feeds one chunk of environ bytes, matching against `target` and copying a matched value's
+    /// bytes into `destination`. Returns the value's length, bounded by `destination.len()`, once
+    /// this or an earlier chunk has reached the value's terminating NUL.
+    fn feed(&mut self, chunk: &[u8], target: &[u8], destination: &mut [u8]) -> Option<usize> {
+        for &byte in chunk {
+            if let Some(length) = self.value_at.as_mut() {
+                if byte == 0 {
+                    return Some(if self.overflowed || *length == destination.len() {
+                        destination.len()
+                    } else {
+                        *length
+                    });
+                }
+
+                if let Some(slot) = destination.get_mut(*length) {
+                    *slot = byte;
+                    *length += 1;
+                } else {
+                    self.overflowed = true;
+                }
+
+                continue;
+            }
+
+            if byte == 0 {
+                self.key_at = 0;
+                self.matching = true;
+            } else if self.matching && self.key_at < target.len() && byte == target[self.key_at] {
+                self.key_at += 1;
+            } else if self.matching && self.key_at == target.len() && byte == b'=' {
+                self.value_at = Some(0);
+            } else {
+                self.matching = false;
+            }
+        }
+
+        None
+    }
+}
+
+/// What one attempt at reading the startup environment produced.
+///
+/// A signal that arrives while a `read` is blocked makes it return `-1` with `EINTR` and no bytes
+/// moved. Folding that into the same failure as a real I/O error would turn an ordinary, retryable
+/// interruption into a refused startup, so the two are distinguished here and only one of them is
+/// worth another attempt.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadOutcome {
+    /// This many bytes were placed in the chunk buffer; zero means the stream ended.
+    Read(usize),
+
+    /// A signal interrupted the read before it moved anything, so repeating it is meaningful.
+    Interrupted,
+
+    /// The read failed for a reason repeating it cannot fix.
+    Failed,
+}
+
+/// Classifies one raw `read` return, consulting `errno` only when the call actually failed.
+///
+/// `errno` is supplied rather than read here so a test can drive the interrupted and final-failure
+/// arms directly, and so a successful read cannot pay for a thread-local lookup it does not need.
+#[cfg(target_os = "linux")]
+fn read_outcome(read: isize, errno: impl FnOnce() -> core::ffi::c_int) -> ReadOutcome {
+    match usize::try_from(read) {
+        Ok(read_len) => ReadOutcome::Read(read_len),
+        Err(_negative) if errno() == EINTR => ReadOutcome::Interrupted,
+        Err(_negative) => ReadOutcome::Failed,
+    }
+}
+
+/// How many interrupted attempts one startup capture tolerates before reporting a failure.
+///
+/// Counted across the whole capture rather than reset per call, so a process being signalled
+/// without pause ends in a loud, bounded failure rather than spinning inside a loader constructor
+/// forever. Generous enough that ordinary job-control or timer signals cannot exhaust it: a
+/// blocked read of `/proc/self/environ` is measured in microseconds, so reaching this many
+/// interruptions means something is delivering signals faster than the kernel can answer a read.
+#[cfg(target_os = "linux")]
+const INTERRUPTED_ATTEMPTS: usize = 64;
+
+/// `EINTR`, which Linux fixes at 4 on every architecture it supports, including the ones that
+/// renumber part of the table. Spelled out because this crate carries no dependencies, `libc`
+/// among them.
+#[cfg(target_os = "linux")]
+const EINTR: core::ffi::c_int = 4;
+
+/// The `errno` the last failed C library call left behind on this thread.
+#[cfg(target_os = "linux")]
+fn last_errno() -> core::ffi::c_int {
+    // SAFETY: `__errno_location` returns a pointer to this thread's `errno`, which the C library
+    // keeps valid for as long as the thread exists.
+    let location = unsafe { __errno_location() };
+
+    // SAFETY: exactly the one `int` that pointer names is read, and nothing else on this thread can
+    // be writing it between the call above and here.
+    unsafe { *location }
+}
+
+/// Drives one [`EnvironScan`] across a sequence of read attempts, matching the framing and failure
+/// handling of the real `/proc/self/environ` loop: `read` reports the bytes it placed in the chunk
+/// buffer, an interruption worth repeating, or a failure that ends the capture as
+/// [`EnvironmentValue::Error`].
+///
+/// Isolated from `open_fd`/`read_fd` so a test can script exactly the split, empty, interrupted and
+/// failure transitions the real loop cannot be steered through without controlling the file it
+/// reads and the signals delivered to the process reading it.
+#[cfg(target_os = "linux")]
+fn scan_environ(target: &[u8], destination: &mut [u8], mut read: impl FnMut(&mut [u8; 512]) -> ReadOutcome) -> EnvironmentValue {
+    let mut chunk = [0_u8; 512];
+    let mut scan = EnvironScan::new();
+    let mut interruptions = 0_usize;
+
+    loop {
+        let read_len = match read(&mut chunk) {
+            ReadOutcome::Read(read_len) => read_len,
+            ReadOutcome::Interrupted => {
+                interruptions += 1;
+
+                if interruptions > INTERRUPTED_ATTEMPTS {
+                    return EnvironmentValue::Error;
+                }
+
+                continue;
+            }
+            ReadOutcome::Failed => return EnvironmentValue::Error,
+        };
+
+        if read_len == 0 {
+            return EnvironmentValue::Absent;
+        }
+
+        if let Some(length) = scan.feed(&chunk[..read_len], target, destination) {
+            return EnvironmentValue::Found(length);
+        }
+    }
 }
 
 /// Copies one Linux environment value from the immutable image captured by `exec`.
 ///
 /// `/proc/self/environ` does not follow later `setenv` changes, so a native constructor that
 /// started a thread before this constructor cannot make this read race with environment mutation.
+///
+/// A signal delivered to this process can interrupt the open or any of the reads without moving a
+/// byte. Those attempts are repeated, bounded by [`INTERRUPTED_ATTEMPTS`], because reporting one as
+/// a failure would refuse a startup that had nothing wrong with it.
 #[cfg(target_os = "linux")]
 fn copy_environment(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
     #[cfg(test)]
@@ -435,122 +764,252 @@ fn copy_environment(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
         return EnvironmentValue::Absent;
     };
     let path = b"/proc/self/environ\0";
+    let mut interruptions = 0_usize;
 
-    // SAFETY: `path` is NUL-terminated and `O_RDONLY` takes no variadic mode argument.
-    let descriptor = unsafe { open_fd(path.as_ptr().cast(), 0) };
+    let descriptor = loop {
+        // SAFETY: `path` is NUL-terminated and `O_RDONLY` takes no variadic mode argument.
+        let descriptor = unsafe { open_fd(path.as_ptr().cast(), 0) };
 
-    if descriptor < 0 {
-        return EnvironmentValue::Error;
-    }
+        if descriptor >= 0 {
+            break descriptor;
+        }
 
-    let mut chunk = [0_u8; 512];
-    let mut key_at = 0;
-    let mut matching = true;
-    let mut value_at = None;
-    let mut overflowed = false;
-    let mut answer = EnvironmentValue::Absent;
-    let mut found = false;
-    let mut failed = false;
+        interruptions += 1;
 
-    loop {
+        if last_errno() != EINTR || interruptions > INTERRUPTED_ATTEMPTS {
+            return EnvironmentValue::Error;
+        }
+    };
+
+    let answer = scan_environ(target, destination, |chunk| {
         // SAFETY: `chunk` is writable for the supplied length, and `descriptor` remains open.
         let read = unsafe { read_fd(descriptor, chunk.as_mut_ptr().cast(), chunk.len()) };
-        let Ok(read) = usize::try_from(read) else {
-            failed = true;
-            break;
-        };
 
-        if read == 0 {
-            break;
-        }
-
-        for &byte in &chunk[..read] {
-            if let Some(length) = value_at.as_mut() {
-                if byte == 0 {
-                    found = true;
-                    answer = EnvironmentValue::Found(if overflowed || *length == destination.len() {
-                        destination.len()
-                    } else {
-                        *length
-                    });
-                    break;
-                }
-
-                if let Some(slot) = destination.get_mut(*length) {
-                    *slot = byte;
-                    *length += 1;
-                } else {
-                    overflowed = true;
-                }
-
-                continue;
-            }
-
-            if byte == 0 {
-                key_at = 0;
-                matching = true;
-            } else if matching && key_at < target.len() && byte == target[key_at] {
-                key_at += 1;
-            } else if matching && key_at == target.len() && byte == b'=' {
-                value_at = Some(0);
-            } else {
-                matching = false;
-            }
-        }
-
-        if found {
-            break;
-        }
-    }
+        read_outcome(read, last_errno)
+    });
 
     // SAFETY: `descriptor` was returned open above and is closed exactly once here.
     let _closed = unsafe { close_fd(descriptor) };
-    if failed { EnvironmentValue::Error } else { answer }
+
+    answer
 }
 
 /// Copies one environment value on Unix targets without an immutable process-environment image.
+///
+/// Delegates to [`copy_environment_via_getenv`], named separately so the concurrency regression
+/// below can call it directly on every Unix this crate tests, including Linux, even though
+/// production Linux never takes this path.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn copy_environment(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
+    copy_environment_via_getenv(name, destination)
+}
+
+/// Copies one environment value through `getenv`, the only startup interface available on a Unix
+/// with no immutable process-environment image.
+///
+/// # POSIX precondition
+///
+/// POSIX permits `getenv` to be called concurrently with other environment reads, but not with
+/// native environment mutation through `setenv`, `putenv`, `unsetenv`, or equivalent direct
+/// mutation. This safe function relies on that process-wide precondition. It runs before Rust
+/// `main`, so safe Rust code has not had an opportunity to start a thread that performs such a
+/// mutation; Rust's process-environment mutation APIs are unsafe for the same reason. A foreign
+/// native constructor that starts concurrent environment mutation before this constructor violates
+/// the abstraction's precondition and is outside what this runtime can make sound.
+///
+/// # Integrity detection
+///
+/// The second `getenv` and copy are an integrity check, not a memory-safety proof. Under the POSIX
+/// precondition, each dereference is already valid. Comparing the pointer, length, and bytes detects
+/// an inconsistent observation if foreign code violates that precondition in a way visible to both
+/// reads, allowing startup to fail loudly through [`environment_error`] rather than accepting a
+/// torn value. Matching reads do not prove that a forbidden concurrent mutation did not occur.
+#[cfg(all(unix, any(test, not(target_os = "linux"))))]
+fn copy_environment_via_getenv(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
     #[cfg(test)]
     let _previous = STARTUP_ENVIRONMENT_READS.fetch_add(1, Ordering::Relaxed);
 
-    // SAFETY: every caller supplies one of this module's NUL-terminated constant names. The
-    // returned pointer is copied immediately during platform startup and is never retained.
-    let value = unsafe { getenv(name.as_ptr().cast()) };
+    // SAFETY: every caller supplies one of this module's NUL-terminated constant names.
+    let first_pointer = unsafe { getenv(name.as_ptr().cast()) };
 
-    if value.is_null() {
-        return EnvironmentValue::Absent;
+    if first_pointer.is_null() {
+        // A lone null answer could itself be a torn observation of a variable another thread is
+        // concurrently setting for the first time, so absence is trusted only once a second,
+        // independent call agrees.
+        // SAFETY: as above.
+        return if unsafe { getenv(name.as_ptr().cast()) }.is_null() {
+            EnvironmentValue::Absent
+        } else {
+            EnvironmentValue::Error
+        };
     }
 
-    // SAFETY: `getenv` returned a C string that remains valid for this startup-only copy.
-    EnvironmentValue::Found(unsafe { copy_c_string(value.cast(), destination) }.unwrap_or(destination.len()))
+    // SAFETY: under the POSIX precondition documented above, no concurrent native mutation can
+    // invalidate the storage returned by `getenv` during this bounded copy.
+    let first_length = unsafe { copy_c_string(first_pointer.cast(), destination) };
+
+    // SAFETY: as above; `getenv` may be called at any time.
+    let second_pointer = unsafe { getenv(name.as_ptr().cast()) };
+
+    if second_pointer != first_pointer {
+        return EnvironmentValue::Error;
+    }
+
+    let mut confirmation = [0_u8; PATH_LIMIT];
+    let region = &mut confirmation[..destination.len()];
+
+    // SAFETY: under the POSIX precondition documented above, `second_pointer` remains valid during
+    // this bounded copy; `region` has exactly `destination`'s length.
+    let second_length = unsafe { copy_c_string(second_pointer.cast(), region) };
+
+    if second_length != first_length || *destination != *region {
+        return EnvironmentValue::Error;
+    }
+
+    EnvironmentValue::Found(first_length.unwrap_or(destination.len()))
 }
 
 /// Stops startup in a shape the parent recognizes as an infrastructure failure.
-#[cfg(unix)]
+///
+/// Excluded from coverage because immediate process termination cannot flush coverage counters.
+#[cfg(any(unix, windows))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn environment_error() -> ! {
-    let mut remaining = ENVIRONMENT_ERROR_MARKER;
+    #[cfg(unix)]
+    {
+        let mut remaining = ENVIRONMENT_ERROR_MARKER;
 
-    while !remaining.is_empty() {
-        // SAFETY: file descriptor 2 is the process's conventional stderr, and `remaining` is
-        // readable for the supplied length.
-        let written = unsafe { write_fd(2, remaining.as_ptr().cast(), remaining.len()) };
-        let Ok(written) = usize::try_from(written) else {
-            break;
-        };
+        while !remaining.is_empty() {
+            // SAFETY: file descriptor 2 is the process's conventional stderr, and `remaining` is
+            // readable for the supplied length.
+            let written = unsafe { write_fd(2, remaining.as_ptr().cast(), remaining.len()) };
+            let Ok(written) = usize::try_from(written) else {
+                break;
+            };
 
-        if written == 0 {
-            break;
+            if written == 0 {
+                break;
+            }
+
+            remaining = remaining
+                .get(written..)
+                .expect("POSIX write cannot report more bytes than the supplied buffer contains");
         }
 
-        remaining = remaining
-            .get(written..)
-            .expect("POSIX write cannot report more bytes than the supplied buffer contains");
+        // SAFETY: startup cannot continue without knowing whether the requested mutant was
+        // selected. `_exit` avoids running handlers registered by constructors that may only be
+        // partly complete.
+        unsafe { exit_immediately(86) }
     }
 
-    // SAFETY: startup cannot continue without knowing whether the requested mutant was selected.
-    // `_exit` avoids running handlers registered by constructors that may only be partly complete.
-    unsafe { exit_immediately(86) }
+    #[cfg(windows)]
+    {
+        // SAFETY: retrieving the process's standard-error handle has no precondition.
+        let stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+
+        if !stderr.is_null() && stderr.addr() != INVALID_HANDLE_VALUE {
+            let mut remaining = ENVIRONMENT_ERROR_MARKER;
+
+            while !remaining.is_empty() {
+                let mut written = 0_u32;
+                let mut overlapped = WindowsOverlapped::for_append();
+                let bytes_to_write = u32::try_from(remaining.len()).unwrap_or(u32::MAX);
+
+                // A valid OVERLAPPED is required when stderr is an inherited pipe or file opened
+                // for overlapped I/O. Seekable synchronous handles honour its all-ones offset as
+                // append-to-end, while pipes ignore the offset.
+                // SAFETY: null security and name pointers request an unnamed event with default
+                // security. The returned handle is checked before use.
+                let event = unsafe { CreateEventW(core::ptr::null(), 0, 0, core::ptr::null()) };
+                let mut retry_synchronously = event.is_null();
+                let mut pending = false;
+
+                let completed = if retry_synchronously {
+                    false
+                } else {
+                    overlapped.event = event;
+
+                    // SAFETY: `stderr` is the process standard-error handle, `remaining` is
+                    // readable for the supplied length, `overlapped` remains writable until a
+                    // pending operation completes, and it owns a live event.
+                    let succeeded = unsafe {
+                        WriteFile(
+                            stderr,
+                            remaining.as_ptr().cast(),
+                            bytes_to_write,
+                            core::ptr::null_mut(),
+                            core::ptr::from_mut(&mut overlapped).cast(),
+                        )
+                    };
+
+                    if succeeded != 0 {
+                        written = bytes_to_write;
+                        true
+                    } else {
+                        // SAFETY: `GetLastError` reads thread-local Win32 state immediately after
+                        // the failed `WriteFile`.
+                        pending = unsafe { GetLastError() } == ERROR_IO_PENDING;
+                        retry_synchronously = !pending;
+
+                        // SAFETY: the operation owns `overlapped` and its event until this blocking
+                        // call reports completion or failure.
+                        pending
+                            && unsafe {
+                                GetOverlappedResult(
+                                    stderr,
+                                    core::ptr::from_mut(&mut overlapped).cast(),
+                                    core::ptr::from_mut(&mut written),
+                                    1,
+                                ) != 0
+                            }
+                    }
+                };
+
+                if !event.is_null() && (!pending || completed) {
+                    // SAFETY: `event` came from `CreateEventW` above. No operation used it, or its
+                    // operation completed before this close.
+                    let _closed = unsafe { CloseHandle(event) };
+                }
+
+                let completed = if retry_synchronously {
+                    written = 0;
+
+                    // Some synchronous handles, notably consoles, reject a non-null OVERLAPPED.
+                    // Retrying without one preserves their marker output. An overlapped handle is
+                    // expected to have returned `ERROR_IO_PENDING` and therefore not reach here.
+                    // SAFETY: `stderr` is the process standard-error handle, `remaining` is
+                    // readable for the supplied length, and `written` is writable.
+                    unsafe {
+                        WriteFile(
+                            stderr,
+                            remaining.as_ptr().cast(),
+                            bytes_to_write,
+                            core::ptr::from_mut(&mut written),
+                            core::ptr::null_mut(),
+                        ) != 0
+                    }
+                } else {
+                    completed
+                };
+
+                if !completed || written == 0 {
+                    break;
+                }
+
+                let Ok(written) = usize::try_from(written) else {
+                    break;
+                };
+
+                remaining = remaining
+                    .get(written..)
+                    .expect("WriteFile cannot report more bytes than the supplied buffer contains");
+            }
+        }
+
+        // SAFETY: startup cannot continue without a trustworthy environment result. `ExitProcess`
+        // terminates immediately instead of running partially initialized exit handlers.
+        unsafe { ExitProcess(86) }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -563,6 +1022,12 @@ unsafe extern "C" {
 
     #[link_name = "close"]
     fn close_fd(descriptor: core::ffi::c_int) -> core::ffi::c_int;
+
+    /// The Linux C library's accessor for this thread's `errno`, which is how a failed `open` or
+    /// `read` says whether a signal interrupted it. Declared here rather than taken from `libc`
+    /// because this crate is injected into the user's dependency graph and must stay free of
+    /// dependencies; the symbol is the one glibc, musl and uClibc all publish for it.
+    fn __errno_location() -> *mut core::ffi::c_int;
 }
 
 #[cfg(unix)]
@@ -574,12 +1039,20 @@ unsafe extern "C" {
     fn exit_immediately(status: core::ffi::c_int) -> !;
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(all(unix, any(test, not(target_os = "linux"))))]
 unsafe extern "C" {
     /// The C library's `getenv`, whose signature is fixed by POSIX. Declared here rather than
     /// taken from `libc` because this crate is injected into the user's dependency graph and must
     /// stay free of dependencies.
     fn getenv(name: *const core::ffi::c_char) -> *const core::ffi::c_char;
+}
+
+// Test-only access used to mutate the environment while copy_environment_via_getenv captures it.
+#[cfg(all(unix, test))]
+unsafe extern "C" {
+    fn setenv(name: *const core::ffi::c_char, value: *const core::ffi::c_char, overwrite: core::ffi::c_int) -> core::ffi::c_int;
+
+    fn unsetenv(name: *const core::ffi::c_char) -> core::ffi::c_int;
 }
 
 #[cfg(windows)]
@@ -599,6 +1072,86 @@ unsafe extern "system" {
     /// code page on the way out, which drops any character the code page cannot represent — an
     /// ordinary occurrence for a user profile directory with a non-Latin name.
     fn GetEnvironmentVariableW(name: *const u16, buffer: *mut u16, size: u32) -> u32;
+
+    /// Sets the calling thread's last-error value so a subsequent zero return can be classified.
+    fn SetLastError(error: u32);
+
+    /// Returns the calling thread's last-error value.
+    fn GetLastError() -> u32;
+
+    /// Returns one of the process standard handles.
+    fn GetStdHandle(which: u32) -> *mut core::ffi::c_void;
+
+    /// Creates an event used to wait for an overlapped write.
+    fn CreateEventW(
+        event_attributes: *const core::ffi::c_void,
+        manual_reset: core::ffi::c_int,
+        initial_state: core::ffi::c_int,
+        name: *const u16,
+    ) -> *mut core::ffi::c_void;
+
+    /// Writes bytes directly to a Win32 handle.
+    fn WriteFile(
+        handle: *mut core::ffi::c_void,
+        buffer: *const core::ffi::c_void,
+        bytes_to_write: u32,
+        bytes_written: *mut u32,
+        overlapped: *mut core::ffi::c_void,
+    ) -> core::ffi::c_int;
+
+    /// Waits for an overlapped operation and returns its transferred byte count.
+    fn GetOverlappedResult(
+        handle: *mut core::ffi::c_void,
+        overlapped: *mut core::ffi::c_void,
+        bytes_transferred: *mut u32,
+        wait: core::ffi::c_int,
+    ) -> core::ffi::c_int;
+
+    /// Closes a Win32 object handle.
+    fn CloseHandle(handle: *mut core::ffi::c_void) -> core::ffi::c_int;
+
+    /// Terminates the process without running exit handlers.
+    fn ExitProcess(exit_code: u32) -> !;
+
+    /// Changes one process environment variable. Used only by the pre-main test helper.
+    #[cfg(test)]
+    fn SetEnvironmentVariableA(name: *const u8, value: *const u8) -> core::ffi::c_int;
+}
+
+/// The Win32 `STD_ERROR_HANDLE` value.
+#[cfg(windows)]
+const STD_ERROR_HANDLE: u32 = (-12_i32).cast_unsigned();
+
+/// The address value used by Win32 for an invalid handle.
+#[cfg(windows)]
+const INVALID_HANDLE_VALUE: usize = usize::MAX;
+
+/// The Win32 `ERROR_IO_PENDING` status.
+#[cfg(windows)]
+const ERROR_IO_PENDING: u32 = 997;
+
+/// The Win32 `OVERLAPPED` layout used by `WriteFile`.
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsOverlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    event: *mut core::ffi::c_void,
+}
+
+#[cfg(windows)]
+impl WindowsOverlapped {
+    const fn for_append() -> Self {
+        Self {
+            internal: 0,
+            internal_high: 0,
+            offset: u32::MAX,
+            offset_high: u32::MAX,
+            event: core::ptr::null_mut(),
+        }
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -640,7 +1193,25 @@ unsafe extern "C" {
 /// Records that the site with ordinal `id` was reached, if it has not been recorded already.
 ///
 /// The bitmap is what keeps this affordable. A site inside a loop is reached millions of times but
-/// occupies one bit, and no file is opened or written until the process exits.
+/// occupies one bit, and no file is opened or written until the process exits. Every hit after the
+/// first takes a cheap relaxed precheck of the bit (or [`OVERFLOWED`]) it would set and returns
+/// immediately if it is already set, skipping the lease/compare-exchange/decrement protocol below
+/// entirely.
+///
+/// # Why the precheck cannot lose a site under concurrent sealing
+///
+/// [`REACHED`] bits and [`OVERFLOWED`] are set-only for a census's whole lifetime — nothing ever
+/// clears them — so a relaxed load that observes one already set is observing a fact that stays
+/// true forever after, regardless of what ordering did or did not make visible to this thread yet.
+/// The precheck can therefore only ever take a shortcut that is *correct to take*: it never
+/// fabricates a "set" it did not really witness. The reverse case is symmetric and does not need
+/// the precheck to be right at all: if the relevant bit is not yet visible to this thread — whether
+/// truly unset or set by a write this thread has not observed — falling through to the full
+/// lease/fetch-or/release protocol below is exactly what already happens on every call today, so
+/// no case exists where the precheck causes a site to go unrecorded that would otherwise have been.
+// Cost: the precheck is justified structurally, per the above, rather than empirically; measuring
+// first-hit, repeated-hit, and unique-site throughput against a lease taken on every hit remains
+// outstanding.
 // Cold: reached only under a census, never in a scoring run, and even then only off the inlined
 // per-site guard `a`. Keeping it out of line stops its bitmap machinery being inlined into every
 // guard site and bloating the instrumented build, which is the dominant fixed cost of a run.
@@ -653,6 +1224,18 @@ fn note(id: u32) {
     let Ok(index) = usize::try_from(id) else {
         return;
     };
+
+    if index >= SITES {
+        if OVERFLOWED.load(Ordering::Relaxed) {
+            return;
+        }
+    } else {
+        let bit = 1_u32 << (index % WORD_BITS);
+
+        if REACHED[index / WORD_BITS].load(Ordering::Relaxed) & bit != 0 {
+            return;
+        }
+    }
 
     // The lease starts before the bitmap claim. A seal must therefore wait from the instant this
     // guard makes a site reachable rather than scan past an update that has not landed yet.
@@ -1010,8 +1593,8 @@ fn open() -> *mut core::ffi::c_void {
         }
 
         // SAFETY: startup copied the path and explicitly wrote its NUL terminator into this static
-        // before publishing the non-zero length. The buffer is immutable after publication;
-        // `MODE` is NUL-terminated too.
+        // — see `terminate_census_path` — before publishing the non-zero length acquired above.
+        // The buffer is immutable after publication; `MODE` is NUL-terminated too.
         unsafe { fopen(CENSUS_PATH.bytes.get().cast(), MODE.as_ptr().cast()) }
     }
 
@@ -1120,14 +1703,172 @@ static INSTALL: extern "C" fn() = install;
 #[unsafe(link_section = ".CRT$XCU")]
 static INSTALL: extern "C" fn() = install;
 
+/// Marks a test-binary child that must verify the captured selection before `main`.
+#[cfg(all(test, any(unix, windows), not(miri)))]
+const ENVIRONMENT_HELPER_VAR: &str = "GAMMA_RT_ENVIRONMENT_HELPER";
+
+/// [`ENVIRONMENT_HELPER_VAR`] in the NUL-terminated form required by native APIs.
+#[cfg(all(test, any(unix, windows), not(miri)))]
+const ENVIRONMENT_HELPER_VAR_C: &[u8] = b"GAMMA_RT_ENVIRONMENT_HELPER\0";
+
+/// The replacement value used after the helper has captured ordinal 7.
+#[cfg(all(test, any(unix, windows), not(miri)))]
+const ENVIRONMENT_HELPER_REPLACEMENT_C: &[u8] = b"99\0";
+
+/// Marks a Windows test-binary child that must exercise the fatal environment-error writer.
+#[cfg(all(test, windows, not(miri)))]
+const ENVIRONMENT_ERROR_HELPER_VAR_C: &[u8] = b"GAMMA_RT_ENVIRONMENT_ERROR_HELPER\0";
+
+/// Returns whether this process was launched as the pre-main environment helper.
+#[cfg(all(test, any(unix, windows), not(miri)))]
+fn environment_helper_requested() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: the name is NUL-terminated. This runs during single-threaded process startup,
+        // before the helper performs any environment mutation.
+        let value = unsafe { getenv(ENVIRONMENT_HELPER_VAR_C.as_ptr().cast()) };
+
+        if value.is_null() {
+            return false;
+        }
+
+        // SAFETY: under the same startup precondition, the returned value remains valid.
+        let first = unsafe { *value.cast::<u8>() };
+
+        if first != b'1' {
+            return false;
+        }
+
+        // SAFETY: because the first byte is non-NUL, the C string has a subsequent byte.
+        let terminator = unsafe { value.cast::<u8>().add(1) };
+        // SAFETY: `terminator` points at that second byte.
+        let second = unsafe { *terminator };
+
+        first == b'1' && second == 0
+    }
+
+    #[cfg(windows)]
+    {
+        let mut value = [0_u8; 2];
+
+        // SAFETY: clearing last error has no precondition.
+        unsafe { SetLastError(ERROR_SUCCESS) };
+        // SAFETY: the name is NUL-terminated and `value` is writable for the supplied length.
+        let written = unsafe {
+            GetEnvironmentVariableA(
+                ENVIRONMENT_HELPER_VAR_C.as_ptr(),
+                value.as_mut_ptr(),
+                u32::try_from(value.len()).unwrap_or(u32::MAX),
+            )
+        };
+
+        written == 1 && value[0] == b'1'
+    }
+}
+
+/// Runs the environment-stability regression before the libtest harness can start any threads.
+///
+/// The parent re-executes this test binary with [`ENVIRONMENT_HELPER_VAR_C`] set. This constructor
+/// then performs the entire check and terminates the child without entering `main`, so the native
+/// environment mutation occurs in a genuinely single-threaded process rather than in a filtered
+/// libtest test.
+#[cfg(all(test, any(unix, windows), not(miri)))]
+extern "C" fn run_environment_helper() {
+    if !environment_helper_requested() {
+        return;
+    }
+
+    // Constructor order is platform- and linker-dependent. Calling `install` explicitly makes
+    // the helper capture its launch environment before it performs the mutation, whether or not
+    // the ordinary runtime constructor already ran.
+    install();
+    let before = active();
+
+    #[cfg(unix)]
+    // SAFETY: this constructor exits before `main`; no other Rust thread exists, and the two
+    // arguments are NUL-terminated strings.
+    let changed = unsafe { setenv(ACTIVE_VAR_C.as_ptr().cast(), ENVIRONMENT_HELPER_REPLACEMENT_C.as_ptr().cast(), 1) == 0 };
+
+    #[cfg(windows)]
+    // SAFETY: this constructor exits before `main`; no other Rust thread exists, and both
+    // arguments are NUL-terminated strings.
+    let changed = unsafe { SetEnvironmentVariableA(ACTIVE_VAR_C.as_ptr(), ENVIRONMENT_HELPER_REPLACEMENT_C.as_ptr()) != 0 };
+
+    let after = active();
+    let succeeded = changed && before == 7 && after == 7;
+
+    #[cfg(unix)]
+    // SAFETY: the helper must not enter the libtest harness after mutating the process environment.
+    unsafe {
+        exit_immediately(i32::from(!succeeded));
+    }
+
+    #[cfg(windows)]
+    // SAFETY: the helper must not enter the libtest harness after mutating the process environment.
+    unsafe {
+        ExitProcess(u32::from(!succeeded));
+    }
+}
+
+/// Installs the pre-main environment helper in Unix test binaries.
+#[cfg(all(test, unix, not(target_vendor = "apple"), not(miri)))]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static RUN_ENVIRONMENT_HELPER: extern "C" fn() = run_environment_helper;
+
+/// Exercises [`environment_error`] before the Windows test harness replaces inherited handles.
+///
+/// The selected child terminates inside [`environment_error`] before coverage counters can flush.
+#[cfg(all(test, windows, not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+extern "C" fn run_environment_error_helper() {
+    let mut value = [0_u8; 2];
+
+    // SAFETY: the name is NUL-terminated and `value` is writable for the supplied length.
+    let written = unsafe {
+        GetEnvironmentVariableA(
+            ENVIRONMENT_ERROR_HELPER_VAR_C.as_ptr(),
+            value.as_mut_ptr(),
+            u32::try_from(value.len()).unwrap_or(u32::MAX),
+        )
+    };
+
+    if written == 1 && value[0] == b'1' {
+        environment_error();
+    }
+}
+
+/// Installs the fatal-writer helper in Windows test binaries.
+#[cfg(all(test, windows, not(miri)))]
+#[used]
+#[unsafe(link_section = ".CRT$XCU")]
+static RUN_ENVIRONMENT_ERROR_HELPER: extern "C" fn() = run_environment_error_helper;
+
+/// Installs the pre-main environment helper in Apple test binaries.
+#[cfg(all(test, target_vendor = "apple", not(miri)))]
+#[used]
+#[unsafe(link_section = "__DATA,__mod_init_func")]
+static RUN_ENVIRONMENT_HELPER: extern "C" fn() = run_environment_helper;
+
+/// Installs the pre-main environment helper in Windows test binaries.
+#[cfg(all(test, windows, not(miri)))]
+#[used]
+#[unsafe(link_section = ".CRT$XCU")]
+static RUN_ENVIRONMENT_HELPER: extern "C" fn() = run_environment_helper;
+
 /// Returns the ordinal of the mutant active in this process.
 ///
 /// The selection is captured without allocation during process startup. It cannot change later:
 /// a test manipulating its own environment must not change which mutant is live halfway through a
 /// run, and guards must not read an environment another thread may safely be changing.
 ///
-/// ```rust
-/// // Whatever this process was launched with, the answer never changes.
+/// ```text
+/// // Illustrative only: within one process the answer is fixed by definition, so comparing two
+/// // immediately adjacent calls proves nothing about that immutability. The regression that
+/// // actually exercises it launches a child with a known ordinal, has the child attempt to
+/// // overwrite its own `GAMMA_ACTIVE` after startup, and confirms `active` still reports the
+/// // value it was launched with — see `active_is_immune_to_the_process_changing_its_own_environment`
+/// // in this crate's test suite.
 /// assert_eq!(gamma_rt::active(), gamma_rt::active());
 /// ```
 #[inline]
@@ -1143,13 +1884,49 @@ pub fn active() -> u32 {
 /// Returns the raw startup-captured selection, which is an ordinal, [`NONE`], or [`CENSUS`].
 ///
 /// Split from [`active`] because the guard needs to distinguish census mode and every other caller
-/// needs not to.
+/// needs not to. Never returns [`UNINSTALLED`]: observing it means some other native constructor
+/// ran instrumented code before this crate's own, so [`uninstalled_guard`] fails visibly instead of
+/// letting the caller mistake it for a legitimate [`NONE`].
 #[inline]
 fn selected() -> u32 {
     // The constructor's `Release` store publishes the copied census path before a guard observing
-    // census mode can use it. The `NONE` initializer is a conservative fallback if an unusual
-    // loader invokes a guard before this constructor; it deliberately does not perform a lazy read.
-    ACTIVE.load(Ordering::Acquire)
+    // census mode can use it.
+    let value = ACTIVE.load(Ordering::Acquire);
+
+    #[cfg(all(any(unix, windows), not(miri)))]
+    if value == UNINSTALLED {
+        uninstalled_guard();
+    }
+
+    value
+}
+
+/// Fails visibly when a guard observes [`UNINSTALLED`], rather than silently reporting the
+/// safe-looking [`NONE`] a truly non-hosted target would report forever.
+///
+/// Those two situations must not be conflated: a target with no `unix` or `windows` constructor
+/// mechanism, or a Miri execution of either, never links [`install`] and [`NONE`] is its correct,
+/// permanent answer, documented at the crate root. [`UNINSTALLED`] instead means a *hosted,
+/// non-Miri* target reached a guard before its own [`install`] ran — necessarily because some
+/// other native constructor executed instrumented Rust first, since nothing else can observe this
+/// crate's statics before then. No check of `ACTIVE` alone can tell that apart from an ordinary
+/// unmutated run, so it is called out the moment the otherwise-unreachable sentinel is observed:
+/// pre-install guard execution fails visibly instead of silently selecting baseline behavior.
+///
+/// # Panics
+///
+/// Always. There is no way to recover a trustworthy selection once this state is observed, and a
+/// run a mutation-testing tool cannot classify must never be reported as a passing mutant or an
+/// unreached census site.
+#[cfg(all(any(unix, windows), not(miri)))]
+#[cold]
+#[inline(never)]
+fn uninstalled_guard() -> ! {
+    panic!(
+        "gamma_rt: a guard executed before this crate's own constructor installed the runtime \
+         selection, which means another native constructor ran instrumented code first; no result \
+         from this process can be trusted"
+    );
 }
 
 /// Returns `true` when the mutant with ordinal `id` is the active one.
@@ -1202,7 +1979,10 @@ pub fn a(id: u32) -> bool {
 /// to know whether it is running under mutation at all.
 ///
 /// ```rust
-/// assert_eq!(gamma_rt::any(), gamma_rt::active() != gamma_rt::NONE);
+/// // Outside a mutation run nothing is active, which is what lets an ordinary build of an
+/// // instrumented crate behave exactly like an uninstrumented one. Restating this as a
+/// // comparison against `active()` would only repeat the implementation back at itself.
+/// assert!(!gamma_rt::any());
 /// ```
 #[inline]
 #[must_use]
@@ -1435,7 +2215,7 @@ mod tests {
         assert_eq!(parse(b"0"), NONE);
         assert_eq!(parse(b"7"), 7);
         assert_eq!(parse(b" 42 \n"), 42);
-        assert_eq!(parse(b"4294967292"), u32::MAX - 3);
+        assert_eq!(parse(b"4294967291"), u32::MAX - 4);
     }
 
     #[test]
@@ -1447,6 +2227,7 @@ mod tests {
         assert_eq!(parse(b"4294967295"), NONE, "the sentinel is not an ordinal");
         assert_eq!(parse(b"4294967294"), NONE, "nor is the census mode");
         assert_eq!(parse(b"4294967293"), NONE, "nor is the census file's seal");
+        assert_eq!(parse(b"4294967292"), NONE, "nor is the pre-install sentinel");
     }
 
     #[test]
@@ -1529,6 +2310,435 @@ mod tests {
 
         assert_eq!(length, None, "a truncated value is no value");
         assert_eq!(length.map_or(NONE, |length| parse(&copied[..length])), NONE);
+    }
+
+    /// A captured path is terminated where it ends, rather than where the storage happens to be
+    /// zero.
+    #[cfg(unix)]
+    #[test]
+    fn a_captured_path_is_terminated_by_the_capture_itself() {
+        let mut path = [0xFF_u8; PATH_LIMIT];
+
+        path[..4].copy_from_slice(b"/tmp");
+
+        assert_eq!(terminate_census_path(&mut path, EnvironmentValue::Found(4)), CensusRequest::Path(4));
+        assert_eq!(path[4], 0, "the capture must write the terminator `fopen` stops at");
+        assert_eq!(path[5], 0xFF, "and must write nothing beyond it");
+    }
+
+    /// The boundary the zeroed static hides: a value one byte short of the limit.
+    ///
+    /// Its terminator is the buffer's very last byte, so a capture that wrote no terminator would
+    /// leave `fopen` reading past the end of the static — undefined behavior — the moment the
+    /// storage stopped being zero-initialized. The buffer is pre-filled with non-zero bytes here
+    /// precisely so that nothing but an explicit write can make this pass.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_one_byte_short_of_the_limit_is_terminated_at_the_last_byte() {
+        let mut path = [0xFF_u8; PATH_LIMIT];
+        let length = PATH_LIMIT - 1;
+
+        path[..length].fill(b'p');
+
+        assert_eq!(
+            terminate_census_path(&mut path, EnvironmentValue::Found(length)),
+            CensusRequest::Path(length)
+        );
+        assert_eq!(path[length], 0, "the longest retainable path is left unterminated");
+        assert!(path[..length].iter().all(|byte| *byte == b'p'), "the path itself was disturbed");
+    }
+
+    /// A value that fills the buffer has nowhere to put a terminator, so no path is published.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_exactly_fills_the_limit_is_census_mode_without_a_usable_path() {
+        let mut path = [b'p'; PATH_LIMIT];
+
+        assert_eq!(
+            terminate_census_path(&mut path, EnvironmentValue::Found(PATH_LIMIT)),
+            CensusRequest::Unusable
+        );
+        assert!(
+            path.iter().all(|byte| *byte == b'p'),
+            "a truncated value must not be terminated over, nor written past"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_or_unset_census_variable_is_absence_rather_than_census_mode() {
+        let mut path = [0_u8; PATH_LIMIT];
+
+        assert_eq!(terminate_census_path(&mut path, EnvironmentValue::Absent), CensusRequest::Absent);
+        assert_eq!(terminate_census_path(&mut path, EnvironmentValue::Found(0)), CensusRequest::Absent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_environment_is_not_reported_as_an_absent_census_variable() {
+        let mut path = [0_u8; PATH_LIMIT];
+
+        assert_eq!(terminate_census_path(&mut path, EnvironmentValue::Error), CensusRequest::Error);
+    }
+
+    /// A census request this process could not read never selects an active mutant.
+    ///
+    /// The failure this pins: falling through to `GAMMA_ACTIVE` would run the mutant, write no
+    /// census file, and hand the coordinator a baseline failure it would read as a verdict about
+    /// that mutant. The caller turns this `Err` into the environment-error protocol instead.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_census_environment_failure_is_a_startup_failure_rather_than_a_mutant_selection() {
+        let consulted = Cell::new(0_usize);
+        let answer = selection_from(CensusRequest::Error, || {
+            consulted.set(consulted.get() + 1);
+
+            Ok(7)
+        });
+
+        assert_eq!(answer, Err(()));
+        assert_eq!(consulted.get(), 0, "a failed census read went on to select an active mutant");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn an_absent_census_variable_falls_through_to_the_active_ordinal() {
+        assert_eq!(selection_from(CensusRequest::Absent, || Ok(7)), Ok(7));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn an_active_environment_failure_is_still_a_startup_failure() {
+        assert_eq!(selection_from(CensusRequest::Absent, || Err(())), Err(()));
+    }
+
+    /// Either census answer selects census mode, and neither reads `GAMMA_ACTIVE` at all.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_census_request_selects_census_mode_without_consulting_the_active_ordinal() {
+        for request in [CensusRequest::Path(4), CensusRequest::Unusable] {
+            let consulted = Cell::new(0_usize);
+            let answer = selection_from(request, || {
+                consulted.set(consulted.get() + 1);
+
+                Ok(7)
+            });
+
+            assert_eq!(answer, Ok(CENSUS), "{request:?}");
+            assert_eq!(consulted.get(), 0, "census mode consulted `GAMMA_ACTIVE`: {request:?}");
+        }
+    }
+
+    /// One scripted `read` of the environ stream.
+    ///
+    /// The three shapes a real read has: bytes placed in the chunk buffer — an empty chunk being
+    /// end of stream — a signal that interrupted it before it moved anything, and a failure no
+    /// repetition can fix.
+    #[cfg(target_os = "linux")]
+    enum ScriptedRead<'a> {
+        Chunk(&'a [u8]),
+        Interrupted,
+        Failed,
+    }
+
+    /// Reports the reads a script supplies in order, mirroring what a real `read` syscall means to
+    /// [`scan_environ`]. Panics if [`scan_environ`] asks for more reads than the script supplies,
+    /// which would mean a change grew the number of reads a case needs.
+    #[cfg(target_os = "linux")]
+    fn scripted_reads<'a>(reads: &'a [ScriptedRead<'a>]) -> impl FnMut(&mut [u8; 512]) -> ReadOutcome + 'a {
+        let mut reads = reads.iter();
+
+        move |buffer: &mut [u8; 512]| {
+            let read = reads
+                .next()
+                .expect("the script must supply a read for every loop iteration scan_environ takes");
+
+            match read {
+                ScriptedRead::Chunk(chunk) => {
+                    buffer[..chunk.len()].copy_from_slice(chunk);
+
+                    ReadOutcome::Read(chunk.len())
+                }
+                ScriptedRead::Interrupted => ReadOutcome::Interrupted,
+                ScriptedRead::Failed => ReadOutcome::Failed,
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_key_split_across_a_read_boundary_still_matches() {
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(
+            b"NAME",
+            &mut destination,
+            scripted_reads(&[ScriptedRead::Chunk(b"NA"), ScriptedRead::Chunk(b"ME=value\0")]),
+        );
+
+        assert_eq!(answer, EnvironmentValue::Found(5));
+        assert_eq!(&destination[..5], b"value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_split_right_at_the_delimiter_still_matches() {
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(
+            b"NAME",
+            &mut destination,
+            scripted_reads(&[ScriptedRead::Chunk(b"NAME"), ScriptedRead::Chunk(b"=value\0")]),
+        );
+
+        assert_eq!(answer, EnvironmentValue::Found(5));
+        assert_eq!(&destination[..5], b"value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_split_inside_the_value_still_matches() {
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(
+            b"NAME",
+            &mut destination,
+            scripted_reads(&[ScriptedRead::Chunk(b"NAME=val"), ScriptedRead::Chunk(b"ue\0")]),
+        );
+
+        assert_eq!(answer, EnvironmentValue::Found(5));
+        assert_eq!(&destination[..5], b"value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_split_immediately_before_the_terminator_still_matches() {
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(
+            b"NAME",
+            &mut destination,
+            scripted_reads(&[ScriptedRead::Chunk(b"NAME=value"), ScriptedRead::Chunk(b"\0")]),
+        );
+
+        assert_eq!(answer, EnvironmentValue::Found(5));
+        assert_eq!(&destination[..5], b"value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_multibyte_unicode_value_split_across_a_read_boundary_still_matches() {
+        // "héllo" as UTF-8: 'é' is the two-byte sequence 0xC3 0xA9, split here between two reads.
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(
+            b"NAME",
+            &mut destination,
+            scripted_reads(&[ScriptedRead::Chunk(b"NAME=h\xC3"), ScriptedRead::Chunk(b"\xA9llo\0")]),
+        );
+
+        assert_eq!(answer, EnvironmentValue::Found(6));
+        assert_eq!(&destination[..6], "héllo".as_bytes());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_over_limit_value_split_across_reads_still_reports_the_destination_length() {
+        let mut destination = [0_u8; 4];
+        let answer = scan_environ(
+            b"NAME",
+            &mut destination,
+            scripted_reads(&[
+                ScriptedRead::Chunk(b"NAME=ab"),
+                ScriptedRead::Chunk(b"cd"),
+                ScriptedRead::Chunk(b"efghij\0"),
+            ]),
+        );
+
+        assert_eq!(answer, EnvironmentValue::Found(4));
+        assert_eq!(&destination, b"abcd");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_key_that_diverges_after_a_partial_match_is_not_mistaken_for_the_target() {
+        // "NAMES" shares its first four bytes with the target "NAME" but is a different, longer
+        // key; its fifth byte must break the match rather than being treated as the `=` that would
+        // start a value.
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(
+            b"NAME",
+            &mut destination,
+            scripted_reads(&[ScriptedRead::Chunk(b"NAMES=wrong\0NAME=value\0")]),
+        );
+
+        assert_eq!(answer, EnvironmentValue::Found(5));
+        assert_eq!(&destination[..5], b"value");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_absent_key_is_reported_once_the_stream_ends() {
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(
+            b"NAME",
+            &mut destination,
+            scripted_reads(&[ScriptedRead::Chunk(b"OTHER=x\0"), ScriptedRead::Chunk(b"")]),
+        );
+
+        assert_eq!(answer, EnvironmentValue::Absent);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_read_is_reported_as_an_error_rather_than_absence() {
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(
+            b"NAME",
+            &mut destination,
+            scripted_reads(&[ScriptedRead::Chunk(b"NAME="), ScriptedRead::Failed]),
+        );
+
+        assert_eq!(answer, EnvironmentValue::Error);
+    }
+
+    /// A signal that interrupts a read costs the capture nothing but the repeat.
+    ///
+    /// Reporting the interruption as a failure would refuse a startup with nothing wrong with it:
+    /// the caller turns a census read failure into the environment-error protocol, so a run under
+    /// an ordinary job-control or timer signal would die instead of taking its census.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_interrupted_read_is_retried_rather_than_reported_as_a_failure() {
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(
+            b"NAME",
+            &mut destination,
+            scripted_reads(&[
+                ScriptedRead::Interrupted,
+                ScriptedRead::Chunk(b"NAME=val"),
+                ScriptedRead::Interrupted,
+                ScriptedRead::Chunk(b"ue\0"),
+            ]),
+        );
+
+        assert_eq!(answer, EnvironmentValue::Found(5));
+        assert_eq!(&destination[..5], b"value");
+    }
+
+    /// Retrying is bounded, so a process being signalled without pause fails rather than spins.
+    ///
+    /// This runs inside a loader constructor, where an unbounded retry loop is a hang with no
+    /// diagnostic at all: the process never reaches `main` and never says why.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn endless_interruptions_are_reported_as_a_failure_rather_than_spun_on() {
+        let script: Vec<ScriptedRead<'_>> = (0..=INTERRUPTED_ATTEMPTS).map(|_| ScriptedRead::Interrupted).collect();
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(b"NAME", &mut destination, scripted_reads(&script));
+
+        assert_eq!(answer, EnvironmentValue::Error);
+    }
+
+    /// The interruption budget covers a whole capture rather than being refilled by every read.
+    ///
+    /// A per-read budget would let an interruption arriving between chunks reset the count and
+    /// leave the loop unbounded after all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_interruption_budget_is_not_refilled_by_a_read_that_succeeded() {
+        let mut script: Vec<ScriptedRead<'_>> = (0..INTERRUPTED_ATTEMPTS).map(|_| ScriptedRead::Interrupted).collect();
+
+        script.push(ScriptedRead::Chunk(b"NAME=v"));
+        script.push(ScriptedRead::Interrupted);
+
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ(b"NAME", &mut destination, scripted_reads(&script));
+
+        assert_eq!(answer, EnvironmentValue::Error);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_successful_read_reports_its_length_without_consulting_errno() {
+        let lookups = Cell::new(0_usize);
+        let outcome = read_outcome(12, || {
+            lookups.set(lookups.get() + 1);
+
+            EINTR
+        });
+
+        assert_eq!(outcome, ReadOutcome::Read(12));
+        assert_eq!(lookups.get(), 0, "a successful read paid for an errno lookup it cannot need");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_end_of_stream_read_is_a_length_rather_than_a_failure() {
+        let lookups = Cell::new(0_usize);
+        let outcome = read_outcome(0, || {
+            lookups.set(lookups.get() + 1);
+
+            EINTR
+        });
+
+        assert_eq!(outcome, ReadOutcome::Read(0));
+        assert_eq!(lookups.get(), 0, "end of stream is not a failure and must not consult errno");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_read_interrupted_by_a_signal_is_worth_repeating() {
+        assert_eq!(read_outcome(-1, || EINTR), ReadOutcome::Interrupted);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_read_that_failed_for_any_other_reason_is_final() {
+        // `EIO`. Repeating it would only produce the same answer more slowly.
+        assert_eq!(read_outcome(-1, || 5), ReadOutcome::Failed);
+    }
+
+    #[cfg(any(windows, test))]
+    #[test]
+    fn an_unset_variable_is_absent() {
+        assert_eq!(
+            environment_read_outcome(0, ERROR_ENVVAR_NOT_FOUND, 16),
+            EnvironmentReadOutcome::Absent
+        );
+    }
+
+    #[cfg(any(windows, test))]
+    #[test]
+    fn an_empty_variable_is_found_with_zero_length() {
+        assert_eq!(environment_read_outcome(0, ERROR_SUCCESS, 16), EnvironmentReadOutcome::Found(0));
+    }
+
+    #[cfg(any(windows, test))]
+    #[test]
+    fn a_zero_return_with_an_api_error_is_not_absence() {
+        assert_eq!(environment_read_outcome(0, 5, 16), EnvironmentReadOutcome::Error);
+    }
+
+    #[cfg(any(windows, test))]
+    #[test]
+    fn a_value_that_exactly_fills_the_buffer_is_too_long_to_store() {
+        // `GetEnvironmentVariable{A,W}` reports a length equal to the buffer when the value did
+        // not fit — there is no room left for the terminator this crate always keeps.
+        assert_eq!(
+            environment_read_outcome(16, ERROR_SUCCESS, 16),
+            EnvironmentReadOutcome::TooLongToStore
+        );
+    }
+
+    #[cfg(any(windows, test))]
+    #[test]
+    fn a_value_one_past_the_buffer_is_too_long_to_store() {
+        assert_eq!(
+            environment_read_outcome(17, ERROR_SUCCESS, 16),
+            EnvironmentReadOutcome::TooLongToStore
+        );
+    }
+
+    #[cfg(any(windows, test))]
+    #[test]
+    fn a_value_that_leaves_room_for_the_terminator_is_found() {
+        assert_eq!(environment_read_outcome(15, ERROR_SUCCESS, 16), EnvironmentReadOutcome::Found(15));
     }
 
     #[test]
@@ -1623,6 +2833,213 @@ mod tests {
         fn the_child_reports_what_it_read() {
             // Only meaningful when launched by the test above; harmless on its own.
             println!("read={}", active());
+        }
+
+        #[test]
+        fn active_is_immune_to_the_process_changing_its_own_environment() {
+            // The child exits from a test-only constructor before libtest reaches `main`, so its
+            // process-global environment mutation is genuinely single-threaded. The exit status
+            // reports whether it captured 7, changed the native environment to 99, and still
+            // observed 7 afterwards.
+            let executable = std::env::current_exe().expect("the test binary knows its own path");
+
+            let output = std::process::Command::new(&executable)
+                .env(ENVIRONMENT_HELPER_VAR, "1")
+                .env(ACTIVE_VAR, "7")
+                .env_remove(CENSUS_VAR)
+                .output()
+                .expect("the pre-main environment helper runs");
+
+            assert!(
+                output.status.success(),
+                "pre-main environment helper failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[test]
+        #[cfg(all(any(unix, windows), not(miri)))]
+        fn a_guard_reached_before_installation_fails_visibly_instead_of_reporting_baseline() {
+            // Linking a fixture whose own pre-main constructor calls a guard, at varying object
+            // and library order across ELF, Mach-O, and Windows, is beyond what a source-level
+            // regression can drive; this proves the underlying mechanism directly instead. The
+            // child's own `install` constructor already ran before its `main`, exactly like every
+            // other test in this binary, so the sentinel is forced back afterward purely to
+            // simulate a guard that runs in the window before that constructor executes.
+            //
+            // A subprocess of its own, selected by name and admitted by an environment marker: the
+            // forcing is one-way, so the inner half would ruin any process it shared with siblings.
+            let executable = std::env::current_exe().expect("the test binary knows its own path");
+
+            let output = std::process::Command::new(&executable)
+                .args([
+                    "--exact",
+                    "runtime::tests::process_tests::the_child_simulates_a_pre_install_guard",
+                    "--nocapture",
+                ])
+                .env(PRE_INSTALL_CHILD, "1")
+                .output()
+                .expect("the child runs");
+
+            let said = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            // Checked before the exit status, and the reason the inner half announces itself at
+            // all: a filter that matched nothing — a renamed inner test — and an inner half that
+            // returned early because the marker never reached it are both successful runs of zero
+            // tests, and a failure for some third reason is a non-zero exit that proves nothing
+            // about the guard. Only this marker says the child really reached the pre-install
+            // state, which is what the two assertions below are then reading the consequences of.
+            assert!(
+                said.contains(PRE_INSTALL_REACHED),
+                "the child never reached the simulated pre-install state\n{said}\n{stderr}"
+            );
+            assert!(!output.status.success(), "a pre-install guard must not exit successfully");
+            assert!(
+                stderr.contains("gamma_rt: a guard executed before this crate's own constructor"),
+                "{stderr}"
+            );
+        }
+
+        #[test]
+        #[cfg(windows)]
+        fn a_startup_error_is_written_to_overlapped_stderr() {
+            use std::os::windows::fs::OpenOptionsExt;
+            use std::process::Stdio;
+
+            const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+
+            let executable = std::env::current_exe().expect("the test binary knows its own path");
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the test host's clock is after the Unix epoch")
+                .as_nanos();
+            let stderr_path = std::env::temp_dir().join(format!("gamma-rt-overlapped-stderr-{}-{nonce}.txt", std::process::id()));
+            let stderr = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .custom_flags(FILE_FLAG_OVERLAPPED)
+                .open(&stderr_path)
+                .expect("an overlapped stderr file");
+
+            let status = std::process::Command::new(&executable)
+                .env("GAMMA_RT_ENVIRONMENT_ERROR_HELPER", "1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(stderr))
+                .status()
+                .expect("the child runs");
+            let bytes = std::fs::read(&stderr_path).expect("the child's stderr remains readable");
+            std::fs::remove_file(stderr_path).expect("the temporary stderr file is removed");
+
+            assert_eq!(
+                status.code(),
+                Some(86),
+                "the startup failure keeps its reserved exit code: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            assert!(
+                bytes
+                    .windows(ENVIRONMENT_ERROR_MARKER.len())
+                    .any(|window| window == ENVIRONMENT_ERROR_MARKER),
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+
+        /// Marks a re-run of this test binary as the inner half of the pre-install guard test.
+        ///
+        /// Carried on the environment rather than the command line because the command line belongs
+        /// to the test harness, which rejects arguments it does not know.
+        #[cfg(all(any(unix, windows), not(miri)))]
+        const PRE_INSTALL_CHILD: &str = "GAMMA_RT_PRE_INSTALL_CHILD";
+
+        /// What the inner half prints once it has forced the pre-install state, before it panics.
+        #[cfg(all(any(unix, windows), not(miri)))]
+        const PRE_INSTALL_REACHED: &str = "the pre-install state was forced";
+
+        #[test]
+        #[cfg(all(any(unix, windows), not(miri)))]
+        fn the_child_simulates_a_pre_install_guard() {
+            // Inert unless the outer test asked for it, because what it does cannot be undone.
+            // `install` runs once, before `main`, so a process whose sentinel has been forced back
+            // to `UNINSTALLED` stays that way: every sibling test the harness schedules afterward
+            // in this binary would then reach a guard that is behaving perfectly correctly and
+            // panic, and which tests those are is a matter of harness scheduling, so the damage
+            // would appear on some machines and not others. Under a direct `cargo test`, where this
+            // runs alongside everything else rather than alone, the marker is absent and this
+            // returns without touching anything.
+            if std::env::var_os(PRE_INSTALL_CHILD).is_none() {
+                return;
+            }
+
+            // Said before the sentinel is touched, so that it is on the wire whichever way the
+            // guard below ends this process. `println!` writes through a line buffer, so the
+            // newline is what flushes it rather than an orderly shutdown that a panic need not
+            // reach.
+            println!("{PRE_INSTALL_REACHED}");
+
+            ACTIVE.store(UNINSTALLED, Ordering::Release);
+
+            let _ = active();
+        }
+
+        #[test]
+        #[cfg(all(unix, not(miri)))]
+        fn copy_environment_via_getenv_reads_stable_values_in_an_isolated_process() {
+            // Environment mutation is process-global, so even a sequential set-and-read belongs in
+            // a child where no sibling test can read the environment at the same time.
+            let executable = std::env::current_exe().expect("the test binary knows its own path");
+
+            let output = std::process::Command::new(&executable)
+                .env(GETENV_CHILD, "1")
+                .args([
+                    "--exact",
+                    "runtime::tests::process_tests::the_child_reads_stable_values_via_getenv",
+                    "--nocapture",
+                ])
+                .output()
+                .expect("the child runs");
+
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        /// Marks a re-run of this test binary as the isolated half of the `getenv` test.
+        #[cfg(all(unix, not(miri)))]
+        const GETENV_CHILD: &str = "GAMMA_RT_GETENV_CHILD";
+
+        #[test]
+        #[cfg(all(unix, not(miri)))]
+        fn the_child_reads_stable_values_via_getenv() {
+            if std::env::var_os(GETENV_CHILD).is_none() {
+                return;
+            }
+
+            let name = b"GAMMA_RT_COR1_TEST_VARIABLE\0";
+            let values: [&[u8]; 4] = [b"1", b"22", b"333", b"4444"];
+
+            // SAFETY: `name` is a NUL-terminated C string and this isolated process has no
+            // concurrent environment access.
+            unsafe { unsetenv(name.as_ptr().cast()) };
+
+            let mut destination = [0_u8; 32];
+            assert_eq!(copy_environment_via_getenv(name, &mut destination), EnvironmentValue::Absent);
+
+            for value in values {
+                let mut buffer = [0_u8; 8];
+                buffer[..value.len()].copy_from_slice(value);
+
+                // SAFETY: `name` and `buffer` are NUL-terminated C strings, and this isolated
+                // process has no concurrent environment access.
+                let status = unsafe { setenv(name.as_ptr().cast(), buffer.as_ptr().cast(), 1) };
+                assert_eq!(status, 0, "setenv rejected a valid name and value");
+
+                let mut destination = [0_u8; 32];
+                let EnvironmentValue::Found(length) = copy_environment_via_getenv(name, &mut destination) else {
+                    core::panic!("getenv did not return the stable value");
+                };
+
+                assert_eq!(&destination[..length], value);
+            }
         }
 
         #[test]

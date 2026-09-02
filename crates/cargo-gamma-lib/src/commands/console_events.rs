@@ -81,8 +81,10 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
         }
 
         // Written whether or not the display is on. The display goes quiet when output is piped,
-        // and that is precisely where a user who asked to see the build needs to see it.
-        self.progress.insist(self.host, &crate::report::continuation(), line);
+        // and that is precisely where a user who asked to see the build needs to see it. Relayed
+        // rather than insisted on, because this is cargo's own text: its colour is the reason the
+        // option exists, and everything else it could carry is not cargo's to say.
+        self.progress.relay(self.host, &crate::report::continuation(), line);
     }
 
     fn wants_build_output(&self) -> bool {

@@ -75,7 +75,7 @@ fn attribute_directives(file: &SourceFile, scopes: &Scopes, cfg: &CfgSet) -> Res
                     } else {
                         return Err(Error::new(format!(
                             "{}:{line}: unknown directive `{namespace}::{name}`, expected `skip`, `expect_survived`, `expect_killed`, `test_timeout_multiplier`, or `timeout_multiplier`",
-                            file.path
+                            file.path()
                         ))
                         .usage());
                     }
@@ -144,14 +144,14 @@ fn unwrap_meta(meta: &Meta, cfg: &CfgSet) -> Vec<(syn::Path, TokenStream)> {
 fn comment_directives(file: &SourceFile, scopes: &Scopes) -> Result<Vec<Directive>> {
     let mut found = Vec::new();
 
-    for comment in &file.comments {
+    for comment in file.comments() {
         // Only `//` carries directives. A doc comment is part of the crate's published text, and
         // silently giving it a second meaning would be a trap.
         if comment.kind != CommentKind::Line {
             continue;
         }
 
-        let body = comment.body.trim();
+        let body = file.slice(&comment.body);
 
         let Some(source) = directive_source(body) else {
             continue;
@@ -160,7 +160,8 @@ fn comment_directives(file: &SourceFile, scopes: &Scopes) -> Result<Vec<Directiv
         if crate::parse::exceeds_nesting_limit(&source) {
             return Err(Error::new(format!(
                 "{}:{}: `{body}` nests too deeply to be safely parsed as a directive",
-                file.path, comment.line
+                file.path(),
+                comment.line
             ))
             .usage());
         }
@@ -169,7 +170,8 @@ fn comment_directives(file: &SourceFile, scopes: &Scopes) -> Result<Vec<Directiv
         let attributes = Parser::parse_str(parser, &source).map_err(|error| {
             Error::new(format!(
                 "{}:{}: `{body}` is not a well-formed directive: {error}",
-                file.path, comment.line
+                file.path(),
+                comment.line
             ))
             .usage()
         })?;
@@ -189,7 +191,7 @@ fn comment_directives(file: &SourceFile, scopes: &Scopes) -> Result<Vec<Directiv
                     if name == STATED_VALUE {
                         return Err(Error::new(format!(
                             "{}:{}: `{namespace}::{name}` states the value a function returns and must be written as a real attribute on that function, not as a comment",
-                            file.path, comment.line
+                            file.path(), comment.line
                         ))
                         .usage());
                     }
@@ -201,7 +203,7 @@ fn comment_directives(file: &SourceFile, scopes: &Scopes) -> Result<Vec<Directiv
                     } else {
                         return Err(Error::new(format!(
                             "{}:{}: unknown directive `{namespace}::{name}`, expected `skip`, `expect_survived`, `expect_killed`, `test_timeout_multiplier`, or `timeout_multiplier`",
-                            file.path, comment.line
+                            file.path(), comment.line
                         ))
                         .usage());
                     }
@@ -221,7 +223,7 @@ fn comment_directives(file: &SourceFile, scopes: &Scopes) -> Result<Vec<Directiv
             };
 
             let Some(scope) = scope else {
-                return Err(Error::new(format!("{}:{}: `{body}` does not apply to anything", file.path, comment.line)).usage());
+                return Err(Error::new(format!("{}:{}: `{body}` does not apply to anything", file.path(), comment.line)).usage());
             };
 
             let directive = build(intent, &arguments, channel, comment.line, scope, file)?;
@@ -235,7 +237,7 @@ fn comment_directives(file: &SourceFile, scopes: &Scopes) -> Result<Vec<Directiv
         // in it resolved to one the intent has been lost. Saying so is the whole point: silence
         // here reads as a working suppression and returns survivors instead.
         if !recognized {
-            return Err(Error::new(format!("{}:{}: `{body}` is not a recognized directive", file.path, comment.line)).usage());
+            return Err(Error::new(format!("{}:{}: `{body}` is not a recognized directive", file.path(), comment.line)).usage());
         }
     }
 

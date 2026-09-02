@@ -40,7 +40,7 @@
 //! |   - Used for TTL validation                          |
 //! +------------------------------------------------------+
 //! | Row Data (variable length)                           |
-//! |   - Variable-length encoded integers (vlen crate)    |
+//! |   - Variable-length encoded integers (vu128 crate)   |
 //! |   - Strings stored as length prefix + UTF-8 bytes    |
 //! |   - Optional fields use discriminant byte            |
 //! +------------------------------------------------------+

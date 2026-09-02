@@ -172,13 +172,7 @@ fn emit_reports<H: Host>(
     crate::elements::write_json(&report, &documents.json)?;
     writeln!(stream, "{} {}", styler.verb("Wrote"), documents.json)?;
 
-    let source = if args.html_external {
-        crate::html::Source::External
-    } else {
-        crate::html::Source::Inline
-    };
-
-    crate::html::write_page(&report, source, &documents.html)?;
+    crate::html::write_page(&report, &documents.html)?;
     writeln!(stream, "{} {}", styler.verb("Wrote"), documents.html)?;
     drop(stream);
 
@@ -370,6 +364,18 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
             "{} {count} {} not hold",
             styler.error("error:"),
             if count == 1 { "expectation did" } else { "expectations did" }
+        );
+
+        return Ok(EXIT_GATE_FAILED);
+    }
+
+    if args.min_score.is_some() && summary.pending > 0 {
+        let _ = writeln!(
+            host.error(),
+            "{} {} {} still pending, so the `--min-score` gate cannot evaluate the complete population",
+            styler.error("error:"),
+            summary.pending,
+            if summary.pending == 1 { "mutant is" } else { "mutants are" }
         );
 
         return Ok(EXIT_GATE_FAILED);
@@ -789,6 +795,10 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         verdict_log: VerdictLog::default(),
     };
 
+    #[cfg(feature = "internals")]
+    if incremental.is_some() && args.measure.cache_dir.is_some() {
+        crate::testing::pause_after_cache_adoption(&survey.root);
+    }
     let outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks);
 
     // A phase that failed never got to say what it found, so the line it opened is still waiting
@@ -1414,7 +1424,6 @@ mod tests {
         fails_at_every_line(3, |host| {
             let args = RunArgs {
                 artifact_dir: Some(root.clone()),
-                html_external: true,
                 annotations: crate::ci::Annotations::None,
                 ..Default::default()
             };
@@ -1442,7 +1451,6 @@ mod tests {
         let summary = root.join("summary.md");
         let args = RunArgs {
             artifact_dir: Some(root.join("reports")),
-            html_external: true,
             annotations: crate::ci::Annotations::Github,
             ..Default::default()
         };

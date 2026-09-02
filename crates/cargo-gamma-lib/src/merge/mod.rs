@@ -38,6 +38,8 @@ mod union;
 mod verdict;
 
 pub(crate) use merged::MAX_SHARDS;
+#[doc(inline)]
 pub use merged::Merged;
 pub(crate) use read::read_limited;
+#[doc(inline)]
 pub use union::merge;

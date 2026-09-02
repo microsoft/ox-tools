@@ -157,7 +157,7 @@ fn a_build_past_its_output_limit_fails_without_retaining_the_excess() {
         .stderr(Stdio::piped());
 
     let error = supervise_with_limits(
-        &mut command,
+        command,
         &work,
         Some(Duration::from_secs(30)),
         &mut crate::testing::Recorder::default(),
@@ -852,7 +852,8 @@ fn an_unattributed_failure_is_isolated_to_the_mutant_that_provably_breaks_the_bu
     fs::create_dir_all(work.root.join("gamma-rt/src").as_std_path()).expect("runtime source");
     fs::write(
         work.root.join("gamma-rt/Cargo.toml").as_std_path(),
-        "[package]\nname = \"gamma_rt\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        "[package]\nname = \"cargo-gamma-rt\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
+         [lib]\nname = \"gamma_rt\"\n",
     )
     .expect("runtime manifest");
     fs::write(
@@ -1490,7 +1491,7 @@ fn a_build_stopped_by_its_budget_takes_its_descendants_with_it() {
         let work = Workspace::adopt(root.clone(), root.join("target"));
 
         let outcome = supervise(
-            &mut command,
+            command,
             &work,
             Some(Duration::from_millis(750)),
             &mut crate::testing::Recorder::default(),
@@ -1543,7 +1544,7 @@ fn a_finished_build_is_collected_without_waiting_for_its_survivors() {
         let began = Instant::now();
 
         let output = supervise(
-            &mut command,
+            command,
             &work,
             Some(Duration::from_secs(45)),
             &mut crate::testing::Recorder::default(),
@@ -1594,7 +1595,7 @@ fn a_cargo_that_cannot_be_found_names_the_program_and_where_it_came_from() {
 }
 
 fn at(line: u32, column: u32) -> Position {
-    Position { line, column }
+    Position::new(line, column).expect("a position written into a test is one-based by construction")
 }
 
 fn guard(site: Range<Position>, mutated: Option<Range<Position>>) -> Guard {
@@ -1652,6 +1653,7 @@ fn mutant() -> Mutant {
         column: 3,
         mutator: ("lit.true_to_false".to_owned()).into(),
         item_path: ("pkg::f".to_owned()).into(),
+        trait_impl: None,
         occurrence: 0,
         replacement_index: 0,
         original: "true".to_owned().into(),

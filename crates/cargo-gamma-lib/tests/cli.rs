@@ -5,11 +5,10 @@
 
 //! End-to-end tests of the command-line surface, driven through a fake host.
 
-use core::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
-use std::{env, fs};
+use std::fs;
 
 use camino::Utf8PathBuf;
+use cargo_gamma_lib::internals::exec::gamma_base;
 use cargo_gamma_lib::run;
 use cargo_gamma_lib::testing::Sink;
 use tempfile::TempDir;
@@ -39,20 +38,15 @@ fn workspace(source: &str) -> TempDir {
 
 fn scratch_base(dir: &TempDir) -> Utf8PathBuf {
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
-    let mut identity = DefaultHasher::new();
-    root.hash(&mut identity);
 
-    let cache = env::var_os("XDG_CACHE_HOME")
-        .or_else(|| env::var_os("LOCALAPPDATA"))
-        .and_then(|path| Utf8PathBuf::from_path_buf(path.into()).ok())
-        .or_else(|| {
-            env::var_os("HOME")
-                .and_then(|path| Utf8PathBuf::from_path_buf(path.into()).ok())
-                .map(|home| home.join(".cache"))
-        })
-        .unwrap_or_else(|| root.parent().expect("temporary directory parent").join(".cargo-gamma-cache"));
+    gamma_base(&root, None)
+}
 
-    cache.join("cargo-gamma").join(format!("{:016x}", identity.finish()))
+fn mark_cache_owner(dir: &TempDir, base: &Utf8PathBuf) {
+    let owner = fs::canonicalize(dir.path()).expect("the workspace path can be resolved");
+    let owner = Utf8PathBuf::from_path_buf(owner).expect("the resolved workspace path is UTF-8");
+
+    fs::write(base.join(".cargo-gamma-owner"), owner.as_str()).expect("could not write the cache owner");
 }
 
 /// Runs the tool against a directory and returns the exit code and captured host.
@@ -105,6 +99,57 @@ fn listing_mutants_reports_the_expected_operators() {
     assert_eq!(code, EXIT_OK, "{}", host.err());
     assert!(output.contains("relational.lt_to_le"), "{output}");
     assert!(output.contains("arith.add_to_sub"), "{output}");
+}
+
+#[test]
+fn configured_trait_implementation_exclusions_remove_their_mutants() {
+    let dir = workspace(
+        "struct Subject(i32);
+
+         impl core::fmt::Debug for Subject {
+             fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                 let value = self.0 + 1;
+                 write!(formatter, \"{value}\")
+             }
+         }
+
+         impl core::fmt::Display for Subject {
+             fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                 let value = self.0 - 1;
+                 write!(formatter, \"{value}\")
+             }
+         }
+
+         pub fn outside(value: i32) -> i32 { value * 2 }
+        ",
+    );
+    fs::write(dir.path().join("gamma.toml"), "exclude-trait-impls = [\"Debug\", \"Display\"]\n").expect("could not write gamma.toml");
+
+    let (unfiltered_code, unfiltered_host) = invoke(&dir, &["list", "mutants", "--no-config"]);
+    let (filtered_code, filtered_host) = invoke(&dir, &["list", "mutants"]);
+    let unfiltered = unfiltered_host.out();
+    let filtered = filtered_host.out();
+
+    assert_eq!(unfiltered_code, EXIT_OK, "{}", unfiltered_host.err());
+    assert_eq!(filtered_code, EXIT_OK, "{}", filtered_host.err());
+    assert!(unfiltered.contains("self.0 + 1"), "{unfiltered}");
+    assert!(unfiltered.contains("self.0 - 1"), "{unfiltered}");
+    assert!(!filtered.contains("self.0 + 1"), "{filtered}");
+    assert!(!filtered.contains("self.0 - 1"), "{filtered}");
+    assert!(filtered.contains("value * 2"), "{filtered}");
+}
+
+#[test]
+fn an_unmatched_mutant_exclusion_is_a_usage_error() {
+    let dir = workspace("pub fn outside(value: i32) -> i32 { value * 2 }");
+    fs::write(dir.path().join("gamma.toml"), "exclude-trait-impls = [\"Debgu\"]\n").expect("could not write gamma.toml");
+
+    let (code, host) = invoke(&dir, &["list", "mutants"]);
+    let error = host.err();
+
+    assert_eq!(code, EXIT_USAGE, "{}", host.out());
+    assert!(error.contains("matched no trait implementations"), "{error}");
+    assert!(error.contains("Debgu"), "{error}");
 }
 
 #[test]
@@ -303,7 +348,9 @@ fn clean_deletes_only_the_current_workspaces_cached_data() {
     let base = scratch_base(&dir);
     let report = dir.path().join("target/cargo-gamma/gamma-report.json");
 
-    fs::create_dir_all(base.join("workspace")).expect("cached workspace");
+    fs::create_dir_all(&base).expect("cache");
+    mark_cache_owner(&dir, &base);
+    fs::create_dir(base.join("workspace")).expect("cached workspace");
     fs::write(base.join("last-gamma-run.json"), "{}").expect("run record");
     fs::create_dir_all(report.parent().expect("report parent")).expect("report directory");
     fs::write(&report, "{}").expect("published report");
@@ -527,6 +574,7 @@ fn seed_record(dir: &TempDir, population: &[(String, String)]) {
     let base = scratch_base(dir);
 
     fs::create_dir_all(&base).expect("could not create the scratch base");
+    mark_cache_owner(dir, &base);
 
     let (unviable, file) = population.first().expect("the fixture yields mutants");
     let (killed, _elsewhere) = population.get(1).expect("the fixture yields more than one mutant");

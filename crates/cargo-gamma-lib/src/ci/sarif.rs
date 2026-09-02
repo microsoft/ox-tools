@@ -14,17 +14,19 @@ use crate::{HashMap, HashSet, Result};
 
 /// A SARIF 2.1.0 log.
 #[derive(Debug, Serialize)]
-pub(super) struct Log {
+pub(super) struct Log<'findings> {
     pub(super) version: &'static str,
     #[serde(rename = "$schema")]
     pub(super) schema: &'static str,
-    pub(super) runs: Vec<Run>,
+    pub(super) runs: Vec<Run<'findings>>,
 }
 
+/// Borrows its results rather than owning them, so that fitting the log to the byte cap can measure
+/// one prefix after another over findings that were built once.
 #[derive(Debug, Serialize)]
-pub(super) struct Run {
+pub(super) struct Run<'findings> {
     pub(super) tool: Tool,
-    pub(super) results: Vec<Finding>,
+    pub(super) results: &'findings [Finding],
 }
 
 #[derive(Debug, Serialize)]
@@ -118,33 +120,108 @@ const SARIF_BYTES: usize = 10 * 1024 * 1024;
 /// Rule identifiers are our stable mutator names, which is what makes GitHub's alert grouping and
 /// dismissal work per operator: a team can permanently dismiss every `literal.int_zero` alert
 /// without touching anything else, and that decision keeps applying to code written next year.
+///
+/// # Errors
+///
+/// Returns an error if the log cannot be serialized to JSON. Nothing in the document is caller
+/// data of a kind serde can refuse — every value is a string, an integer or a fixed-shape struct —
+/// so this reports a failure that should not be reachable rather than a condition to handle.
+///
+/// Exceeding either the result-count or the byte cap is not an error: the log is shortened until it
+/// fits and the returned [`Truncation`] says what was dropped, because a CI run that uploads
+/// nothing is worse than one that uploads the survivors it had room for.
 pub fn sarif(mutants: &[Mutant], root: &Utf8Path, level: Level) -> Result<(String, Option<Truncation>)> {
     let survivors = findings(mutants);
     let found = survivors.len();
-    let mut kept: Vec<&Mutant> = survivors.into_iter().take(SARIF_LIMIT).collect();
+    let kept: Vec<&Mutant> = survivors.into_iter().take(SARIF_LIMIT).collect();
+    let results = results(&kept, root, level);
 
     // Shrunk until it fits rather than estimated, because the size of a finding is decided by the
     // length of a path, a message and an identifier, none of which this can predict. Halving
-    // converges in a handful of serializations even from the count limit, and the alternative to
-    // any of it is an upload GitHub refuses whole.
-    loop {
-        let text = render(&kept, root, level)?;
+    // converges in a handful of measurements even from the count limit, and the alternative to any
+    // of it is an upload GitHub refuses whole.
+    //
+    // What is measured is not what is built. Each candidate prefix is serialized into a writer that
+    // counts bytes and keeps none of them, so a log that is over the cap costs its length in
+    // arithmetic rather than in a multi-megabyte `String` that is looked at once and dropped. Only
+    // the prefix that fits is rendered, exactly once. The sequence of prefixes is the same one the
+    // repeated-render form walked, so the log that comes out is the same log.
+    let mut length = results.len();
 
-        if text.len() <= SARIF_BYTES || kept.is_empty() {
-            let truncation = (found > kept.len()).then_some(Truncation {
-                found,
-                written: kept.len(),
-            });
+    loop {
+        let rules = rules(&kept[..length], level);
+        let log = log(&results[..length], rules);
+
+        if measure(&log)? <= SARIF_BYTES || length == 0 {
+            let text = serde_json::to_string_pretty(&log)
+                .map_err(|cause| crate::error::error!("could not serialize the SARIF log").caused_by(cause))?;
+            let truncation = (found > length).then_some(Truncation { found, written: length });
 
             return Ok((text, truncation));
         }
 
-        kept.truncate(kept.len() / 2);
+        length /= 2;
     }
 }
 
-/// Serializes one SARIF log over exactly the findings it is given.
-fn render(kept: &[&Mutant], root: &Utf8Path, level: Level) -> Result<String> {
+/// The byte length the log would serialize to, without keeping the bytes.
+///
+/// # Errors
+///
+/// Returns an error if the log cannot be serialized.
+fn measure(log: &Log<'_>) -> Result<usize> {
+    let mut counter = Counted::default();
+
+    serde_json::to_writer_pretty(&mut counter, log)
+        .map_err(|cause| crate::error::error!("could not serialize the SARIF log").caused_by(cause))?;
+
+    Ok(counter.bytes)
+}
+
+/// A writer that remembers how much was written to it and nothing else.
+#[derive(Debug, Default)]
+struct Counted {
+    bytes: usize,
+}
+
+impl std::io::Write for Counted {
+    #[expect(clippy::renamed_function_params, reason = "`buf` is less clear than `buffer`")]
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes += buffer.len();
+
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Assembles the log document around results that were built once and rules that were not.
+fn log(results: &[Finding], rules: Vec<Rule>) -> Log<'_> {
+    Log {
+        version: "2.1.0",
+        schema: "https://json.schemastore.org/sarif-2.1.0.json",
+        runs: vec![Run {
+            tool: Tool {
+                driver: Driver {
+                    name: "cargo-gamma",
+                    information_uri: "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma",
+                    version: env!("CARGO_PKG_VERSION"),
+                    rules,
+                },
+            },
+            results,
+        }],
+    }
+}
+
+/// The rule table for exactly the findings that are being kept.
+///
+/// Rebuilt per candidate rather than trimmed, because a rule is shared by every finding that names
+/// it and dropping the tail of the results can retire a rule that only they used. There are at most
+/// as many rules as there are mutators, so this is small however large the population is.
+fn rules(kept: &[&Mutant], level: Level) -> Vec<Rule> {
     let mut seen = HashSet::default();
     let mut rules = Vec::new();
 
@@ -172,8 +249,12 @@ fn render(kept: &[&Mutant], root: &Utf8Path, level: Level) -> Result<String> {
 
     rules.sort_by(|left, right| left.id.cmp(&right.id));
 
-    let results = kept
-        .iter()
+    rules
+}
+
+/// Builds one SARIF result per kept mutant.
+fn results(kept: &[&Mutant], root: &Utf8Path, level: Level) -> Vec<Finding> {
+    kept.iter()
         .map(|mutant| {
             let mut fingerprints = HashMap::default();
 
@@ -199,25 +280,7 @@ fn render(kept: &[&Mutant], root: &Utf8Path, level: Level) -> Result<String> {
                 partial_fingerprints: fingerprints,
             }
         })
-        .collect();
-
-    let log = Log {
-        version: "2.1.0",
-        schema: "https://json.schemastore.org/sarif-2.1.0.json",
-        runs: vec![Run {
-            tool: Tool {
-                driver: Driver {
-                    name: "cargo-gamma",
-                    information_uri: "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma",
-                    version: env!("CARGO_PKG_VERSION"),
-                    rules,
-                },
-            },
-            results,
-        }],
-    };
-
-    serde_json::to_string_pretty(&log).map_err(|cause| crate::error::error!("could not serialize the SARIF log").caused_by(cause))
+        .collect()
 }
 
 #[cfg(test)]
@@ -257,7 +320,7 @@ mod tests {
 
         assert_eq!(result["level"], "warning");
         assert_eq!(
-            result["partialFingerprints"]["gammaMutantId/v4"],
+            result["partialFingerprints"][format!("gammaMutantId/v{}", crate::model::MUTANT_ID_VERSION)],
             "/w/src/a.rs:7:relational.gt_to_ge"
         );
 

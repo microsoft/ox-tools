@@ -170,7 +170,11 @@ fn workspace_at_base() -> TempDir {
     // A minimal two-crate workspace cargo-delta can snapshot.
     write(
         &root.join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nrust-version = \"1.97\"\n",
+    );
+    write(
+        &root.join("Justfile"),
+        "set windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n",
     );
     write(
         &root.join("crates/alpha/Cargo.toml"),
@@ -848,7 +852,11 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     // The introducing commit: add the cargo workspace + emit the anvil tree.
     write(
         &root.join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nrust-version = \"1.97\"\n",
+    );
+    write(
+        &root.join("Justfile"),
+        "set unstable\nset windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n",
     );
     write(
         &root.join("crates/alpha/Cargo.toml"),
@@ -891,10 +899,19 @@ fn fake_cargo(dir: &Path, log: &Path) {
     fs::create_dir_all(dir).unwrap();
     #[cfg(windows)]
     {
-        // `.cmd` so pwsh's `& cargo` resolves it via PATHEXT before any real
-        // `cargo.exe` on a later PATH entry.
-        let script = format!("@echo off\r\n>>\"{}\" echo %*\r\nexit /b 0\r\n", log.display());
-        fs::write(dir.join("cargo.cmd"), script).unwrap();
+        // Script shims receive the inline argument-array expression as one
+        // nested array, whereas native Cargo flattens it. Normalize the shim
+        // input before recording the native-process argv contract.
+        let script = format!(
+            "$effectiveArgs = @()\n\
+             foreach ($argument in $args) {{\n\
+             \x20   if ($argument -is [Array]) {{ $effectiveArgs += @($argument) }} else {{ $effectiveArgs += $argument }}\n\
+             }}\n\
+             Add-Content -LiteralPath '{}' -Value ($effectiveArgs -join ' ')\n\
+             exit 0\n",
+            log.display()
+        );
+        fs::write(dir.join("cargo.ps1"), script).unwrap();
     }
     #[cfg(unix)]
     {
@@ -984,6 +1001,68 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     );
 }
 
+#[test]
+fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msrv() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    run_impact(root);
+    let affected = fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let bin = root.join(".fakebin");
+    let log = root.join("cargo-argv.log");
+    fake_cargo(&bin, &log);
+    let path = path_with_prefix(&bin);
+    let run_msrv = || {
+        just_cmd(root, &["anvil-msrv-test"])
+            .env("ANVIL_IMPACT", "consume")
+            .env("RUSTUP_TOOLCHAIN", "test-stable")
+            .env("PATH", &path)
+            .output()
+            .unwrap()
+    };
+
+    let output = run_msrv();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "anvil-msrv-test failed:\n{combined}");
+    let argv = fs::read_to_string(&log).unwrap();
+    for expected in [
+        format!("+1.97 test {affected} --all-targets --all-features --locked"),
+        format!("+1.97 test {affected} --all-targets --locked"),
+    ] {
+        assert!(argv.contains(&expected), "missing MSRV invocation '{expected}' in:\n{argv}");
+    }
+
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        manifest.replace("\n[workspace.package]\nrust-version = \"1.97\"\n", "\n"),
+    )
+    .unwrap();
+    fs::write(&log, "").unwrap();
+
+    let skipped = run_msrv();
+    let skip_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&skipped.stdout),
+        String::from_utf8_lossy(&skipped.stderr)
+    );
+    assert!(skipped.status.success(), "no-MSRV invocation failed:\n{skip_combined}");
+    assert!(
+        fs::read_to_string(&log).unwrap().is_empty(),
+        "no-MSRV invocation must skip before calling cargo"
+    );
+}
+
 /// Write a fake `cargo` into `dir` that answers `cargo metadata …` by printing
 /// the contents of `metadata_json` and captures every other invocation's argv
 /// (one per line) to `log`, exiting 0. Lets `anvil-loom` be driven with a
@@ -993,16 +1072,22 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
     #[cfg(windows)]
     {
         let script = format!(
-            "@echo off\r\nif \"%1\"==\"metadata\" (\r\n  type \"{meta}\"\r\n  exit /b 0\r\n)\r\n>>\"{log}\" echo %*\r\nexit /b 0\r\n",
+            "$effectiveArgs = @()\n\
+             foreach ($argument in $args) {{\n\
+             \x20   if ($argument -is [Array]) {{ $effectiveArgs += @($argument) }} else {{ $effectiveArgs += $argument }}\n\
+             }}\n\
+             if ($effectiveArgs -contains 'metadata') {{ Get-Content -Raw -LiteralPath '{meta}'; exit 0 }}\n\
+             Add-Content -LiteralPath '{log}' -Value ($effectiveArgs -join ' ')\n\
+             exit 0\n",
             meta = metadata_json.display(),
             log = log.display()
         );
-        fs::write(dir.join("cargo.cmd"), script).unwrap();
+        fs::write(dir.join("cargo.ps1"), script).unwrap();
     }
     #[cfg(unix)]
     {
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = metadata ]; then cat '{meta}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
+            "#!/bin/sh\ncase \"$1\" in +*) shift ;; esac\nif [ \"$1\" = metadata ]; then cat '{meta}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
             meta = metadata_json.display(),
             log = log.display()
         );
@@ -1307,7 +1392,11 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
     let root = tmp.path();
     write(
         &root.join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nrust-version = \"1.97\"\n",
+    );
+    write(
+        &root.join("Justfile"),
+        "set unstable\nset windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n",
     );
     write(
         &root.join("crates/my-macro/Cargo.toml"),
@@ -1334,23 +1423,27 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
 }
 
 /// Drive `just _anvil-impact-snapshot` under a `cargo` shim that records the
-/// `RUSTUP_TOOLCHAIN` in effect at each `cargo delta snapshot` and a `rustup`
-/// shim that reports a fixed active toolchain, returning the two logged values
-/// in order: `[baseline, current]`. `caller_toolchain` is the value the caller
-/// exports (or `None` to leave it unset).
-fn snapshot_toolchain_probe(caller_toolchain: Option<&str>) -> Vec<String> {
+/// `RUSTUP_TOOLCHAIN` in effect at each `cargo delta snapshot`, returning the
+/// two logged values in order: `[baseline, current]`. `caller_toolchain` is the
+/// input override the caller exports (or `None` to use repository selection).
+fn snapshot_toolchain_probe(caller_toolchain: Option<&str>, toolchain_file: bool) -> Vec<String> {
     let tmp = workspace();
     let root = tmp.path();
-    // cargo shim: log the active RUSTUP_TOOLCHAIN on each `delta snapshot`
-    // (emitting `{}` as the snapshot), satisfy the cargo-delta prereq probe
-    // (`cargo install --list`), and no-op everything else. rustup shim: report
-    // a fixed active toolchain, distinct from any caller value, so the baseline
-    // override is unambiguous.
+    if toolchain_file {
+        write(&root.join("rust-toolchain.toml"), "[toolchain]\npath = \"toolchains/local\"\n");
+        git(root, &["add", "rust-toolchain.toml"]);
+        git(root, &["commit", "-q", "-m", "select local toolchain"]);
+    }
+    // cargo shim: log the effective explicit argument or RUSTUP_TOOLCHAIN on
+    // each `delta snapshot` (emitting `{}` as the snapshot), satisfy the
+    // cargo-delta prereq probe (`cargo install --list`), and no-op everything
+    // else.
     let shim = ShimBin::new(&[
         (
             "cargo.ps1",
             "if (($args -contains 'delta') -and ($args -contains 'snapshot')) {\n\
-            \x20   $tc = if (Test-Path Env:\\RUSTUP_TOOLCHAIN) { $env:RUSTUP_TOOLCHAIN } else { '<unset>' }\n\
+            \x20   $explicit = @($args | Where-Object { $_ -like '+*' } | Select-Object -First 1)\n\
+            \x20   $tc = if ($explicit.Count -eq 1) { $explicit[0].Substring(1) } elseif (Test-Path Env:\\RUSTUP_TOOLCHAIN) { $env:RUSTUP_TOOLCHAIN } else { '<unset>' }\n\
             \x20   Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value $tc\n\
             \x20   Write-Output '{}'\n\
             \x20   exit 0\n\
@@ -1362,12 +1455,8 @@ fn snapshot_toolchain_probe(caller_toolchain: Option<&str>) -> Vec<String> {
             exit 0\n",
         ),
         (
-            "rustup.ps1",
-            "if (($args -contains 'show') -and ($args -contains 'active-toolchain')) {\n\
-            \x20   Write-Output 'anvil-active-toolchain'\n\
-            \x20   exit 0\n\
-            }\n\
-            exit 0\n",
+            "rustc.ps1",
+            "if ($args -contains 'sysroot') { Write-Output '/toolchains/test (fork) toolchain' }\nexit 0\n",
         ),
     ]);
 
@@ -1389,35 +1478,39 @@ fn snapshot_toolchain_probe(caller_toolchain: Option<&str>) -> Vec<String> {
 
 #[test]
 #[serial]
-fn impact_snapshot_runs_baseline_under_active_toolchain_then_restores_caller_value() {
+fn impact_snapshot_uses_current_checkout_toolchain_for_both_trees() {
     if !core_tools_available() {
         return;
     }
     // The baseline snapshot is taken inside a worktree checked out at the merge
     // target, whose rust-toolchain.toml may pin a toolchain that is NOT
-    // installed here (any PR that bumps rust-toolchain.toml). The recipe runs
-    // that snapshot under the *active* toolchain via RUSTUP_TOOLCHAIN, then must
-    // put the caller's value back so the *current* snapshot runs under the
-    // toolchain the caller chose -- restoring a prior value, or removing the
-    // override entirely when the caller set none. A regression that forgets to
-    // restore would leak the baseline override into the current snapshot.
+    // installed here (any PR that bumps rust-toolchain.toml). Both snapshots
+    // must therefore use the compiler selected from the current checkout so
+    // cargo-delta compares metadata produced under one compiler policy.
 
-    // Case A: the caller pins RUSTUP_TOOLCHAIN. Baseline runs under the active
-    // toolchain; the current snapshot must see the caller's pin restored.
-    let with_caller = snapshot_toolchain_probe(Some("caller-pin-toolchain"));
+    // Case A: the caller override is the selected compiler for both trees.
+    let with_caller = snapshot_toolchain_probe(Some("caller-pin-toolchain"), false);
     assert_eq!(
         with_caller,
-        vec!["anvil-active-toolchain".to_owned(), "caller-pin-toolchain".to_owned()],
-        "baseline must snapshot under the active toolchain, then the caller's RUSTUP_TOOLCHAIN must be restored for the current snapshot"
+        vec!["caller-pin-toolchain".to_owned(), "caller-pin-toolchain".to_owned()],
+        "baseline and current snapshots must both use the caller's selected compiler"
     );
 
-    // Case B: the caller sets nothing. The recipe introduces RUSTUP_TOOLCHAIN
-    // only for the baseline, then must REMOVE it so the current snapshot runs
-    // under the caller's (unset) toolchain rather than a leaked override.
-    let without_caller = snapshot_toolchain_probe(None);
+    // Case B: without an override, the workspace MSRV selects both snapshots.
+    let without_caller = snapshot_toolchain_probe(None, false);
     assert_eq!(
         without_caller,
-        vec!["anvil-active-toolchain".to_owned(), "<unset>".to_owned()],
-        "with no caller RUSTUP_TOOLCHAIN, the recipe must remove the baseline override so the current snapshot sees it unset"
+        vec!["1.97".to_owned(), "1.97".to_owned()],
+        "baseline and current snapshots must both use Anvil's selected MSRV"
+    );
+
+    // Case C: the baseline receives the current checkout's selected rustc
+    // sysroot as an unambiguous path toolchain. The current snapshot needs no
+    // override because it runs under the selecting repository file itself.
+    let with_file = snapshot_toolchain_probe(None, true);
+    assert_eq!(
+        with_file,
+        vec!["/toolchains/test (fork) toolchain".to_owned(), "<unset>".to_owned()],
+        "the baseline must inherit the current file selection while the current snapshot uses it natively"
     );
 }

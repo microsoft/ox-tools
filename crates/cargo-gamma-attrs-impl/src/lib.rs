@@ -46,4 +46,5 @@
 
 mod implementation;
 
-pub use implementation::{CHAIN_FACTOR, MOST_FACTOR, NESTING_LIMIT, inert, inert_timeout, value};
+#[doc(inline)]
+pub use implementation::{CHAIN_FACTOR, MOST_FACTOR, NESTING_LIMIT, exceeds_nesting_limit, inert, inert_timeout, value};

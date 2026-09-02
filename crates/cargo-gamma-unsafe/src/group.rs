@@ -44,6 +44,12 @@ pub fn exited(pid: u32) -> io::Result<bool> {
     Ok(reported != 0)
 }
 
+/// Whether an observation error proves another waiter already reaped the child.
+#[must_use]
+pub fn reaped_elsewhere(cause: &io::Error) -> bool {
+    cause.raw_os_error() == Some(libc::ECHILD)
+}
+
 /// Kills every process in a group.
 ///
 /// A group that has already exited is treated as successfully gone.
@@ -226,5 +232,7 @@ mod tests {
         let error = exited(1).expect_err("pid 1 is not this process's child");
 
         assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+        assert!(reaped_elsewhere(&error));
+        assert!(!reaped_elsewhere(&io::Error::from_raw_os_error(libc::EPERM)));
     }
 }

@@ -15,6 +15,7 @@ use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, Target, TargetKind};
+use syn::visit::{self, Visit};
 use walkdir::WalkDir;
 
 use super::compile_fail::{CompileFailTarget, compile_fail_targets};
@@ -179,6 +180,7 @@ pub struct Survey {
     diff: Option<Diff>,
     shard: Option<(u32, u32)>,
     settled: HashMap<MutantId, Outcome>,
+    exclude_trait_impls: Vec<String>,
 }
 
 /// What scanning some part of the workspace yielded.
@@ -283,6 +285,8 @@ impl Survey {
         let enabled = features::enabled(&metadata, &features);
         let mut files: Vec<TargetFile> = Vec::new();
         let mut seen: HashSet<Utf8PathBuf> = HashSet::default();
+        let mut exclusion_files: Vec<TargetFile> = Vec::new();
+        let mut exclusion_seen: HashSet<(Utf8PathBuf, String)> = HashSet::default();
         let mut declaration_files: HashMap<String, Vec<Utf8PathBuf>> = HashMap::default();
         let mut declaration_seen: HashSet<Utf8PathBuf> = HashSet::default();
         let mut roots: HashMap<String, Vec<Utf8PathBuf>> = HashMap::default();
@@ -296,6 +300,7 @@ impl Survey {
         // the workspace and the overwhelmingly common case has no patterns at all. A diff needs the
         // same list, to say which workspace file each path it names refers to.
         let checking_patterns = !args.files.is_empty() || !args.exclude_files.is_empty();
+        let checking_exclusions = !args.exclude_trait_impls.is_empty();
         let collecting_walked = checking_patterns || diff.is_some();
         let mut walked: Vec<Utf8PathBuf> = Vec::new();
 
@@ -320,7 +325,7 @@ impl Survey {
             // patterns usually live in `gamma.toml` and are written once for the whole workspace,
             // whereas `--package` narrows a single run; validating them against the narrowed set
             // would reject a correct config on every run that happened to select another package.
-            if !mutating && !checking_patterns {
+            if !mutating && !checking_patterns && !checking_exclusions {
                 continue;
             }
 
@@ -350,6 +355,14 @@ impl Survey {
 
                 for absolute in walk_rust_files(directory)? {
                     let relative = placed_under(&root, &absolute, &package.name)?;
+
+                    if checking_exclusions && exclusion_seen.insert((absolute.clone(), package.name.to_string())) {
+                        exclusion_files.push(TargetFile {
+                            path: relative.clone(),
+                            absolute: absolute.clone(),
+                            package: package.name.to_string(),
+                        });
+                    }
 
                     if collecting_walked {
                         walked.push(relative.clone());
@@ -390,6 +403,10 @@ impl Survey {
         for paths in declaration_files.values_mut() {
             paths.sort();
         }
+        exclusion_files.sort_by(|left, right| left.path.cmp(&right.path));
+
+        let cfgs = configuration(&root, cargo, &enabled);
+        validate_trait_exclusions(&args.exclude_trait_impls, &exclusion_files, &cfgs)?;
 
         // The diff names files; only the workspace can say which files those are. Resolving it
         // needs the walk to have happened, and it fails rather than selects nothing when not one
@@ -416,8 +433,6 @@ impl Survey {
             by_package.entry(file.package.clone()).or_default().push(position);
         }
 
-        let cfgs = configuration(&root, cargo, &enabled);
-
         Ok(Self {
             root,
             files,
@@ -433,6 +448,7 @@ impl Survey {
             diff,
             shard,
             settled: HashMap::default(),
+            exclude_trait_impls: args.exclude_trait_impls.clone(),
             source_dirs: sorted(source_dirs),
             external_inputs: external_inputs.roots,
             untracked_build_script_inputs: external_inputs.has_build_scripts,
@@ -568,11 +584,29 @@ impl Survey {
         );
         let Scan {
             mut mutants,
-            suppressed,
+            mut suppressed,
             idle,
             skipped,
             digests,
         } = scan(&files, &declaration_files, &roots, selection, &self.cfgs)?;
+
+        if !self.exclude_trait_impls.is_empty() {
+            let mut excluded_suppressed = 0_usize;
+
+            mutants.retain(|mutant| {
+                let excluded = mutant
+                    .trait_impl
+                    .as_ref()
+                    .is_some_and(|name| self.exclude_trait_impls.iter().any(|excluded| excluded == name.as_ref()));
+
+                if excluded && mutant.outcome == Outcome::Ignored {
+                    excluded_suppressed = excluded_suppressed.saturating_add(1);
+                }
+
+                !excluded
+            });
+            suppressed = suppressed.saturating_sub(excluded_suppressed);
+        }
 
         // Within a file the diff still has the last word: a changed line usually sits among many
         // that were not touched, and mutating those would report on code the change never went
@@ -663,6 +697,15 @@ impl Survey {
     }
 }
 
+fn unmatched_exclusion(index: usize, exclusion: &str) -> Error {
+    error!(
+        "exclude-trait-impls entry {} (`{}`) matched no trait implementations; check the lexical terminal trait name",
+        index + 1,
+        exclusion
+    )
+    .usage()
+}
+
 /// Reports what each package yielded, once the counts exist.
 ///
 /// Package order follows the files, which are already sorted by path, so the same workspace always
@@ -705,7 +748,7 @@ fn mutate(file: &TargetFile, source: &SourceFile, selection: &Selection, cfgs: &
     // Taken from the tree that was parsed for mutants anyway, so knowing which files exist only for
     // tests costs a walk over the top-level items rather than a second parse of everything.
     let cfg = cfgs.for_package(&file.package);
-    let declared = modules::declarations(&file.absolute, &source.ast, cfg);
+    let declared = modules::declarations(&file.absolute, source.ast(), cfg);
 
     // Before anything is collected, because a stated value that cannot be honoured is a hint the
     // author believes is working. Reporting it is worth more than the mutants of the file it sits
@@ -731,8 +774,99 @@ fn mutate(file: &TargetFile, source: &SourceFile, selection: &Selection, cfgs: &
         suppressed,
         idle,
         declared,
-        digest: crate::discover::digest(source.text.as_bytes()),
+        digest: crate::discover::digest(source.text().as_bytes()),
     })
+}
+
+struct TraitImplementations<'cfg> {
+    cfg: &'cfg CfgSet,
+    names: HashSet<String>,
+}
+
+impl TraitImplementations<'_> {
+    fn collect(file: &syn::File, cfg: &CfgSet) -> HashSet<String> {
+        let mut collector = TraitImplementations {
+            cfg,
+            names: HashSet::default(),
+        };
+
+        collector.visit_file(file);
+
+        collector.names
+    }
+}
+
+/// Validates workspace-scoped trait exclusions before run-scoped filters narrow the population.
+fn validate_trait_exclusions(exclusions: &[String], files: &[TargetFile], cfgs: &Cfgs) -> Result<()> {
+    if exclusions.is_empty() {
+        return Ok(());
+    }
+
+    let mut implementations: HashSet<String> = HashSet::default();
+
+    for file in files {
+        match SourceFile::read(&file.absolute) {
+            Ok(source) => implementations.extend(TraitImplementations::collect(source.ast(), cfgs.for_package(&file.package))),
+            Err(error) if error.is_skippable() => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        if exclusions.iter().all(|exclusion| implementations.contains(exclusion.as_str())) {
+            return Ok(());
+        }
+    }
+
+    if let Some((index, exclusion)) = exclusions
+        .iter()
+        .enumerate()
+        .find(|(_index, exclusion)| !implementations.contains(exclusion.as_str()))
+    {
+        return Err(unmatched_exclusion(index, exclusion));
+    }
+
+    Ok(())
+}
+
+impl<'ast> Visit<'ast> for TraitImplementations<'_> {
+    #[expect(
+        clippy::renamed_function_params,
+        reason = "`item` identifies the syntax node more clearly than the trait declaration's `i`"
+    )]
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !self.cfg.holds_for(item_attributes(item)) {
+            return;
+        }
+
+        if let syn::Item::Impl(item) = item
+            && let Some((path, _for_token)) = &item.trait_
+            && let Some(segment) = path.segments.last()
+        {
+            let _new = self.names.insert(segment.ident.to_string());
+        }
+
+        visit::visit_item(self, item);
+    }
+}
+
+fn item_attributes(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(node) => &node.attrs,
+        syn::Item::Enum(node) => &node.attrs,
+        syn::Item::ExternCrate(node) => &node.attrs,
+        syn::Item::Fn(node) => &node.attrs,
+        syn::Item::ForeignMod(node) => &node.attrs,
+        syn::Item::Impl(node) => &node.attrs,
+        syn::Item::Macro(node) => &node.attrs,
+        syn::Item::Mod(node) => &node.attrs,
+        syn::Item::Static(node) => &node.attrs,
+        syn::Item::Struct(node) => &node.attrs,
+        syn::Item::Trait(node) => &node.attrs,
+        syn::Item::TraitAlias(node) => &node.attrs,
+        syn::Item::Type(node) => &node.attrs,
+        syn::Item::Union(node) => &node.attrs,
+        syn::Item::Use(node) => &node.attrs,
+        _ => &[],
+    }
 }
 
 /// Reads, parses and mutates every file, returning the population and how much of it was suppressed.
@@ -831,10 +965,17 @@ fn scan(
         .map(|&(path, cfg)| (path, cfg))
         .collect();
 
-    if !extra_decl_files.is_empty() {
-        let extra_declared = parse_declarations_parallel(&extra_decl_files)?;
+    let declaration_skips: Vec<(Utf8PathBuf, String)> = if extra_decl_files.is_empty() {
+        Vec::new()
+    } else {
+        let Declarations {
+            declared: extra_declared,
+            skipped: extra_skipped,
+        } = parse_declarations_parallel(&extra_decl_files)?;
+
         declared.extend(extra_declared);
-    }
+        extra_skipped
+    };
 
     let excluded = modules::excluded_files(roots, &declared);
     let total = collected.iter().map(|(_index, parsed)| parsed.mutants.len()).sum();
@@ -851,103 +992,159 @@ fn scan(
         if let Some(file) = files.get(index) {
             let _replaced = digests.insert(file.path.clone(), parsed.digest);
         }
-
         mutants.extend(parsed.mutants);
         suppressed += parsed.suppressed;
         idle.extend(parsed.idle);
     }
 
-    // Sorted by file order for the same reason the earliest failure is the one reported: which
-    // worker claimed which file is a race, and a diagnostic that reorders itself between runs is
-    // one nobody can diff.
-    let mut unanalyzable = shared.skipped.into_inner().unwrap_or_else(PoisonError::into_inner);
+    // Keyed by path rather than by claim order for the same reason the earliest failure is the one
+    // reported: which worker claimed which file is a race, and a diagnostic that reorders itself
+    // between runs is one nobody can diff. Sorting the selected and declaration-only skips together
+    // by the same key also makes the list independent of *which* of the two paths read a file, so
+    // narrowing a selection moves a skip between paths without moving it in the report.
+    let selected_skips = shared.skipped.into_inner().unwrap_or_else(PoisonError::into_inner);
+    let mut unanalyzable: Vec<(Utf8PathBuf, String)> = selected_skips
+        .into_iter()
+        .map(|(at, message)| {
+            let path = files.get(at).map_or_else(Utf8PathBuf::new, |file| file.absolute.clone());
 
-    unanalyzable.sort_by_key(|(at, _message)| *at);
+            (path, message)
+        })
+        .chain(declaration_skips)
+        .collect();
+
+    unanalyzable.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    unanalyzable.dedup();
 
     Ok(Scan {
         mutants,
         suppressed,
         idle,
-        skipped: unanalyzable.into_iter().map(|(_at, message)| message).collect(),
+        skipped: unanalyzable.into_iter().map(|(_path, message)| message).collect(),
         digests,
     })
 }
 
-type DeclarationParse = (usize, Result<(Utf8PathBuf, Vec<modules::Declaration>)>);
+type DeclarationParse = (usize, Result<DeclarationOutcome>);
+
+/// What parsing one declaration-only file yielded: its declarations, or the reason it was skipped.
+enum DeclarationOutcome {
+    /// The file parsed, and declares these modules.
+    Declared(Utf8PathBuf, Vec<modules::Declaration>),
+
+    /// The file could not be analyzed, and this diagnostic names it and says why.
+    Skipped(Utf8PathBuf, String),
+}
+
+/// Declarations gathered from files outside the selection, with the ones that could not be read.
+struct Declarations {
+    declared: Vec<(Utf8PathBuf, Vec<modules::Declaration>)>,
+    skipped: Vec<(Utf8PathBuf, String)>,
+}
 
 /// Parses declaration-only files with bounded parallelism.
 ///
 /// Each file is read and parsed solely to extract module declarations — no mutation is performed.
 /// The parallelism is bounded by `available_parallelism` to avoid exceeding system thread limits.
-/// Results are returned in input order.
+/// Results are returned in path order.
+///
+/// A file this tool cannot analyze but `rustc` can build is recorded as a skip rather than a
+/// failure, exactly as the selected-file path records it. Otherwise narrowing a selection would
+/// move such a file from the mutating path to this one and turn a partial measurement of an
+/// otherwise valid workspace into a failed run, without a line of the workspace having changed.
+/// Its declarations are lost with it, so a module only that file declares is treated as absent —
+/// the same shape as the file having been unreadable to a selection that never mentioned it.
 ///
 /// # Errors
 ///
-/// Returns the first file-read or parse error encountered, in path order.
-fn parse_declarations_parallel(files: &[(&Utf8Path, &CfgSet)]) -> Result<Vec<(Utf8PathBuf, Vec<modules::Declaration>)>> {
+/// Returns the first non-skippable file-read or parse error encountered, in path order.
+fn parse_declarations_parallel(files: &[(&Utf8Path, &CfgSet)]) -> Result<Declarations> {
     if files.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Declarations {
+            declared: Vec::new(),
+            skipped: Vec::new(),
+        });
     }
 
     let workers = thread::available_parallelism().map_or(1, NonZero::get).min(files.len());
 
-    if workers <= 1 {
+    let mut results: Vec<DeclarationParse> = if workers <= 1 {
         let mut results = Vec::with_capacity(files.len());
-        for &(path, cfg) in files {
-            let source = SourceFile::read(path)?;
-            results.push(((*path).to_owned(), modules::declarations(path, &source.ast, cfg)));
+
+        for (index, &(path, cfg)) in files.iter().enumerate() {
+            results.push((index, parse_declarations_of(path, cfg)));
         }
-        return Ok(results);
-    }
 
-    let next = AtomicUsize::new(0);
+        results
+    } else {
+        let next = AtomicUsize::new(0);
 
-    let mut results: Vec<DeclarationParse> = thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                let next = &next;
-                scope.spawn(move || {
-                    let mut mine = Vec::new();
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(&(path, cfg)) = files.get(index) else {
-                            break;
-                        };
-                        match SourceFile::read(path) {
-                            Ok(source) => {
-                                let decls = modules::declarations(path, &source.ast, cfg);
-                                mine.push((index, Ok(((*path).to_owned(), decls))));
-                            }
-                            Err(e) => {
-                                mine.push((index, Err(e.into())));
-                            }
+        thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_worker| {
+                    let next = &next;
+
+                    scope.spawn(move || {
+                        let mut mine = Vec::new();
+
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(&(path, cfg)) = files.get(index) else {
+                                break;
+                            };
+
+                            mine.push((index, parse_declarations_of(path, cfg)));
                         }
-                    }
-                    mine
-                })
-            })
-            .collect();
 
-        let mut all = Vec::new();
-        for handle in handles {
-            all.extend(handle.join().unwrap_or_else(|payload| resume_unwind(payload)));
-        }
-        all
-    });
+                        mine
+                    })
+                })
+                .collect();
+
+            let mut all = Vec::new();
+
+            for handle in handles {
+                all.extend(handle.join().unwrap_or_else(|payload| resume_unwind(payload)));
+            }
+
+            all
+        })
+    };
 
     results.sort_by_key(|(index, _result)| *index);
 
     // Check for errors after restoring input order, so scheduling cannot choose the diagnostic.
-    let mut ok_results: Vec<(Utf8PathBuf, Vec<modules::Declaration>)> = Vec::with_capacity(results.len());
+    let mut gathered = Declarations {
+        declared: Vec::with_capacity(results.len()),
+        skipped: Vec::new(),
+    };
 
     for (_index, result) in results {
-        ok_results.push(result?);
+        match result? {
+            DeclarationOutcome::Declared(path, declarations) => gathered.declared.push((path, declarations)),
+            DeclarationOutcome::Skipped(path, message) => gathered.skipped.push((path, message)),
+        }
     }
 
     // Declaration consumers use path order, independent of how the caller ordered its pairs.
-    ok_results.sort_by(|a, b| a.0.cmp(&b.0));
+    gathered.declared.sort_by(|left, right| left.0.cmp(&right.0));
+    gathered.skipped.sort_by(|left, right| left.0.cmp(&right.0));
 
-    Ok(ok_results)
+    Ok(gathered)
+}
+
+/// Reads one declaration-only file, turning a skippable failure into a named skip.
+fn parse_declarations_of(path: &Utf8Path, cfg: &CfgSet) -> Result<DeclarationOutcome> {
+    match SourceFile::read(path) {
+        Ok(source) => Ok(DeclarationOutcome::Declared(
+            path.to_owned(),
+            modules::declarations(path, source.ast(), cfg),
+        )),
+
+        Err(error) if error.is_skippable() => Ok(DeclarationOutcome::Skipped(path.to_owned(), error.to_string())),
+
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// What parsing and mutating a set of files produced.
@@ -1020,8 +1217,8 @@ fn work(files: &[&TargetFile], shared: &Shared, selection: &Selection, cfgs: &Cf
                 Ok(mut source) => {
                     // Report paths relative to the workspace root; that is what a user can act on
                     // and what a suppression or an expectation is keyed by.
-                    source.path = file.path.clone();
-                    index.absorb(collect::Defaults::of_in(&source.ast, cfgs.for_package(&file.package)));
+                    source.set_path(file.path.clone());
+                    index.absorb(collect::Defaults::of_in(source.ast(), cfgs.for_package(&file.package)));
                     mine.push((at, source));
                 }
 
@@ -2599,6 +2796,134 @@ mod tests {
         assert!(absent.mutants.is_empty(), "{:?}", absent.mutants);
     }
 
+    #[test]
+    fn every_mutant_exclusion_rule_must_match() {
+        let (_directory, root) = workspace();
+
+        write(
+            &root,
+            "core/src/lib.rs",
+            "trait Diagnostic { fn value(&self) -> i32; }\n\
+             struct Message;\n\
+             impl Diagnostic for Message { fn value(&self) -> i32 { 1 + 2 } }\n",
+        );
+
+        let failure = Survey::new(
+            &SelectArgs {
+                dir: root,
+                exclude_trait_impls: vec!["Diagnostic".to_owned(), "Diagnostc".to_owned()],
+                ..SelectArgs::default()
+            },
+            None,
+        )
+        .expect_err("one unmatched entry must refuse the selection");
+
+        assert!(failure.is_usage());
+        assert!(failure.to_string().contains("entry 2"), "{failure}");
+        assert!(failure.to_string().contains("Diagnostc"), "{failure}");
+        assert!(failure.to_string().contains("matched no trait implementations"), "{failure}");
+    }
+
+    #[test]
+    fn exclusion_validation_matches_implementations_without_selected_mutants() {
+        let (_directory, root) = workspace();
+
+        write(
+            &root,
+            "core/src/lib.rs",
+            "trait Diagnostic { fn write(&self); }\n\
+             struct Message;\n\
+             impl Diagnostic for Message { fn write(&self) {} }\n\
+             pub fn compare(left: i32, right: i32) -> bool { left < right }\n",
+        );
+
+        let survey = survey(
+            &root,
+            SelectArgs {
+                exclude_trait_impls: vec!["Diagnostic".to_owned()],
+                ..SelectArgs::default()
+            },
+        );
+        let mut ordinals = 0;
+        let scanned = survey
+            .scan(None, &Selection::parse("relational").expect("selection"), &mut ordinals)
+            .expect("the implementation exists even though it contains no selected mutant");
+
+        assert!(!scanned.mutants.is_empty(), "the ordinary relational mutant remains selected");
+    }
+
+    #[test]
+    fn package_scans_apply_exclusions_after_workspace_validation() {
+        let (_directory, root) = workspace();
+
+        write(
+            &root,
+            "core/src/lib.rs",
+            "trait Diagnostic { fn value(&self) -> i32; }\n\
+             struct Message;\n\
+             impl Diagnostic for Message { fn value(&self) -> i32 { 1 + 2 } }\n",
+        );
+
+        let survey = survey(
+            &root,
+            SelectArgs {
+                exclude_trait_impls: vec!["Diagnostic".to_owned()],
+                ..SelectArgs::default()
+            },
+        );
+        let packages = survey.packages();
+
+        assert_eq!(packages, ["app", "core"], "the non-matching package must be scanned first");
+
+        let selection = Selection::parse("arith.add_to_sub").expect("selection");
+        let mut ordinals = 0;
+        let first = survey
+            .scan(Some(&packages[0]), &selection, &mut ordinals)
+            .expect("workspace validation already established the name");
+        let second = survey
+            .scan(Some(&packages[1]), &selection, &mut ordinals)
+            .expect("the matching package is scanned normally");
+
+        assert!(!first.mutants.is_empty(), "the first package still contributes ordinary mutants");
+        assert!(
+            second
+                .mutants
+                .iter()
+                .all(|mutant| mutant.trait_impl.as_deref() != Some("Diagnostic")),
+            "{:?}",
+            second.mutants
+        );
+    }
+
+    #[test]
+    fn exclusion_validation_is_independent_of_package_selection() {
+        let (_directory, root) = workspace();
+
+        write(
+            &root,
+            "core/src/lib.rs",
+            "struct Message;\n\
+             impl core::fmt::Debug for Message {\n\
+                 fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {\n\
+                     formatter.write_str(\"message\")\n\
+                 }\n\
+             }\n",
+        );
+
+        let survey = Survey::new(
+            &SelectArgs {
+                dir: root,
+                packages: vec!["app".to_owned()],
+                exclude_trait_impls: vec!["Debug".to_owned()],
+                ..SelectArgs::default()
+            },
+            None,
+        )
+        .expect("a workspace-wide exclusion may match outside the selected package");
+
+        assert_eq!(survey.packages(), ["app"]);
+    }
+
     /// A workspace whose shapes exercise the deduplication and graph-walking paths.
     ///
     /// `core` has both a library and a binary rooted in the same directory, so its files are
@@ -2927,6 +3252,64 @@ mod tests {
             scanned.mutants.iter().any(|mutant| mutant.file.as_str().ends_with("lib.rs")),
             "{:?}",
             scanned.mutants.iter().map(|mutant| mutant.file.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// The same deeply nested file, reached only as a module declaration, must be skipped rather
+    /// than fail the run.
+    ///
+    /// Narrowing `--files` moves a file out of the mutating population and into the
+    /// declaration-only path, which exists purely to learn which modules are test-only or
+    /// inactive. If that path propagated the nesting-limit error, the very same buildable
+    /// workspace would measure partially under a wide selection and refuse to run at all under a
+    /// narrow one — a selection flag deciding whether the tree is sound. Both selections must
+    /// complete, and both must name the same file for the same reason.
+    #[test]
+    fn a_file_too_deep_to_walk_is_skipped_the_same_way_when_only_its_declarations_are_needed() {
+        let (_directory, root) = workspace();
+
+        let depth = 512;
+        let deep = format!("pub fn deep() -> i32 {{\n    {}1{}\n}}\n", "(".repeat(depth), ")".repeat(depth));
+
+        write(&root, "core/src/deep.rs", &deep);
+        write(
+            &root,
+            "core/src/lib.rs",
+            "mod deep;\n\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+        );
+
+        let scan_with = |args: SelectArgs| {
+            let survey = survey(&root, args);
+            let mut ordinals = 0;
+
+            survey
+                .scan(None, &Selection::parse("all").expect("every mutator resolves"), &mut ordinals)
+                .expect("a file this tool cannot walk does not make the workspace unmeasurable")
+        };
+
+        let wide = scan_with(SelectArgs::default());
+
+        // Narrow enough that `core/src/deep.rs` is no longer mutated, and so is read only for the
+        // module declarations it might contain.
+        let narrow = scan_with(SelectArgs {
+            files: vec!["core/src/lib.rs".to_owned()],
+            ..SelectArgs::default()
+        });
+
+        assert_eq!(narrow.skipped, wide.skipped, "the same file must be reported either way");
+        assert_eq!(narrow.skipped.len(), 1, "{:?}", narrow.skipped);
+
+        let note = narrow.skipped.first().expect("one file was skipped");
+
+        assert!(note.contains("deep.rs"), "the skip does not name the file: {note}");
+        assert!(note.contains("nests deeper"), "the skip does not say why: {note}");
+
+        // And the narrowed selection still measures what it did select, rather than being emptied
+        // by the file it could not read.
+        assert!(
+            narrow.mutants.iter().any(|mutant| mutant.file.as_str().ends_with("lib.rs")),
+            "{:?}",
+            narrow.mutants.iter().map(|mutant| mutant.file.as_str()).collect::<Vec<_>>()
         );
     }
 
