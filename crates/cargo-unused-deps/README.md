@@ -1,11 +1,11 @@
 <div align="center">
- <img src="./logo.png" alt="Cargo-Ensure-No-Unused-Workspace-Deps Logo" width="96">
+ <img src="./logo.png" alt="Cargo-Unused-Deps Logo" width="96">
 
-# Cargo-Ensure-No-Unused-Workspace-Deps
+# Cargo-Unused-Deps
 
-[![crates.io](https://img.shields.io/crates/v/cargo-ensure-no-unused-workspace-deps.svg)](https://crates.io/crates/cargo-ensure-no-unused-workspace-deps)
-[![docs.rs](https://docs.rs/cargo-ensure-no-unused-workspace-deps/badge.svg)](https://docs.rs/cargo-ensure-no-unused-workspace-deps)
-[![MSRV](https://img.shields.io/crates/msrv/cargo-ensure-no-unused-workspace-deps)](https://crates.io/crates/cargo-ensure-no-unused-workspace-deps)
+[![crates.io](https://img.shields.io/crates/v/cargo-unused-deps.svg)](https://crates.io/crates/cargo-unused-deps)
+[![docs.rs](https://docs.rs/cargo-unused-deps/badge.svg)](https://docs.rs/cargo-unused-deps)
+[![MSRV](https://img.shields.io/crates/msrv/cargo-unused-deps)](https://crates.io/crates/cargo-unused-deps)
 [![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
@@ -34,13 +34,13 @@ enough to run on every pull request.
 Run in a cargo workspace:
 
 ```bash
-cargo ensure-no-unused-workspace-deps
+cargo unused-deps
 ```
 
 Remove what it finds:
 
 ```bash
-cargo ensure-no-unused-workspace-deps --fix
+cargo unused-deps --fix
 ```
 
 `--manifest-path` points at an explicit workspace root, defaulting to the
@@ -53,7 +53,7 @@ into an error for callers that know they are pointing at a workspace root.
 An entry kept on purpose is exempted in the workspace manifest:
 
 ```toml
-[workspace.metadata.ensure-no-unused-workspace-deps]
+[workspace.metadata.unused-deps]
 allowed = ["kept-on-purpose"]
 ```
 
@@ -79,7 +79,7 @@ dropped.
 ## Installation
 
 ```bash
-cargo install cargo-ensure-no-unused-workspace-deps
+cargo install cargo-unused-deps
 ```
 
 ## Example output
@@ -96,6 +96,6 @@ Re-run with --fix to remove them.
 
 <hr/>
 <sub>
-This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-unused-workspace-deps">source code</a>.
+This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-unused-deps">source code</a>.
 </sub>
 

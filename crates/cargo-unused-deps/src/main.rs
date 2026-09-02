@@ -9,13 +9,13 @@
 //! After installation, run in any cargo workspace:
 //!
 //! ```bash
-//! cargo ensure-no-unused-workspace-deps
+//! cargo unused-deps
 //! ```
 //!
 //! Or point at an explicit workspace root:
 //!
 //! ```bash
-//! cargo ensure-no-unused-workspace-deps --manifest-path path/to/Cargo.toml
+//! cargo unused-deps --manifest-path path/to/Cargo.toml
 //! ```
 //!
 //! The tool exits with code 0 when every catalog entry is inherited by a member,
@@ -28,5 +28,5 @@ use anyhow::Result;
 fn main() -> Result<ExitCode> {
     // TODO: This could be a main.rs only crate, but CI complains when processing bin-only crates:
     //  https://github.com/rust-lang/cargo/issues/15231.
-    cargo_ensure_no_unused_workspace_deps::run()
+    cargo_unused_deps::run()
 }

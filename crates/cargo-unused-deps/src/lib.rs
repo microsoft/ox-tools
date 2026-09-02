@@ -3,11 +3,9 @@
 
 //! A cargo sub-command that ensures every `[workspace.dependencies]` entry is
 //! inherited by at least one workspace member.
+#![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-unused-deps/logo.png")]
 #![doc(
-    html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-ensure-no-unused-workspace-deps/logo.png"
-)]
-#![doc(
-    html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-ensure-no-unused-workspace-deps/favicon.ico"
+    html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-unused-deps/favicon.ico"
 )]
 //!
 //! A workspace root declares a dependency catalog that members draw from with
@@ -28,13 +26,13 @@
 //! Run in a cargo workspace:
 //!
 //! ```bash
-//! cargo ensure-no-unused-workspace-deps
+//! cargo unused-deps
 //! ```
 //!
 //! Remove what it finds:
 //!
 //! ```bash
-//! cargo ensure-no-unused-workspace-deps --fix
+//! cargo unused-deps --fix
 //! ```
 //!
 //! `--manifest-path` points at an explicit workspace root, defaulting to the
@@ -47,7 +45,7 @@
 //! An entry kept on purpose is exempted in the workspace manifest:
 //!
 //! ```toml
-//! [workspace.metadata.ensure-no-unused-workspace-deps]
+//! [workspace.metadata.unused-deps]
 //! allowed = ["kept-on-purpose"]
 //! ```
 //!
@@ -73,7 +71,7 @@
 //! # Installation
 //!
 //! ```bash
-//! cargo install cargo-ensure-no-unused-workspace-deps
+//! cargo install cargo-unused-deps
 //! ```
 //!
 //! # Example output
@@ -125,8 +123,8 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Ensure every `[workspace.dependencies]` entry is inherited by a member
-    #[command(version, display_name = "cargo-ensure-no-unused-workspace-deps")]
-    EnsureNoUnusedWorkspaceDeps {
+    #[command(version, display_name = "cargo-unused-deps")]
+    UnusedDeps {
         /// Path to the workspace root Cargo.toml
         #[arg(long, default_value = "Cargo.toml", value_name = "PATH")]
         manifest_path: PathBuf,
@@ -157,7 +155,7 @@ enum Commands {
 /// members cannot be enumerated, or if a fixed manifest cannot be written back.
 pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
-    let Commands::EnsureNoUnusedWorkspaceDeps {
+    let Commands::UnusedDeps {
         manifest_path,
         fix,
         require_workspace,

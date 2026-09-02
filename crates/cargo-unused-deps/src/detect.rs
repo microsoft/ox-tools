@@ -13,7 +13,7 @@ use toml_edit::{DocumentMut, Item, TableLike, Value};
 const DEP_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
 
 /// Key under `[workspace.metadata]` holding this tool's configuration.
-const METADATA_KEY: &str = "ensure-no-unused-workspace-deps";
+const METADATA_KEY: &str = "unused-deps";
 
 /// What a manifest turned out to be.
 pub enum Catalog {

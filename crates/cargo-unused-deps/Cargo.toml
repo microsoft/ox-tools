@@ -2,8 +2,8 @@
 # Licensed under the MIT License.
 
 [package]
-name = "cargo-ensure-no-unused-workspace-deps"
-description = "A cargo subcommand that ensures every [workspace.dependencies] entry is inherited by a workspace member"
+name = "cargo-unused-deps"
+description = "A cargo subcommand that finds unused dependencies, starting with uninherited [workspace.dependencies] entries"
 version = "0.1.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "ci"]
@@ -14,7 +14,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-unused-workspace-deps"
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-unused-deps"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -25,7 +25,7 @@ all-features = true
 allowed_external_types = ["anyhow::Result"]
 
 [[bin]]
-name = "cargo-ensure-no-unused-workspace-deps"
+name = "cargo-unused-deps"
 path = "src/main.rs"
 
 [dependencies]

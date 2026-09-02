@@ -1,7 +1,7 @@
-# cargo-ensure-no-unused-workspace-deps — Design
+# cargo-unused-deps — Design
 
 > Status: **Adopted**.
-> Crate name: `cargo-ensure-no-unused-workspace-deps`.
+> Crate name: `cargo-unused-deps`.
 > Home: `github.com/microsoft/ox-tools`, published to crates.io.
 
 ## 1. Problem
@@ -35,7 +35,7 @@ manifests, decidable by reading them.
    occasionally accuses a load-bearing dependency would be turned off.
 3. **Cheap.** No compilation, no toolchain pin, no network. Fast enough for the
    text/metadata tier that runs on every pull request.
-4. **Cargo-native UX.** Ship as `cargo ensure-no-unused-workspace-deps`, matching its
+4. **Cargo-native UX.** Ship as `cargo unused-deps`, matching its
    sibling gates `cargo ensure-no-cyclic-deps` and `cargo ensure-no-default-features`.
 5. **Mechanical remediation.** Removing an entry nobody inherits is lossless, so the
    tool offers `--fix` rather than leaving a 48-entry sweep to hand editing.
@@ -81,7 +81,7 @@ deliberately permissive: it errs toward *used*.
 ### Invocation
 
 ```bash
-cargo ensure-no-unused-workspace-deps [--manifest-path <PATH>] [--fix] [--require-workspace]
+cargo unused-deps [--manifest-path <PATH>] [--fix] [--require-workspace]
 ```
 
 | Option                | Default      | Meaning                                                              |
@@ -112,7 +112,7 @@ A deliberate exception is declared in the workspace manifest, not on the command
 line, because the generated CI recipe invokes the tool with a fixed argument list:
 
 ```toml
-[workspace.metadata.ensure-no-unused-workspace-deps]
+[workspace.metadata.unused-deps]
 allowed = ["kept-on-purpose"]
 ```
 
@@ -235,7 +235,7 @@ since) was likewise rejected as a pinned dependency.
 ## 7. CI integration
 
 The check belongs in the `modified` tier, running in the `pr-fast` group as
-`cargo ensure-no-unused-workspace-deps` alongside `ensure-no-cyclic-deps` and
+`cargo unused-deps` alongside `ensure-no-cyclic-deps` and
 `ensure-no-default-features`. It is a text/metadata check: one platform is enough and
 no toolchain pin is required.
 

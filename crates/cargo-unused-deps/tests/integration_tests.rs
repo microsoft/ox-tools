@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Integration tests for cargo-ensure-no-unused-workspace-deps.
+//! Integration tests for cargo-unused-deps.
 //!
 //! Each test builds a throwaway workspace on disk and runs the compiled binary
 //! against it, so the behaviour under test is the one users get, including the
@@ -23,7 +23,7 @@ use tempfile::TempDir;
 
 /// Path to the binary under test.
 fn binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_cargo-ensure-no-unused-workspace-deps"))
+    PathBuf::from(env!("CARGO_BIN_EXE_cargo-unused-deps"))
 }
 
 /// Write a workspace root manifest plus one member per entry in `members`.
@@ -50,7 +50,7 @@ fn workspace(root: &str, members: &[(&str, &str)]) -> TempDir {
 /// Run the tool against `manifest_path` with `args`.
 fn run(manifest_path: &Path, args: &[&str]) -> Output {
     Command::new(binary())
-        .arg("ensure-no-unused-workspace-deps")
+        .arg("unused-deps")
         .arg("--manifest-path")
         .arg(manifest_path)
         .args(args)
@@ -194,7 +194,7 @@ fn counts_the_root_package_as_a_member() {
 fn honors_the_allow_list_and_reports_stale_entries() {
     let root = concat!(
         "[workspace]\nmembers = [\"member\"]\n\n",
-        "[workspace.metadata.ensure-no-unused-workspace-deps]\nallowed = [\"kept\", \"stale\"]\n\n",
+        "[workspace.metadata.unused-deps]\nallowed = [\"kept\", \"stale\"]\n\n",
         "[workspace.dependencies]\nkept = \"1\"\nstale = \"1\"\n",
     );
     let dir = workspace(root, &[("member", "[dependencies]\nstale = { workspace = true }\n")]);
@@ -336,7 +336,7 @@ fn fix_keeps_an_allowed_entry_while_removing_the_others() {
     // an allowed finding, and `--fix` has to leave that entry on disk.
     let root = concat!(
         "[workspace]\nmembers = [\"member\"]\n\n",
-        "[workspace.metadata.ensure-no-unused-workspace-deps]\nallowed = [\"kept\"]\n\n",
+        "[workspace.metadata.unused-deps]\nallowed = [\"kept\"]\n\n",
         "[workspace.dependencies]\nkept = \"1\"\nonce_cell = \"1\"\nserde = \"1\"\n",
     );
     let dir = workspace(root, &[("member", "[dependencies]\nserde = { workspace = true }\n")]);
@@ -401,7 +401,7 @@ fn a_stale_allow_entry_is_reported_against_an_empty_catalog() {
     // suppresses nothing, so every one of them is stale.
     let root = concat!(
         "[workspace]\nmembers = [\"member\"]\n\n",
-        "[workspace.metadata.ensure-no-unused-workspace-deps]\nallowed = [\"old\"]\n",
+        "[workspace.metadata.unused-deps]\nallowed = [\"old\"]\n",
     );
     let dir = workspace(root, &[("member", "")]);
     let manifest = dir.path().join("Cargo.toml");
