@@ -37,6 +37,10 @@ allow = [
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
+    # Public-domain-equivalent license carried by `vu128`, the variable-length
+    # integer codec behind `cargo-aprz`'s binary crates.io tables. It is the
+    # crate's only license, so it cannot resolve to one of the entries above.
+    "0BSD",
     # Data-only license carried by `webpki-root-certs` (the Mozilla root
     # certificate set), pulled in transitively by `reqwest`'s rustls backend.
     "CDLA-Permissive-2.0",

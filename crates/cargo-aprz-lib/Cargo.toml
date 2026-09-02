@@ -4,7 +4,7 @@
 [package]
 name = "cargo-aprz-lib"
 description = "Internal library for cargo-aprz"
-version = "1.1.0"
+version = "1.1.1"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "dependencies", "analysis", "quality"]
 categories = ["development-tools"]
@@ -117,7 +117,7 @@ tick = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "process", "time"] }
 toml = { workspace = true, features = ["parse", "serde", "display"] }
 url = { workspace = true }
-vlen = { workspace = true }
+vu128 = { workspace = true }
 walkdir = { workspace = true }
 zstd = { workspace = true }
 

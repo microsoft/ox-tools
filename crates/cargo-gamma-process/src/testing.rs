@@ -52,18 +52,11 @@ fn step(directive: &str) -> Option<i32> {
             None
         }
         "spawn" => {
-            let executable = if cfg!(target_os = "linux") {
-                std::path::PathBuf::from("/proc/self/exe")
-            } else {
-                std::env::current_exe().expect("the helper knows its own path")
-            };
-            let mut child = std::process::Command::new(executable);
-
-            for inner in payload.split('|') {
-                let _ = child.arg(format!("--gamma-step={inner}"));
-            }
-
-            let _spawned = child.spawn().expect("the helper can start another copy of itself");
+            launch(payload, false);
+            None
+        }
+        "flee" => {
+            launch(payload, true);
             None
         }
         "eat" => {
@@ -86,12 +79,39 @@ fn step(directive: &str) -> Option<i32> {
         _ => Some(97),
     }
 }
+
+fn launch(payload: &str, own_group: bool) {
+    let executable = if cfg!(target_os = "linux") {
+        std::path::PathBuf::from("/proc/self/exe")
+    } else {
+        std::env::current_exe().expect("the helper knows its own path")
+    };
+    let mut child = std::process::Command::new(executable);
+
+    for inner in payload.split('|') {
+        let _ = child.arg(format!("--gamma-step={inner}"));
+    }
+
+    // The escape a process group has no answer to: one unprivileged call and every later signal to
+    // the group misses this process. A cgroup leaf and a job object are not renounceable this way.
+    #[cfg(unix)]
+    if own_group {
+        use std::os::unix::process::CommandExt as _;
+
+        let _ = child.process_group(0);
+    }
+
+    #[cfg(not(unix))]
+    let _ = own_group;
+
+    let _spawned = child.spawn().expect("the helper can start another copy of itself");
+}
 "#;
 
 pub fn helper_binary_path() -> &'static Utf8Path {
     static BUILT: OnceLock<Utf8PathBuf> = OnceLock::new();
 
-    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-2")).as_path()
+    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-3")).as_path()
 }
 
 /// Builds the helper binary under `name`, or reuses one already there.
@@ -159,22 +179,6 @@ pub fn workdir(prefix: &str) -> tempfile::TempDir {
         .expect("the temporary directory should be creatable")
 }
 
-pub fn without_memory_support(what: &str) -> bool {
-    standing_down_for(what, crate::support())
-}
-
-/// The decision behind [`without_memory_support`], taking the support answer rather than asking
-/// for it, so a test can drive both outcomes without depending on what this host actually offers.
-fn standing_down_for(what: &str, support: Result<(), String>) -> bool {
-    match support {
-        Ok(()) => false,
-        Err(reason) => {
-            eprintln!("standing down: {what} - {reason}");
-            true
-        }
-    }
-}
-
 #[cfg(unix)]
 pub const WATCHDOG: Duration = Duration::from_mins(1);
 
@@ -237,16 +241,6 @@ mod tests {
         let dir = workdir("gamma-testing-workdir-check");
 
         assert!(dir.path().is_dir());
-    }
-
-    #[test]
-    fn standing_down_reports_real_support() {
-        assert!(!standing_down_for("a host that supports metering", Ok(())));
-    }
-
-    #[test]
-    fn standing_down_reports_a_lack_of_support() {
-        assert!(standing_down_for("a host that cannot meter", Err("no cgroups here".to_owned())));
     }
 
     #[cfg(unix)]

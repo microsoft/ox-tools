@@ -368,6 +368,8 @@ mod tests {
         // "unsupported" without a cause sends the reader to the source of this tool instead of to
         // the configuration of their machine.
         if let Err(reason) = support() {
+            let reason = reason.to_string();
+
             assert!(reason.len() > 20, "{reason}");
         }
     }

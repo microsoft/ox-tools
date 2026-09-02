@@ -95,7 +95,7 @@ pub trait Table: Sized {
         let count = row_writer.row_count();
         let timestamp = now.timestamp().max(0).cast_unsigned();
 
-        // padding to ensure vlen never tries to read past EOF
+        // padding to ensure vu128 never tries to read past EOF
         buf_writer.write_all(&[0u8; 10])?;
 
         // Go back and write the header

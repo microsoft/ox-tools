@@ -94,7 +94,7 @@ impl Killers {
                 continue;
             };
 
-            found.absorb(&source.ast.items, "", file);
+            found.absorb(&source.ast().items, "", file);
         }
 
         found

@@ -54,6 +54,15 @@ pub(super) fn is_noop(replacement: &str, original: &str, shape: Shape, defaults:
 /// Deliberately narrow: it answers for this one shape and nothing else, rather than pretending to
 /// decide equivalence in general.
 pub(super) fn is_same_leak(replacement: &str, original: &str, defaults: &DefaultPaths, defaulted_types: &[String]) -> bool {
+    // Every match here requires `leak` as a literal identifier in both expressions' `Box::leak`
+    // path (checked later by `path_ends_with`), so its absence from the raw text of either side
+    // rules out a match without tokenizing either one. Almost no replacement or original is this
+    // shape, so this skips the two token passes below entirely for the overwhelming majority of
+    // candidates.
+    if !replacement.contains("leak") || !original.contains("leak") {
+        return false;
+    }
+
     let (Some(replacement), Some(original)) = (leaked_value(replacement), leaked_value(original)) else {
         return false;
     };
@@ -378,6 +387,23 @@ mod tests {
         }
 
         assert_eq!(marker().saturating_sub(second), expected_growth);
+    }
+
+    /// The substring pre-check that skips tokenizing non-leak shapes must not change the answer:
+    /// it has to still recognize a genuine match and still reject anything lacking the literal
+    /// `leak` text, which is the only case it fast-paths.
+    #[test]
+    fn the_leak_prefilter_rejects_and_accepts_the_same_pairs_as_full_tokenization() {
+        let defaults = defaults();
+
+        assert!(is_same_leak(
+            "Box::leak(Box::new(Default::default()))",
+            "Box::leak(Box::new(T::default()))",
+            &defaults,
+            &[String::from("T")],
+        ));
+        assert!(!is_same_leak("None", "0", &defaults, &[]));
+        assert!(!is_same_leak("Box::leak(Box::new(1))", "0", &defaults, &[]));
     }
 
     #[test]

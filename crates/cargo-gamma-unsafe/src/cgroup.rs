@@ -28,6 +28,7 @@
 //! Where none of that is possible, `support` says so with the reason, and the run reports that
 //! rather than claiming a limit it never installed.
 
+#[cfg(not(loom))]
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
 use std::fs::{self, File, OpenOptions};
@@ -37,6 +38,11 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::{Mutex, OnceLock};
 use std::{io, thread};
+
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use crate::{PlatformError, Situation, interrupt};
 
 /// Where the unified hierarchy is mounted, on every distribution that uses it.
 const MOUNT: &str = "/sys/fs/cgroup";
@@ -70,7 +76,14 @@ const REAPER_PAUSE: Duration = Duration::from_millis(100);
 static ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 /// Distinguishes concurrently created cgroups, since workers create them from several threads.
+#[cfg(not(loom))]
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(loom)]
+loom::lazy_static! {
+    /// Distinguishes concurrently created cgroups, under a scheduler that owns its own statics.
+    static ref SEQUENCE: AtomicU64 = AtomicU64::new(0);
+}
 
 /// State shared by leaf creation, destruction, and the background reaper.
 ///
@@ -88,7 +101,14 @@ struct Reaper {
 static REAPER: OnceLock<Mutex<Reaper>> = OnceLock::new();
 
 /// Prevents starting one reaper thread per abandoned leaf.
+#[cfg(not(loom))]
 static REAPER_RUNNING: AtomicBool = AtomicBool::new(false);
+
+#[cfg(loom)]
+loom::lazy_static! {
+    /// Prevents starting one reaper thread per abandoned leaf, under the Loom scheduler.
+    static ref REAPER_RUNNING: AtomicBool = AtomicBool::new(false);
+}
 
 /// How many distinct names a cgroup creation attempts before refusing to reuse a stale leaf.
 const NAME_ATTEMPTS: u64 = 64;
@@ -239,18 +259,47 @@ fn reap_owned_leaves(root: &Path) -> bool {
     pending
 }
 
+/// Hands out the value that distinguishes one concurrently created leaf name from another.
+///
+/// Taken through a function of its own, rather than read from the static at the call site, so that
+/// the uniqueness every leaf name rests on can be modelled: a read-modify-write is indivisible and
+/// a load-then-store is not, and the call site alone does not say which of the two this is. Two
+/// leaves sharing a name means two invocations sharing an accounting, which is silently wrong
+/// rather than loud.
+///
+/// Relaxed is enough. Nothing is published through this value; it is only required to be different
+/// from every other value handed out, and that is a property of the read-modify-write itself.
+fn next_name_ticket(sequence: &AtomicU64) -> u64 {
+    sequence.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Claims the sole right to run the background reaper, or declines because somebody holds it.
+///
+/// Taken through a function of its own for the same reason as [`next_name_ticket`]: exactly one
+/// caller may be told to start a thread, and a compare-and-swap is what makes that true where a
+/// load followed by a store would let two callers both see `false`. One reaper thread per
+/// abandoned leaf is the failure this prevents.
+fn claim_reaper(running: &AtomicBool) -> bool {
+    running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok()
+}
+
+/// Hands the reaper claim back after a start that did not happen.
+///
+/// Without this, a single failed thread spawn would leave the claim held forever and no later
+/// abandoned leaf would ever be reaped, on a run that is still perfectly able to spawn threads.
+fn release_reaper_claim(running: &AtomicBool) {
+    running.store(false, Ordering::Release);
+}
+
 /// Starts the bounded, shared background reaper after foreground cleanup gives up.
 fn ensure_reaper() {
-    if REAPER_RUNNING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
+    if !claim_reaper(&REAPER_RUNNING) {
         return;
     }
 
     match thread::Builder::new().name("gamma-cgroup-reaper".to_owned()).spawn(reaper_loop) {
         Ok(worker) => drop(worker),
-        Err(_cause) => REAPER_RUNNING.store(false, Ordering::Release),
+        Err(_cause) => release_reaper_claim(&REAPER_RUNNING),
     }
 }
 
@@ -471,7 +520,7 @@ fn lists(path: &Path, file: &str, wanted: &str) -> bool {
 /// `memory.max` is what bounds a mutant, and `memory.peak` — which arrived in Linux 5.19 — is what
 /// the baseline measures in order to choose that bound.
 fn probe(root: &Path) -> Result<(), String> {
-    probe_with(root, process::id(), || SEQUENCE.fetch_add(1, Ordering::Relaxed))
+    probe_with(root, process::id(), || next_name_ticket(&SEQUENCE))
 }
 
 fn probe_with(root: &Path, pid: u32, next: impl FnMut() -> u64) -> Result<(), String> {
@@ -511,6 +560,15 @@ fn unoffered(path: &Path) -> Option<&'static str> {
     ["memory.max", "memory.peak"].into_iter().find(|name| !path.join(name).exists())
 }
 
+/// Reports the failure of one leaf, rather than of the host that would have held it.
+///
+/// Separated from [`Situation::Unsupported`] because the two demand opposite responses: a host that
+/// can never hold a leaf lets an unmetered run degrade once, while a host that can and did not is
+/// one launch that must be refused rather than run outside its boundary.
+fn refused(reason: String) -> PlatformError {
+    PlatformError::new(Situation::Refused, reason)
+}
+
 /// One invocation's accounting boundary: a cgroup leaf holding a test binary and its descendants.
 #[derive(Debug)]
 pub struct Cgroup {
@@ -522,6 +580,24 @@ pub struct Cgroup {
 
     /// Whether this leaf was registered with the shared reaper.
     tracked: bool,
+
+    /// The interrupt-registry slot this leaf's kill descriptor was published to, if any.
+    ///
+    /// Recorded by [`interrupt::Spawning::watch_cgroup`] as it publishes the descriptor, and
+    /// discharged by this type's own `Drop` — which is what makes the registration impossible for
+    /// a safe caller to outlive. Nothing outside this crate can create, observe, or clear it.
+    watch: Option<CgroupWatch>,
+}
+
+/// Where a live cgroup's kill descriptor is published in the process-wide interrupt registry.
+///
+/// The group is kept alongside the slot because a slot only belongs to this cgroup while the group
+/// it was claimed for is still in it: a signal handler empties every slot it kills, and a run that
+/// deferred its own death goes on spawning into the slots that frees.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CgroupWatch {
+    slot: usize,
+    group: i32,
 }
 
 /// An open cgroup kill switch, valid while its owning [`Cgroup`] remains alive.
@@ -536,20 +612,31 @@ impl KillHandle {
 
 impl Cgroup {
     /// Creates a leaf, optionally bounded, ready for a child to move itself into.
-    pub fn create(limit: Option<u64>) -> Result<Self, String> {
-        let root = root().map_err(str::to_owned)?;
+    ///
+    /// # Errors
+    ///
+    /// Reports [`Situation::Unsupported`] when this host offers no cgroup root to create leaves
+    /// under at all — no cgroup v2 unified hierarchy, no delegated cgroup, no memory controller to
+    /// hand to children, or a kernel without the interface files a run depends on. That answer is
+    /// settled once per process, so a caller may treat it as a standing fact about the machine and
+    /// degrade or refuse the whole run rather than retry.
+    ///
+    /// Reports [`Situation::Refused`] when a root exists but this leaf could not be made: the
+    /// creator's own generation could not be read, every candidate name under the root was taken,
+    /// a ceiling could not be written, or the leaf's `cgroup.kill` switch could not be opened. That
+    /// concerns one launch rather than the host, and a caller must refuse that launch rather than
+    /// run it inside a boundary it does not have.
+    pub fn create(limit: Option<u64>) -> Result<Self, PlatformError> {
+        let root = root().map_err(|reason| PlatformError::new(Situation::Unsupported, reason))?;
         let (group, start_reaper) = {
             // Creation and registration are one critical section. A reaper never sees a
             // successfully created leaf as inactive between these two steps.
             let mut reaper = reaper();
-            let mut group = Self::create_under(root, limit)?;
+            let mut group = Self::create_under(root, limit).map_err(refused)?;
             let kill_path = group.path.join("cgroup.kill");
-            group.kill = Some(
-                OpenOptions::new()
-                    .write(true)
-                    .open(&kill_path)
-                    .map_err(|cause| format!("`{}` could not be opened: {cause}", kill_path.display()))?,
-            );
+            group.kill = Some(OpenOptions::new().write(true).open(&kill_path).map_err(|cause| {
+                PlatformError::because(Situation::Refused, format!("`{}` could not be opened", kill_path.display()), cause)
+            })?);
 
             reaper.root = Some(root.to_path_buf());
             reaper.active.push(group.path.clone());
@@ -568,7 +655,7 @@ impl Cgroup {
 
     /// Creates and configures a leaf beneath an already selected cgroup root.
     fn create_under(root: &Path, limit: Option<u64>) -> Result<Self, String> {
-        Self::create_under_with(root, limit, process::id(), || SEQUENCE.fetch_add(1, Ordering::Relaxed))
+        Self::create_under_with(root, limit, process::id(), || next_name_ticket(&SEQUENCE))
     }
 
     fn create_under_with(root: &Path, limit: Option<u64>, pid: u32, next: impl FnMut() -> u64) -> Result<Self, String> {
@@ -580,6 +667,7 @@ impl Cgroup {
             path,
             kill: None,
             tracked: false,
+            watch: None,
         };
 
         group.configure(limit)?;
@@ -612,12 +700,19 @@ impl Cgroup {
     }
 
     /// Arranges for the child to place itself in this cgroup before it executes.
-    pub fn arm(&self, command: &mut Command) -> Result<(), String> {
+    ///
+    /// # Errors
+    ///
+    /// Reports [`Situation::Refused`] when the leaf's `cgroup.procs` could not be opened for
+    /// writing before the fork. The descriptor has to exist before the child does, because the
+    /// child moves itself in between `fork` and `exec`; a caller that could not obtain one must
+    /// not spawn, since the child would then run outside the boundary entirely.
+    pub fn arm(&self, command: &mut Command) -> Result<(), PlatformError> {
         let procs = self.path.join("cgroup.procs");
         let file = OpenOptions::new()
             .write(true)
             .open(&procs)
-            .map_err(|cause| format!("`{}` could not be opened: {cause}", procs.display()))?;
+            .map_err(|cause| PlatformError::because(Situation::Refused, format!("`{}` could not be opened", procs.display()), cause))?;
 
         let join = move || {
             let fd = file.as_raw_fd();
@@ -671,11 +766,22 @@ impl Cgroup {
 
     /// The already-open kill switch the signal registry may use while this cgroup is retained.
     ///
-    /// The registry stores the descriptor after this borrow ends. Its owner must therefore call
-    /// `interrupt::forget_cgroup`, which waits for an in-flight sweep, before dropping the cgroup.
+    /// The registry stores the raw descriptor after this borrow ends, which is safe only because
+    /// [`Self::watched_at`] records where it went and this type's `Drop` hands it back — after
+    /// waiting for any sweep still using it — before the owning `File` closes it. Nothing outside
+    /// this crate can reach either half, so the pairing cannot be got wrong by a safe caller.
     #[must_use]
     pub(crate) fn kill_handle(&self) -> Option<KillHandle> {
         self.kill.as_ref().map(|kill| KillHandle(kill.as_raw_fd()))
+    }
+
+    /// Records where this leaf's kill descriptor was published, so its drop can take it back.
+    ///
+    /// Called by [`interrupt::Spawning::watch_cgroup`] immediately before the descriptor becomes
+    /// visible to a signal handler, so there is no instant at which the registry holds a
+    /// descriptor this cgroup does not know it must retract.
+    pub(crate) const fn watched_at(&mut self, slot: usize, group: i32) {
+        self.watch = Some(CgroupWatch { slot, group });
     }
 
     /// Whether the kernel reported killing this workload for reaching its ceiling.
@@ -714,6 +820,17 @@ impl Cgroup {
 
 impl Drop for Cgroup {
     fn drop(&mut self) {
+        // Discharged first, and unconditionally once a registration was ever made. The registry
+        // holds a raw descriptor this leaf owns, and the `kill` field below closes it as this
+        // value is destroyed; a handler sweeping while that happened would write `"1"` into
+        // whatever the kernel handed the number to next. The release waits for every sweep in
+        // flight, so by the time it returns no handler holds this descriptor and none can take it
+        // up again. Doing it here rather than asking the caller to is what makes the pairing
+        // impossible to get wrong: there is no safe way to drop a watched cgroup without it.
+        if let Some(watch) = self.watch.take() {
+            interrupt::release_watched_cgroup(watch.slot, watch.group);
+        }
+
         // A cgroup that still holds a process cannot be removed. Foreground cleanup stays bounded
         // so one orphan cannot set the run's pace; the shared reaper keeps trying after this
         // method returns and removes the leaf once the orphan exits.
@@ -779,6 +896,105 @@ mod tests {
         assert!(root().is_ok(), "{NEEDS_DELEGATION}: {:?}", root().err());
     }
 
+    /// A cgroup standing over a plain directory whose kill switch a signal handler can be given.
+    ///
+    /// The switch is unlinked as soon as it is opened, so the leaf's directory is still removable
+    /// when it is dropped while the descriptor itself stays open and valid — which is the property
+    /// the registration these tests are about depends on.
+    fn watchable(path: &Path) -> Cgroup {
+        let switch = path.join("cgroup.kill");
+        let kill = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&switch)
+            .expect("the stand-in kill switch is creatable");
+
+        fs::remove_file(&switch).expect("the stand-in kill switch is unlinkable");
+
+        Cgroup {
+            path: path.to_path_buf(),
+            kill: Some(kill),
+            tracked: false,
+            watch: None,
+        }
+    }
+
+    /// A dropped cgroup takes its kill descriptor out of the interrupt registry itself.
+    ///
+    /// The registry holds a raw descriptor this leaf owns, and dropping the leaf closes it. A
+    /// registration left behind is a number the kernel is free to hand to the next `open` on any
+    /// thread, and the next terminal signal would then write `"1"` into an unrelated file or an
+    /// unrelated cgroup. Nothing but this drop is asked to prevent that: there is no release for a
+    /// caller to skip.
+    #[test]
+    fn dropping_a_watched_cgroup_takes_its_kill_descriptor_out_of_the_registry() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = directory.path().join("leaf");
+
+        fs::create_dir(&path).expect("created");
+
+        let mut group = watchable(&path);
+        let descriptor = group.kill.as_ref().expect("the stand-in leaf has a kill switch").as_raw_fd();
+        let watched = 0x0060_0d5e;
+        let spawning = interrupt::spawning();
+        let slot = spawning
+            .watch_cgroup(watched, Some(&mut group))
+            .expect("a free slot, since a fresh registry has a thousand");
+
+        assert_eq!(
+            interrupt::watched_pair(slot),
+            (watched, Some(descriptor)),
+            "the leaf's kill descriptor was never published"
+        );
+
+        drop(group);
+
+        let (registered, _kill) = interrupt::watched_pair(slot);
+        assert_ne!(
+            registered, watched,
+            "a dropped cgroup left its now-closed kill descriptor registered for its process group"
+        );
+
+        drop(spawning);
+    }
+
+    /// A dropped cgroup leaves a slot some later spawn has claimed alone.
+    ///
+    /// The subtree that owned this leaf hands its process-group slot back as soon as its leader is
+    /// reaped, well before the leaf itself is dropped, and a run goes on spawning into the slots
+    /// that frees. A drop that cleared its remembered slot unconditionally would take a live
+    /// child out of the next sweep.
+    #[test]
+    fn dropping_a_watched_cgroup_leaves_a_slot_its_group_no_longer_holds() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = directory.path().join("leaf");
+
+        fs::create_dir(&path).expect("created");
+
+        let mut group = watchable(&path);
+        let watched = 0x0060_0d6e;
+        let spawning = interrupt::spawning();
+        let slot = spawning.watch_cgroup(watched, Some(&mut group)).expect("a free slot");
+
+        // What the owning subtree does the moment its leader is reaped.
+        interrupt::forget(slot, watched);
+
+        let replacement = 0x0060_0d6f;
+        let taken = spawning.watch(replacement).expect("the freed slot, or another");
+
+        drop(group);
+
+        assert_eq!(
+            interrupt::watched(taken),
+            replacement,
+            "a dropped cgroup took a later child's registration with it"
+        );
+
+        interrupt::forget(taken, replacement);
+        drop(spawning);
+    }
+
     /// A cgroup standing over a plain directory, for testing the interface-file handling.
     ///
     /// Everything a `Cgroup` does to a live leaf it does by reading and writing named files in one
@@ -789,6 +1005,7 @@ mod tests {
             path: path.to_path_buf(),
             kill: None,
             tracked: false,
+            watch: None,
         }
     }
 
@@ -1224,6 +1441,7 @@ mod tests {
             path: path.clone(),
             kill: None,
             tracked: false,
+            watch: None,
         });
 
         let budget = REMOVAL_PAUSE * REMOVAL_ATTEMPTS;
@@ -1254,6 +1472,7 @@ mod tests {
             path: path.clone(),
             kill: None,
             tracked: false,
+            watch: None,
         });
 
         assert!(path.exists(), "a non-empty cgroup cannot be removed");
@@ -1359,7 +1578,7 @@ mod tests {
         let group = over(directory.path());
         let mut command = Command::new("true");
 
-        assert_eq!(group.arm(&mut command), Ok(()));
+        group.arm(&mut command).expect("the temporary `cgroup.procs` can be opened");
         assert!(command.status().expect("`true` should run").success());
         assert_eq!(
             fs::read(&procs).expect("readable"),
@@ -1379,7 +1598,12 @@ mod tests {
             .arm(&mut Command::new("true"))
             .expect_err("there is no `cgroup.procs` to open");
 
-        assert!(refusal.contains("could not be opened"), "{refusal}");
+        assert_eq!(refusal.situation(), Situation::Refused);
+        assert!(refusal.to_string().contains("could not be opened"), "{refusal}");
+        assert!(
+            std::error::Error::source(&refusal).is_some(),
+            "the operating system's own reason must be retained"
+        );
     }
 
     #[test]
@@ -1666,5 +1890,149 @@ mod tests {
 
             assert!(!path.exists(), "the reaper left `{}` behind", path.display());
         }
+    }
+}
+
+#[cfg(loom)]
+pub(crate) mod loom_models {
+    use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use loom::sync::{Arc, Mutex};
+
+    use super::{claim_reaper, next_name_ticket, release_reaper_claim};
+
+    /// Two workers creating leaves at the same moment never get the same name.
+    ///
+    /// A leaf name carries the ticket and nothing else that distinguishes one concurrent creation
+    /// from another, so two workers handed the same ticket would build the same directory name.
+    /// One of them then loses the `EEXIST` retry to the other and the two invocations share an
+    /// accounting: the second mutant is charged the first one's peak, or is bounded by a limit that
+    /// was never its own. Nothing observable says this happened.
+    ///
+    /// Fails as soon as the read-modify-write becomes a load followed by a store, which is the one
+    /// edit that looks harmless here.
+    pub(super) fn concurrent_leaf_creations_never_share_a_name() {
+        loom::model(|| {
+            let sequence = Arc::new(AtomicU64::new(0));
+            let handed_out = Arc::new(Mutex::new(Vec::new()));
+
+            let workers: Vec<_> = (0..2)
+                .map(|_worker| {
+                    let sequence = Arc::clone(&sequence);
+                    let handed_out = Arc::clone(&handed_out);
+
+                    loom::thread::spawn(move || {
+                        let ticket = next_name_ticket(&sequence);
+
+                        handed_out.lock().expect("ticket recorder").push(ticket);
+                    })
+                })
+                .collect();
+
+            for worker in workers {
+                worker.join().expect("ticket thread");
+            }
+
+            let mut tickets = handed_out.lock().expect("ticket recorder").clone();
+
+            tickets.sort_unstable();
+
+            let issued = tickets.len();
+
+            tickets.dedup();
+
+            assert_eq!(tickets.len(), issued, "two concurrent leaf creations were handed the same name");
+        });
+    }
+
+    /// However many leaves are abandoned at once, exactly one caller starts the reaper.
+    ///
+    /// The reaper is a permanent thread with a sleep loop, so a second one is not a duplicate piece
+    /// of work that finishes: it is a thread that lives as long as the run and scans the same
+    /// directory for as long. Two of them can also both see the same abandoned leaf and race each
+    /// other's `remove_dir`.
+    ///
+    /// Fails as soon as the claim becomes a load followed by a store, which lets both callers see
+    /// `false`.
+    pub(super) fn only_one_caller_ever_starts_the_reaper() {
+        loom::model(|| {
+            let running = Arc::new(AtomicBool::new(false));
+            let starters = Arc::new(Mutex::new(0_usize));
+
+            let callers: Vec<_> = (0..2)
+                .map(|_caller| {
+                    let running = Arc::clone(&running);
+                    let starters = Arc::clone(&starters);
+
+                    loom::thread::spawn(move || {
+                        if claim_reaper(&running) {
+                            *starters.lock().expect("start recorder") += 1;
+                        }
+                    })
+                })
+                .collect();
+
+            for caller in callers {
+                caller.join().expect("claim thread");
+            }
+
+            assert_eq!(*starters.lock().expect("start recorder"), 1, "the number of reaper threads started");
+        });
+    }
+
+    /// A claim handed back after a failed thread spawn leaves the next caller able to start one.
+    ///
+    /// The retry transition. A run whose first `thread::Builder::spawn` failed — a momentary
+    /// thread-table shortage — must not be left permanently without a reaper, because the leaves
+    /// that need one are exactly the ones foreground cleanup already gave up on. Modelled against
+    /// a concurrent claimant so that handing the claim back cannot instead take it away from
+    /// somebody who has already started the thread.
+    pub(super) fn a_reaper_claim_handed_back_can_be_taken_again() {
+        loom::model(|| {
+            let running = Arc::new(AtomicBool::new(false));
+            let started = Arc::new(Mutex::new(0_usize));
+
+            // The caller whose thread spawn fails: it claims, cannot start, and gives the claim up.
+            let failing = {
+                let running = Arc::clone(&running);
+
+                loom::thread::spawn(move || {
+                    if claim_reaper(&running) {
+                        release_reaper_claim(&running);
+                    }
+                })
+            };
+
+            let retrying = {
+                let running = Arc::clone(&running);
+                let started = Arc::clone(&started);
+
+                loom::thread::spawn(move || {
+                    if claim_reaper(&running) {
+                        *started.lock().expect("start recorder") += 1;
+                    }
+                })
+            };
+
+            failing.join().expect("failing thread");
+            retrying.join().expect("retrying thread");
+
+            // Whoever ends up holding the claim, the run must not be left believing a reaper is
+            // running when none is: either the second caller started one, or the claim is free for
+            // the next abandoned leaf to try again.
+            let running_now = running.load(Ordering::SeqCst);
+            let started_now = *started.lock().expect("start recorder");
+
+            assert!(
+                started_now == 1 || !running_now,
+                "the reaper claim was left held with no reaper behind it"
+            );
+        });
+    }
+
+    /// Runs every cgroup atomic model.
+    pub(crate) fn run() {
+        concurrent_leaf_creations_never_share_a_name();
+        only_one_caller_ever_starts_the_reaper();
+        a_reaper_claim_handed_back_can_be_taken_again();
     }
 }

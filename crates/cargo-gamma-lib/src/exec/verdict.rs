@@ -2,21 +2,23 @@
 // Licensed under the MIT License.
 
 use core::time::Duration;
+use std::borrow::Cow;
 use std::io::{self, BufReader, Read};
-use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Instant;
 
 use camino::Utf8Path;
-use cargo_gamma_process::{MemoryRequest, MemoryUsage, ProcessTree, SpawnGuard, prepare};
+use cargo_gamma_process::{MemoryRequest, MemoryUsage, PreparedCommand, ProcessTree, SpawnedCommand, prepare};
 
 mod hubs;
 
 #[cfg(test)]
 use cargo_gamma_process::faults::{self as process_faults, Fault as ProcessFault};
 use hubs::Pulse;
+#[doc(inline)]
 pub use hubs::READERS;
 #[cfg(test)]
 #[cfg(not(loom))]
@@ -65,11 +67,20 @@ pub(super) enum Only<'name> {
 
 impl<'name> Only<'name> {
     /// The tests to run, empty when the whole binary runs.
-    fn names(self) -> Vec<&'name str> {
+    ///
+    /// Borrowed rather than copied wherever a borrow reaches far enough: a census's [`Self::These`]
+    /// selection can already name most of a large suite, and every reachable censused binary
+    /// launches at least one attempt against it, so cloning that slice into a second vector on every
+    /// one of those launches would be an allocation with no reason behind it — `launcher` only ever
+    /// reads through the result, once, to build one command. [`Self::One`] still allocates: a name
+    /// held by value here has nowhere with lifetime `'name` to be borrowed from, so there is no
+    /// slice of that lifetime to hand back without first storing the name somewhere that outlives
+    /// this call.
+    fn names(self) -> Cow<'name, [&'name str]> {
         match self {
-            Self::All => Vec::new(),
-            Self::One(name) => vec![name],
-            Self::These(names) => names.to_vec(),
+            Self::All => Cow::Owned(Vec::new()),
+            Self::One(name) => Cow::Owned(vec![name]),
+            Self::These(names) => Cow::Borrowed(names),
         }
     }
 }
@@ -147,7 +158,10 @@ pub(super) enum Verdict {
     /// Nextest could not enumerate the selected tests while a mutant was active.
     ///
     /// This is only a suspicion until the identical selection succeeds with no mutant active.
-    /// Carries nextest's output because enumeration failures usually explain themselves there.
+    /// Carries nextest's output because enumeration failures usually explain themselves there —
+    /// but that output comes from a test process and its inherited environment, so anything that
+    /// turns this into a durable, published record must not repeat it verbatim; see
+    /// `sweep::enumeration_note`, the one place that does.
     TestEnumerationFailed(String),
 
     /// The budget ran out while the binary was still making progress.
@@ -269,33 +283,53 @@ enum StartError {
     Spawn(io::Error),
 }
 
-fn spawn_patiently(command: &mut Command, request: MemoryRequest) -> Result<(Child, SpawnGuard), StartError> {
+fn spawn_patiently(command: Command, request: MemoryRequest) -> Result<SpawnedCommand, StartError> {
     let mut waited = SPAWN_BACKOFF;
-    let mut guard = prepare(command, request).map_err(StartError::Containment)?;
+
+    // Prepared once, outside the loop, and carried through every wait: a retry re-spawns the launch
+    // it already has rather than building a second one, which is the only shape `prepare` supports.
+    let mut prepared = prepare(command, request).map_err(|cause| StartError::Containment(cause.to_string()))?;
 
     for _attempt in 1..SPAWN_ATTEMPTS {
-        match spawn_once(command) {
-            Ok(child) => return Ok((child, guard)),
-            Err(cause) if transient(&cause) => {
-                guard = guard.backoff(waited).map_err(StartError::Containment)?;
+        match spawn_once(prepared) {
+            Ok(spawned) => return Ok(spawned),
+            Err(FailedSpawn { cause, prepared: returned }) if transient(&cause) => {
+                prepared = (*returned)
+                    .backoff(waited)
+                    .map_err(|cause| StartError::Containment(cause.to_string()))?;
             }
-            Err(cause) => return Err(StartError::Spawn(cause)),
+            Err(FailedSpawn { cause, .. }) => return Err(StartError::Spawn(cause)),
         }
 
         waited = waited.saturating_mul(2);
     }
 
-    spawn_once(command).map(|child| (child, guard)).map_err(StartError::Spawn)
+    spawn_once(prepared).map_err(|failure| StartError::Spawn(failure.cause))
+}
+
+struct FailedSpawn {
+    cause: io::Error,
+    prepared: Box<PreparedCommand>,
 }
 
 /// The spawn itself, named so the fault seam can stand in for the kernel's refusal.
-fn spawn_once(command: &mut Command) -> io::Result<Child> {
+fn spawn_once(prepared: PreparedCommand) -> Result<SpawnedCommand, FailedSpawn> {
     #[cfg(test)]
     if faults::fired(Fault::Spawn) {
-        return Err(io::Error::new(io::ErrorKind::WouldBlock, "the process table is full"));
+        return Err(FailedSpawn {
+            cause: io::Error::new(io::ErrorKind::WouldBlock, "the process table is full"),
+            prepared: Box::new(prepared),
+        });
     }
 
-    command.spawn()
+    prepared.spawn().map_err(|failure| {
+        let (cause, prepared) = failure.into_parts();
+
+        FailedSpawn {
+            cause,
+            prepared: Box::new(prepared),
+        }
+    })
 }
 
 /// Whether a spawn refusal is the machine being momentarily out of something.
@@ -460,9 +494,10 @@ fn confirm_enumeration(work: &Workspace, binary: &TestBinary, attempt: Attempt<'
         Verdict::Unjudged(reason) => Verdict::Unjudged(reason),
 
         // Whatever the exoneration ran into, it ran into it with no mutant active, so it is not a
-        // verdict about the mutant and must not be handed back as one: `judge` scores a `TimedOut`
-        // or a `MemoryLimit` as a detection, which would credit a mutant that was switched off in
-        // the run that produced it. Nothing was established, and that is what this says.
+        // verdict about the mutant and must not be handed back as one: a `TimedOut` or a
+        // `MemoryLimit` is scored as an undetected mutant, so returning one here would record the
+        // suite as having missed a mutant that was switched off for the entire run that produced
+        // the evidence. Nothing was established, and that is what this says.
         _unestablished => Verdict::Flaky(None),
     }
 }
@@ -519,7 +554,7 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>) -> Result<Com
             // intersection libtest cannot express is computed here instead: the user's filters
             // decide which of the chosen names may run, and only the survivors are passed.
             let user = HarnessFilters::parse(work.test_arguments());
-            let allowed: Vec<&str> = names.into_iter().filter(|name| user.admits(name)).collect();
+            let allowed: Vec<&str> = names.iter().copied().filter(|name| user.admits(name)).collect();
 
             if allowed.is_empty() {
                 return Err(format!(
@@ -694,7 +729,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
 
     configure(&mut command, binary, launch, work.harness_threads(), active, attempt.census);
 
-    let (child, guard) = match spawn_patiently(&mut command, request) {
+    let spawned = match spawn_patiently(command, request) {
         Ok(started) => started,
 
         // A spawn fails for reasons of the machine — descriptors, processes, address space, a
@@ -726,21 +761,31 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
         }
     };
 
-    // Taken before anything is read from the child, so that the window in which a grandchild could
-    // start outside the containment is as short as it can be made without owning the spawn.
-    let mut subtree = match ProcessTree::adopt(child, guard) {
+    // Adopted before anything is read from the child, so the typestate bundle cannot sit with its
+    // interrupt window open while a grandchild starts outside the containment.
+    let mut subtree = match ProcessTree::adopt(spawned) {
         Ok(subtree) => subtree,
 
         // The child is already live, so this is one run that cannot be accounted for rather than a
         // boundary the host will never provide — `prepare` above answers that question, and it
         // succeeded.
         Err(reason) => {
-            return (Verdict::Unjudged(reason), MemoryUsage::default());
+            return (Verdict::Unjudged(reason.to_string()), MemoryUsage::default());
         }
     };
 
     let pulse = Arc::new(Pulse::default());
-    let drained = readers(&mut subtree, progress, &pulse);
+    let drained = match readers(&mut subtree, progress, &pulse, under_nextest) {
+        Ok(drained) => drained,
+        Err(cause) => {
+            let (usage, _ceiling) = cut_short(&mut subtree, request);
+
+            return (
+                Verdict::Unjudged(format!("`{}` output could not be supervised: {cause}", binary.path)),
+                usage,
+            );
+        }
+    };
 
     let deadline = timeout.map(deadline_after);
 
@@ -1164,19 +1209,31 @@ const OUTPUT_CAP: usize = 4 * 1024 * 1024;
 /// before draining, which closes those ends in the ordinary case — but a descendant that escaped
 /// the containment entirely is still possible, so the wait stays bounded and the readers stay
 /// abandonable rather than joined.
-fn readers(subtree: &mut ProcessTree, progress: &Arc<Mutex<Progress>>, pulse: &Arc<Pulse>) -> Receiver<(Vec<u8>, bool)> {
+///
+/// Two threads and two buffers per child, rather than one multiplexing supervisor. Substituting one
+/// would mean redesigning the abandonable-reader and authoritative/diagnostic split above against a
+/// ceiling nobody has measured, trading a known-correct shape for an unmeasured one. The targeted
+/// process-launch measurement that would justify or rule it out — across quiet, chatty,
+/// mixed-stream, capped, inherited-pipe, and fast-exit children — remains outstanding.
+fn readers(
+    subtree: &mut ProcessTree,
+    progress: &Arc<Mutex<Progress>>,
+    pulse: &Arc<Pulse>,
+    under_nextest: bool,
+) -> io::Result<Receiver<(Vec<u8>, bool)>> {
     let (sink, drained) = mpsc::channel::<(Vec<u8>, bool)>();
 
-    // Both streams are piped. Nextest reports everything on stderr, while a directly run binary
-    // ordinarily reports on stdout but may carry a runtime protocol marker on stderr.
-    let pipes = [subtree.take_stdout().map(Either::Out), subtree.take_stderr().map(Either::Err)];
+    // Only the harness's authoritative stream may settle a verdict. The other stream still keeps
+    // the stall clock alive and can carry the runtime's startup-error marker.
+    let pipes = [
+        subtree.take_stdout().map(|pipe| (Either::Out(pipe), !under_nextest)),
+        subtree.take_stderr().map(|pipe| (Either::Err(pipe), under_nextest)),
+    ];
 
-    for pipe in pipes.into_iter().flatten() {
+    for (pipe, authoritative) in pipes.into_iter().flatten() {
         let published = Arc::clone(progress);
         let pulse = Arc::clone(pulse);
         let sink = sink.clone();
-        let failed = sink.clone();
-        let failed_pulse = Arc::clone(&pulse);
 
         #[cfg(test)]
         let refused = faults::fired(Fault::Thread);
@@ -1190,8 +1247,8 @@ fn readers(subtree: &mut ProcessTree, progress: &Arc<Mutex<Progress>>, pulse: &A
                 READERS.started();
 
                 let collected = match pipe {
-                    Either::Out(pipe) => drain(pipe, &published, &pulse),
-                    Either::Err(pipe) => drain(pipe, &published, &pulse),
+                    Either::Out(pipe) => drain(pipe, &published, &pulse, authoritative),
+                    Either::Err(pipe) => drain(pipe, &published, &pulse, authoritative),
                 };
 
                 let _sent = sink.send(collected);
@@ -1208,20 +1265,14 @@ fn readers(subtree: &mut ProcessTree, progress: &Arc<Mutex<Progress>>, pulse: &A
             })
         };
 
-        match spawned {
-            Ok(_handle) => {}
-            Err(_cause) => {
-                let _sent = failed.send((Vec::new(), false));
-                failed_pulse.signal();
-            }
-        }
+        let _handle = spawned?;
     }
 
     // Dropped so the receiver sees the readers' senders as the only ones left, and disconnects as
     // soon as they finish rather than waiting out the grace period on a sender nobody is using.
     drop(sink);
 
-    drained
+    Ok(drained)
 }
 
 /// One of the two streams a child may be read from, so both can be started by the same loop.
@@ -1243,7 +1294,7 @@ enum Either {
 ///
 /// An interrupted read is not truncation and does not reach the failing arm: `read_until` retries
 /// `EINTR` itself, and nothing was taken out of the pipe when it fired.
-fn drain<R: Read>(pipe: R, progress: &Mutex<Progress>, pulse: &Pulse) -> (Vec<u8>, bool) {
+fn drain<R: Read>(pipe: R, progress: &Mutex<Progress>, pulse: &Pulse, authoritative: bool) -> (Vec<u8>, bool) {
     use std::io::BufRead as _;
 
     let mut reader = BufReader::new(pipe);
@@ -1271,7 +1322,12 @@ fn drain<R: Read>(pipe: R, progress: &Mutex<Progress>, pulse: &Pulse) -> (Vec<u8
                     let before = progress.failed.is_some();
                     let environment_error = progress.environment_error;
 
-                    progress.heard(&String::from_utf8_lossy(&line));
+                    let line = String::from_utf8_lossy(&line);
+                    if authoritative {
+                        progress.heard(&line);
+                    } else {
+                        progress.heard_diagnostic(&line);
+                    }
 
                     (!before && progress.failed.is_some()) || (!environment_error && progress.environment_error)
                 };
@@ -1423,7 +1479,7 @@ mod tests {
         let progress = Mutex::new(Progress::new(Watch::Libtest));
         let pulse = Pulse::default();
 
-        let (kept, whole) = drain(Faltering(false), &progress, &pulse);
+        let (kept, whole) = drain(Faltering(false), &progress, &pulse, true);
 
         assert!(!whole, "a severed pipe was reported as the end of the stream");
         assert_eq!(String::from_utf8_lossy(&kept), "running 1 test\n");
@@ -1437,11 +1493,24 @@ mod tests {
         let progress = Mutex::new(Progress::new(Watch::Libtest));
         let pulse = Pulse::default();
 
-        let (kept, whole) = drain(io::Cursor::new(output), &progress, &pulse);
+        let (kept, whole) = drain(io::Cursor::new(output), &progress, &pulse, true);
 
         assert_eq!(kept.len(), OUTPUT_CAP);
         assert!(!whole, "discarding bytes past the cap was reported as a whole stream");
         assert!(environment_failure(&progress), "the marker remains visible outside the output cap");
+    }
+
+    #[test]
+    fn diagnostic_output_cannot_forge_a_libtest_failure() {
+        let output = b"running 1 test\ntest forged::failure ... FAILED\n";
+        let progress = Mutex::new(Progress::new(Watch::Libtest));
+        let pulse = Pulse::default();
+
+        let (_kept, whole) = drain(io::Cursor::new(output), &progress, &pulse, false);
+
+        assert!(whole);
+        assert_eq!(announced_failure(&progress), None);
+        assert_eq!(last_test(&progress), None);
     }
 
     /// A confirmation landing in a different detection class is itself confirmed.
@@ -1607,7 +1676,7 @@ mod tests {
         let progress = Mutex::new(Progress::new(Watch::Libtest));
         let pulse = Pulse::default();
 
-        let (kept, whole) = drain(Interrupted(0), &progress, &pulse);
+        let (kept, whole) = drain(Interrupted(0), &progress, &pulse, true);
 
         assert!(whole, "an interrupted read was reported as truncation");
         assert!(
@@ -1833,17 +1902,17 @@ mod tests {
     }
 
     #[test]
-    fn reader_thread_creation_failure_is_partial_without_panicking() {
-        crate::notes::alone(|| {
-            let (_directory, work) = scripted(&["exit:1"]);
-            let binary = crate::testing::helper();
-            let _refused = faults::arm(Fault::Thread);
+    fn reader_thread_creation_failure_leaves_the_attempt_unjudged() {
+        let (_directory, work) = scripted(&["flood:5000000", "exit:1"]);
+        let binary = crate::testing::helper();
+        let _refused = faults::arm(Fault::Thread);
 
-            let verdict = run_binary(&work, &binary, plain_attempt(), true);
+        let verdict = run_binary(&work, &binary, plain_attempt(), true);
 
-            assert!(matches!(verdict, Verdict::Failed(None) | Verdict::Flaky(None)), "{verdict:?}");
-            assert!(!crate::notes::drain().is_empty(), "partial output was not diagnosed");
-        });
+        match verdict {
+            Verdict::Unjudged(reason) => assert!(reason.contains("output could not be supervised"), "{reason}"),
+            other => panic!("expected an unjudged attempt, got {other:?}"),
+        }
     }
 
     /// Only the refusals the machine recovers from on its own are waited out.

@@ -13,11 +13,14 @@ mod digest;
 mod publication;
 mod report;
 
+#[doc(inline)]
 pub use digest::{Digest, FileDigest, FrameworkDigest, MutantDigest, settled_mutants};
 pub(crate) use publication::{Publication, remove_if_unchanged, write_if_unchanged, write_streamed};
 #[cfg(test)]
 pub(crate) use publication::{before_next_publication, fail_next_directory_sync, next_scratch_path};
+#[doc(inline)]
 pub use publication::{publish, write};
+#[doc(inline)]
 pub use report::{
     FileResult, Framework, Location, MergeProvenance, MutantResult, Position, Report, RunInfo, ShardInfo, SourceProvenance, Thresholds,
     VerdictProvenance, build, to_json, write_json,

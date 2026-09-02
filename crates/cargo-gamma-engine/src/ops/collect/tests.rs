@@ -112,8 +112,7 @@ fn cached_normalization_matches_a_direct_recomputation_for_every_replacement_at_
                 &candidate.item_path,
                 candidate.mutator,
                 &normalized,
-                0,
-                candidate.replacement_index,
+                crate::model::SiteIndex::new(0, candidate.replacement_index),
                 (candidate.mutator == "fn_value.err_with").then_some(candidate.replacement.as_str()),
             )
         })
@@ -414,6 +413,7 @@ fn item_paths_include_module_impl_and_method() {
     let found = candidates(source, "arith.add_to_sub");
 
     assert_eq!(&*found[0].item_path, "m::S::go");
+    assert!(found[0].trait_impl.is_none());
 }
 
 #[test]
@@ -430,11 +430,69 @@ fn item_paths_distinguish_trait_defaults_from_each_other_and_free_functions() {
 }
 
 #[test]
-fn impl_paths_strip_references_and_generics() {
-    let source = "struct S<T>(T); impl<T> S<T> { fn go(&self, a: i32) -> i32 { a + 1 } }";
+fn impl_paths_retain_qualification_generics_and_references() {
+    let source = "struct S;
+        impl a::S { fn go(&self) -> i32 { 1 + 1 } }
+        impl b::S { fn go(&self) -> i32 { 2 + 2 } }
+        impl S<u8> { fn go(&self) -> i32 { 3 + 3 } }
+        impl S<u16> { fn go(&self) -> i32 { 4 + 4 } }
+        impl S { fn go(&self) -> i32 { 5 + 5 } }
+        trait Go { fn go(&self) -> i32; }
+        impl Go for &S { fn go(&self) -> i32 { 6 + 6 } }
+        impl Go for S { fn go(&self) -> i32 { 7 + 7 } }";
     let found = candidates(source, "arith.add_to_sub");
+    let paths: Vec<&str> = found.iter().map(|candidate| &*candidate.item_path).collect();
 
-    assert_eq!(&*found[0].item_path, "S::go");
+    assert_eq!(
+        paths,
+        vec![
+            "a::S::go",
+            "b::S::go",
+            "S<u8>::go",
+            "S<u16>::go",
+            "S::go",
+            "<&S as Go>::go",
+            "<S as Go>::go",
+        ]
+    );
+}
+
+#[test]
+fn impl_identities_survive_reordering_across_qualified_instantiated_and_reference_self_types() {
+    let first = "impl a::S { fn go(&self) -> i32 { 1 + 1 } }
+        impl S<u8> { fn go(&self) -> i32 { 1 + 1 } }
+        impl S<u16> { fn go(&self) -> i32 { 1 + 1 } }
+        trait Go { fn go(&self) -> i32; }
+        impl Go for &S { fn go(&self) -> i32 { 1 + 1 } }
+        impl Go for S { fn go(&self) -> i32 { 1 + 1 } }";
+    let second = "trait Go { fn go(&self) -> i32; }
+        impl Go for S { fn go(&self) -> i32 { 1 + 1 } }
+        impl Go for &S { fn go(&self) -> i32 { 1 + 1 } }
+        impl S<u16> { fn go(&self) -> i32 { 1 + 1 } }
+        impl S<u8> { fn go(&self) -> i32 { 1 + 1 } }
+        impl a::S { fn go(&self) -> i32 { 1 + 1 } }";
+
+    let identities = |source: &str| {
+        let file = SourceFile::parse("test.rs", source.to_owned()).expect("the fixture parses");
+        let selection = Selection::parse("arith.add_to_sub").expect("the mutator exists");
+        let mut ids: Vec<(String, String)> = into_definitions(&file, collect(&file, &selection))
+            .into_iter()
+            .map(|mutant| (mutant.item_path.to_string(), mutant.id.to_string()))
+            .collect();
+
+        ids.sort_unstable();
+        ids
+    };
+
+    let before = identities(first);
+    let after = identities(second);
+
+    assert_eq!(
+        before, after,
+        "every qualified, instantiated, or reference self type must keep its own id regardless of \
+         impl block order"
+    );
+    assert_eq!(before.len(), 5, "each distinct self type must produce its own entry, not share one");
 }
 
 #[test]
@@ -472,6 +530,20 @@ fn trait_implementation_paths_keep_identical_methods_stable_when_reordered() {
     assert!(paths.contains(&"S::f"), "{paths:?}");
     assert!(paths.contains(&"<S as First>::f"), "{paths:?}");
     assert!(paths.contains(&"<S as Second>::f"), "{paths:?}");
+}
+
+#[test]
+fn trait_implementations_record_the_terminal_trait_name() {
+    let source = "struct A; struct B; struct C;
+        impl Debug for A { fn fmt(&self) -> i32 { 1 + 1 } }
+        impl fmt::Debug for B { fn fmt(&self) -> i32 { 2 + 2 } }
+        impl core::fmt::Debug for C { fn fmt(&self) -> i32 { 3 + 3 } }
+        fn outside() -> i32 { 4 + 4 }";
+    let found = candidates(source, "arith.add_to_sub");
+
+    assert_eq!(found.len(), 4);
+    assert!(found[..3].iter().all(|candidate| candidate.trait_impl.as_deref() == Some("Debug")));
+    assert!(found[3].trait_impl.is_none(), "trait context must not escape its implementation");
 }
 
 #[test]
@@ -1131,8 +1203,8 @@ fn impl_paths_handle_reference_and_non_path_self_types() {
     let found = candidates(source, "arith.add_to_sub");
     let paths: Vec<&str> = found.iter().map(|candidate| &*candidate.item_path).collect();
 
-    assert!(paths.contains(&"<S as T>::f"), "{paths:?}");
-    assert!(paths.contains(&"<_ as T>::f"), "{paths:?}");
+    assert!(paths.contains(&"<&S as T>::f"), "{paths:?}");
+    assert!(paths.contains(&"<(S,) as T>::f"), "{paths:?}");
 }
 
 #[test]
@@ -2702,7 +2774,7 @@ fn a_non_ascii_file_instruments_into_source_that_still_parses() {
     let mutations: Vec<_> = found
         .iter()
         .enumerate()
-        .map(|(ordinal, mutant)| crate::schema::AssignedMutant::new(u32::try_from(ordinal).unwrap(), mutant))
+        .map(|(ordinal, mutant)| crate::schema::AssignedMutant::new(crate::schema::Ordinal::new(u32::try_from(ordinal).unwrap()), mutant))
         .collect();
     let instrumented = crate::schema::instrument(&file.text, &mutations).expect("instruments");
 
@@ -3297,4 +3369,187 @@ fn the_fused_pass_reports_the_same_fault_as_check_stated_and_collects_nothing() 
         actual, expected,
         "the fused pass must report the identical fault check_stated would have reported alone"
     );
+}
+
+/// Runs both entry points over one fixture and returns their candidates side by side, reduced to
+/// the fields that identify each.
+///
+/// Written once rather than per fixture because the invariant the tests below check is always the
+/// same one: the pre-pass the fused entry point runs must not learn anything the pass
+/// [`collect_with`] runs internally would not, or the two disagree about which guesses an active
+/// site is entitled to.
+fn separately_and_fused(source: &str, ops: &str, cfg: &CfgSet) -> (Vec<CandidateKey>, Vec<CandidateKey>) {
+    let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+    let selection = Selection::parse(ops).unwrap();
+    let defaults = Defaults::of(&file.ast);
+
+    let separately = collect_with(&file, &selection, cfg, &defaults);
+    let fused = check_stated_and_collect_with(&file, &selection, cfg, &defaults).expect("the fixture has no fault to report");
+
+    (
+        separately.iter().map(candidate_key).collect(),
+        fused.iter().map(candidate_key).collect(),
+    )
+}
+
+/// The tuple [`candidate_key`] reduces a candidate to, named so the helper above can return two
+/// lists of them without spelling it out twice.
+type CandidateKey = (Range<usize>, &'static str, CompactString, u32, String, Shape);
+
+/// Code the selected build strips is not code either pass may learn from, and the two passes must
+/// strip exactly the same code.
+///
+/// The gate is written twice — once in `indexes::Walk`'s own visitor, which `collect_with` drives,
+/// and once in `phase_one::PhaseOne`'s, which the fused entry point drives — so the two can drift
+/// apart with nothing else noticing. The fixture makes such a drift visible in the candidates
+/// rather than only in the indexes: `count` is a number in the active struct and a `String` in the
+/// inactive one, so whichever side indexed the inactive field would demote the name to unknown and
+/// withhold the perturbation the active site is entitled to.
+///
+/// An enforced set is essential — [`CfgSet::unconditional`] answers every predicate `true`, so
+/// nothing would be stripped and the fixture would test nothing.
+#[test]
+fn the_fused_pass_strips_the_same_inactive_code_the_separate_passes_do() {
+    let source = r#"
+        struct Inactive {
+            #[cfg(windows)]
+            count: String,
+        }
+
+        struct Active {
+            count: u32,
+        }
+
+        #[cfg(windows)]
+        const LIMIT: &str = "not built";
+
+        const LIMIT: u32 = 1;
+
+        fn f(record: &Active) -> u32 {
+            record.count + LIMIT
+        }
+    "#;
+    let cfg = CfgSet::parse("unix\n");
+
+    let (separately, fused) = separately_and_fused(source, "expr.increment,expr.decrement,arith.add_to_sub", &cfg);
+
+    assert!(!fused.is_empty(), "the fixture is expected to produce candidates");
+    assert_eq!(
+        fused, separately,
+        "the fused pass must strip exactly what the separate passes strip"
+    );
+}
+
+/// The collector offers no mutant in test code, so neither pass may draw evidence from it. This is
+/// the case `CfgSet::holds_for` alone got wrong: `cfg(test)` *holds* for the instrumented build,
+/// so a pre-pass reading it indexed the helper below while the collector skipped it, and the
+/// guesses made about the active `count` were drawn from a struct the measured code has nothing to
+/// do with.
+///
+/// No enforced set is needed here, because the test gate is decided without consulting whether
+/// predicates are enforced at all — which is also why this fixture was wrong for every caller that
+/// passes an unconditional set.
+#[test]
+fn the_fused_pass_strips_the_same_test_gated_code_the_separate_passes_do() {
+    let source = r#"
+        #[cfg(test)]
+        mod tests {
+            struct Helper {
+                count: String,
+            }
+
+            const LIMIT: &str = "fixture";
+        }
+
+        struct Active {
+            count: u32,
+        }
+
+        const LIMIT: u32 = 1;
+
+        fn f(record: &Active) -> u32 {
+            record.count + LIMIT
+        }
+    "#;
+    let cfg = CfgSet::unconditional();
+
+    let (separately, fused) = separately_and_fused(source, "expr.increment,expr.decrement,arith.add_to_sub", &cfg);
+
+    assert!(!fused.is_empty(), "the fixture is expected to produce candidates");
+    assert_eq!(
+        fused, separately,
+        "the fused pass must strip exactly what the separate passes strip"
+    );
+}
+
+/// Conditional compilation inside a body is written on statements and locals, which no item
+/// visitor reaches — so this is the level the two visitors are most likely to drift apart at, and
+/// the level `indexes_in`'s own unit tests pin against the collector's rule.
+#[test]
+fn the_fused_pass_strips_the_same_inactive_statements_the_separate_passes_do() {
+    let source = r"
+        fn f(data: &[u8]) -> usize {
+            #[cfg(windows)]
+            let _ = 1 < only_on_windows;
+
+            let count: usize = 1;
+
+            count + data.len()
+        }
+    ";
+    let cfg = CfgSet::parse("unix\n");
+
+    let (separately, fused) = separately_and_fused(source, "expr.increment,expr.decrement,arith.add_to_sub", &cfg);
+
+    assert!(!fused.is_empty(), "the fixture is expected to produce candidates");
+    assert_eq!(
+        fused, separately,
+        "the fused pass must strip exactly what the separate passes strip"
+    );
+}
+
+/// Every stated value the two channels accept has to reach a candidate, or the attribute is a hint
+/// that reads as working and measures nothing — the failure the `const fn` and empty-body
+/// rejections in `stated::check` exist to make impossible.
+///
+/// The three positions a function is written in are all covered, because only one of them is an
+/// `ItemFn` and a gate applied in one place would leave the other two silent.
+#[test]
+fn every_accepted_stated_value_emits_a_candidate() {
+    let sources = [
+        "#[gamma::value(7)]\nfn f() -> u32 { 1 }",
+        "struct S;\nimpl S {\n#[gamma::value(7)]\nfn f(&self) -> u32 { 1 }\n}",
+        "trait T {\n#[gamma::value(7)]\nfn f(&self) -> u32 { 1 }\n}",
+    ];
+
+    for source in sources {
+        let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+
+        check_stated(&file).unwrap_or_else(|error| panic!("`{source}` states a value on a function: {error}"));
+
+        let found = candidates(source, "fn_value.stated");
+
+        assert_eq!(
+            found.iter().map(|candidate| candidate.replacement.as_str()).collect::<Vec<_>>(),
+            vec!["7"],
+            "`{source}` states a value that must become a mutant"
+        );
+    }
+}
+
+/// The converse of the test above: the two positions collection returns from before it reads a
+/// stated value emit nothing, which is exactly why `stated::check` refuses the attribute there.
+/// If either of these ever started producing a candidate, that refusal would have become wrong.
+#[test]
+fn the_positions_a_stated_value_is_refused_on_emit_no_candidate() {
+    for source in ["#[gamma::value(7)]\nconst fn f() -> u32 { 1 }", "#[gamma::value(())]\nfn f() {}"] {
+        assert!(
+            candidates(source, "fn_value.stated").is_empty(),
+            "`{source}` must emit nothing, which is what makes refusing the attribute correct"
+        );
+
+        let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+
+        let _rejected = check_stated(&file).expect_err("an inert position must be reported rather than silently ignored");
+    }
 }

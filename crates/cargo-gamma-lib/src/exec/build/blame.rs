@@ -98,7 +98,7 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
                 if guard.mutated.as_ref().is_some_and(|mutated| covers(mutated, &reported)) {
                     let _ = exact.insert(ordinal);
                 } else if covers(&guard.site, &reported) {
-                    let width = guard.site.end.line.saturating_sub(guard.site.start.line);
+                    let width = guard.site.end.line().saturating_sub(guard.site.start.line());
 
                     match &mut enclosing {
                         Some((best, ordinals)) if *best == width => {
@@ -113,7 +113,7 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
                     // non-constant and the complaint lands on the whole construct that depended on
                     // it. Every guard inside the smallest such region is a candidate, because
                     // nothing narrower distinguishes them.
-                    let width = reported.end.line.saturating_sub(reported.start.line);
+                    let width = reported.end.line().saturating_sub(reported.start.line());
 
                     match &mut contained {
                         Some((best, ordinals)) if *best == width => {
@@ -260,7 +260,7 @@ pub(super) fn diverted(
         );
 
         for (ordinal, guard) in here {
-            if !region.contains(&guard.site.start.line) {
+            if !region.contains(&guard.site.start.line()) {
                 continue;
             }
 
@@ -316,13 +316,11 @@ pub(super) fn clamped(number: u64) -> u32 {
 }
 
 /// Reads the region a compiler diagnostic points at out of its JSON span.
+///
+/// A span whose line or column is absent, or is zero, yields no region: cargo counts both from
+/// one, so a zero is a producer that meant no position at all rather than the first character.
 pub(super) fn position_range(span: &Span<'_>) -> Option<Range<Position>> {
-    let at = |line: Option<u64>, column: Option<u64>| {
-        Some(Position {
-            line: clamped(line?),
-            column: clamped(column?),
-        })
-    };
+    let at = |line: Option<u64>, column: Option<u64>| Position::new(clamped(line?), clamped(column?));
 
     Some(at(span.line_start, span.column_start)?..at(span.line_end, span.column_end)?)
 }

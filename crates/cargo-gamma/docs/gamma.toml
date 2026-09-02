@@ -59,6 +59,13 @@
 #     "**/build.rs",
 # ]
 
+# Exclude mutants inside implementations with a listed lexical terminal trait name. Qualification
+# is ignored, but this does not perform rustc name resolution and cannot distinguish imported
+# traits written with the same terminal name. Every name must match a discovered implementation.
+#
+# Debug output is diagnostic text without a stable formatting contract.
+# exclude-trait-impls = ["Debug", "Display"]
+
 # Packages to mutate. Empty follows Cargo: the owning package below a package root, or the
 # workspace's default members at the workspace root.
 #
@@ -274,12 +281,3 @@
 # Default: target/cargo-gamma in the original workspace.
 #
 # artifact-dir = "target/cargo-gamma"
-
-# Load the HTML viewer from a CDN instead of embedding it. Default: false.
-#
-# Produces a much smaller file, at the cost of needing network access to read it — which a CI
-# artifact opened from an air-gapped machine will not have.
-#
-# [reporters]
-#
-# html-external = false

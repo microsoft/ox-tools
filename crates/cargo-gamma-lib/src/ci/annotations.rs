@@ -8,6 +8,7 @@ use clap::ValueEnum;
 
 use super::finding::{describe, findings, relative};
 use crate::model::Mutant;
+use crate::report::encode_controls;
 
 /// How much of the CI surfacing to emit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -90,10 +91,16 @@ fn escape_property(text: &str) -> String {
 
 /// Escapes a workflow command message.
 ///
-/// A newline inside a message would end the command and turn the remainder into log noise, so the
-/// escaping is not cosmetic.
+/// Two layers, because they defend different things. Every control character is first shown rather
+/// than obeyed: the log this lands in is a terminal-rendered one, so a path or source fragment
+/// carrying `ESC [2K` erases the lines above it and one carrying an OSC 8 sequence hangs a
+/// hyperlink of its author's choosing on text a reader takes for workflow output. What is left
+/// is then escaped for the workflow command syntax itself, where an unescaped `%`, carriage return,
+/// or newline ends the command and turns the remainder into log noise. The second layer no longer
+/// has a return or a newline to find, and is kept because it is what the syntax requires rather
+/// than a consequence of the first.
 fn escape_data(text: &str) -> String {
-    text.replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
+    encode_controls(text).replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
 }
 
 #[cfg(test)]
@@ -151,7 +158,10 @@ mod tests {
     fn a_newline_cannot_escape_a_message() {
         // A raw newline would end the workflow command and turn the rest into log noise. Mutant
         // text is already flattened before it gets here, so this is the belt to that suspenders.
-        assert_eq!(escape_data("a\r\nb"), "a%0D%0Ab");
+        let escaped = escape_data("a\r\nb");
+
+        assert_eq!(escaped, "a\\r\\nb");
+        assert!(!escaped.contains('\r') && !escaped.contains('\n'));
     }
 
     #[test]
@@ -173,7 +183,7 @@ mod tests {
         let lines = annotations(&mutants, &root());
 
         assert!(
-            lines[0].starts_with("::warning file=src/a%2Cb%3Ac%0D%0A.rs,line=12,col=5,"),
+            lines[0].starts_with("::warning file=src/a%2Cb%3Ac\\r\\n.rs,line=12,col=5,"),
             "{}",
             lines[0]
         );
@@ -182,7 +192,25 @@ mod tests {
     #[test]
     fn a_percent_is_escaped_before_anything_else() {
         // Escaping it last would double-escape the escapes.
-        assert_eq!(escape_data("%0A\n"), "%250A%0A");
+        assert_eq!(escape_data("%0A"), "%250A");
+    }
+
+    /// A CI log is rendered by a terminal, so a path that erases lines does it there too.
+    #[test]
+    fn a_path_cannot_address_the_terminal_the_log_is_read_in() {
+        let hostile = "/w/src/\r\u{1b}[2K\u{9b}31mforged\u{1b}]8;;https://evil.test\u{7}link.rs";
+        let mutants = vec![mutant(hostile, 12, "relational.gt_to_ge", Outcome::Survived)];
+        let lines = annotations(&mutants, &root());
+
+        for line in &lines {
+            assert!(!line.contains('\u{1b}'), "{line:?}");
+            assert!(!line.contains('\u{9b}'), "{line:?}");
+            assert!(!line.contains('\u{7}'), "{line:?}");
+            assert!(!line.contains('\r'), "{line:?}");
+            assert!(!line.contains('\n'), "{line:?}");
+        }
+
+        assert!(lines[0].contains("\\r\\e[2K"), "{}", lines[0]);
     }
 
     #[test]

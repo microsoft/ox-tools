@@ -12,6 +12,7 @@
 //!
 //! Run with `GAMMA_BLESS_DOCS=1` to rewrite the files instead of failing.
 
+use std::collections::BTreeSet;
 use std::fs;
 
 use camino::Utf8PathBuf;
@@ -186,21 +187,25 @@ fn kebab(name: &str) -> String {
     name.replace('_', "-")
 }
 
-/// Returns the field names declared in one `pub struct` in `config.rs`.
+/// Returns the serialized field names declared in one struct in `config.rs`.
 ///
 /// The struct is found by name and read to its closing brace. Parsing the source is crude, but it
 /// is the only source of truth available: serde's `deny_unknown_fields` is generated at compile
 /// time and leaves no runtime list of accepted keys behind to compare against.
 fn fields(source: &str, name: &str) -> Vec<String> {
-    let header = format!("pub struct {name} {{");
+    let public = format!("pub struct {name} {{");
+    let private = format!("struct {name} {{");
+    let header = if source.contains(&public) { public } else { private };
 
     assert!(source.contains(&header), "config.rs declares no struct named {name}");
     let (_, body) = source.split_once(header.as_str()).expect("the struct header is present");
 
     body.lines()
         .take_while(|line| !line.starts_with('}'))
-        .filter_map(|line| line.strip_prefix("    pub "))
-        .filter_map(|rest| rest.split(':').next())
+        .filter_map(|line| line.strip_prefix("    "))
+        .map(|line| line.strip_prefix("pub ").unwrap_or(line))
+        .filter_map(|rest| rest.split_once(':').map(|(field, _type)| field))
+        .filter(|field| field.chars().all(|character| character.is_ascii_alphanumeric() || character == '_'))
         .map(kebab)
         .collect()
 }
@@ -216,10 +221,7 @@ fn every_configuration_key_is_documented() {
     // is what they copy to start from. A key present in only one of them is invisible to half the
     // people looking for it.
     let source = include_str!("../src/config.rs");
-    let keys: Vec<String> = ["Config", "Shard", "Reporters"]
-        .iter()
-        .flat_map(|name| fields(source, name))
-        .collect();
+    let keys: Vec<String> = ["Config", "Shard"].iter().flat_map(|name| fields(source, name)).collect();
 
     for doc in ["docs/CONFIG.md", "docs/gamma.toml"] {
         let path = root_dir().join(doc);
@@ -261,6 +263,35 @@ fn the_example_configuration_is_inert_and_parses() {
         format!("{config:?}"),
         format!("{:?}", Config::default()),
         "docs/gamma.toml sets a key rather than only documenting it, so copying it would change behavior"
+    );
+}
+
+/// Keeps the configuration used to mutate this workspace loadable by cargo-gamma itself.
+///
+/// Loaded the way a run loads it — [`Config::load`] against the workspace directory — rather than
+/// by reading the file and parsing the text. The two are not the same check: `load` is what resolves
+/// the file name, and it answers a missing file with the defaults, so a test that reads the text
+/// itself would still pass if the file were renamed out from under the tool while every real run
+/// silently lost every setting in it.
+///
+/// The settings are asserted rather than merely accepted, because "parses" is satisfied by an empty
+/// file. This workspace's own mutation runs depend on these exclusions being in force: without them
+/// every `Debug` and redaction implementation contributes mutants that no test can meaningfully
+/// convict, and the score they drag down is the one the gate is set against.
+#[test]
+fn the_workspace_configuration_loads_with_its_settings_intact() {
+    let config = Config::load(&workspace_dir()).expect("the workspace gamma.toml is not a valid configuration file");
+
+    assert!(
+        config.exclude_files.iter().any(|pattern| pattern == "crates/automation/**"),
+        "the workspace configuration no longer excludes the automation crate: {:?}",
+        config.exclude_files
+    );
+
+    assert_eq!(
+        config.exclude_trait_impls,
+        ["Debug"],
+        "the diagnostic-output trait exclusion changed"
     );
 }
 
@@ -444,7 +475,10 @@ fn every_crate_that_can_forbid_unsafe_code_does() {
     );
 }
 
-/// No source file mutates the process environment — anywhere, with no exemption.
+/// The functions allowed to write the process environment, and nothing else is.
+const ENVIRONMENT_WRITERS: [(&str, &str); 0] = [];
+
+/// Nothing writes the process environment through Rust's standard-library API.
 ///
 /// The suite runs tests on threads, and `setenv` racing `getenv` is a data race in `libc` rather
 /// than merely a confusing value — which is why edition 2024 made `set_var` unsafe. A mutex only
@@ -455,8 +489,8 @@ fn every_crate_that_can_forbid_unsafe_code_does() {
 ///
 /// The rule is enforced twice over. `set_var` is an unsafe call, and every crate in this workspace
 /// except `cargo-gamma-unsafe` carries `#![forbid(unsafe_code)]` — so a write anywhere else does
-/// not merely break this test, it does not compile. What this test adds is that even the one crate
-/// that *could* write the environment no longer does: there is no exempt file left.
+/// not merely break this test, it does not compile. This test additionally guards the exempt crate
+/// and fails if a standard-library environment write appears anywhere.
 ///
 /// Enforced here rather than written down and hoped for, because the discipline held right up
 /// until it did not: the harness width was once published with `set_var`, which was sound for the
@@ -466,22 +500,43 @@ fn every_crate_that_can_forbid_unsafe_code_does() {
 /// tests that need cargo to read `RUSTFLAGS` or `CARGO` now put them too, by re-executing a child.
 #[test]
 fn nothing_writes_the_process_environment() {
-    let root = root_dir();
+    let root = workspace_dir();
     let mut offenders = Vec::new();
+    let mut allowances_used = BTreeSet::new();
 
-    for entry in walk(&root.join("crates")) {
-        let relative = entry.strip_prefix(&root).map_or_else(|_| entry.to_string(), ToString::to_string);
-        let text = fs::read_to_string(entry.as_std_path()).unwrap_or_else(|_| panic!("could not read {entry}"));
+    for path in gamma_crates() {
+        for entry in walk(&path.join("src")).into_iter().chain(walk_optional(&path.join("tests"))) {
+            let relative = entry
+                .strip_prefix(&root)
+                .map_or_else(|_| entry.to_string(), ToString::to_string)
+                .replace('\\', "/");
+            let text = fs::read_to_string(entry.as_std_path()).unwrap_or_else(|_| panic!("could not read {entry}"));
+            let mut enclosing = "";
 
-        for (number, line) in text.lines().enumerate() {
-            // A mention in prose is what every doc comment about this rule is, including this
-            // test's own. Only a call counts.
-            // Assembled rather than written out, so that this line does not match itself.
-            if ["set_var(", "remove_var("]
-                .iter()
-                .any(|call| line.contains(&format!("env::{call}")))
-            {
-                offenders.push(format!("{relative}:{}", number + 1));
+            for (number, line) in text.lines().enumerate() {
+                if let Some(name) = function_name(line) {
+                    enclosing = name;
+                }
+
+                // A mention in prose is what every doc comment about this rule is, including this
+                // test's own. Only a call counts.
+                // Assembled rather than written out, so that this line does not match itself.
+                if !["set_var(", "remove_var("]
+                    .iter()
+                    .any(|call| line.contains(&format!("env::{call}")))
+                {
+                    continue;
+                }
+
+                let allowed = ENVIRONMENT_WRITERS
+                    .iter()
+                    .position(|(file, function)| *file == relative && *function == enclosing);
+
+                if let Some(index) = allowed {
+                    let _new = allowances_used.insert(index);
+                } else {
+                    offenders.push(format!("{relative}:{} in `{enclosing}`", number + 1));
+                }
             }
         }
     }
@@ -491,10 +546,55 @@ fn nothing_writes_the_process_environment() {
         "these write the process environment, which races every other thread's read: {}",
         offenders.join(", ")
     );
+
+    let stale: Vec<String> = ENVIRONMENT_WRITERS
+        .iter()
+        .enumerate()
+        .filter(|(index, _allowance)| !allowances_used.contains(index))
+        .map(|(_index, (file, function))| format!("{file} `{function}`"))
+        .collect();
+
+    assert!(
+        stale.is_empty(),
+        "these allowances match nothing and have to be deleted rather than left to cover the next write: {}",
+        stale.join(", ")
+    );
 }
 
-/// Every `.rs` file under `directory`, recursively.
+/// The name of the function this line declares, when it declares one.
+fn function_name(line: &str) -> Option<&str> {
+    let rest = line.trim_start();
+    let rest = rest.strip_prefix("pub ").unwrap_or(rest);
+    let rest = rest
+        .strip_prefix("pub(crate) ")
+        .or_else(|| rest.strip_prefix("pub(super) "))
+        .unwrap_or(rest);
+    let rest = rest.strip_prefix("async ").unwrap_or(rest);
+    let rest = rest.strip_prefix("const ").unwrap_or(rest);
+    let rest = rest.strip_prefix("unsafe ").unwrap_or(rest);
+    let rest = rest.strip_prefix("extern \"C\" ").unwrap_or(rest);
+
+    let name = rest.strip_prefix("fn ")?.split(['(', '<', ' ']).next()?;
+
+    (!name.is_empty()).then_some(name)
+}
+
+/// Every `.rs` file under `directory`, recursively, failing if it is not there to walk.
+///
+/// A missing directory is a mistake in the caller rather than a codebase with nothing in it, and
+/// returning an empty list for one makes every policy check built on this pass by finding nothing.
+/// Use [`walk_optional`] where absence is a legitimate answer.
 fn walk(directory: &Utf8PathBuf) -> Vec<Utf8PathBuf> {
+    assert!(
+        directory.is_dir(),
+        "{directory} is not a directory, so a check walking it would pass by reading nothing"
+    );
+
+    walk_optional(directory)
+}
+
+/// Every `.rs` file under `directory`, recursively, or none when the directory does not exist.
+fn walk_optional(directory: &Utf8PathBuf) -> Vec<Utf8PathBuf> {
     let mut found = Vec::new();
     let Ok(entries) = fs::read_dir(directory.as_std_path()) else {
         return found;
@@ -504,11 +604,191 @@ fn walk(directory: &Utf8PathBuf) -> Vec<Utf8PathBuf> {
         let path = Utf8PathBuf::from_path_buf(entry.path()).expect("the repository has no non-UTF-8 paths");
 
         if path.is_dir() {
-            found.extend(walk(&path));
+            found.extend(walk_optional(&path));
         } else if path.extension() == Some("rs") {
             found.push(path);
         }
     }
 
     found
+}
+
+/// Every `cargo-gamma*` crate directory in the workspace, in read order.
+fn gamma_crates() -> Vec<Utf8PathBuf> {
+    let mut found = Vec::new();
+
+    for entry in fs::read_dir(workspace_dir().join("crates").as_std_path())
+        .expect("the workspace has a crates directory")
+        .flatten()
+    {
+        let path = Utf8PathBuf::from_path_buf(entry.path()).expect("the repository has no non-UTF-8 paths");
+
+        if path.is_dir() && path.file_name().unwrap_or_default().starts_with("cargo-gamma") {
+            found.push(path);
+        }
+    }
+
+    assert!(
+        !found.is_empty(),
+        "no cargo-gamma crate was found, so this check would pass vacuously"
+    );
+
+    found
+}
+
+/// The names of every module declared anywhere under one crate's `src` tree.
+///
+/// Used to tell a re-export of this crate's own module from one that reaches into a dependency.
+/// Collected across the whole crate rather than per file because a module declared in `foo/mod.rs`
+/// is re-exported from its siblings by bare name, with nothing in the re-exporting file to say
+/// where the name came from.
+fn declared_modules(sources: &[Utf8PathBuf]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+
+    for path in sources {
+        let text = fs::read_to_string(path.as_std_path()).unwrap_or_else(|_| panic!("could not read {path}"));
+
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            let declaration = trimmed
+                .strip_prefix("pub(crate) mod ")
+                .or_else(|| trimmed.strip_prefix("pub(super) mod "))
+                .or_else(|| trimmed.strip_prefix("pub mod "))
+                .or_else(|| trimmed.strip_prefix("mod "));
+
+            if let Some(rest) = declaration {
+                let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+
+                if !name.is_empty() {
+                    let _inserted = names.insert(name);
+                }
+            }
+        }
+    }
+
+    names
+}
+
+/// The first path segment a `use` statement names, if the line is a re-export.
+///
+/// Returns `None` for anything that is not a public re-export, including `pub(crate) use`, which
+/// widens nothing outside this crate.
+fn reexported_root(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("pub use ")?;
+    let segment = rest.split(&[':', ' ', ';', '{', ','][..]).next()?.trim();
+
+    (!segment.is_empty()).then_some(segment)
+}
+
+/// No public facade re-exports by glob, anywhere in the tool's crates.
+///
+/// A `pub use module::*` promises whatever that module happens to hold *next*, which makes adding a
+/// `pub` item to an implementation module a silent change to another crate's published surface. The
+/// feature-gated `internals` facade was the last holdout: it could not name a private module, since
+/// re-exporting one is a hard error rather than a lint, so the feature that opens the facade is now
+/// also what widens the module declarations it names.
+///
+/// Enforced here rather than by review because a glob is one character and reads as a convenience.
+/// Nothing else in the build fails when one is added, and the surface it widens is documentation-
+/// hidden, so the usual signals — a docs diff, a broken downstream build — are all absent.
+#[test]
+fn no_public_facade_re_exports_by_glob() {
+    // Assembled rather than written out, so that this line does not match itself if the check ever
+    // grows to cover its own file.
+    let glob = format!("::{}", '*');
+    let mut globs = Vec::new();
+
+    for path in gamma_crates() {
+        for source in walk(&path.join("src")) {
+            let text = fs::read_to_string(source.as_std_path()).unwrap_or_else(|_| panic!("could not read {source}"));
+
+            for (number, line) in text.lines().enumerate() {
+                if line.trim_start().starts_with("pub use ") && line.contains(&glob) {
+                    globs.push(format!("{source}:{}", number + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        globs.is_empty(),
+        "these re-export by glob, so an item added to the module behind them joins a public surface without review: {}",
+        globs.join(", ")
+    );
+}
+
+/// Every public re-export of a local item says how it is documented, and no foreign one is inlined.
+///
+/// rustdoc renders a re-export of an item from *this* crate as a link back to the implementation
+/// module unless the re-export is inlined, so a reader following the published path arrives
+/// somewhere they were never meant to import from — and the canonical path in the documentation
+/// stops matching the one the crate intends. `#[doc(inline)]` is what pins the item to the facade
+/// that exports it. `#[doc(hidden)]` counts as an answer too: an export nobody is meant to find
+/// does not need a canonical path, and saying so explicitly is what tells the two cases apart.
+///
+/// A re-export that reaches into another crate is the opposite case and is held to the opposite
+/// rule. rustdoc already inlines those by default, because the crate they came from may not be
+/// documented alongside this one, so `#[doc(inline)]` there states nothing that is not already
+/// true — and reading one suggests the attribute is what makes the item appear, which is exactly
+/// the belief that leaves a local re-export bare. They are required to carry nothing.
+#[test]
+fn every_local_re_export_states_how_it_is_documented() {
+    let mut bare = Vec::new();
+    let mut redundant = Vec::new();
+
+    for path in gamma_crates() {
+        let sources = walk(&path.join("src"));
+        let modules = declared_modules(&sources);
+
+        for source in &sources {
+            let text = fs::read_to_string(source.as_std_path()).unwrap_or_else(|_| panic!("could not read {source}"));
+            let lines: Vec<&str> = text.lines().collect();
+
+            for (index, line) in lines.iter().enumerate() {
+                let Some(root) = reexported_root(line) else {
+                    continue;
+                };
+
+                // The attribute need not be adjacent: a `cfg` gate commonly sits between it and the
+                // statement, in either order.
+                let attributes: Vec<&str> = lines[..index]
+                    .iter()
+                    .rev()
+                    .take_while(|previous| previous.trim_start().starts_with('#'))
+                    .copied()
+                    .collect();
+
+                let local = ["crate", "self", "super"].contains(&root) || modules.contains(root);
+
+                if !local {
+                    if attributes
+                        .iter()
+                        .any(|previous| previous.trim_start().starts_with("#[doc(inline)]"))
+                    {
+                        redundant.push(format!("{source}:{}", index + 1));
+                    }
+
+                    continue;
+                }
+
+                if !attributes.iter().any(|previous| previous.trim_start().starts_with("#[doc(")) {
+                    bare.push(format!("{source}:{}", index + 1));
+                }
+            }
+        }
+    }
+
+    assert!(
+        bare.is_empty(),
+        "these re-export a local item without saying whether it is inlined or hidden, so rustdoc \
+         publishes a canonical path pointing at the implementation module: {}",
+        bare.join(", ")
+    );
+
+    assert!(
+        redundant.is_empty(),
+        "these inline a re-export from another crate, which rustdoc already does, copying that \
+         crate's documentation in where it goes stale silently: {}",
+        redundant.join(", ")
+    );
 }

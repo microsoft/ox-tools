@@ -4,7 +4,7 @@
 [package]
 name = "cargo-ensure-no-default-features"
 description = "A cargo subcommand that ensures dependencies are declared with default-features = false"
-version = "1.1.0"
+version = "1.1.1"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "features", "ci"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]

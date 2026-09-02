@@ -40,6 +40,12 @@ pub fn families() -> Vec<&'static str> {
 /// Expands one selector into the mutator names it matches.
 ///
 /// A selector is a full name, a family prefix, an `@preset`, an academic alias, or `all`.
+///
+/// # Errors
+///
+/// Returns an error if the selector does not match a mutator name, family or sub-family prefix,
+/// preset, or alias in the registry. The error suggests the closest known spelling when one is
+/// close enough to be a plausible typo.
 pub fn resolve(selector: &str) -> Result<Vec<&'static str>> {
     if selector == "all" {
         return Ok(REGISTRY.iter().map(|m| m.name).collect());

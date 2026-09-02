@@ -53,6 +53,9 @@ pub struct Config {
     /// Globs excluding files from mutation.
     pub exclude_files: Vec<String>,
 
+    /// Lexical terminal trait names whose implementations are excluded from mutation.
+    pub exclude_trait_impls: Vec<String>,
+
     /// Fail the run below this mutation score.
     pub min_score: Option<f64>,
 
@@ -143,10 +146,6 @@ pub struct Config {
     /// Sharding.
     #[serde(default)]
     pub shard: Shard,
-
-    /// File reports.
-    #[serde(default)]
-    pub reporters: Reporters,
 }
 
 /// Reads a size key that [`Config::validate`] has already accepted.
@@ -168,14 +167,6 @@ pub struct Shard {
 
     /// Which shard to run, from zero.
     pub index: Option<u32>,
-}
-
-/// The `[reporters]` table.
-#[derive(Debug, Default, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
-pub struct Reporters {
-    /// Load the viewer from a CDN instead of embedding it.
-    pub html_external: Option<bool>,
 }
 
 impl Config {
@@ -276,6 +267,16 @@ impl Config {
             }
         }
 
+        if let Some(name) = self
+            .exclude_trait_impls
+            .iter()
+            .find(|name| syn::parse_str::<syn::Ident>(name).is_err())
+        {
+            return Err(format!(
+                "exclude-trait-impls entry `{name}` must be one unqualified Rust identifier"
+            ));
+        }
+
         Ok(())
     }
 
@@ -330,8 +331,6 @@ impl Config {
         args.no_baseline = args.no_baseline || self.no_baseline.unwrap_or(false);
         args.no_confirm = args.no_confirm || self.no_confirm.unwrap_or(false);
         args.artifact_dir = args.artifact_dir.take().or_else(|| self.artifact_dir.clone());
-        args.html_external = args.html_external || self.reporters.html_external.unwrap_or(false);
-
         if !args.measure.test_packages.is_empty() && args.measure.test_workspace {
             return Err(contradiction(
                 "test-packages",
@@ -363,6 +362,7 @@ impl Config {
 
         select.files.extend(self.files.iter().cloned());
         select.exclude_files.extend(self.exclude_files.iter().cloned());
+        select.exclude_trait_impls.extend(self.exclude_trait_impls.iter().cloned());
         select.packages.extend(self.packages.iter().cloned());
         select.errors.extend(self.errors.iter().cloned());
         select.features.features.extend(self.features.iter().cloned());
@@ -426,6 +426,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::commands::{BuildLimitArgs, FeatureArgs, MeasureArgs};
 
     fn select_args(dir: &Utf8Path) -> SelectArgs {
         SelectArgs {
@@ -733,6 +734,35 @@ mod tests {
     }
 
     #[test]
+    fn trait_implementation_exclusions_reach_mutant_selection() {
+        let config = Config::parse("exclude-trait-impls = [\"Debug\", \"Display\"]\n").expect("the trait exclusions parse");
+        let mut select = SelectArgs::default();
+
+        config
+            .apply_selection(&mut select)
+            .expect("the exclusion does not contradict another setting");
+
+        assert_eq!(select.exclude_trait_impls, ["Debug", "Display"]);
+    }
+
+    #[test]
+    fn a_trait_exclusion_names_terminal_identifiers() {
+        let qualified = Config::parse("exclude-trait-impls = [\"Debug\", \"fmt::Display\"]\n").expect_err("must be rejected");
+        let empty_entry = Config::parse("exclude-trait-impls = [\"Debug\", \"\"]\n").expect_err("must be rejected");
+
+        assert!(qualified.contains("one unqualified Rust identifier"), "{qualified}");
+        assert!(empty_entry.contains("one unqualified Rust identifier"), "{empty_entry}");
+    }
+
+    #[test]
+    fn trait_exclusions_reject_the_old_table() {
+        let old_field = Config::parse("[[exclude-mutants]]\ntrait-impls = \"Debug\"\nreason = \"diagnostic\"\n")
+            .expect_err("the old table must be rejected");
+
+        assert!(old_field.contains("unknown field"), "{old_field}");
+    }
+
+    #[test]
     fn ops_are_joined_into_the_selector_list_the_flag_parses() {
         // One selector per line, with room for a comment, is the reason this is a list. It has to
         // arrive at exactly the same parser the flag uses, or the two spellings will drift.
@@ -810,16 +840,6 @@ mod tests {
         args.artifact_dir = Some("cli-out".into());
         config.apply(&mut args).expect("command line wins");
         assert_eq!(args.artifact_dir.as_deref(), Some(Utf8Path::new("cli-out")));
-    }
-
-    #[test]
-    fn individual_report_destinations_are_not_configurable() {
-        for key in ["html", "json", "sarif", "advice"] {
-            let text = format!("[reporters]\n{key} = \"out/report\"\n");
-            let failure = Config::parse(&text).expect_err("individual destinations are gone");
-
-            assert!(failure.contains("unknown field"), "{key}: {failure}");
-        }
     }
 
     #[test]
@@ -993,5 +1013,289 @@ mod tests {
         let error = Config::load(path).expect_err("an unreadable config must not be treated as absent");
 
         assert!(error.to_string().contains(RELATIVE_PATH), "{error}");
+    }
+
+    /// A configuration with every key set, each to a value nothing else in the merge produces.
+    ///
+    /// Sentinel values rather than plausible ones on purpose: an assignment that reached the wrong
+    /// field, or that was deleted and left the default behind, has to fail rather than coincide.
+    /// `test_workspace` is the one key held false here, because it and `test-packages` cannot both
+    /// apply — the pair has a test of its own below.
+    fn every_key_set() -> Config {
+        Config {
+            mutators: Some(vec!["arith".to_owned(), "!arith.add_to_sub".to_owned()]),
+            files: vec!["file-from-the-file".to_owned()],
+            exclude_files: vec!["excluded-file-from-the-file".to_owned()],
+            exclude_trait_impls: vec!["TraitFromTheFile".to_owned()],
+            min_score: Some(61.5),
+            jobs: Some(62),
+            test_timeout_multiplier: Some(63.5),
+            incremental: Some(crate::exec::IncrementalMode::No),
+            no_baseline: Some(true),
+            no_confirm: Some(true),
+            packages: vec!["package-from-the-file".to_owned()],
+            test_packages: vec!["test-package-from-the-file".to_owned()],
+            test_workspace: Some(false),
+            whole_test_binaries: Some(true),
+            include_tests: vec!["included-test-from-the-file".to_owned()],
+            exclude_tests: vec!["excluded-test-from-the-file".to_owned()],
+            features: vec!["feature-from-the-file".to_owned()],
+            all_features: Some(true),
+            no_default_features: Some(true),
+            profile: Some("profile-from-the-file".to_owned()),
+            cargo_args: vec!["--cargo-argument-from-the-file".to_owned()],
+            cargo_test_args: vec!["--cargo-test-argument-from-the-file".to_owned()],
+            errors: vec!["ErrorFromTheFile".to_owned()],
+            minimum_test_timeout: Some(64.5),
+            nextest: Some(true),
+            memory: Some(crate::exec::MemoryControl::Measure),
+            memory_multiplier: Some(65.5),
+            memory_headroom: Some("128MiB".to_owned()),
+            memory_limit: Some("2GiB".to_owned()),
+            baseline_memory_limit: Some("4GiB".to_owned()),
+            build_timeout: Some(66.5),
+            build_timeout_multiplier: Some(67.5),
+            artifact_dir: Some(Utf8PathBuf::from("artifacts-from-the-file")),
+            shard: Shard {
+                count: Some(68),
+                index: Some(9),
+            },
+        }
+    }
+
+    /// Every key in the file reaches the setting it names, when the command line said nothing.
+    ///
+    /// The one test that is exhaustive over `apply` and `apply_selection` together. The individual
+    /// tests above each pin one interesting rule; what none of them can catch is an assignment that
+    /// was simply deleted, or one that was written against the neighbouring field, because a
+    /// defaulted value looks exactly like a setting nobody configured.
+    #[test]
+    fn every_configured_key_reaches_its_setting() {
+        let config = every_key_set();
+        let mut args = RunArgs::default();
+
+        config
+            .apply(&mut args)
+            .expect("no two settings in this file contradict one another");
+
+        assert_eq!(args.select.mutators.as_deref(), Some("arith,!arith.add_to_sub"));
+        assert_eq!(args.select.files, ["file-from-the-file"]);
+        assert_eq!(args.select.exclude_files, ["excluded-file-from-the-file"]);
+        assert_eq!(args.select.exclude_trait_impls, ["TraitFromTheFile"]);
+        assert_eq!(args.select.packages, ["package-from-the-file"]);
+        assert_eq!(args.select.errors, ["ErrorFromTheFile"]);
+        assert_eq!(args.select.features.features, ["feature-from-the-file"]);
+        assert!(args.select.features.all_features);
+        assert!(args.select.features.no_default_features);
+        assert_eq!(args.select.shard_count, Some(68));
+        assert_eq!(args.select.shard_index, Some(9));
+
+        assert_eq!(args.min_score, Some(61.5));
+        assert_eq!(args.measure.jobs, Some(62));
+        assert_eq!(args.measure.test_timeout_multiplier, Some(63.5));
+        assert_eq!(args.measure.minimum_test_timeout, Some(64.5));
+        assert!(args.measure.nextest);
+        assert_eq!(args.measure.memory, Some(crate::exec::MemoryControl::Measure));
+        assert_eq!(args.measure.memory_multiplier, Some(65.5));
+        assert_eq!(args.measure.memory_headroom, Some(128 * 1024 * 1024));
+        assert_eq!(args.measure.memory_limit, Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(args.measure.baseline_memory_limit, Some(4 * 1024 * 1024 * 1024));
+        assert_eq!(args.limits.build_timeout, Some(66.5));
+        assert_eq!(args.limits.build_timeout_multiplier, Some(67.5));
+        assert_eq!(args.incremental, Some(crate::exec::IncrementalMode::No));
+        assert_eq!(args.measure.profile.as_deref(), Some("profile-from-the-file"));
+        assert_eq!(args.measure.cargo_args, ["--cargo-argument-from-the-file"]);
+        assert_eq!(args.measure.cargo_test_args, ["--cargo-test-argument-from-the-file"]);
+        assert_eq!(args.measure.test_packages, ["test-package-from-the-file"]);
+        assert!(!args.measure.test_workspace, "the file said false, so nothing may turn it on");
+        assert!(args.measure.whole_test_binaries);
+        assert_eq!(args.measure.include_tests, ["included-test-from-the-file"]);
+        assert_eq!(args.measure.exclude_tests, ["excluded-test-from-the-file"]);
+        assert!(args.no_baseline);
+        assert!(args.no_confirm);
+        assert_eq!(args.artifact_dir.as_deref(), Some(Utf8Path::new("artifacts-from-the-file")));
+    }
+
+    /// The command line wins every scalar, combines every flag with OR, and goes first in every list.
+    ///
+    /// The mirror of `every_key_set`: a command line that states every mergeable setting, and
+    /// states each one differently, so that a value arriving from the file is always visible.
+    fn every_setting_typed() -> RunArgs {
+        RunArgs {
+            select: SelectArgs {
+                mutators: Some("literal".to_owned()),
+                files: vec!["file-from-the-command-line".to_owned()],
+                exclude_files: vec!["excluded-file-from-the-command-line".to_owned()],
+                packages: vec!["package-from-the-command-line".to_owned()],
+                errors: vec!["ErrorFromTheCommandLine".to_owned()],
+                shard_count: Some(3),
+                shard_index: Some(1),
+                features: FeatureArgs {
+                    features: vec!["feature-from-the-command-line".to_owned()],
+                    ..FeatureArgs::default()
+                },
+                ..SelectArgs::default()
+            },
+            min_score: Some(11.5),
+            incremental: Some(crate::exec::IncrementalMode::Build),
+            artifact_dir: Some(Utf8PathBuf::from("artifacts-from-the-command-line")),
+            measure: MeasureArgs {
+                jobs: Some(12),
+                test_timeout_multiplier: Some(13.5),
+                minimum_test_timeout: Some(14.5),
+                memory: Some(crate::exec::MemoryControl::Off),
+                memory_multiplier: Some(15.5),
+                memory_headroom: Some(1),
+                memory_limit: Some(2),
+                baseline_memory_limit: Some(3),
+                profile: Some("profile-from-the-command-line".to_owned()),
+                cargo_args: vec!["--cargo-argument-from-the-command-line".to_owned()],
+                cargo_test_args: vec!["--cargo-test-argument-from-the-command-line".to_owned()],
+                test_packages: vec!["test-package-from-the-command-line".to_owned()],
+                include_tests: vec!["included-test-from-the-command-line".to_owned()],
+                exclude_tests: vec!["excluded-test-from-the-command-line".to_owned()],
+                ..MeasureArgs::default()
+            },
+            limits: BuildLimitArgs {
+                build_timeout: Some(16.5),
+                build_timeout_multiplier: Some(17.5),
+                ..BuildLimitArgs::default()
+            },
+            ..RunArgs::default()
+        }
+    }
+
+    /// Every scalar the command line states survives the merge unchanged.
+    ///
+    /// The half that a `.or(...)` written the wrong way round would pass on its own: a file that
+    /// overwrote a typed setting is invisible unless both sources state that setting differently,
+    /// and every value on both sides here does.
+    #[test]
+    fn the_command_line_outranks_the_file_for_every_scalar() {
+        let config = every_key_set();
+        let mut args = every_setting_typed();
+
+        config
+            .apply(&mut args)
+            .expect("no two settings in this merge contradict one another");
+
+        assert_eq!(args.select.mutators.as_deref(), Some("literal"));
+        assert_eq!(args.select.shard_count, Some(3));
+        assert_eq!(args.select.shard_index, Some(1));
+        assert_eq!(args.min_score, Some(11.5));
+        assert_eq!(args.measure.jobs, Some(12));
+        assert_eq!(args.measure.test_timeout_multiplier, Some(13.5));
+        assert_eq!(args.measure.minimum_test_timeout, Some(14.5));
+        assert_eq!(args.measure.memory_multiplier, Some(15.5));
+        assert_eq!(args.measure.memory_headroom, Some(1));
+        assert_eq!(args.measure.memory_limit, Some(2));
+        assert_eq!(args.measure.baseline_memory_limit, Some(3));
+        assert_eq!(args.limits.build_timeout, Some(16.5));
+        assert_eq!(args.limits.build_timeout_multiplier, Some(17.5));
+        assert_eq!(args.incremental, Some(crate::exec::IncrementalMode::Build));
+        assert_eq!(args.measure.profile.as_deref(), Some("profile-from-the-command-line"));
+        assert_eq!(args.artifact_dir.as_deref(), Some(Utf8Path::new("artifacts-from-the-command-line")));
+
+        // A stated mode outranks both the file's and the one the typed ceilings imply.
+        assert_eq!(args.measure.memory, Some(crate::exec::MemoryControl::Off));
+    }
+
+    /// Every list keeps what was typed and appends what the file adds, in that order.
+    ///
+    /// Concatenation rather than replacement is the contract, and the order is part of it: a
+    /// project default extends the run that was asked for instead of reordering it. Both halves
+    /// have to be asserted, since a merge that dropped one source entirely still leaves a
+    /// non-empty list behind.
+    #[test]
+    fn every_list_concatenates_with_the_command_line_first() {
+        let config = every_key_set();
+        let mut args = every_setting_typed();
+
+        config
+            .apply(&mut args)
+            .expect("no two settings in this merge contradict one another");
+
+        assert_eq!(args.select.files, ["file-from-the-command-line", "file-from-the-file"]);
+        assert_eq!(
+            args.select.exclude_files,
+            ["excluded-file-from-the-command-line", "excluded-file-from-the-file"]
+        );
+        assert_eq!(args.select.packages, ["package-from-the-command-line", "package-from-the-file"]);
+        assert_eq!(args.select.errors, ["ErrorFromTheCommandLine", "ErrorFromTheFile"]);
+        assert_eq!(
+            args.select.features.features,
+            ["feature-from-the-command-line", "feature-from-the-file"]
+        );
+        assert_eq!(
+            args.measure.cargo_args,
+            ["--cargo-argument-from-the-command-line", "--cargo-argument-from-the-file"]
+        );
+        assert_eq!(
+            args.measure.cargo_test_args,
+            ["--cargo-test-argument-from-the-command-line", "--cargo-test-argument-from-the-file"]
+        );
+        assert_eq!(
+            args.measure.test_packages,
+            ["test-package-from-the-command-line", "test-package-from-the-file"]
+        );
+        assert_eq!(
+            args.measure.include_tests,
+            ["included-test-from-the-command-line", "included-test-from-the-file"]
+        );
+        assert_eq!(
+            args.measure.exclude_tests,
+            ["excluded-test-from-the-command-line", "excluded-test-from-the-file"]
+        );
+
+        // The exclusions have no command-line spelling, so the file's are all there are.
+        assert_eq!(args.select.exclude_trait_impls, ["TraitFromTheFile"]);
+    }
+
+    /// A ceiling typed on the command line implies a mode, ahead of whatever the file asked for.
+    ///
+    /// The one three-way precedence in the merge, and the one an `.or` chain in the wrong order
+    /// gets subtly wrong: an explicit `--memory` still wins, but a bare `--memory-limit` has to
+    /// outrank the file rather than lose to it, or a typed ceiling would be measured and not
+    /// enforced.
+    #[test]
+    fn a_typed_ceiling_implies_a_mode_that_outranks_the_file() {
+        let config = every_key_set();
+        let mut args = RunArgs {
+            measure: MeasureArgs {
+                memory_limit: Some(9),
+                ..MeasureArgs::default()
+            },
+            ..RunArgs::default()
+        };
+
+        config
+            .apply(&mut args)
+            .expect("no two settings in this merge contradict one another");
+
+        assert_eq!(args.measure.memory, Some(crate::exec::MemoryControl::Enforce));
+    }
+
+    /// The file's `test-workspace` is merged with a logical OR, and then contradicts its own
+    /// `test-packages`.
+    ///
+    /// Held out of the exhaustive test because the two cannot both apply, which leaves the `true`
+    /// branch of this one assignment unreached by it. The error is the assertion: reaching it at
+    /// all proves the flag was merged, since a deleted assignment would leave it false and the
+    /// merge would succeed.
+    #[test]
+    fn a_configured_test_workspace_is_merged_and_then_contradicts_configured_test_packages() {
+        let config = Config {
+            test_workspace: Some(true),
+            ..every_key_set()
+        };
+        let mut args = RunArgs::default();
+
+        let error = config
+            .apply(&mut args)
+            .expect_err("`test-packages` and `test-workspace` cannot both apply");
+
+        assert!(error.is_usage(), "{error}");
+        assert!(error.to_string().contains("test-packages"), "{error}");
+        assert!(error.to_string().contains("test-workspace"), "{error}");
     }
 }

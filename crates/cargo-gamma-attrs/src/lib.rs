@@ -432,8 +432,11 @@ pub fn expect_killed(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// from an `impl` block or a module, and stating one on either is a compile error: a single
 /// expression essentially never type-checks as the body of every function beneath it. For the same
 /// reason it cannot be stated on a trait method that is only declared — there is no body to replace,
-/// and the implementations do not inherit it. `const fn` bodies and empty bodies are never mutated,
-/// so a value stated on one is honoured by nothing.
+/// and the implementations do not inherit it. A `const fn` body and an empty body are refused for
+/// the same reason: collection never reaches the stated value on either, so the attribute would be
+/// a hint that reads as working and produces nothing. A mutant is spliced in behind a run-time
+/// guard call that no `const fn` body may make, and an empty body already evaluates to `()`, so a
+/// value substituted for it would be the identical program.
 ///
 /// Nothing is taken on trust. The stated expression becomes an ordinary mutant, and if it does not
 /// type-check it is withdrawn exactly as any other unviable mutant is — one rollback round, no
@@ -515,6 +518,22 @@ pub fn expect_killed(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     fn at(&self) -> usize;
 /// }
 /// ```
+///
+/// ```compile_fail
+/// // A `const fn` body is a const context throughout, and the guard a mutant is spliced in behind
+/// // is a run-time call, so nothing would ever be substituted here.
+/// #[gamma::value(0)]
+/// const fn budget() -> u32 {
+///     512
+/// }
+/// ```
+///
+/// ```compile_fail
+/// // An empty body already evaluates to `()`, so substituting a value for it would be the same
+/// // program and no test could tell the two apart.
+/// #[gamma::value(())]
+/// fn nothing() {}
+/// ```
 #[proc_macro_attribute]
 pub fn value(attr: TokenStream, item: TokenStream) -> TokenStream {
     cargo_gamma_attrs_impl::value(attr.into(), item.into()).into()
@@ -539,7 +558,25 @@ pub fn value(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// fn compute_hash(seed: u64) -> u64 {
 ///     seed.wrapping_mul(6364136223846793005).wrapping_add(1)
 /// }
+///
+/// // A positional multiplier is an argument like any other, so selectors, a `reason`, a `tag`, and
+/// // a trailing comma may follow it — the same text the equivalent `// gamma:` directive accepts.
+/// #[gamma::test_timeout_multiplier(3.0, reason = "hashes a megabyte")]
+/// fn digest(data: &[u8]) -> u64 {
+///     data.iter().map(|b| u64::from(*b)).sum()
+/// }
+///
+/// // Position carries no meaning: each argument is read on its own, so a multiplier written after
+/// // its selectors states the same thing as one written before them.
+/// #[gamma::test_timeout_multiplier(arith, 2.5, reason = "widening arithmetic is slow here")]
+/// fn accumulate(data: &[u8]) -> u64 {
+///     data.iter().fold(0, |total, b| total + u64::from(*b))
+/// }
 /// ```
+///
+/// Exactly one multiplier applies to an item, so stating a second one — in any spelling, and in
+/// either order — is a compile error rather than a silent override. The tool's directive scanner
+/// refuses the same text, so commenting the attribute out does not change the verdict.
 ///
 /// A malformed multiplier is a compile error, so a mistyped budget fails loudly at build time
 /// rather than being quietly rejected later by the tool's directive scanner — or worse, reaching
@@ -566,6 +603,57 @@ pub fn value(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```compile_fail
 /// // Negative, so smaller than any baseline it would scale.
 /// #[gamma::test_timeout_multiplier(-1.0)]
+/// fn heavy(data: &[u8]) -> usize {
+///     data.len()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// // Wherever in the list it sits, a multiplier still has to bound a timeout: the selectors before
+/// // it neither excuse it nor turn it into one of their own.
+/// #[gamma::test_timeout_multiplier(arith, -1.0)]
+/// fn heavy(data: &[u8]) -> usize {
+///     data.len()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// // A lone parenthesized number: grouping does not turn a bare literal into a named multiplier.
+/// #[gamma::test_timeout_multiplier((2.5))]
+/// fn heavy(data: &[u8]) -> usize {
+///     data.len()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// // Two multiplier keys, even under different spellings, leave which one applies to the order
+/// // they were expanded in.
+/// #[gamma::test_timeout_multiplier(factor = 2.0, multiplier = 3.0)]
+/// fn heavy(data: &[u8]) -> usize {
+///     data.len()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// // Trailing tokens after a named value are not a second argument; the value ends at its literal.
+/// #[gamma::test_timeout_multiplier(test_timeout_multiplier = 2.0 + 1.0)]
+/// fn heavy(data: &[u8]) -> usize {
+///     data.len()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// // A positional multiplier states one, so a named one beside it is the same ambiguity two named
+/// // ones are — in either order.
+/// #[gamma::test_timeout_multiplier(2.0, factor = 3.0)]
+/// fn heavy(data: &[u8]) -> usize {
+///     data.len()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// // Two positional multipliers: neither is named, so there is nothing to prefer between them.
+/// #[gamma::test_timeout_multiplier(2.0, 3.0)]
 /// fn heavy(data: &[u8]) -> usize {
 ///     data.len()
 /// }

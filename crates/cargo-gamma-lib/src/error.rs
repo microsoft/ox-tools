@@ -5,6 +5,7 @@
 
 use core::error::Error as StdError;
 use core::fmt::{self, Display, Formatter};
+use std::backtrace::Backtrace;
 use std::io;
 
 /// An error carrying a human-readable message and an optional cause.
@@ -17,6 +18,15 @@ pub struct Error {
     cause: Option<Box<dyn StdError + Send + Sync>>,
     usage: bool,
     skippable: bool,
+
+    /// Captured at construction, unconditionally.
+    ///
+    /// Every path that produces an `Error` funnels through [`Self::new`] or through a conversion
+    /// that carries the origin's own capture across, so the frames recorded are the ones where the
+    /// failure happened rather than where it was rewrapped. Whether frames are recorded at all is
+    /// controlled the way the standard library controls it everywhere else, by
+    /// `RUST_BACKTRACE`/`RUST_LIB_BACKTRACE`, so this costs nothing when they are unset.
+    backtrace: Backtrace,
 }
 
 impl Error {
@@ -27,6 +37,7 @@ impl Error {
             cause: None,
             usage: false,
             skippable: false,
+            backtrace: Backtrace::capture(),
         }
     }
 
@@ -80,6 +91,16 @@ impl Error {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// Returns the backtrace captured where this error was first constructed.
+    ///
+    /// Not printed to the user: a mutation run reports what it could not do and what to do about
+    /// it, and a stack of this tool's own frames answers neither question. It is here for the case
+    /// the message cannot cover, a failure that should have been impossible, where the only useful
+    /// next question is which code path produced it.
+    pub const fn backtrace(&self) -> &Backtrace {
+        &self.backtrace
+    }
 }
 
 impl Display for Error {
@@ -109,13 +130,23 @@ impl From<io::Error> for Error {
 
 impl From<cargo_gamma_engine::Error> for Error {
     fn from(value: cargo_gamma_engine::Error) -> Self {
-        let (message, cause, usage, skippable) = value.into_parts();
+        // The engine's capture is carried across rather than replaced. Capturing here would record
+        // this conversion, which every engine error passes through and which therefore identifies
+        // nothing.
+        let cargo_gamma_engine::Parts {
+            message,
+            cause,
+            usage,
+            skippable,
+            backtrace,
+        } = value.into_parts();
 
         Self {
             message,
             cause,
             usage,
             skippable,
+            backtrace,
         }
     }
 }

@@ -77,15 +77,7 @@ impl Progress {
 
     /// Records that the harness produced a line, and how long it had been silent beforehand.
     pub(super) fn heard(&mut self, line: &str) {
-        let now = Instant::now();
-
-        self.quiet = self.quiet.max(now.saturating_duration_since(self.heard));
-
-        self.heard = now;
-        self.environment_error |= line
-            .as_bytes()
-            .windows(gamma_rt::ENVIRONMENT_ERROR_MARKER.len())
-            .any(|window| window == gamma_rt::ENVIRONMENT_ERROR_MARKER);
+        self.note_activity(line);
 
         if let Some(rest) = line.strip_prefix("test ")
             && let Some((name, verdict)) = rest.split_once(" ... ")
@@ -129,6 +121,23 @@ impl Progress {
         {
             self.tests = Some(self.tests.unwrap_or(0).saturating_add(count));
         }
+    }
+
+    /// Records activity and runtime diagnostics from a non-authoritative output stream.
+    pub(super) fn heard_diagnostic(&mut self, line: &str) {
+        self.note_activity(line);
+    }
+
+    fn note_activity(&mut self, line: &str) {
+        let now = Instant::now();
+
+        self.quiet = self.quiet.max(now.saturating_duration_since(self.heard));
+
+        self.heard = now;
+        self.environment_error |= line
+            .as_bytes()
+            .windows(gamma_rt::ENVIRONMENT_ERROR_MARKER.len())
+            .any(|window| window == gamma_rt::ENVIRONMENT_ERROR_MARKER);
     }
 
     /// Remembers the first failure announced, leaving any later one alone.

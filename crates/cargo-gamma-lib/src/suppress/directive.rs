@@ -64,7 +64,7 @@ pub(super) fn build(
     let parsed = parse_arguments(arguments);
 
     if let Some(err) = parsed.errors.first() {
-        return Err(Error::new(format!("{}:{line}: {err}", file.path)).usage());
+        return Err(Error::new(format!("{}:{line}: {err}", file.path())).usage());
     }
 
     // An unrecognized `name = value` pair is a typo, and swallowing it is dangerous rather than
@@ -74,7 +74,7 @@ pub(super) fn build(
     if let Some(name) = parsed.unknown.first() {
         return Err(Error::new(format!(
             "{}:{line}: unknown argument `{name}` in directive, expected `reason`, `tag`, or `test_timeout_multiplier`",
-            file.path
+            file.path()
         ))
         .usage());
     }
@@ -87,7 +87,7 @@ pub(super) fn build(
 
         selection
             .apply(&parsed.selectors)
-            .map_err(|error| Error::new(format!("{}:{line}: {error}", file.path)).usage())?;
+            .map_err(|error| Error::new(format!("{}:{line}: {error}", file.path())).usage())?;
 
         selection
     };
@@ -186,7 +186,7 @@ fn parse_arguments(tokens: &TokenStream) -> Arguments {
                     // which panics — turning a typo in a comment into an internal error that
                     // discards a completed build and baseline.
                     Ok(val) => match crate::bounds::factor(&text, val) {
-                        Ok(bounded) => arguments.test_timeout_multiplier = Some(bounded),
+                        Ok(bounded) => state_multiplier(arguments, bounded),
                         Err(message) => arguments.errors.push(format!("timeout multiplier {message}")),
                     },
                     Err(_cause) => {
@@ -217,7 +217,7 @@ fn parse_arguments(tokens: &TokenStream) -> Arguments {
                 // clear the same bound the other two entry points apply. One that does not parse is
                 // a selector, not a bad multiplier, so it is not an error here.
                 match crate::bounds::factor(&cleaned, val) {
-                    Ok(bounded) => arguments.test_timeout_multiplier = Some(bounded),
+                    Ok(bounded) => state_multiplier(arguments, bounded),
                     Err(message) => arguments.errors.push(format!("timeout multiplier {message}")),
                 }
             } else {
@@ -239,6 +239,26 @@ fn parse_arguments(tokens: &TokenStream) -> Arguments {
     flush(&mut current, &mut arguments);
     arguments.selectors = selectors.join(",");
     arguments
+}
+
+/// Records the one timeout multiplier a directive may state, refusing a second.
+///
+/// An item has one timeout, so a second multiplier — positional or keyed, and in whichever order
+/// the two were written — can only mean the author believes something other than what would
+/// happen. Keeping whichever arrived last hides that behind a directive that looks like it says two
+/// things and quietly does one. Refusing says which argument to delete, and matches the proc-macro
+/// validator in `cargo-gamma-attrs-impl`, so uncommenting a directive cannot change the verdict on
+/// text that is otherwise character-for-character identical.
+fn state_multiplier(arguments: &mut Arguments, value: f64) {
+    if arguments.test_timeout_multiplier.is_some() {
+        arguments
+            .errors
+            .push("a timeout multiplier is stated a second time; only one may apply to an item".to_owned());
+
+        return;
+    }
+
+    arguments.test_timeout_multiplier = Some(value);
 }
 
 /// Returns whether `tokens` are exactly one Rust string literal.

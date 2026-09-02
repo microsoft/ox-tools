@@ -9,6 +9,14 @@
 //!
 //! The recipe is the one every Stryker implementation uses: inline the viewer bundle and assign
 //! the report as a JavaScript property rather than fetching it.
+//!
+//! There is deliberately no second mode that loads the viewer from somewhere else. A report
+//! carries the whole mutated source of the code it describes, and a page that fetches its viewer
+//! hands all of it to whatever that script turns out to be on the day the file is opened. The
+//! bytes here were reviewed and committed once; a remote artifact cannot be, unless its exact
+//! content is pinned by a digest this repository can establish without trusting the fetch — which
+//! it cannot, because the vendored bundle is built here rather than copied byte-for-byte from a
+//! published one. Rather than ship an unverified `<script src>`, the mode is gone.
 
 use std::io;
 
@@ -19,31 +27,26 @@ use crate::elements::Report;
 use crate::error::error;
 
 /// The vendored viewer, inlined so the report needs nothing at run time.
-const VIEWER: &str = include_str!("vendor/mutation-test-elements.js");
+const VIEWER: &str = include_str!("vendor/mutation-test-elements.js.vendored");
 
-/// The URL used by [`Source::External`].
-const VIEWER_CDN: &str = "https://cdn.jsdelivr.net/npm/mutation-testing-elements@3/dist/mutation-test-elements.js";
-
-/// Where the rendered page gets the viewer from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Source {
-    /// Inline the vendored bundle. The report works offline.
-    #[default]
-    Inline,
-
-    /// Reference the bundle on a public CDN, for anyone who would rather not ship 230 KB per
-    /// report and knows their readers are online.
-    External,
-}
+/// The version of the viewer bundle vendored beside this module.
+///
+/// Read from the file the vendoring step writes, so the two cannot disagree: there is one place
+/// that says which upstream release the bytes came from, and it is the same place the bytes are.
+pub const VIEWER_VERSION: &str = include_str!("vendor/VERSION").trim_ascii();
 
 /// Renders a complete HTML page for a report.
-pub fn render(report: &Report, source: Source) -> Result<String> {
+///
+/// # Errors
+///
+/// Returns an error if the report cannot be serialized into the page.
+pub fn render(report: &Report) -> Result<String> {
     let mut page = Vec::new();
 
     // The page is built by the same streaming path that writes it to disk, so the two cannot drift:
     // writing to a `Vec` cannot fail for I/O, and the report serializes infallibly, so the only way
     // this errors is the case handled below.
-    stream(report, source, &mut page).map_err(|cause| error!("could not serialize the report").caused_by(cause))?;
+    stream(report, &mut page).map_err(|cause| error!("could not serialize the report").caused_by(cause))?;
 
     String::from_utf8(page).map_err(|cause| error!("could not serialize the report").caused_by(cause))
 }
@@ -54,8 +57,12 @@ pub fn render(report: &Report, source: Source) -> Result<String> {
 /// The bytes are exactly [`render`]'s — this is the same page, produced by the same streaming path — but
 /// the prefix, the embedded report and the suffix go straight into the atomic publication's staging
 /// file rather than being concatenated into a `String` first.
-pub fn write_page(report: &Report, source: Source, path: &Utf8Path) -> Result<()> {
-    crate::elements::write_streamed(path, |writer| stream(report, source, writer))
+///
+/// # Errors
+///
+/// Returns an error if the page cannot be serialized or cannot be published to `path`.
+pub fn write_page(report: &Report, path: &Utf8Path) -> Result<()> {
+    crate::elements::write_streamed(path, |writer| stream(report, writer))
 }
 
 /// Streams the self-contained page into `writer`: the prefix, then the report as the embedded
@@ -64,7 +71,7 @@ pub fn write_page(report: &Report, source: Source, path: &Utf8Path) -> Result<()
 /// The report is written through [`EscapeScript`] so that a `</script>` in a string literal cannot
 /// terminate the element carrying it, matching the escaping the whole-string form used. Splitting
 /// the page this way is what keeps neither the report JSON nor the page held whole in memory.
-fn stream(report: &Report, source: Source, writer: &mut dyn io::Write) -> io::Result<()> {
+fn stream(report: &Report, writer: &mut dyn io::Write) -> io::Result<()> {
     write!(
         writer,
         "<!DOCTYPE html>\n\
@@ -76,10 +83,7 @@ fn stream(report: &Report, source: Source, writer: &mut dyn io::Write) -> io::Re
          <style>{PAGE_STYLE}</style>\n"
     )?;
 
-    match source {
-        Source::Inline => write!(writer, "<script>{VIEWER}</script>")?,
-        Source::External => write!(writer, "<script src=\"{VIEWER_CDN}\"></script>")?,
-    }
+    write!(writer, "<script>{VIEWER}</script>")?;
 
     write!(
         writer,
@@ -193,24 +197,46 @@ mod tests {
 
     #[test]
     fn the_inline_page_carries_the_whole_viewer() {
-        let page = render(&report(), Source::Inline).expect("renders");
+        let page = render(&report()).expect("renders");
 
         assert!(page.contains("<mutation-test-report-app"), "the custom element is missing");
         assert!(page.len() > VIEWER.len(), "the viewer was not inlined");
         assert!(!page.contains("cdn.jsdelivr.net"), "the offline report must not reference a CDN");
     }
 
+    /// No rendered page may load code from anywhere but itself.
+    ///
+    /// This is the whole security property of the report format, so it is asserted over the
+    /// executable markup rather than over an option. URL strings embedded in the vendored
+    /// JavaScript are inert and do not imply a network load.
     #[test]
-    fn the_external_page_is_small_and_references_the_cdn() {
-        let page = render(&report(), Source::External).expect("renders");
+    fn the_page_loads_no_code_from_anywhere_else() {
+        let page = render(&report()).expect("renders");
+        let head = page.split("app.report =").next().expect("the page has a prefix");
 
-        assert!(page.len() < 4096, "the external report should not inline the viewer");
-        assert!(page.contains(VIEWER_CDN), "{page}");
+        assert!(!head.contains("<script src"), "the viewer must not be fetched");
+        assert!(!head.contains("<link "), "the page must not fetch a stylesheet");
+    }
+
+    /// The vendored bundle names the upstream release it came from.
+    ///
+    /// The version is the only provenance the page has left now that nothing is fetched, and it is
+    /// read from the file the vendoring step writes rather than restated in code, so a bundle
+    /// refreshed without updating the marker — or the reverse — cannot go unnoticed.
+    #[test]
+    fn the_vendored_viewer_records_its_upstream_version() {
+        assert!(!VIEWER_VERSION.is_empty(), "the vendored viewer has no recorded version");
+        assert!(
+            VIEWER_VERSION
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.'),
+            "`{VIEWER_VERSION}` is not a bare version number"
+        );
     }
 
     #[test]
     fn the_page_follows_the_theme_the_viewer_settled_on() {
-        let page = render(&report(), Source::External).expect("renders");
+        let page = render(&report()).expect("renders");
 
         assert!(page.contains("color-scheme: light dark"), "{page}");
         assert!(page.contains("prefers-color-scheme: dark"), "{page}");
@@ -221,7 +247,7 @@ mod tests {
     fn the_theme_listener_is_registered_before_the_report_starts_the_update_cycle() {
         // Assigning the report is what makes the viewer resolve its theme and emit the event, so a
         // listener added afterwards is racing the very update it exists to hear about.
-        let page = render(&report(), Source::External).expect("renders");
+        let page = render(&report()).expect("renders");
         let listener = page.find("addEventListener").expect("the listener is present");
         let assignment = page.find("app.report =").expect("the report is assigned");
 
@@ -244,7 +270,7 @@ mod tests {
             },
         );
 
-        let page = render(&subject, Source::External).expect("renders");
+        let page = render(&subject).expect("renders");
 
         assert!(!page.contains("</script><script>alert(1)"), "{page}");
         assert!(page.contains("\\u003c/script"), "{page}");
@@ -268,27 +294,18 @@ mod tests {
         assert!(!escaped.contains('>'));
     }
 
-    /// The streamed page is byte-for-byte the string form, for both the inline and the external
-    /// bundle, and it is published atomically — so writing the report to disk by streaming cannot
-    /// change the page a browser opens.
+    /// The streamed page is byte-for-byte the string form, and it is published atomically — so
+    /// writing the report to disk by streaming cannot change the page a browser opens.
     #[test]
     fn the_streamed_page_matches_the_string_form() {
         let report = report();
         let directory = crate::testing::workdir("html-stream-page-");
         let root = camino::Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the scratch path is UTF-8");
+        let path = root.join("report.html");
 
-        for source in [Source::Inline, Source::External] {
-            let path = root.join("report.html");
-            let _ = std::fs::remove_file(path.as_std_path());
+        write_page(&report, &path).expect("streams the page");
 
-            write_page(&report, source, &path).expect("streams the page");
-
-            let expected = render(&report, source).expect("renders");
-            assert_eq!(
-                std::fs::read_to_string(path.as_std_path()).expect("published bytes"),
-                expected,
-                "{source:?}"
-            );
-        }
+        let expected = render(&report).expect("renders");
+        assert_eq!(std::fs::read_to_string(path.as_std_path()).expect("published bytes"), expected);
     }
 }

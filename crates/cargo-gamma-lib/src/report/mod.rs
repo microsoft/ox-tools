@@ -13,8 +13,13 @@ mod styler;
 mod summary;
 mod text;
 
+pub use cargo_gamma_engine::text::{encode_controls, encode_preserving_color};
+#[doc(inline)]
 pub use progress::Progress;
+#[doc(inline)]
 pub use styler::Styler;
+#[doc(inline)]
 pub use summary::{Listings, session_notes, skipped, summarize};
 pub(crate) use text::{bytes, score, unstyled};
+#[doc(inline)]
 pub use text::{continuation, quantity};

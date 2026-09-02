@@ -27,10 +27,17 @@ mod removal;
 mod verification;
 mod verify;
 
+#[doc(inline)]
 pub use diff::diff;
+#[doc(inline)]
 pub use edit::Edit;
+#[doc(inline)]
 pub use eligible::Eligible;
+#[doc(inline)]
 pub use plan::{apply, plan, today};
+#[doc(inline)]
 pub use removal::{removable, remove};
+#[doc(inline)]
 pub use verification::Verification;
+#[doc(inline)]
 pub use verify::verify;

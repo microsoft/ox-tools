@@ -51,10 +51,17 @@ pub fn collect_with(file: &SourceFile, selection: &Selection, cfg: &CfgSet, defa
 /// Reports a file's stated-value errors and collects its candidates in one walk of the syntax tree,
 /// rather than the two [`super::check_stated`] and [`collect_with`] would run one after the other.
 ///
-/// Equivalent to calling [`super::check_stated`] and then [`collect_with`]: the same fault, in the
-/// same wording, stops candidate collection before it starts, and the candidates returned when there
-/// is no fault are the same candidates `collect_with` would have produced from the same inputs. The
-/// only difference is that both passes now read the file's syntax tree once between them, instead of
+/// The candidates are exactly the candidates [`collect_with`] would have produced from the same
+/// inputs, and a fault stops collection before it starts in the same wording [`super::check_stated`]
+/// would have used. The one difference is *which* stated values are audited at all:
+/// [`super::check_stated`] reads a whole file and knows nothing about configuration, while this
+/// pass audits only what `cfg` says the measured build compiles and this tool would mutate —
+/// skipping configured-out and test-gated code, the same rule that decides where a candidate may
+/// be offered. A stated value there produces no mutant under either entry point, so the fused pass
+/// stays silent about it rather than failing a run over code it is not measuring; `rustc` still
+/// rejects a malformed one when that code is built.
+///
+/// Everything else is shared: both passes read the file's syntax tree once between them, instead of
 /// [`super::check_stated`]'s own pass, an index-building pass `collect_with` would otherwise run
 /// internally, and `collect_with`'s own candidate-collecting pass.
 pub fn check_stated_and_collect_with(
@@ -63,7 +70,7 @@ pub fn check_stated_and_collect_with(
     cfg: &CfgSet,
     defaults: &Defaults,
 ) -> Result<Vec<Candidate>> {
-    let indexes = phase_one::run(file, selection)?;
+    let indexes = phase_one::run(file, selection, cfg)?;
     let collector = Collector::with_indexes(file, selection, selection.errors(), cfg, defaults, indexes);
 
     Ok(finish(file, collector))
