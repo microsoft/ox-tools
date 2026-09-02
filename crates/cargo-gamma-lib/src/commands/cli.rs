@@ -12,6 +12,7 @@ use crate::ci::{Annotations, Level};
 use crate::error::error;
 use crate::ops::registry::Selection;
 
+/// Workspace Cargo-tool help styling: bold green structure, bold cyan literals, and cyan values.
 const CLAP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
     .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
@@ -247,7 +248,8 @@ pub struct SelectArgs {
     #[arg(long = "exclude-file", value_name = "GLOB")]
     pub exclude_files: Vec<String>,
 
-    /// Lexical terminal trait names excluded through `gamma.toml`.
+    /// Unqualified Rust identifiers forming the final written trait-path segment, excluded through
+    /// `gamma.toml`.
     #[arg(skip)]
     pub exclude_trait_impls: Vec<String>,
 

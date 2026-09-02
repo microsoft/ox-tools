@@ -44,9 +44,12 @@ pub fn exited(pid: u32) -> io::Result<bool> {
     Ok(reported != 0)
 }
 
-/// Whether an observation error proves another waiter already reaped the child.
+/// Whether an observation failed because the caller has no matching child it can wait for.
+///
+/// `ECHILD` does not establish why no child can be waited for. A caller that previously owned a
+/// matching child may interpret it as evidence that another waiter already reaped that child.
 #[must_use]
-pub fn reaped_elsewhere(cause: &io::Error) -> bool {
+pub fn is_no_child_to_wait_for(cause: &io::Error) -> bool {
     cause.raw_os_error() == Some(libc::ECHILD)
 }
 
@@ -224,15 +227,15 @@ mod tests {
         assert_eq!(error.raw_os_error(), Some(libc::EPERM));
     }
 
-    /// A process id that is not this process's child cannot be observed for its exit: another
-    /// waiter — here, nobody — owns it, so the kernel reports `ECHILD`.
+    /// A process id that is not this process's child cannot be observed for its exit, so the kernel
+    /// reports `ECHILD` even though no competing waiter reaped it.
     #[test]
     fn observing_a_pid_that_is_not_this_process_own_child_fails() {
         // Pid 1 (init, or the container's own init process) is never this test's child.
         let error = exited(1).expect_err("pid 1 is not this process's child");
 
         assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
-        assert!(reaped_elsewhere(&error));
-        assert!(!reaped_elsewhere(&io::Error::from_raw_os_error(libc::EPERM)));
+        assert!(is_no_child_to_wait_for(&error));
+        assert!(!is_no_child_to_wait_for(&io::Error::from_raw_os_error(libc::EPERM)));
     }
 }

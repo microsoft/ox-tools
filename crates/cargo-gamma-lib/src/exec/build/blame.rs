@@ -318,7 +318,7 @@ pub(super) fn clamped(number: u64) -> u32 {
 /// Reads the region a compiler diagnostic points at out of its JSON span.
 ///
 /// A span whose line or column is absent, or is zero, yields no region: cargo counts both from
-/// one, so a zero is a producer that meant no position at all rather than the first character.
+/// one, so zero means the producer supplied no position rather than the first character.
 pub(super) fn position_range(span: &Span<'_>) -> Option<Range<Position>> {
     let at = |line: Option<u64>, column: Option<u64>| Position::new(clamped(line?), clamped(column?));
 

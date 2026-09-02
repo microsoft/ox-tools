@@ -76,6 +76,8 @@ pub(crate) use verdict::CONFIRM_FACTOR;
 pub use verdict::READERS;
 #[cfg(loom)]
 pub(crate) use verdict::run_loom_models;
+#[cfg(any(test, feature = "internals"))]
+pub(crate) use workspace::cache_lock_identity;
 #[doc(inline)]
 pub use workspace::{Workspace, clean_cache, footprint, gamma_base, scratch_tree};
 pub(crate) use workspace::{claim_cache, claim_workspace};

@@ -432,11 +432,9 @@ pub fn expect_killed(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// from an `impl` block or a module, and stating one on either is a compile error: a single
 /// expression essentially never type-checks as the body of every function beneath it. For the same
 /// reason it cannot be stated on a trait method that is only declared — there is no body to replace,
-/// and the implementations do not inherit it. A `const fn` body and an empty body are refused for
-/// the same reason: collection never reaches the stated value on either, so the attribute would be
-/// a hint that reads as working and produces nothing. A mutant is spliced in behind a run-time
-/// guard call that no `const fn` body may make, and an empty body already evaluates to `()`, so a
-/// value substituted for it would be the identical program.
+/// and the implementations do not inherit it. It is also rejected on a `const fn` or a function
+/// with an empty body. Those functions are not eligible for stated-value mutation, so accepting the
+/// annotation would leave a hint that reads as working but produces no mutant.
 ///
 /// Nothing is taken on trust. The stated expression becomes an ordinary mutant, and if it does not
 /// type-check it is withdrawn exactly as any other unviable mutant is — one rollback round, no
@@ -520,8 +518,7 @@ pub fn expect_killed(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 ///
 /// ```compile_fail
-/// // A `const fn` body is a const context throughout, and the guard a mutant is spliced in behind
-/// // is a run-time call, so nothing would ever be substituted here.
+/// // A `const fn` is not eligible for stated-value mutation.
 /// #[gamma::value(0)]
 /// const fn budget() -> u32 {
 ///     512
@@ -529,8 +526,7 @@ pub fn expect_killed(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 ///
 /// ```compile_fail
-/// // An empty body already evaluates to `()`, so substituting a value for it would be the same
-/// // program and no test could tell the two apart.
+/// // An empty body is not eligible for stated-value mutation.
 /// #[gamma::value(())]
 /// fn nothing() {}
 /// ```
@@ -560,17 +556,17 @@ pub fn value(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 ///
 /// // A positional multiplier is an argument like any other, so selectors, a `reason`, a `tag`, and
-/// // a trailing comma may follow it — the same text the equivalent `// gamma:` directive accepts.
-/// #[gamma::test_timeout_multiplier(3.0, reason = "hashes a megabyte")]
-/// fn digest(data: &[u8]) -> u64 {
-///     data.iter().map(|b| u64::from(*b)).sum()
+/// // a trailing comma may follow it — the same text the equivalent comment-form directive accepts.
+/// #[gamma::test_timeout_multiplier(3.0, reason = "scans a 1 MiB buffer")]
+/// fn digest(data: &[u8; 1_048_576]) -> u64 {
+///     data.iter().map(|byte| u64::from(*byte)).sum()
 /// }
 ///
 /// // Position carries no meaning: each argument is read on its own, so a multiplier written after
 /// // its selectors states the same thing as one written before them.
-/// #[gamma::test_timeout_multiplier(arith, 2.5, reason = "widening arithmetic is slow here")]
+/// #[gamma::test_timeout_multiplier(arith, 2.5, reason = "repeats the byte scan 100 times")]
 /// fn accumulate(data: &[u8]) -> u64 {
-///     data.iter().fold(0, |total, b| total + u64::from(*b))
+///     (0..100).flat_map(|_| data).map(|byte| u64::from(*byte)).sum()
 /// }
 /// ```
 ///

@@ -37,7 +37,13 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::commands::Host;
 use crate::exec::Workspace;
 
-type PauseChannels = (mpsc::SyncSender<()>, mpsc::Receiver<()>);
+type PauseChannels = (mpsc::SyncSender<usize>, mpsc::Receiver<()>);
+
+/// One lazily initialized registry for a command boundary.
+///
+/// Each instance maps a workspace root to the reached/release channels for a one-shot pause.
+/// Separate instances keep independently controlled command boundaries from consuming each
+/// other's registrations.
 type Pauses = OnceLock<Mutex<crate::HashMap<Utf8PathBuf, PauseChannels>>>;
 
 static CACHE_ADOPTION_PAUSES: Pauses = OnceLock::new();
@@ -46,18 +52,22 @@ static WORKSPACE_PREPARATION_PAUSES: Pauses = OnceLock::new();
 /// A deterministic pause at a registered command boundary.
 #[derive(Debug)]
 pub struct CommandPause {
-    reached: mpsc::Receiver<()>,
+    reached: mpsc::Receiver<usize>,
     release: Option<mpsc::SyncSender<()>>,
     waiting: bool,
 }
 
 impl CommandPause {
-    /// Waits until the command reaches the registered boundary.
-    pub fn wait(&mut self) {
-        self.reached
+    /// Waits until the command reaches the registered boundary and returns the cache-lock identity
+    /// carried into that boundary.
+    pub fn wait(&mut self) -> usize {
+        let observation = self
+            .reached
             .recv_timeout(Duration::from_mins(2))
             .expect("the command should reach its registered pause before the test budget expires");
         self.waiting = true;
+
+        observation
     }
 
     /// Allows the paused command to continue.
@@ -111,7 +121,7 @@ pub fn hold_during_workspace_preparation(root: Utf8PathBuf) -> CommandPause {
     hold_at(&WORKSPACE_PREPARATION_PAUSES, root)
 }
 
-fn pause_at(pauses: &Pauses, root: &Utf8Path) {
+fn pause_at(pauses: &Pauses, root: &Utf8Path, observation: usize) {
     let Some(pauses) = pauses.get() else {
         return;
     };
@@ -121,18 +131,18 @@ fn pause_at(pauses: &Pauses, root: &Utf8Path) {
         .remove(root);
 
     if let Some((reached, release)) = pause
-        && reached.send(()).is_ok()
+        && reached.send(observation).is_ok()
     {
         let _released = release.recv();
     }
 }
 
-pub(crate) fn pause_after_cache_adoption(root: &Utf8Path) {
-    pause_at(&CACHE_ADOPTION_PAUSES, root);
+pub(crate) fn pause_after_cache_adoption(root: &Utf8Path, lock_identity: usize) {
+    pause_at(&CACHE_ADOPTION_PAUSES, root, lock_identity);
 }
 
-pub(crate) fn pause_during_workspace_preparation(root: &Utf8Path) {
-    pause_at(&WORKSPACE_PREPARATION_PAUSES, root);
+pub(crate) fn pause_during_workspace_preparation(root: &Utf8Path, lock_identity: usize) {
+    pause_at(&WORKSPACE_PREPARATION_PAUSES, root, lock_identity);
 }
 
 /// A [`Host`] that captures both streams in memory.
@@ -693,6 +703,10 @@ pub const WATCHDOG: Duration = Duration::from_mins(1);
 /// If `body` does not finish within `budget`, or panics. A panic inside `body` is re-raised here so
 /// that it fails the test rather than being swallowed by the worker thread.
 pub fn within<T: Send + 'static>(budget: Duration, what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
+    if std::env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
+        return body();
+    }
+
     let (sender, receiver) = mpsc::channel();
 
     // Detached on purpose: see above. The handle is dropped rather than joined.
@@ -1020,7 +1034,6 @@ pub mod ci_fixture {
             column: 5,
             mutator: (mutator.to_owned()).into(),
             item_path: ("subject::f".to_owned()).into(),
-            trait_impl: None,
             occurrence: 0,
             replacement_index: 0,
             original: "a > b".into(),
@@ -1064,7 +1077,6 @@ pub mod advise_fixture {
             column: 1,
             span: 0..1,
             item_path: ("f".to_owned()).into(),
-            trait_impl: None,
             occurrence: 0,
             replacement_index: 0,
             original: "a".into(),
@@ -1130,7 +1142,6 @@ pub mod discover_fixture {
             column: 1,
             mutator: ("relational.gt_to_ge".to_owned()).into(),
             item_path: ("f".to_owned()).into(),
-            trait_impl: None,
             occurrence: 0,
             replacement_index: 0,
             original: "a > b".into(),

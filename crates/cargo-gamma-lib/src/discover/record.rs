@@ -4,6 +4,7 @@
 //! Build facts and checked hints from the last run.
 
 use std::process::Command;
+use std::slice::Iter;
 use std::{env, fs};
 
 use blake3::Hasher;
@@ -492,32 +493,39 @@ struct Entry {
     elapsed_ms: u64,
 }
 
-/// Every recorded verdict in a [`RunRecord`], in file order and then in record order.
+/// Every recorded verdict in a [`RunRecord`], with files in stored order and entries within each
+/// file in stored order.
 ///
 /// Returned by [`RunRecord::iter`], and by `IntoIterator` on `&RunRecord`. Named rather than
 /// returned as `impl Iterator` so that `&RunRecord` can name it as its `IntoIter`, which is what
 /// lets a `for` loop over a record work.
 #[derive(Debug, Clone)]
 pub struct Entries<'a> {
-    files: core::slice::Iter<'a, RecordedFile>,
+    files: Iter<'a, RecordedFile>,
 
-    /// The file currently being drained, absent before the first file is reached.
-    mutants: Option<core::slice::Iter<'a, Entry>>,
+    /// The iterator over entries in the current file, absent before the first file is reached.
+    mutants: Option<Iter<'a, Entry>>,
 }
 
 impl<'a> Iterator for Entries<'a> {
     type Item = (&'a str, Outcome);
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(mutants) = self.mutants.as_mut()
-                && let Some(entry) = mutants.next()
-            {
+        if let Some(entry) = self.mutants.as_mut().and_then(Iterator::next) {
+            return Some((entry.id.as_str(), entry.outcome));
+        }
+
+        for file in self.files.by_ref() {
+            let mut mutants = file.mutants.iter();
+
+            if let Some(entry) = mutants.next() {
+                self.mutants = Some(mutants);
+
                 return Some((entry.id.as_str(), entry.outcome));
             }
-
-            self.mutants = Some(self.files.next()?.mutants.iter());
         }
+
+        None
     }
 }
 
@@ -525,6 +533,7 @@ impl<'a> IntoIterator for &'a RunRecord {
     type Item = (&'a str, Outcome);
     type IntoIter = Entries<'a>;
 
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }

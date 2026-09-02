@@ -17,12 +17,11 @@ use serde::{Deserialize, Serialize};
 /// A newtype over the text rather than an alias for it. This is the key that cached verdicts,
 /// shard assignments and configured expectations are all stored under, so a mutator name, a
 /// package name or a file path reaching one of those maps by mistake would attach one mutant's
-/// history to another and nothing downstream could tell the difference. An alias made every one of
-/// those the same type.
+/// history to another and nothing downstream could tell the difference. The distinct type prevents
+/// those unrelated strings from being substituted accidentally.
 ///
-/// The wrapper is transparent to Serde, so every plan, record and report an earlier version wrote
-/// still reads back unchanged, and it dereferences to `str`, so the identity reads as the text it
-/// is.
+/// The wrapper is transparent to Serde, so the identity's wire representation remains its
+/// underlying string. It dereferences to `str`, so the identity reads as the text it is.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MutantId(CompactString);
@@ -30,16 +29,17 @@ pub struct MutantId(CompactString);
 impl MutantId {
     /// Wraps text that is already a rendered identity.
     ///
-    /// Deliberately not validating that the text is [`MUTANT_ID_HEX_LEN`] hex characters: the
-    /// identities in a record written by a future version, or by a test that wants a readable
-    /// name, are still identities as far as every map keyed on one is concerned, and refusing them
-    /// would turn a forward-compatible read into a hard failure.
+    /// The text is deliberately opaque rather than restricted to the currently emitted
+    /// [`MUTANT_ID_HEX_LEN`]-character hexadecimal form. Tests and external callers may use
+    /// readable identities, while every map keyed on this type only needs stable equality.
+    #[inline]
     #[must_use]
     pub fn new(text: impl AsRef<str>) -> Self {
         Self(CompactString::new(text))
     }
 
     /// The identity as a string slice.
+    #[inline]
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
@@ -58,18 +58,21 @@ impl MutantId {
 impl Deref for MutantId {
     type Target = str;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         self.0.as_str()
     }
 }
 
 impl Borrow<str> for MutantId {
+    #[inline]
     fn borrow(&self) -> &str {
         self.0.as_str()
     }
 }
 
 impl AsRef<str> for MutantId {
+    #[inline]
     fn as_ref(&self) -> &str {
         self.0.as_str()
     }
@@ -77,66 +80,77 @@ impl AsRef<str> for MutantId {
 
 impl Display for MutantId {
     #[expect(clippy::renamed_function_params, reason = "`f` is less clear than `formatter`")]
+    #[inline]
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(&self.0, formatter)
     }
 }
 
 impl From<CompactString> for MutantId {
+    #[inline]
     fn from(value: CompactString) -> Self {
         Self(value)
     }
 }
 
 impl From<String> for MutantId {
+    #[inline]
     fn from(value: String) -> Self {
         Self(value.into())
     }
 }
 
 impl From<&str> for MutantId {
+    #[inline]
     fn from(value: &str) -> Self {
         Self(value.into())
     }
 }
 
 impl From<MutantId> for CompactString {
+    #[inline]
     fn from(value: MutantId) -> Self {
         value.0
     }
 }
 
 impl PartialEq<str> for MutantId {
+    #[inline]
     fn eq(&self, other: &str) -> bool {
         self.0.as_str() == other
     }
 }
 
 impl PartialEq<&str> for MutantId {
+    #[inline]
     fn eq(&self, other: &&str) -> bool {
         self.0.as_str() == *other
     }
 }
 
 impl PartialEq<String> for MutantId {
+    #[inline]
     fn eq(&self, other: &String) -> bool {
         self.0.as_str() == other.as_str()
     }
 }
 
 impl PartialEq<MutantId> for str {
+    #[inline]
     fn eq(&self, other: &MutantId) -> bool {
         self == other.0.as_str()
     }
 }
 
 impl PartialEq<MutantId> for &str {
+    #[inline]
     fn eq(&self, other: &MutantId) -> bool {
         *self == other.0.as_str()
     }
 }
 
 impl PartialEq<MutantId> for String {
+    #[inline]
     fn eq(&self, other: &MutantId) -> bool {
         self.as_str() == other.0.as_str()
     }
@@ -160,6 +174,7 @@ impl SiteIndex {
     /// Both counts are zero-based and unbounded: a site can repeat as often as the enclosing item
     /// contains it, and a mutator may offer any number of replacements, so there is nothing here
     /// to reject — only two meanings to keep apart.
+    #[inline]
     #[must_use]
     pub const fn new(occurrence: u32, replacement_index: u32) -> Self {
         Self {
@@ -169,28 +184,29 @@ impl SiteIndex {
     }
 
     /// Which repeat of an otherwise identical site within the enclosing item this is.
+    #[inline]
     #[must_use]
     pub const fn occurrence(self) -> u32 {
         self.occurrence
     }
 
     /// Which of the mutator's replacements for that site this is.
+    #[inline]
     #[must_use]
     pub const fn replacement_index(self) -> u32 {
         self.replacement_index
     }
 }
 
-/// The identity normalization contract emitted by this version.
+/// The identity normalization contract.
 ///
-/// Version 4 adds caller-supplied error replacement text to those mutants' identities. Every
-/// identity whose replacement comes from the registry remains byte-identical.
+/// Caller-supplied error replacement text participates in those mutants' identities. Every
+/// identity whose replacement comes from the registry remains independent of replacement text.
 ///
-/// Version 5 builds the item-path scope of an implementation from the self type's complete source span —
-/// qualification, generic arguments, and reference syntax included — instead of only its final
-/// path segment. `a::S`, `b::S`, `S<u8>`, `S<u16>`, `S`, and `&S` now keep distinct item paths and
-/// therefore distinct identities; under version 4 they shared one path and fell back to
-/// source-order occurrence, which reordering `impl` blocks could reassign to a different type.
+/// The current contract builds an implementation's item-path scope from the self type's complete
+/// token-aware source representation. Qualification, generic arguments, reference syntax, and
+/// lexical token boundaries therefore remain distinct. The preceding contract used only the final
+/// path segment and could fall back to source-order occurrence for otherwise distinct self types.
 pub const MUTANT_ID_VERSION: u32 = 5;
 
 /// Computes the stable, content-addressed identity of a mutant.

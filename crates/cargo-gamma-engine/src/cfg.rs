@@ -156,6 +156,7 @@ impl CfgSet {
     /// `cfg_attr` can add either `cfg(test)` or a test attribute itself. Both have to be read
     /// after its condition is evaluated, or the collector can mutate a test helper that rustc
     /// treats as a test, while a false condition can hide ordinary production code on a guess.
+    #[doc(hidden)]
     #[must_use]
     pub fn test_gated(&self, attrs: &[Attribute]) -> bool {
         self.test_gated_effective(attrs, &self.effective(attrs))
@@ -167,6 +168,7 @@ impl CfgSet {
     /// Every call site that asks this asks both [`Self::test_gated`] and [`Self::holds_for`]
     /// together, and each independently expands `cfg_attr` metadata — cloning every attribute and
     /// shifting a vector — to answer its one question. This shares that expansion between both.
+    #[doc(hidden)]
     #[must_use]
     pub fn skip_gate(&self, attrs: &[Attribute]) -> bool {
         let effective = self.effective(attrs);

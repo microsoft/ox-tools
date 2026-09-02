@@ -968,7 +968,6 @@ mod tests {
                 column: 1,
                 mutator: ("arith.add_to_sub".to_owned()).into(),
                 item_path: ("f".to_owned()).into(),
-                trait_impl: None,
                 occurrence: 0,
                 replacement_index: 0,
                 original: "a + b".to_owned().into(),

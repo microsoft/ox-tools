@@ -116,6 +116,7 @@ fn sample() -> Report {
         files: files.into_iter().collect(),
         config: Some(RunInfo {
             started_at: 1_700_000_000,
+            mutant_id_version: Some(cargo_gamma_lib::internals::model::MUTANT_ID_VERSION),
             merged: false,
             shard: Some(ShardInfo { index: 1, count: 4 }),
             tests: Some(37),

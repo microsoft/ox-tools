@@ -65,6 +65,22 @@ fn a_statement_that_is_configured_out_is_not_mutated() {
     assert!(found.is_empty(), "{found:?}");
 }
 
+#[test]
+fn a_match_arm_that_is_configured_out_takes_its_body_with_it() {
+    let source = "fn f(x: bool) -> i32 { match x { #[cfg(not(unix))] true => 1 + 2, _ => 0 } }";
+    let found = mutators(source, "arith.add_to_sub", &CfgSet::parse("unix"));
+
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_match_arm_that_is_configured_in_still_mutates_its_body() {
+    let source = "fn f(x: bool) -> i32 { match x { #[cfg(unix)] true => 1 + 2, _ => 0 } }";
+    let found = mutators(source, "arith.add_to_sub", &CfgSet::parse("unix"));
+
+    assert_eq!(found, vec!["arith.add_to_sub"]);
+}
+
 /// The same statement, in the build this time, is mutated as it always was.
 #[test]
 fn a_statement_that_is_configured_in_still_is_mutated() {

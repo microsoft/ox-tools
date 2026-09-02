@@ -16,6 +16,9 @@ use std::sync::mpsc;
 use camino::{Utf8Path, Utf8PathBuf};
 
 const HELPER_SOURCE: &str = r#"
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
+
 thread_local! {
     static HELD: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -107,12 +110,11 @@ fn launch(payload: &str, own_group: bool) {
         let _ = child.arg(format!("--gamma-step={inner}"));
     }
 
-    // The escape a process group has no answer to: one unprivileged call and every later signal to
-    // the group misses this process. A cgroup leaf and a job object are not renounceable this way.
+    // Starting a new process group removes this child from the parent's group, so later signals to
+    // that group no longer reach it. The same call cannot remove a child from its cgroup leaf or
+    // Windows job object.
     #[cfg(unix)]
     if own_group {
-        use std::os::unix::process::CommandExt as _;
-
         let _ = child.process_group(0);
     }
 
@@ -126,7 +128,9 @@ fn launch(payload: &str, own_group: bool) {
 pub fn helper_binary_path() -> &'static Utf8Path {
     static BUILT: OnceLock<Utf8PathBuf> = OnceLock::new();
 
-    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-5")).as_path()
+    // The suffix is the helper cache generation. Advance it whenever `HELPER_SOURCE` changes,
+    // because `build_or_reuse_helper` deliberately trusts an existing binary with this name.
+    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-6")).as_path()
 }
 
 /// Builds the helper binary under `name`, or reuses one already there.

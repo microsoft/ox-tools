@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 use core::fmt::Display;
+use core::mem::{replace, take};
+use core::ops::Range;
 use std::sync::Arc;
 
 use compact_str::{CompactString, format_compact};
@@ -12,7 +14,7 @@ use syn::spanned::Spanned as _;
 use syn::token::Comma;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, BinOp, Block, Expr, ExprBinary, ExprBreak, ExprCall, ExprContinue, ExprForLoop, ExprIf, ExprIndex, ExprLit, ExprLoop,
+    Arm, Attribute, BinOp, Block, Expr, ExprBinary, ExprBreak, ExprCall, ExprContinue, ExprForLoop, ExprIf, ExprIndex, ExprLit, ExprLoop,
     ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat, ExprReturn, ExprStruct, ExprUnary, ExprWhile, FnArg, GenericArgument,
     Generics, ImplItem, ImplItemConst, ImplItemFn, ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemTrait, Lit, Local, Macro, Member,
     Pat, RangeLimits, ReturnType, Signature, Stmt, TraitItemConst, TraitItemFn, Type, UnOp, Variant,
@@ -349,7 +351,7 @@ impl<'a> Collector<'a> {
     fn emit_at(
         &mut self,
         mutator: &'static str,
-        range: core::ops::Range<usize>,
+        range: Range<usize>,
         replacement: impl Into<CompactString>,
         replacement_index: u32,
         shape: Shape,
@@ -1073,8 +1075,8 @@ impl<'a> Collector<'a> {
         // maps are swapped out whole, so the undo entries the parameters and the body record refer
         // to a map that is thrown away — they are discarded on the way out rather than replayed.
         let mark = self.undo.len();
-        let outer_bindings = core::mem::take(&mut self.bindings);
-        let outer_deferred = core::mem::take(&mut self.deferred);
+        let outer_bindings = take(&mut self.bindings);
+        let outer_deferred = take(&mut self.deferred);
 
         for input in &sig.inputs {
             let FnArg::Typed(typed) = input else {
@@ -1335,7 +1337,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         let depth = self.generics.len();
         let defaulted_depth = self.defaulted.len();
         let outer = self.in_default_impl;
-        let outer_trait_impl = core::mem::replace(
+        let outer_trait_impl = replace(
             &mut self.trait_impl,
             node.trait_
                 .as_ref()
@@ -1343,7 +1345,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 .map(|segment| Arc::from(segment.ident.to_string())),
         );
         let outer_self_type = self.impl_self_type.replace((*node.self_ty).clone());
-        let outer_associated = core::mem::replace(
+        let outer_associated = replace(
             &mut self.impl_self_associated,
             node.items
                 .iter()
@@ -1636,6 +1638,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         });
         visit::visit_expr_loop(self, node);
         let _ = self.loops.pop();
+    }
+
+    fn visit_arm(&mut self, node: &'ast Arm) {
+        if !self.skipped(&node.attrs) {
+            visit::visit_arm(self, node);
+        }
     }
 
     fn visit_expr_match(&mut self, node: &'ast ExprMatch) {

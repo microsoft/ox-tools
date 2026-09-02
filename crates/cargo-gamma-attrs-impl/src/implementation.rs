@@ -3,7 +3,7 @@
 
 use core::mem;
 
-use proc_macro2::{Delimiter, Literal, Punct, Spacing, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Literal, TokenStream, TokenTree};
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::{Block, Expr, ImplItemFn, ItemFn, Token, TraitItemFn};
@@ -27,7 +27,7 @@ pub fn inert(name: &str, attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Validates the argument list of `#[gamma::test_timeout_multiplier(...)]` and returns the item untouched.
+/// Validates a timeout-multiplier attribute and returns the item untouched.
 #[must_use]
 pub fn inert_timeout(name: &str, attr: &TokenStream, item: TokenStream) -> TokenStream {
     match validate_timeout_multiplier(attr) {
@@ -67,13 +67,10 @@ pub fn inert_timeout(name: &str, attr: &TokenStream, item: TokenStream) -> Token
 /// never type-checks as the body of more than one signature, so the inheriting reading would be a
 /// promise the compiler breaks at every use.
 ///
-/// Finally, it insists the function is one a mutant could be spliced into at all. A `const fn` body
-/// is a const context throughout, and the guard a mutant sits behind is a run-time call no const
-/// context may make; an empty body already evaluates to `()`, so every value written to replace it
-/// yields the identical program. Collection returns before it ever reads the stated value in both
-/// cases, so accepting them here would leave an attribute that reads as a working hint and produces
-/// no mutant anywhere — the same silence the bodiless-declaration diagnostic already exists to
-/// prevent.
+/// Finally, it rejects `const fn` and empty bodies because cargo-gamma does not define stated-value
+/// mutation sites for them. Accepting the annotation would leave a hint that reads as working and
+/// produces no mutant anywhere — the same silence the bodiless-declaration diagnostic already
+/// exists to prevent.
 #[must_use]
 pub fn value(attr: TokenStream, item: TokenStream) -> TokenStream {
     match validate_value(attr, &item) {
@@ -96,7 +93,7 @@ pub fn value(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Exposed (hidden from docs) so `cargo-gamma-lib`'s agreement test can pin this copy against the
 /// library's own `NESTING_LIMIT`, which is the only thing that keeps the two in step.
 #[doc(hidden)]
-pub const NESTING_LIMIT: usize = 64;
+pub(super) const NESTING_LIMIT: usize = 64;
 
 /// How many postfix links are allowed per delimiter nesting level.
 ///
@@ -107,7 +104,7 @@ pub const NESTING_LIMIT: usize = 64;
 /// Exposed (hidden from docs) so `cargo-gamma-lib`'s agreement test can pin this copy against the
 /// library's own `CHAIN_FACTOR`.
 #[doc(hidden)]
-pub const CHAIN_FACTOR: usize = 4;
+pub(super) const CHAIN_FACTOR: usize = 4;
 
 /// Whether the preceding token can end an expression.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -152,7 +149,7 @@ struct Frame {
     clippy::too_many_lines,
     reason = "delimiter and expression-path state must advance together through one token walk"
 )]
-pub fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool {
+pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool {
     let postfix_limit = limit.saturating_mul(CHAIN_FACTOR);
     let mut frames = vec![Frame {
         iter: stream.clone().into_iter(),
@@ -342,10 +339,7 @@ fn validate_value(attr: TokenStream, item: &TokenStream) -> Result<(), String> {
     }
 
     if matches!(parsed.body, Some(Body::Empty)) {
-        return Err(
-            "expected a function with something to replace; an empty body already evaluates to `()`, so a mutant substituting this value would be the identical program and no test could detect it"
-                .to_owned(),
-        );
+        return Err("expected a non-empty function body; empty bodies are not eligible for stated-value mutation".to_owned());
     }
 
     if states_a_value(item) {
@@ -372,7 +366,7 @@ struct ParsedFunction {
 
 /// Whether a function's body holds anything a stated value would displace.
 enum Body {
-    /// `{ }`, which already evaluates to `()` whatever is written to replace it.
+    /// `{ }`, which is not eligible for stated-value mutation.
     Empty,
 
     /// At least one statement, which is what a substituted value takes the place of.
@@ -522,42 +516,11 @@ fn is_string_literal(text: &str) -> bool {
 /// Exposed (hidden from docs) so `cargo-gamma-lib`'s agreement test can pin this copy against the
 /// library's own `MOST_FACTOR`.
 #[doc(hidden)]
-pub const MOST_FACTOR: f64 = 1e6;
+pub(super) const MOST_FACTOR: f64 = 1e6;
 
 /// Checks a multiplier is positive, finite, and small enough to scale a baseline without overflow.
 fn is_bounded_multiplier(value: f64) -> bool {
     value > 0.0 && value.is_finite() && value <= MOST_FACTOR
-}
-
-/// Splits an attribute argument list on its top-level commas.
-///
-/// Empty segments are dropped, so a trailing comma — and the `a,,b` a careless edit leaves behind —
-/// mean here exactly what they mean to the comment-directive parser in `cargo-gamma-lib`, which
-/// flushes a comma-delimited argument only when it holds tokens.
-///
-/// Only top-level commas separate: a comma inside a group belongs to whatever that group is, and
-/// splitting on it would tear one argument in half.
-fn arguments_of(attr: TokenStream) -> Vec<Vec<TokenTree>> {
-    let mut arguments: Vec<Vec<TokenTree>> = Vec::new();
-    let mut current: Vec<TokenTree> = Vec::new();
-
-    for tree in attr {
-        if matches!(&tree, TokenTree::Punct(punct) if punct.as_char() == ',') {
-            if !current.is_empty() {
-                arguments.push(mem::take(&mut current));
-            }
-
-            continue;
-        }
-
-        current.push(tree);
-    }
-
-    if !current.is_empty() {
-        arguments.push(current);
-    }
-
-    arguments
 }
 
 /// Returns whether an argument is written as a bare number rather than as a key or a selector.
@@ -595,52 +558,72 @@ fn is_positional_multiplier(argument: &[TokenTree]) -> bool {
 /// been stated, so that a second one — in any spelling, in either order — is refused rather than
 /// silently overriding the first.
 fn validate_timeout_multiplier(attr: &TokenStream) -> Result<(), String> {
-    let arguments = arguments_of(attr.clone());
+    let mut multiplier = None;
+    let mut saw_argument = false;
+    let mut current = Vec::new();
 
-    if arguments.is_empty() {
-        return Err("expected a timeout multiplier, as in `#[gamma::test_timeout_multiplier(2.0)]`".to_owned());
+    for tree in attr.clone() {
+        if matches!(&tree, TokenTree::Punct(punct) if punct.as_char() == ',') {
+            validate_timeout_argument(&mut current, &mut multiplier, &mut saw_argument)?;
+        } else {
+            current.push(tree);
+        }
     }
 
-    let mut stated = false;
-    let mut rest = TokenStream::new();
+    validate_timeout_argument(&mut current, &mut multiplier, &mut saw_argument)?;
 
-    for argument in &arguments {
-        if is_positional_multiplier(argument) {
-            // Concatenated from the tokens of this argument alone, rather than rendered from the
-            // whole stream, so a sign and its digits stay one number and the arguments around it
-            // stay out of it.
-            let written: String = argument.iter().map(ToString::to_string).collect();
-
-            match written.parse::<f64>() {
-                Ok(value) if is_bounded_multiplier(value) => {}
-                _ => {
-                    return Err(format!(
-                        "timeout multiplier must be a positive number no greater than {MOST_FACTOR}"
-                    ));
-                }
-            }
-
-            if stated {
-                return Err(DUPLICATE_MULTIPLIER.to_owned());
-            }
-
-            stated = true;
-
-            continue;
-        }
-
-        if !rest.is_empty() {
-            rest.extend(core::iter::once(TokenTree::Punct(Punct::new(',', Spacing::Alone))));
-        }
-
-        rest.extend(argument.iter().cloned());
+    if saw_argument {
+        Ok(())
+    } else {
+        Err("expected a timeout multiplier, as in `#[gamma::test_timeout_multiplier(2.0)]`".to_owned())
     }
+}
 
-    if rest.is_empty() {
+/// One spelling by which the argument list has already stated its multiplier.
+enum Multiplier {
+    Positional,
+    Keyed(String),
+}
+
+/// Validates one completed top-level timeout argument and reuses its buffer.
+fn validate_timeout_argument(
+    argument: &mut Vec<TokenTree>,
+    multiplier: &mut Option<Multiplier>,
+    saw_argument: &mut bool,
+) -> Result<(), String> {
+    if argument.is_empty() {
         return Ok(());
     }
 
-    validate_shape(rest, if stated { Reading::AfterMultiplier } else { Reading::Multiplier })
+    *saw_argument = true;
+
+    if is_positional_multiplier(argument) {
+        let written: String = argument.iter().map(ToString::to_string).collect();
+
+        match written.parse::<f64>() {
+            Ok(value) if is_bounded_multiplier(value) => {}
+            _ => {
+                return Err(format!(
+                    "timeout multiplier must be a positive number no greater than {MOST_FACTOR}"
+                ));
+            }
+        }
+
+        match multiplier {
+            Some(Multiplier::Positional) => return Err(DUPLICATE_MULTIPLIER.to_owned()),
+            Some(Multiplier::Keyed(key)) => {
+                return Err(format!(
+                    "a timeout multiplier is stated both on its own and as `{key}`; only one may apply to an item"
+                ));
+            }
+            None => *multiplier = Some(Multiplier::Positional),
+        }
+
+        argument.clear();
+        return Ok(());
+    }
+
+    validate_shape_tokens(mem::take(argument), true, multiplier)
 }
 
 /// Reported when an argument list states more than one timeout multiplier.
@@ -651,35 +634,12 @@ fn validate_timeout_multiplier(attr: &TokenStream) -> Result<(), String> {
 /// reason, so uncommenting a directive cannot change the verdict.
 const DUPLICATE_MULTIPLIER: &str = "a timeout multiplier is stated a second time; only one may apply to an item";
 
-/// How strictly one argument list is read.
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Reading {
-    /// A `#[gamma::skip]`-family attribute, which carries no number for validation to protect.
-    Selectors,
-
-    /// A timeout multiplier's remaining arguments, none of which has stated one positionally.
-    Multiplier,
-
-    /// A timeout multiplier's remaining arguments, one of which was a positional multiplier —
-    /// wherever in the list it sat.
-    AfterMultiplier,
-}
-
-impl Reading {
-    /// Returns whether a bare literal or a leading sign is a malformed multiplier rather than an
-    /// unrecognized selector token.
-    const fn is_strict(self) -> bool {
-        !matches!(self, Self::Selectors)
-    }
-}
-
 /// Checks the structural shape of a `#[gamma::skip]`-family argument list.
 ///
-/// A thin wrapper over [`validate_shape`] in [`Reading::Selectors`] mode: a selector attribute has
-/// no numeric argument to protect, so every bare literal or sign a timeout multiplier would refuse
-/// is left alone here.
+/// A selector attribute has no numeric argument to protect, so every bare literal or sign a timeout
+/// multiplier would refuse is left alone here.
 fn validate(attr: TokenStream) -> Result<(), String> {
-    validate_shape(attr, Reading::Selectors)
+    validate_shape(attr)
 }
 
 /// Checks the structural shape of an argument list.
@@ -689,14 +649,6 @@ fn validate(attr: TokenStream) -> Result<(), String> {
 /// hard errors with a spelling suggestion. What this does check is the shape that a human is
 /// likely to get wrong without noticing — a `reason` or `tag` that is not a string, or a timeout
 /// multiplier that is not a positive number.
-///
-/// `reading` is strict only for a timeout multiplier's grammar, which mixes selectors with at most
-/// one numeric setting. There a bare literal, a leading sign, or a second multiplier key is never a
-/// selector that merely was not recognized — it is exactly the malformed multiplier this validation
-/// exists to catch, so it is rejected here rather than silently walked past. A selector attribute
-/// passes [`Reading::Selectors`], because none of its arguments carry a number for this to protect,
-/// and [`Reading::AfterMultiplier`] starts out having already seen one so that a keyed multiplier
-/// following a positional one is the duplicate it is.
 ///
 /// Nested groups are walked with an explicit stack rather than by recursion. The nesting is
 /// whatever the user wrote inside an attribute, and this code runs inside `rustc` while their
@@ -709,10 +661,15 @@ fn validate(attr: TokenStream) -> Result<(), String> {
 /// the lookahead a few keys away (`trees.get(index + 1)` and beyond) needs random access within a
 /// level, not just the next token. An attribute argument list is small enough that a hand-rolled
 /// bounded-lookahead cursor would not pay for the churn at every lookahead site below.
-fn validate_shape(attr: TokenStream, reading: Reading) -> Result<(), String> {
-    let strict = reading.is_strict();
-    let mut frames: Vec<(Vec<TokenTree>, usize)> = vec![(attr.into_iter().collect(), 0)];
-    let mut multiplier_seen = reading == Reading::AfterMultiplier;
+fn validate_shape(attr: TokenStream) -> Result<(), String> {
+    let mut multiplier = None;
+
+    validate_shape_tokens(attr.into_iter().collect(), false, &mut multiplier)
+}
+
+/// Checks already materialized tokens without rebuilding their stream.
+fn validate_shape_tokens(tokens: Vec<TokenTree>, strict: bool, multiplier: &mut Option<Multiplier>) -> Result<(), String> {
+    let mut frames: Vec<(Vec<TokenTree>, usize)> = vec![(tokens, 0)];
 
     'frames: while let Some((trees, mut index)) = frames.pop() {
         while index < trees.len() {
@@ -759,20 +716,15 @@ fn validate_shape(attr: TokenStream, reading: Reading) -> Result<(), String> {
                     }
 
                     if strict {
-                        if multiplier_seen {
-                            // Which of the two came first in the source is not recoverable here —
-                            // a positional multiplier is lifted out of the list before this pass
-                            // runs — and it does not matter: both orders are the same mistake, so
-                            // both get the same order-free wording rather than one that blames
-                            // whichever argument this pass happened to reach.
-                            return Err(if reading == Reading::AfterMultiplier {
+                        if let Some(previous) = multiplier.as_ref() {
+                            return Err(if matches!(previous, Multiplier::Positional) {
                                 format!("a timeout multiplier is stated both on its own and as `{key}`; only one may apply to an item")
                             } else {
                                 format!("`{key}` states a timeout multiplier a second time; only one may apply to an item")
                             });
                         }
 
-                        multiplier_seen = true;
+                        *multiplier = Some(Multiplier::Keyed(key.clone()));
                     }
 
                     if trees
@@ -1388,16 +1340,14 @@ mod tests {
         }
     }
 
-    /// An empty body already evaluates to `()`, so a mutant substituting a value for it is the
-    /// identical program and no test could ever tell the two apart. Reporting it as a survivor
-    /// would be an accusation against the suite for something nothing could detect, so the
-    /// attribute is refused rather than silently ignored.
+    /// Empty bodies are not eligible for stated-value mutation, so accepting an attribute there
+    /// would leave a hint that produces no mutant.
     #[test]
     fn a_value_stated_on_an_empty_bodied_function_is_rejected() {
         for item in ["fn f() {}", "fn f(&self) {}", "fn f(&self) -> () { }"] {
             let rejected = validate_value(stream("0"), &stream(item)).expect_err("an empty body has nothing to replace");
 
-            assert!(rejected.contains("an empty body already evaluates to `()`"), "`{item}`: {rejected}");
+            assert!(rejected.contains("empty bodies are not eligible"), "`{item}`: {rejected}");
         }
     }
 

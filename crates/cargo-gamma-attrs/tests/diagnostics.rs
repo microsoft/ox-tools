@@ -3,95 +3,23 @@
 
 #![cfg(not(miri))]
 
-//! Pins the exact diagnostic each exported macro reports for a malformed argument, by compiling a
-//! fixture against the real `gamma` proc-macro artifact rather than a stand-in.
+//! Checks each exported macro's diagnostic identity and essential reason.
 //!
 //! A `compile_fail` doctest only proves that *some* error occurred; it accepts a diagnostic from
-//! any cause, including an unrelated one a regression introduced by accident. Real compilation,
-//! checked against a substring every macro's diagnostic carries — its own `#[gamma::<name>]:`
-//! prefix — is what actually distinguishes "the tool objected" from "the tool objected under its
-//! own name, for the reason it states".
+//! any cause, including an unrelated one a regression introduced by accident. These tests compile
+//! through Cargo against this checkout's path dependency, then check the macro prefix and message
+//! fragment that distinguish the intended rejection.
 
-use std::env;
+use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{self, Command};
+use std::{env, fs};
 
-fn rustc() -> String {
-    env::var("RUSTC").unwrap_or_else(|_missing| "rustc".to_owned())
+fn cargo() -> OsString {
+    env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
 }
 
-/// The directory holding every artifact `cargo test` built for this run.
-///
-/// The running test binary's own path is used to find it, rather than a guessed `target/...`
-/// layout: it is correct regardless of profile, target triple, or a customized target directory,
-/// because it is where this very process was actually loaded from.
-fn deps_dir() -> PathBuf {
-    let exe = env::current_exe().expect("a running test binary knows its own path");
-
-    exe.parent().expect("a test binary is always inside some directory").to_path_buf()
-}
-
-/// Finds the most recently built `gamma` proc-macro artifact.
-///
-/// Named by prefix rather than a fixed path, because the exact filename carries a per-build hash
-/// this test cannot predict. An explicit `--target` puts this test under the target triple while
-/// proc macros remain host artifacts, so both the test's dependency directory and the corresponding
-/// host dependency directory are searched.
-///
-/// Panics rather than reporting absence, because absence is not a host limitation: cargo builds
-/// the dependency before it links this binary, so a missing artifact means the lookup is wrong and
-/// every diagnostic below would otherwise be skipped while reporting success.
-#[track_caller]
-fn gamma_artifact() -> PathBuf {
-    let directory = deps_dir();
-    let profile = directory
-        .parent()
-        .expect("a dependency directory is always inside a profile directory");
-    let mut directories = vec![directory.clone()];
-
-    if let (Some(profile_name), Some(target_root)) = (profile.file_name(), profile.parent().and_then(|parent| parent.parent())) {
-        let host = target_root.join(profile_name).join("deps");
-
-        if host != directory && host.is_dir() {
-            directories.push(host);
-        }
-    }
-
-    let mut candidates: Vec<PathBuf> = directories
-        .iter()
-        .flat_map(|directory| {
-            std::fs::read_dir(directory)
-                .unwrap_or_else(|error| panic!("artifact directory {} must be readable: {error}", directory.display()))
-        })
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-            let is_gamma = name.starts_with("libgamma-") || name.starts_with("gamma-");
-            let is_dynamic = matches!(
-                path.extension().and_then(|extension| extension.to_str()),
-                Some("so" | "dylib" | "dll")
-            );
-
-            is_gamma && is_dynamic
-        })
-        .collect();
-
-    candidates.sort_by_key(|path| std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok());
-
-    candidates.pop().unwrap_or_else(|| {
-        panic!(
-            "no `gamma` proc-macro artifact in {}, which cargo must have built before running this test",
-            directories
-                .iter()
-                .map(|directory| directory.display().to_string())
-                .collect::<Vec<_>>()
-                .join(" or ")
-        )
-    })
-}
-
-/// Compiles `source` against the real `gamma` crate and returns what `rustc` said about it.
+/// Compiles `source` against this checkout's `gamma` crate and returns Cargo's stderr.
 ///
 /// Every failure is reported as a failure. A skip here would be indistinguishable from a passing
 /// diagnostic check, so a lookup that stopped finding the artifact, or a host without a usable
@@ -101,25 +29,28 @@ fn gamma_artifact() -> PathBuf {
 /// compile means the validation this test exists to pin has stopped rejecting it.
 #[track_caller]
 fn diagnostic_for(name: &str, source: &str) -> String {
-    let artifact = gamma_artifact();
-    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("diagnostics-{}", std::process::id()));
+    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let directory = scratch.join(format!("diagnostics-{}-{name}", process::id()));
+    let target = scratch.join(format!("diagnostics-{}-target", process::id()));
+    let source_dir = directory.join("src");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let manifest = format!(
+        "[package]\nname = {name:?}\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n\
+         [workspace]\n\n[dependencies]\ngamma = {{ package = \"cargo-gamma-attrs\", path = {manifest_dir:?} }}\n"
+    );
 
-    std::fs::create_dir_all(&directory).expect("the scratch directory must be creatable");
+    fs::create_dir_all(&source_dir).expect("the scratch directory must be creatable");
+    fs::write(directory.join("Cargo.toml"), manifest).expect("the fixture manifest must be writable");
+    fs::write(source_dir.join("lib.rs"), source).expect("the fixture source must be writable");
 
-    let path = directory.join(format!("{name}.rs"));
-
-    std::fs::write(&path, source).expect("the fixture source must be writable");
-
-    let compiler = rustc();
+    let compiler = cargo();
     let output = Command::new(&compiler)
-        .args(["--edition", "2024", "--crate-type", "lib", "--emit", "metadata"])
-        .arg("--extern")
-        .arg(format!("gamma={}", artifact.display()))
-        .arg("-o")
-        .arg(directory.join(format!("{name}.rmeta")))
-        .arg(&path)
+        .args(["check", "--quiet", "--manifest-path"])
+        .arg(directory.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target)
         .output()
-        .unwrap_or_else(|error| panic!("`{compiler}` must be runnable to pin what it reports for {name}: {error}"));
+        .unwrap_or_else(|error| panic!("Cargo must be runnable to check what it reports for {name}: {error}"));
 
     assert!(
         !output.status.success(),

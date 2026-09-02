@@ -38,10 +38,12 @@
 //!
 //! Containment itself is not conditional on that request. A Unix process group is escapable — a
 //! descendant that calls `setsid` leaves it, and every later signal to the group misses it — so
-//! every launch enters a cgroup leaf on Linux and a job on Windows whether or not anything is being
-//! measured, and a launch that cannot be given one is refused rather than run unreachable. Where
-//! the host can seal nothing at all, [`containment`] says so once, before anything the repository
-//! controls has been executed, and [`ProcessTree::sealed`] reports the same fact per launch.
+//! every Windows launch enters a job and every Linux launch attempts to enter a cgroup leaf whether
+//! or not anything is being measured. An unmetered Linux launch may use best-effort process-group
+//! containment only when the host has no supported cgroup facility. Sealed containment means a
+//! boundary descendants cannot leave: [`containment`] reports when the host cannot provide one
+//! before repository-controlled code executes, and [`ProcessTree::sealed`] reports the resulting
+//! state for one launch.
 //!
 //! The boundary is in force from the child's first instruction. On Linux the child moves itself
 //! into the cgroup between fork and exec; on Windows it normally starts suspended, enters the
@@ -53,9 +55,12 @@
 //! [`Command`](std::process::Command) accumulates every such step it is given, a command can only
 //! be prepared once. That is stated in the types rather than checked: [`prepare`] consumes the
 //! command and returns a [`PreparedCommand`], whose consuming spawn advances to
-//! [`SpawnedCommand`]. A failed spawn returns [`SpawnFailure`] with the preparation intact for
-//! retry and backoff; a successful spawn can only be surrendered to [`ProcessTree::adopt`], so one
-//! preparation cannot leave an earlier child outside containment and launch another.
+//! [`SpawnedCommand`]. A failed spawn returns [`SpawnFailure`] with the preparation intact. The
+//! caller classifies its underlying operating-system error, retries transient resource-related
+//! spawn failures after [`PreparedCommand::backoff`], and propagates permanent failures. A
+//! successful spawn can only be surrendered to [`ProcessTree::adopt`], so one preparation cannot
+//! leave an earlier child outside containment and launch another; dropping the post-spawn state
+//! before adoption terminates and reaps that child.
 //!
 //! [`output`] is the contained counterpart of
 //! [`Command::output`](std::process::Command::output). It drains stdout and stderr concurrently,
@@ -66,6 +71,14 @@
 //! normally preserves that guarantee through a dedicated job that dies with its last handle. Unix
 //! installs explicit interruption handling through `cargo-gamma-unsafe`.
 
+pub use cargo_gamma_unsafe::{PlatformError, Situation, support};
+#[doc(inline)]
+pub use memory_request::MemoryRequest;
+#[doc(inline)]
+pub use memory_usage::MemoryUsage;
+#[doc(inline)]
+pub use process_tree::{OutputError, PreparedCommand, ProcessTree, SpawnFailure, SpawnedCommand, capacity, containment, output, prepare};
+
 mod memory_request;
 mod memory_usage;
 mod process_tree;
@@ -75,10 +88,17 @@ pub mod faults;
 #[cfg(test)]
 mod testing;
 
-pub use cargo_gamma_unsafe::{PlatformError, Situation, support};
-#[doc(inline)]
-pub use memory_request::MemoryRequest;
-#[doc(inline)]
-pub use memory_usage::MemoryUsage;
-#[doc(inline)]
-pub use process_tree::{OutputError, PreparedCommand, ProcessTree, SpawnFailure, SpawnedCommand, capacity, containment, output, prepare};
+#[cfg(test)]
+mod unwind_contracts {
+    use core::panic::{RefUnwindSafe, UnwindSafe};
+
+    use super::{ProcessTree, SpawnedCommand};
+
+    fn assert_unwind_safe<T: UnwindSafe + RefUnwindSafe>() {}
+
+    #[test]
+    fn public_launch_states_are_unwind_safe() {
+        assert_unwind_safe::<SpawnedCommand>();
+        assert_unwind_safe::<ProcessTree>();
+    }
+}

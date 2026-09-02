@@ -10,7 +10,8 @@
 //! they are slower than the rest of the suite, but they are the only coverage that proves the
 //! encoding in `schema.rs` actually compiles and that a verdict means what it claims.
 
-use std::fs;
+use std::sync::Arc;
+use std::{fs, thread};
 
 use camino::Utf8PathBuf;
 use cargo_gamma_lib::internals::exec::gamma_base;
@@ -374,36 +375,31 @@ fn a_second_run_reestablishes_the_first_runs_kills() {
     assert!(!output.contains("Iterating"), "a kill must never be carried: {output}");
 }
 
-#[test]
-fn an_incremental_command_holds_its_cache_lock_from_adoption_through_preparation() {
+fn incremental_args(cache: Option<&str>) -> Vec<&str> {
+    let mut args = vec!["--mutators", "relational", "--incremental", "build"];
+
+    if let Some(cache) = cache {
+        args.extend(["--cache-dir", cache]);
+    }
+
+    args
+}
+
+fn assert_incremental_cache_lock_is_held(cache: Option<&str>) {
     step_aside_if_nested!();
-    let dir = std::sync::Arc::new(workspace(SUBJECT));
-    let cache = TempDir::new().expect("could not create the redirected cache");
-    let cache = cache.path().to_str().expect("cache path is not UTF-8").to_owned();
-    let args = ["--mutators", "relational", "--incremental", "build", "--cache-dir", cache.as_str()];
+    let dir = Arc::new(workspace(SUBJECT));
+    let args = incremental_args(cache);
     let (warmed, output) = session(&dir, &args);
 
     assert_eq!(warmed, EXIT_OK, "{output}");
 
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("workspace path is not UTF-8");
     let mut adopted = cargo_gamma_lib::testing::hold_after_cache_adoption(root.clone());
-    let first_dir = std::sync::Arc::clone(&dir);
-    let first_cache = cache.clone();
-    let first = std::thread::spawn(move || {
-        session(
-            &first_dir,
-            &[
-                "--mutators",
-                "relational",
-                "--incremental",
-                "build",
-                "--cache-dir",
-                first_cache.as_str(),
-            ],
-        )
-    });
+    let first_dir = Arc::clone(&dir);
+    let first_cache = cache.map(str::to_owned);
+    let first = thread::spawn(move || session(&first_dir, &incremental_args(first_cache.as_deref())));
 
-    adopted.wait();
+    let adopted_lock = adopted.wait();
 
     let (blocked, output) = session(&dir, &args);
 
@@ -412,7 +408,12 @@ fn an_incremental_command_holds_its_cache_lock_from_adoption_through_preparation
 
     let mut preparing = cargo_gamma_lib::testing::hold_during_workspace_preparation(root);
     adopted.release();
-    preparing.wait();
+    let preparing_lock = preparing.wait();
+
+    assert_eq!(
+        preparing_lock, adopted_lock,
+        "workspace preparation must receive the lock pair claimed before cache adoption"
+    );
 
     let (blocked, output) = session(&dir, &args);
 
@@ -428,6 +429,19 @@ fn an_incremental_command_holds_its_cache_lock_from_adoption_through_preparation
     let (reacquired, output) = session(&dir, &args);
 
     assert_eq!(reacquired, EXIT_OK, "{output}");
+}
+
+#[test]
+fn an_incremental_command_holds_the_default_cache_lock_from_adoption_through_preparation() {
+    assert_incremental_cache_lock_is_held(None);
+}
+
+#[test]
+fn an_incremental_command_holds_a_redirected_cache_lock_from_adoption_through_preparation() {
+    let cache = TempDir::new().expect("could not create the redirected cache");
+    let cache = cache.path().to_str().expect("cache path is not UTF-8").to_owned();
+
+    assert_incremental_cache_lock_is_held(Some(&cache));
 }
 
 #[test]
@@ -1271,7 +1285,7 @@ mod tests {
 ";
 
 #[test]
-fn a_runaway_mutant_is_cut_off_long_before_its_budget() {
+fn a_runaway_mutant_is_reported_as_stalled() {
     step_aside_if_nested!();
     let dir = workspace(HANGS);
     let (code, output) = session(&dir, &["--mutators", "relational.gt_to_ge", "--minimum-test-timeout", "120"]);

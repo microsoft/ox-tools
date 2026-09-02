@@ -28,6 +28,11 @@ disable = true
 # public API necessarily accepts and returns proc-macro token streams.
 allowed_external_types = ["proc_macro2::TokenStream"]
 
+[features]
+# Exposes the hand-copied parser limits to the workspace agreement test. This is test plumbing,
+# not a supported downstream API.
+agreement = []
+
 # HARD CONSTRAINT: this crate must not become a proc-macro crate.
 # A proc macro's code runs only inside rustc while some *other* crate is being compiled, which
 # puts it out of reach of both the coverage harness and the mutation runtime. Keeping the logic

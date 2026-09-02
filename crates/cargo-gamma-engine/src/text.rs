@@ -7,19 +7,21 @@
 //! item paths, test names, source fragments, and the diagnostics a build tool produces about them.
 //! Those values end up on a console beside status lines the tool draws with real escape sequences,
 //! and a terminal cannot tell the two apart. A path containing `\r\x1b[2K` erases the line above
-//! it; one containing an OSC 8 sequence attaches a hyperlink of its author's choosing to text a
-//! reader will assume the tool wrote; one containing a newline forges a whole line of output.
+//! it; one containing an Operating System Command (OSC) 8 sequence attaches a hyperlink of its
+//! author's choosing to text a reader will assume the tool wrote; one containing a newline forges
+//! a whole line of output.
 //!
 //! The rule here is that a control character is *shown* rather than *obeyed*. Encoding is visible
 //! by design — a reader who sees `\e` or `\u{9b}` in a filename is being told something true about
-//! that filename — and it is reversible by eye, which a lossy strip would not be.
+//! that filename — without a lossy strip hiding that the control was present.
 //!
 //! Two policies exist because two kinds of text arrive here. Values the tool interpolates into its
 //! own sentences never legitimately contain an escape, so [`encode_controls`] encodes every one.
-//! Output relayed verbatim from another tool does legitimately arrive colored, and color cannot
-//! move a cursor, erase a row, or address the terminal, so [`encode_preserving_color`] lets a
-//! complete SGR sequence through and encodes everything else — including every other CSI sequence,
-//! every operating-system command, and the C1 controls that spell those in a single byte.
+//! Output relayed verbatim from another tool does legitimately arrive colored, so
+//! [`encode_preserving_color`] allows color and bold Select Graphic Rendition (SGR) sequences,
+//! appends a trusted reset, and encodes everything else — including every other Control Sequence
+//! Introducer (CSI) sequence, every OSC sequence, and the `U+0080..=U+009F` C1 control characters
+//! that spell those in a single byte.
 
 use core::fmt::Write as _;
 use std::borrow::Cow;
@@ -29,29 +31,35 @@ const ESCAPE: u8 = 0x1b;
 
 /// The lead byte of the UTF-8 encoding of every C1 control.
 ///
-/// The C1 controls are `U+0080..=U+009F`, which UTF-8 encodes as `0xC2` followed by the code point's
-/// own low byte. They matter because a terminal in 8-bit mode reads them as one-byte spellings of
-/// the sequences the escape introduces — `U+009B` is CSI and `U+009D` is OSC — so encoding `ESC`
-/// alone would leave the same capabilities reachable by another spelling.
+/// The C1 controls are `U+0080..=U+009F`, whose UTF-8 encodings share one lead byte followed by the
+/// code point's own low byte. They matter because a terminal in 8-bit mode reads them as one-byte
+/// spellings of the sequences the Escape (ESC) character introduces — `U+009B` is CSI and
+/// `U+009D` is OSC — so encoding ESC alone would leave the same capabilities reachable by another
+/// spelling.
 const C1_LEAD: u8 = 0xC2;
+
+/// The trusted sequence that restores default terminal styling after relayed output.
+const STYLE_RESET: &str = "\x1b[0m";
 
 /// Encodes every control character, so nothing in `text` can address the terminal.
 ///
 /// For values the tool interpolates into its own output: paths, identifiers, test names, notes, and
 /// source fragments. None of them has a legitimate reason to carry a control character, so the
 /// newline that would forge a line and the escape that would erase one are treated alike.
+#[inline]
 #[must_use]
 pub fn encode_controls(text: &str) -> Cow<'_, str> {
     encode(text, false)
 }
 
-/// Encodes every control character except a complete color sequence.
+/// Encodes every control character except an allowed color or bold SGR sequence.
 ///
 /// For output relayed verbatim from another tool, where color is the reason the output is being
-/// shown at all. A select-graphic-rendition sequence — `ESC [`, digits, `;` or `:`, then `m` —
-/// changes how following text is painted and can do nothing else: it cannot move the cursor, erase
-/// anything, resize the window, or speak to the operating system. Every other sequence, including
-/// an `ESC [` run that never reaches its `m`, is encoded like any other control.
+/// shown at all and bold is part of the compiler's ordinary diagnostic presentation. Color,
+/// bold-on, bold-off, and reset parameters are preserved; other presentation effects such as
+/// concealment are encoded. A trusted reset is appended whenever styling was preserved so a
+/// relayed line cannot change how later cargo-gamma output is rendered.
+#[inline]
 #[must_use]
 pub fn encode_preserving_color(text: &str) -> Cow<'_, str> {
     encode(text, true)
@@ -67,8 +75,11 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
     let mut encoded: Option<String> = None;
     let mut copied = 0;
     let mut cursor = 0;
+    let mut preserved_style = false;
 
     while let Some(&byte) = bytes.get(cursor) {
+        let before = cursor;
+
         // A UTF-8 continuation or lead byte of anything above the C1 block is ordinary text, and
         // stepping over it one byte at a time is safe because no byte of a multi-byte character can
         // be confused with an ASCII control.
@@ -83,26 +94,31 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
                 cursor += 2;
                 copied = cursor;
 
+                assert!(cursor > before, "encoding a C1 control must advance past its UTF-8 bytes");
                 continue;
             }
 
             cursor += 1;
 
+            assert!(cursor > before, "scanning UTF-8 text must advance by one byte");
             continue;
         }
 
         if !byte.is_ascii_control() {
             cursor += 1;
 
+            assert!(cursor > before, "scanning printable ASCII must advance by one byte");
             continue;
         }
 
         if keep_color
             && byte == ESCAPE
-            && let Some(end) = color_sequence_end(bytes, cursor)
+            && let Some(end) = style_sequence_end(bytes, cursor)
         {
+            preserved_style = true;
             cursor = end;
 
+            assert!(cursor > before, "preserving an SGR sequence must advance past the sequence");
             continue;
         }
 
@@ -113,14 +129,20 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
 
         cursor += 1;
         copied = cursor;
+
+        assert!(cursor > before, "encoding an ASCII control must advance by one byte");
     }
 
     match encoded {
         Some(mut out) => {
             out.push_str(&text[copied..]);
+            if preserved_style {
+                out.push_str(STYLE_RESET);
+            }
 
             Cow::Owned(out)
         }
+        None if preserved_style => Cow::Owned(format!("{text}{STYLE_RESET}")),
         None => Cow::Borrowed(text),
     }
 }
@@ -149,12 +171,12 @@ fn push_escape(out: &mut String, control: char) {
     }
 }
 
-/// The index just past a complete SGR sequence beginning at `start`, if there is one.
+/// The index just past an allowed SGR sequence beginning at `start`, if there is one.
 ///
 /// Returns `None` for anything else, including a sequence that runs off the end of the text: an
 /// unterminated `ESC [` is exactly what a value would carry to make the *next* thing printed part
 /// of its own sequence, so it must be encoded rather than passed on in the hope of a later `m`.
-fn color_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
+fn style_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
     if bytes.get(start + 1) != Some(&b'[') {
         return None;
     }
@@ -162,9 +184,18 @@ fn color_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut cursor = start + 2;
 
     while let Some(&byte) = bytes.get(cursor) {
+        let before = cursor;
+
         match byte {
-            b'0'..=b'9' | b';' | b':' => cursor += 1,
-            b'm' => return Some(cursor + 1),
+            b'0'..=b'9' | b';' | b':' => {
+                cursor += 1;
+                assert!(cursor > before, "scanning an SGR parameter must advance by one byte");
+            }
+            b'm' => {
+                let parameters = core::str::from_utf8(&bytes[start + 2..cursor]).ok()?;
+
+                return allowed_style(parameters).then_some(cursor + 1);
+            }
             _ => return None,
         }
     }
@@ -172,8 +203,79 @@ fn color_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
+/// Whether one SGR parameter list is limited to color, bold, and reset operations.
+fn allowed_style(parameters: &str) -> bool {
+    if parameters.is_empty() {
+        return true;
+    }
+
+    let mut parameters = parameters.split(';');
+
+    while let Some(parameter) = parameters.next() {
+        if parameter.contains(':') {
+            if !allowed_colon_color(parameter) {
+                return false;
+            }
+
+            continue;
+        }
+
+        let Ok(code) = parameter.parse::<u16>() else {
+            return false;
+        };
+
+        match code {
+            0 | 1 | 22 | 30..=37 | 39 | 40..=47 | 49 | 90..=97 | 100..=107 => {}
+            38 | 48 => {
+                let Some(mode) = parameters.next().and_then(|value| value.parse::<u16>().ok()) else {
+                    return false;
+                };
+                let components = if mode == 5 {
+                    1
+                } else if mode == 2 {
+                    3
+                } else {
+                    return false;
+                };
+
+                for _component in 0..components {
+                    if !parameters.next().is_some_and(color_component) {
+                        return false;
+                    }
+                }
+            }
+            _ => return false,
+        }
+    }
+
+    true
+}
+
+/// Whether a colon-delimited SGR field is an extended foreground or background color.
+fn allowed_colon_color(parameter: &str) -> bool {
+    let parts: Vec<&str> = parameter.split(':').collect();
+
+    match parts.as_slice() {
+        [channel @ ("38" | "48"), "5", index] => !channel.is_empty() && color_component(index),
+        [channel @ ("38" | "48"), "2", red, green, blue] => {
+            !channel.is_empty() && [red, green, blue].into_iter().all(|component| color_component(component))
+        }
+        [channel @ ("38" | "48"), "2", "", red, green, blue] => {
+            !channel.is_empty() && [red, green, blue].into_iter().all(|component| color_component(component))
+        }
+        _ => false,
+    }
+}
+
+/// Whether a numeric color component fits the byte-sized SGR color space.
+fn color_component(component: &str) -> bool {
+    component.parse::<u8>().is_ok()
+}
+
 #[cfg(test)]
 mod tests {
+    use core::iter::once;
+
     use super::*;
 
     #[test]
@@ -209,7 +311,7 @@ mod tests {
 
     #[test]
     fn every_c0_control_and_delete_is_encoded() {
-        for code in (0..=0x1f_u8).chain(core::iter::once(0x7f)) {
+        for code in (0..=0x1f_u8).chain(once(0x7f)) {
             let subject = String::from(char::from(code));
             let encoded = encode_controls(&subject);
 
@@ -238,7 +340,7 @@ mod tests {
     fn color_is_kept_only_by_the_relaying_policy() {
         let painted = "\u{1b}[1;32mCompiling\u{1b}[0m gamma";
 
-        assert_eq!(encode_preserving_color(painted), painted);
+        assert_eq!(encode_preserving_color(painted), format!("{painted}{STYLE_RESET}"));
         assert_eq!(encode_controls(painted), "\\e[1;32mCompiling\\e[0m gamma");
     }
 
@@ -251,6 +353,7 @@ mod tests {
         assert_eq!(encode_preserving_color("\u{1b}[?25l"), "\\e[?25l");
         assert_eq!(encode_preserving_color("\u{1b}]0;title\u{7}"), "\\e]0;title\\u{07}");
         assert_eq!(encode_preserving_color("line\rline"), "line\\rline");
+        assert_eq!(encode_preserving_color("\u{1b}[8mhidden"), "\\e[8mhidden");
     }
 
     #[test]
@@ -266,7 +369,19 @@ mod tests {
     fn relayed_color_around_encoded_controls_keeps_both_decisions() {
         assert_eq!(
             encode_preserving_color("\u{1b}[31merror\u{1b}[0m: src/\u{9b}2K.rs\n"),
-            "\u{1b}[31merror\u{1b}[0m: src/\\u{9b}2K.rs\\n"
+            format!("\u{1b}[31merror\u{1b}[0m: src/\\u{{9b}}2K.rs\\n{STYLE_RESET}")
+        );
+    }
+
+    #[test]
+    fn relayed_styling_is_contained_by_a_trusted_reset() {
+        assert_eq!(
+            encode_preserving_color("\u{1b}[38;5;196merror"),
+            format!("\u{1b}[38;5;196merror{STYLE_RESET}")
+        );
+        assert_eq!(
+            encode_preserving_color("\u{1b}[48:2::1:2:3mbackground"),
+            format!("\u{1b}[48:2::1:2:3mbackground{STYLE_RESET}")
         );
     }
 }

@@ -53,7 +53,8 @@ pub struct Config {
     /// Globs excluding files from mutation.
     pub exclude_files: Vec<String>,
 
-    /// Lexical terminal trait names whose implementations are excluded from mutation.
+    /// Unqualified Rust identifiers forming the final written trait-path segment whose
+    /// implementations are excluded from mutation.
     pub exclude_trait_impls: Vec<String>,
 
     /// Fail the run below this mutation score.
@@ -272,9 +273,7 @@ impl Config {
             .iter()
             .find(|name| syn::parse_str::<syn::Ident>(name).is_err())
         {
-            return Err(format!(
-                "exclude-trait-impls entry `{name}` must be one unqualified Rust identifier"
-            ));
+            return Err(format!("exclude-trait-impls entry `{name}` must be an unqualified Rust identifier"));
         }
 
         Ok(())
@@ -427,6 +426,7 @@ mod tests {
 
     use super::*;
     use crate::commands::{BuildLimitArgs, FeatureArgs, MeasureArgs};
+    use crate::exec::{IncrementalMode, MemoryControl};
 
     fn select_args(dir: &Utf8Path) -> SelectArgs {
         SelectArgs {
@@ -746,12 +746,12 @@ mod tests {
     }
 
     #[test]
-    fn a_trait_exclusion_names_terminal_identifiers() {
+    fn a_trait_exclusion_names_an_unqualified_final_path_identifier() {
         let qualified = Config::parse("exclude-trait-impls = [\"Debug\", \"fmt::Display\"]\n").expect_err("must be rejected");
         let empty_entry = Config::parse("exclude-trait-impls = [\"Debug\", \"\"]\n").expect_err("must be rejected");
 
-        assert!(qualified.contains("one unqualified Rust identifier"), "{qualified}");
-        assert!(empty_entry.contains("one unqualified Rust identifier"), "{empty_entry}");
+        assert!(qualified.contains("an unqualified Rust identifier"), "{qualified}");
+        assert!(empty_entry.contains("an unqualified Rust identifier"), "{empty_entry}");
     }
 
     #[test]
@@ -1019,8 +1019,8 @@ mod tests {
     ///
     /// Sentinel values rather than plausible ones on purpose: an assignment that reached the wrong
     /// field, or that was deleted and left the default behind, has to fail rather than coincide.
-    /// `test_workspace` is the one key held false here, because it and `test-packages` cannot both
-    /// apply — the pair has a test of its own below.
+    /// `test_workspace` is left in its non-conflicting state because it and `test-packages` cannot
+    /// both apply — the pair has a test of its own below.
     fn every_key_set() -> Config {
         Config {
             mutators: Some(vec!["arith".to_owned(), "!arith.add_to_sub".to_owned()]),
@@ -1030,7 +1030,7 @@ mod tests {
             min_score: Some(61.5),
             jobs: Some(62),
             test_timeout_multiplier: Some(63.5),
-            incremental: Some(crate::exec::IncrementalMode::No),
+            incremental: Some(IncrementalMode::No),
             no_baseline: Some(true),
             no_confirm: Some(true),
             packages: vec!["package-from-the-file".to_owned()],
@@ -1048,7 +1048,7 @@ mod tests {
             errors: vec!["ErrorFromTheFile".to_owned()],
             minimum_test_timeout: Some(64.5),
             nextest: Some(true),
-            memory: Some(crate::exec::MemoryControl::Measure),
+            memory: Some(MemoryControl::Measure),
             memory_multiplier: Some(65.5),
             memory_headroom: Some("128MiB".to_owned()),
             memory_limit: Some("2GiB".to_owned()),
@@ -1095,14 +1095,14 @@ mod tests {
         assert_eq!(args.measure.test_timeout_multiplier, Some(63.5));
         assert_eq!(args.measure.minimum_test_timeout, Some(64.5));
         assert!(args.measure.nextest);
-        assert_eq!(args.measure.memory, Some(crate::exec::MemoryControl::Measure));
+        assert_eq!(args.measure.memory, Some(MemoryControl::Measure));
         assert_eq!(args.measure.memory_multiplier, Some(65.5));
         assert_eq!(args.measure.memory_headroom, Some(128 * 1024 * 1024));
         assert_eq!(args.measure.memory_limit, Some(2 * 1024 * 1024 * 1024));
         assert_eq!(args.measure.baseline_memory_limit, Some(4 * 1024 * 1024 * 1024));
         assert_eq!(args.limits.build_timeout, Some(66.5));
         assert_eq!(args.limits.build_timeout_multiplier, Some(67.5));
-        assert_eq!(args.incremental, Some(crate::exec::IncrementalMode::No));
+        assert_eq!(args.incremental, Some(IncrementalMode::No));
         assert_eq!(args.measure.profile.as_deref(), Some("profile-from-the-file"));
         assert_eq!(args.measure.cargo_args, ["--cargo-argument-from-the-file"]);
         assert_eq!(args.measure.cargo_test_args, ["--cargo-test-argument-from-the-file"]);
@@ -1137,13 +1137,13 @@ mod tests {
                 ..SelectArgs::default()
             },
             min_score: Some(11.5),
-            incremental: Some(crate::exec::IncrementalMode::Build),
+            incremental: Some(IncrementalMode::Build),
             artifact_dir: Some(Utf8PathBuf::from("artifacts-from-the-command-line")),
             measure: MeasureArgs {
                 jobs: Some(12),
                 test_timeout_multiplier: Some(13.5),
                 minimum_test_timeout: Some(14.5),
-                memory: Some(crate::exec::MemoryControl::Off),
+                memory: Some(MemoryControl::Off),
                 memory_multiplier: Some(15.5),
                 memory_headroom: Some(1),
                 memory_limit: Some(2),
@@ -1192,12 +1192,12 @@ mod tests {
         assert_eq!(args.measure.baseline_memory_limit, Some(3));
         assert_eq!(args.limits.build_timeout, Some(16.5));
         assert_eq!(args.limits.build_timeout_multiplier, Some(17.5));
-        assert_eq!(args.incremental, Some(crate::exec::IncrementalMode::Build));
+        assert_eq!(args.incremental, Some(IncrementalMode::Build));
         assert_eq!(args.measure.profile.as_deref(), Some("profile-from-the-command-line"));
         assert_eq!(args.artifact_dir.as_deref(), Some(Utf8Path::new("artifacts-from-the-command-line")));
 
         // A stated mode outranks both the file's and the one the typed ceilings imply.
-        assert_eq!(args.measure.memory, Some(crate::exec::MemoryControl::Off));
+        assert_eq!(args.measure.memory, Some(MemoryControl::Off));
     }
 
     /// Every list keeps what was typed and appends what the file adds, in that order.
@@ -1272,16 +1272,16 @@ mod tests {
             .apply(&mut args)
             .expect("no two settings in this merge contradict one another");
 
-        assert_eq!(args.measure.memory, Some(crate::exec::MemoryControl::Enforce));
+        assert_eq!(args.measure.memory, Some(MemoryControl::Enforce));
     }
 
     /// The file's `test-workspace` is merged with a logical OR, and then contradicts its own
     /// `test-packages`.
     ///
-    /// Held out of the exhaustive test because the two cannot both apply, which leaves the `true`
-    /// branch of this one assignment unreached by it. The error is the assertion: reaching it at
-    /// all proves the flag was merged, since a deleted assignment would leave it false and the
-    /// merge would succeed.
+    /// Held out of the exhaustive test because the two cannot both apply, leaving the conflicting
+    /// case of this assignment unreached there. The error is the assertion: reaching it at all
+    /// proves the flag was merged, since a deleted assignment would leave the non-conflicting state
+    /// and the merge would succeed.
     #[test]
     fn a_configured_test_workspace_is_merged_and_then_contradicts_configured_test_packages() {
         let config = Config {

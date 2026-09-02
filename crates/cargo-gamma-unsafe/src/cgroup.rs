@@ -40,6 +40,8 @@ use std::sync::{Mutex, OnceLock};
 use std::{io, thread};
 
 #[cfg(loom)]
+use loom::lazy_static;
+#[cfg(loom)]
 use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{PlatformError, Situation, interrupt};
@@ -80,7 +82,7 @@ static ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(loom)]
-loom::lazy_static! {
+lazy_static! {
     /// Distinguishes concurrently created cgroups, under a scheduler that owns its own statics.
     static ref SEQUENCE: AtomicU64 = AtomicU64::new(0);
 }
@@ -105,7 +107,7 @@ static REAPER: OnceLock<Mutex<Reaper>> = OnceLock::new();
 static REAPER_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[cfg(loom)]
-loom::lazy_static! {
+lazy_static! {
     /// Prevents starting one reaper thread per abandoned leaf, under the Loom scheduler.
     static ref REAPER_RUNNING: AtomicBool = AtomicBool::new(false);
 }
@@ -142,16 +144,6 @@ fn reaper() -> std::sync::MutexGuard<'static, Reaper> {
         .get_or_init(|| Mutex::new(Reaper::default()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Returns the creator pid encoded in one of this process's per-invocation leaf names.
-///
-/// Probe and supervisor cgroups deliberately do not match: only leaves named by
-/// [`create_under_with`] are candidates for deferred removal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct LeafOwner {
-    pid: u32,
-    generation: Option<u64>,
 }
 
 fn leaf_owner(name: &std::ffi::OsStr) -> Option<LeafOwner> {
@@ -591,18 +583,27 @@ pub struct Cgroup {
 
 /// Where a live cgroup's kill descriptor is published in the process-wide interrupt registry.
 ///
-/// The group is kept alongside the slot because a slot only belongs to this cgroup while the group
-/// it was claimed for is still in it: a signal handler empties every slot it kills, and a run that
-/// deferred its own death goes on spawning into the slots that frees.
-#[derive(Clone, Copy, Debug)]
+/// The descriptor has a registry slot independent of the leader's process-group slot. Retaining
+/// the descriptor lets `Drop` clear the slot only while it still holds this cgroup's registration.
+#[derive(Debug)]
 pub(crate) struct CgroupWatch {
     slot: usize,
-    group: i32,
+    descriptor: RawFd,
 }
 
 /// An open cgroup kill switch, valid while its owning [`Cgroup`] remains alive.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct KillHandle(RawFd);
+
+/// The creator identity encoded in one of this process's per-invocation leaf names.
+///
+/// Probe and supervisor cgroups deliberately do not match: only leaves named by
+/// [`Cgroup::create_under_with`] are candidates for deferred removal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LeafOwner {
+    pid: u32,
+    generation: Option<u64>,
+}
 
 impl KillHandle {
     pub(crate) const fn raw(self) -> RawFd {
@@ -617,17 +618,32 @@ impl Cgroup {
     ///
     /// Reports [`Situation::Unsupported`] when this host offers no cgroup root to create leaves
     /// under at all — no cgroup v2 unified hierarchy, no delegated cgroup, no memory controller to
-    /// hand to children, or a kernel without the interface files a run depends on. That answer is
-    /// settled once per process, so a caller may treat it as a standing fact about the machine and
-    /// degrade or refuse the whole run rather than retry.
+    /// hand to children, or a kernel without the interface files a run depends on. This is a
+    /// host-wide capability classification rather than one failed leaf.
     ///
     /// Reports [`Situation::Refused`] when a root exists but this leaf could not be made: the
     /// creator's own generation could not be read, every candidate name under the root was taken,
     /// a ceiling could not be written, or the leaf's `cgroup.kill` switch could not be opened. That
-    /// concerns one launch rather than the host, and a caller must refuse that launch rather than
-    /// run it inside a boundary it does not have.
+    /// concerns one launch rather than the host, and the caller must not launch that command.
     pub fn create(limit: Option<u64>) -> Result<Self, PlatformError> {
         let root = root().map_err(|reason| PlatformError::new(Situation::Unsupported, reason))?;
+        Self::create_at(root, limit)
+    }
+
+    /// Creates an unmetered leaf when cgroup containment is supported.
+    ///
+    /// Returns `Ok(None)` for the cached host-wide unsupported condition without constructing a
+    /// backtrace-bearing [`PlatformError`]. Per-launch failures remain [`Situation::Refused`]
+    /// errors because a supported host failed to create this particular boundary.
+    pub fn create_unmetered_if_supported() -> Result<Option<Self>, PlatformError> {
+        let Ok(root) = root() else {
+            return Ok(None);
+        };
+
+        Self::create_at(root, None).map(Some)
+    }
+
+    fn create_at(root: &Path, limit: Option<u64>) -> Result<Self, PlatformError> {
         let (group, start_reaper) = {
             // Creation and registration are one critical section. A reaper never sees a
             // successfully created leaf as inactive between these two steps.
@@ -705,8 +721,8 @@ impl Cgroup {
     ///
     /// Reports [`Situation::Refused`] when the leaf's `cgroup.procs` could not be opened for
     /// writing before the fork. The descriptor has to exist before the child does, because the
-    /// child moves itself in between `fork` and `exec`; a caller that could not obtain one must
-    /// not spawn, since the child would then run outside the boundary entirely.
+    /// child moves itself in between `fork` and `exec`; the caller must not spawn after this
+    /// refusal.
     pub fn arm(&self, command: &mut Command) -> Result<(), PlatformError> {
         let procs = self.path.join("cgroup.procs");
         let file = OpenOptions::new()
@@ -777,11 +793,15 @@ impl Cgroup {
 
     /// Records where this leaf's kill descriptor was published, so its drop can take it back.
     ///
-    /// Called by [`interrupt::Spawning::watch_cgroup`] immediately before the descriptor becomes
-    /// visible to a signal handler, so there is no instant at which the registry holds a
-    /// descriptor this cgroup does not know it must retract.
-    pub(crate) const fn watched_at(&mut self, slot: usize, group: i32) {
-        self.watch = Some(CgroupWatch { slot, group });
+    /// Called by [`interrupt::Spawning::watch_cgroup`] as the descriptor is published. The unique
+    /// cgroup borrow keeps the owning file live until this reminder is stored.
+    pub(crate) const fn is_watched(&self) -> bool {
+        self.watch.is_some()
+    }
+
+    /// Records the owned registry lifetime of this leaf's kill descriptor.
+    pub(crate) const fn watched_at(&mut self, slot: usize, descriptor: RawFd) {
+        self.watch = Some(CgroupWatch { slot, descriptor });
     }
 
     /// Whether the kernel reported killing this workload for reaching its ceiling.
@@ -828,7 +848,7 @@ impl Drop for Cgroup {
         // up again. Doing it here rather than asking the caller to is what makes the pairing
         // impossible to get wrong: there is no safe way to drop a watched cgroup without it.
         if let Some(watch) = self.watch.take() {
-            interrupt::release_watched_cgroup(watch.slot, watch.group);
+            interrupt::release_watched_cgroup(watch.slot, watch.descriptor);
         }
 
         // A cgroup that still holds a process cannot be removed. Foreground cleanup stays bounded
@@ -873,6 +893,8 @@ fn remove_with_retry(mut remove: impl FnMut() -> bool, mut pause: impl FnMut()) 
 
 #[cfg(all(test, not(miri)))]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
 
     /// Why the tests below are `#[ignore]`d, and how to run them.
@@ -886,6 +908,10 @@ mod tests {
     /// run the suite somewhere delegated. `#[ignore]` says so in the harness's own vocabulary, in
     /// every runner, without a convention anybody has to know to read.
     const NEEDS_DELEGATION: &str = "needs a delegated cgroup: run with --ignored under `systemd-run --user --scope -p Delegate=yes`";
+
+    /// Arbitrary valid process-group identifiers; replacement must differ from watched.
+    const WATCHED_PROCESS_GROUP: i32 = 41;
+    const REPLACEMENT_PROCESS_GROUP: i32 = 42;
 
     /// Fails an explicitly requested run on a host that cannot support it, saying what is missing.
     ///
@@ -936,26 +962,29 @@ mod tests {
 
         let mut group = watchable(&path);
         let descriptor = group.kill.as_ref().expect("the stand-in leaf has a kill switch").as_raw_fd();
-        let watched = 0x0060_0d5e;
+        let watched = WATCHED_PROCESS_GROUP;
         let spawning = interrupt::spawning();
         let slot = spawning
             .watch_cgroup(watched, Some(&mut group))
             .expect("a free slot, since a fresh registry has a thousand");
+        let cgroup_slot = group.watch.as_ref().expect("the cgroup owns its registry watch").slot;
 
+        assert_eq!(interrupt::watched(slot), watched, "the process group was never published");
         assert_eq!(
-            interrupt::watched_pair(slot),
-            (watched, Some(descriptor)),
-            "the leaf's kill descriptor was never published"
+            interrupt::watched_cgroup(cgroup_slot),
+            Some(descriptor),
+            "the kill descriptor was never published"
         );
 
         drop(group);
 
-        let (registered, _kill) = interrupt::watched_pair(slot);
-        assert_ne!(
-            registered, watched,
-            "a dropped cgroup left its now-closed kill descriptor registered for its process group"
+        assert_eq!(
+            interrupt::watched_cgroup(cgroup_slot),
+            None,
+            "a dropped cgroup left its now-closed kill descriptor registered"
         );
 
+        interrupt::forget(slot, watched);
         drop(spawning);
     }
 
@@ -973,14 +1002,21 @@ mod tests {
         fs::create_dir(&path).expect("created");
 
         let mut group = watchable(&path);
-        let watched = 0x0060_0d6e;
+        let watched = WATCHED_PROCESS_GROUP;
         let spawning = interrupt::spawning();
         let slot = spawning.watch_cgroup(watched, Some(&mut group)).expect("a free slot");
+        let cgroup_slot = group.watch.as_ref().expect("the cgroup owns its registry watch").slot;
+        let descriptor = group.kill.as_ref().expect("the stand-in leaf has a kill switch").as_raw_fd();
 
         // What the owning subtree does the moment its leader is reaped.
         interrupt::forget(slot, watched);
+        assert_eq!(
+            interrupt::watched_cgroup(cgroup_slot),
+            Some(descriptor),
+            "releasing the leader's process group retracted descendant interruption coverage"
+        );
 
-        let replacement = 0x0060_0d6f;
+        let replacement = REPLACEMENT_PROCESS_GROUP;
         let taken = spawning.watch(replacement).expect("the freed slot, or another");
 
         drop(group);
@@ -992,6 +1028,37 @@ mod tests {
         );
 
         interrupt::forget(taken, replacement);
+        drop(spawning);
+    }
+
+    /// A cgroup can publish its kill descriptor only once.
+    #[test]
+    fn a_cgroup_cannot_be_registered_twice() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let path = directory.path().join("leaf");
+
+        fs::create_dir(&path).expect("created");
+
+        let mut group = watchable(&path);
+        let spawning = interrupt::spawning();
+        let first = spawning
+            .watch_cgroup(WATCHED_PROCESS_GROUP, Some(&mut group))
+            .expect("the first registration succeeds");
+        let cgroup_slot = group.watch.as_ref().expect("the cgroup owns its registry watch").slot;
+
+        assert_eq!(
+            spawning.watch_cgroup(REPLACEMENT_PROCESS_GROUP, Some(&mut group)),
+            None,
+            "a second registration must be refused"
+        );
+        assert_eq!(
+            interrupt::watched_cgroup(cgroup_slot),
+            group.kill.as_ref().map(std::os::fd::AsRawFd::as_raw_fd),
+            "the original descriptor registration must remain owned"
+        );
+
+        interrupt::forget(first, WATCHED_PROCESS_GROUP);
+        drop(group);
         drop(spawning);
     }
 
@@ -1600,10 +1667,7 @@ mod tests {
 
         assert_eq!(refusal.situation(), Situation::Refused);
         assert!(refusal.to_string().contains("could not be opened"), "{refusal}");
-        assert!(
-            std::error::Error::source(&refusal).is_some(),
-            "the operating system's own reason must be retained"
-        );
+        assert!(refusal.source().is_some(), "the operating system's own reason must be retained");
     }
 
     #[test]

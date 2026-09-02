@@ -27,7 +27,7 @@ use crate::cfg::{CfgSet, Cfgs, features};
 use crate::commands::{FeatureArgs, SelectArgs};
 use crate::error::{Error, error};
 use crate::exec::CargoOptions;
-use crate::model::{Interner, Mutant, MutantId, Outcome};
+use crate::model::{Channel, Interner, Mutant, MutantId, Outcome, Suppression};
 use crate::ops::collect;
 use crate::ops::registry::Selection;
 use crate::parse::SourceFile;
@@ -189,7 +189,7 @@ pub struct Scanned {
     /// The mutants found, with ordinals already assigned to the live ones.
     pub mutants: Vec<Mutant>,
 
-    /// How many were suppressed by a directive. They stay in `mutants`, marked as ignored.
+    /// How many were suppressed by an explicit policy. They stay in `mutants`, marked as ignored.
     pub suppressed: usize,
 
     /// The skip directives that suppressed nothing, though this run offered them the chance.
@@ -584,29 +584,11 @@ impl Survey {
         );
         let Scan {
             mut mutants,
-            mut suppressed,
+            suppressed,
             idle,
             skipped,
             digests,
-        } = scan(&files, &declaration_files, &roots, selection, &self.cfgs)?;
-
-        if !self.exclude_trait_impls.is_empty() {
-            let mut excluded_suppressed = 0_usize;
-
-            mutants.retain(|mutant| {
-                let excluded = mutant
-                    .trait_impl
-                    .as_ref()
-                    .is_some_and(|name| self.exclude_trait_impls.iter().any(|excluded| excluded == name.as_ref()));
-
-                if excluded && mutant.outcome == Outcome::Ignored {
-                    excluded_suppressed = excluded_suppressed.saturating_add(1);
-                }
-
-                !excluded
-            });
-            suppressed = suppressed.saturating_sub(excluded_suppressed);
-        }
+        } = scan(&files, &declaration_files, &roots, selection, &self.cfgs, &self.exclude_trait_impls)?;
 
         // Within a file the diff still has the last word: a changed line usually sits among many
         // that were not touched, and mutating those would report on code the change never went
@@ -699,7 +681,7 @@ impl Survey {
 
 fn unmatched_exclusion(index: usize, exclusion: &str) -> Error {
     error!(
-        "exclude-trait-impls entry {} (`{}`) matched no trait implementations; check the lexical terminal trait name",
+        "exclude-trait-impls entry {} (`{}`) matched no trait implementations; check the unqualified Rust identifier forming the final written trait-path segment",
         index + 1,
         exclusion
     )
@@ -744,7 +726,14 @@ fn report_by_package(files: &[TargetFile], mutants: &[Mutant], notify: &mut impl
 }
 
 /// Turns one parsed file into its mutants, with the suppressions it declares already applied.
-fn mutate(file: &TargetFile, source: &SourceFile, selection: &Selection, cfgs: &Cfgs, defaults: &collect::Defaults) -> Result<Parsed> {
+fn mutate(
+    file: &TargetFile,
+    source: &SourceFile,
+    selection: &Selection,
+    cfgs: &Cfgs,
+    defaults: &collect::Defaults,
+    exclude_trait_impls: &[String],
+) -> Result<Parsed> {
     // Taken from the tree that was parsed for mutants anyway, so knowing which files exist only for
     // tests costs a walk over the top-level items rather than a second parse of everything.
     let cfg = cfgs.for_package(&file.package);
@@ -759,9 +748,34 @@ fn mutate(file: &TargetFile, source: &SourceFile, selection: &Selection, cfgs: &
     // indexes in a single walk of the syntax tree rather than the two separate ones a standalone
     // `check_stated` followed by `collect_with` would need.
     let candidates = collect::check_stated_and_collect_with(source, selection, cfg, defaults)?;
-    let mut found = collect::into_mutants(source, &file.package, candidates);
+    let (mut found, trait_impls): (Vec<_>, Vec<_>) = collect::into_mutants_with_traits(source, &file.package, candidates)
+        .into_iter()
+        .unzip();
     let directives = suppress::directives_for(source, cfg)?;
-    let suppressed = suppress::suppress(&mut found, &directives);
+    let mut suppressed = suppress::suppress(&mut found, &directives);
+
+    for (mutant, trait_impl) in found.iter_mut().zip(trait_impls) {
+        let Some(trait_name) = trait_impl
+            .as_ref()
+            .filter(|name| exclude_trait_impls.iter().any(|excluded| excluded == name.as_ref()))
+        else {
+            continue;
+        };
+
+        // Source suppression already made an overlapping mutant visible and accounted for it.
+        // Configuration changes only otherwise-live matches so the population keeps one ignored
+        // entry and one suppression count per mutant.
+        if mutant.outcome == Outcome::Pending {
+            mutant.outcome = Outcome::Ignored;
+            mutant.suppression = Some(Suppression {
+                channel: Channel::Config,
+                reason: Some(format!("trait implementation `{trait_name}` matched `exclude-trait-impls`")),
+                tag: None,
+                line: None,
+            });
+            suppressed = suppressed.saturating_add(1);
+        }
+    }
 
     // Asked here, before the diff and the shard have had their say, because those narrow the
     // population within a file that was scanned in full. A directive whose mutants all fall
@@ -897,6 +911,7 @@ fn scan(
     roots: &[Utf8PathBuf],
     selection: &Selection,
     cfgs: &Cfgs,
+    exclude_trait_impls: &[String],
 ) -> Result<Scan> {
     let workers = thread::available_parallelism().map_or(1, NonZero::get).min(files.len().max(1));
     let shared = Shared {
@@ -912,7 +927,7 @@ fn scan(
             .map(|_worker| {
                 let shared = &shared;
 
-                scope.spawn(move || work(files, shared, selection, cfgs))
+                scope.spawn(move || work(files, shared, selection, cfgs, exclude_trait_impls))
             })
             .collect();
 
@@ -997,11 +1012,12 @@ fn scan(
         idle.extend(parsed.idle);
     }
 
-    // Keyed by path rather than by claim order for the same reason the earliest failure is the one
+    // Keyed by filesystem path rather than by claim order for the same reason the earliest failure
+    // is the one
     // reported: which worker claimed which file is a race, and a diagnostic that reorders itself
-    // between runs is one nobody can diff. Sorting the selected and declaration-only skips together
-    // by the same key also makes the list independent of *which* of the two paths read a file, so
-    // narrowing a selection moves a skip between paths without moving it in the report.
+    // between runs is one nobody can diff. Sorting the selected-file and declaration-only skips
+    // together by the same key also makes the list independent of which scan read a file, so
+    // narrowing a selection moves a skip between scans without moving it in the report.
     let selected_skips = shared.skipped.into_inner().unwrap_or_else(PoisonError::into_inner);
     let mut unanalyzable: Vec<(Utf8PathBuf, String)> = selected_skips
         .into_iter()
@@ -1046,14 +1062,15 @@ struct Declarations {
 ///
 /// Each file is read and parsed solely to extract module declarations — no mutation is performed.
 /// The parallelism is bounded by `available_parallelism` to avoid exceeding system thread limits.
-/// Results are returned in path order.
+/// Results are returned in filesystem-path order.
 ///
 /// A file this tool cannot analyze but `rustc` can build is recorded as a skip rather than a
-/// failure, exactly as the selected-file path records it. Otherwise narrowing a selection would
-/// move such a file from the mutating path to this one and turn a partial measurement of an
-/// otherwise valid workspace into a failed run, without a line of the workspace having changed.
-/// Its declarations are lost with it, so a module only that file declares is treated as absent —
-/// the same shape as the file having been unreadable to a selection that never mentioned it.
+/// failure, exactly as the selected-file scan records it. Otherwise narrowing a selection would
+/// move such a file from the mutating scan to this declaration-only scan and turn a partial
+/// measurement of an otherwise valid workspace into a failed run, without a line of the workspace
+/// having changed. Its declarations are lost with it, so a module only that file declares is
+/// treated as absent — the same shape as the file having been unreadable to a selection that never
+/// mentioned it.
 ///
 /// # Errors
 ///
@@ -1185,7 +1202,13 @@ struct Shared {
 ///
 /// The `usize` in the error is the index of the offending file, so `scan` can report the earliest
 /// in file order rather than whichever worker happened to notice first.
-fn work(files: &[&TargetFile], shared: &Shared, selection: &Selection, cfgs: &Cfgs) -> Result<Vec<(usize, Parsed)>, (usize, Error)> {
+fn work(
+    files: &[&TargetFile],
+    shared: &Shared,
+    selection: &Selection,
+    cfgs: &Cfgs,
+    exclude_trait_impls: &[String],
+) -> Result<Vec<(usize, Parsed)>, (usize, Error)> {
     let Shared {
         next,
         partials,
@@ -1282,7 +1305,7 @@ fn work(files: &[&TargetFile], shared: &Shared, selection: &Selection, cfgs: &Cf
     for (at, source) in &mine {
         let Some(file) = files.get(*at) else { continue };
 
-        match mutate(file, source, selection, cfgs, defaults) {
+        match mutate(file, source, selection, cfgs, defaults, exclude_trait_impls) {
             Ok(one) => parsed.push((*at, one)),
             Err(error) => return Err((*at, error)),
         }
@@ -2885,14 +2908,29 @@ mod tests {
             .expect("the matching package is scanned normally");
 
         assert!(!first.mutants.is_empty(), "the first package still contributes ordinary mutants");
-        assert!(
-            second
-                .mutants
-                .iter()
-                .all(|mutant| mutant.trait_impl.as_deref() != Some("Diagnostic")),
-            "{:?}",
-            second.mutants
-        );
+        let excluded: Vec<_> = second
+            .mutants
+            .iter()
+            .filter(|mutant| {
+                mutant.suppression.as_ref().is_some_and(|suppression| {
+                    suppression.channel == Channel::Config
+                        && suppression
+                            .reason
+                            .as_deref()
+                            .is_some_and(|reason| reason.contains("trait implementation `Diagnostic`"))
+                })
+            })
+            .collect();
+
+        assert!(!excluded.is_empty(), "the excluded implementation remains visible");
+        assert!(excluded.iter().all(|mutant| mutant.outcome == Outcome::Ignored));
+        assert!(excluded.iter().all(|mutant| {
+            mutant
+                .suppression
+                .as_ref()
+                .is_some_and(|suppression| suppression.channel == Channel::Config)
+        }));
+        assert_eq!(second.suppressed, excluded.len());
     }
 
     #[test]
@@ -3219,11 +3257,7 @@ mod tests {
     fn a_file_too_deep_to_walk_is_left_out_by_name_rather_than_stopping_the_scan() {
         let (_directory, root) = workspace();
 
-        // Deliberately a number rather than the limit itself: what is under test is that a file
-        // this tool refuses is stepped over, not where the refusal starts, and a test that reads
-        // the constant would still pass if the constant were raised past anything real.
-        let depth = 512;
-        let deep = format!("pub fn deep() -> i32 {{\n    {}1{}\n}}\n", "(".repeat(depth), ")".repeat(depth));
+        let deep = too_deep_source();
 
         write(&root, "core/src/deep.rs", &deep);
         write(
@@ -3255,12 +3289,20 @@ mod tests {
         );
     }
 
+    /// Source deliberately deeper than the parser accepts, without reading the implementation
+    /// limit: these regressions exercise how a refused file is handled, not where refusal starts.
+    fn too_deep_source() -> String {
+        let depth = 512;
+
+        format!("pub fn deep() -> i32 {{\n    {}1{}\n}}\n", "(".repeat(depth), ")".repeat(depth))
+    }
+
     /// The same deeply nested file, reached only as a module declaration, must be skipped rather
     /// than fail the run.
     ///
     /// Narrowing `--files` moves a file out of the mutating population and into the
-    /// declaration-only path, which exists purely to learn which modules are test-only or
-    /// inactive. If that path propagated the nesting-limit error, the very same buildable
+    /// declaration-only scan, which exists purely to learn which modules are test-only or
+    /// inactive. If that scan propagated the nesting-limit error, the very same buildable
     /// workspace would measure partially under a wide selection and refuse to run at all under a
     /// narrow one — a selection flag deciding whether the tree is sound. Both selections must
     /// complete, and both must name the same file for the same reason.
@@ -3268,8 +3310,7 @@ mod tests {
     fn a_file_too_deep_to_walk_is_skipped_the_same_way_when_only_its_declarations_are_needed() {
         let (_directory, root) = workspace();
 
-        let depth = 512;
-        let deep = format!("pub fn deep() -> i32 {{\n    {}1{}\n}}\n", "(".repeat(depth), ")".repeat(depth));
+        let deep = too_deep_source();
 
         write(&root, "core/src/deep.rs", &deep);
         write(

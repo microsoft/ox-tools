@@ -48,8 +48,8 @@ pub fn collect_with(file: &SourceFile, selection: &Selection, cfg: &CfgSet, defa
     finish(file, collector)
 }
 
-/// Reports a file's stated-value errors and collects its candidates in one walk of the syntax tree,
-/// rather than the two [`super::check_stated`] and [`collect_with`] would run one after the other.
+/// Reports a file's stated-value errors and collects its candidates without running the standalone
+/// stated-value audit before collection.
 ///
 /// The candidates are exactly the candidates [`collect_with`] would have produced from the same
 /// inputs, and a fault stops collection before it starts in the same wording [`super::check_stated`]
@@ -61,9 +61,9 @@ pub fn collect_with(file: &SourceFile, selection: &Selection, cfg: &CfgSet, defa
 /// stays silent about it rather than failing a run over code it is not measuring; `rustc` still
 /// rejects a malformed one when that code is built.
 ///
-/// Everything else is shared: both passes read the file's syntax tree once between them, instead of
-/// [`super::check_stated`]'s own pass, an index-building pass `collect_with` would otherwise run
-/// internally, and `collect_with`'s own candidate-collecting pass.
+/// Everything else is shared: the pre-pass combines the audit with the index construction
+/// `collect_with` would otherwise run internally, then the ordinary candidate-collecting pass uses
+/// those indexes.
 pub fn check_stated_and_collect_with(
     file: &SourceFile,
     selection: &Selection,

@@ -860,14 +860,11 @@ The rules are deliberately few:
   mutant that fails to build and is withdrawn as `unviable`, exactly like a wrong guess. Refusing to
   generate it would mean guessing again, in the direction of silently discarding the mutants of
   authors who were right.
-- **Not on a `const fn` or an empty body.** The guard a mutant is spliced in behind is a run-time
-  call no `const fn` body may make, and replacing an empty body changes nothing whatever the value
-  is — so collection never reads a value stated on either. Rather than accept an attribute that
-  produces nothing, both are a compile error, and `cargo gamma list mutants` reports them too.
+- **Not on a `const fn` or an empty body.** Stated-value mutation is supported only on non-const
+  functions and methods with non-empty bodies.
 
-A stated value is also visible without building anything: `cargo gamma list mutants` reports it, and
-reports a malformed, duplicated, misplaced or inert one as an error rather than passing over it, so
-a mistake in an attribute cannot read as a working hint that quietly does nothing.
+A supported stated value is visible without building anything in `cargo gamma list mutants`.
+Unsupported annotations are rejected rather than treated as working hints that quietly do nothing.
 
 ### Mutants that are never offered
 

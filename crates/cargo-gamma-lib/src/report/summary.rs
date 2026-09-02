@@ -124,9 +124,8 @@ pub fn skipped<H: Host>(host: &mut H, plan: &Plan, styler: Styler) -> Result<()>
 ///
 /// # Errors
 ///
-/// Returns an error if the host's output stream rejects a write. In practice that is a closed pipe
-/// — the reader on the other end of `| head` went away — and the caller's choice is whether a
-/// summary nobody is reading should end the run.
+/// Returns an error if writing skipped-file diagnostics or summary results to either host stream
+/// fails. A downstream reader closing a pipe is one possible cause.
 pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: Listings) -> Result<()> {
     skipped(host, plan, styler)?;
 

@@ -9,9 +9,17 @@
 //! facade does not already expose, so they compile against the crate as a consumer does.
 
 mod identity {
-
     use camino::Utf8Path;
     use cargo_gamma_lib::internals::model::*;
+    use serde_json::{from_str, to_string};
+
+    fn assert_unwind_safe<T: core::panic::UnwindSafe + core::panic::RefUnwindSafe>() {}
+
+    #[test]
+    fn public_test_and_iteration_types_are_unwind_safe() {
+        assert_unwind_safe::<cargo_gamma_lib::internals::discover::RecordEntries<'static>>();
+        assert_unwind_safe::<cargo_gamma_lib::testing::CommandPause>();
+    }
 
     #[test]
     fn a_site_key_separates_every_field_it_is_given() {
@@ -129,10 +137,10 @@ mod identity {
         }
     }
 
-    /// The identity is a newtype now, and it has to keep behaving as the bare string every stored
-    /// record, report and suppression already holds — on the wire and at a comparison alike.
+    /// The identity newtype behaves as the bare string stored records, reports, and suppressions
+    /// use, both on the wire and in comparisons.
     #[test]
-    fn an_identity_is_still_a_bare_string_on_the_wire() {
+    fn an_identity_is_a_bare_string_on_the_wire() {
         let id = mutant_id(
             Utf8Path::new("src/lib.rs"),
             "foo",
@@ -140,10 +148,10 @@ mod identity {
             "a + b",
             SiteIndex::new(0, 0),
         );
-        let json = serde_json::to_string(&id).expect("an identity serializes");
+        let json = to_string(&id).expect("an identity serializes");
 
         assert_eq!(json, "\"97ac41aad8e4\"");
-        assert_eq!(serde_json::from_str::<MutantId>(&json).expect("an identity deserializes"), id);
+        assert_eq!(from_str::<MutantId>(&json).expect("an identity deserializes"), id);
         assert_eq!(id, "97ac41aad8e4");
         assert_eq!("97ac41aad8e4", id);
         assert_eq!(id.as_str(), "97ac41aad8e4");
@@ -152,10 +160,12 @@ mod identity {
         assert_eq!(MutantId::from("97ac41aad8e4".to_owned()), id);
     }
 
-    /// The two site counts mean different things, and the type keeps them apart at the call site
-    /// rather than leaving two adjacent integers for a reader to get right.
+    /// `SiteIndex` groups the two identity coordinates and gives each a named accessor.
+    ///
+    /// Its constructor takes adjacent `u32` values in documented order; reversing them must change
+    /// the identity.
     #[test]
-    fn the_site_counts_are_not_interchangeable() {
+    fn the_site_counts_are_grouped_and_named() {
         let path = Utf8Path::new("src/lib.rs");
 
         assert_ne!(

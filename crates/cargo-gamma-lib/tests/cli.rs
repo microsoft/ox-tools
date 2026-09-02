@@ -42,6 +42,10 @@ fn scratch_base(dir: &TempDir) -> Utf8PathBuf {
     gamma_base(&root, None)
 }
 
+/// Reproduces the cache-owner marker validated by `exec::workspace`.
+///
+/// Production stores the canonical workspace root, so the fixture must use the same path form and
+/// marker name for seeded caches to be accepted as belonging to this workspace.
 fn mark_cache_owner(dir: &TempDir, base: &Utf8PathBuf) {
     let owner = fs::canonicalize(dir.path()).expect("the workspace path can be resolved");
     let owner = Utf8PathBuf::from_path_buf(owner).expect("the resolved workspace path is UTF-8");
@@ -102,7 +106,7 @@ fn listing_mutants_reports_the_expected_operators() {
 }
 
 #[test]
-fn configured_trait_implementation_exclusions_remove_their_mutants() {
+fn configured_trait_implementation_exclusions_suppress_their_mutants() {
     let dir = workspace(
         "struct Subject(i32);
 
@@ -134,9 +138,25 @@ fn configured_trait_implementation_exclusions_remove_their_mutants() {
     assert_eq!(filtered_code, EXIT_OK, "{}", filtered_host.err());
     assert!(unfiltered.contains("self.0 + 1"), "{unfiltered}");
     assert!(unfiltered.contains("self.0 - 1"), "{unfiltered}");
-    assert!(!filtered.contains("self.0 + 1"), "{filtered}");
-    assert!(!filtered.contains("self.0 - 1"), "{filtered}");
-    assert!(filtered.contains("value * 2"), "{filtered}");
+    assert!(!unfiltered.contains("[suppressed: config]"), "{unfiltered}");
+    assert!(
+        filtered
+            .lines()
+            .any(|line| line.contains("self.0 + 1") && line.contains("[suppressed: config]")),
+        "{filtered}"
+    );
+    assert!(
+        filtered
+            .lines()
+            .any(|line| line.contains("self.0 - 1") && line.contains("[suppressed: config]")),
+        "{filtered}"
+    );
+    assert!(
+        filtered
+            .lines()
+            .any(|line| line.contains("value * 2") && !line.contains("[suppressed:")),
+        "{filtered}"
+    );
 }
 
 #[test]

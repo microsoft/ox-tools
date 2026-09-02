@@ -21,3 +21,18 @@ pub fn into_mutants(file: &SourceFile, package: &str, candidates: Vec<Candidate>
         .map(|definition| Mutant::from_definition(definition, Arc::clone(&package)))
         .collect()
 }
+
+/// Attaches Cargo package and neutral run state while retaining short-lived trait selection data.
+pub(crate) fn into_mutants_with_traits(file: &SourceFile, package: &str, candidates: Vec<Candidate>) -> Vec<(Mutant, Option<Arc<str>>)> {
+    let package = Arc::from(package);
+
+    into_definitions(file, candidates)
+        .into_iter()
+        .map(|mut definition| {
+            let trait_impl = definition.trait_impl.take();
+            let mutant = Mutant::from_definition(definition, Arc::clone(&package));
+
+            (mutant, trait_impl)
+        })
+        .collect()
+}

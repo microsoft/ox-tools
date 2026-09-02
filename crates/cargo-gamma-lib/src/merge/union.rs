@@ -5,12 +5,13 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ptr::from_ref;
 
 use super::merged::Merged;
 use super::status::{NEVER_RUN, scoring};
 use super::verdict::Verdict;
 use crate::elements::{FileResult, MergeProvenance, MutantResult, Report, RunInfo, SourceProvenance, VerdictProvenance};
-use crate::model::Scoring;
+use crate::model::{MUTANT_ID_VERSION, Scoring};
 
 /// Merges reports, keeping the most recent verdict per mutant ID.
 ///
@@ -33,8 +34,24 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
     let mut latest: HashMap<&str, Verdict<'_>> = HashMap::new();
     let mut out = Merged::default();
     let mut lineages = Lineages::default();
-    let current = populations(reports, &mut lineages);
-    let sources = sources(reports, &mut lineages);
+    let selected_identity_version = reports
+        .iter()
+        .map(|(_, report)| identity_version(report))
+        .max()
+        .unwrap_or(MUTANT_ID_VERSION);
+    let compatible: Vec<&(String, Report)> = reports
+        .iter()
+        .filter(|(_, report)| identity_version(report) == selected_identity_version)
+        .collect();
+
+    out.identity_incompatible = reports
+        .iter()
+        .filter(|(_, report)| identity_version(report) != selected_identity_version)
+        .map(|(name, _report)| name.clone())
+        .collect();
+
+    let current = populations(&compatible, &mut lineages);
+    let sources = sources(&compatible, &mut lineages);
 
     // Withdrawal is a fact about a mutant, not about the inputs that mentioned it. Counting a
     // sighting per input made ten nightly reports of the same three withdrawn ids read as thirty,
@@ -43,16 +60,16 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
     // otherwise become visible.
     let mut withdrawn: HashSet<&str> = HashSet::new();
 
-    out.unchecked = reports
+    out.unchecked = compatible
         .iter()
-        .flat_map(|(_, report)| report.files.keys())
+        .flat_map(|(_name, report)| report.files.keys())
         .filter(|path| !current.contains_key(path.as_str()))
         .collect::<HashSet<_>>()
         .len();
 
-    out.shard_count = rotation(reports);
+    out.shard_count = rotation(&compatible);
 
-    for (name, report) in reports {
+    for (name, report) in compatible.iter().copied() {
         let input_name = name.as_str();
 
         if let Some(shard) = report.config.as_ref().and_then(|config| config.shard) {
@@ -107,6 +124,7 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
     // The dissenters are named in whatever order the inputs arrived in, and a shell glob chooses
     // that; sorting is what stops the same rotation reading differently on two machines.
     out.inconsistent.sort();
+    out.identity_incompatible.sort();
 
     for verdict in latest.values() {
         if verdict.presentation.is_none() {
@@ -138,8 +156,17 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
         files.entry(verdict.file).or_default().push(verdict);
     }
 
-    out.report = rebuild(reports, &sources, files);
+    out.report = rebuild(&compatible, &sources, files);
     out
+}
+
+/// The mutant-identity scheme a report belongs to.
+fn identity_version(report: &Report) -> u32 {
+    report
+        .config
+        .as_ref()
+        .and_then(|config| config.mutant_id_version)
+        .unwrap_or(MUTANT_ID_VERSION)
 }
 
 struct Candidate<'report> {
@@ -274,12 +301,12 @@ struct Source<'report> {
 }
 
 fn populations<'report>(
-    reports: &'report [(String, Report)],
+    reports: &[&'report (String, Report)],
     lineages: &mut Lineages<'report>,
 ) -> HashMap<&'report str, Population<'report>> {
     let mut newest: HashMap<&str, Population<'_>> = HashMap::new();
 
-    for (name, report) in reports {
+    for (name, report) in reports.iter().copied() {
         if report.config.as_ref().is_some_and(|config| config.shard.is_some() || config.merged) {
             continue;
         }
@@ -334,7 +361,7 @@ fn populations<'report>(
 /// which is how "3 of 2 shards seen, 150% of the rotation" gets printed. Inputs that disagree are
 /// still named in [`Merged::inconsistent`], because a merge across two different partitions of the
 /// population is a coverage figure nobody should read.
-fn rotation(reports: &[(String, Report)]) -> Option<u32> {
+fn rotation(reports: &[&(String, Report)]) -> Option<u32> {
     reports
         .iter()
         .filter_map(|(_, report)| {
@@ -444,7 +471,7 @@ struct Lineages<'report> {
 impl<'report> Lineages<'report> {
     /// The lineage of a file's source under one origin name, computed at most once.
     fn source(&mut self, name: &'report str, file: &'report FileResult) -> String {
-        let key = (core::ptr::from_ref(file).addr(), name);
+        let key = (from_ref(file).addr(), name);
 
         if let Some(known) = self.sources.get(&key) {
             return known.clone();
@@ -472,10 +499,10 @@ impl<'report> Lineages<'report> {
 }
 
 /// Selects one source generation per file before choosing verdicts.
-fn sources<'report>(reports: &'report [(String, Report)], lineages: &mut Lineages<'report>) -> HashMap<&'report str, Source<'report>> {
+fn sources<'report>(reports: &[&'report (String, Report)], lineages: &mut Lineages<'report>) -> HashMap<&'report str, Source<'report>> {
     let mut newest = HashMap::new();
 
-    for (name, report) in reports {
+    for (name, report) in reports.iter().copied() {
         for (path, file) in &report.files {
             let (started_at, origin, lineage) = source_provenance(name, report, path, file, lineages);
             let candidate = Source {
@@ -503,6 +530,23 @@ fn sources<'report>(reports: &'report [(String, Report)], lineages: &mut Lineage
     newest
 }
 
+fn merged_tests(reports: &[&(String, Report)]) -> Option<usize> {
+    reports
+        .iter()
+        .map(|(_, report)| report.config.as_ref()?.tests)
+        .try_fold(usize::MAX, |lowest, tests| tests.map(|tests| lowest.min(tests)))
+        .filter(|_| !reports.is_empty())
+}
+
+fn merged_not_built(reports: &[&(String, Report)]) -> Option<usize> {
+    let count = reports
+        .iter()
+        .filter_map(|(_, report)| report.config.as_ref()?.not_built)
+        .fold(0, usize::saturating_add);
+
+    (count > 0).then_some(count)
+}
+
 /// Rebuilds a report document from the merged verdicts.
 ///
 /// Source text is taken from whichever input had it. A file's source can differ between reports from
@@ -512,7 +556,7 @@ fn sources<'report>(reports: &'report [(String, Report)], lineages: &mut Lineage
 /// recent the winner is settled by [`rank`], the same tie-break the population used, so the source
 /// and the mutants rendered over it come from one coherent choice rather than from opposite ends of
 /// the argument list.
-fn rebuild(reports: &[(String, Report)], sources: &HashMap<&str, Source<'_>>, files: HashMap<&str, Vec<&Verdict<'_>>>) -> Option<Report> {
+fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, files: HashMap<&str, Vec<&Verdict<'_>>>) -> Option<Report> {
     let base = reports
         .iter()
         .max_by(|left, right| rank(&left.0, started_at(&left.1), "").cmp(&rank(&right.0, started_at(&right.1), "")))
@@ -590,20 +634,6 @@ fn rebuild(reports: &[(String, Report)], sources: &HashMap<&str, Source<'_>>, fi
         })
         .collect();
 
-    let tests = reports
-        .iter()
-        .map(|(_, report)| {
-            let config = report.config.as_ref()?;
-            config.tests
-        })
-        .try_fold(usize::MAX, |lowest, tests| tests.map(|tests| lowest.min(tests)));
-    let not_built = reports
-        .iter()
-        .filter_map(|(_, report)| {
-            let config = report.config.as_ref()?;
-            config.not_built
-        })
-        .fold(0, usize::saturating_add);
     let dropped_test_packages = reports
         .iter()
         .filter_map(|(_, report)| report.config.as_ref())
@@ -620,10 +650,11 @@ fn rebuild(reports: &[(String, Report)], sources: &HashMap<&str, Source<'_>>, fi
         files: merged_files,
         config: Some(RunInfo {
             started_at: newest,
+            mutant_id_version: Some(identity_version(base)),
             merged: true,
             shard: None,
-            tests: tests.filter(|_| !reports.is_empty()),
-            not_built: (not_built > 0).then_some(not_built),
+            tests: merged_tests(reports),
+            not_built: merged_not_built(reports),
             dropped_test_packages,
             merge_provenance: Some(provenance),
         }),
@@ -674,6 +705,40 @@ mod tests {
         assert_eq!(merged.valid, 2);
         assert_eq!(merged.detected, 1);
         assert!((merged.score() - 50.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn explicitly_mixed_identity_schemes_are_isolated_instead_of_unioning_their_ids() {
+        let mut legacy = report(Some((0, 2)), 100, vec![mutant("legacy-id", 1, "Survived")]);
+        legacy.config.as_mut().expect("config").mutant_id_version = Some(MUTANT_ID_VERSION - 1);
+        let current = report(Some((1, 2)), 200, vec![mutant("current-id", 1, "Killed")]);
+
+        let merged = merge(&[("legacy".to_owned(), legacy), ("current".to_owned(), current)], 300, None);
+
+        assert_eq!(merged.identity_incompatible, ["legacy"]);
+        assert_eq!(merged.valid, 1);
+        assert_eq!(merged.detected, 1);
+        assert_eq!(
+            merged
+                .report
+                .as_ref()
+                .and_then(|report| report.config.as_ref())
+                .and_then(|config| config.mutant_id_version),
+            Some(MUTANT_ID_VERSION)
+        );
+    }
+
+    #[test]
+    fn unstamped_reports_use_the_current_identity_scheme() {
+        let mut unstamped = report(Some((0, 2)), 100, vec![mutant("unstamped-id", 1, "Survived")]);
+        unstamped.config.as_mut().expect("config").mutant_id_version = None;
+        let current = report(Some((1, 2)), 200, vec![mutant("current-id", 1, "Killed")]);
+
+        let merged = merge(&[("unstamped".to_owned(), unstamped), ("current".to_owned(), current)], 300, None);
+
+        assert!(merged.identity_incompatible.is_empty());
+        assert_eq!(merged.valid, 2);
+        assert_eq!(merged.detected, 1);
     }
 
     #[test]

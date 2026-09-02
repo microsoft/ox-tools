@@ -19,6 +19,9 @@ pub struct MutantDefinition {
     pub site: Arc<MutationSite>,
     pub mutator: Arc<str>,
     pub item_path: Arc<str>,
+    /// Terminal identifier of the enclosing implemented trait, for selection policy.
+    ///
+    /// This is the final written path segment, not a qualified trait path or an identity component.
     pub trait_impl: Option<Arc<str>>,
     pub occurrence: u32,
     pub replacement_index: u32,
