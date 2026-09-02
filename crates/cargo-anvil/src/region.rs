@@ -373,9 +373,22 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
 /// would delete a genuine array element.
 ///
 /// Text inside an existing managed region is never examined, so a region that
-/// legitimately owns the same table elsewhere in the file is untouched.
+/// legitimately owns the same table elsewhere in the file is untouched, and a
+/// host containing a multi-line string is left alone entirely — its content is
+/// beyond what a line-oriented scanner can judge.
 #[must_use]
 pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax) -> String {
+    // A multi-line string is content this line-oriented scanner cannot read.
+    // Its quote state does not survive the line break, so a `#` inside one
+    // looks like a comment and a bracketed line inside one looks like a table
+    // header — either of which would corrupt the comparison and could delete
+    // a table that genuinely differs. Rather than guess, decline adoption
+    // outright: leaving a visible duplicate-table failure is the documented
+    // preference over silently losing user configuration.
+    if contains_multi_line_string(text) || contains_multi_line_string(body) {
+        return text.to_owned();
+    }
+
     let managed = toml_tables(body, syntax);
     if managed.is_empty() {
         return text.to_owned();
@@ -491,6 +504,16 @@ fn is_array_of_tables(header: &str) -> bool {
     header.starts_with("[[")
 }
 
+/// Whether `text` contains a TOML multi-line string delimiter.
+///
+/// Both the basic (`"""`) and literal (`'''`) forms count. This is a coarse
+/// test on purpose: it decides only whether the line-oriented scanner is out
+/// of its depth, and being wrong in the cautious direction merely declines an
+/// adoption that would otherwise have been safe.
+fn contains_multi_line_string(text: &str) -> bool {
+    text.contains("\"\"\"") || text.contains("'''")
+}
+
 /// Return `line` without a trailing TOML comment, if it has one.
 ///
 /// A `#` inside a quoted string is data rather than a comment, so quoting is
@@ -559,6 +582,41 @@ mod tests {
     #[test]
     fn missing_region_returns_none() {
         assert_eq!(find_region("user content\n", "anvil-x", SYN).unwrap(), None);
+    }
+
+    /// A multi-line string is content this line-oriented scanner cannot read:
+    /// its lines are values, not keys, and the quote state does not survive
+    /// the line break. Rather than guess at their meaning, adoption declines
+    /// outright — leaving a visible duplicate-table failure is the documented
+    /// preference over silently deleting user configuration.
+    #[test]
+    fn a_multi_line_string_declines_adoption_entirely() {
+        let text = "[lints]\nworkspace = true\n\n[package]\ndescription = \"\"\"\nnote # not a comment\n\"\"\"\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+
+        assert_eq!(adopted, text, "nothing is adopted while a multi-line string is present:\n{adopted}");
+    }
+
+    /// The sharp edge of the same problem: a bracketed line *inside* a
+    /// multi-line string is a value, not a table header. Reading it as one
+    /// would start dropping in the middle of the user's string and mangle it.
+    #[test]
+    fn a_bracketed_line_inside_a_multi_line_string_is_not_a_table_header() {
+        let text = "[package]\ndescription = \"\"\"\n[lints]\nworkspace = true\n\"\"\"\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+
+        assert_eq!(adopted, text, "the string's content is left intact:\n{adopted}");
+    }
+
+    /// A single-line literal string uses a different delimiter run and must
+    /// not be mistaken for a multi-line one, or ordinary adoption would stop
+    /// working wherever a quoted value appears.
+    #[test]
+    fn an_ordinary_quoted_value_still_permits_adoption() {
+        let text = "[advisories]\nyanked = \"deny\"\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[advisories]\nyanked = \"deny\"\n", SYN);
+
+        assert_eq!(adopted, "", "the table is still adopted:\n{adopted}");
     }
 
     /// The quote tracking in `strip_trailing_comment` decides whether a `#` is
