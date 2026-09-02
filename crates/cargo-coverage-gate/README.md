@@ -18,8 +18,9 @@
 A pull-request-time gate that compares per-package line coverage produced
 by [`cargo-llvm-cov`][__link0] against per-package thresholds carried in
 `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
-coverage lcov tracefile, resolves each package’s threshold from a small
-three-layer lookup, and emits a verdict table to stdout (and,
+coverage lcov tracefile, resolves each package’s base policy from a small
+three-layer lookup, applies any matching package target policy, and emits a
+verdict table to stdout (and,
 optionally, to a Markdown summary file for CI step summaries). A failing
 verdict includes actionable details without relying on a later
 coverage-service upload. A coverable line is a distinct LCOV `DA:` record.
@@ -48,7 +49,7 @@ Individual packages can override it:
 min-lines-percent = 95
 ```
 
-For each workspace member, the effective threshold is the first match
+For each workspace member, the base threshold is the first match
 among:
 
 1. `[package.metadata.coverage-gate] min-lines-percent = N` in the package’s
@@ -79,14 +80,14 @@ coverable code. The two keys are mutually exclusive, and
 
 #### Target-specific policies
 
-A package can replace that policy for a Cargo-style target selector:
+A package can replace its base policy for a Cargo-style target selector:
 
 ```toml
 [package.metadata.coverage-gate]
 min-lines-percent = 100
 
 [package.metadata.coverage-gate.target.'cfg(not(windows))']
-min-lines-percent = 0
+expect-no-coverable-lines = true
 
 [package.metadata.coverage-gate.target.x86_64-unknown-linux-gnu]
 min-lines-percent = 100
@@ -99,12 +100,18 @@ A target-specific no-coverable-lines assertion uses the same nesting:
 expect-no-coverable-lines = true
 ```
 
-Target keys accept exact Rust target triples or quoted `cfg(...)`
-expressions using Cargo’s target grammar. A target table sets either
-`min-lines-percent` or `expect-no-coverable-lines = true`, replacing the
-package’s base policy for that target. Exact triples take precedence over
-matching `cfg(...)` expressions. Multiple matching cfg policies are a
-configuration error rather than depending on declaration order.
+Target tables are package-scoped; they are invalid in workspace metadata.
+Their keys accept exact Rust target triples or quoted `cfg(...)` expressions
+using the target-derived subset of Cargo’s target grammar. Target
+configuration options such as `windows`, `unix`, `target_os`, and
+`target_arch` are supported. Build-context options such as `feature`, `test`,
+`debug_assertions`, and `proc_macro` are rejected because a standalone target
+query cannot evaluate them. A selected target table sets either
+`min-lines-percent` or `expect-no-coverable-lines = true`, completely
+replacing the package’s base policy to produce its effective policy. Exact
+triples take precedence over matching `cfg(...)` expressions. Multiple
+matching cfg policies are a configuration error rather than depending on
+declaration order.
 
 A zero target-specific threshold disables gating on the matching target,
 but does not disable test execution or instrumentation. Those test binaries
@@ -166,7 +173,8 @@ let code = report.verdict().as_exit_code();
 
 [`evaluate`][__link1] gates one lcov tracefile for the rustc host target, while
 [`evaluate_many`][__link2] merges multiple tracefiles at line level.
-[`evaluate_many_for_target`][__link3] evaluates an explicit Rust target triple.
+[`evaluate_many_for_target`][__link3] evaluates a selected Rust target, which may be
+supplied explicitly or omitted to select the rustc host target.
 Evaluation returns an [`EvaluatedReport`][__link4], which renders as plain
 text via [`EvaluatedReport::render_text`][__link5] or GitHub-flavored Markdown via
 [`EvaluatedReport::render_markdown`][__link6] and reduces to a [`Verdict`][__link7] via

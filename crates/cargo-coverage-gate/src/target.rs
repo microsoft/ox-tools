@@ -29,6 +29,8 @@ impl TargetContext {
 
     fn resolve_with_rustc(target: Option<&str>, rustc: &OsStr) -> Result<Self, ResolveTargetError> {
         let rustc_display = rustc.to_string_lossy();
+        // An explicit triple skips host discovery, but every triple still
+        // needs its cfg values because they cannot be derived from its name.
         let triple = if let Some(target) = target {
             target.to_owned()
         } else {

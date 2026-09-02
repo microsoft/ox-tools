@@ -147,11 +147,11 @@ pub(crate) struct InvalidTargetSelectorError {
 
 /// A target selector depends on Cargo build-unit context.
 #[ohno::error]
-#[display("{source}: coverage-gate target selector `{selector}` uses unsupported build-context cfg attributes: {attributes}")]
+#[display("{source}: coverage-gate target selector `{selector}` uses unsupported build-context configuration options: {options}")]
 pub(crate) struct UnsupportedTargetSelectorError {
     pub(crate) source: String,
     pub(crate) selector: String,
-    pub(crate) attributes: String,
+    pub(crate) options: String,
 }
 
 /// More than one `cfg(...)` target policy matched the selected Rust target.

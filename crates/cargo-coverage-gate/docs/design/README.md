@@ -47,8 +47,10 @@ lower-coverage code.
 ## 3. Non-Goals
 
 - Running tests or producing coverage data. The tool consumes the lcov
-  tracefile produced by [`cargo-llvm-cov`][cargo-llvm-cov]; it does not
-  invoke the toolchain itself.
+  tracefile produced by [`cargo-llvm-cov`][cargo-llvm-cov] and never invokes
+  test, build, or coverage commands. Workspace discovery and target-policy
+  evaluation may issue the read-only Cargo and rustc queries described in
+  §10.2.
 - Diff coverage (per-line annotation of changed lines). Different concern,
   different consumers (review tooling like Codecov); this tool answers a
   separable question.
@@ -69,8 +71,9 @@ lower-coverage code.
 
 Corollaries:
 
-- Each workspace member gets an effective threshold via the
-  three-layer resolution (per-package → workspace → built-in `100.0`).
+- Each workspace member gets a base policy via the three-layer resolution
+  (per-package → workspace → built-in `100.0`). A matching package-scoped
+  target table replaces that base policy to produce the effective policy.
   Opting a package out of gating is explicit: set `min-lines-percent = 0.0`.
   A package that legitimately has **no coverable lines** instead declares
   `expect-no-coverable-lines = true` — a self-validating assertion that
@@ -102,11 +105,12 @@ cargo coverage-gate  [--lcov <path>]... [-p <spec>]... [--package <spec>]...
 ```
 
 A single command — no subcommands. The tool reads one or more cargo-llvm-cov
-lcov tracefiles (merging them at the line level), resolves the effective per-package threshold (per-package metadata,
-then workspace default, then the built-in default of `100.0`), computes
-per-package percentages, and emits a verdict table. Exit `0` if every
-in-scope package meets its threshold; exit `1` if any in-scope package
-fails; exit `2` on configuration error.
+lcov tracefiles (merging them at the line level), resolves each package's base
+policy (package metadata, then workspace default, then the built-in default of
+`100.0`), applies a matching package-scoped target replacement, computes
+per-package percentages, and emits a verdict table. Exit `0` if every in-scope
+package meets its effective policy; exit `1` if any in-scope package fails;
+exit `2` on configuration error.
 
 Flags:
 
@@ -141,9 +145,9 @@ Flags:
 The tool never writes to `Cargo.toml`. All threshold values are set by
 hand, so every change appears in a PR diff and is reviewed.
 
-### 5.3 The threshold metadata
+### 5.3 Policy metadata
 
-A package's threshold is resolved in three layers, in priority order:
+A package's base policy is resolved in three layers, in priority order:
 
 1. **per-package**: `[package.metadata.coverage-gate]` in the package's
    `Cargo.toml`.
@@ -230,26 +234,25 @@ Rules:
 
 #### Target-specific policy
 
-Packages whose implementation exists only on selected compilation targets use
-Cargo-style target selectors nested under their package metadata:
+Packages whose coverage policy varies by compilation target use Cargo-style
+target selectors nested under package metadata:
 
 ```toml
 [package.metadata.coverage-gate]
 min-lines-percent = 100
 
 [package.metadata.coverage-gate.target.'cfg(not(windows))']
-min-lines-percent = 0
+expect-no-coverable-lines = true
 ```
 
-Selectors use the same grammar as Cargo's target-specific dependency tables:
-an exact target triple (`x86_64-pc-windows-msvc`) or a quoted `cfg(...)`
-expression (`cfg(windows)`, `cfg(target_os = "linux")`,
-`cfg(all(unix, target_arch = "x86_64"))`). Coverage-gate uses the
-`cargo-platform` parser and matches `cfg(...)` expressions against
-`rustc --print cfg --target <triple>`, so it does not maintain a second target
-language. As in Cargo target-specific dependency selection, selectors must
-describe target properties. Build-context predicates such as `cfg(feature =
-"...")`, `cfg(test)`, `cfg(debug_assertions)`, and `cfg(proc_macro)` are
+Target keys use the target-derived subset of Cargo's target-specific dependency
+selector grammar: an exact target triple (`x86_64-pc-windows-msvc`) or a quoted
+`cfg(...)` expression composed from target configuration options
+(`cfg(windows)`, `cfg(target_os = "linux")`,
+`cfg(all(unix, target_arch = "x86_64"))`). Coverage-gate parses selectors with
+`cargo-platform` and matches cfg expressions against
+`rustc --print cfg --target <triple>`. Build-context configuration
+options such as `feature`, `test`, `debug_assertions`, and `proc_macro` are
 configuration errors because a standalone target query cannot evaluate them.
 
 `min-lines-percent = 0` disables gating for that package on the matching
@@ -259,10 +262,11 @@ may contribute coverage to other workspace packages. This is distinct from
 `expect-no-coverable-lines = true`, which asserts that the selected package
 itself owns no coverable lines.
 
-Target tables replace the base policy with either `min-lines-percent` or
-`expect-no-coverable-lines = true`. The two are mutually exclusive. An exact
-target that overrides a broader `cfg(...)` opt-out repeats its positive
-threshold.
+Target tables are package-scoped; declaring one in workspace metadata is a
+configuration error. A selected table replaces the base policy with either
+`min-lines-percent` or `expect-no-coverable-lines = true`, producing the final
+effective policy. The two behaviors are mutually exclusive. An exact target
+that overrides a broader cfg policy repeats its desired policy.
 
 Resolution follows Cargo's precedence:
 
@@ -270,8 +274,8 @@ Resolution follows Cargo's precedence:
 2. Otherwise one matching `cfg(...)` table supplies the target policy.
 3. Multiple matching `cfg(...)` tables are a configuration error rather than
    depending on TOML declaration order.
-4. With no matching target table, the ordinary package → workspace → built-in
-   policy applies.
+4. With no matching target table, the base package → workspace → built-in
+   policy remains effective.
 
 The CLI accepts `--target <triple>`. When omitted, it obtains the rustc host
 target from `rustc -vV`. Rust target discovery is lazy: if no package declares
