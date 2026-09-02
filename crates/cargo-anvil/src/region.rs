@@ -368,7 +368,9 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
 /// exists to prevent — a `deny.toml` whose `[advisories]` lists the repository's own
 /// `ignore` entries is the case that matters, and it is covered by a fixture.
 /// Comments and blank lines are ignored when comparing, since neither carries
-/// configuration.
+/// configuration, and an array-of-tables (`[[bin]]`) is never adopted at all:
+/// TOML lets those repeat, so a second one is not a duplicate and dropping it
+/// would delete a genuine array element.
 ///
 /// Text inside an existing managed region is never examined, so a region that
 /// legitimately owns the same table elsewhere in the file is untouched.
@@ -386,7 +388,8 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
     // below is a single pass with no lookahead.
     let mut adoptable: Vec<&str> = Vec::new();
     for (header, keys) in toml_tables(text, syntax) {
-        if let Some(managed_keys) = managed.iter().find(|(name, _)| *name == header).map(|(_, keys)| keys)
+        if !is_array_of_tables(header)
+            && let Some(managed_keys) = managed.iter().find(|(name, _)| *name == header).map(|(_, keys)| keys)
             && keys.iter().all(|key| managed_keys.contains(key))
         {
             adoptable.push(header);
@@ -434,8 +437,9 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 }
 
 /// Collect each top-level TOML table outside any managed region, as its header
-/// and the trimmed key lines beneath it. Comments and blank lines are dropped,
-/// since neither carries configuration.
+/// and the key lines beneath it. Blank lines and whole-line comments are
+/// dropped and a trailing comment is stripped from every header and key line,
+/// since a comment carries no configuration and must not defeat a comparison.
 fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
     let prefix = syntax.prefix();
     let open = prefix.to_owned() + " >>> anvil-managed:";
@@ -460,15 +464,39 @@ fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
         if let Some(header) = toml_table_header(trimmed) {
             tables.push((header, Vec::new()));
         } else if let Some((_, keys)) = tables.last_mut() {
-            keys.push(trimmed);
+            keys.push(strip_trailing_comment(trimmed));
         }
     }
 
     tables
 }
 
-/// Return a trimmed TOML table header without its trailing comment.
+/// Return a trimmed TOML table header, without its trailing comment.
+///
+/// This is a boundary test: an array-of-tables header (`[[bin]]`) counts, so
+/// that the keys beneath it are not attributed to the table above it. Whether
+/// such a header may be *adopted* is a separate question, decided by
+/// [`is_array_of_tables`].
 fn toml_table_header(line: &str) -> Option<&str> {
+    let header = strip_trailing_comment(line);
+    (header.starts_with('[') && header.ends_with(']')).then_some(header)
+}
+
+/// Whether a table header declares an array of tables (`[[bin]]`).
+///
+/// TOML allows these to repeat, so a second one is not a duplicate and there
+/// is no parse failure for adoption to fix. Adopting one would let a later
+/// array element be deleted as though it were a duplicate of the first.
+fn is_array_of_tables(header: &str) -> bool {
+    header.starts_with("[[")
+}
+
+/// Return `line` without a trailing TOML comment, if it has one.
+///
+/// A `#` inside a quoted string is data rather than a comment, so quoting is
+/// tracked: truncating there would corrupt the value and could make two
+/// genuinely different keys compare equal.
+fn strip_trailing_comment(line: &str) -> &str {
     let mut quote = None;
     let mut escaped = false;
     let comment = line.char_indices().find_map(|(index, character)| match (quote, character) {
@@ -490,8 +518,7 @@ fn toml_table_header(line: &str) -> Option<&str> {
             None
         }
     });
-    let header = line[..comment.unwrap_or(line.len())].trim_end();
-    (header.starts_with('[') && header.ends_with(']')).then_some(header)
+    line[..comment.unwrap_or(line.len())].trim_end()
 }
 
 struct LineIter<'a> {
@@ -532,6 +559,56 @@ mod tests {
     #[test]
     fn missing_region_returns_none() {
         assert_eq!(find_region("user content\n", "anvil-x", SYN).unwrap(), None);
+    }
+
+    /// A trailing comment on a key line carries no configuration, so it must
+    /// not defeat the key comparison. If it did, the hand-written table would
+    /// be judged un-adoptable and the duplicate header would be appended --
+    /// which is precisely the unparseable manifest this module exists to
+    /// prevent.
+    #[test]
+    fn a_key_line_with_a_trailing_comment_is_still_adoptable() {
+        let text = "[lints]\nworkspace = true # our policy\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+
+        assert_eq!(adopted, "", "the hand-written table is adopted whole:\n{adopted}");
+    }
+
+    /// A `#` inside a quoted value is data, not a comment. Stripping it would
+    /// truncate the value and could make two genuinely different keys compare
+    /// equal, adopting -- and therefore deleting -- a table that differs.
+    #[test]
+    fn a_hash_inside_a_quoted_value_is_not_treated_as_a_comment() {
+        let text = "[advisories]\nignore = [\"RUSTSEC-1#1\"]\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[advisories]\nignore = [\"RUSTSEC-2#2\"]\n", SYN);
+
+        assert_eq!(adopted, text, "differing quoted values are not adoptable:\n{adopted}");
+    }
+
+    /// TOML allows an array-of-tables header to repeat, so a second `[[bin]]`
+    /// is not a duplicate and there is no parse failure to fix. Treating one
+    /// as an ordinary table would let adoption delete a genuine array element.
+    #[test]
+    fn an_array_of_tables_is_never_adopted() {
+        let text = "[[bin]]\nname = \"a\"\n\n[[bin]]\nname = \"b\"\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[[bin]]\nname = \"a\"\n", SYN);
+
+        assert_eq!(adopted, text, "every array element survives:\n{adopted}");
+    }
+
+    /// An array-of-tables header still marks a table boundary even though it
+    /// can never be adopted. Were it not treated as one, the keys beneath it
+    /// would be attributed to the table above, making that table look like it
+    /// carried extra user keys and silently defeating adoption.
+    #[test]
+    fn an_array_of_tables_bounds_the_table_above_it() {
+        let text = "[lints]\nworkspace = true\n\n[[bin]]\nname = \"a\"\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+
+        assert_eq!(
+            adopted, "[[bin]]\nname = \"a\"\n",
+            "[lints] is adopted, the array is not:\n{adopted}"
+        );
     }
 
     /// An adopted table's body ends where a managed region begins. If the
