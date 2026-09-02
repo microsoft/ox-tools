@@ -51,6 +51,12 @@ fn step(directive: &str) -> Option<i32> {
             let _ = std::fs::write(payload, b"");
             None
         }
+        "wait" => {
+            while !std::path::Path::new(payload).exists() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            None
+        }
         "spawn" => {
             launch(payload, false);
             None
@@ -111,7 +117,7 @@ fn launch(payload: &str, own_group: bool) {
 pub fn helper_binary_path() -> &'static Utf8Path {
     static BUILT: OnceLock<Utf8PathBuf> = OnceLock::new();
 
-    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-3")).as_path()
+    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-4")).as_path()
 }
 
 /// Builds the helper binary under `name`, or reuses one already there.
