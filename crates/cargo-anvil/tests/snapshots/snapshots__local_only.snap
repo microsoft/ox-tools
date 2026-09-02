@@ -369,6 +369,7 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+allow-wildcard-paths = true
 # <<< anvil-managed: anvil-deny-bans
 
 # >>> anvil-managed: anvil-deny-sources

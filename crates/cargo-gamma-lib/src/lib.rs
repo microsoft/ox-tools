@@ -285,9 +285,6 @@ macro_rules! expose_internals {
         #[cfg(feature = "internals")]
         #[doc(hidden)]
         pub mod internals {
-            #[doc(hidden)]
-            pub use cargo_gamma_attrs_impl as attrs_impl;
-
             $(
                 #[doc(hidden)]
                 pub use crate::$name;

@@ -31,7 +31,7 @@ min-lines-percent = 96.7
 # Exposes the crate's internal modules so that the integration tests in `tests/` can drive them
 # directly. Test targets that need it declare it in `required-features`; test commands must still
 # enable it explicitly. Never enable it from outside this crate.
-internals = ["dep:cargo-gamma-attrs-impl", "dep:tempfile"]
+internals = ["dep:tempfile"]
 # Selects the dedicated Loom integration target. The scheduler itself is still activated by
 # `RUSTFLAGS="--cfg loom"` in the repository check.
 loom = []
@@ -39,7 +39,6 @@ loom = []
 [dependencies]
 blake3 = { workspace = true, features = ["std"] }
 camino = { workspace = true }
-cargo-gamma-attrs-impl = { workspace = true, optional = true }
 cargo-gamma-engine = { workspace = true }
 cargo-gamma-process = { workspace = true }
 cargo-gamma-rt = { workspace = true }
@@ -75,6 +74,9 @@ libc = { workspace = true, features = ["std"] }
 [dev-dependencies]
 bolero = { workspace = true }
 bolero-engine = { workspace = true, features = ["any"] }
+# Cargo omits versionless dev-dependencies from published packages. The local path keeps the
+# cross-crate agreement tests available without adding a registry or release-order dependency.
+cargo-gamma-attrs-impl = { path = "../cargo-gamma-attrs-impl" }
 cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
 tempfile = { workspace = true }
 
