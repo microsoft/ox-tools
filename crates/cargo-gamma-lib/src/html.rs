@@ -10,13 +10,9 @@
 //! The recipe is the one every Stryker implementation uses: inline the viewer bundle and assign
 //! the report as a JavaScript property rather than fetching it.
 //!
-//! There is deliberately no second mode that loads the viewer from somewhere else. A report
-//! carries the whole mutated source of the code it describes, and a page that fetches its viewer
-//! hands all of it to whatever that script turns out to be on the day the file is opened. The
-//! bytes here were reviewed and committed once; a remote artifact cannot be, unless its exact
-//! content is pinned by a digest this repository can establish without trusting the fetch — which
-//! it cannot, because the vendored bundle is built here rather than copied byte-for-byte from a
-//! published one. Rather than ship an unverified `<script src>`, the mode is gone.
+//! The report always embeds the viewer. A report carries the whole mutated source of the code it
+//! describes, and loading a remote script would disclose that source and its results to code whose
+//! content this repository cannot authenticate.
 
 use std::io;
 
@@ -33,7 +29,8 @@ const VIEWER: &str = include_str!("vendor/mutation-test-elements.js.vendored");
 ///
 /// Read from the file the vendoring step writes, so the two cannot disagree: there is one place
 /// that says which upstream release the bytes came from, and it is the same place the bytes are.
-pub const VIEWER_VERSION: &str = include_str!("vendor/VERSION").trim_ascii();
+#[cfg(test)]
+const VIEWER_VERSION: &str = include_str!("vendor/VERSION").trim_ascii();
 
 /// Renders a complete HTML page for a report.
 ///
@@ -220,18 +217,14 @@ mod tests {
 
     /// The vendored bundle names the upstream release it came from.
     ///
-    /// The version is the only provenance the page has left now that nothing is fetched, and it is
-    /// read from the file the vendoring step writes rather than restated in code, so a bundle
-    /// refreshed without updating the marker — or the reverse — cannot go unnoticed.
+    /// The version is read from the file the vendoring step writes rather than restated in code, so
+    /// the marker and bundle are maintained together. It preserves the complete upstream semantic
+    /// version, including pre-release or build metadata.
     #[test]
     fn the_vendored_viewer_records_its_upstream_version() {
         assert!(!VIEWER_VERSION.is_empty(), "the vendored viewer has no recorded version");
-        assert!(
-            VIEWER_VERSION
-                .chars()
-                .all(|character| character.is_ascii_digit() || character == '.'),
-            "`{VIEWER_VERSION}` is not a bare version number"
-        );
+        cargo_metadata::semver::Version::parse(VIEWER_VERSION)
+            .unwrap_or_else(|cause| panic!("`{VIEWER_VERSION}` is not a semantic version: {cause}"));
     }
 
     #[test]

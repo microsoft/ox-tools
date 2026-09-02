@@ -8,6 +8,8 @@ use core::fmt::{self, Display, Formatter};
 use std::backtrace::Backtrace;
 use std::io;
 
+use cargo_gamma_engine::{Error as EngineError, Parts as EngineParts};
+
 /// An error carrying a human-readable message and an optional cause.
 ///
 /// Messages are written for the person who ran the command, not for a log aggregator: they say
@@ -128,12 +130,12 @@ impl From<io::Error> for Error {
     }
 }
 
-impl From<cargo_gamma_engine::Error> for Error {
-    fn from(value: cargo_gamma_engine::Error) -> Self {
+impl From<EngineError> for Error {
+    fn from(value: EngineError) -> Self {
         // The engine's capture is carried across rather than replaced. Capturing here would record
         // this conversion, which every engine error passes through and which therefore identifies
         // nothing.
-        let cargo_gamma_engine::Parts {
+        let EngineParts {
             message,
             cause,
             usage,

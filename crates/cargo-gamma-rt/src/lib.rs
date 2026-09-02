@@ -26,8 +26,8 @@
 //!
 //! # What a guard looks like
 //!
-//! [`a`] is the only function the instrumented source calls, and it appears in one of three shapes,
-//! chosen by what Rust will accept in that position:
+//! [`a`] is the only function the instrumented source calls. Guard shape follows what Rust accepts
+//! at the mutation site:
 //!
 //! ```text
 //! // an expression, whose value the mutant replaces
@@ -121,11 +121,13 @@
 //! Two further failure shapes exist because "captured, but wrong" is worse than either of the
 //! above:
 //!
-//! - If some other native constructor runs instrumented code before this crate's own constructor
-//!   installs the captured selection — on a hosted target outside a Miri execution, where that
-//!   installation is expected — a guard reached in that window panics rather than silently
-//!   reporting the baseline. `NONE` would otherwise be ambiguous between "genuinely unmutated" and
-//!   "asked too early to know", and only the first may ever be reported as a passing mutant.
+//! - If some other native constructor — a loader or C-runtime startup hook that runs before
+//!   `main` — runs instrumented code before this crate's own constructor installs the captured
+//!   selection, a guard reached in that window emits a fixed diagnostic and terminates immediately
+//!   without unwinding rather than silently reporting the baseline. This applies on a hosted target
+//!   outside a Miri execution, where that installation is expected. `NONE` would otherwise be
+//!   ambiguous between "genuinely unmutated" and "asked too early to know", and only the first may
+//!   ever be reported as a passing mutant.
 //! - On a Unix with no immutable startup environment image, [`ACTIVE_VAR`] is read through
 //!   `getenv` under the POSIX process-wide precondition that no native environment mutation runs
 //!   concurrently. This capture happens before Rust `main`, so safe Rust has not had an opportunity
@@ -164,9 +166,9 @@
 //! sets the variable on itself changes nothing, which is the honest behavior. The run drives
 //! selection by launching a fresh process per mutant.
 //!
-//! # The three entry points
+//! # Runtime entry points
 //!
-//! [`a`] is what the guards call, and the only one of the three that instrumented source contains.
+//! [`a`] is what the guards call, and the only runtime entry point instrumented source contains.
 //! [`active`] and [`any`] are there for the tool's own diagnostics and for anyone inspecting a
 //! scratch tree by hand:
 //!
@@ -222,4 +224,6 @@ pub use either::Either;
 #[doc(hidden)]
 pub use runtime::run_loom_models;
 #[doc(inline)]
-pub use runtime::{ACTIVE_VAR, CENSUS_VAR, ENVIRONMENT_ERROR_MARKER, MAX_CENSUS_SITES, NONE, OVERFLOW, SEAL, a, active, any};
+pub use runtime::{
+    ACTIVE_VAR, CENSUS_VAR, ENVIRONMENT_ERROR_MARKER, MAX_CENSUS_SITES, NONE, OVERFLOW, PRE_INSTALL_ERROR_MARKER, SEAL, a, active, any,
+};

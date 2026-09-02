@@ -80,7 +80,7 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
             site,
             mutator: interner.text(candidate.mutator),
             item_path: interner.text(&candidate.item_path),
-            trait_impl: candidate.trait_impl.as_deref().map(|name| interner.text(name)),
+            trait_impl: candidate.trait_impl,
             occurrence: index,
             replacement_index: candidate.replacement_index,
             replacement: candidate.replacement,

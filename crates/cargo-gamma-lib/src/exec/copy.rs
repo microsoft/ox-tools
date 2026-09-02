@@ -12,14 +12,14 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use std::fs::{self, File, FileTimes};
 use std::io::ErrorKind;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use ignore::{WalkBuilder, WalkState};
 
+use crate::Result;
 use crate::error::{Error, error};
-use crate::{HashMap, Result};
 
 /// Version control directories, which are large, hold nothing a build reads, and are actively
 /// hazardous in a tree a tool is rewriting: a stray command run from the scratch copy could commit
@@ -59,57 +59,22 @@ pub(super) fn visible_vcs_metadata(path: &Utf8Path) -> Vec<Utf8PathBuf> {
     found
 }
 
-/// Whether copy-on-write cloning is still worth attempting for one copy destination.
+/// Whether copy-on-write cloning is still worth attempting during one synchronization operation.
 ///
 /// A filesystem either supports reflinks or does not, so one failure settles it for every later
-/// file written to the same destination and the rest of the copy goes straight to a byte-for-byte
-/// read. The check is a latch rather than a per-file probe because the failure is not always
-/// reported as [`std::io::ErrorKind::Unsupported`] — some platforms return a plain permission or
-/// argument error — so there is nothing reliable to match on.
-///
-/// Scoped to the destination tree rather than to the process, because "can this be cloned" is a
-/// property of where the copy is being written and one run writes to more than one place: the
-/// default scratch tree lives under the user's cache directory and a `--cache-dir` routinely names
-/// another mount. A process-wide latch let the first failure anywhere disable cloning everywhere
-/// afterwards, including on destinations that support it. Nothing was ever copied wrongly — the
-/// byte-for-byte fallback is exact — but every later copy paid full price for one unrelated mount.
-///
-/// The destination tree, rather than the filesystem it sits on, is the key: it is what the caller
-/// names, a run has only a handful of them, and two trees on one mount that each learn the same
-/// answer cost one redundant clone attempt apiece. Deriving a filesystem identity instead would buy
-/// that one attempt back and, since every test's scratch tree is on the same mount as every other
-/// test's, would re-couple the capability across the whole test suite.
+/// file in that operation and its fresh-copy fallback. The check is a latch rather than a per-file
+/// probe because the failure is not always reported as [`std::io::ErrorKind::Unsupported`] — some
+/// platforms return a plain permission or argument error — so there is nothing reliable to match
+/// on. A later operation starts with a fresh latch because the path may have been rebound to a
+/// different filesystem and no cross-operation state is needed for correctness.
 #[derive(Clone, Debug)]
 pub(super) struct Reflinks {
     works: Arc<AtomicBool>,
 }
 
-/// What each copy destination has been observed to support, so a second copy into the same tree
-/// does not have to rediscover it.
-static CAPABILITIES: LazyLock<Mutex<HashMap<Utf8PathBuf, Arc<AtomicBool>>>> = LazyLock::new(|| Mutex::new(HashMap::default()));
-
 impl Reflinks {
-    /// The capability every copy into `destination` shares.
-    pub(super) fn for_destination(destination: &Utf8Path) -> Self {
-        let mut known = CAPABILITIES.lock().unwrap_or_else(PoisonError::into_inner);
-        let works = Arc::clone(
-            known
-                .entry(destination.to_owned())
-                .or_insert_with(|| Arc::new(AtomicBool::new(true))),
-        );
-
-        Self { works }
-    }
-
-    /// A capability no other copy — and, in the tests, no other test — shares.
-    ///
-    /// Registering nothing is the point: a test that copies onto a destination whose filesystem
-    /// cannot clone would otherwise decide which branch every later copy in the process takes, and
-    /// the tests run in parallel, so which branch a test exercises would depend on the order the
-    /// harness happened to schedule them in. Both branches copy correctly, so nothing failed — the
-    /// coverage simply moved.
-    #[cfg(test)]
-    pub(super) fn isolated() -> Self {
+    /// Starts an independent operation that has not observed a clone failure.
+    pub(super) fn new() -> Self {
         Self {
             works: Arc::new(AtomicBool::new(true)),
         }
@@ -142,11 +107,11 @@ pub(super) struct CopyOptions {
 /// `skip` is the directory the copy is being written under when that sits inside the source tree,
 /// which is the default arrangement; without it the copy would try to copy itself.
 ///
-/// Test-only, and deliberately on an isolated capability: what these tests check is what ends up in
-/// the destination, which is the same either way a file gets there.
+/// Test-only. What these tests check is what ends up in the destination, which is the same either
+/// way a file gets there.
 #[cfg(test)]
 pub(super) fn copy_tree(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path) -> Result<()> {
-    copy_tree_with(from, to, skip, CopyOptions::default(), &Reflinks::isolated())
+    copy_tree_with(from, to, skip, CopyOptions::default(), &Reflinks::new())
 }
 
 /// Copies a source tree, taking what a run asked for into account.
@@ -161,8 +126,7 @@ pub(super) fn copy_tree(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path) -> Resu
 /// of the tree — and mutant discovery, which walks the tree rather than asking git, finds and
 /// mutates it. Leaving it out of the copy would fail the build over a file the real tree has.
 ///
-/// `reflinks` is the cloning capability of `to`; see [`Reflinks`] for why the caller supplies it
-/// rather than this reading a process-wide one.
+/// `reflinks` is shared with every copy path in the current synchronization operation.
 pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, options: CopyOptions, reflinks: &Reflinks) -> Result<()> {
     fs::create_dir_all(to.as_std_path()).map_err(|cause| error!("could not create the scratch tree at `{to}`").caused_by(cause))?;
 
@@ -629,7 +593,7 @@ mod tests {
             &to,
             Utf8Path::new("/nowhere"),
             CopyOptions { copy_ignored: true },
-            &Reflinks::isolated(),
+            &Reflinks::new(),
         )
         .unwrap();
 
@@ -990,7 +954,7 @@ mod tests {
         let (_temporary, from, to) = tree();
         let gone = from.join("was-here");
 
-        let cause = copy_entry(&gone, &to.join("was-here"), &Reflinks::isolated()).unwrap_err();
+        let cause = copy_entry(&gone, &to.join("was-here"), &Reflinks::new()).unwrap_err();
 
         assert!(cause.to_string().contains("could not read"), "{cause}");
     }
@@ -1006,7 +970,7 @@ mod tests {
         fs::create_dir_all(to.as_std_path()).unwrap();
         fs::write(to.join("adir").as_std_path(), "blocking file").unwrap();
 
-        let cause = copy_entry(&from.join("adir"), &to.join("adir"), &Reflinks::isolated()).unwrap_err();
+        let cause = copy_entry(&from.join("adir"), &to.join("adir"), &Reflinks::new()).unwrap_err();
 
         assert!(cause.to_string().contains("could not create"), "{cause}");
     }
@@ -1023,7 +987,7 @@ mod tests {
         fs::create_dir_all(to.as_std_path()).unwrap();
         fs::write(to.join("blocker").as_std_path(), "blocking file").unwrap();
 
-        let cause = copy_entry(&from.join("leaf"), &to.join("blocker").join("leaf"), &Reflinks::isolated()).unwrap_err();
+        let cause = copy_entry(&from.join("leaf"), &to.join("blocker").join("leaf"), &Reflinks::new()).unwrap_err();
 
         assert!(cause.to_string().contains("could not create"), "{cause}");
     }
@@ -1040,7 +1004,7 @@ mod tests {
         fs::create_dir_all(to.as_std_path()).unwrap();
 
         // `to/nested` deliberately does not exist yet.
-        copy_entry(&from.join("leaf"), &to.join("nested").join("leaf"), &Reflinks::isolated()).unwrap();
+        copy_entry(&from.join("leaf"), &to.join("nested").join("leaf"), &Reflinks::new()).unwrap();
 
         assert_eq!(fs::read_to_string(to.join("nested").join("leaf").as_std_path()).unwrap(), "source");
     }
@@ -1079,72 +1043,20 @@ mod tests {
         assert!(cause.to_string().contains("could not recreate the link"), "{cause}");
     }
 
-    /// A destination that cannot clone must not decide for a destination that can.
-    ///
-    /// A run writes to more than one place — the default scratch tree under the user's cache
-    /// directory, and a `--cache-dir` that routinely names another mount — and the capability used
-    /// to be one process-wide latch. The first failure anywhere sent every later copy in the
-    /// process down the byte-for-byte path, on filesystems that clone perfectly well. Nothing was
-    /// copied wrongly, which is exactly why it went unnoticed: it only ever cost time.
+    /// Clone capability is shared within one operation and forgotten before the next.
     #[test]
-    fn a_destination_that_cannot_clone_does_not_disable_cloning_for_another() {
-        let (_temporary, from, to) = tree();
-        let elsewhere = to.parent().expect("the fixture destination has a parent").join("elsewhere");
+    fn reflink_capability_is_scoped_to_one_operation() {
+        let operation = Reflinks::new();
+        let same_operation = operation.clone();
+        let later_operation = Reflinks::new();
 
-        let unsupported = Reflinks::for_destination(&to);
-        let other = Reflinks::for_destination(&elsewhere);
+        operation.unsupported();
 
-        unsupported.unsupported();
-
-        assert!(!unsupported.worth_trying(), "the failing destination must stop asking");
+        assert!(!same_operation.worth_trying(), "all copy paths in one operation share the latch");
         assert_eq!(
-            other.worth_trying(),
+            later_operation.worth_trying(),
             reflink_supported(),
-            "one destination's failure must not answer for another"
+            "a later operation must probe its current filesystem independently"
         );
-
-        // A second copy into the same destination inherits what the first one learned there, which
-        // is the whole point of remembering it at all.
-        assert!(!Reflinks::for_destination(&to).worth_trying());
-
-        // Both destinations still copy, whichever branch they take.
-        fs::write(from.join("file.rs").as_std_path(), "fn f() {}").unwrap();
-        copy_tree_with(&from, &to, Utf8Path::new("/nowhere"), CopyOptions::default(), &unsupported).unwrap();
-        copy_tree_with(&from, &elsewhere, Utf8Path::new("/nowhere"), CopyOptions::default(), &other).unwrap();
-
-        assert_eq!(fs::read_to_string(to.join("file.rs").as_std_path()).unwrap(), "fn f() {}");
-        assert_eq!(fs::read_to_string(elsewhere.join("file.rs").as_std_path()).unwrap(), "fn f() {}");
-    }
-
-    /// A test that meets an unsupported destination must not change which branch another test runs.
-    ///
-    /// The capability was a process-global one-way latch, and the tests run in parallel: one test
-    /// copying onto a filesystem without cloning silently moved every later test in that process
-    /// onto the fallback path. Both branches copy correctly, so nothing failed — but which branch
-    /// any given test covered depended on the order the harness happened to schedule them in, which
-    /// is not a property a coverage number can be read against.
-    #[test]
-    fn an_isolated_capability_shares_nothing_with_the_registry_or_another_test() {
-        let (_temporary, _from, to) = tree();
-
-        let registered = Reflinks::for_destination(&to);
-        let mine = Reflinks::isolated();
-        let theirs = Reflinks::isolated();
-
-        mine.unsupported();
-
-        assert!(!mine.worth_trying(), "a test's own capability is its own to trip");
-        assert_eq!(theirs.worth_trying(), reflink_supported(), "another test must be unaffected");
-        assert_eq!(
-            registered.worth_trying(),
-            reflink_supported(),
-            "an isolated capability must not reach the shared registry"
-        );
-
-        // And the traffic does not flow the other way either: tripping the registered capability
-        // for this destination leaves both isolated ones as they were.
-        registered.unsupported();
-
-        assert_eq!(theirs.worth_trying(), reflink_supported());
     }
 }

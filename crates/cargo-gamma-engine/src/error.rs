@@ -7,6 +7,10 @@ use std::backtrace::Backtrace;
 use std::io;
 
 /// An engine error with the coordinator-facing classification preserved.
+///
+/// This type intentionally makes no `UnwindSafe` or `RefUnwindSafe` promise. Its source is an
+/// unconstrained dynamic error supplied by the failing subsystem, and callers crossing a panic
+/// boundary must decide whether that particular operation is safe to resume from.
 #[derive(Debug)]
 pub struct Error {
     message: String,
@@ -65,6 +69,7 @@ impl Error {
     }
 
     /// Returns the backtrace captured when this error was constructed.
+    #[inline]
     pub const fn backtrace(&self) -> &Backtrace {
         &self.backtrace
     }
@@ -84,29 +89,6 @@ impl Error {
             backtrace: self.backtrace,
         }
     }
-}
-
-/// Everything an [`Error`] carries, handed over one field at a time.
-///
-/// A struct rather than a tuple because four of the five fields are `String`, `bool`, `bool` and an
-/// `Option` — a shape in which nothing but position says which is which, and in which swapping the
-/// two flags compiles.
-#[derive(Debug)]
-pub struct Parts {
-    /// What was being attempted, in the words the user will read.
-    pub message: String,
-
-    /// The underlying failure, when there was one.
-    pub cause: Option<Box<dyn StdError + Send + Sync>>,
-
-    /// Whether this is something the user typed rather than something that went wrong.
-    pub usage: bool,
-
-    /// Whether the caller may step over this and finish the rest of the job.
-    pub skippable: bool,
-
-    /// Where the error was constructed, captured there rather than here.
-    pub backtrace: Backtrace,
 }
 
 impl Display for Error {
@@ -134,6 +116,30 @@ impl From<io::Error> for Error {
     }
 }
 
+/// Everything an [`Error`] carries, handed over one field at a time.
+///
+/// Named fields prevent the flags and optional cause from being confused by position.
+///
+/// Like [`Error`], this type intentionally makes no unwind-safety promise because it carries the
+/// same unconstrained dynamic source.
+#[derive(Debug)]
+pub struct Parts {
+    /// What was being attempted, in the words the user will read.
+    pub message: String,
+
+    /// The underlying failure, when there was one.
+    pub cause: Option<Box<dyn StdError + Send + Sync>>,
+
+    /// Whether this is something the user typed rather than something that went wrong.
+    pub usage: bool,
+
+    /// Whether the caller may step over this and finish the rest of the job.
+    pub skippable: bool,
+
+    /// Where the error was constructed, captured there rather than here.
+    pub backtrace: Backtrace,
+}
+
 macro_rules! error {
     ($($arg:tt)*) => { $crate::error::Error::new(format!($($arg)*)) };
 }
@@ -142,6 +148,7 @@ pub(crate) use error;
 
 #[cfg(test)]
 mod tests {
+    use std::backtrace::BacktraceStatus;
     use std::env;
     use std::process::Command;
 
@@ -252,8 +259,6 @@ mod tests {
     /// test exists to catch is still caught there.
     #[test]
     fn every_construction_path_captures_a_backtrace() {
-        use std::backtrace::BacktraceStatus;
-
         const CHILD: &str = "CARGO_GAMMA_BACKTRACE_CHILD";
         const TEST: &str = "error::tests::every_construction_path_captures_a_backtrace";
 

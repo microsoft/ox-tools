@@ -52,8 +52,7 @@ const CONSTANT: &str = "`#[gamma::value(...)]` states what a mutant substitutes,
                         call that no `const fn` body may make; this value would replace nothing";
 
 /// What to say about a stated value on a function whose body is empty.
-const EMPTY: &str = "`#[gamma::value(...)]` states what a mutant substitutes, and an empty body already evaluates to `()`; \
-                     substituting this value would be the identical program, which no test could detect";
+const EMPTY: &str = "`#[gamma::value(...)]` requires a non-empty function body; empty bodies are not eligible for stated-value mutation";
 
 /// Returns the byte range of the expression an item's attributes state, if they state one.
 ///
@@ -83,11 +82,11 @@ pub(super) fn stated_range(attrs: &[Attribute]) -> Option<Range<usize>> {
 /// # Errors
 ///
 /// Returns an error if a stated value is malformed, duplicated, written on something that is not a
-/// function, written on a function with no body to replace, or written on a function collection
-/// never reads a value from — a `const fn`, or one whose body is empty. The proc macro rejects all
-/// of them at compile time, so a crate that builds cannot reach them — but this tool reads source
-/// rather than build output, and `gamma list mutants` runs against trees that have never been
-/// compiled. Ignoring one there would leave a hint that reads as if it works and does nothing,
+/// function, written on a function with no body to replace, or written on a function from which
+/// discovery never reads a value — a `const fn`, or one whose body is empty. The proc macro rejects
+/// all of them at compile time, so a crate that builds cannot reach them — but this tool reads
+/// source rather than build output, and `gamma list mutants` runs against trees that have never
+/// been compiled. Ignoring one there would leave a hint that reads as if it works and does nothing,
 /// which is the failure mode the whole channel exists to avoid.
 ///
 /// Fatal rather than a warning, for the same reason a suppression naming no mutator is: the run
@@ -148,10 +147,10 @@ pub(super) struct Audit {
 impl Audit {
     /// Records what an item's own attributes get wrong, and which of them a function claimed.
     ///
-    /// `inert` is what to say when the function is one collection never reads a stated value from
-    /// at all — a `const fn`, or a function whose body is empty. Both return before `stated_range`
-    /// is consulted, so an attribute there produces no mutant and reads as if it does; naming the
-    /// reason is what turns that silence into a diagnostic.
+    /// `inert` explains why discovery never reads a stated value from the function — because it is
+    /// a `const fn`, or because its body is empty. Both return before `stated_range` is consulted,
+    /// so an attribute there produces no mutant and reads as if it does; naming the reason is what
+    /// turns that silence into a diagnostic.
     ///
     /// A malformed argument list is reported ahead of an inert position, because it is the more
     /// specific mistake: an author who wrote `#[gamma::value(1 +)]` on a `const fn` has two things
@@ -211,23 +210,6 @@ impl Audit {
     }
 }
 
-/// Returns why a function collection reaches would still never read a stated value from, if it is
-/// one of those.
-///
-/// The two conditions are exactly the early returns collection makes before it consults an item's
-/// stated value, kept as one function so the three function grammars cannot drift apart on which
-/// of them counts. `const` is checked first because a `const fn` with an empty body is inert for
-/// both reasons, and the const one is the one the author must resolve to get a mutant at all.
-const fn inert_reason(constant: bool, empty: bool) -> Option<&'static str> {
-    if constant {
-        Some(CONSTANT)
-    } else if empty {
-        Some(EMPTY)
-    } else {
-        None
-    }
-}
-
 #[expect(
     clippy::renamed_function_params,
     reason = "syn names every visitor parameter `i`, which says nothing about what it is"
@@ -252,6 +234,21 @@ impl<'ast> Visit<'ast> for Audit {
         self.on_trait_item_fn(node);
 
         visit::visit_trait_item_fn(self, node);
+    }
+}
+
+/// Returns why discovery would never read a stated value from a function it reaches.
+///
+/// The two conditions are exactly the early returns discovery makes before it consults an item's
+/// stated value. Keeping them here prevents the three function grammars from drifting apart.
+/// `const` is checked first because resolving it is required before any mutant can exist.
+const fn inert_reason(constant: bool, empty: bool) -> Option<&'static str> {
+    if constant {
+        Some(CONSTANT)
+    } else if empty {
+        Some(EMPTY)
+    } else {
+        None
     }
 }
 
@@ -454,9 +451,8 @@ mod tests {
         }
     }
 
-    /// An empty body already evaluates to `()`, so a mutant substituting a value for it would be
-    /// the identical program. Collection skips the site for that reason, which makes an attribute
-    /// there another hint that produces nothing.
+    /// Empty bodies are not eligible for stated-value mutation, so accepting an attribute there
+    /// would leave a hint that produces no mutant.
     #[test]
     fn a_value_stated_on_an_empty_bodied_function_is_reported() {
         let sources = [
@@ -468,7 +464,10 @@ mod tests {
         for source in sources {
             let rejected = check(&file(source)).expect_err("an empty body has nothing to replace").to_string();
 
-            assert!(rejected.contains("already evaluates to `()`"), "`{source}`: {rejected}");
+            assert!(
+                rejected.contains("not eligible for stated-value mutation"),
+                "`{source}`: {rejected}"
+            );
         }
     }
 

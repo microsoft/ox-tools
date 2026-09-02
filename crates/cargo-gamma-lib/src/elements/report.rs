@@ -85,6 +85,14 @@ pub struct RunInfo {
     /// ordering, windowing — and parsing a date format back is a step that can only lose.
     pub started_at: u64,
 
+    /// The mutant-identity scheme used by every ID in this report.
+    ///
+    /// Reports written before this field existed omit it and are treated as the current scheme by
+    /// the merger. Keeping it with run metadata lets a shard rotation reject identities from a
+    /// different namespace instead of counting the same logical mutant twice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mutant_id_version: Option<u32>,
+
     /// Whether this document combines reports rather than describing one run.
     ///
     /// A merged document is not a complete population snapshot even though it has no shard
@@ -446,9 +454,10 @@ fn reason_for(mutant: &Mutant) -> Option<String> {
 ///
 /// # Errors
 ///
-/// Returns an error if a mutated file's source cannot be read back from disk, which is what
-/// embedding it requires. The read happens after the run rather than during it, so a file the
-/// repository deleted or made unreadable in the meantime fails here.
+/// Returns an error if a mutated file's source cannot be read back from disk or parsed for
+/// source-location rendering, which embedding it requires. The read and parse happen after the run
+/// rather than during it, so a file the repository deleted, made unreadable, made invalid Rust, or
+/// nested beyond the supported parser limit in the meantime fails here.
 pub fn build(plan: &Plan, thresholds: Thresholds, run: Option<RunInfo>) -> Result<Report> {
     let mut files: BTreeMap<String, FileResult> = BTreeMap::new();
 
@@ -497,6 +506,7 @@ pub fn build(plan: &Plan, thresholds: Thresholds, run: Option<RunInfo>) -> Resul
         files,
         config: run.map(|run| RunInfo {
             not_built: (not_built > 0).then_some(not_built),
+            mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
             ..run
         }),
     })
@@ -939,13 +949,13 @@ pub fn to_json(report: &Report) -> Result<String> {
 
 /// Writes the report to `path` as pretty-printed JSON.
 ///
-/// Serialized straight from the typed report rather than through a `serde_json::Value`. The tree
-/// was a second complete copy of a document that embeds every mutated file's whole source, built
-/// only so that it could be validated and then thrown away; validating the types themselves asks
-/// the same questions of the same data without the copy. Key order is the declaration order of the
-/// types rather than the alphabetical order a `Value` imposed, which is just as deterministic —
-/// the field order of a `struct` does not vary between runs — and the one map whose order is
-/// observable is ordered for exactly this reason.
+/// Serialized straight from the typed report rather than through an intermediate
+/// `serde_json::Value`. That intermediate JSON value was a second complete copy of a document that
+/// embeds every mutated file's whole source, built only so that it could be validated and then
+/// thrown away; validating the typed report asks the same questions of the same data without the
+/// copy. Key order is the declaration order of the types rather than the alphabetical order a
+/// `Value` imposed, which is just as deterministic — the field order of a `struct` does not vary
+/// between runs — and the one map whose order is observable is ordered for exactly this reason.
 ///
 /// # Errors
 ///
@@ -959,10 +969,10 @@ pub fn write_json(report: &Report, path: &Utf8Path) -> Result<()> {
 
 /// Validates a report this crate built, against the same rules as the untyped document check.
 ///
-/// The typed form makes most of that check unnecessary: a field that the schema says must be a
-/// string is a `String`, one that must be a number is an `f64`, and one that is required is not an
-/// `Option`. What is left is everything the type system cannot state — the version pattern, the
-/// bounded thresholds, positions that must be at least one, the closed status vocabulary, and the
+/// The typed form makes most of that check unnecessary: schema strings and numbers are represented
+/// by the corresponding Rust string and numeric types, and a required field is not an `Option`.
+/// What is left is everything the type system cannot state — the version pattern, the bounded
+/// thresholds, positions that must be at least one, the closed status vocabulary, and the
 /// uniqueness of mutants within a file — and those are checked here.
 ///
 /// [`validate_schema`] stays, and is not implemented in terms of this: it is asked about documents
@@ -1008,6 +1018,10 @@ fn validate_file_result(file: &FileResult, path: &str) -> SchemaResult<()> {
                 "{path} mutant `{}` has unknown schema status `{}`",
                 mutant.id, mutant.status
             ));
+        }
+
+        if mutant.duration.is_some_and(|duration| !duration.is_finite()) {
+            return Err(format!("{path}.duration must be a finite JSON number"));
         }
 
         for (corner, position) in [("start", &mutant.location.start), ("end", &mutant.location.end)] {
@@ -1600,6 +1614,7 @@ mod tests {
         };
         let info = RunInfo {
             started_at: 0,
+            mutant_id_version: None,
             merged: false,
             shard: None,
             tests: None,
@@ -1626,6 +1641,7 @@ mod tests {
             Thresholds::default(),
             Some(RunInfo {
                 started_at: 0,
+                mutant_id_version: None,
                 merged: false,
                 shard: None,
                 tests: None,
@@ -1764,6 +1780,27 @@ mod tests {
         );
 
         assert!(to_json(&position).is_err(), "a zero source position must not be emitted");
+    }
+
+    #[test]
+    fn serialization_refuses_non_finite_durations_before_publishing() {
+        let directory = crate::testing::workdir("elements-non-finite-duration-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the scratch path is UTF-8");
+
+        for (index, duration) in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY].into_iter().enumerate() {
+            let mut mutant = fixtures::mutant_result();
+            mutant.duration = Some(duration);
+            let report = fixtures::report_with(None, 100, vec![mutant]);
+            let error = to_json(&report).expect_err("non-finite duration must not serialize");
+
+            assert!(error.to_string().contains("duration must be a finite JSON number"), "{error}");
+
+            let path = root.join(format!("report-{index}.json"));
+            let error = write_json(&report, &path).expect_err("non-finite duration must not be published");
+
+            assert!(error.to_string().contains("duration must be a finite JSON number"), "{error}");
+            assert!(!path.exists(), "a rejected report must leave no file behind");
+        }
     }
 
     /// The streamed JSON writer emits exactly the bytes the string form produces and publishes them

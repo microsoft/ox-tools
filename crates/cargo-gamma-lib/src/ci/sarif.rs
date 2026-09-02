@@ -3,6 +3,8 @@
 
 //! The twelve pieces of a SARIF 2.1.0 log document, all serialized together as one wire format.
 
+use std::io::{self, Write};
+
 use camino::Utf8Path;
 use serde::Serialize;
 
@@ -146,9 +148,9 @@ pub fn sarif(mutants: &[Mutant], root: &Utf8Path, level: Level) -> Result<(Strin
     // arithmetic rather than in a multi-megabyte `String` that is looked at once and dropped. Only
     // the prefix that fits is rendered, exactly once. The sequence of prefixes is the same one the
     // repeated-render form walked, so the log that comes out is the same log.
-    let mut length = results.len();
+    let lengths = core::iter::successors(Some(results.len()), |length| (*length > 0).then_some(*length / 2));
 
-    loop {
+    for length in lengths {
         let rules = rules(&kept[..length], level);
         let log = log(&results[..length], rules);
 
@@ -159,9 +161,9 @@ pub fn sarif(mutants: &[Mutant], root: &Utf8Path, level: Level) -> Result<(Strin
 
             return Ok((text, truncation));
         }
-
-        length /= 2;
     }
+
+    unreachable!("the zero-length SARIF document always fits");
 }
 
 /// The byte length the log would serialize to, without keeping the bytes.
@@ -184,15 +186,15 @@ struct Counted {
     bytes: usize,
 }
 
-impl std::io::Write for Counted {
+impl Write for Counted {
     #[expect(clippy::renamed_function_params, reason = "`buf` is less clear than `buffer`")]
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         self.bytes += buffer.len();
 
         Ok(buffer.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }

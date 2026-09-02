@@ -1,33 +1,29 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Classifying a platform refusal without reading its message.
+//! Classifying a failed platform operation without reading its message.
 
-/// What kind of refusal a [`crate::PlatformError`] reports.
+/// What kind of platform failure a [`crate::PlatformError`] reports.
 ///
-/// Carried separately from the message so a caller can decide what to do — refuse the run, degrade
-/// it, or record it against one mutant — without matching on prose that exists to be read by a
-/// person.
+/// Carried separately from the message so a caller can classify the failure without matching on
+/// prose that exists to be read by a person. This implementation crate keeps the enum
+/// non-exhaustive so future platform distinctions can be added without breaking coordinating
+/// callers; callers must preserve a conservative fallback for an unknown classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Situation {
-    /// The host has no facility that can do what was asked, and never will during this run.
+    /// The host lacks the requested facility for the duration of this run.
     ///
-    /// A kernel without cgroup v2 delegation and a Unix that is not Linux both answer this way. It
-    /// is a standing fact about the machine rather than about the operation, so retrying is
-    /// pointless and the run's response is to refuse or to degrade, once.
+    /// Examples include a Linux host without delegated cgroup v2 memory control and a non-Linux
+    /// Unix host without an equivalent process-tree memory boundary.
     Unsupported,
 
     /// The facility exists, but this particular operation on it did not succeed.
     ///
-    /// A leaf that could not be created, an interface file that could not be written, a job that
-    /// would not take its child. Another attempt might succeed, and the caller is expected to
-    /// refuse the one launch rather than the whole run.
+    /// Examples include failure to create one cgroup leaf, write one interface file, or assign one
+    /// child with `AssignProcessToJobObject`.
     Refused,
 
-    /// A terminal signal has already begun taking this run apart.
-    ///
-    /// Nothing further may be created: the process is free to die at the next instruction, and a
-    /// child made now would outlive it.
+    /// Interruption-driven teardown has begun and process termination may occur immediately.
     Interrupted,
 }

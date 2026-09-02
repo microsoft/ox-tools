@@ -22,7 +22,7 @@ pub struct Plan {
     /// Every mutant to be tested, with ordinals assigned.
     pub mutants: Vec<Mutant>,
 
-    /// Mutants suppressed by a directive. They stay in `mutants`, marked as ignored.
+    /// Mutants suppressed by an explicit policy. They stay in `mutants`, marked as ignored.
     pub suppressed: usize,
 
     /// Skip directives this run offered a mutant to and which suppressed none of it.

@@ -4,11 +4,14 @@
 use core::ops::Range;
 
 use compact_str::CompactString;
+use syn::parse_file;
 
 use super::*;
 use crate::cfg::CfgSet;
+use crate::model::{MutantId, SiteIndex, mutant_id_with_discriminator, normalize_site_text};
 use crate::ops::registry::{REGISTRY, Selection};
 use crate::parse::SourceFile;
+use crate::schema::{AssignedMutant, Ordinal, instrument};
 
 fn candidates(source: &str, ops: &str) -> Vec<Candidate> {
     let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
@@ -101,24 +104,24 @@ fn cached_normalization_matches_a_direct_recomputation_for_every_replacement_at_
     let found = with_errors(source, &["MyError::Io", "MyError::Eof", "MyError::Closed"]);
 
     // Independently recomputed, from the same source bytes, with no cache in the loop.
-    let expected: Vec<crate::model::MutantId> = found
+    let expected: Vec<MutantId> = found
         .iter()
         .map(|candidate| {
             let text = file.slice(&candidate.span);
-            let normalized = crate::model::normalize_site_text(text);
+            let normalized = normalize_site_text(text);
 
-            crate::model::mutant_id_with_discriminator(
+            mutant_id_with_discriminator(
                 &file.path,
                 &candidate.item_path,
                 candidate.mutator,
                 &normalized,
-                crate::model::SiteIndex::new(0, candidate.replacement_index),
+                SiteIndex::new(0, candidate.replacement_index),
                 (candidate.mutator == "fn_value.err_with").then_some(candidate.replacement.as_str()),
             )
         })
         .collect();
 
-    let actual: Vec<crate::model::MutantId> = into_definitions(&file, found).into_iter().map(|mutant| mutant.id).collect();
+    let actual: Vec<MutantId> = into_definitions(&file, found).into_iter().map(|mutant| mutant.id).collect();
 
     assert_eq!(actual, expected);
 }
@@ -493,6 +496,38 @@ fn impl_identities_survive_reordering_across_qualified_instantiated_and_referenc
          impl block order"
     );
     assert_eq!(before.len(), 5, "each distinct self type must produce its own entry, not share one");
+}
+
+#[test]
+fn impl_identities_preserve_word_boundaries_when_blocks_are_reordered() {
+    let first = "trait Marker {}
+        trait Subject { fn f(&self) -> i32; }
+        struct dynMarker;
+        impl Subject for dyn Marker { fn f(&self) -> i32 { 1 + 1 } }
+        impl Subject for dynMarker { fn f(&self) -> i32 { 1 + 1 } }";
+    let second = "trait Marker {}
+        trait Subject { fn f(&self) -> i32; }
+        struct dynMarker;
+        impl Subject for dynMarker { fn f(&self) -> i32 { 1 + 1 } }
+        impl Subject for dyn Marker { fn f(&self) -> i32 { 1 + 1 } }";
+
+    let identities = |source: &str| {
+        let file = SourceFile::parse("test.rs", source.to_owned()).expect("the fixture parses");
+        let selection = Selection::parse("arith.add_to_sub").expect("the mutator exists");
+        let mut ids: Vec<(String, String)> = into_definitions(&file, collect(&file, &selection))
+            .into_iter()
+            .map(|mutant| (mutant.item_path.to_string(), mutant.id.to_string()))
+            .collect();
+
+        ids.sort_unstable();
+        ids
+    };
+
+    let before = identities(first);
+
+    assert_eq!(before, identities(second));
+    assert_ne!(before[0].0, before[1].0);
+    assert_ne!(before[0].1, before[1].1);
 }
 
 #[test]
@@ -2667,16 +2702,16 @@ fn span_of(text: &str, needle: &str) -> core::ops::Range<usize> {
     start..start + needle.len()
 }
 
-/// A selection that reads none of the prepass indexes must collect exactly what a full one does.
+/// A selection that reads none of the pre-pass indexes must collect exactly what a full one does.
 ///
-/// The whole-file prepass is skipped when no selected mutator consults it, and skipping work is
+/// The whole-file pre-pass is skipped when no selected mutator consults it, and skipping work is
 /// only safe if it is invisible: the candidates a narrow selection yields have to be the ones a
 /// selection that *does* build the indexes yields for those same mutators. When the gate was
 /// first written it missed `result.ok_to_err`, which reads the import index to decide whether an
 /// `Err` is constructible, and five mutants changed — a gate on an index is wrong exactly when
 /// its output stops matching the ungated walk.
 #[test]
-fn a_selection_that_needs_no_prepass_collects_what_a_full_one_does() {
+fn a_selection_that_needs_no_pre_pass_collects_what_a_full_one_does() {
     let source = "\
 use std::io::Error;
 const CAP: usize = 8;
@@ -2774,11 +2809,11 @@ fn a_non_ascii_file_instruments_into_source_that_still_parses() {
     let mutations: Vec<_> = found
         .iter()
         .enumerate()
-        .map(|(ordinal, mutant)| crate::schema::AssignedMutant::new(crate::schema::Ordinal::new(u32::try_from(ordinal).unwrap()), mutant))
+        .map(|(ordinal, mutant)| AssignedMutant::new(Ordinal::new(u32::try_from(ordinal).unwrap()), mutant))
         .collect();
-    let instrumented = crate::schema::instrument(&file.text, &mutations).expect("instruments");
+    let instrumented = instrument(&file.text, &mutations).expect("instruments");
 
-    let _ = syn::parse_file(&instrumented).expect("the instrumented file no longer parses");
+    let _ = parse_file(&instrumented).expect("the instrumented file no longer parses");
 
     for identifier in ["tälle", "gröÿe", "ändern", "ünïcøde"] {
         assert!(
@@ -3287,10 +3322,16 @@ fn every_registry_entry_produces_at_least_one_candidate_against_the_composite_fi
     }
 }
 
+/// The identifying fields returned by [`candidate_key`].
+///
+/// The alias lets [`separately_and_fused`] return both candidate lists without repeating the tuple
+/// type.
+type CandidateKey = (Range<usize>, &'static str, CompactString, u32, String, Shape);
+
 /// A candidate reduced to the fields that identify it, so two independently produced `Vec`s can be
 /// compared without `Candidate` needing `PartialEq` for production code that never asks two of them
 /// whether they are equal.
-fn candidate_key(candidate: &Candidate) -> (Range<usize>, &'static str, CompactString, u32, String, Shape) {
+fn candidate_key(candidate: &Candidate) -> CandidateKey {
     (
         candidate.span.clone(),
         candidate.mutator,
@@ -3301,11 +3342,11 @@ fn candidate_key(candidate: &Candidate) -> (Range<usize>, &'static str, CompactS
     )
 }
 
-/// The fused pass exists only to spend one walk of the syntax tree instead of two; it must never
-/// spend it on a different answer. Every family in [`EVERY_FAMILY_FIXTURE`] — including the numeric
-/// evidence and import indexes only [`check_stated_and_collect_with`]'s pre-pass builds — is
-/// selected here, so this is the same walk [`collect_with`] would have driven from indexes
-/// `check_stated`'s own pass never touches.
+/// The fused pre-pass exists to audit stated values while building collection indexes; it must
+/// never produce a different answer. Every family in [`EVERY_FAMILY_FIXTURE`] — including the
+/// numeric evidence and import indexes only [`check_stated_and_collect_with`]'s pre-pass builds —
+/// is selected here, so the candidate pass reads the same indexes [`collect_with`] would have
+/// built separately.
 ///
 /// Both sides are compared through [`candidate_key`] rather than by ordering the raw `Vec`s: both
 /// already come out of [`finish`](super::traversal) sorted by the same span-then-mutator-then-index
@@ -3392,10 +3433,6 @@ fn separately_and_fused(source: &str, ops: &str, cfg: &CfgSet) -> (Vec<Candidate
     )
 }
 
-/// The tuple [`candidate_key`] reduces a candidate to, named so the helper above can return two
-/// lists of them without spelling it out twice.
-type CandidateKey = (Range<usize>, &'static str, CompactString, u32, String, Shape);
-
 /// Code the selected build strips is not code either pass may learn from, and the two passes must
 /// strip exactly the same code.
 ///
@@ -3438,6 +3475,32 @@ fn the_fused_pass_strips_the_same_inactive_code_the_separate_passes_do() {
         fused, separately,
         "the fused pass must strip exactly what the separate passes strip"
     );
+}
+
+/// A field-level gate applies before the stated-value audit sees the field's attributes.
+#[test]
+fn the_fused_pass_does_not_audit_stated_values_on_inactive_fields() {
+    let source = r"
+        struct Record {
+            #[cfg(windows)]
+            #[gamma::value(not a valid value)]
+            count: u32,
+            active: u32,
+        }
+
+        fn f(record: &Record) -> u32 {
+            record.active + 1
+        }
+    ";
+    let file = SourceFile::parse("fixture.rs", source.to_owned()).unwrap();
+    let selection = Selection::parse("arith.add_to_sub").unwrap();
+    let cfg = CfgSet::parse("unix\n");
+    let defaults = Defaults::of_in(&file.ast, &cfg);
+
+    let candidates = check_stated_and_collect_with(&file, &selection, &cfg, &defaults)
+        .expect("a malformed stated value on an inactive field is outside the selected build");
+
+    assert!(!candidates.is_empty(), "the active function still supplies a candidate");
 }
 
 /// The collector offers no mutant in test code, so neither pass may draw evidence from it. This is
@@ -3512,8 +3575,8 @@ fn the_fused_pass_strips_the_same_inactive_statements_the_separate_passes_do() {
 /// that reads as working and measures nothing — the failure the `const fn` and empty-body
 /// rejections in `stated::check` exist to make impossible.
 ///
-/// The three positions a function is written in are all covered, because only one of them is an
-/// `ItemFn` and a gate applied in one place would leave the other two silent.
+/// Every position in which a function is written is covered, because a gate applied to `ItemFn`
+/// alone would leave methods and trait methods silent.
 #[test]
 fn every_accepted_stated_value_emits_a_candidate() {
     let sources = [

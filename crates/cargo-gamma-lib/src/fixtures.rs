@@ -49,7 +49,6 @@ pub(crate) fn mutant() -> Mutant {
         column: 1,
         mutator: "relational.lt_to_le".to_owned().into(),
         item_path: "f".to_owned().into(),
-        trait_impl: None,
         occurrence: 0,
         replacement_index: 0,
         original: "a".to_owned().into(),
@@ -137,6 +136,7 @@ pub(crate) fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: V
         files,
         config: Some(RunInfo {
             started_at,
+            mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
             merged: false,
             shard: shard.map(|(index, count)| ShardInfo { index, count }),
             tests: None,

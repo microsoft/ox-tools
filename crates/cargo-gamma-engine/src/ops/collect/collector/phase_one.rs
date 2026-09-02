@@ -34,16 +34,16 @@
 
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst, ItemFn,
-    ItemStatic, ItemStruct, ItemUse, Stmt, TraitItem, TraitItemConst, TraitItemFn,
+    Arm, Attribute, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, Field, ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst,
+    ItemFn, ItemStatic, ItemStruct, ItemUse, Stmt, TraitItem, TraitItemConst, TraitItemFn,
 };
 
-use super::super::defaults::{impl_item_attrs, item_attrs, trait_item_attrs};
-use super::super::stated::{self, Audit};
-use super::indexes::{Indexes, Walk};
-use super::predicates::{expr_attrs, stmt_attrs};
 use crate::Result;
 use crate::cfg::CfgSet;
+use crate::ops::collect::collector::indexes::{Indexes, Walk};
+use crate::ops::collect::collector::predicates::{expr_attrs, stmt_attrs};
+use crate::ops::collect::defaults::{impl_item_attrs, item_attrs, trait_item_attrs};
+use crate::ops::collect::stated::{self, Audit};
 use crate::ops::registry::Selection;
 use crate::parse::SourceFile;
 
@@ -64,7 +64,7 @@ pub(in crate::ops::collect) fn run(file: &SourceFile, selection: &Selection, cfg
     let mut combined = PhaseOne {
         audit: Audit::default(),
         walk: Walk::new(selection, cfg),
-        cfg: cfg.clone(),
+        cfg,
     };
 
     combined.visit_file(&file.ast);
@@ -80,17 +80,17 @@ pub(in crate::ops::collect) fn run(file: &SourceFile, selection: &Selection, cfg
 /// exactly the fields, invariants and standalone tests it already had; only the traversal itself is
 /// shared. `cfg` is held here rather than in either sub-visitor because it gates the shared
 /// traversal itself — see [`Self::visit_item`] — not either sub-visitor's own state.
-struct PhaseOne {
+struct PhaseOne<'cfg> {
     audit: Audit,
-    walk: Walk,
-    cfg: CfgSet,
+    walk: Walk<'cfg>,
+    cfg: &'cfg CfgSet,
 }
 
 #[expect(
     clippy::renamed_function_params,
     reason = "syn names every visitor parameter `i`, which says nothing about what it is"
 )]
-impl<'ast> Visit<'ast> for PhaseOne {
+impl<'ast> Visit<'ast> for PhaseOne<'_> {
     fn visit_attribute(&mut self, node: &'ast Attribute) {
         self.audit.on_attribute(node);
         visit::visit_attribute(self, node);
@@ -127,6 +127,20 @@ impl<'ast> Visit<'ast> for PhaseOne {
     fn visit_trait_item(&mut self, node: &'ast TraitItem) {
         if !self.cfg.skip_gate(trait_item_attrs(node)) {
             visit::visit_trait_item(self, node);
+        }
+    }
+
+    /// Gates fields before either their attributes or their types reach a pre-pass.
+    fn visit_field(&mut self, node: &'ast Field) {
+        if !self.cfg.skip_gate(&node.attrs) {
+            visit::visit_field(self, node);
+        }
+    }
+
+    /// Gates match arms, whose attributes belong to the arm rather than its body expression.
+    fn visit_arm(&mut self, node: &'ast Arm) {
+        if !self.cfg.skip_gate(&node.attrs) {
+            visit::visit_arm(self, node);
         }
     }
 

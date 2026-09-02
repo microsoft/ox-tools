@@ -39,9 +39,11 @@ crate's dependency graph and must remain dependency-free.
 - Fallible platform boundaries return a structured `PlatformError` carrying a
   `Situation` — unsupported host, refused operation, or interrupted run — and a
   captured backtrace, so callers classify failures without parsing messages.
-- Windows containment routes each native call through a private wrapper so a
-  test can fail it in isolation; the failure arms are otherwise unreachable on a
-  healthy machine.
+  The compatible `Into<String>` constructors accept dynamic and non-static
+  borrowed messages; explicit static-message constructors avoid allocating for
+  diagnostics embedded in the program.
+- Replaceable registry, cgroup, job-backend, and fault-injection mechanics are
+  recorded in the [implementation guide](IMPLEMENTATION.md).
 
 ## Portability
 

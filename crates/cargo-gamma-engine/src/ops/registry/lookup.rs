@@ -39,11 +39,13 @@ pub fn families() -> Vec<&'static str> {
 
 /// Expands one selector into the mutator names it matches.
 ///
-/// A selector is a full name, a family prefix, an `@preset`, an academic alias, or `all`.
+/// A selector is a full name, a dotted mutator-name prefix, an `@preset`, an academic alias, or
+/// `all`. A prefix can name a top-level family such as `arith` or an intermediate group such as
+/// `combinator.iter`.
 ///
 /// # Errors
 ///
-/// Returns an error if the selector does not match a mutator name, family or sub-family prefix,
+/// Returns an error if the selector does not match a mutator name, dotted mutator-name prefix,
 /// preset, or alias in the registry. The error suggests the closest known spelling when one is
 /// close enough to be a plausible typo.
 pub fn resolve(selector: &str) -> Result<Vec<&'static str>> {
@@ -70,7 +72,7 @@ pub fn resolve(selector: &str) -> Result<Vec<&'static str>> {
         return Ok(vec![mutator.name]);
     }
 
-    // Family or sub-family prefix: `arith`, or `combinator.iter`.
+    // Dotted mutator-name prefix: `arith`, or `combinator.iter`.
     let prefix = format!("{selector}.");
     let matched: Vec<&'static str> = REGISTRY
         .iter()

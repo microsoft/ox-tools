@@ -7,11 +7,11 @@ use std::io::{self, BufReader, Read};
 use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
 use std::time::Instant;
+use std::{fmt, thread};
 
 use camino::Utf8Path;
-use cargo_gamma_process::{MemoryRequest, MemoryUsage, PreparedCommand, ProcessTree, SpawnedCommand, prepare};
+use cargo_gamma_process::{MemoryRequest, MemoryUsage, PlatformError, PreparedCommand, ProcessTree, SpawnedCommand, prepare};
 
 mod hubs;
 
@@ -31,7 +31,7 @@ use super::faults::{self, Fault};
 use super::harness_filters::HarnessFilters;
 use super::loader::{Launch, STACK_VAR, UNDER_GAMMA_VAR, configure_loader};
 use super::nextest;
-use super::progress::{Progress, Watch};
+use super::progress::{Progress, Watch, runtime_startup_failure};
 use super::stall::Stall;
 use super::test_binary::{TEST_THREADS_VAR, TestBinary};
 use super::workspace::Workspace;
@@ -71,11 +71,10 @@ impl<'name> Only<'name> {
     /// Borrowed rather than copied wherever a borrow reaches far enough: a census's [`Self::These`]
     /// selection can already name most of a large suite, and every reachable censused binary
     /// launches at least one attempt against it, so cloning that slice into a second vector on every
-    /// one of those launches would be an allocation with no reason behind it — `launcher` only ever
-    /// reads through the result, once, to build one command. [`Self::One`] still allocates: a name
-    /// held by value here has nowhere with lifetime `'name` to be borrowed from, so there is no
-    /// slice of that lifetime to hand back without first storing the name somewhere that outlives
-    /// this call.
+    /// one of those launches would allocate an unnecessary vector because `launcher` only reads
+    /// the result once to build one command. [`Self::One`] still allocates because the enum stores
+    /// only the string reference; returning a borrowed one-element slice would require storage
+    /// whose lifetime outlives this call.
     fn names(self) -> Cow<'name, [&'name str]> {
         match self {
             Self::All => Cow::Owned(Vec::new()),
@@ -279,7 +278,7 @@ const SPAWN_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Starts the child, waiting out a refusal the machine will recover from on its own.
 enum StartError {
-    Containment(String),
+    Containment(PlatformError),
     Spawn(io::Error),
 }
 
@@ -288,15 +287,13 @@ fn spawn_patiently(command: Command, request: MemoryRequest) -> Result<SpawnedCo
 
     // Prepared once, outside the loop, and carried through every wait: a retry re-spawns the launch
     // it already has rather than building a second one, which is the only shape `prepare` supports.
-    let mut prepared = prepare(command, request).map_err(|cause| StartError::Containment(cause.to_string()))?;
+    let mut prepared = prepare(command, request).map_err(StartError::Containment)?;
 
     for _attempt in 1..SPAWN_ATTEMPTS {
         match spawn_once(prepared) {
             Ok(spawned) => return Ok(spawned),
             Err(FailedSpawn { cause, prepared: returned }) if transient(&cause) => {
-                prepared = (*returned)
-                    .backoff(waited)
-                    .map_err(|cause| StartError::Containment(cause.to_string()))?;
+                prepared = (*returned).backoff(waited).map_err(StartError::Containment)?;
             }
             Err(FailedSpawn { cause, .. }) => return Err(StartError::Spawn(cause)),
         }
@@ -305,6 +302,31 @@ fn spawn_patiently(command: Command, request: MemoryRequest) -> Result<SpawnedCo
     }
 
     spawn_once(prepared).map_err(|failure| StartError::Spawn(failure.cause))
+}
+
+fn start_or_verdict(command: Command, binary: &TestBinary, request: MemoryRequest) -> Result<SpawnedCommand, (Verdict, MemoryUsage)> {
+    spawn_patiently(command, request).map_err(|reason| {
+        // A spawn fails for reasons of the machine — descriptors, processes, address space, a
+        // binary being written as it is read — and none of them is a test failing. Reporting one as
+        // a failing suite would credit the tests with a kill they never made.
+        let verdict = match reason {
+            StartError::Containment(reason) => Verdict::Unmetered(reason.to_string()),
+            StartError::Spawn(cause) => {
+                let reason = if request.wanted() {
+                    format!(
+                        "`{}` could not be started inside its memory accounting boundary: {cause}",
+                        binary.path
+                    )
+                } else {
+                    format!("`{}` could not be started: {cause}", binary.path)
+                };
+
+                Verdict::Unjudged(reason)
+            }
+        };
+
+        (verdict, MemoryUsage::default())
+    })
 }
 
 struct FailedSpawn {
@@ -493,11 +515,9 @@ fn confirm_enumeration(work: &Workspace, binary: &TestBinary, attempt: Attempt<'
         Verdict::Unmetered(reason) => Verdict::Unmetered(reason),
         Verdict::Unjudged(reason) => Verdict::Unjudged(reason),
 
-        // Whatever the exoneration ran into, it ran into it with no mutant active, so it is not a
-        // verdict about the mutant and must not be handed back as one: a `TimedOut` or a
-        // `MemoryLimit` is scored as an undetected mutant, so returning one here would record the
-        // suite as having missed a mutant that was switched off for the entire run that produced
-        // the evidence. Nothing was established, and that is what this says.
+        // Timeout or memory-limit evidence from an exonerating run cannot be attributed to the
+        // mutant because no mutant was active. Returning either verdict would record the suite as
+        // having missed a mutant that was switched off for the run that produced the evidence.
         _unestablished => Verdict::Flaky(None),
     }
 }
@@ -586,25 +606,32 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>) -> Result<Com
 /// and one failed convicts the mutant, whereas a code saying nextest matched no tests or could not
 /// start is a fact about this run. Crediting the suite with a kill it never made would inflate the
 /// score, so anything nextest does not describe as a test failure stops the run instead.
-fn settle(under_nextest: bool, active: Option<u32>, code: Option<i32>, text: &[u8], usage: MemoryUsage) -> (Verdict, MemoryUsage) {
-    if text
-        .windows(gamma_rt::ENVIRONMENT_ERROR_MARKER.len())
-        .any(|window| window == gamma_rt::ENVIRONMENT_ERROR_MARKER)
-    {
+fn settle(
+    under_nextest: bool,
+    active: Option<u32>,
+    code: Option<i32>,
+    text: &[u8],
+    authoritative: &[u8],
+    usage: MemoryUsage,
+) -> (Verdict, MemoryUsage) {
+    if runtime_startup_failure(text) {
         return (
-            Verdict::Unmetered("the guard runtime could not acquire the process startup environment".to_owned()),
+            Verdict::Unmetered(
+                "the guard runtime could not acquire the process startup environment or install its startup selection".to_owned(),
+            ),
             usage,
         );
     }
 
     let output = String::from_utf8_lossy(text);
+    let authoritative = String::from_utf8_lossy(authoritative);
 
     if !under_nextest {
-        return (Verdict::Failed(first_failure(&output).map(str::to_owned)), usage);
+        return (Verdict::Failed(first_failure(&authoritative).map(str::to_owned)), usage);
     }
 
     match code {
-        Some(nextest::TEST_RUN_FAILED) => (Verdict::Failed(nextest::first_failure(&output).map(str::to_owned)), usage),
+        Some(nextest::TEST_RUN_FAILED) => (Verdict::Failed(nextest::first_failure(&authoritative).map(str::to_owned)), usage),
 
         // Nothing ran, so nothing decided anything. This is the filterset and the built tree
         // disagreeing about what exists, which is a fault in the run rather than in the mutant.
@@ -620,6 +647,16 @@ fn settle(under_nextest: bool, active: Option<u32>, code: Option<i32>, text: &[u
     }
 }
 
+fn settle_collected(
+    under_nextest: bool,
+    active: Option<u32>,
+    code: Option<i32>,
+    collected: &Collected,
+    usage: MemoryUsage,
+) -> (Verdict, MemoryUsage) {
+    settle(under_nextest, active, code, &collected.text, &collected.authoritative, usage)
+}
+
 /// Describes a nextest infrastructure failure without discarding its diagnostic output.
 fn nextest_runner_failure(code: Option<i32>, output: &str) -> String {
     let mut reason = format!(
@@ -630,7 +667,7 @@ fn nextest_runner_failure(code: Option<i32>, output: &str) -> String {
 
     if !useful.is_empty() {
         reason.push_str(":\n");
-        reason.push_str(&tail(useful, 20));
+        reason.push_str(tail(useful, DIAGNOSTIC_TAIL_LINES).as_ref());
     }
 
     reason
@@ -729,36 +766,9 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
 
     configure(&mut command, binary, launch, work.harness_threads(), active, attempt.census);
 
-    let spawned = match spawn_patiently(command, request) {
+    let spawned = match start_or_verdict(command, binary, request) {
         Ok(started) => started,
-
-        // A spawn fails for reasons of the machine — descriptors, processes, address space, a
-        // binary being written as it is read — and none of them is a test failing. Reporting one as
-        // a failing suite would credit the tests with a kill they never made, which is the one
-        // direction this tool must not be wrong in.
-        //
-        // Nor is it a fact about the run. `spawn_patiently` has already waited out the transient
-        // shapes, so what is left is this one mutant's run being impossible right now, and the
-        // sweep records that against the mutant and carries on.
-        //
-        // The accounting the run asked for decides only how the refusal reads, not what it means.
-        // With a boundary installed the spawn is the step that puts the child inside it, so saying
-        // so is the more useful sentence; with none installed — every host without a delegated
-        // cgroup, and every run given `--memory off` — there is no boundary to blame and the
-        // kernel's own reason is the whole of what is known.
-        Err(StartError::Containment(reason)) => return (Verdict::Unmetered(reason), MemoryUsage::default()),
-        Err(StartError::Spawn(cause)) => {
-            let reason = if request.wanted() {
-                format!(
-                    "`{}` could not be started inside its memory accounting boundary: {cause}",
-                    binary.path
-                )
-            } else {
-                format!("`{}` could not be started: {cause}", binary.path)
-            };
-
-            return (Verdict::Unjudged(reason), MemoryUsage::default());
-        }
+        Err(verdict) => return verdict,
     };
 
     // Adopted before anything is read from the child, so the typestate bundle cannot sit with its
@@ -800,7 +810,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 // the interrupt slot, and only then reaped the leader.
                 debug_assert!(subtree.released(), "the containment is released before the output is drained");
 
-                let (text, whole) = collected(&drained, DRAIN_GRACE);
+                let collected = collected(&drained, DRAIN_GRACE);
                 let usage = subtree.usage();
                 let ceiling = request.limit.filter(|_limit| exhausted(&usage, status.success()));
 
@@ -817,7 +827,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 // test — and that reading is only sound if the text is all of it. The run is not
                 // abandoned over it: the exit status still says the suite failed, which is the
                 // verdict, and only the name is at risk.
-                if !whole {
+                if !collected.whole {
                     announce_partial(binary);
                 }
 
@@ -825,7 +835,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 // report is the more useful of the two: a named test is somewhere a reader can go,
                 // and a memory verdict that pre-empted it would leave them with a number and no
                 // idea which of the suite's tests to open.
-                let (verdict, usage) = settle(under_nextest, active, status.code(), &text, usage);
+                let (verdict, usage) = settle_collected(under_nextest, active, status.code(), &collected, usage);
 
                 return (prefer_named(verdict, usage.peak, ceiling), usage);
             }
@@ -898,7 +908,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 // reader threads reach end of file and end, rather than being left holding pipes
                 // for the rest of the run. Whether it was complete is discarded with it — nothing
                 // was going to be concluded from the text either way.
-                let (_text, _whole) = collected(&drained, DRAIN_GRACE);
+                let _discarded = collected(&drained, DRAIN_GRACE);
 
                 return (
                     Verdict::Unjudged(format!("`{}` could not be asked whether it had finished: {cause}", binary.path)),
@@ -918,29 +928,56 @@ fn deadline_after(timeout: Duration) -> Instant {
 
 /// Gathers whatever the readers have handed back, and whether it is all of it.
 ///
-/// Both streams are wanted and either may arrive first: the failure that names a test can be on one
-/// while the other is still open, so this waits out the grace period rather than taking the first
-/// chunk. A stream that ended in a read failure makes the whole collection partial, because there
-/// is no way to tell which stream the missing text would have been on — the announcement that names
-/// the killing test could have been on either.
+/// Both streams are wanted and either may arrive first, so this waits out the grace period rather
+/// than taking the first chunk. Their combined text remains available for environment and runner
+/// diagnostics, while the authoritative stream is retained separately for failure-name parsing.
+/// A stream that ended in a read failure makes the whole collection partial.
 ///
 /// A reader that never returns is the same loss and is reported the same way. Only a disconnect
 /// says every reader has sent and dropped its sender; running out of grace means one of them is
 /// still holding a pipe open — a descendant that escaped the containment inherited the write end —
 /// and its stream is missing entirely. Reading that as a complete collection would let a run whose
 /// `FAIL` line never arrived convict a mutant with no killer named and warn about nothing.
-fn collected(drained: &Receiver<(Vec<u8>, bool)>, grace: Duration) -> (Vec<u8>, bool) {
+struct Drained {
+    text: Vec<u8>,
+    complete: bool,
+    authoritative: bool,
+}
+
+struct Collected {
+    text: Vec<u8>,
+    authoritative: Vec<u8>,
+    whole: bool,
+}
+
+fn collected(drained: &Receiver<Drained>, grace: Duration) -> Collected {
     let mut text = Vec::new();
+    let mut authoritative = Vec::new();
     let mut whole = true;
 
     loop {
         match drained.recv_timeout(grace) {
-            Ok((chunk, complete)) => {
-                text.extend_from_slice(&chunk);
-                whole &= complete;
+            Ok(chunk) => {
+                if chunk.authoritative {
+                    authoritative.extend_from_slice(&chunk.text);
+                }
+                text.extend_from_slice(&chunk.text);
+                whole &= chunk.complete;
             }
-            Err(RecvTimeoutError::Disconnected) => return (text, whole),
-            Err(RecvTimeoutError::Timeout) => return (text, false),
+            Err(RecvTimeoutError::Disconnected) => {
+                return Collected {
+                    text,
+                    authoritative,
+                    whole,
+                };
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Collected {
+                    text,
+                    authoritative,
+                    whole: false,
+                };
+            }
         }
     }
 }
@@ -1161,8 +1198,11 @@ fn environment_failure(progress: &Mutex<Progress>) -> bool {
 }
 
 fn environment_verdict(progress: &Mutex<Progress>) -> Option<Verdict> {
-    environment_failure(progress)
-        .then(|| Verdict::Unmetered("the guard runtime could not acquire the process startup environment".to_owned()))
+    environment_failure(progress).then(|| {
+        Verdict::Unmetered(
+            "the guard runtime could not acquire the process startup environment or install its startup selection".to_owned(),
+        )
+    })
 }
 
 fn unfinished_nextest_failure(under_nextest: bool, progress: &Mutex<Progress>) -> Option<Verdict> {
@@ -1196,6 +1236,40 @@ fn quiet_of(progress: &Mutex<Progress>) -> Duration {
 /// runaway mutant into an out-of-memory kill of the whole run.
 const OUTPUT_CAP: usize = 4 * 1024 * 1024;
 
+/// Which of a child's two piped streams a reader is draining.
+#[derive(Clone, Copy, Debug)]
+enum ReaderStream {
+    Stdout,
+    Stderr,
+}
+
+impl fmt::Display for ReaderStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stdout => f.write_str("standard output"),
+            Self::Stderr => f.write_str("standard error"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ReaderStartError {
+    stream: ReaderStream,
+    cause: io::Error,
+}
+
+impl fmt::Display for ReaderStartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the {} reader could not be started: {}", self.stream, self.cause)
+    }
+}
+
+impl std::error::Error for ReaderStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
 /// Starts a reader for each of the child's piped streams, and yields what they collect.
 ///
 /// A pipe must be drained by somebody other than the thread waiting for the child to exit. A pipe
@@ -1220,17 +1294,21 @@ fn readers(
     progress: &Arc<Mutex<Progress>>,
     pulse: &Arc<Pulse>,
     under_nextest: bool,
-) -> io::Result<Receiver<(Vec<u8>, bool)>> {
-    let (sink, drained) = mpsc::channel::<(Vec<u8>, bool)>();
+) -> Result<Receiver<Drained>, ReaderStartError> {
+    let (sink, drained) = mpsc::channel::<Drained>();
 
     // Only the harness's authoritative stream may settle a verdict. The other stream still keeps
     // the stall clock alive and can carry the runtime's startup-error marker.
     let pipes = [
-        subtree.take_stdout().map(|pipe| (Either::Out(pipe), !under_nextest)),
-        subtree.take_stderr().map(|pipe| (Either::Err(pipe), under_nextest)),
+        subtree
+            .take_stdout()
+            .map(|pipe| (Either::Out(pipe), !under_nextest, ReaderStream::Stdout)),
+        subtree
+            .take_stderr()
+            .map(|pipe| (Either::Err(pipe), under_nextest, ReaderStream::Stderr)),
     ];
 
-    for (pipe, authoritative) in pipes.into_iter().flatten() {
+    for (pipe, authoritative, stream) in pipes.into_iter().flatten() {
         let published = Arc::clone(progress);
         let pulse = Arc::clone(pulse);
         let sink = sink.clone();
@@ -1246,12 +1324,16 @@ fn readers(
             thread::Builder::new().name("cargo-gamma-output".to_owned()).spawn(move || {
                 READERS.started();
 
-                let collected = match pipe {
+                let (text, complete) = match pipe {
                     Either::Out(pipe) => drain(pipe, &published, &pulse, authoritative),
                     Either::Err(pipe) => drain(pipe, &published, &pulse, authoritative),
                 };
 
-                let _sent = sink.send(collected);
+                let _sent = sink.send(Drained {
+                    text,
+                    complete,
+                    authoritative,
+                });
 
                 // End of stream. A child that exits closes its pipes, so this is how the waiting thread
                 // learns the run is over without having to ask again on a timer. It is sent even when
@@ -1265,7 +1347,7 @@ fn readers(
             })
         };
 
-        let _handle = spawned?;
+        let _handle = spawned.map_err(|cause| ReaderStartError { stream, cause })?;
     }
 
     // Dropped so the receiver sees the readers' senders as the only ones left, and disconnects as
@@ -1364,12 +1446,40 @@ fn first_failure(output: &str) -> Option<&str> {
     })
 }
 
-/// Returns the last `count` lines of some text.
-pub(super) fn tail(text: &str, count: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(count);
+/// Number of trailing lines retained from verbose nextest diagnostics.
+///
+/// This keeps the summary and nearby cause visible while bounding console noise. Enumeration and
+/// runner failures deliberately use the same local-diagnostic policy.
+pub(super) const DIAGNOSTIC_TAIL_LINES: usize = 20;
 
-    lines.get(start..).unwrap_or_default().join("\n")
+/// Returns the last `count` lines without indexing the complete input.
+pub(super) fn tail(text: &str, count: usize) -> Cow<'_, str> {
+    if count == 0 || text.is_empty() {
+        return Cow::Borrowed("");
+    }
+
+    let text = text.strip_suffix('\n').map_or(text, |without_newline| {
+        without_newline.strip_suffix('\r').unwrap_or(without_newline)
+    });
+    let mut remaining = count;
+    let mut start = 0;
+
+    for (index, _) in text.match_indices('\n').rev() {
+        if remaining == 1 {
+            start = index + 1;
+            break;
+        }
+
+        remaining -= 1;
+    }
+
+    let selected = text.get(start..).unwrap_or_default();
+
+    if selected.contains('\r') {
+        Cow::Owned(selected.lines().collect::<Vec<_>>().join("\n"))
+    } else {
+        Cow::Borrowed(selected)
+    }
 }
 
 #[cfg(all(test, not(loom), not(miri)))]
@@ -1608,16 +1718,20 @@ mod tests {
     /// killer named, and suppresses the warning that would have said so.
     #[test]
     fn a_reader_that_never_returns_leaves_the_collection_partial() {
-        let (sink, drained) = mpsc::channel::<(Vec<u8>, bool)>();
+        let (sink, drained) = mpsc::channel::<Drained>();
 
         // One reader finished; the other is still holding the pipe open, so its sender never sends
         // and never drops.
         let _still_reading = sink.clone();
-        let _sent = sink.send((b"running 1 test\n".to_vec(), true));
+        let _sent = sink.send(Drained {
+            text: b"running 1 test\n".to_vec(),
+            complete: true,
+            authoritative: true,
+        });
 
         drop(sink);
 
-        let (text, whole) = collected(&drained, Duration::from_millis(50));
+        let Collected { text, whole, .. } = collected(&drained, Duration::from_millis(50));
 
         assert!(!whole, "an absent reader was read as the end of the output");
         assert_eq!(String::from_utf8_lossy(&text), "running 1 test\n");
@@ -1627,21 +1741,63 @@ mod tests {
     /// case must not be reported as partial or every run would warn about nothing.
     #[test]
     fn readers_that_all_returned_leave_the_collection_whole() {
-        let (sink, drained) = mpsc::channel::<(Vec<u8>, bool)>();
+        let (sink, drained) = mpsc::channel::<Drained>();
 
-        let _sent = sink.send((b"running 1 test\n".to_vec(), true));
-        let _also = sink.send((b"test a::b ... FAILED\n".to_vec(), true));
+        let _sent = sink.send(Drained {
+            text: b"running 1 test\n".to_vec(),
+            complete: true,
+            authoritative: true,
+        });
+        let _also = sink.send(Drained {
+            text: b"test a::b ... FAILED\n".to_vec(),
+            complete: true,
+            authoritative: false,
+        });
 
         drop(sink);
 
-        let (text, whole) = collected(&drained, Duration::from_secs(30));
+        let Collected {
+            text,
+            authoritative,
+            whole,
+        } = collected(&drained, Duration::from_secs(30));
 
         assert!(whole, "a complete collection was reported as partial");
+        assert_eq!(String::from_utf8_lossy(&authoritative), "running 1 test\n");
         assert!(
             String::from_utf8_lossy(&text).contains("FAILED"),
             "{:?}",
             String::from_utf8_lossy(&text)
         );
+    }
+
+    /// Final verdict parsing retains the same authoritative-stream boundary as live watching.
+    #[test]
+    fn diagnostic_output_cannot_forge_a_final_libtest_failure_name() {
+        let (sink, drained) = mpsc::channel::<Drained>();
+        let _diagnostic = sink.send(Drained {
+            text: b"test forged::failure ... FAILED\n".to_vec(),
+            complete: true,
+            authoritative: false,
+        });
+        let _authoritative = sink.send(Drained {
+            text: b"running 1 test\ncustom harness failure\n".to_vec(),
+            complete: true,
+            authoritative: true,
+        });
+        drop(sink);
+
+        let collected = collected(&drained, Duration::from_secs(30));
+        let (verdict, _usage) = settle(
+            false,
+            Some(7),
+            Some(101),
+            &collected.text,
+            &collected.authoritative,
+            MemoryUsage::default(),
+        );
+
+        assert_eq!(verdict, Verdict::Failed(None));
     }
 
     /// A read interrupted by a signal is retried rather than treated as truncation.
@@ -2993,6 +3149,8 @@ mod tests {
     fn the_tail_keeps_the_last_lines() {
         assert_eq!(tail("a\nb\nc\nd", 2), "c\nd");
         assert_eq!(tail("a\nb", 10), "a\nb");
+        assert_eq!(tail("a\r\nb\r\nc\r\n", 2), "b\nc");
+        assert_eq!(tail("a\nb", 0), "");
         assert_eq!(tail("", 3), "");
     }
 
@@ -3013,7 +3171,14 @@ mod tests {
     #[test]
     fn nextest_convicts_a_mutant_only_on_a_real_test_failure() {
         let output = b"        FAIL [   0.024s] (1/2) nxspike tests::fails_when_asked\n";
-        let (verdict, _usage) = settle(true, Some(7), Some(nextest::TEST_RUN_FAILED), output, MemoryUsage::default());
+        let (verdict, _usage) = settle(
+            true,
+            Some(7),
+            Some(nextest::TEST_RUN_FAILED),
+            output,
+            output,
+            MemoryUsage::default(),
+        );
 
         assert_eq!(verdict, Verdict::Failed(Some("tests::fails_when_asked".to_owned())));
     }
@@ -3026,9 +3191,17 @@ mod tests {
             Some(7),
             Some(nextest::TEST_LIST_CREATION_FAILED),
             output,
+            output,
             MemoryUsage::default(),
         );
-        let (baseline, _usage) = settle(true, None, Some(nextest::TEST_LIST_CREATION_FAILED), output, MemoryUsage::default());
+        let (baseline, _usage) = settle(
+            true,
+            None,
+            Some(nextest::TEST_LIST_CREATION_FAILED),
+            output,
+            output,
+            MemoryUsage::default(),
+        );
 
         assert_eq!(
             suspect,
@@ -3044,7 +3217,7 @@ mod tests {
     /// Scoring that as a kill would credit the suite with one it never made, so the run stops.
     #[test]
     fn nextest_matching_no_tests_abandons_the_run_rather_than_scoring_it() {
-        let (verdict, _usage) = settle(true, Some(7), Some(nextest::NO_TESTS_RUN), b"", MemoryUsage::default());
+        let (verdict, _usage) = settle(true, Some(7), Some(nextest::NO_TESTS_RUN), b"", b"", MemoryUsage::default());
 
         assert!(matches!(verdict, Verdict::Unmetered(_)), "{verdict:?}");
     }
@@ -3054,7 +3227,7 @@ mod tests {
     #[test]
     fn a_code_nextest_uses_for_its_own_failures_is_not_a_verdict() {
         for code in [Some(94), Some(101), None] {
-            let (verdict, _usage) = settle(true, Some(7), code, b"", MemoryUsage::default());
+            let (verdict, _usage) = settle(true, Some(7), code, b"", b"", MemoryUsage::default());
 
             assert!(matches!(verdict, Verdict::Unmetered(_)), "{code:?} gave {verdict:?}");
         }
@@ -3067,7 +3240,7 @@ mod tests {
         let output = b"test module::case ... FAILED\n";
 
         for code in [Some(nextest::NO_TESTS_RUN), Some(101), None] {
-            let (verdict, _usage) = settle(false, Some(7), code, output, MemoryUsage::default());
+            let (verdict, _usage) = settle(false, Some(7), code, output, output, MemoryUsage::default());
 
             assert_eq!(verdict, Verdict::Failed(Some("module::case".to_owned())), "{code:?}");
         }
@@ -3084,11 +3257,34 @@ mod tests {
                 Some(7),
                 Some(nextest::TEST_RUN_FAILED),
                 &output,
+                &output,
                 MemoryUsage::default(),
             );
 
             assert!(
                 matches!(verdict, Verdict::Unmetered(ref reason) if reason.contains("startup environment")),
+                "{verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_guard_before_runtime_installation_never_convicts_a_mutant() {
+        let mut output = b"test module::case ... FAILED\n".to_vec();
+        output.extend_from_slice(gamma_rt::PRE_INSTALL_ERROR_MARKER);
+
+        for under_nextest in [false, true] {
+            let (verdict, _usage) = settle(
+                under_nextest,
+                Some(7),
+                Some(nextest::TEST_RUN_FAILED),
+                &output,
+                &output,
+                MemoryUsage::default(),
+            );
+
+            assert!(
+                matches!(verdict, Verdict::Unmetered(ref reason) if reason.contains("startup selection")),
                 "{verdict:?}"
             );
         }
@@ -3126,7 +3322,14 @@ mod tests {
         }
         assert_eq!(failure_to_cut_short(false, &direct).as_deref(), Some("tests::case"));
 
-        let (verdict, _usage) = settle(true, Some(7), Some(nextest::TEST_RUN_FAILED), &output, MemoryUsage::default());
+        let (verdict, _usage) = settle(
+            true,
+            Some(7),
+            Some(nextest::TEST_RUN_FAILED),
+            &output,
+            &output,
+            MemoryUsage::default(),
+        );
 
         assert!(
             matches!(verdict, Verdict::Unmetered(ref reason) if reason.contains("startup environment")),

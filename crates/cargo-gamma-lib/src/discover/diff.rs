@@ -41,8 +41,8 @@ impl Diff {
     ///
     /// # Errors
     ///
-    /// Returns an error if the diff cannot be read: `-` names a stream that fails part way
-    /// through or is not UTF-8, and any other path names a file that cannot be opened or read.
+    /// Returns an error when `path` is `-` and reading `input` fails or its bytes are not UTF-8, or
+    /// when another path cannot be opened, read, or decoded as UTF-8.
     pub fn read_from(path: &Utf8Path, mut input: impl Read) -> Result<Self> {
         let text = if path == "-" {
             let mut buffer = String::new();

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Test-only failures at the Win32 calls Windows containment is built from.
+//! Test-only failures supplied by the fake Win32-call backend.
 //!
 //! Every one of these calls can fail on a real machine — a handle quota reached, a thread that
 //! ended between the snapshot and the open, a job the process is no longer permitted to configure —
@@ -13,6 +13,7 @@
 //! beside it are unaffected.
 
 use core::cell::RefCell;
+use std::thread;
 
 /// A Win32 call a test can ask to fail once on its own thread.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,6 +41,12 @@ pub(crate) enum NativeCall {
 
     /// The job's limits and policy flags cannot be installed.
     ConfigureJob,
+
+    /// The job's peak-memory accounting cannot be queried.
+    QueryAccounting,
+
+    /// The completion port cannot be checked for a memory-limit notification.
+    CompletionStatus,
 
     /// The job refuses the child it was created for.
     AssignProcess,
@@ -123,9 +130,7 @@ mod tests {
     #[test]
     fn faults_are_thread_local() {
         let _armed = arm(NativeCall::TerminateJob);
-        let elsewhere = std::thread::spawn(|| fired(NativeCall::TerminateJob))
-            .join()
-            .expect("the probe thread");
+        let elsewhere = thread::spawn(|| fired(NativeCall::TerminateJob)).join().expect("the probe thread");
 
         assert!(!elsewhere, "a fault armed here fired on another thread");
         assert!(fired(NativeCall::TerminateJob));

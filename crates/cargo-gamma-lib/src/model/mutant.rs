@@ -80,13 +80,6 @@ pub struct Mutant {
     /// Shared: one item contributes as many mutants as it has sites.
     pub item_path: Arc<str>,
 
-    /// Terminal name of the enclosing implemented trait, if any.
-    ///
-    /// Discovery-only metadata used by configured exclusions. Reports omit it because exclusions
-    /// are applied before a campaign population is published.
-    #[serde(skip)]
-    pub trait_impl: Option<Arc<str>>,
-
     /// Index among identical normalized sites within the enclosing item.
     pub occurrence: u32,
 
@@ -146,7 +139,6 @@ impl Mutant {
             column: definition.site.column,
             mutator: definition.mutator,
             item_path: definition.item_path,
-            trait_impl: definition.trait_impl,
             occurrence: definition.occurrence,
             replacement_index: definition.replacement_index,
             original: definition.site.original.clone(),

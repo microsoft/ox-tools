@@ -62,6 +62,7 @@
   },
   "config": {
     "startedAt": 1700000000,
+    "mutantIdVersion": 5,
     "shard": {
       "index": 1,
       "count": 4

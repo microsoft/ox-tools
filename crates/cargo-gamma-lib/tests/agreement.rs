@@ -7,7 +7,7 @@
 //! nesting guards accept and reject the same syntax.
 //!
 //! `cargo-gamma-attrs-impl` is a proc-macro-support crate that the tool cannot depend on in the
-//! direction that would let the two share a constant, so it re-declares three of the library's
+//! direction that would let the two share a constant, so it re-declares the library's
 //! limits and the crate docs on each side promise, in prose, that they agree. Nothing but this test
 //! binds the copies: change `MOST_FACTOR`, `NESTING_LIMIT`, or `CHAIN_FACTOR` on one side alone and
 //! the compile-time attribute check and the run-time directive scanner start accepting different
@@ -23,12 +23,11 @@
 //! comments name as a nesting hazard — so a scanner that omitted a family, or counted it against a
 //! different threshold, disagrees with its sibling at whatever depth that first matters.
 //!
-//! There are two contracts, not one, because the two scanners are deliberately not equal
-//! everywhere:
+//! The scanners keep distinct contracts because they are deliberately not equal everywhere:
 //!
 //! - For delimiters, prefix operators, binary chains, casts and `else if` ladders they agree
 //!   exactly, and [`nesting_guards`] asserts that verdict for verdict.
-//! - For the three postfix families — calls, indexes, and method links — the engine charges several
+//! - For postfix calls, indexes, and method links, the engine charges several
 //!   units per link where the proc macro charges one, on purpose: the engine's cost stands in for
 //!   the parser stack a postfix chain will actually cost, and the proc macro is guarding a much
 //!   shallower walk over one attribute's tokens. Equality there was a contract neither side was
@@ -40,104 +39,34 @@
 //! attribute and the comment directive are the same text with `//` in front of it, so an argument
 //! list one channel accepts must not be a compile error to the other.
 
+use cargo_gamma_attrs_impl::inert_timeout;
+use cargo_gamma_attrs_impl::test_support::{
+    CHAIN_FACTOR, MOST_FACTOR, NESTING_LIMIT, exceeds_nesting_limit as attrs_exceeds_nesting_limit,
+};
+use cargo_gamma_engine::parse::exceeds_nesting_limit as engine_exceeds_nesting_limit;
 use cargo_gamma_lib::internals::parse::{SourceFile, nesting};
 use cargo_gamma_lib::internals::{bounds, suppress};
+use proc_macro2::TokenStream;
 
 #[test]
 fn the_proc_macro_limits_match_the_library() {
     // `MOST_FACTOR` is a float; comparing the bit patterns is an exact equality that also keeps the
     // pedantic `float_cmp` lint from firing on two constants that are, by construction, identical.
     assert_eq!(
-        cargo_gamma_attrs_impl::MOST_FACTOR.to_bits(),
+        MOST_FACTOR.to_bits(),
         bounds::MOST_FACTOR.to_bits(),
         "the proc-macro's multiplier ceiling drifted from `bounds::MOST_FACTOR`"
     );
     assert_eq!(
-        cargo_gamma_attrs_impl::NESTING_LIMIT,
+        NESTING_LIMIT,
         nesting::NESTING_LIMIT,
         "the proc-macro's nesting limit drifted from `parse::nesting::NESTING_LIMIT`"
     );
     assert_eq!(
-        cargo_gamma_attrs_impl::CHAIN_FACTOR,
+        CHAIN_FACTOR,
         nesting::CHAIN_FACTOR,
         "the proc-macro's chain factor drifted from `parse::nesting::CHAIN_FACTOR`"
     );
-}
-
-/// Generates one syntax family at a chosen depth, for [`nesting_guards`].
-///
-/// Every generator produces a flat token sequence — sibling calls, sibling operators, sibling
-/// `else if` arms — rather than one token nested inside another, with the sole exception of
-/// [`delimiters`]. That is deliberate: this file parses its own corpus with `proc_macro2` to drive
-/// the proc-macro scanner, and a flat sequence costs that parser one stack frame regardless of how
-/// many repetitions it holds, where genuine nesting costs one frame per level. Keeping every family
-/// but one flat is what lets the corpus safely sweep hundreds of repetitions on an ordinary thread
-/// stack.
-mod corpus {
-    /// `n` levels of parenthesis nesting around a literal.
-    ///
-    /// The one family here that is genuinely nested rather than flat, so it alone is swept over a
-    /// modest range in [`nesting_guards`] — comfortably past where either scanner's delimiter check
-    /// can trigger, but far short of where nested-group parsing itself would risk this test's own
-    /// stack.
-    pub fn delimiters(n: usize) -> String {
-        format!("{}0{}", "(".repeat(n), ")".repeat(n))
-    }
-
-    /// `n` sibling calls: `a()()()...`.
-    pub fn postfix_calls(n: usize) -> String {
-        format!("a{}", "()".repeat(n))
-    }
-
-    /// `n` sibling indexing operations: `a[0][0][0]...`.
-    pub fn postfix_indexes(n: usize) -> String {
-        format!("a{}", "[0]".repeat(n))
-    }
-
-    /// `n` sibling method calls: `a.m().m().m()...`.
-    pub fn postfix_methods(n: usize) -> String {
-        format!("a{}", ".m()".repeat(n))
-    }
-
-    /// `n` prefix negations: `----...1`.
-    pub fn unary_chain(n: usize) -> String {
-        format!("{}1", "-".repeat(n))
-    }
-
-    /// `n` links of same-precedence addition: `a + a + a + ...`.
-    pub fn binary_chain(n: usize) -> String {
-        let mut text = "a".to_owned();
-
-        for _ in 0..n {
-            text.push_str(" + a");
-        }
-
-        text
-    }
-
-    /// `n` links of `as`-casts: `0 as i64 as i64 as i64...`.
-    pub fn cast_chain(n: usize) -> String {
-        let mut text = "0".to_owned();
-
-        for _ in 0..n {
-            text.push_str(" as i64");
-        }
-
-        text
-    }
-
-    /// An `else if` ladder with `n` middle arms.
-    pub fn else_if_ladder(n: usize) -> String {
-        let mut text = "if true {}".to_owned();
-
-        for _ in 0..n {
-            text.push_str(" else if true {}");
-        }
-
-        text.push_str(" else {}");
-
-        text
-    }
 }
 
 /// Sweeps one syntax family from shallow to `ceiling`, and asserts the engine's and the
@@ -188,13 +117,13 @@ fn nesting_guards(family: &str, ceiling: usize, generate: impl Fn(usize) -> Stri
 /// are deliberate, so the contract between them is directional, and it has two halves:
 ///
 /// 1. At every depth, the engine is never the more permissive of the two. It is the scanner
-///    standing in front of the deeper recursion, so text it waves through must not be text the
+///    standing in front of the deeper recursion, so text the engine accepts must not be text the
 ///    proc macro refused — that would be the one direction in which a disagreement is a defect
 ///    rather than a difference in weighting.
 /// 2. Each scanner's *first* rejection is a real boundary, both are reached inside `ceiling`, and
 ///    the engine's comes strictly first. That is what pins the weighting itself: flatten the
 ///    engine's postfix cost to one unit per link and the two boundaries coincide, which this
-///    refuses; raise the proc macro's above the engine's and half one fires instead.
+///    rejects; raise the proc macro's above the engine's and the first assertion fails instead.
 #[track_caller]
 fn nesting_guards_are_ordered(family: &str, ceiling: usize, generate: impl Fn(usize) -> String) {
     let mut engine_first = None;
@@ -236,23 +165,23 @@ fn nesting_guards_are_ordered(family: &str, ceiling: usize, generate: impl Fn(us
 #[track_caller]
 fn verdicts(family: &str, n: usize, generate: impl Fn(usize) -> String) -> (bool, bool) {
     let text = generate(n);
-    let stream: proc_macro2::TokenStream = text
+    let stream: TokenStream = text
         .parse()
         .unwrap_or_else(|error| panic!("{family}'s corpus at n={n} is not a valid token stream: {error}\n{text}"));
 
     (
-        cargo_gamma_engine::parse::exceeds_nesting_limit(&text),
-        cargo_gamma_attrs_impl::exceeds_nesting_limit(&stream, cargo_gamma_attrs_impl::NESTING_LIMIT),
+        engine_exceeds_nesting_limit(&text),
+        attrs_exceeds_nesting_limit(&stream, NESTING_LIMIT),
     )
 }
 
 /// The engine's postfix boundary must be reached well inside this ceiling and the proc macro's
 /// must be reached too, since [`nesting_guards_are_ordered`] requires both.
-const CHAIN_CEILING: usize = cargo_gamma_attrs_impl::NESTING_LIMIT * cargo_gamma_attrs_impl::CHAIN_FACTOR * 2;
+const CHAIN_CEILING: usize = NESTING_LIMIT * CHAIN_FACTOR * 2;
 
 #[test]
 fn the_two_nesting_guards_agree_on_delimiters() {
-    nesting_guards("delimiters", cargo_gamma_attrs_impl::NESTING_LIMIT + 16, corpus::delimiters);
+    nesting_guards("delimiters", NESTING_LIMIT + 16, corpus::delimiters);
 }
 
 #[test]
@@ -305,10 +234,10 @@ fn directive_multiplier(arguments: &str) -> Option<f64> {
 /// Whether the attribute channel compiles one argument list rather than replacing it with a
 /// `compile_error!`.
 fn attribute_accepts(arguments: &str) -> bool {
-    let attr: proc_macro2::TokenStream = arguments.parse().expect("the arguments are valid Rust tokens");
-    let item: proc_macro2::TokenStream = "fn f() -> u32 { 1 }".parse().expect("the item is valid Rust tokens");
+    let attr: TokenStream = arguments.parse().expect("the arguments are valid Rust tokens");
+    let item: TokenStream = "fn f() -> u32 { 1 }".parse().expect("the item is valid Rust tokens");
 
-    !cargo_gamma_attrs_impl::inert_timeout("test_timeout_multiplier", &attr, item)
+    !inert_timeout("test_timeout_multiplier", &attr, item)
         .to_string()
         .contains("compile_error")
 }
@@ -412,5 +341,81 @@ fn the_two_channels_agree_on_timeout_multiplier_arguments() {
             None,
             "the directive channel accepted the duplicate multiplier in `{arguments}`"
         );
+    }
+}
+
+/// Generates one syntax family at a chosen depth, for [`nesting_guards`].
+///
+/// Every generator produces a flat token sequence — sibling calls, sibling operators, sibling
+/// `else if` arms — rather than one token nested inside another, with the sole exception of
+/// [`delimiters`]. That is deliberate: this file parses its own corpus with `proc_macro2` to drive
+/// the proc-macro scanner, and a flat sequence costs that parser one stack frame regardless of how
+/// many repetitions it holds, where genuine nesting costs one frame per level. Keeping every family
+/// but one flat is what lets the corpus safely sweep hundreds of repetitions on an ordinary thread
+/// stack.
+mod corpus {
+    /// `n` levels of parenthesis nesting around a literal.
+    ///
+    /// The one family here that is genuinely nested rather than flat, so it alone is swept over a
+    /// modest range in [`nesting_guards`] — comfortably past where either scanner's delimiter check
+    /// can trigger, but far short of where nested-group parsing itself would risk this test's own
+    /// stack.
+    pub(super) fn delimiters(n: usize) -> String {
+        format!("{}0{}", "(".repeat(n), ")".repeat(n))
+    }
+
+    /// `n` sibling calls: `a()()()...`.
+    pub(super) fn postfix_calls(n: usize) -> String {
+        format!("a{}", "()".repeat(n))
+    }
+
+    /// `n` sibling indexing operations: `a[0][0][0]...`.
+    pub(super) fn postfix_indexes(n: usize) -> String {
+        format!("a{}", "[0]".repeat(n))
+    }
+
+    /// `n` sibling method calls: `a.m().m().m()...`.
+    pub(super) fn postfix_methods(n: usize) -> String {
+        format!("a{}", ".m()".repeat(n))
+    }
+
+    /// `n` prefix negations: `----...1`.
+    pub(super) fn unary_chain(n: usize) -> String {
+        format!("{}1", "-".repeat(n))
+    }
+
+    /// `n` links of same-precedence addition: `a + a + a + ...`.
+    pub(super) fn binary_chain(n: usize) -> String {
+        let mut text = "a".to_owned();
+
+        for _ in 0..n {
+            text.push_str(" + a");
+        }
+
+        text
+    }
+
+    /// `n` links of `as`-casts: `0 as i64 as i64 as i64...`.
+    pub(super) fn cast_chain(n: usize) -> String {
+        let mut text = "0".to_owned();
+
+        for _ in 0..n {
+            text.push_str(" as i64");
+        }
+
+        text
+    }
+
+    /// An `else if` ladder with `n` middle arms.
+    pub(super) fn else_if_ladder(n: usize) -> String {
+        let mut text = "if true {}".to_owned();
+
+        for _ in 0..n {
+            text.push_str(" else if true {}");
+        }
+
+        text.push_str(" else {}");
+
+        text
     }
 }

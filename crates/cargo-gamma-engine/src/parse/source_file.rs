@@ -147,18 +147,21 @@ impl SourceFile {
     }
 
     /// Returns the 1-based line number of a byte offset.
+    #[inline]
     #[must_use]
     pub fn line_of(&self, offset: usize) -> usize {
         self.location(offset).0
     }
 
     /// Returns the source text covered by a byte range.
+    #[inline]
     #[must_use]
     pub fn slice(&self, span: &Range<usize>) -> &str {
         self.text.get(span.start..span.end).unwrap_or("")
     }
 
     /// Returns the path as it should appear in reports.
+    #[inline]
     #[must_use]
     pub fn path(&self) -> &Utf8Path {
         &self.path
@@ -169,23 +172,27 @@ impl SourceFile {
     /// A file is often read from an absolute path and then reported relative to the workspace
     /// root once the caller knows it; this is the one controlled way to update that path after
     /// parsing, so every other representation field stays untouched and in agreement with `text`.
+    #[inline]
     pub fn set_path(&mut self, path: impl Into<Utf8PathBuf>) {
         self.path = path.into();
     }
 
     /// Returns the exact bytes that were parsed. All spans index into this.
+    #[inline]
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
     }
 
     /// Returns the syntax tree.
+    #[inline]
     #[must_use]
     pub fn ast(&self) -> &File {
         &self.ast
     }
 
     /// Returns every comment in the file, in source order.
+    #[inline]
     #[must_use]
     pub fn comments(&self) -> &[Comment] {
         &self.comments

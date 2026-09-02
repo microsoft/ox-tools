@@ -59,9 +59,10 @@
 #     "**/build.rs",
 # ]
 
-# Exclude mutants inside implementations with a listed lexical terminal trait name. Qualification
-# is ignored, but this does not perform rustc name resolution and cannot distinguish imported
-# traits written with the same terminal name. Every name must match a discovered implementation.
+# Exclude mutants inside implementations whose final written trait-path segment is a listed
+# unqualified Rust identifier. Qualification is ignored, but this does not perform rustc name
+# resolution and cannot distinguish imported traits written with the same final identifier. Every
+# identifier must match a discovered implementation.
 #
 # Debug output is diagnostic text without a stable formatting contract.
 # exclude-trait-impls = ["Debug", "Display"]

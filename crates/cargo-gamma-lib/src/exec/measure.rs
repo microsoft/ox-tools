@@ -7,7 +7,7 @@ use core::fmt::Write as _;
 use core::time::Duration;
 use std::time::Instant;
 
-use cargo_gamma_process::MemoryRequest;
+use cargo_gamma_process::{MemoryRequest, containment};
 
 use super::baseline::{Baseline, measure_baseline};
 use super::build::{Abandoned, Converger};
@@ -487,10 +487,10 @@ fn measure_with_locks(
 
     // Said here, before the tree is copied and long before a build script or a test binary runs.
     // Containment is what keeps a test's descendants from outliving the run, and on a host that
-    // cannot seal a subtree it reduces to a process group any descendant leaves with one
+    // cannot seal a subtree it falls back to a process group that any descendant can leave with an
     // unprivileged call. That is a fact about the machine rather than about this run, so it is
     // reported once, up front, rather than discovered when an orphan holds a scratch tree open.
-    if let Err(reason) = cargo_gamma_process::containment() {
+    if let Err(reason) = containment() {
         let reason = reason.to_string();
 
         events.warn(&format!(
@@ -1037,9 +1037,8 @@ fn take_baseline(
 /// invisible until it matters. A user who believes their machine is protected and finds out
 /// otherwise mid-run is worse off than one who was told plainly at the start.
 fn admit_memory_control(config: &Config) -> Result<(MemoryPolicy, Option<String>)> {
-    // Reduced to prose here rather than carried further: the only thing left to do with a host
-    // that cannot meter is to quote its reason at the user, and taking prose lets the decision
-    // below be driven by tests on any machine.
+    // Converted to display text here because downstream logic only reports the platform error, and
+    // accepting text lets the policy decision be tested independently of host capabilities.
     settle_memory_control(config, memory::support().map_err(|reason| reason.to_string()))
 }
 

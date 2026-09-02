@@ -3,6 +3,12 @@
 
 #[cfg(any(unix, windows))]
 use core::cell::UnsafeCell;
+#[cfg(unix)]
+use core::ffi::c_char;
+#[cfg(any(unix, windows))]
+use core::ffi::{c_int, c_void};
+#[cfg(any(unix, windows, test))]
+use core::num::NonZeroUsize;
 #[cfg(all(any(unix, windows), not(all(loom, feature = "loom"))))]
 use core::sync::atomic::AtomicUsize as RecorderAtomicUsize;
 #[cfg(any(unix, windows))]
@@ -101,17 +107,15 @@ const CENSUS: u32 = u32::MAX - 1;
 
 /// How many sites a census can record.
 ///
-/// One bit each, in a zeroed static, so the whole table costs 128 KiB of address space that is
-/// never paged in unless a census actually runs. A population past this is not silently
-/// half-recorded: a site over the edge records [`OVERFLOW`], which tells the tool to throw
-/// the whole census away rather than mistake an unrecorded site for an unreached one.
-///
-/// Public and unconditional — unlike the table it sizes — so the coordinator in `cargo-gamma-lib`
-/// can derive a census file's protocol-legal maximum size from the same one source of truth this
-/// table is built from, rather than hardcoding a second copy of the limit that could silently drift
-/// from it.
+/// This is the shared coordinator/runtime protocol maximum. A population past it is not silently
+/// half-recorded: a site over the edge records [`OVERFLOW`], which tells the coordinator to discard
+/// the whole census rather than mistake an unrecorded site for an unreached one.
 pub const MAX_CENSUS_SITES: usize = 1 << 20;
 
+/// The number of site bits retained by the runtime's private bitmap.
+///
+/// One bit per site makes the zeroed table occupy 128 KiB of address space, with pages committed
+/// only when a census reaches the corresponding sites.
 #[cfg(any(unix, windows))]
 const SITES: usize = MAX_CENSUS_SITES;
 
@@ -150,8 +154,8 @@ pub const SEAL: u32 = u32::MAX - 2;
 /// The longest census path this will retain, in native code units.
 ///
 /// It is long enough for ordinary Unix and Win32 paths, and bounded because startup copies the
-/// path into static storage without an allocator. A path beyond this bound was already unusable on
-/// Windows and now leaves the census unsealed on Unix too, which is the conservative outcome.
+/// path into static storage without an allocator. A path beyond this bound leaves the census
+/// unsealed, which prevents the coordinator from trusting a partial result.
 #[cfg(any(unix, windows))]
 const PATH_LIMIT: usize = 4096;
 
@@ -159,13 +163,13 @@ const PATH_LIMIT: usize = 4096;
 #[cfg(any(unix, windows))]
 const READ_LIMIT: usize = 32;
 
-/// The pseudo-ordinal meaning "[`install`] has not run on this platform yet".
+/// The pseudo-ordinal meaning "`install` has not run on this platform yet".
 ///
 /// Distinct from [`NONE`], which is the correct, permanent value on a target with no `unix` or
 /// `windows` constructor mechanism at all — a genuinely non-hosted target that never links
-/// [`install`], documented at the crate root under "`no_std`, and what it does not buy" — and,
-/// for the same reason, under Miri, which cannot execute a real ELF, Mach-O, or PE constructor and
-/// so never runs [`install`] either. This sentinel instead marks the narrow, transient window on a
+/// `install`, documented at the crate root under "`no_std`, and what it does not buy" — and, for
+/// the same reason, under Miri, which cannot execute a real ELF, Mach-O, or PE constructor and so
+/// never runs `install` either. This sentinel instead marks the narrow, transient window on a
 /// hosted, non-Miri target between process start and this crate's own constructor running, so a
 /// guard reached in that window is not mistaken for a legitimate unmutated run: see [`selected`].
 ///
@@ -174,19 +178,19 @@ const READ_LIMIT: usize = 32;
 #[cfg(any(unix, windows))]
 const UNINSTALLED: u32 = u32::MAX - 3;
 
-/// The selection captured by [`install`] before user code can start threads.
+/// The selection captured by `install` before user code can start threads.
 ///
 /// On a hosted, non-Miri target this starts at [`UNINSTALLED`]: the only other
 /// constructor-ordering signal available is [`NONE`], which is indistinguishable from a legitimate
-/// request for unmutated behavior and would let a guard reached before [`install`] silently
+/// request for unmutated behavior and would let a guard reached before `install` silently
 /// misreport a mutant or census run as a baseline one. [`selected`] turns an observation of
-/// [`UNINSTALLED`] into a loud failure instead. A target with neither `unix` nor `windows`, or a
-/// Miri execution of either, never links [`install`] at all, so it starts at, and stays at, the
-/// actually-correct [`NONE`] fallback described at the crate root.
+/// [`UNINSTALLED`] into immediate, non-unwinding process termination instead. A target with neither
+/// `unix` nor `windows`, or a Miri execution of either, never links `install` at all, so it starts
+/// at, and stays at, the actually-correct [`NONE`] fallback described at the crate root.
 #[cfg(all(any(unix, windows), not(miri)))]
 static ACTIVE: AtomicU32 = AtomicU32::new(UNINSTALLED);
 
-/// The selection on a target — or a Miri execution — with no working [`install`] constructor,
+/// The selection on a target — or a Miri execution — with no working `install` constructor,
 /// which is documented at the crate root as the permanently safe fallback.
 #[cfg(any(not(any(unix, windows)), miri))]
 static ACTIVE: AtomicU32 = AtomicU32::new(NONE);
@@ -258,8 +262,8 @@ fn capture_selection() -> u32 {
 
 /// Turns what startup learned about `GAMMA_CENSUS` into a selection, or into a startup failure.
 ///
-/// Census mode wins over an active ordinal, as it did when guards read these variables lazily, so
-/// `active` is consulted only when the census variable was genuinely absent.
+/// Census mode takes precedence over an active ordinal, so `active` is consulted only when the
+/// census variable was genuinely absent.
 ///
 /// A census request this process could not read is **not** absence, and must not fall through to
 /// active selection: the process would then execute a mutant, write no census file, and report a
@@ -286,6 +290,10 @@ fn selection_from(census: CensusRequest, active: impl FnOnce() -> Result<u32, ()
 /// status. It is public because the vendored runtime and its parent must share one protocol value.
 pub const ENVIRONMENT_ERROR_MARKER: &[u8] = b"cargo-gamma: startup environment acquisition failed\n";
 
+/// The diagnostic emitted when instrumented code runs before this runtime's constructor.
+pub const PRE_INSTALL_ERROR_MARKER: &[u8] =
+    b"gamma_rt: a guard executed before this crate's own constructor installed the runtime selection\n";
+
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnvironmentValue {
@@ -296,18 +304,16 @@ enum EnvironmentValue {
 
 /// What startup learned about `GAMMA_CENSUS`, which is not the same question as what it holds.
 ///
-/// Absence and failure were once the same answer, and a failure that reads as absence is the one
-/// that matters: it lets a census process go on to select an active mutant, run it, write no
-/// census, and be reported as a baseline failure. They are separate variants here so that
-/// [`selection_from`] can give them opposite answers.
+/// Absence and failure require opposite decisions: absence permits active-mutant selection, while
+/// failure must stop startup before a run can produce evidence under the wrong mode.
 #[cfg(any(unix, windows))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CensusRequest {
     /// `GAMMA_CENSUS` was unset, or set to nothing: this process is not taking a census.
     Absent,
 
-    /// Census mode, with a NUL-terminated path of this many bytes retained in [`CENSUS_PATH`].
-    Path(usize),
+    /// Census mode, with a NUL-terminated path of this non-zero length retained in [`CENSUS_PATH`].
+    Path(NonZeroUsize),
 
     /// Census mode, with a path too long for [`PATH_LIMIT`] to retain and therefore never opened.
     Unusable,
@@ -377,12 +383,14 @@ fn capture_active() -> Result<u32, ()> {
 enum EnvironmentReadOutcome {
     /// The variable was unset.
     Absent,
+    /// The variable was set to an empty value.
+    Empty,
     /// The API failed for a reason other than the variable being absent.
     Error,
     /// The variable was set, but its reported length does not fit the buffer.
     TooLongToStore,
-    /// The variable was set, fits, and is this many units long.
-    Found(usize),
+    /// The variable was set, fits, and has this non-zero length.
+    Found(NonZeroUsize),
 }
 
 /// Successful Win32 last-error value, used to distinguish an empty value from API failure.
@@ -400,7 +408,7 @@ const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
 fn environment_read_outcome(written: u32, last_error: u32, buffer_len: usize) -> EnvironmentReadOutcome {
     if written == 0 {
         return match last_error {
-            ERROR_SUCCESS => EnvironmentReadOutcome::Found(0),
+            ERROR_SUCCESS => EnvironmentReadOutcome::Empty,
             ERROR_ENVVAR_NOT_FOUND => EnvironmentReadOutcome::Absent,
             _ => EnvironmentReadOutcome::Error,
         };
@@ -414,7 +422,7 @@ fn environment_read_outcome(written: u32, last_error: u32, buffer_len: usize) ->
         return EnvironmentReadOutcome::TooLongToStore;
     }
 
-    EnvironmentReadOutcome::Found(length)
+    EnvironmentReadOutcome::Found(NonZeroUsize::new(length).expect("the zero return was handled before converting the reported length"))
 }
 
 /// Reads `GAMMA_ACTIVE` during startup without allocation.
@@ -444,9 +452,9 @@ fn capture_active() -> Result<u32, ()> {
     };
 
     match environment_read_outcome(written, last_error, buffer.len()) {
-        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::TooLongToStore => Ok(NONE),
+        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Empty | EnvironmentReadOutcome::TooLongToStore => Ok(NONE),
         EnvironmentReadOutcome::Error => Err(()),
-        EnvironmentReadOutcome::Found(length) => Ok(parse(&buffer[..length])),
+        EnvironmentReadOutcome::Found(length) => Ok(parse(&buffer[..length.get()])),
     }
 }
 
@@ -462,7 +470,7 @@ fn capture_census_path() -> CensusRequest {
     let request = terminate_census_path(path, value);
 
     if let CensusRequest::Path(length) = request {
-        CENSUS_PATH_LENGTH.store(length, Ordering::Release);
+        CENSUS_PATH_LENGTH.store(length.get(), Ordering::Release);
     }
 
     request
@@ -493,7 +501,9 @@ fn terminate_census_path(path: &mut [u8; PATH_LIMIT], value: EnvironmentValue) -
             Some(terminator) => {
                 *terminator = 0;
 
-                CensusRequest::Path(length)
+                CensusRequest::Path(
+                    NonZeroUsize::new(length).expect("the zero-length environment value was handled before path termination"),
+                )
             }
 
             // The value filled the buffer, so it was truncated and there is no room to terminate
@@ -530,16 +540,16 @@ fn capture_census_path() -> CensusRequest {
     };
 
     match environment_read_outcome(written, last_error, buffer.len()) {
-        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Found(0) => CensusRequest::Absent,
+        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Empty => CensusRequest::Absent,
         EnvironmentReadOutcome::Error => CensusRequest::Error,
         EnvironmentReadOutcome::TooLongToStore => CensusRequest::Unusable,
         EnvironmentReadOutcome::Found(length) => {
             // SAFETY: only this constructor writes the `UnsafeCell`, and `length` bytes plus the
             // API's terminator all fit in both arrays.
             unsafe {
-                core::ptr::copy_nonoverlapping(buffer.as_ptr(), CENSUS_PATH.bytes.get().cast(), length + 1);
+                core::ptr::copy_nonoverlapping(buffer.as_ptr(), CENSUS_PATH.bytes.get().cast(), length.get() + 1);
             }
-            CENSUS_PATH_LENGTH.store(length, Ordering::Release);
+            CENSUS_PATH_LENGTH.store(length.get(), Ordering::Release);
 
             CensusRequest::Path(length)
         }
@@ -553,8 +563,8 @@ fn capture_census_path() -> CensusRequest {
 /// — selects unmutated behavior, which is the answer that cannot turn a mutated program into a
 /// passing one.
 ///
-/// The four reserved words of the encoding — [`UNINSTALLED`], the census file's [`SEAL`],
-/// [`CENSUS`], and the overflow marker — are refused as one contiguous range: a population would
+/// The reserved words of the encoding — [`UNINSTALLED`], the census file's [`SEAL`], [`CENSUS`],
+/// and the overflow marker — are refused as one contiguous range: a population would
 /// have to hold four billion mutants to reach them, and a startup sentinel, a mode, or a file
 /// marker is not something `GAMMA_ACTIVE` may ask for.
 #[cfg(any(unix, windows))]
@@ -672,7 +682,7 @@ enum ReadOutcome {
 /// `errno` is supplied rather than read here so a test can drive the interrupted and final-failure
 /// arms directly, and so a successful read cannot pay for a thread-local lookup it does not need.
 #[cfg(target_os = "linux")]
-fn read_outcome(read: isize, errno: impl FnOnce() -> core::ffi::c_int) -> ReadOutcome {
+fn read_outcome(read: isize, errno: impl FnOnce() -> c_int) -> ReadOutcome {
     match usize::try_from(read) {
         Ok(read_len) => ReadOutcome::Read(read_len),
         Err(_negative) if errno() == EINTR => ReadOutcome::Interrupted,
@@ -684,21 +694,30 @@ fn read_outcome(read: isize, errno: impl FnOnce() -> core::ffi::c_int) -> ReadOu
 ///
 /// Counted across the whole capture rather than reset per call, so a process being signalled
 /// without pause ends in a loud, bounded failure rather than spinning inside a loader constructor
-/// forever. Generous enough that ordinary job-control or timer signals cannot exhaust it: a
-/// blocked read of `/proc/self/environ` is measured in microseconds, so reaching this many
-/// interruptions means something is delivering signals faster than the kernel can answer a read.
+/// forever. This is a deliberately conservative policy limit rather than a benchmark-derived
+/// threshold: it tolerates a short burst of dozens of signals, while values in the same
+/// power-of-two range from 32 through 256 preserve the intended trade-off between ordinary burst
+/// tolerance and bounded pre-main delay.
 #[cfg(target_os = "linux")]
 const INTERRUPTED_ATTEMPTS: usize = 64;
 
-/// `EINTR`, which Linux fixes at 4 on every architecture it supports, including the ones that
-/// renumber part of the table. Spelled out because this crate carries no dependencies, `libc`
-/// among them.
+/// The Linux UAPI-defined `EINTR` value from `<asm-generic/errno-base.h>`.
+///
+/// Spelled out because this crate carries no dependencies, `libc` among them.
 #[cfg(target_os = "linux")]
-const EINTR: core::ffi::c_int = 4;
+const EINTR: c_int = 4;
+
+/// Bytes read from `/proc/self/environ` per syscall.
+///
+/// The size is deliberately a modest power-of-two policy choice rather than a platform limit. It
+/// keeps the native-constructor stack buffer small while reading ordinary environment images in a
+/// handful of syscalls; any non-zero size preserves the framing algorithm.
+#[cfg(target_os = "linux")]
+const ENVIRONMENT_READ_CHUNK: usize = 512;
 
 /// The `errno` the last failed C library call left behind on this thread.
 #[cfg(target_os = "linux")]
-fn last_errno() -> core::ffi::c_int {
+fn last_errno() -> c_int {
     // SAFETY: `__errno_location` returns a pointer to this thread's `errno`, which the C library
     // keeps valid for as long as the thread exists.
     let location = unsafe { __errno_location() };
@@ -709,18 +728,21 @@ fn last_errno() -> core::ffi::c_int {
 }
 
 /// Drives one [`EnvironScan`] across a sequence of read attempts, matching the framing and failure
-/// handling of the real `/proc/self/environ` loop: `read` reports the bytes it placed in the chunk
-/// buffer, an interruption worth repeating, or a failure that ends the capture as
-/// [`EnvironmentValue::Error`].
+/// handling of the real `/proc/self/environ` loop. `interruptions` carries attempts already spent
+/// opening the environment image, so the read phase cannot replenish the whole-capture budget.
 ///
 /// Isolated from `open_fd`/`read_fd` so a test can script exactly the split, empty, interrupted and
 /// failure transitions the real loop cannot be steered through without controlling the file it
 /// reads and the signals delivered to the process reading it.
 #[cfg(target_os = "linux")]
-fn scan_environ(target: &[u8], destination: &mut [u8], mut read: impl FnMut(&mut [u8; 512]) -> ReadOutcome) -> EnvironmentValue {
-    let mut chunk = [0_u8; 512];
+fn scan_environ_with_interruptions(
+    target: &[u8],
+    destination: &mut [u8],
+    mut interruptions: usize,
+    mut read: impl FnMut(&mut [u8; ENVIRONMENT_READ_CHUNK]) -> ReadOutcome,
+) -> EnvironmentValue {
+    let mut chunk = [0_u8; ENVIRONMENT_READ_CHUNK];
     let mut scan = EnvironScan::new();
-    let mut interruptions = 0_usize;
 
     loop {
         let read_len = match read(&mut chunk) {
@@ -747,14 +769,24 @@ fn scan_environ(target: &[u8], destination: &mut [u8], mut read: impl FnMut(&mut
     }
 }
 
+/// Test-facing scan that starts with an unused interruption budget.
+#[cfg(all(test, target_os = "linux"))]
+fn scan_environ(
+    target: &[u8],
+    destination: &mut [u8],
+    read: impl FnMut(&mut [u8; ENVIRONMENT_READ_CHUNK]) -> ReadOutcome,
+) -> EnvironmentValue {
+    scan_environ_with_interruptions(target, destination, 0, read)
+}
+
 /// Copies one Linux environment value from the immutable image captured by `exec`.
 ///
 /// `/proc/self/environ` does not follow later `setenv` changes, so a native constructor that
 /// started a thread before this constructor cannot make this read race with environment mutation.
 ///
 /// A signal delivered to this process can interrupt the open or any of the reads without moving a
-/// byte. Those attempts are repeated, bounded by [`INTERRUPTED_ATTEMPTS`], because reporting one as
-/// a failure would refuse a startup that had nothing wrong with it.
+/// byte. Those attempts are repeated, bounded by [`INTERRUPTED_ATTEMPTS`], because such an
+/// interruption is transient and does not make the captured startup environment untrustworthy.
 #[cfg(target_os = "linux")]
 fn copy_environment(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
     #[cfg(test)]
@@ -781,7 +813,7 @@ fn copy_environment(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
         }
     };
 
-    let answer = scan_environ(target, destination, |chunk| {
+    let answer = scan_environ_with_interruptions(target, destination, interruptions, |chunk| {
         // SAFETY: `chunk` is writable for the supplied length, and `descriptor` remains open.
         let read = unsafe { read_fd(descriptor, chunk.as_mut_ptr().cast(), chunk.len()) };
 
@@ -822,8 +854,9 @@ fn copy_environment(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
 /// The second `getenv` and copy are an integrity check, not a memory-safety proof. Under the POSIX
 /// precondition, each dereference is already valid. Comparing the pointer, length, and bytes detects
 /// an inconsistent observation if foreign code violates that precondition in a way visible to both
-/// reads, allowing startup to fail loudly through [`environment_error`] rather than accepting a
-/// torn value. Matching reads do not prove that a forbidden concurrent mutation did not occur.
+/// reads, allowing startup to emit the environment-error marker and terminate through
+/// [`environment_error`] rather than accepting a torn value. Matching reads do not prove that a
+/// forbidden concurrent mutation did not occur.
 #[cfg(all(unix, any(test, not(target_os = "linux"))))]
 fn copy_environment_via_getenv(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
     #[cfg(test)]
@@ -875,9 +908,18 @@ fn copy_environment_via_getenv(name: &[u8], destination: &mut [u8]) -> Environme
 #[cfg(any(unix, windows))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn environment_error() -> ! {
+    terminate_with_marker(ENVIRONMENT_ERROR_MARKER)
+}
+
+/// Writes a fixed startup diagnostic and terminates without unwinding or running exit handlers.
+///
+/// Excluded from coverage because immediate process termination cannot flush coverage counters.
+#[cfg(any(unix, windows))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn terminate_with_marker(marker: &[u8]) -> ! {
     #[cfg(unix)]
     {
-        let mut remaining = ENVIRONMENT_ERROR_MARKER;
+        let mut remaining = marker;
 
         while !remaining.is_empty() {
             // SAFETY: file descriptor 2 is the process's conventional stderr, and `remaining` is
@@ -891,9 +933,11 @@ fn environment_error() -> ! {
                 break;
             }
 
-            remaining = remaining
-                .get(written..)
-                .expect("POSIX write cannot report more bytes than the supplied buffer contains");
+            let Some(rest) = remaining.get(written..) else {
+                break;
+            };
+
+            remaining = rest;
         }
 
         // SAFETY: startup cannot continue without knowing whether the requested mutant was
@@ -908,7 +952,7 @@ fn environment_error() -> ! {
         let stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
 
         if !stderr.is_null() && stderr.addr() != INVALID_HANDLE_VALUE {
-            let mut remaining = ENVIRONMENT_ERROR_MARKER;
+            let mut remaining = marker;
 
             while !remaining.is_empty() {
                 let mut written = 0_u32;
@@ -1000,9 +1044,11 @@ fn environment_error() -> ! {
                     break;
                 };
 
-                remaining = remaining
-                    .get(written..)
-                    .expect("WriteFile cannot report more bytes than the supplied buffer contains");
+                let Some(rest) = remaining.get(written..) else {
+                    break;
+                };
+
+                remaining = rest;
             }
         }
 
@@ -1015,28 +1061,28 @@ fn environment_error() -> ! {
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
     #[link_name = "open"]
-    fn open_fd(path: *const core::ffi::c_char, flags: core::ffi::c_int, ...) -> core::ffi::c_int;
+    fn open_fd(path: *const c_char, flags: c_int, ...) -> c_int;
 
     #[link_name = "read"]
-    fn read_fd(descriptor: core::ffi::c_int, buffer: *mut core::ffi::c_void, count: usize) -> isize;
+    fn read_fd(descriptor: c_int, buffer: *mut c_void, count: usize) -> isize;
 
     #[link_name = "close"]
-    fn close_fd(descriptor: core::ffi::c_int) -> core::ffi::c_int;
+    fn close_fd(descriptor: c_int) -> c_int;
 
     /// The Linux C library's accessor for this thread's `errno`, which is how a failed `open` or
     /// `read` says whether a signal interrupted it. Declared here rather than taken from `libc`
     /// because this crate is injected into the user's dependency graph and must stay free of
     /// dependencies; the symbol is the one glibc, musl and uClibc all publish for it.
-    fn __errno_location() -> *mut core::ffi::c_int;
+    fn __errno_location() -> *mut c_int;
 }
 
 #[cfg(unix)]
 unsafe extern "C" {
     #[link_name = "write"]
-    fn write_fd(descriptor: core::ffi::c_int, buffer: *const core::ffi::c_void, count: usize) -> isize;
+    fn write_fd(descriptor: c_int, buffer: *const c_void, count: usize) -> isize;
 
     #[link_name = "_exit"]
-    fn exit_immediately(status: core::ffi::c_int) -> !;
+    fn exit_immediately(status: c_int) -> !;
 }
 
 #[cfg(all(unix, any(test, not(target_os = "linux"))))]
@@ -1044,15 +1090,15 @@ unsafe extern "C" {
     /// The C library's `getenv`, whose signature is fixed by POSIX. Declared here rather than
     /// taken from `libc` because this crate is injected into the user's dependency graph and must
     /// stay free of dependencies.
-    fn getenv(name: *const core::ffi::c_char) -> *const core::ffi::c_char;
+    fn getenv(name: *const c_char) -> *const c_char;
 }
 
 // Test-only access used to mutate the environment while copy_environment_via_getenv captures it.
 #[cfg(all(unix, test))]
 unsafe extern "C" {
-    fn setenv(name: *const core::ffi::c_char, value: *const core::ffi::c_char, overwrite: core::ffi::c_int) -> core::ffi::c_int;
+    fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
 
-    fn unsetenv(name: *const core::ffi::c_char) -> core::ffi::c_int;
+    fn unsetenv(name: *const c_char) -> c_int;
 }
 
 #[cfg(windows)]
@@ -1080,42 +1126,32 @@ unsafe extern "system" {
     fn GetLastError() -> u32;
 
     /// Returns one of the process standard handles.
-    fn GetStdHandle(which: u32) -> *mut core::ffi::c_void;
+    fn GetStdHandle(which: u32) -> *mut c_void;
 
     /// Creates an event used to wait for an overlapped write.
-    fn CreateEventW(
-        event_attributes: *const core::ffi::c_void,
-        manual_reset: core::ffi::c_int,
-        initial_state: core::ffi::c_int,
-        name: *const u16,
-    ) -> *mut core::ffi::c_void;
+    fn CreateEventW(event_attributes: *const c_void, manual_reset: c_int, initial_state: c_int, name: *const u16) -> *mut c_void;
 
     /// Writes bytes directly to a Win32 handle.
     fn WriteFile(
-        handle: *mut core::ffi::c_void,
-        buffer: *const core::ffi::c_void,
+        handle: *mut c_void,
+        buffer: *const c_void,
         bytes_to_write: u32,
         bytes_written: *mut u32,
-        overlapped: *mut core::ffi::c_void,
-    ) -> core::ffi::c_int;
+        overlapped: *mut c_void,
+    ) -> c_int;
 
     /// Waits for an overlapped operation and returns its transferred byte count.
-    fn GetOverlappedResult(
-        handle: *mut core::ffi::c_void,
-        overlapped: *mut core::ffi::c_void,
-        bytes_transferred: *mut u32,
-        wait: core::ffi::c_int,
-    ) -> core::ffi::c_int;
+    fn GetOverlappedResult(handle: *mut c_void, overlapped: *mut c_void, bytes_transferred: *mut u32, wait: c_int) -> c_int;
 
     /// Closes a Win32 object handle.
-    fn CloseHandle(handle: *mut core::ffi::c_void) -> core::ffi::c_int;
+    fn CloseHandle(handle: *mut c_void) -> c_int;
 
     /// Terminates the process without running exit handlers.
     fn ExitProcess(exit_code: u32) -> !;
 
     /// Changes one process environment variable. Used only by the pre-main test helper.
     #[cfg(test)]
-    fn SetEnvironmentVariableA(name: *const u8, value: *const u8) -> core::ffi::c_int;
+    fn SetEnvironmentVariableA(name: *const u8, value: *const u8) -> c_int;
 }
 
 /// The Win32 `STD_ERROR_HANDLE` value.
@@ -1138,7 +1174,7 @@ struct WindowsOverlapped {
     internal_high: usize,
     offset: u32,
     offset_high: u32,
-    event: *mut core::ffi::c_void,
+    event: *mut c_void,
 }
 
 #[cfg(windows)]
@@ -1164,7 +1200,7 @@ unsafe extern "C" {
     /// stream. A reader that finds the seal intact at the end knows every record before it arrived
     /// too. A process that aborts skips the handler and leaves no sealed census to trust.
     #[cfg(unix)]
-    fn fopen(path: *const core::ffi::c_char, mode: *const core::ffi::c_char) -> *mut core::ffi::c_void;
+    fn fopen(path: *const c_char, mode: *const c_char) -> *mut c_void;
 
     /// The Microsoft CRT's wide `fopen`, identical to it in everything said above and taking its
     /// path and mode as UTF-16. Windows uses this rather than the narrow `fopen`, which interprets
@@ -1173,21 +1209,21 @@ unsafe extern "C" {
     /// would silently never work on that host — the run merely slower, forever, with the reason
     /// invisible.
     #[cfg(windows)]
-    fn _wfopen(path: *const u16, mode: *const u16) -> *mut core::ffi::c_void;
+    fn _wfopen(path: *const u16, mode: *const u16) -> *mut c_void;
 
     /// The C library's `fwrite`, likewise fixed by the standard, and likewise thread-safe: it
     /// locks the stream, so the guards of a multi-threaded test cannot tear each other's records.
-    fn fwrite(buffer: *const core::ffi::c_void, size: usize, count: usize, stream: *mut core::ffi::c_void) -> usize;
+    fn fwrite(buffer: *const c_void, size: usize, count: usize, stream: *mut c_void) -> usize;
 
     /// The C library's `fflush`, fixed by the standard. Called once at a clean exit to force the
     /// buffered records and the seal out to the file at a point where a failure merely leaves the
     /// file unsealed, rather than deferring to a close whose failure would go unnoticed.
-    fn fflush(stream: *mut core::ffi::c_void) -> core::ffi::c_int;
+    fn fflush(stream: *mut c_void) -> c_int;
 
     /// The C library's `atexit`, fixed by the standard. Registers [`seal`] to run at a normal exit;
     /// an abnormal one — `abort`, a fatal signal, `_exit` — skips it by design, which is exactly
     /// what leaves an unsealed file for the reader to reject.
-    fn atexit(handler: extern "C" fn()) -> core::ffi::c_int;
+    fn atexit(handler: extern "C" fn()) -> c_int;
 }
 
 /// Records that the site with ordinal `id` was reached, if it has not been recorded already.
@@ -1209,9 +1245,9 @@ unsafe extern "C" {
 /// truly unset or set by a write this thread has not observed — falling through to the full
 /// lease/fetch-or/release protocol below is exactly what already happens on every call today, so
 /// no case exists where the precheck causes a site to go unrecorded that would otherwise have been.
-// Cost: the precheck is justified structurally, per the above, rather than empirically; measuring
-// first-hit, repeated-hit, and unique-site throughput against a lease taken on every hit remains
-// outstanding.
+// Cost: this deliberately makes no empirical throughput promise. The structural trade-off is
+// sufficient here: census-only first and unique hits pay one relaxed load, while repeated hits
+// avoid the recorder lease and compare-exchange protocol entirely.
 // Cold: reached only under a census, never in a scoring run, and even then only off the inlined
 // per-site guard `a`. Keeping it out of line stops its bitmap machinery being inlined into every
 // guard site and bloating the instrumented build, which is the dominant fixed cost of a run.
@@ -1428,7 +1464,7 @@ fn pause_after_lease() {
 
 /// Writes one byte slice, with a test-only zero-write seam.
 #[cfg(any(unix, windows))]
-fn write_bytes(bytes: &[u8], stream: *mut core::ffi::c_void) -> usize {
+fn write_bytes(bytes: &[u8], stream: *mut c_void) -> usize {
     #[cfg(test)]
     if TEST_WRITE_STATE
         .compare_exchange(BLOCK_AND_SHORT, WRITE_ENTERED, Ordering::AcqRel, Ordering::Acquire)
@@ -1448,7 +1484,7 @@ fn write_bytes(bytes: &[u8], stream: *mut core::ffi::c_void) -> usize {
 
 /// Writes one four-byte little-endian record.
 #[cfg(any(unix, windows))]
-fn write_record(record: u32, stream: *mut core::ffi::c_void) -> bool {
+fn write_record(record: u32, stream: *mut c_void) -> bool {
     let bytes = record.to_le_bytes();
 
     write_bytes(&bytes, stream) == bytes.len()
@@ -1463,7 +1499,7 @@ const _: () = assert!(OUTPUT_BUFFER.is_multiple_of(core::mem::size_of::<u32>()))
 
 /// Adds one record to an exit-time output batch, flushing a full batch first.
 #[cfg(any(unix, windows))]
-fn buffer_record(record: u32, buffer: &mut [u8; OUTPUT_BUFFER], used: &mut usize, stream: *mut core::ffi::c_void) -> bool {
+fn buffer_record(record: u32, buffer: &mut [u8; OUTPUT_BUFFER], used: &mut usize, stream: *mut c_void) -> bool {
     if *used == buffer.len() {
         if write_bytes(buffer, stream) != buffer.len() {
             return false;
@@ -1481,7 +1517,7 @@ fn buffer_record(record: u32, buffer: &mut [u8; OUTPUT_BUFFER], used: &mut usize
 
 /// Serializes every reached site from the bitmap in ascending ordinal order.
 #[cfg(any(unix, windows))]
-fn write_reached(stream: *mut core::ffi::c_void) -> bool {
+fn write_reached(stream: *mut c_void) -> bool {
     let mut buffer = [0_u8; OUTPUT_BUFFER];
     let mut used = 0_usize;
 
@@ -1517,7 +1553,7 @@ fn write_reached(stream: *mut core::ffi::c_void) -> bool {
 /// interleave mid-record. The window being contended is a single `fopen`, so spinning through it
 /// costs less than the machinery to avoid spinning would.
 #[cfg(any(unix, windows))]
-fn sink() -> *mut core::ffi::c_void {
+fn sink() -> *mut c_void {
     /// No stream has been opened yet.
     const UNOPENED: usize = 0;
 
@@ -1576,7 +1612,7 @@ fn sink() -> *mut core::ffi::c_void {
                   and leaves the return looking like a tail expression"
     )
 )]
-fn open() -> *mut core::ffi::c_void {
+fn open() -> *mut c_void {
     /// Append, binary: the records are bytes, not text, and a platform that would translate line
     /// endings must not touch them.
     #[cfg(unix)]
@@ -1652,7 +1688,7 @@ extern "C" fn seal() {
 
 /// Returns the selection that is safe to publish after exit-handler registration.
 #[cfg(any(unix, windows))]
-fn selection_after_registration(selection: u32, mut register: impl FnMut(extern "C" fn()) -> core::ffi::c_int) -> u32 {
+fn selection_after_registration(selection: u32, mut register: impl FnMut(extern "C" fn()) -> c_int) -> u32 {
     if selection != CENSUS || register(seal) == 0 {
         selection
     } else {
@@ -1860,17 +1896,9 @@ static RUN_ENVIRONMENT_HELPER: extern "C" fn() = run_environment_helper;
 ///
 /// The selection is captured without allocation during process startup. It cannot change later:
 /// a test manipulating its own environment must not change which mutant is live halfway through a
-/// run, and guards must not read an environment another thread may safely be changing.
-///
-/// ```text
-/// // Illustrative only: within one process the answer is fixed by definition, so comparing two
-/// // immediately adjacent calls proves nothing about that immutability. The regression that
-/// // actually exercises it launches a child with a known ordinal, has the child attempt to
-/// // overwrite its own `GAMMA_ACTIVE` after startup, and confirms `active` still reports the
-/// // value it was launched with — see `active_is_immune_to_the_process_changing_its_own_environment`
-/// // in this crate's test suite.
-/// assert_eq!(gamma_rt::active(), gamma_rt::active());
-/// ```
+/// run, and guards must not read an environment another thread may safely be changing. The
+/// `active_is_immune_to_the_process_changing_its_own_environment` process regression in this
+/// crate's test suite exercises that startup-to-runtime transition.
 #[inline]
 #[must_use]
 pub fn active() -> u32 {
@@ -1884,9 +1912,9 @@ pub fn active() -> u32 {
 /// Returns the raw startup-captured selection, which is an ordinal, [`NONE`], or [`CENSUS`].
 ///
 /// Split from [`active`] because the guard needs to distinguish census mode and every other caller
-/// needs not to. Never returns [`UNINSTALLED`]: observing it means some other native constructor
-/// ran instrumented code before this crate's own, so [`uninstalled_guard`] fails visibly instead of
-/// letting the caller mistake it for a legitimate [`NONE`].
+/// needs not to. Never returns `UNINSTALLED`: observing it means some other native constructor
+/// ran instrumented code before this crate's own, so `uninstalled_guard` terminates the process
+/// instead of letting the caller mistake it for a legitimate [`NONE`].
 #[inline]
 fn selected() -> u32 {
     // The constructor's `Release` store publishes the copied census path before a guard observing
@@ -1901,8 +1929,8 @@ fn selected() -> u32 {
     value
 }
 
-/// Fails visibly when a guard observes [`UNINSTALLED`], rather than silently reporting the
-/// safe-looking [`NONE`] a truly non-hosted target would report forever.
+/// Terminates when a guard observes [`UNINSTALLED`], rather than silently reporting the safe-looking
+/// [`NONE`] a truly non-hosted target would report forever.
 ///
 /// Those two situations must not be conflated: a target with no `unix` or `windows` constructor
 /// mechanism, or a Miri execution of either, never links [`install`] and [`NONE`] is its correct,
@@ -1911,22 +1939,16 @@ fn selected() -> u32 {
 /// other native constructor executed instrumented Rust first, since nothing else can observe this
 /// crate's statics before then. No check of `ACTIVE` alone can tell that apart from an ordinary
 /// unmutated run, so it is called out the moment the otherwise-unreachable sentinel is observed:
-/// pre-install guard execution fails visibly instead of silently selecting baseline behavior.
+/// pre-install guard execution terminates the process instead of silently selecting baseline
+/// behavior. Termination does not unwind, so instrumented constructor code cannot absorb it with
+/// `catch_unwind` and continue into this crate's later [`install`].
 ///
-/// # Panics
-///
-/// Always. There is no way to recover a trustworthy selection once this state is observed, and a
-/// run a mutation-testing tool cannot classify must never be reported as a passing mutant or an
-/// unreached census site.
+/// Excluded from coverage because immediate process termination cannot flush coverage counters.
 #[cfg(all(any(unix, windows), not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cold]
-#[inline(never)]
 fn uninstalled_guard() -> ! {
-    panic!(
-        "gamma_rt: a guard executed before this crate's own constructor installed the runtime \
-         selection, which means another native constructor ran instrumented code first; no result \
-         from this process can be trusted"
-    );
+    terminate_with_marker(PRE_INSTALL_ERROR_MARKER)
 }
 
 /// Returns `true` when the mutant with ordinal `id` is the active one.
@@ -2321,7 +2343,10 @@ mod tests {
 
         path[..4].copy_from_slice(b"/tmp");
 
-        assert_eq!(terminate_census_path(&mut path, EnvironmentValue::Found(4)), CensusRequest::Path(4));
+        assert_eq!(
+            terminate_census_path(&mut path, EnvironmentValue::Found(4)),
+            CensusRequest::Path(NonZeroUsize::new(4).expect("four is non-zero"))
+        );
         assert_eq!(path[4], 0, "the capture must write the terminator `fopen` stops at");
         assert_eq!(path[5], 0xFF, "and must write nothing beyond it");
     }
@@ -2342,7 +2367,7 @@ mod tests {
 
         assert_eq!(
             terminate_census_path(&mut path, EnvironmentValue::Found(length)),
-            CensusRequest::Path(length)
+            CensusRequest::Path(NonZeroUsize::new(length).expect("PATH_LIMIT minus one is non-zero"))
         );
         assert_eq!(path[length], 0, "the longest retainable path is left unterminated");
         assert!(path[..length].iter().all(|byte| *byte == b'p'), "the path itself was disturbed");
@@ -2416,7 +2441,10 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[test]
     fn a_census_request_selects_census_mode_without_consulting_the_active_ordinal() {
-        for request in [CensusRequest::Path(4), CensusRequest::Unusable] {
+        for request in [
+            CensusRequest::Path(NonZeroUsize::new(4).expect("four is non-zero")),
+            CensusRequest::Unusable,
+        ] {
             let consulted = Cell::new(0_usize);
             let answer = selection_from(request, || {
                 consulted.set(consulted.get() + 1);
@@ -2445,10 +2473,10 @@ mod tests {
     /// [`scan_environ`]. Panics if [`scan_environ`] asks for more reads than the script supplies,
     /// which would mean a change grew the number of reads a case needs.
     #[cfg(target_os = "linux")]
-    fn scripted_reads<'a>(reads: &'a [ScriptedRead<'a>]) -> impl FnMut(&mut [u8; 512]) -> ReadOutcome + 'a {
+    fn scripted_reads<'a>(reads: &'a [ScriptedRead<'a>]) -> impl FnMut(&mut [u8; ENVIRONMENT_READ_CHUNK]) -> ReadOutcome + 'a {
         let mut reads = reads.iter();
 
-        move |buffer: &mut [u8; 512]| {
+        move |buffer: &mut [u8; ENVIRONMENT_READ_CHUNK]| {
             let read = reads
                 .next()
                 .expect("the script must supply a read for every loop iteration scan_environ takes");
@@ -2599,9 +2627,9 @@ mod tests {
 
     /// A signal that interrupts a read costs the capture nothing but the repeat.
     ///
-    /// Reporting the interruption as a failure would refuse a startup with nothing wrong with it:
-    /// the caller turns a census read failure into the environment-error protocol, so a run under
-    /// an ordinary job-control or timer signal would die instead of taking its census.
+    /// Reporting the transient interruption as a failure would make the caller emit the
+    /// environment-error marker and terminate, so a run under an ordinary job-control or timer
+    /// signal would end instead of taking its census.
     #[cfg(target_os = "linux")]
     #[test]
     fn an_interrupted_read_is_retried_rather_than_reported_as_a_failure() {
@@ -2649,6 +2677,20 @@ mod tests {
 
         let mut destination = [0_u8; 16];
         let answer = scan_environ(b"NAME", &mut destination, scripted_reads(&script));
+
+        assert_eq!(answer, EnvironmentValue::Error);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_read_phase_honors_interruptions_spent_while_opening() {
+        let mut destination = [0_u8; 16];
+        let answer = scan_environ_with_interruptions(
+            b"NAME",
+            &mut destination,
+            INTERRUPTED_ATTEMPTS,
+            scripted_reads(&[ScriptedRead::Interrupted]),
+        );
 
         assert_eq!(answer, EnvironmentValue::Error);
     }
@@ -2705,8 +2747,8 @@ mod tests {
 
     #[cfg(any(windows, test))]
     #[test]
-    fn an_empty_variable_is_found_with_zero_length() {
-        assert_eq!(environment_read_outcome(0, ERROR_SUCCESS, 16), EnvironmentReadOutcome::Found(0));
+    fn an_empty_variable_is_distinguished_from_absence() {
+        assert_eq!(environment_read_outcome(0, ERROR_SUCCESS, 16), EnvironmentReadOutcome::Empty);
     }
 
     #[cfg(any(windows, test))]
@@ -2738,7 +2780,10 @@ mod tests {
     #[cfg(any(windows, test))]
     #[test]
     fn a_value_that_leaves_room_for_the_terminator_is_found() {
-        assert_eq!(environment_read_outcome(15, ERROR_SUCCESS, 16), EnvironmentReadOutcome::Found(15));
+        assert_eq!(
+            environment_read_outcome(15, ERROR_SUCCESS, 16),
+            EnvironmentReadOutcome::Found(NonZeroUsize::new(15).expect("fifteen is non-zero"))
+        );
     }
 
     #[test]
@@ -2794,6 +2839,23 @@ mod tests {
 
     #[cfg(not(miri))]
     mod process_tests {
+        use std::env;
+        #[cfg(any(unix, windows))]
+        use std::fs;
+        #[cfg(windows)]
+        use std::fs::OpenOptions;
+        #[cfg(windows)]
+        use std::os::windows::fs::OpenOptionsExt as _;
+        #[cfg(any(unix, windows))]
+        use std::path::Path;
+        #[cfg(any(unix, windows))]
+        use std::process;
+        use std::process::Command;
+        #[cfg(windows)]
+        use std::process::Stdio;
+        #[cfg(any(unix, windows))]
+        use std::thread;
+
         use super::*;
 
         #[test]
@@ -2801,7 +2863,7 @@ mod tests {
             // Setting a variable in this process would be a data race against every other test, so the
             // check runs in a child launched with the variable already set — which is exactly how the
             // tool passes an ordinal to a real test binary.
-            let executable = std::env::current_exe().expect("the test binary knows its own path");
+            let executable = env::current_exe().expect("the test binary knows its own path");
 
             // Thirty-eight bytes, longer than `READ_LIMIT`, whose first thirty-two trim to `1234567`.
             // A truncated read must not be mistaken for that ordinal.
@@ -2813,7 +2875,7 @@ mod tests {
                 ("", "read=0"),
                 (truncated.as_str(), "read=0"),
             ] {
-                let output = std::process::Command::new(&executable)
+                let output = Command::new(&executable)
                     .args([
                         "--exact",
                         "runtime::tests::process_tests::the_child_reports_what_it_read",
@@ -2841,9 +2903,9 @@ mod tests {
             // process-global environment mutation is genuinely single-threaded. The exit status
             // reports whether it captured 7, changed the native environment to 99, and still
             // observed 7 afterwards.
-            let executable = std::env::current_exe().expect("the test binary knows its own path");
+            let executable = env::current_exe().expect("the test binary knows its own path");
 
-            let output = std::process::Command::new(&executable)
+            let output = Command::new(&executable)
                 .env(ENVIRONMENT_HELPER_VAR, "1")
                 .env(ACTIVE_VAR, "7")
                 .env_remove(CENSUS_VAR)
@@ -2859,7 +2921,7 @@ mod tests {
 
         #[test]
         #[cfg(all(any(unix, windows), not(miri)))]
-        fn a_guard_reached_before_installation_fails_visibly_instead_of_reporting_baseline() {
+        fn a_guard_reached_before_installation_terminates_instead_of_reporting_baseline() {
             // Linking a fixture whose own pre-main constructor calls a guard, at varying object
             // and library order across ELF, Mach-O, and Windows, is beyond what a source-level
             // regression can drive; this proves the underlying mechanism directly instead. The
@@ -2868,10 +2930,11 @@ mod tests {
             // simulate a guard that runs in the window before that constructor executes.
             //
             // A subprocess of its own, selected by name and admitted by an environment marker: the
-            // forcing is one-way, so the inner half would ruin any process it shared with siblings.
-            let executable = std::env::current_exe().expect("the test binary knows its own path");
+            // forcing is one-way, so the inner half would invalidate sibling test results in any
+            // process it shared with them.
+            let executable = env::current_exe().expect("the test binary knows its own path");
 
-            let output = std::process::Command::new(&executable)
+            let output = Command::new(&executable)
                 .args([
                     "--exact",
                     "runtime::tests::process_tests::the_child_simulates_a_pre_install_guard",
@@ -2895,41 +2958,43 @@ mod tests {
                 "the child never reached the simulated pre-install state\n{said}\n{stderr}"
             );
             assert!(!output.status.success(), "a pre-install guard must not exit successfully");
+            assert_eq!(
+                output.status.code(),
+                Some(86),
+                "a pre-install guard must use the reserved infrastructure-failure status"
+            );
             assert!(
                 stderr.contains("gamma_rt: a guard executed before this crate's own constructor"),
                 "{stderr}"
+            );
+            assert!(
+                !said.contains(PRE_INSTALL_CONTINUED),
+                "catch_unwind absorbed the pre-install failure and execution continued\n{said}\n{stderr}"
             );
         }
 
         #[test]
         #[cfg(windows)]
         fn a_startup_error_is_written_to_overlapped_stderr() {
-            use std::os::windows::fs::OpenOptionsExt;
-            use std::process::Stdio;
-
             const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
 
-            let executable = std::env::current_exe().expect("the test binary knows its own path");
-            let nonce = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("the test host's clock is after the Unix epoch")
-                .as_nanos();
-            let stderr_path = std::env::temp_dir().join(format!("gamma-rt-overlapped-stderr-{}-{nonce}.txt", std::process::id()));
-            let stderr = std::fs::OpenOptions::new()
+            let executable = env::current_exe().expect("the test binary knows its own path");
+            let directory = tempfile::tempdir().expect("an owned temporary directory");
+            let stderr_path = directory.path().join("stderr");
+            let stderr = OpenOptions::new()
                 .create_new(true)
                 .write(true)
                 .custom_flags(FILE_FLAG_OVERLAPPED)
                 .open(&stderr_path)
                 .expect("an overlapped stderr file");
 
-            let status = std::process::Command::new(&executable)
+            let status = Command::new(&executable)
                 .env("GAMMA_RT_ENVIRONMENT_ERROR_HELPER", "1")
                 .stdout(Stdio::null())
                 .stderr(Stdio::from(stderr))
                 .status()
                 .expect("the child runs");
-            let bytes = std::fs::read(&stderr_path).expect("the child's stderr remains readable");
-            std::fs::remove_file(stderr_path).expect("the temporary stderr file is removed");
+            let bytes = fs::read(&stderr_path).expect("the child's stderr remains readable");
 
             assert_eq!(
                 status.code(),
@@ -2953,9 +3018,13 @@ mod tests {
         #[cfg(all(any(unix, windows), not(miri)))]
         const PRE_INSTALL_CHILD: &str = "GAMMA_RT_PRE_INSTALL_CHILD";
 
-        /// What the inner half prints once it has forced the pre-install state, before it panics.
+        /// What the inner half prints once it has forced the pre-install state, before it terminates.
         #[cfg(all(any(unix, windows), not(miri)))]
         const PRE_INSTALL_REACHED: &str = "the pre-install state was forced";
+
+        /// What a catchable pre-install panic would let the inner half print incorrectly.
+        #[cfg(all(any(unix, windows), not(miri)))]
+        const PRE_INSTALL_CONTINUED: &str = "execution continued after the pre-install guard";
 
         #[test]
         #[cfg(all(any(unix, windows), not(miri)))]
@@ -2963,24 +3032,26 @@ mod tests {
             // Inert unless the outer test asked for it, because what it does cannot be undone.
             // `install` runs once, before `main`, so a process whose sentinel has been forced back
             // to `UNINSTALLED` stays that way: every sibling test the harness schedules afterward
-            // in this binary would then reach a guard that is behaving perfectly correctly and
-            // panic, and which tests those are is a matter of harness scheduling, so the damage
-            // would appear on some machines and not others. Under a direct `cargo test`, where this
-            // runs alongside everything else rather than alone, the marker is absent and this
-            // returns without touching anything.
-            if std::env::var_os(PRE_INSTALL_CHILD).is_none() {
+            // in this binary would then reach a guard that correctly terminates the process. Which
+            // tests those are is a matter of harness scheduling, so the resulting invalid test
+            // results would differ across hosts. Under a direct `cargo test`, where this runs
+            // alongside everything else rather than alone, the marker is absent and this returns
+            // without touching anything.
+            if env::var_os(PRE_INSTALL_CHILD).is_none() {
                 return;
             }
 
             // Said before the sentinel is touched, so that it is on the wire whichever way the
             // guard below ends this process. `println!` writes through a line buffer, so the
-            // newline is what flushes it rather than an orderly shutdown that a panic need not
-            // reach.
+            // newline flushes it without relying on the orderly shutdown that immediate
+            // termination skips.
             println!("{PRE_INSTALL_REACHED}");
 
             ACTIVE.store(UNINSTALLED, Ordering::Release);
 
-            let _ = active();
+            let _caught = std::panic::catch_unwind(active);
+
+            println!("{PRE_INSTALL_CONTINUED}");
         }
 
         #[test]
@@ -2988,9 +3059,9 @@ mod tests {
         fn copy_environment_via_getenv_reads_stable_values_in_an_isolated_process() {
             // Environment mutation is process-global, so even a sequential set-and-read belongs in
             // a child where no sibling test can read the environment at the same time.
-            let executable = std::env::current_exe().expect("the test binary knows its own path");
+            let executable = env::current_exe().expect("the test binary knows its own path");
 
-            let output = std::process::Command::new(&executable)
+            let output = Command::new(&executable)
                 .env(GETENV_CHILD, "1")
                 .args([
                     "--exact",
@@ -3010,7 +3081,7 @@ mod tests {
         #[test]
         #[cfg(all(unix, not(miri)))]
         fn the_child_reads_stable_values_via_getenv() {
-            if std::env::var_os(GETENV_CHILD).is_none() {
+            if env::var_os(GETENV_CHILD).is_none() {
                 return;
             }
 
@@ -3045,9 +3116,9 @@ mod tests {
         #[test]
         #[cfg(any(unix, windows))]
         fn the_reserved_ordinal_is_inactive_in_baseline_census_and_mutant_processes() {
-            let executable = std::env::current_exe().expect("the test binary knows its own path");
+            let executable = env::current_exe().expect("the test binary knows its own path");
 
-            let baseline = std::process::Command::new(&executable)
+            let baseline = Command::new(&executable)
                 .args([
                     "--exact",
                     "runtime::tests::process_tests::the_child_reports_guard_selection",
@@ -3062,7 +3133,7 @@ mod tests {
 
             assert!(baseline.contains("active=0 none=false seven=false"), "{baseline}");
 
-            let mutant = std::process::Command::new(&executable)
+            let mutant = Command::new(&executable)
                 .args([
                     "--exact",
                     "runtime::tests::process_tests::the_child_reports_guard_selection",
@@ -3078,12 +3149,12 @@ mod tests {
             assert!(mutant.contains("active=7 none=false seven=true"), "{mutant}");
 
             let sequence = CENSUS_NONE_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::current_dir()
+            let path = env::current_dir()
                 .expect("the test process has a working directory")
-                .join(format!(".gamma-census-none-{}-{sequence}.bin", std::process::id()));
-            let _removed = std::fs::remove_file(&path);
+                .join(format!(".gamma-census-none-{}-{sequence}.bin", process::id()));
+            let _removed = fs::remove_file(&path);
 
-            let census = std::process::Command::new(&executable)
+            let census = Command::new(&executable)
                 .args([
                     "--exact",
                     "runtime::tests::process_tests::the_child_reports_guard_selection",
@@ -3095,7 +3166,7 @@ mod tests {
                 .expect("the census child runs");
             assert!(census.status.success(), "{}", String::from_utf8_lossy(&census.stderr));
             let census = String::from_utf8_lossy(&census.stdout);
-            let _removed = std::fs::remove_file(&path);
+            let _removed = fs::remove_file(&path);
 
             assert!(census.contains("active=0 none=false seven=false"), "{census}");
         }
@@ -3111,17 +3182,17 @@ mod tests {
         fn census_bytes_of(test: &str) -> Vec<u8> {
             static CENSUS_TEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
-            let executable = std::env::current_exe().expect("the test binary knows its own path");
+            let executable = env::current_exe().expect("the test binary knows its own path");
             let sequence = CENSUS_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::current_dir()
+            let path = env::current_dir()
                 .expect("the test process has a working directory")
-                .join(format!(".gamma-census-{}-{sequence}.bin", std::process::id()));
+                .join(format!(".gamma-census-{}-{sequence}.bin", process::id()));
 
             // Opened for appending, so a leftover from an earlier run would be read as part of this
             // one. Removing it first is what makes the assertion below about the whole file sound.
-            let _ = std::fs::remove_file(&path);
+            let _ = fs::remove_file(&path);
 
-            let output = std::process::Command::new(&executable)
+            let output = Command::new(&executable)
                 .args(["--exact", test, "--nocapture"])
                 .env(CENSUS_VAR, &path)
                 .output()
@@ -3131,8 +3202,8 @@ mod tests {
 
             // Nothing flushes the census before the child exits, so this read has to happen after the
             // wait that `output` performed.
-            let bytes = std::fs::read(&path).expect("the child wrote a census");
-            let _ = std::fs::remove_file(&path);
+            let bytes = fs::read(&path).expect("the child wrote a census");
+            let _ = fs::remove_file(&path);
 
             bytes
         }
@@ -3237,7 +3308,7 @@ mod tests {
             TEST_SEAL_WAITING.store(false, Ordering::Release);
             TEST_SEAL_CLAIMED.store(false, Ordering::Release);
 
-            std::thread::scope(|scope| {
+            thread::scope(|scope| {
                 let writer = scope.spawn(|| {
                     assert!(!a(79));
                 });
@@ -3277,7 +3348,7 @@ mod tests {
             assert!(!a(73));
 
             TEST_WRITE_STATE.store(BLOCK_AND_SHORT, Ordering::Release);
-            std::thread::scope(|scope| {
+            thread::scope(|scope| {
                 let sealer = scope.spawn(|| seal());
 
                 while TEST_WRITE_STATE.load(Ordering::Acquire) != WRITE_ENTERED {
@@ -3316,10 +3387,10 @@ mod tests {
 
             assert!(!a(17));
 
-            let path = std::env::var_os(CENSUS_VAR).expect("the parent supplied a census path");
+            let path = env::var_os(CENSUS_VAR).expect("the parent supplied a census path");
 
             assert!(
-                !std::path::Path::new(&path).exists(),
+                !Path::new(&path).exists(),
                 "recording a site touched the census file before process exit"
             );
         }

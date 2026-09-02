@@ -12,19 +12,16 @@
 //!
 //! A child is placed in a process group of its own by the spawn itself, and the id of that group
 //! is the child's pid — which the parent only learns once the spawn has returned. There is
-//! therefore an unavoidable window in which a group exists and nothing has been told about it. A
-//! handler that ran in that window with no protocol to consult would scan the registry, find
-//! nothing, restore the default disposition and re-raise: the parent dies of the signal and the
-//! child, in a group of its own that no signal had reached, goes on running. Registering afterwards
-//! is no answer either, since the handler scans each slot once and may have already passed the slot
-//! the registration lands in.
+//! therefore an unavoidable window in which the group exists but is not registered. A handler that
+//! ran in that window with no protocol to consult would scan the registry, find nothing, restore the
+//! default disposition and re-raise: the parent dies of the signal and the unwatched child goes on
+//! running in its own process group. Registering afterwards is no answer either, since the handler
+//! scans each slot once and may have already passed the slot the registration lands in.
 //!
 //! [`spawning`] closes both. A spawner announces itself before it creates anything and reads the
 //! interrupt state afterwards; a handler announces itself before it scans and reads the spawner
 //! count afterwards. Both sides use sequentially consistent operations, so at least one of them
-//! sees the other — this is Dekker's argument, and it is the whole of the guarantee. Loom builds
-//! add explicit sequentially consistent fences to express that cross-atomic order because Loom
-//! deliberately models sequentially consistent atomic accesses as acquire-release operations:
+//! sees the other — this is Dekker's argument, and it is the whole of the guarantee:
 //!
 //! * The spawner sees the interrupt. It then either has not created its child yet, and does not,
 //!   or has, and [`Spawning::watch`] kills the new group as it registers it.
@@ -32,8 +29,8 @@
 //!   leaving the fatal half of the interrupt to whichever spawner is last out of the window.
 //!
 //! There is no interleaving in which the spawner believes the run is calm and the handler believes
-//! nothing is being spawned, so no thread ever re-raises a terminal signal while a child exists
-//! that nothing has been told about.
+//! nothing is being spawned, so no thread ever re-raises a terminal signal while an unwatched child
+//! exists.
 //!
 //! The cost is that an interrupt arriving mid-spawn is delivered when that spawn finishes rather
 //! than at once, and the alternative is the leak above. The width is whatever a caller holds the
@@ -46,12 +43,12 @@
 
 use core::fmt;
 #[cfg(not(loom))]
-use core::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::io;
 use std::sync::OnceLock;
 
 #[cfg(loom)]
-use loom::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering, fence};
+use loom::sync::atomic::{AtomicI32, AtomicUsize, Ordering, fence};
 
 #[cfg(target_os = "linux")]
 use crate::cgroup::Cgroup;
@@ -88,17 +85,22 @@ const EMPTY: i32 = 0;
 /// Zero is not a signal number, so it cannot be confused with one that has.
 const CALM: i32 = 0;
 
-/// A slot with neither a process group nor a cgroup kill descriptor.
-const EMPTY_ENTRY: u64 = 0;
-
 /// The groups an interrupt takes with it, and the protocol that keeps a child from slipping past.
 ///
 /// Separated from the process-wide [`REGISTRY`] it is normally reached through, and given the kill
 /// it performs as a parameter, so that the protocol can be driven through its races by a test in a
 /// chosen order. Signal timing is not something a test can choose; this is.
 struct Registry {
-    /// Process groups and their optional cgroup kill switches, atomically paired per slot.
-    watched: [AtomicU64; SLOTS],
+    /// Process groups watched until their owning process tree releases the numeric identity.
+    groups: [AtomicI32; SLOTS],
+
+    /// Encoded cgroup kill descriptors watched until their owning cgroup is dropped.
+    ///
+    /// Stored separately because a process-group identifier may be released as soon as its leader
+    /// is reaped, while descendants can remain inside the cgroup until the containment boundary is
+    /// drained. Zero means empty; a descriptor is stored one greater so descriptor zero remains
+    /// representable.
+    cgroups: [AtomicI32; SLOTS],
 
     /// Sweeps currently using descriptors, so release cannot close one under a handler.
     handling: AtomicUsize,
@@ -117,7 +119,8 @@ impl Registry {
     #[cfg(not(loom))]
     const fn new() -> Self {
         Self {
-            watched: [const { AtomicU64::new(EMPTY_ENTRY) }; SLOTS],
+            groups: [const { AtomicI32::new(EMPTY) }; SLOTS],
+            cgroups: [const { AtomicI32::new(EMPTY) }; SLOTS],
             handling: AtomicUsize::new(0),
             spawning: AtomicUsize::new(0),
             interrupted: AtomicI32::new(CALM),
@@ -128,14 +131,15 @@ impl Registry {
     #[cfg(loom)]
     fn new() -> Self {
         Self {
-            watched: core::array::from_fn(|_| AtomicU64::new(EMPTY_ENTRY)),
+            groups: core::array::from_fn(|_| AtomicI32::new(EMPTY)),
+            cgroups: core::array::from_fn(|_| AtomicI32::new(EMPTY)),
             handling: AtomicUsize::new(0),
             spawning: AtomicUsize::new(0),
             interrupted: AtomicI32::new(CALM),
         }
     }
 
-    /// Announces a spawn about to create a group nothing has been told about yet.
+    /// Announces a spawn about to create a process group that is not registered yet.
     ///
     /// Sequentially consistent, and paired with the [`Registry::signal`] the caller performs next:
     /// together they are one half of the handshake described at the top of this module.
@@ -191,10 +195,10 @@ impl Registry {
             return None;
         }
 
-        let slot = self.watched.iter().position(|slot| {
-            slot.compare_exchange(EMPTY_ENTRY, entry(group, None), Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-        });
+        let slot = self
+            .groups
+            .iter()
+            .position(|slot| slot.compare_exchange(EMPTY, group, Ordering::SeqCst, Ordering::SeqCst).is_ok());
 
         if self.signal() != CALM {
             kill(group);
@@ -209,34 +213,39 @@ impl Registry {
     /// it kills, and a run that deferred its death goes on spawning: the slot a caller was given
     /// may already belong to somebody else by the time it is handed back, and clearing it would
     /// take that child out of the next sweep.
-    fn release(&self, slot: usize, group: i32, wait_for_cgroup: bool) {
-        if let Some(entry) = self.watched.get(slot) {
-            let mut held = entry.load(Ordering::SeqCst);
-
-            while entry_group(held) == group {
-                match entry.compare_exchange(held, EMPTY_ENTRY, Ordering::SeqCst, Ordering::SeqCst) {
-                    Ok(_released) => break,
-                    Err(current) => held = current,
-                }
-            }
-        }
-
-        if wait_for_cgroup {
-            while self.handling.load(Ordering::SeqCst) != 0 {
-                std::thread::yield_now();
-            }
+    fn release(&self, slot: usize, group: i32) {
+        if let Some(entry) = self.groups.get(slot) {
+            let _released = entry.compare_exchange(group, EMPTY, Ordering::SeqCst, Ordering::SeqCst);
         }
     }
 
-    /// Pairs an already-open cgroup kill switch with a claimed process-group slot.
+    /// Watches an already-open cgroup kill switch for the lifetime of its owning cgroup.
     #[cfg(target_os = "linux")]
-    fn attach_cgroup<C: Fn(i32)>(&self, slot: usize, group: i32, cgroup: i32, kill: &C) {
-        if let Some(slot) = self.watched.get(slot) {
-            let _attached = slot.compare_exchange(entry(group, None), entry(group, Some(cgroup)), Ordering::SeqCst, Ordering::SeqCst);
-        }
+    fn claim_cgroup<C: Fn(i32)>(&self, descriptor: i32, kill: &C) -> Option<usize> {
+        let encoded = descriptor.checked_add(1).filter(|encoded| *encoded > EMPTY)?;
+        let slot = self
+            .cgroups
+            .iter()
+            .position(|slot| slot.compare_exchange(EMPTY, encoded, Ordering::SeqCst, Ordering::SeqCst).is_ok());
 
         if self.signal() != CALM {
-            kill(cgroup);
+            kill(descriptor);
+        }
+
+        slot
+    }
+
+    /// Stops watching a cgroup descriptor and waits for a sweep that already took it.
+    #[cfg(target_os = "linux")]
+    fn release_cgroup(&self, slot: usize, descriptor: i32) {
+        if let Some(entry) = self.cgroups.get(slot)
+            && let Some(encoded) = descriptor.checked_add(1)
+        {
+            let _released = entry.compare_exchange(encoded, EMPTY, Ordering::SeqCst, Ordering::SeqCst);
+        }
+
+        while self.handling.load(Ordering::SeqCst) != 0 {
+            std::thread::yield_now();
         }
     }
 
@@ -264,14 +273,18 @@ impl Registry {
     fn sweep_with<K: Fn(i32), C: Fn(i32)>(&self, kill: &K, kill_cgroup: &C) {
         let _active = self.handling.fetch_add(1, Ordering::SeqCst);
 
-        for entry in &self.watched {
-            let (group, cgroup) = split_entry(entry.swap(EMPTY_ENTRY, Ordering::SeqCst));
-
+        for entry in &self.groups {
+            let group = entry.swap(EMPTY, Ordering::SeqCst);
             if group > EMPTY {
-                if let Some(descriptor) = cgroup {
-                    kill_cgroup(descriptor);
-                }
                 kill(group);
+            }
+        }
+
+        for entry in &self.cgroups {
+            let encoded = entry.swap(EMPTY, Ordering::SeqCst);
+
+            if encoded > EMPTY {
+                kill_cgroup(encoded - 1);
             }
         }
 
@@ -280,33 +293,16 @@ impl Registry {
 
     /// What a slot currently holds, or zero for one that is free.
     fn holding(&self, slot: usize) -> i32 {
-        self.watched
-            .get(slot)
-            .map_or(EMPTY, |entry| entry_group(entry.load(Ordering::SeqCst)))
+        self.groups.get(slot).map_or(EMPTY, |entry| entry.load(Ordering::SeqCst))
     }
-}
 
-fn entry(group: i32, cgroup: Option<i32>) -> u64 {
-    let group = u64::from(u32::try_from(group).expect("claim accepts only positive process-group identifiers"));
-    let descriptor = cgroup.map_or(0, |fd| {
-        u64::from(u32::try_from(fd).expect("cgroup kill handles contain open, nonnegative descriptors")) + 1
-    });
-
-    (group << 32) | descriptor
-}
-
-fn split_entry(entry: u64) -> (i32, Option<i32>) {
-    let group = i32::try_from(entry >> 32).unwrap_or(EMPTY);
-    let descriptor = u32::try_from(entry & u64::from(u32::MAX))
-        .ok()
-        .and_then(|encoded| encoded.checked_sub(1))
-        .and_then(|fd| i32::try_from(fd).ok());
-
-    (group, descriptor)
-}
-
-fn entry_group(entry: u64) -> i32 {
-    split_entry(entry).0
+    #[cfg(all(test, target_os = "linux", not(miri)))]
+    fn holding_cgroup(&self, slot: usize) -> Option<i32> {
+        self.cgroups.get(slot).and_then(|entry| {
+            let encoded = entry.load(Ordering::SeqCst);
+            (encoded > EMPTY).then(|| encoded - 1)
+        })
+    }
 }
 
 /// The run's registry, which every signal handler and every spawn shares.
@@ -453,7 +449,7 @@ pub struct Spawning(&'static Registry);
 impl Spawning {
     /// Whether a terminal signal has already begun taking this run apart.
     ///
-    /// A spawner that sees this must not create anything: the process is free to die at the next
+    /// A spawner that sees this must not create anything: process termination may occur at the next
     /// instruction, since nothing it is protecting exists yet.
     #[must_use]
     pub fn interrupted(&self) -> bool {
@@ -492,11 +488,21 @@ impl Spawning {
         if let Some(cgroup) = cgroup
             && let Some(handle) = cgroup.kill_handle()
         {
-            // Recorded before the descriptor is published, so there is no window in which the
-            // registry holds a descriptor the cgroup does not know it must retract.
-            cgroup.watched_at(slot, group);
+            if cgroup.is_watched() {
+                self.0.release(slot, group);
 
-            self.0.attach_cgroup(slot, group, handle.raw(), &kill_cgroup);
+                return None;
+            }
+
+            let Some(cgroup_slot) = self.0.claim_cgroup(handle.raw(), &kill_cgroup) else {
+                self.0.release(slot, group);
+
+                return None;
+            };
+
+            // The unique cgroup borrow keeps the descriptor's owning file live while the registry
+            // slot is recorded in its one-shot watch state.
+            cgroup.watched_at(cgroup_slot, handle.raw());
         }
 
         Some(slot)
@@ -542,11 +548,8 @@ pub fn watched(slot: usize) -> i32 {
 /// asserting about the registry itself.
 #[cfg(all(test, target_os = "linux", not(miri)))]
 #[must_use]
-pub(crate) fn watched_pair(slot: usize) -> (i32, Option<i32>) {
-    registry()
-        .watched
-        .get(slot)
-        .map_or((EMPTY, None), |entry| split_entry(entry.load(Ordering::SeqCst)))
+pub(crate) fn watched_cgroup(slot: usize) -> Option<i32> {
+    registry().holding_cgroup(slot)
 }
 
 /// Stops watching a group, leaving a slot some other spawn has since claimed alone.
@@ -555,7 +558,7 @@ pub(crate) fn watched_pair(slot: usize) -> (i32, Option<i32>) {
 /// group it was claimed for is still in it: a handler empties every slot it kills, and a run that
 /// deferred its own death goes on spawning into the slots that frees.
 pub fn forget(slot: usize, group: i32) {
-    registry().release(slot, group, false);
+    registry().release(slot, group);
 }
 
 /// Stops watching a Linux group and waits for any handler using its cgroup descriptor.
@@ -564,8 +567,8 @@ pub fn forget(slot: usize, group: i32) {
 /// about to be closed. It is not public: the release has to be tied to the cgroup's lifetime
 /// rather than offered to a caller who could skip it, call it twice, or call it too early.
 #[cfg(target_os = "linux")]
-pub(crate) fn release_watched_cgroup(slot: usize, group: i32) {
-    registry().release(slot, group, true);
+pub(crate) fn release_watched_cgroup(slot: usize, descriptor: i32) {
+    registry().release_cgroup(slot, descriptor);
 }
 
 /// Kills a process group, which is the only thing the registry does to the world outside itself.
@@ -850,9 +853,8 @@ mod tests {
         let cgroups = RefCell::new(Vec::new());
         let group_kill = |group| groups.borrow_mut().push(group);
         let cgroup_kill = |descriptor| cgroups.borrow_mut().push(descriptor);
-        let slot = registry.claim(4242, &group_kill).expect("a free slot");
-
-        registry.attach_cgroup(slot, 4242, 17, &cgroup_kill);
+        let _group_slot = registry.claim(4242, &group_kill).expect("a free group slot");
+        let _cgroup_slot = registry.claim_cgroup(17, &cgroup_kill).expect("a free cgroup slot");
 
         assert_eq!(registry.interrupt_with(libc::SIGINT, &group_kill, &cgroup_kill), Some(libc::SIGINT));
         assert_eq!(*groups.borrow(), vec![4242]);
@@ -867,16 +869,15 @@ mod tests {
         let cgroups = RefCell::new(Vec::new());
         let group_kill = |group| groups.borrow_mut().push(group);
         let cgroup_kill = |descriptor| cgroups.borrow_mut().push(descriptor);
-        let old = registry.claim(11, &group_kill).expect("a free slot");
-
-        registry.attach_cgroup(old, 11, 17, &cgroup_kill);
+        let _old_group = registry.claim(11, &group_kill).expect("a free group slot");
+        let old = registry.claim_cgroup(17, &cgroup_kill).expect("a free cgroup slot");
         assert_eq!(registry.interrupt_with(libc::SIGINT, &group_kill, &cgroup_kill), Some(libc::SIGINT));
 
-        let new = registry.claim(22, &group_kill).expect("the handler returned the slot");
-        registry.attach_cgroup(new, 22, 23, &cgroup_kill);
-        registry.release(old, 11, true);
+        let _new_group = registry.claim(22, &group_kill).expect("the handler returned a group slot");
+        let new = registry.claim_cgroup(23, &cgroup_kill).expect("the handler returned a cgroup slot");
+        registry.release_cgroup(old, 17);
 
-        assert_eq!(registry.holding(new), 22);
+        assert_eq!(registry.holding_cgroup(new), Some(23));
         registry.sweep_with(&group_kill, &cgroup_kill);
         assert!(cgroups.borrow().contains(&23), "the new owner's cgroup descriptor must survive");
     }
@@ -1001,13 +1002,13 @@ mod tests {
         recorded(|registry, kill, _killed| {
             let mine = registry.claim(11, &kill).expect("a free slot");
 
-            registry.release(mine, 11, false);
+            registry.release(mine, 11);
 
             let theirs = registry.claim(22, &kill).expect("the same slot, now free");
 
             assert_eq!(theirs, mine);
 
-            registry.release(mine, 11, false);
+            registry.release(mine, 11);
 
             assert_eq!(registry.holding(theirs), 22, "somebody else's registration must survive");
         });
@@ -1017,7 +1018,7 @@ mod tests {
     #[test]
     fn releasing_an_out_of_range_slot_does_nothing() {
         recorded(|registry, _kill, _killed| {
-            registry.release(usize::MAX, 1, false);
+            registry.release(usize::MAX, 1);
 
             assert_eq!(registry.holding(usize::MAX), EMPTY);
         });
@@ -1123,7 +1124,7 @@ mod tests {
 
             let (slot, group) = taken.pop().expect("the last claim");
 
-            registry.release(slot, group, false);
+            registry.release(slot, group);
 
             assert_eq!(registry.claim(9999, &kill), Some(slot), "the released slot was not reused");
         });
@@ -1251,10 +1252,11 @@ mod loom_models {
 
     use super::Registry;
 
+    /// An arbitrary positive process-group identifier, distinct from the registry's empty marker.
+    const PROCESS_GROUP: i32 = 41;
+
     pub(super) fn claim_versus_sweep_never_orphans_the_claimed_group() {
         loom::model(|| {
-            const GROUP: i32 = 41;
-
             let registry = Arc::new(Registry::new());
             let killed = Arc::new(Mutex::new(Vec::new()));
 
@@ -1265,7 +1267,7 @@ mod loom_models {
                 loom::thread::spawn(move || {
                     let kill = |group| killed.lock().expect("kill recorder").push(group);
 
-                    assert!(registry.claim(GROUP, &kill).is_some());
+                    assert!(registry.claim(PROCESS_GROUP, &kill).is_some());
                 })
             };
             let sweeping = {
@@ -1283,7 +1285,7 @@ mod loom_models {
             sweeping.join().expect("sweep thread");
 
             assert!(
-                killed.lock().expect("kill recorder").contains(&GROUP),
+                killed.lock().expect("kill recorder").contains(&PROCESS_GROUP),
                 "the claimed group escaped both sides of the protocol"
             );
         });
@@ -1299,10 +1301,8 @@ mod loom_models {
     ///
     /// Fails as soon as either side's sequentially consistent operation or fence is weakened,
     /// because Dekker's argument is the only thing holding the two reads together.
-    pub(super) fn a_spawn_window_never_leaves_a_child_no_one_was_told_about() {
+    pub(super) fn a_spawn_window_never_leaves_an_unwatched_child() {
         loom::model(|| {
-            const GROUP: i32 = 41;
-
             let registry = Arc::new(Registry::new());
             let killed = Arc::new(Mutex::new(Vec::new()));
 
@@ -1315,10 +1315,10 @@ mod loom_models {
 
                     registry.open();
 
-                    // The spawner's half: a run already dying must create nothing at all, since it
-                    // is free to die at the next instruction.
+                    // Interruption-driven termination may occur at the next instruction, so no
+                    // child may be created after the signal is observed.
                     let created = if registry.signal() == super::CALM {
-                        assert!(registry.claim(GROUP, &kill).is_some(), "a registry of free slots");
+                        assert!(registry.claim(PROCESS_GROUP, &kill).is_some(), "a registry of free slots");
 
                         true
                     } else {
@@ -1346,31 +1346,27 @@ mod loom_models {
             handling.join().expect("handler thread");
 
             assert!(
-                !created || killed.lock().expect("kill recorder").contains(&GROUP),
+                !created || killed.lock().expect("kill recorder").contains(&PROCESS_GROUP),
                 "a child created during an interrupt was left running by both sides"
             );
         });
     }
 
-    /// However the two sides interleave, at least one performs the signal and it is never absorbed.
+    /// However the two sides interleave, at least one accepts responsibility for re-raising.
     ///
     /// The other half of the same protocol, and the one a missing kill would not reveal. A handler
-    /// that found a window open declines to die and leaves the fatal half behind; if the spawner
-    /// closing that window then also declines, the run has swallowed a `Ctrl-C` and the user
-    /// presses it again. If both perform it, the second is acting on a process the first already
-    /// ended — harmless in production, but here it says the count is not a count of deaths.
-    pub(super) fn an_interrupt_is_never_absorbed_by_a_closing_window() {
+    /// that finds a window open defers re-raising the signal to the last spawner leaving the
+    /// window. The model records that responsibility rather than process termination itself.
+    pub(super) fn a_terminal_signal_always_has_a_reraise_owner() {
         loom::model(|| {
-            const GROUP: i32 = 41;
-
             let registry = Arc::new(Registry::new());
             let killed = Arc::new(Mutex::new(Vec::new()));
-            let deaths = Arc::new(Mutex::new(0_usize));
+            let reraises = Arc::new(Mutex::new(0_usize));
 
             let spawning = {
                 let registry = Arc::clone(&registry);
                 let killed = Arc::clone(&killed);
-                let deaths = Arc::clone(&deaths);
+                let reraises = Arc::clone(&reraises);
 
                 loom::thread::spawn(move || {
                     let kill = |group| killed.lock().expect("kill recorder").push(group);
@@ -1378,26 +1374,25 @@ mod loom_models {
                     registry.open();
 
                     if registry.signal() == super::CALM {
-                        let _slot = registry.claim(GROUP, &kill);
+                        let _slot = registry.claim(PROCESS_GROUP, &kill);
                     }
 
-                    // A window that was opened before the handler ran is the one that must die: the
-                    // handler saw it and declined.
+                    // A window that was open when the handler ran owns the deferred re-raise.
                     if registry.close(&kill).is_some() {
-                        *deaths.lock().expect("death recorder") += 1;
+                        *reraises.lock().expect("re-raise recorder") += 1;
                     }
                 })
             };
             let handling = {
                 let registry = Arc::clone(&registry);
                 let killed = Arc::clone(&killed);
-                let deaths = Arc::clone(&deaths);
+                let reraises = Arc::clone(&reraises);
 
                 loom::thread::spawn(move || {
                     let kill = |group| killed.lock().expect("kill recorder").push(group);
 
                     if registry.interrupt(libc::SIGINT, &kill).is_some() {
-                        *deaths.lock().expect("death recorder") += 1;
+                        *reraises.lock().expect("re-raise recorder") += 1;
                     }
                 })
             };
@@ -1406,8 +1401,8 @@ mod loom_models {
             handling.join().expect("handler thread");
 
             assert!(
-                *deaths.lock().expect("death recorder") >= 1,
-                "the run absorbed a terminal signal: neither side performed the death it demanded"
+                *reraises.lock().expect("re-raise recorder") >= 1,
+                "neither side accepted responsibility for re-raising the terminal signal"
             );
         });
     }
@@ -1416,6 +1411,6 @@ mod loom_models {
 #[cfg(loom)]
 pub(crate) fn run_loom_models() {
     loom_models::claim_versus_sweep_never_orphans_the_claimed_group();
-    loom_models::a_spawn_window_never_leaves_a_child_no_one_was_told_about();
-    loom_models::an_interrupt_is_never_absorbed_by_a_closing_window();
+    loom_models::a_spawn_window_never_leaves_an_unwatched_child();
+    loom_models::a_terminal_signal_always_has_a_reraise_owner();
 }

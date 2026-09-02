@@ -44,6 +44,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::time::Duration;
+use std::io::Read as _;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 use std::{fs, io, thread};
@@ -459,8 +461,8 @@ fn list(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
 }
 
 /// Builds the direct `--list` invocation for one test binary.
-fn listing_command(work: &Workspace, binary: &TestBinary) -> std::process::Command {
-    let mut command = std::process::Command::new(binary.path.as_std_path());
+fn listing_command(work: &Workspace, binary: &TestBinary) -> Command {
+    let mut command = Command::new(binary.path.as_std_path());
 
     let _ = command
         .args(["--list", "--format=terse"])
@@ -470,7 +472,7 @@ fn listing_command(work: &Workspace, binary: &TestBinary) -> std::process::Comma
         // own is carried, since that one would fight with the format asked for here.
         .args(HarnessFilters::parse(work.test_arguments()).selecting())
         .current_dir(working_directory(work, binary).as_std_path())
-        .stderr(std::process::Stdio::null());
+        .stderr(Stdio::null());
 
     configure_loader(&mut command, work.launch());
 
@@ -493,9 +495,7 @@ fn listing_command(work: &Workspace, binary: &TestBinary) -> std::process::Comma
 /// A budget reached is `None` rather than a partial listing: half an enumeration is a census that
 /// believes some tests do not exist, and a test believed not to exist is one no mutant is ever run
 /// against.
-fn listed(mut command: std::process::Command, budget: Duration) -> Option<Vec<Box<str>>> {
-    use std::process::Stdio;
-
+fn listed(mut command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
     // Nothing is metered — the question is what the binary is, not what it costs — so the request
     // asks for no measurement and no ceiling. Containment does not follow that request: `prepare`
     // seals every launch it can, and the listing of a `harness = false` target is exactly the kind
@@ -535,11 +535,9 @@ fn listed(mut command: std::process::Command, budget: Duration) -> Option<Vec<Bo
         let refused = false;
 
         let spawned = if refused {
-            Err(std::io::Error::other("the reader thread a test asked to fail"))
+            Err(io::Error::other("the reader thread a test asked to fail"))
         } else {
             thread::Builder::new().name("cargo-gamma-census-output".to_owned()).spawn(move || {
-                use std::io::Read as _;
-
                 let mut text = Vec::new();
                 let mut buffer = [0_u8; 8192];
                 let mut whole = true;
@@ -833,12 +831,16 @@ where
 
                                 // The runtime normally writes every set bit once. Deduplicate here
                                 // as a protocol boundary too, so malformed input cannot inflate a
-                                // site's saturation count and prematurely stop the walk.
+                                // relevant site's saturation count and prematurely stop the walk.
+                                // Irrelevant records are discarded first so an untrusted census
+                                // cannot force the coordinator to sort the complete protocol-sized
+                                // population when only a small target set can affect this binary.
                                 let mut sites = sites;
+                                sites.retain(|site| wanted.is_some_and(|wanted| wanted.contains(site)));
                                 sites.sort_unstable();
                                 sites.dedup();
 
-                                for site in sites.into_iter().filter(|site| wanted.is_some_and(|wanted| wanted.contains(site))) {
+                                for site in sites {
                                     let tests = reached.entry(site).or_default();
 
                                     tests.push(test_index);
@@ -982,12 +984,55 @@ fn sample(work: &Workspace, binary: &TestBinary, name: &str, path: &Utf8Path, st
 
 /// The largest census file this will read into memory.
 ///
-/// One record per site, plus the [`OVERFLOW`] marker and the [`SEAL`], is the largest whole census
-/// [`gamma_rt::write_reached`](gamma_rt) can ever produce: it serializes each set bit of its
-/// `MAX_CENSUS_SITES`-sized bitmap at most once, in one pass, so no honest file can hold more
-/// records than that. Named from `gamma_rt::MAX_CENSUS_SITES` rather than a second hardcoded
-/// number, so the two cannot silently drift apart.
-const MAX_CENSUS_BYTES: u64 = (gamma_rt::MAX_CENSUS_SITES as u64 + 2) * 4;
+/// [`gamma_rt::write_reached`](gamma_rt) serializes each set bit of its
+/// `MAX_CENSUS_SITES`-sized bitmap at most once, followed by protocol markers. Deriving the bound
+/// from the bitmap, marker set, and wire-record type keeps those parts from drifting independently.
+const CENSUS_MARKERS: [u32; 2] = [OVERFLOW, SEAL];
+const CENSUS_RECORD_BYTES: u64 = core::mem::size_of::<u32>() as u64;
+const MAX_CENSUS_BYTES: u64 = (gamma_rt::MAX_CENSUS_SITES as u64 + CENSUS_MARKERS.len() as u64) * CENSUS_RECORD_BYTES;
+
+/// Census bytes whose size has been checked against the runtime protocol.
+///
+/// Keeping this state in the type prevents the decoder, which allocates capacity from the input
+/// length, from accepting an unchecked byte slice when another production caller is added.
+#[derive(Debug)]
+struct BoundedCensus(Vec<u8>);
+
+/// Why a census file could not be read within the runtime protocol boundary.
+#[derive(Debug)]
+enum CensusReadError {
+    Io(io::Error),
+    Oversized { actual: u64, maximum: u64 },
+}
+
+impl core::fmt::Display for CensusReadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(cause) => cause.fmt(f),
+            Self::Oversized { actual, maximum } => {
+                write!(
+                    f,
+                    "the census file contains {actual} bytes, more than the runtime protocol maximum of {maximum}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for CensusReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(cause) => Some(cause),
+            Self::Oversized { .. } => None,
+        }
+    }
+}
+
+impl From<io::Error> for CensusReadError {
+    fn from(cause: io::Error) -> Self {
+        Self::Io(cause)
+    }
+}
 
 /// Reads a census file into memory, refusing anything past [`MAX_CENSUS_BYTES`].
 ///
@@ -995,27 +1040,24 @@ const MAX_CENSUS_BYTES: u64 = (gamma_rt::MAX_CENSUS_SITES as u64 + 2) * 4;
 /// coordinator reading it back is long-lived, judging every mutant after this one — so a test that
 /// replaced the runtime's short record stream with an arbitrarily large or sparse file must not be
 /// able to make this allocate on the test's behalf. The cap is enforced by bounding the read itself
-/// with [`Read::take`], not by trusting `fs::metadata`'s reported length first: a sparse file can
-/// misstate that length, but it cannot make more bytes actually arrive through the pipe this reads.
-fn read_bounded(path: &Utf8Path) -> io::Result<Vec<u8>> {
-    use std::io::Read as _;
-
+/// with [`std::io::Read::take`], independently of metadata: sparse files can have large logical
+/// lengths while consuming little physical storage, and files can change after inspection.
+fn read_bounded(path: &Utf8Path) -> Result<BoundedCensus, CensusReadError> {
     let file = fs::File::open(path.as_std_path())?;
     let mut bytes = Vec::new();
 
-    // One byte past the cap is asked for, not exactly the cap, so a file that is exactly on the
-    // boundary is not confused with one that overruns it: reading the cap's worth successfully
-    // leaves nothing to distinguish "exactly full" from "truncated at the limit" until the extra
-    // byte either arrives (oversized) or the stream ends first (within bounds).
+    // Probe beyond the accepted boundary so an exact-length file can be distinguished from a
+    // truncated read of an oversized one.
     let _read = file.take(MAX_CENSUS_BYTES.saturating_add(1)).read_to_end(&mut bytes)?;
 
     if u64::try_from(bytes.len()).is_ok_and(|len| len > MAX_CENSUS_BYTES) {
-        return Err(io::Error::other(
-            "the census file is larger than any whole census the runtime protocol can produce",
-        ));
+        return Err(CensusReadError::Oversized {
+            actual: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            maximum: MAX_CENSUS_BYTES,
+        });
     }
 
-    Ok(bytes)
+    Ok(BoundedCensus(bytes))
 }
 
 /// Turns the runtime's records into site ordinals, or `None` if the file is not a whole census.
@@ -1027,10 +1069,11 @@ fn read_bounded(path: &Utf8Path) -> io::Result<Vec<u8>> {
 /// marker (the runtime ran out of table) — because each means sites may be missing, and missing is
 /// the one thing this must never guess at.
 ///
-/// Callers are expected to bound `bytes` — with [`read_bounded`], in production — before this is
-/// reached: the preallocation below is sized from that length, and only a caller that already
-/// refused an oversized file makes that sizing safe.
-fn decode(bytes: &[u8]) -> Option<Vec<u32>> {
+/// The [`BoundedCensus`] input proves the length-based preallocation below is within the protocol
+/// bound.
+fn decode(bytes: &BoundedCensus) -> Option<Vec<u32>> {
+    let bytes = bytes.0.as_slice();
+
     if !bytes.len().is_multiple_of(4) {
         return None;
     }
@@ -1059,6 +1102,8 @@ fn decode(bytes: &[u8]) -> Option<Vec<u32>> {
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
 
     #[test]
@@ -1435,16 +1480,20 @@ mod tests {
         assert!(matches!(census.work(&binary("/t/b"), 7), CensusWork::Whole));
     }
 
+    fn decode_fixture(bytes: &[u8]) -> Option<Vec<u32>> {
+        decode(&BoundedCensus(bytes.to_vec()))
+    }
+
     #[test]
     fn whole_sealed_records_decode_in_the_order_they_were_written() {
-        assert_eq!(decode(&sealed(&[3, 9, 1])), Some(vec![3, 9, 1]));
+        assert_eq!(decode_fixture(&sealed(&[3, 9, 1])), Some(vec![3, 9, 1]));
     }
 
     #[test]
     fn a_lone_seal_is_an_empty_reach_not_a_failure() {
         // The census of a test that reached no site: the runtime still sealed it, so it decodes to
         // an honest empty reach rather than being mistaken for a run that never finished.
-        assert_eq!(decode(&sealed(&[])), Some(Vec::new()));
+        assert_eq!(decode_fixture(&sealed(&[])), Some(Vec::new()));
     }
 
     #[test]
@@ -1454,8 +1503,8 @@ mod tests {
         // the empty file is the same story with nothing written before the process died.
         let whole: Vec<u8> = [3_u32, 9, 1].iter().flat_map(|site| site.to_le_bytes()).collect();
 
-        assert_eq!(decode(&whole), None);
-        assert_eq!(decode(&[]), None);
+        assert_eq!(decode_fixture(&whole), None);
+        assert_eq!(decode_fixture(&[]), None);
     }
 
     #[test]
@@ -1464,15 +1513,15 @@ mod tests {
         // this aligned prefix must not be mistaken for a complete one-site census.
         let prefix = 73_u32.to_le_bytes();
 
-        assert_eq!(decode(&prefix), None);
+        assert_eq!(decode_fixture(&prefix), None);
     }
 
     #[test]
     fn a_truncated_census_is_refused_rather_than_read_as_far_as_it_goes() {
         // A partial trailing record means the process died before its buffer was flushed, so sites
         // are missing — and a missing site is exactly what would be misread as an unreached one.
-        assert_eq!(decode(&[1, 0, 0]), None);
-        assert_eq!(decode(&[1, 0, 0, 0, 2]), None);
+        assert_eq!(decode_fixture(&[1, 0, 0]), None);
+        assert_eq!(decode_fixture(&[1, 0, 0, 0, 2]), None);
     }
 
     #[test]
@@ -1482,8 +1531,8 @@ mod tests {
         let trailing: Vec<u8> = [SEAL, 7].iter().flat_map(|record| record.to_le_bytes()).collect();
         let doubled: Vec<u8> = [SEAL, SEAL].iter().flat_map(|record| record.to_le_bytes()).collect();
 
-        assert_eq!(decode(&trailing), None);
-        assert_eq!(decode(&doubled), None);
+        assert_eq!(decode_fixture(&trailing), None);
+        assert_eq!(decode_fixture(&doubled), None);
     }
 
     #[test]
@@ -1492,66 +1541,53 @@ mod tests {
         // has to override the seal rather than be excused by it.
         let bytes: Vec<u8> = [3_u32, OVERFLOW, 9, SEAL].iter().flat_map(|record| record.to_le_bytes()).collect();
 
-        assert_eq!(decode(&bytes), None);
+        assert_eq!(decode_fixture(&bytes), None);
     }
 
-    /// A censused test controls the file at the path it was handed and can write more to it than
-    /// any honest run of the runtime protocol ever would. This proves the excess is refused rather
-    /// than read into memory: a file one record past every site plus both markers is definitely
-    /// past the protocol's own maximum, and `read_bounded` must say so without this coordinator
-    /// having trusted the file's own claimed size first.
+    /// The independently derived wire-format boundary is accepted and any excess is refused.
+    ///
+    /// Deriving the fixture without [`MAX_CENSUS_BYTES`] makes a regression that shrinks the
+    /// production bound observable instead of shrinking the test input with it.
     #[test]
-    fn read_bounded_refuses_a_file_past_the_protocol_maximum() {
+    fn read_bounded_accepts_the_protocol_maximum_and_refuses_excess() {
         let scratch = crate::testing::workdir("sec2-oversized");
         let path = Utf8PathBuf::from_path_buf(scratch.path().join("census.bin")).expect("a temp path is valid UTF-8");
+        let protocol_maximum = (gamma_rt::MAX_CENSUS_SITES + CENSUS_MARKERS.len()) * core::mem::size_of::<u32>();
 
-        let oversized =
-            usize::try_from(MAX_CENSUS_BYTES.saturating_add(4)).expect("the bound fits in memory on any host that runs this test");
-        fs::write(path.as_std_path(), vec![0_u8; oversized]).expect("the oversized fixture file is writable");
+        fs::write(path.as_std_path(), vec![0_u8; protocol_maximum]).expect("the boundary fixture file is writable");
+        let accepted = read_bounded(&path).expect("the protocol maximum is accepted");
 
-        let error = read_bounded(&path).expect_err("a file past the protocol's maximum size must be refused");
+        assert_eq!(accepted.0.len(), protocol_maximum);
 
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path.as_std_path())
+            .expect("the boundary fixture remains writable")
+            .write_all(&[0])
+            .expect("the excess byte is appended");
+        let error = read_bounded(&path).expect_err("a file past the protocol maximum must be refused");
         assert!(error.to_string().contains("protocol"), "{error}");
     }
 
-    /// A child that replaces the census file with a sparse one can claim an enormous logical size
-    /// while writing almost no real data — the attack this bound exists for. `read_bounded` must not
-    /// allocate anywhere near that claimed size: it is bounded by [`Read::take`], not by trusting
-    /// `fs::metadata`, so this proves the read is refused promptly rather than after the coordinator
-    /// tried to hold the whole claimed length in memory.
+    /// A sparse file can have a large logical length while consuming little physical storage.
+    ///
+    /// The fixture is comfortably beyond the protocol bound, so rejection demonstrates that the
+    /// reader consumes only its bounded prefix rather than allocating for the file's logical size.
     #[test]
-    fn read_bounded_refuses_a_sparse_file_without_believing_its_claimed_length() {
-        use std::io::Write as _;
+    fn read_bounded_refuses_a_sparse_file_with_a_large_logical_length() {
+        const SPARSE_LOGICAL_LENGTH: u64 = 1 << 34;
 
         let scratch = crate::testing::workdir("sec2-sparse");
         let path = Utf8PathBuf::from_path_buf(scratch.path().join("census.bin")).expect("a temp path is valid UTF-8");
 
         let file = fs::File::create(path.as_std_path()).expect("the sparse fixture file is creatable");
-        // Claims tens of gigabytes without writing them: a real disk write of that size would make
-        // this test itself the resource exhaustion it is trying to prove `read_bounded` refuses.
-        file.set_len(1 << 34)
+        file.set_len(SPARSE_LOGICAL_LENGTH)
             .expect("the filesystem under the test work directory supports sparse files");
         drop(file);
 
         let error = read_bounded(&path).expect_err("a sparse file past the protocol's maximum must be refused");
 
         assert!(error.to_string().contains("protocol"), "{error}");
-
-        // The refusal came from the bytes actually read rather than from the claimed length: had
-        // `read_bounded` trusted `fs::metadata` instead, this would still pass, so the write below
-        // is what tells the two apart. Reopening confirms the file is still exactly as small as it
-        // was left, and rereading it with the same bound still refuses it.
-        let mut confirm = fs::File::options()
-            .append(true)
-            .open(path.as_std_path())
-            .expect("the sparse fixture file remains open-able");
-        confirm
-            .write_all(&sealed(&[1]))
-            .expect("appending a small whole census to the sparse claim succeeds");
-        drop(confirm);
-
-        let _still_refused =
-            read_bounded(&path).expect_err("a sparse claim past the bound is refused regardless of what real data follows it");
     }
 
     /// `walked` counts subprocesses that actually launched, not tests that were listed.

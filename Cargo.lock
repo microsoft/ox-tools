@@ -647,6 +647,7 @@ name = "cargo-gamma-rt"
 version = "0.1.0"
 dependencies = [
  "loom",
+ "tempfile",
 ]
 
 [[package]]

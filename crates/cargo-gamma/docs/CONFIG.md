@@ -114,10 +114,11 @@ recording about a mutator you have switched off. See [MUTATORS.md](MUTATORS.md) 
 it alone for a focused run, or add it to the normal selection with
 `mutators = ["@default", "@pedantic"]`.
 
-Each `exclude-trait-impls` entry is compared with the lexical terminal identifier written in an implementation path.
+Each `exclude-trait-impls` entry is an unqualified Rust identifier compared with the final written
+segment of an implementation's trait path.
 Qualification does not matter: `impl Debug`, `impl fmt::Debug`, and `impl core::fmt::Debug` all
-have the terminal name `Debug`. An alias keeps its written name, so `impl Diagnostic` is matched by
-the `Diagnostic` entry.
+have the final identifier `Debug`. An alias keeps its written identifier, so `impl Diagnostic` is
+matched by the `Diagnostic` entry.
 
 This is lexical matching, not Rust name resolution. Gamma cannot semantically distinguish two
 imported traits that are both written with the same terminal name, and it does not guess which

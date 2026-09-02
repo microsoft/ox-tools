@@ -52,6 +52,136 @@ pub const GUARD_PATH: &str = "::gamma_rt::a";
 /// agree on a type without it.
 pub const EITHER_PATH: &str = "::gamma_rt::Either";
 
+/// A one-based line and column in instrumented text, ordered as the text reads.
+///
+/// The coordinates are private because zero is not a position. Everything that consumes one — a
+/// compiler diagnostic, an editor, the diagnostic-attribution logic that decides which mutant a
+/// build error belongs to — counts from one, so a zero would compare as strictly before the first
+/// character of the file and silently widen every containment test that reaches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Position {
+    line: NonZeroU32,
+    column: NonZeroU32,
+}
+
+impl Position {
+    /// Builds a position from one-based coordinates, rejecting a zero in either.
+    ///
+    /// Returns `None` rather than clamping, because the callers that reach this hold numbers
+    /// copied out of someone else's JSON: a zero there means the producer did not mean a position
+    /// at all, and turning it into line one would attribute a diagnostic to real code.
+    #[must_use]
+    pub const fn new(line: u32, column: u32) -> Option<Self> {
+        match (NonZeroU32::new(line), NonZeroU32::new(column)) {
+            (Some(line), Some(column)) => Some(Self { line, column }),
+            _other => None,
+        }
+    }
+
+    /// Builds a position from zero-based coordinates, as an offset sweep counts them.
+    ///
+    /// Total by construction: adding one to a count that starts at zero cannot produce zero, and a
+    /// count too large for `u32` saturates to the largest representable position rather than
+    /// wrapping into a small one.
+    #[must_use]
+    pub(crate) fn from_zero_based(line: usize, column: usize) -> Self {
+        let one_based = |count: usize| {
+            let widened = u32::try_from(count).unwrap_or(u32::MAX - 1);
+
+            NonZeroU32::new(widened.saturating_add(1)).expect("a saturating increment of an unsigned count is never zero")
+        };
+
+        Self {
+            line: one_based(line),
+            column: one_based(column),
+        }
+    }
+
+    /// The one-based line.
+    #[inline]
+    #[must_use]
+    pub const fn line(self) -> u32 {
+        self.line.get()
+    }
+
+    /// The one-based column.
+    #[inline]
+    #[must_use]
+    pub const fn column(self) -> u32 {
+        self.column.get()
+    }
+}
+
+/// Where one mutant's guard landed in instrumented text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Guard {
+    /// The whole guarded site: the `if`, the mutated branch, and the original text.
+    pub site: Range<Position>,
+
+    /// Just the mutated branch — the only text in the tree that is not a copy of the original.
+    ///
+    /// Nested guards go exclusively in the `else` branch, so these ranges never overlap between
+    /// mutants, not even for two mutants of the same site. A compiler diagnostic landing inside
+    /// one therefore names its cause exactly. A deletion mutant has no replacement text at all,
+    /// and so has nothing here.
+    pub mutated: Option<Range<Position>>,
+}
+
+/// Which guard, of all the guards in one instrumented tree, a mutant is selected by.
+///
+/// A newtype because the number is one of several `u32` counts that travel together and mean
+/// entirely different things: an occurrence counts repeats of a site within an item, a replacement
+/// index counts a mutator's alternatives for one site, and this counts mutants across the whole
+/// run. They are interchangeable to the compiler and to the eye, and swapping two of them produces
+/// a tree that builds, runs, and attributes every verdict to the wrong mutant.
+///
+/// Zero is not a guard. A mutant an earlier run already settled, or that a shard left out, keeps
+/// zero because it was never scheduled, and nothing in the tree ever tests for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Ordinal(u32);
+
+impl Ordinal {
+    /// Names the guard this ordinal selects.
+    #[must_use]
+    pub const fn new(ordinal: u32) -> Self {
+        Self(ordinal)
+    }
+
+    /// The number as the instrumented tree spells it.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// A source-level mutant definition paired with the run-local ordinal that selects its guard.
+#[derive(Clone, Copy, Debug)]
+pub struct AssignedMutant<'a> {
+    ordinal: Ordinal,
+    span: &'a Range<usize>,
+    replacement: &'a str,
+    shape: Shape,
+}
+
+impl<'a> AssignedMutant<'a> {
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn new(ordinal: Ordinal, definition: &'a MutantDefinition) -> Self {
+        Self::from_parts(ordinal, definition.span(), &definition.replacement, definition.shape)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_parts(ordinal: Ordinal, span: &'a Range<usize>, replacement: &'a str, shape: Shape) -> Self {
+        Self {
+            ordinal,
+            span,
+            replacement,
+            shape,
+        }
+    }
+}
+
 /// Which of a guard's up to four positions one resolved offset belongs to.
 #[derive(Clone, Copy)]
 enum Slot {
@@ -112,8 +242,10 @@ fn positions(text: &str, spans: &HashMap<u32, (Range<usize>, Range<usize>)>) -> 
     let mut column = 0_usize;
 
     for (offset, ordinal, slot) in requests {
-        while starts.get(line + 1).is_some_and(|next_start| *next_start <= offset) {
-            line += 1;
+        let containing_line = starts.partition_point(|start| *start <= offset).saturating_sub(1);
+
+        if containing_line > line {
+            line = containing_line;
             cursor = starts[line];
             column = 0;
         }
@@ -157,79 +289,6 @@ fn positions(text: &str, spans: &HashMap<u32, (Range<usize>, Range<usize>)>) -> 
         .collect()
 }
 
-/// A one-based line and column in instrumented text, ordered as the text reads.
-///
-/// The coordinates are private because zero is not a position. Everything that consumes one — a
-/// compiler diagnostic, an editor, the blame that decides which mutant a build error belongs to —
-/// counts from one, so a zero would compare as strictly before the first character of the file and
-/// silently widen every containment test that reaches it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Position {
-    line: NonZeroU32,
-    column: NonZeroU32,
-}
-
-impl Position {
-    /// Builds a position from one-based coordinates, rejecting a zero in either.
-    ///
-    /// Returns `None` rather than clamping, because the callers that reach this hold numbers
-    /// copied out of someone else's JSON: a zero there means the producer did not mean a position
-    /// at all, and turning it into line one would attribute a diagnostic to real code.
-    #[must_use]
-    pub const fn new(line: u32, column: u32) -> Option<Self> {
-        match (NonZeroU32::new(line), NonZeroU32::new(column)) {
-            (Some(line), Some(column)) => Some(Self { line, column }),
-            _other => None,
-        }
-    }
-
-    /// Builds a position from zero-based coordinates, as an offset sweep counts them.
-    ///
-    /// Total by construction: adding one to a count that starts at zero cannot produce zero, and a
-    /// count too large for `u32` saturates to the largest representable position rather than
-    /// wrapping into a small one.
-    #[must_use]
-    pub fn from_zero_based(line: usize, column: usize) -> Self {
-        let one_based = |count: usize| {
-            let widened = u32::try_from(count).unwrap_or(u32::MAX - 1);
-
-            NonZeroU32::new(widened.saturating_add(1)).expect("a saturating increment of an unsigned count is never zero")
-        };
-
-        Self {
-            line: one_based(line),
-            column: one_based(column),
-        }
-    }
-
-    /// The one-based line.
-    #[must_use]
-    pub const fn line(self) -> u32 {
-        self.line.get()
-    }
-
-    /// The one-based column.
-    #[must_use]
-    pub const fn column(self) -> u32 {
-        self.column.get()
-    }
-}
-
-/// Where one mutant's guard landed in instrumented text.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Guard {
-    /// The whole guarded site: the `if`, the mutated branch, and the original text.
-    pub site: Range<Position>,
-
-    /// Just the mutated branch — the only text in the tree that is not a copy of the original.
-    ///
-    /// Nested guards go exclusively in the `else` branch, so these ranges never overlap between
-    /// mutants, not even for two mutants of the same site. A compiler diagnostic landing inside
-    /// one therefore names its cause exactly. A deletion mutant has no replacement text at all,
-    /// and so has nothing here.
-    pub mutated: Option<Range<Position>>,
-}
-
 /// A node in the containment tree of mutation sites within one file.
 #[derive(Debug)]
 struct Node<'a> {
@@ -241,61 +300,6 @@ struct Node<'a> {
 
     /// Sites strictly contained within this one.
     children: Vec<Self>,
-}
-
-/// Which guard, of all the guards in one instrumented tree, a mutant is selected by.
-///
-/// A newtype because the number is one of several `u32` counts that travel together and mean
-/// entirely different things: an occurrence counts repeats of a site within an item, a replacement
-/// index counts a mutator's alternatives for one site, and this counts mutants across the whole
-/// run. They are interchangeable to the compiler and to the eye, and swapping two of them produces
-/// a tree that builds, runs, and attributes every verdict to the wrong mutant.
-///
-/// Zero is not a guard. A mutant an earlier run already settled, or that a shard left out, keeps
-/// zero because it was never scheduled, and nothing in the tree ever tests for it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Ordinal(u32);
-
-impl Ordinal {
-    /// Names the guard this ordinal selects.
-    #[must_use]
-    pub const fn new(ordinal: u32) -> Self {
-        Self(ordinal)
-    }
-
-    /// The number as the instrumented tree spells it.
-    #[must_use]
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-}
-
-/// A source-level mutant definition paired with the run-local ordinal that selects its guard.
-#[derive(Clone, Copy, Debug)]
-pub struct AssignedMutant<'a> {
-    ordinal: Ordinal,
-    span: &'a Range<usize>,
-    replacement: &'a str,
-    shape: Shape,
-}
-
-impl<'a> AssignedMutant<'a> {
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn new(ordinal: Ordinal, definition: &'a MutantDefinition) -> Self {
-        Self::from_parts(ordinal, definition.span(), &definition.replacement, definition.shape)
-    }
-
-    #[doc(hidden)]
-    #[must_use]
-    pub const fn from_parts(ordinal: Ordinal, span: &'a Range<usize>, replacement: &'a str, shape: Shape) -> Self {
-        Self {
-            ordinal,
-            span,
-            replacement,
-            shape,
-        }
-    }
 }
 
 /// Rewrites one file so that it encodes every one of the given mutants.
@@ -645,13 +649,8 @@ mod tests {
         let (_out, guards) = instrument_with_guards(text, &[&only]).expect("instrumented");
         let guard = guards.get(&1).expect("recorded").clone();
 
-        // "    é_" precedes the site: 6 characters, so the site starts at column 7.
-        // The whole rendered site is `(if ::gamma_rt::a(1u32) { 0 } else { café + 1 })`, which is
-        // 48 characters long, so the site ends at column 7 + 48 = 55.
         assert_eq!(guard.site, at(3, 7)..at(3, 55));
 
-        // The replacement `0` begins right after the 26-character `(if ::gamma_rt::a(1u32) { `
-        // prefix, so at column 7 + 26 = 33, and is 1 character long, ending at column 34.
         let mutated = guard.mutated.expect("a replacement was recorded");
 
         assert_eq!(mutated, at(3, 33)..at(3, 34));
@@ -689,7 +688,7 @@ mod tests {
     }
 
     /// Positions order as the text reads: by line first, and only then by column, which is what
-    /// every containment test in the blame pass relies on.
+    /// every containment test in the diagnostic-attribution pass relies on.
     #[test]
     fn positions_order_by_line_before_column() {
         assert!(at(1, 99) < at(2, 1));

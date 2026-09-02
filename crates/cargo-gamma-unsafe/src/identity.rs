@@ -9,10 +9,10 @@
 
 /// The effective user this process acts as.
 ///
-/// Effective rather than real, because it is the effective identity the kernel checks every open
-/// and every write against; a comparison against the real one would describe a permission decision
-/// nobody makes.
+/// Effective rather than real, because it is the effective identity the kernel uses for access
+/// checks on each open and write; the real identity does not determine those checks.
 #[must_use]
+#[inline]
 pub fn effective_user() -> u32 {
     // SAFETY: `geteuid` reads a field of the calling process's own credentials. POSIX specifies it
     // as always succeeding, it takes no arguments, touches no memory the caller owns, and is one of

@@ -29,12 +29,28 @@ verdicts, incremental reuse, reporting, and command dispatch.
   it adds no downstream dependency or release-order constraint.
 - The crate forbids unsafe code.
 
+Replaceable facade, cache, supervision, and test mechanics are recorded in the
+[implementation guide](../IMPLEMENTATION.md).
+
 ## Public contract
 
 The primary public contract is the `cargo gamma` command surface and its
 configuration, reports, diagnostics, and exit codes. The Rust API is an
 implementation detail used by the thin executable crate. Its rustdoc is hidden,
 and its hand-written README warns downstream users not to depend on it.
+
+Reports that omit `config.mutantIdVersion` use the current identity scheme,
+preserving compatibility with reports written before that field was persisted.
+An explicit different version is excluded from a merge because its identifiers
+cannot safely share a population with the current scheme. A merge may still
+produce reports and diagnostics for the compatible population, but
+`--min-score` fails when any requested input was excluded this way rather than
+grading an incomplete population.
+
+Runtime startup failures are infrastructure failures, not mutant kills. This
+includes both failure to acquire the startup environment and a guard reached
+before the runtime constructor installed its selection; either fixed marker
+disqualifies the process as mutation-score evidence.
 
 ### Redirected cache security
 
@@ -45,15 +61,3 @@ its physical ancestry must already be owned by the invoking user or root and
 must not permit another user to replace entries. Sticky shared ancestors such
 as `/tmp` are accepted, but the cache directory itself must not be writable by
 group or other.
-
-## Concurrency model checking
-
-The dedicated Loom target verifies race-sensitive reader accounting without a
-runner-imposed exploration bound. Each model therefore uses the smallest set of
-interchangeable actors that creates contention, avoiding equivalent schedules
-that add cost without adding behavior.
-
-Start and finish races are modeled separately. Finish-only models begin from a
-valid state already produced by successful starts, including a peak no lower
-than the live count. This separation keeps exhaustive exploration tractable
-while preserving the production gauge invariants.

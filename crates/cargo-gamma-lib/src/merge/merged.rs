@@ -51,6 +51,9 @@ pub struct Merged {
     /// the two partitioned the population differently, so "shards seen" no longer means coverage.
     pub inconsistent: Vec<String>,
 
+    /// Inputs excluded because they use a different mutant-identity scheme.
+    pub identity_incompatible: Vec<String>,
+
     /// Mutants detected by a failing test assertion.
     pub detected: usize,
 

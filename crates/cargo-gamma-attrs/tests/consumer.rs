@@ -6,8 +6,10 @@
 //! A doctest inside this crate proves an expansion compiles; it does not prove the annotated item
 //! survived intact, because a valid doctest's example is never called. These tests call the item
 //! each macro annotates, so a shim that discarded the item, swapped its delegation for an
-//! unrelated validator, or otherwise mangled a valid expansion would fail here even where every
-//! existing doctest stays green.
+//! unrelated validator, or otherwise mangled a valid expansion fails here even when every doctest
+//! still compiles.
+
+use gamma::gamma;
 
 #[gamma::skip]
 fn skipped(x: u32) -> u32 {
@@ -71,8 +73,6 @@ fn aliased_multiplied(data: &[u8]) -> usize {
 fn timeout_multiplier_leaves_the_annotated_item_callable() {
     assert_eq!(aliased_multiplied(b"ab"), 6);
 }
-
-use gamma::gamma;
 
 #[gamma(test_timeout_multiplier = 2.0)]
 fn generic_gamma(n: usize) -> usize {

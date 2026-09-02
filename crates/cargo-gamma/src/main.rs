@@ -193,7 +193,7 @@
 //! `cargo-gamma` implements a large number of optimizations to minimize this. Let's explore how `cargo-gamma` does its
 //! work to start understanding these optimizations.
 //!
-//! A run moves through five phases, in order:
+//! A run moves through these phases, in order:
 //!
 //! ```mermaid
 //! flowchart LR
@@ -516,8 +516,7 @@
 //!
 //! ## Verdicts and the score
 //!
-//! Every mutant ends in one of ten verdicts. One counts as detected, four as undetected, and five are
-//! excluded from scoring entirely:
+//! Every mutant ends in a verdict classified as detected, undetected, or excluded from scoring:
 //!
 //! ```mermaid
 //! flowchart TD
@@ -781,8 +780,8 @@
 //!
 //! ### Choosing a channel
 //!
-//! There are five ways to stop a mutant being counted against you. They differ in where the decision
-//! lives and in how visible it is to the next person to read the code.
+//! The available suppression and test-selection channels differ in where the decision lives and in
+//! how visible it is to the next person to read the code.
 //!
 //! | Channel | Scope | Where it lives | Reach for it when |
 //! | --- | --- | --- | --- |
@@ -796,10 +795,11 @@
 //! The first two are almost always the right answer. A directive next to the code says *this* mutant is
 //! equivalent and says why; a config-level exclusion says nothing about any individual site and quietly
 //! grows to cover code written years later that nobody ever considered.
-//! A trait exclusion list is the exception for a deliberate cross-cutting policy. It lists lexical
-//! terminal trait names, so `exclude-trait-impls = ["Debug", "Display"]` covers qualified and
-//! unqualified implementations of either trait without matching report prose. Put the reason in a
-//! comment beside the list, as with `exclude-files`.
+//! A trait exclusion list is the exception for a deliberate cross-cutting policy. It compares each
+//! configured identifier with the final segment of the trait path as written, without name
+//! resolution, so `exclude-trait-impls = ["Debug", "Display"]` covers qualified and unqualified
+//! implementations of either trait without matching report prose. Put the reason in a comment
+//! beside the list, as with `exclude-files`.
 //!
 //! `--exclude-test` is the odd one out: it does not suppress a mutant at all, it narrows the test suite
 //! each mutant is run against. Excluding a test makes mutants *harder* to kill, not easier.
@@ -889,6 +889,10 @@
 //! * `tag` is a short label you choose, which lets a report be grouped by category — `equivalent`, `perf`,
 //!   `unsafe` — and lets a review ask how many suppressions of a given kind a change added.
 //! * `test_timeout_multiplier` overrides the timeout multiplier for the annotated mutants. When that mutant is tested, the multiplier specified in the attribute overrides the default specified in configuration or via `--test-timeout-multiplier` (scaled against the test binary's measured baseline duration and respecting `--minimum-test-timeout`).
+//!   A positional multiplier may appear anywhere in the argument list, but a directive may state
+//!   exactly one multiplier across the positional spelling and the named aliases
+//!   `test_timeout_multiplier`, `timeout_multiplier`, `multiplier`, and `factor`. A second value is
+//!   a usage error.
 //!
 //! Both `reason` and `tag` are optional, but a `skip` with no `reason` is a decision nobody can audit.
 //!
@@ -930,7 +934,8 @@
 //!
 //! It exists for the places an attribute cannot go, and for codebases that would rather not carry a
 //! tool's attributes in shipped source. It behaves identically otherwise, and when expression
-//! attributes stabilize, deleting the two slashes turns each of these into real Rust.
+//! attributes stabilize, deleting the two slashes turns each of these into real Rust. This includes
+//! the single-multiplier rule described above.
 //!
 //! ### Where a directive can go
 //!
@@ -1097,8 +1102,8 @@
 //!
 //! The HTML is a single self-contained file: the viewer and the results are both embedded, so it opens
 //! from a CI artifact, a file share, or a machine with no network at all. There is no mode that loads
-//! the viewer from elsewhere — a report carries the source of the code it describes, and a page that
-//! fetched its viewer would hand all of it to whatever that script turned out to be.
+//! the viewer from elsewhere: loading an external viewer would allow remotely supplied JavaScript to
+//! read and disclose the source and results embedded in the report.
 //!
 //! ## Improving mutation performance
 //!
@@ -1110,8 +1115,8 @@
 //!
 //! ### Where the time goes
 //!
-//! A run has three phases, and knowing which one is costing you is most of the work of making it
-//! faster.
+//! A run's cost separates into build, baseline, and per-mutant work; identifying the dominant term
+//! guides performance tuning.
 //!
 //! ```text
 //! total ≈ build × rounds  +  baseline  +  Σ per mutant (launch + tests until something fails)
