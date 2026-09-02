@@ -41,24 +41,24 @@
 //! list one channel accepts must not be a compile error to the other.
 
 use cargo_gamma_lib::internals::parse::{SourceFile, nesting};
-use cargo_gamma_lib::internals::{bounds, suppress};
+use cargo_gamma_lib::internals::{attrs_impl, bounds, suppress};
 
 #[test]
 fn the_proc_macro_limits_match_the_library() {
     // `MOST_FACTOR` is a float; comparing the bit patterns is an exact equality that also keeps the
     // pedantic `float_cmp` lint from firing on two constants that are, by construction, identical.
     assert_eq!(
-        cargo_gamma_attrs_impl::MOST_FACTOR.to_bits(),
+        attrs_impl::MOST_FACTOR.to_bits(),
         bounds::MOST_FACTOR.to_bits(),
         "the proc-macro's multiplier ceiling drifted from `bounds::MOST_FACTOR`"
     );
     assert_eq!(
-        cargo_gamma_attrs_impl::NESTING_LIMIT,
+        attrs_impl::NESTING_LIMIT,
         nesting::NESTING_LIMIT,
         "the proc-macro's nesting limit drifted from `parse::nesting::NESTING_LIMIT`"
     );
     assert_eq!(
-        cargo_gamma_attrs_impl::CHAIN_FACTOR,
+        attrs_impl::CHAIN_FACTOR,
         nesting::CHAIN_FACTOR,
         "the proc-macro's chain factor drifted from `parse::nesting::CHAIN_FACTOR`"
     );
@@ -242,17 +242,17 @@ fn verdicts(family: &str, n: usize, generate: impl Fn(usize) -> String) -> (bool
 
     (
         cargo_gamma_engine::parse::exceeds_nesting_limit(&text),
-        cargo_gamma_attrs_impl::exceeds_nesting_limit(&stream, cargo_gamma_attrs_impl::NESTING_LIMIT),
+        attrs_impl::exceeds_nesting_limit(&stream, attrs_impl::NESTING_LIMIT),
     )
 }
 
 /// The engine's postfix boundary must be reached well inside this ceiling and the proc macro's
 /// must be reached too, since [`nesting_guards_are_ordered`] requires both.
-const CHAIN_CEILING: usize = cargo_gamma_attrs_impl::NESTING_LIMIT * cargo_gamma_attrs_impl::CHAIN_FACTOR * 2;
+const CHAIN_CEILING: usize = attrs_impl::NESTING_LIMIT * attrs_impl::CHAIN_FACTOR * 2;
 
 #[test]
 fn the_two_nesting_guards_agree_on_delimiters() {
-    nesting_guards("delimiters", cargo_gamma_attrs_impl::NESTING_LIMIT + 16, corpus::delimiters);
+    nesting_guards("delimiters", attrs_impl::NESTING_LIMIT + 16, corpus::delimiters);
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn attribute_accepts(arguments: &str) -> bool {
     let attr: proc_macro2::TokenStream = arguments.parse().expect("the arguments are valid Rust tokens");
     let item: proc_macro2::TokenStream = "fn f() -> u32 { 1 }".parse().expect("the item is valid Rust tokens");
 
-    !cargo_gamma_attrs_impl::inert_timeout("test_timeout_multiplier", &attr, item)
+    !attrs_impl::inert_timeout("test_timeout_multiplier", &attr, item)
         .to_string()
         .contains("compile_error")
 }
