@@ -1056,7 +1056,7 @@ fn claim_redirected_cache(source: &Utf8Path, base: &Utf8Path) -> Result<File> {
         }
     }
 
-    fs::create_dir_all(base.as_std_path())
+    create_private_dir_all(base)
         .map_err(|cause| error!("could not create the redirected cargo-gamma cache at `{base}`").caused_by(cause))?;
 
     reject_linked_cache(base)?;
@@ -1066,6 +1066,25 @@ fn claim_redirected_cache(source: &Utf8Path, base: &Utf8Path) -> Result<File> {
     validate_cache_owner(source, base, CacheKind::Redirected)?;
 
     Ok(lock)
+}
+
+/// Creates a cache directory without granting access beyond the invoking user.
+///
+/// The process umask may be permissive on build agents and in containers. Requesting no group or
+/// other permissions makes the result private under every umask; existing directories are left
+/// unchanged and are still judged by [`reject_foreign_writers`].
+#[cfg(unix)]
+fn create_private_dir_all(path: &Utf8Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path.as_std_path())
+}
+
+#[cfg(not(unix))]
+fn create_private_dir_all(path: &Utf8Path) -> io::Result<()> {
+    fs::create_dir_all(path.as_std_path())
 }
 
 /// Refuses a cache directory that is reached through a link.
@@ -1701,7 +1720,7 @@ mod tests {
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
-        fs::create_dir_all(&base).expect("the user's directory");
+        create_private_dir_all(&base).expect("the user's directory");
         fs::write(base.join("lock"), "not ours").expect("the user's lock file");
 
         let failure = claim_redirected_cache(&source, &base).expect_err("an existing lock file is user data");
@@ -1717,7 +1736,7 @@ mod tests {
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
-        fs::create_dir_all(&base).expect("the empty cache");
+        create_private_dir_all(&base).expect("the empty cache");
         let first = claim_redirected_cache(&source, &base).expect("an empty cache can be claimed");
 
         assert_eq!(
@@ -1743,7 +1762,44 @@ mod tests {
 
         assert!(failure.is_usage());
         assert!(failure.to_string().contains("belongs to the workspace"), "{failure}");
-        assert!(failure.to_string().contains(absolute(&first).as_str()), "{failure}");
+        assert!(failure.to_string().contains(physical(&first).as_str()), "{failure}");
+    }
+
+    /// Cache creation must not inherit a build agent's permissive umask and then reject the
+    /// directory cargo-gamma just created as unsafe.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_redirected_cache_is_private_under_a_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const CHILD: &str = "CARGO_GAMMA_PERMISSIVE_UMASK_CHILD";
+        const TEST: &str = "exec::workspace::tests::a_new_redirected_cache_is_private_under_a_permissive_umask";
+
+        if env::var_os(CHILD).is_none() {
+            let executable = env::current_exe().expect("the current test executable");
+            let output = Command::new("sh")
+                .args(["-c", "umask 000; exec \"$1\" --exact \"$2\" --nocapture", "sh"])
+                .arg(executable)
+                .arg(TEST)
+                .env(CHILD, "1")
+                .output()
+                .expect("the child test process starts");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            assert!(output.status.success(), "child stdout:\n{stdout}\nchild stderr:\n{stderr}");
+            return;
+        }
+
+        let directory = crate::testing::workdir("private-cache-");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).expect("the fixture ancestor is private");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
+        let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
+
+        let _held = claim_redirected_cache(&source, &base).expect("a new cache is private under any umask");
+        let mode = fs::metadata(base.as_std_path()).expect("the cache metadata").permissions().mode();
+
+        assert_eq!(mode & 0o077, 0, "the cache mode {mode:o} grants group or other access");
     }
 
     /// A cache reached through a link is a cache whose identity can be changed after it has been
@@ -1809,7 +1865,7 @@ mod tests {
         let shared = Utf8PathBuf::from_path_buf(directory.path().join("shared")).expect("the shared path is UTF-8");
         let base = shared.join("cache");
 
-        fs::create_dir_all(&base).expect("the cache directory");
+        create_private_dir_all(&base).expect("the cache directory");
         fs::set_permissions(shared.as_std_path(), fs::Permissions::from_mode(0o777)).expect("make the parent world-writable");
 
         let failure = claim_redirected_cache(&source, &base).expect_err("a world-writable ancestor must be refused");
@@ -1836,7 +1892,7 @@ mod tests {
         let shared = Utf8PathBuf::from_path_buf(directory.path().join("shared")).expect("the shared path is UTF-8");
         let base = shared.join("cache");
 
-        fs::create_dir_all(&base).expect("the cache directory");
+        create_private_dir_all(&base).expect("the cache directory");
         fs::set_permissions(shared.as_std_path(), fs::Permissions::from_mode(0o1777)).expect("make the parent sticky and shared");
 
         let claimed = claim_redirected_cache(&source, &base);
@@ -1876,7 +1932,7 @@ mod tests {
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
-        fs::create_dir_all(&base).expect("the cache directory");
+        create_private_dir_all(&base).expect("the cache directory");
         fs::write(base.join(CACHE_OWNER).as_std_path(), "/w\r\u{1b}[2Kforged").expect("the planted marker");
 
         let failure = claim_redirected_cache(&source, &base).expect_err("a foreign marker must be refused");
