@@ -42,11 +42,9 @@ use crate::{HashMap, HashSet};
 ///
 /// ```rust,no_run
 /// # #[cfg(feature = "internals")]
-/// # use cargo_gamma_lib::internals::cfg::features::enabled;
-/// # #[cfg(feature = "internals")]
-/// # use cargo_gamma_lib::internals::commands::FeatureArgs;
-/// # #[cfg(feature = "internals")]
 /// # fn example(metadata: &cargo_metadata::Metadata) {
+/// # use cargo_gamma_lib::internals::cfg::features::enabled;
+/// # use cargo_gamma_lib::internals::commands::FeatureArgs;
 /// let features = enabled(metadata, &FeatureArgs::default());
 ///
 /// // Every member is present, even one with no features at all.
