@@ -491,7 +491,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbLvVGTNtetQUbnp9vX0Ew7_gbkZEyxfXZXyMbltL72AXa-o1hZIGDa2NhcmdvLWFudmlsZTAuNi4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbVqn03OrTnSYblGjeKgXeGVgb6z3iwQiK18Abc5kLxsXto9xhZIGDa2NhcmdvLWFudmlsZTAuNi4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=artifacts
