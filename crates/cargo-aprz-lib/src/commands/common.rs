@@ -702,14 +702,13 @@ mod tests {
             override_path.as_std_path()
         );
 
-        let expected_default = platform_cache_dir()
-            .expect("the test environment has a platform cache directory")
-            .join("cargo-aprz");
-        assert_eq!(
-            Common::<crate::commands::host::TestHost>::resolve_cache_dir(None)
-                .expect("the test environment has a platform cache directory"),
-            expected_default
-        );
+        // The default depends on the environment, so both answers it can give are accepted: a
+        // stripped environment legitimately has no cache location and must ask for `--cache-dir`.
+        let resolved = Common::<crate::commands::host::TestHost>::resolve_cache_dir(None);
+        match platform_cache_dir() {
+            Some(cache_dir) => assert_eq!(resolved.expect("a known cache location resolves"), cache_dir.join("cargo-aprz")),
+            None => assert!(resolved.is_err(), "an unknown cache location is an error, not a path"),
+        }
     }
 
     #[test]
