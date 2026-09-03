@@ -4,7 +4,7 @@
 [package]
 name = "cargo-aprz-lib"
 description = "Internal library for cargo-aprz"
-version = "1.1.1"
+version = "1.1.2"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "dependencies", "analysis", "quality"]
 categories = ["development-tools"]

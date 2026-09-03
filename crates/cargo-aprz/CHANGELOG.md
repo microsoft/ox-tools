@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2] - 2026-09-03
+
+- 🐛 Bug Fixes
+
+  - pick up `cargo-aprz-lib` 1.1.2, which drops the `directories` and `humantime-serde`
+    dependencies ([#145](https://github.com/microsoft/ox-tools/pull/145))
+
 ## 1.1.0 - 2026-08-07
 
 ### Added
