@@ -118,7 +118,7 @@ jobs/stages. Locally, `just anvil-pr-slow` invokes those groups in order, and
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
-| `pr-msrv`         | Same default as `pr-test`             | Affected-package all-target tests under the declared MSRV, in all-features and default-features configurations. The recipe is a no-op when no root MSRV is declared. |
+| `pr-msrv`         | Same default as `pr-test`             | Affected-package tests plus compile-only bench/example checks under the declared MSRV, in all-features and default-features configurations. The recipe is a no-op when no root MSRV is declared. |
 | `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
 | `pr-mutants`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
 
@@ -211,13 +211,15 @@ matrix overhead.
 
 #### `pr-msrv` (minimum-version tests)
 
-When the root manifest declares an MSRV, Anvil runs `cargo test --tests`
-for affected packages under that compiler. `--tests` selects every target that
-carries `test = true` -- library and binary unit tests, and integration tests.
-Anvil runs exactly two feature configurations: `--all-features` and
-the default features. It does not add a `--no-default-features` pass; such a
-pass can exercise feature-negative code, but it is outside the current policy.
-This is the test execution at the minimum supported compiler;
+When the root manifest declares an MSRV, Anvil runs `cargo test --tests` plus
+`cargo check --benches --examples` for affected packages under that compiler.
+`--tests` selects library and binary unit tests and integration tests; the
+separate check preserves compile-only MSRV coverage for benches and examples.
+Anvil runs both commands in exactly two feature configurations:
+`--all-features` and the default features. It does not add a
+`--no-default-features` pass; such a pass can exercise feature-negative code,
+but it is outside the current policy. This is test and compile coverage at the
+minimum supported compiler;
 `pr-test` runs the same affected suite through coverage instrumentation on the
 catalog nightly. Other checks that use the selected stable compiler do not execute
 this suite, so an MSRV fallback does not make `pr-msrv` a duplicate.
@@ -232,10 +234,10 @@ run to a separate driver binary -- criterion's, or a profiler runner such as
 `gungraun-runner` driving Valgrind -- and `anvil-msrv-test-setup` installs only
 the MSRV toolchain, so that driver is absent and the group fails on a
 prerequisite it never declares. That failure says nothing about the minimum
-supported version. It also matches the repository-wide policy that benches and
-examples are compiled but never run: `bench` uses `cargo bench --no-run` and
-`examples` uses `cargo build --examples`, and both keep that compile coverage on
-the selected stable compiler. `--tests` is preferred over the equivalent
+supported version. The separate `cargo check --benches --examples` invocations
+type-check those targets under the MSRV without linking or executing their
+harnesses. This matches the repository-wide policy that benches and examples
+are compiled but never run. `--tests` is preferred over the equivalent
 `--lib --bins --tests` because `--lib` errors with "no library targets found" on
 a bin-only affected package under impact scoping, the same reason `miri` uses it.
 No doctest coverage is lost, since `--all-targets` suppresses doctests too and

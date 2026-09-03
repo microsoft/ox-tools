@@ -1666,6 +1666,12 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Preserve MSRV compile coverage for benches and examples without using
+    # `cargo test --all-targets`, which would execute harness-free benches.
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install the declared MSRV toolchain only when this check is required.
 [group("anvil-setup")]
