@@ -259,6 +259,8 @@
 //!
 //! Anvil compiles the selected scope together once, preserving Cargo feature
 //! unification, and runs the resulting Miri test executables concurrently.
+//! Each executable is one Cargo test target containing one or more libtest
+//! tests.
 //! `ANVIL_MIRI_JOBS` overrides the default worker count. Local callers can use
 //! `--package` to override impact scope, `--test` to select libtest names, or
 //! `--example` with `--package` to run one example instead of the test suite.
