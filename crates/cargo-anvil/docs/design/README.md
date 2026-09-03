@@ -206,7 +206,7 @@ update the recipes or cloud-workflow building blocks.
 A user with only `cargo` (no `just`, no `cargo-anvil`) can still run the basics:
 
 ```sh
-cargo test   --workspace --all-targets --all-features --locked
+cargo test   --workspace --tests --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --check
 ```
@@ -231,7 +231,9 @@ The tool produces a small set of files. They fall into three categories:
   bracketed by sentinel comments. The sentinel pair (`# >>> anvil-managed: <id>` …
   `# <<< anvil-managed: <id>`) delimits the region body and identifies it by stable ID;
   the manifest tracks the last-rendered checksum per `(host, id)`. Outside the
-  sentinels, the user's content is preserved byte-for-byte.
+  sentinels, the user's content is preserved byte-for-byte — except that first
+  introduction into a TOML host may adopt a hand-written table, see
+  [updates.md](./updates.md#adopting-a-hand-written-table-on-first-introduction).
 - **user-authored** — files the user owns; the tool only reads them.
   `rust-toolchain.toml` and `.cargo/config.toml` fall in this category.
 

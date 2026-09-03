@@ -211,19 +211,35 @@ matrix overhead.
 
 #### `pr-msrv` (minimum-version tests)
 
-When the root manifest declares an MSRV, Anvil runs `cargo test --all-targets`
-for affected packages under that compiler. Cargo's all-target set covers
-library and binary unit tests, integration tests, examples, and benches as test
-targets. Anvil runs exactly two feature configurations: `--all-features` and
+When the root manifest declares an MSRV, Anvil runs `cargo test --tests`
+for affected packages under that compiler. `--tests` selects every target that
+carries `test = true` -- library and binary unit tests, and integration tests.
+Anvil runs exactly two feature configurations: `--all-features` and
 the default features. It does not add a `--no-default-features` pass; such a
 pass can exercise feature-negative code, but it is outside the current policy.
-This is the all-target test execution at the minimum supported compiler;
+This is the test execution at the minimum supported compiler;
 `pr-test` runs the same affected suite through coverage instrumentation on the
 catalog nightly. Other checks that use the selected stable compiler do not execute
-this all-target suite, so an MSRV fallback does not make `pr-msrv` a duplicate.
+this suite, so an MSRV fallback does not make `pr-msrv` a duplicate.
 A selecting toolchain file does not suppress the MSRV run, even when it selects the
 same compiler, because the MSRV group is the authoritative minimum-version test
 result.
+
+The check deliberately does **not** use `--all-targets`. That flag expands to
+`--lib --bins --tests --benches --examples`, which makes `cargo test` build *and
+execute* every bench harness. A bench declared `harness = false` delegates its
+run to a separate driver binary -- criterion's, or a profiler runner such as
+`gungraun-runner` driving Valgrind -- and `anvil-msrv-test-setup` installs only
+the MSRV toolchain, so that driver is absent and the group fails on a
+prerequisite it never declares. That failure says nothing about the minimum
+supported version. It also matches the repository-wide policy that benches and
+examples are compiled but never run: `bench` uses `cargo bench --no-run` and
+`examples` uses `cargo build --examples`, and both keep that compile coverage on
+the selected stable compiler. `--tests` is preferred over the equivalent
+`--lib --bins --tests` because `--lib` errors with "no library targets found" on
+a bin-only affected package under impact scoping, the same reason `miri` uses it.
+No doctest coverage is lost, since `--all-targets` suppresses doctests too and
+`doc-test` owns them.
 
 The group uses the same OS/architecture matrix and per-OS impact sets as `pr-test`
 so cfg-gated targets and dependencies are exercised under the MSRV. It runs in
