@@ -185,6 +185,7 @@ mod tests {
             github::scheduled_impl_workflow(),
             github::pr_root_workflow(),
             github::scheduled_root_workflow(),
+            github::code_review_skill(),
             ado::setup_step(),
             ado::impact_step(),
             ado::advisory_comments(),
