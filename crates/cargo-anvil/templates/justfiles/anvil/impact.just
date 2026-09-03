@@ -605,8 +605,10 @@ _anvil-impact-format tier impactJson:
 
 # Private. Resolves an impact category's scope for a check recipe and echoes it on stdout.
 #   1. ANVIL_IMPACT=off            -> tier default (full-workspace / run).
-#   2. include_<tier>.txt present  -> its selector tokens.
-#   3. otherwise                   -> tier default.
+#   2. include_<tier>.txt present  -> validated selector tokens; malformed
+#                                      content fails closed.
+#   3. file missing                -> tier default, except consume mode fails
+#                                      because its downloaded cache is incomplete.
 # Tier default: --workspace for every tier.
 # Each scoped check calls this directly (into a local $selection array) to
 # read its category's scope from the target/anvil/impact cache -- the same cache
