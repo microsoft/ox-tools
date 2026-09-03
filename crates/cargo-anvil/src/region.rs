@@ -24,7 +24,10 @@
 //! Empty body (just the sentinels with no content between them) is the
 //! opt-out signal — see [`updates.md §6`](../../docs/design/updates.md).
 
+use std::collections::BTreeMap;
+
 use ohno::{AppError, app_err, bail};
+use toml_edit::{DocumentMut, Item, Table};
 
 /// Comment syntax used by the host file.
 ///
@@ -375,10 +378,11 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
 /// exists to prevent — a `deny.toml` whose `[advisories]` lists the repository's own
 /// `ignore` entries is the case that matters, and it is covered by a fixture.
 /// Comments and blank lines are ignored when comparing, since neither carries
-/// configuration. The comparison is otherwise textual, so two lines differing
-/// only in spacing around `=` do not match and adoption declines, leaving the
-/// duplicate this function exists to remove. An array-of-tables (`[[bin]]`) is
-/// never adopted at all:
+/// configuration, and both sides are compared through the TOML parser rather
+/// than as source text — so formatting the grammar ignores, such as the
+/// spacing in `workspace=true` or the order two entries appear in, cannot
+/// defeat the comparison and leave the duplicate this function exists to
+/// remove. An array-of-tables (`[[bin]]`) is never adopted at all:
 /// TOML lets those repeat, so a second one is not a duplicate and dropping it
 /// would delete a genuine array element.
 ///
@@ -399,7 +403,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         return text.to_owned();
     }
 
-    let managed = toml_tables(body, syntax);
+    let managed = parsed_tables(body, syntax);
     if managed.is_empty() {
         return text.to_owned();
     }
@@ -409,13 +413,12 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 
     // Which unmanaged tables are safe to drop, decided up front so the rewrite
     // below is a single pass with no lookahead.
-    let mut adoptable: Vec<&str> = Vec::new();
-    for (header, lines) in toml_tables(text, syntax) {
-        if !is_array_of_tables(header)
-            && let Some(managed_lines) = managed.iter().find(|(name, _)| *name == header).map(|(_, lines)| lines)
-            && lines.iter().all(|line| managed_lines.contains(line))
+    let mut adoptable: Vec<Vec<String>> = Vec::new();
+    for (path, values) in parsed_tables(text, syntax) {
+        if let Some(managed_values) = managed.iter().find(|(name, _)| *name == path).map(|(_, values)| values)
+            && values.iter().all(|(key, value)| managed_values.get(key) == Some(value))
         {
-            adoptable.push(header);
+            adoptable.push(path);
         }
     }
     if adoptable.is_empty() {
@@ -442,7 +445,9 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 
         if !in_managed {
             if let Some(header) = toml_table_header(trimmed) {
-                dropping = adoptable.contains(&header);
+                // An array-of-tables header is never adoptable, but it does end
+                // the table above it, so the skip stops here either way.
+                dropping = !is_array_of_tables(header) && table_path(header).is_some_and(|path| adoptable.contains(&path));
             }
             if dropping {
                 continue;
@@ -493,6 +498,89 @@ fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
     }
 
     tables
+}
+
+/// The configuration a TOML table declares, as canonical path/value pairs.
+type TableValues = BTreeMap<Vec<String>, String>;
+
+/// A TOML table's canonical path and the configuration it declares.
+type ParsedTable = (Vec<String>, TableValues);
+
+/// Each adoption candidate in `text`, as the canonical path its header names
+/// and the configuration it declares.
+///
+/// An array-of-tables, and any table whose lines the TOML parser rejects, is
+/// dropped from the result rather than compared: a table this cannot read is
+/// one it must not delete.
+fn parsed_tables(text: &str, syntax: CommentSyntax) -> Vec<ParsedTable> {
+    toml_tables(text, syntax)
+        .into_iter()
+        .filter(|(header, _)| !is_array_of_tables(header))
+        .filter_map(|(header, lines)| Some((table_path(header)?, table_values(&lines)?)))
+        .collect()
+}
+
+/// The canonical path a table header names: `[ workspace . lints ]` and
+/// `[workspace.lints]` both yield `["workspace", "lints"]`.
+///
+/// The path is kept as segments rather than rejoined into a string so that a
+/// quoted key containing a dot cannot be mistaken for a nested path — `["a.b"]`
+/// and `[a.b]` name different tables and must not compare equal.
+fn table_path(header: &str) -> Option<Vec<String>> {
+    let document = header.parse::<DocumentMut>().ok()?;
+    let mut path = Vec::new();
+    let mut table = document.as_table();
+    loop {
+        let mut entries = table.iter();
+        let (key, item) = entries.next()?;
+        if entries.next().is_some() {
+            return None;
+        }
+        path.push(key.to_owned());
+        match item.as_table() {
+            Some(inner) if !inner.is_empty() => table = inner,
+            _ => break,
+        }
+    }
+    Some(path)
+}
+
+/// The configuration a table's lines declare, as canonical path/value pairs.
+///
+/// Comparing what the parser produces rather than the source lines themselves
+/// is what makes adoption insensitive to formatting TOML ignores. Returns
+/// `None` when the lines do not parse, which declines adoption for that table.
+fn table_values(lines: &[&str]) -> Option<TableValues> {
+    let document = lines.join("\n").parse::<DocumentMut>().ok()?;
+    let mut values = BTreeMap::new();
+    collect_values(document.as_table(), &mut Vec::new(), &mut values).then_some(values)
+}
+
+/// Flatten a table's entries into path/value pairs, descending through dotted
+/// keys so `rust.unsafe_op_in_unsafe_fn` is one entry rather than a nested
+/// table.
+///
+/// Returns `false` for anything that is not a value or a nested table. Neither
+/// can
+/// arise from a table body with its headers already removed, and refusing is
+/// the safe answer for a shape this does not model.
+fn collect_values(table: &Table, path: &mut Vec<String>, values: &mut TableValues) -> bool {
+    for (key, item) in table {
+        path.push(key.to_owned());
+        let understood = match item {
+            Item::Value(value) => {
+                values.insert(path.clone(), value.to_string().trim().to_owned());
+                true
+            }
+            Item::Table(inner) => collect_values(inner, path, values),
+            Item::ArrayOfTables(_) | Item::None => false,
+        };
+        path.pop();
+        if !understood {
+            return false;
+        }
+    }
+    true
 }
 
 /// Return a trimmed TOML table header, without its trailing comment.
@@ -668,6 +756,52 @@ mod tests {
         let adopted = adopt_unmanaged_toml_tables(text, "[advisories]\nignore = [\"a#c\"]\n", SYN);
 
         assert_eq!(adopted, text, "the differing table is preserved:\n{adopted}");
+    }
+
+    /// The case that motivated moving the comparison onto the TOML parser: a
+    /// hand-written `workspace=true` declares exactly what the rendered
+    /// `workspace = true` does, and TOML does not care about the spacing. A
+    /// source-text comparison judged them different, declined adoption, and
+    /// appended the duplicate header this module exists to remove.
+    #[test]
+    fn spacing_around_the_assignment_does_not_defeat_adoption() {
+        let adopted = adopt_unmanaged_toml_tables("[lints]\nworkspace=true\n", "[lints]\nworkspace = true\n", SYN);
+
+        assert_eq!(adopted, "", "the table is adopted despite the spacing:\n{adopted}");
+    }
+
+    /// Entry order is not configuration either. Two tables listing the same
+    /// settings in a different order are the same table to TOML, so adoption
+    /// must not turn the ordering into a duplicate header.
+    #[test]
+    fn entry_order_does_not_defeat_adoption() {
+        let text = "[advisories]\nyanked = \"deny\"\nunmaintained = \"warn\"\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[advisories]\nunmaintained = \"warn\"\nyanked = \"deny\"\n", SYN);
+
+        assert_eq!(adopted, "", "the table is adopted despite the order:\n{adopted}");
+    }
+
+    /// `["a.b"]` is one table whose name contains a dot; `[a.b]` is table `b`
+    /// nested in table `a`. Reducing a header to a joined string would
+    /// make them compare equal and delete a table the body never declared,
+    /// which is why the path is compared as segments.
+    #[test]
+    fn a_quoted_dotted_key_is_not_a_nested_path() {
+        let text = "[\"a.b\"]\nx = 1\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[a.b]\nx = 1\n", SYN);
+
+        assert_eq!(adopted, text, "the differently-named table is preserved:\n{adopted}");
+    }
+
+    /// Comparing canonical paths rather than raw header text makes `[bin]` and
+    /// `[[bin]]` share a path, so the array-of-tables exclusion has to hold in
+    /// the rewrite as well as in candidate selection. Were it dropped, the
+    /// array element would be deleted along with the adopted table.
+    #[test]
+    fn an_array_of_tables_survives_adoption_of_a_table_sharing_its_name() {
+        let adopted = adopt_unmanaged_toml_tables("[bin]\nname = \"x\"\n\n[[bin]]\nname = \"x\"\n", "[bin]\nname = \"x\"\n", SYN);
+
+        assert_eq!(adopted, "[[bin]]\nname = \"x\"\n", "the array element survives:\n{adopted}");
     }
 
     /// A trailing comment on a key line carries no configuration, so it must
