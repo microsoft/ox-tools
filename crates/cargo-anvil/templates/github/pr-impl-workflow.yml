@@ -154,13 +154,13 @@ jobs:
       # has opted into sending write tokens to fork workflows.
       - name: Upsert anvil-semver advisory
         if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') != ''
-        uses: marocchino/sticky-pull-request-comment@v3.0.5 # immutable release, the tag cannot be moved
+        uses: marocchino/sticky-pull-request-comment@v3.0.5 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
         with:
           header: anvil-semver
           path: target/anvil/comments/semver.md
       - name: Clear anvil-semver advisory
         if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') == ''
-        uses: marocchino/sticky-pull-request-comment@v3.0.5 # immutable release, the tag cannot be moved
+        uses: marocchino/sticky-pull-request-comment@v3.0.5 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
         with:
           header: anvil-semver
           delete: true
@@ -211,11 +211,12 @@ jobs:
         # Codecov UI without changing the union total.
         # lcov-*.info are produced by the anvil-llvm-cov recipe inside
         # anvil-pr-test (one per feature config); if the affected set was
-        # empty the recipe no-ops and there is no file to upload, so we gate
-        # on the files existing (impact scoping lives in the downloaded cache
-        # now, not a job output). Codecov coalesces the two per-config files.
-        if: matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
-        uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
+        # empty the recipe no-ops and there are no files to upload. `always()`
+        # keeps completed reports publishable after the gate or a later recipe
+        # fails. The separate hashFiles predicates require both feature
+        # configurations; one multi-pattern call would accept a partial pair.
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
+        uses: codecov/codecov-action@v7.0.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
           flags: ${{ matrix.os }}

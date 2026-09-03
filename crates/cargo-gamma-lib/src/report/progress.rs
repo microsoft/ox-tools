@@ -353,14 +353,15 @@ impl Progress {
         self.insist_encoded(host, label, &encode_controls(subject));
     }
 
-    /// Relays one line of another tool's output, keeping the colour it painted itself with.
+    /// Relays one line of another tool's output, keeping its color and bold diagnostic styling.
     ///
     /// Separate from [`insist`](Self::insist) because the two carry different text under different
     /// rules. This tool's own sentences never contain an escape, so an escape in one is an
-    /// injection; a compiler's output legitimately arrives coloured, and reprinting it with the
-    /// colour spelled out as `\e[31m` would make `--show-build` unreadable. Colour is the only
-    /// thing let through: it repaints text and can do nothing else.
-    pub fn relay<H: Host>(&mut self, host: &mut H, label: &str, line: &str) {
+    /// injection; a compiler's output legitimately arrives colored and bold, and reprinting it
+    /// with the styling spelled out as `\e[1;31m` would make `--show-build` unreadable. Other SGR
+    /// effects and terminal controls are encoded, and a trusted reset contains the accepted style
+    /// to this line.
+    pub(crate) fn relay<H: Host>(&mut self, host: &mut H, label: &str, line: &str) {
         self.insist_encoded(host, label, &encode_preserving_color(line));
     }
 
@@ -993,7 +994,7 @@ mod tests {
     /// `None` is the same answer for the purpose: it means nothing has been drawn yet, which is also
     /// not throttled.
     fn expire(progress: &mut Progress) {
-        progress.last_draw = Instant::now().checked_sub(REDRAW_INTERVAL + Duration::from_millis(10));
+        progress.last_draw = None;
     }
 
     /// Replays the erase sequences the display writes, so a test can assert on what is left on
@@ -1425,15 +1426,15 @@ mod tests {
         }
     }
 
-    /// Relayed build output keeps its colour, because that is the whole reason it is shown.
+    /// Relayed build output keeps safe diagnostic styling and contains it to the relayed line.
     #[test]
-    fn relayed_tool_output_keeps_colour_and_loses_everything_else() {
+    fn relayed_tool_output_keeps_safe_styling_and_loses_everything_else() {
         let text = written(|progress, host| {
             progress.relay(host, "          ", "\u{1b}[1;31merror\u{1b}[0m: \u{1b}[2Kwiped");
         });
 
         assert!(text.contains("\u{1b}[1;31merror\u{1b}[0m"), "{text:?}");
-        assert!(text.contains("\\e[2Kwiped"), "{text:?}");
+        assert!(text.contains("\\e[2Kwiped\u{1b}[0m\n"), "{text:?}");
     }
 
     /// This tool's own status lines are unaffected by the policy that protects them.

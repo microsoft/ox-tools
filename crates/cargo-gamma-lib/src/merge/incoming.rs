@@ -3,10 +3,11 @@
 
 //! A report in the shape the interchange schema requires, rather than the shape this tool writes.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::HashMap;
 use crate::elements::{FileResult, Framework, Report, RunInfo, Thresholds};
 
 /// What a producer that did not name itself, or did not name its version, is recorded as.
@@ -46,7 +47,7 @@ pub(super) struct Incoming {
     framework: Option<IncomingFramework>,
 
     /// One entry per mutated file, keyed by workspace-relative path.
-    files: HashMap<String, FileResult>,
+    files: BTreeMap<String, FileResult>,
 
     /// Free-form producer metadata.
     ///
@@ -87,7 +88,7 @@ impl From<Incoming> for Report {
             thresholds: incoming.thresholds,
             project_root: incoming.project_root,
             framework,
-            files: incoming.files.into_iter().collect(),
+            files: incoming.files,
             config,
         }
     }

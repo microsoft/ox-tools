@@ -8,6 +8,15 @@
 This ordinary library implements parsing and validation for the inert
 attributes exported by `cargo-gamma-attrs`.
 
+## Terminology
+
+A **stated value** is the expression in `#[gamma::value(...)]`. A
+**comment-form directive** is an attribute-shaped source comment such as
+`// #[gamma::skip(...)]`. Timeout attributes and directives accept a timeout
+multiplier either as a bare numeric argument or as a named setting. Their
+other arguments are mutator selectors plus the named `reason` and `tag`
+metadata.
+
 ## Boundaries
 
 - This crate must remain a normal library, not a proc-macro crate. Keeping the
@@ -20,7 +29,7 @@ attributes exported by `cargo-gamma-attrs`.
   nothing.
 - Argument lists are split on their top-level commas and each argument is then
   classified on its own, so an attribute accepts exactly the text the equivalent
-  `// gamma:` comment directive accepts. A positional timeout multiplier
+  comment-form directive accepts. A positional timeout multiplier
   therefore carries no positional meaning: it may sit before, between, or after
   selectors, a `reason`, a `tag`, or a trailing comma. What it may not do is
   appear twice — a second multiplier, in any spelling and in either order, is

@@ -22,9 +22,12 @@ therefore covers the complete descendant tree.
 - Platform calls are isolated behind the safe interfaces in
   `cargo-gamma-unsafe`.
 - Containment is independent of memory accounting. A Unix process group can be
-  left with one unprivileged call, so every launch enters a cgroup leaf on Linux
-  and a job object on Windows whether or not anything is being measured; the
-  memory request decides only whether that boundary's readings are reported.
+  left with one unprivileged call. Every Windows launch therefore enters a job
+  object, and every Linux launch attempts to enter a cgroup leaf whether or not
+  anything is being measured; the memory request decides only whether that
+  boundary's readings are reported. An unmetered Linux launch may fall back to
+  its process group only when the host has no supported cgroup facility, after
+  that host-wide limitation has been reported.
 - On Linux, a process tree's cgroup keeps its own interrupt registration for as
   long as the cgroup exists, covering descendants that leave the process group.
   Handing the process-group slot back when the leader is reaped does not retract
@@ -35,10 +38,12 @@ therefore covers the complete descendant tree.
   consumes the command and yields a prepared launch that never hands the command
   back. There is no run-time refusal to bypass and no mark on the command for a
   caller to erase. Spawning consumes that prepared typestate: failure returns it
-  with the operating-system error so a transient shortage can back off and retry,
-  while success yields a distinct bundle coupling the child to its boundary.
-  Adoption consumes that bundle, so a successful launch cannot be reused to
-  create an earlier, unadopted sibling.
+  with the operating-system error so the caller can classify a transient
+  resource-related spawn failure, back off, and retry; permanent launch failures
+  are propagated. Success yields a distinct bundle coupling the child to its
+  boundary. Adoption consumes that bundle, so a successful launch cannot be
+  reused to create an earlier sibling awaiting adoption; abandoning the bundle
+  before adoption terminates and reaps the child.
 - The contained `output` convenience mirrors `Command::output`: it disconnects
   stdin and captures stdout and stderr. Both pipes are drained concurrently
   while the child runs, avoiding pipe-capacity deadlocks. When the leader exits,
@@ -48,15 +53,18 @@ therefore covers the complete descendant tree.
   nested assignment, the spawn is rejected: an inherited job does not provide a
   handle through which this process can later terminate the child's descendants.
   Failure to create a job is likewise a refusal rather than a degraded launch.
-- A host that offers no sealed boundary at all is reported once through
-  `containment`, before any repository-controlled code runs, rather than
-  degrading each launch silently. A host that can seal but fails one launch
-  refuses that launch.
+- Sealed containment uses a boundary that descendants cannot leave. A host that
+  offers no sealed boundary at all is reported once through `containment`,
+  before any repository-controlled code runs, rather than degrading each launch
+  silently. An unmetered launch may then use best-effort process-group
+  containment and report itself as unsealed. A host that can seal but fails one
+  launch refuses that launch.
 - An observation that finds the leader already reaped elsewhere revokes the
   numeric capabilities naming it — the retained child handle and the stored
-  process-group id — after sweeping the boundary that names a directory or a
-  handle, because only the latter can still be proven to reach this run's own
-  descendants.
+  process-group id — after sweeping the non-numeric containment capability: the
+  cgroup directory on Linux or job handle on Windows. That boundary can still be
+  proven to reach this run's descendants after numeric identities may have been
+  reused.
 - The `fault-injection` feature is test-only infrastructure.
 - Tests that need a capability the host may not have are marked ignored and fail
   when asked for by name on a host that cannot supply it, rather than returning
@@ -64,6 +72,9 @@ therefore covers the complete descendant tree.
   restored — the interrupt registry's interrupted flag, its finite watch slots —
   run in a subprocess of their own.
 - The crate forbids unsafe code.
+
+Replaceable typestate, capture, and fault-injection mechanics are recorded in
+the [implementation guide](IMPLEMENTATION.md).
 
 Containment is active from the child's first instruction so descendants cannot
 escape during a launch-time gap. Linux moves the child into its cgroup between

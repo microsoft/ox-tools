@@ -66,23 +66,23 @@ pub struct Config {
     pub low_risk_threshold: f64,
 
     /// Duration to keep crates.io cache data before re-downloading
-    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    #[serde(default = "default_cache_ttl", with = "super::duration")]
     pub crates_cache_ttl: Duration,
 
     /// Duration to keep hosting cache data before re-fetching
-    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    #[serde(default = "default_cache_ttl", with = "super::duration")]
     pub hosting_cache_ttl: Duration,
 
     /// Duration to keep cached codebases before re-fetching
-    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    #[serde(default = "default_cache_ttl", with = "super::duration")]
     pub codebase_cache_ttl: Duration,
 
     /// Duration to keep cached coverage data before re-fetching
-    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    #[serde(default = "default_cache_ttl", with = "super::duration")]
     pub coverage_cache_ttl: Duration,
 
     /// Duration to keep the advisory database cached before re-downloading
-    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    #[serde(default = "default_cache_ttl", with = "super::duration")]
     pub advisories_cache_ttl: Duration,
 }
 

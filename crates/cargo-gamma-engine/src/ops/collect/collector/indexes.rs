@@ -9,9 +9,9 @@ use syn::{
     ItemStruct, ItemUse, Member, Pat, Stmt, TraitItem, TraitItemConst, Type, UseTree,
 };
 
-use super::super::defaults::{impl_item_attrs, item_attrs, trait_item_attrs};
-use super::predicates::{expr_attrs, is_int_literal, is_numeric_binding, is_numeric_receiver, stmt_attrs};
 use crate::cfg::CfgSet;
+use crate::ops::collect::collector::predicates::{expr_attrs, is_int_literal, is_numeric_binding, is_numeric_receiver, stmt_attrs};
+use crate::ops::collect::defaults::{impl_item_attrs, item_attrs, trait_item_attrs};
 use crate::ops::registry::Selection;
 use crate::{HashMap, HashSet};
 
@@ -53,7 +53,7 @@ pub(in crate::ops::collect) struct Indexes {
 }
 
 /// Fills whichever indexes were asked for, ignoring scope.
-pub(super) struct Walk {
+pub(super) struct Walk<'cfg> {
     indexes: Indexes,
 
     /// Whether the numeric evidence — fields, constants, uses — is wanted.
@@ -70,10 +70,10 @@ pub(super) struct Walk {
     /// [`CfgSet::skip_gate`], the one question [`Collector::skipped`](super::Collector::skipped)
     /// asks, at every place this walk can be entered: items, associated items, struct fields,
     /// statements, and expressions.
-    cfg: CfgSet,
+    cfg: &'cfg CfgSet,
 }
 
-impl Walk {
+impl Walk<'_> {
     /// Notes a name, when the expression is the bare identifier that proves it.
     pub(super) fn note(&mut self, expression: &Expr) {
         match expression {
@@ -276,7 +276,7 @@ impl Walk {
     clippy::renamed_function_params,
     reason = "syn names every visitor parameter `i`, which says nothing about what it is"
 )]
-impl<'ast> Visit<'ast> for Walk {
+impl<'ast> Visit<'ast> for Walk<'_> {
     /// Gates every item this walk might otherwise index by the same decision the collector reads
     /// before it ever offers a mutant.
     ///
@@ -455,13 +455,13 @@ pub(super) fn indexes_in(file: &File, selection: &Selection, cfg: &CfgSet) -> In
     walk.indexes
 }
 
-impl Walk {
+impl<'cfg> Walk<'cfg> {
     /// Builds an empty index set, gated exactly as [`indexes_in`] gates its own walk.
     ///
     /// Exposed so the fused phase-one pass (`collector::phase_one`) can build the same starting
     /// state `indexes_in` would, drive it through one combined traversal instead of
     /// `indexes_in`'s own, and read the result back out with [`Walk::into_indexes`].
-    pub(super) fn new(selection: &Selection, cfg: &CfgSet) -> Self {
+    pub(super) fn new(selection: &Selection, cfg: &'cfg CfgSet) -> Self {
         Self {
             indexes: Indexes {
                 fields: HashMap::default(),
@@ -476,7 +476,7 @@ impl Walk {
             // write could be built at all. Missing the second cost five mutants when this gate was
             // first written, which is what a gate on an index has to be checked against.
             imports: selection.any_in_family("fn_value") || selection.contains("result.ok_to_err"),
-            cfg: cfg.clone(),
+            cfg,
         }
     }
 
@@ -490,7 +490,7 @@ impl Walk {
 mod tests {
     use super::*;
 
-    fn walk(numeric: bool, imports: bool) -> Walk {
+    fn walk(numeric: bool, imports: bool, cfg: &CfgSet) -> Walk<'_> {
         Walk {
             indexes: Indexes {
                 fields: HashMap::default(),
@@ -500,13 +500,14 @@ mod tests {
             },
             numeric,
             imports,
-            cfg: CfgSet::unconditional(),
+            cfg,
         }
     }
 
     #[test]
     fn note_tracks_named_fields_behind_references() {
-        let mut walk = walk(true, false);
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(true, false, &cfg);
         let expression = syn::parse_str::<Expr>("&record.count").expect("the field expression parses");
 
         walk.note(&expression);
@@ -516,7 +517,8 @@ mod tests {
 
     #[test]
     fn declared_ignores_constants_when_numeric_index_is_disabled() {
-        let mut walk = walk(false, false);
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(false, false, &cfg);
         let ty = syn::parse_str::<Type>("usize").expect("the numeric type parses");
 
         walk.declared("COUNT", &ty);
@@ -526,7 +528,8 @@ mod tests {
 
     #[test]
     fn descend_handles_groups_renames_and_globs() {
-        let mut walk = walk(false, true);
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(false, true, &cfg);
         let item = syn::parse_str::<ItemUse>("use crate::{Thing as Alias, inner::Item, *};").expect("the use item parses");
 
         walk.descend(&mut Vec::new(), &item.tree);

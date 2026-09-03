@@ -101,3 +101,22 @@ pub fn run_loom_models() {
 #[cfg(all(loom, not(unix)))]
 #[doc(hidden)]
 pub const fn run_loom_models() {}
+
+#[cfg(test)]
+mod unwind_contracts {
+    use core::panic::{RefUnwindSafe, UnwindSafe};
+
+    use crate::Situation;
+    #[cfg(target_os = "linux")]
+    use crate::cgroup::Cgroup;
+
+    fn assert_unwind_safe<T: UnwindSafe + RefUnwindSafe>() {}
+
+    #[test]
+    fn public_value_types_are_unwind_safe() {
+        assert_unwind_safe::<Situation>();
+
+        #[cfg(target_os = "linux")]
+        assert_unwind_safe::<Cgroup>();
+    }
+}

@@ -243,7 +243,7 @@ fn parse_arguments(tokens: &TokenStream) -> Arguments {
 
 /// Records the one timeout multiplier a directive may state, refusing a second.
 ///
-/// An item has one timeout, so a second multiplier — positional or keyed, and in whichever order
+/// An item has one timeout, so a second multiplier — positional or named, and in whichever order
 /// the two were written — can only mean the author believes something other than what would
 /// happen. Keeping whichever arrived last hides that behind a directive that looks like it says two
 /// things and quietly does one. Refusing says which argument to delete, and matches the proc-macro

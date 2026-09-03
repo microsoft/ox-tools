@@ -54,11 +54,10 @@ pub(super) fn is_noop(replacement: &str, original: &str, shape: Shape, defaults:
 /// Deliberately narrow: it answers for this one shape and nothing else, rather than pretending to
 /// decide equivalence in general.
 pub(super) fn is_same_leak(replacement: &str, original: &str, defaults: &DefaultPaths, defaulted_types: &[String]) -> bool {
-    // Every match here requires `leak` as a literal identifier in both expressions' `Box::leak`
-    // path (checked later by `path_ends_with`), so its absence from the raw text of either side
-    // rules out a match without tokenizing either one. Almost no replacement or original is this
-    // shape, so this skips the two token passes below entirely for the overwhelming majority of
-    // candidates.
+    // Every match requires the terminal method identifier checked later by `path_ends_with` in
+    // both expressions, so its absence from either raw text rules out a match without tokenizing
+    // either one. Almost no replacement or original has this shape, so this skips the two token
+    // passes below for the overwhelming majority of candidates.
     if !replacement.contains("leak") || !original.contains("leak") {
         return false;
     }

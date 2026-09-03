@@ -180,6 +180,8 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   ├── anvil-run-group/action.yml      owned   (orchestrate any Just group)
 │   ├── anvil-report-status/action.yml  owned   (publish per-job commit statuses)
 │   ├── anvil-impact/action.yml        owned   (runs `just anvil-impact`, uploads impact artifact; omitted if .delta.toml disabled)
+├── skills/
+│   └── code-review/SKILL.md           owned   (review guidance for PR reviewers, incl. Copilot code review)
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)
     ├── anvil-scheduled-impl.yml         owned   (reusable workflow for the scheduled tier)
@@ -191,6 +193,26 @@ All files are regular owned files tracked by the sidecar `.anvil.lock` manifest
 (no in-file checksum line; see [updates.md §1](./updates.md#1-the-manifest)). Users
 who customize the root workflow take ownership through the standard dirty-file
 flow.
+
+### 2.1 The code-review skill
+
+`.github/skills/code-review/SKILL.md` is not part of the CI graph. It is an
+[agent skill](https://docs.github.com/en/copilot) that GitHub Copilot code
+review loads when it reviews a pull request in the repository, and that human
+reviewers can read directly.
+
+Anvil owns it for the same reason it owns the workflows: the guidance is a
+property of how the repository is validated, not of any one pull request. Anvil
+emits a CI pipeline that already decides whether the code compiles, lints, and
+passes its tests — so a reviewer predicting those outcomes is duplicating a
+check that has a definitive answer, and is wrong often enough to cost the author
+a rebuttal. The skill's central rule follows from that: comment on evidence you
+can see, and leave build, lint, and test outcomes to the pipeline anvil
+generated.
+
+The content is derived from an audit of withdrawn review comments across
+anvil-managed repositories; each rule corresponds to a class of finding that was
+filed and then disproved.
 
 ## 3. Root workflows
 
@@ -557,6 +579,7 @@ runs:
         failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\{0,1\} with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
         echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
         echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+        exit "$status"
     - name: Publish supplemental Anvil commit status
       if: always() && inputs.publish_commit_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
@@ -566,10 +589,6 @@ runs:
         setup_outcome: ${{ steps.setup.outcome }}
         exit_code: ${{ steps.run.outputs.exit_code }}
         failed_recipe: ${{ steps.run.outputs.failed_recipe }}
-    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
-      if: always() && steps.run.outputs.exit_code != '' && steps.run.outputs.exit_code != '0'
-      shell: bash
-      run: exit 1
 ```
 
 Input set on the shared group action:
@@ -616,9 +635,10 @@ the following mechanisms, all driven by Just's existing terminal diagnostic:
 1. The problem matcher registered by `anvil-setup` promotes
    ``error: recipe `anvil-license-headers` failed with exit code 1`` to a
    GitHub annotation.
-2. The group composite ends with a failing step named
-   `Failed Just recipe: anvil-license-headers`, putting the recipe name in the
-   job's step list.
+2. The `Run Anvil group` step itself returns Just's exit status after recording
+   the recipe name and exit code for supplemental reporting. The failed step is
+   therefore the step containing the complete, live recipe output; no
+   synthetic failure step can displace or truncate the underlying diagnostic.
 3. On eligible pull requests, `anvil-report-status` publishes a commit status
    whose reserved context namespace names the failed recipe and runner:
 
@@ -627,10 +647,12 @@ the following mechanisms, all driven by Just's existing terminal diagnostic:
    ```
 
 The group action streams normal Just output, captures the terminal failed
-recipe, reports supplemental presentation on a best-effort basis, and then
-propagates Just's result to the authoritative workflow job. The reporter
-neither invokes checks nor contains group membership. Internal capture,
-parsing, status reconciliation, and test-harness details are documented in the
+recipe, writes its outputs, and returns Just's status from that same step.
+Subsequent reporting uses `always()` and is supplemental and best-effort, so it
+still runs after a recipe failure without replacing the authoritative failed
+step. The reporter neither invokes checks nor contains group membership.
+Internal capture, parsing, status reconciliation, and test-harness details are
+documented in the
 [implementation guide](../implementation.md#github-group-execution-and-status-reporting).
 
 When `publish_commit_statuses` is enabled, the shared reporter manages statuses
@@ -825,7 +847,7 @@ The wiring never gates jobs on the impact result — every job runs regardless o
 status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
 `mutants-full`) must run on every PR even when every tier reports `--skip`. Steps that
 need a per-tier side decision read the downloaded cache file directly (e.g. the Codecov
-upload is gated on the coverage files existing via `hashFiles(...)`), never on a job
+upload is gated on both coverage files existing via `hashFiles(...)`), never on a job
 output.
 
 The check → bucket mapping is in
@@ -954,8 +976,9 @@ the repository is deleted and recreated, and publishing generates a release
 attestation covering the tag, commit SHA and assets. The tag is a stable identifier
 under those rules, and unlike a SHA it stays readable in the diff when the pin is
 bumped. Generated files carry a
-`# immutable release, the tag cannot be moved` comment at each such pin, so the reason
-a tag appears where a SHA is otherwise expected is visible at the use site.
+`# pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)`
+comment at each such pin, so the reason a tag appears where a SHA is otherwise
+expected is visible at the use site.
 
 Every other action is pinned by commit SHA with the version in a trailing comment, for
 example `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`.
@@ -976,8 +999,12 @@ If that returns `false`, or the release is missing, pin the commit SHA instead.
 ## 10. Coverage upload
 
 After `pr-test` (and `scheduled-test`) runs the `anvil-llvm-cov` recipe, the reusable
-workflow uploads the resulting `target/coverage/lcov.info` to Codecov from every leg of
-the matrix except `windows-11-arm`. The windows-arm leg is excluded because its
+workflow uploads the resulting coverage files to Codecov from every leg of the matrix
+except `windows-11-arm`. The upload condition uses `always()` plus a file-existence
+guard: completed coverage reports are retained even when the coverage gate or a later
+group recipe fails, while failures before both the all-features
+(`lcov-all-features.info`) and no-default-features (`lcov-no-default.info`)
+configurations complete do not trigger an empty or partial upload. The windows-arm leg is excluded because its
 LLVM-coverage instrumentation produces `malformed instrumentation profile data: symbol
 name is empty` errors that make the profile unusable. Coverage from every other leg is
 necessary because OS/arch-gated code (`cfg(target_os = ...)`, `cfg(target_arch = ...)`)
@@ -990,10 +1017,10 @@ The upload step:
 
 ```yaml
 - name: Upload coverage to Codecov
-  if: matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
-  uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
+  if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
+  uses: codecov/codecov-action@v7.0.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
   with:
-    files: target/coverage/lcov.info
+    files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
     flags: ${{ matrix.os }}
     token: ${{ secrets.CODECOV_TOKEN }}
     fail_ci_if_error: false
@@ -1006,9 +1033,10 @@ all; private repos set `CODECOV_TOKEN` at the repo level. `fail_ci_if_error: fal
 keeps the build green when Codecov is unreachable (typical for internal repos that
 can't reach `codecov.io`).
 
-On the scheduled upload the step additionally combines the OS flag with a `scheduled`
-marker (`flags: scheduled,${{ matrix.os }}`) so PR vs scheduled streams stay
-distinguishable in the Codecov UI while still being queryable per-OS.
+The scheduled upload has the same `always()` and file-existence semantics. It
+additionally combines the OS flag with a `scheduled` marker
+(`flags: scheduled,${{ matrix.os }}`) so PR vs scheduled streams stay distinguishable
+in the Codecov UI while still being queryable per-OS.
 
 anvil does not gate the PR on coverage. The lcov upload is informational; Codecov's
 own status check is the gating layer when the adopter wants one (configured in Codecov,

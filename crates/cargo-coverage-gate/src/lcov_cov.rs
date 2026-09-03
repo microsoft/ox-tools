@@ -51,6 +51,10 @@ pub(crate) struct FileReport {
     pub(crate) lines_total: u32,
     /// Number of those lines hit at least once across the run.
     pub(crate) lines_covered: u32,
+    /// Instrumented source line numbers in ascending order.
+    pub(crate) coverable_lines: Vec<u32>,
+    /// Instrumented source line numbers with no hits, in ascending order.
+    pub(crate) uncovered_lines: Vec<u32>,
 }
 
 impl CoverageReport {
@@ -120,20 +124,34 @@ impl CoverageReport {
         for (key, section) in report.sections {
             let mut total: u32 = 0;
             let mut covered: u32 = 0;
-            for data in section.lines.values() {
+            let mut coverable_lines = Vec::with_capacity(section.lines.len());
+            let mut uncovered_lines = Vec::new();
+            for (key, data) in &section.lines {
                 total = total.saturating_add(1);
+                coverable_lines.push(key.line);
                 if data.count > 0 {
                     covered = covered.saturating_add(1);
+                } else {
+                    uncovered_lines.push(key.line);
                 }
             }
+            sort_line_numbers(&mut coverable_lines);
+            sort_line_numbers(&mut uncovered_lines);
             files.push(FileReport {
                 filename: key.source_file,
                 lines_total: total,
                 lines_covered: covered,
+                coverable_lines,
+                uncovered_lines,
             });
         }
+        files.sort_by(|a, b| a.filename.cmp(&b.filename));
         Self { files }
     }
+}
+
+fn sort_line_numbers(lines: &mut [u32]) {
+    lines.sort_unstable();
 }
 
 #[cfg(test)]
@@ -161,6 +179,15 @@ mod tests {
         // Fixture has 4 instrumented lines, 3 hit.
         assert_eq!(f.lines_total, 4);
         assert_eq!(f.lines_covered, 3);
+        assert_eq!(f.coverable_lines, vec![1, 2, 3, 4]);
+        assert_eq!(f.uncovered_lines, vec![3]);
+    }
+
+    #[test]
+    fn line_numbers_are_sorted_explicitly() {
+        let mut lines = [8, 2, 5, 3];
+        sort_line_numbers(&mut lines);
+        assert_eq!(lines, [2, 3, 5, 8]);
     }
 
     #[test]
@@ -232,6 +259,8 @@ end_of_record
         let f = &report.files[0];
         assert_eq!(f.lines_total, 4, "line set is the union across configs");
         assert_eq!(f.lines_covered, 3, "covered if hit in either config");
+        assert_eq!(f.coverable_lines, vec![1, 2, 3, 4]);
+        assert_eq!(f.uncovered_lines, vec![4]);
     }
 
     #[test]

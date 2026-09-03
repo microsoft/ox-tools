@@ -93,12 +93,12 @@ fn escape_property(text: &str) -> String {
 ///
 /// Two layers, because they defend different things. Every control character is first shown rather
 /// than obeyed: the log this lands in is a terminal-rendered one, so a path or source fragment
-/// carrying `ESC [2K` erases the lines above it and one carrying an OSC 8 sequence hangs a
-/// hyperlink of its author's choosing on text a reader takes for workflow output. What is left
-/// is then escaped for the workflow command syntax itself, where an unescaped `%`, carriage return,
-/// or newline ends the command and turns the remainder into log noise. The second layer no longer
-/// has a return or a newline to find, and is kept because it is what the syntax requires rather
-/// than a consequence of the first.
+/// carrying the Escape (ESC) sequence `ESC [2K` erases the lines above it and one carrying an
+/// Operating System Command (OSC) 8 sequence hangs a hyperlink of its author's choosing on text a
+/// reader takes for workflow output. What is left is then escaped for the workflow command syntax
+/// itself, where an unescaped `%`, carriage return, or newline ends the command and turns the
+/// remainder into log noise. The second layer no longer has a return or a newline to find, and is
+/// kept because it is what the syntax requires rather than a consequence of the first.
 fn escape_data(text: &str) -> String {
     encode_controls(text).replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
 }

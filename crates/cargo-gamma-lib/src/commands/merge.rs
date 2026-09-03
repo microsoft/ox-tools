@@ -65,6 +65,23 @@ fn merge_at<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler, now: Option
     }
 
     if let Some(minimum) = args.min_score {
+        if !merged.identity_incompatible.is_empty() {
+            writeln!(
+                host.error(),
+                "{} {} {} excluded because of a different mutant-ID scheme, so the `--min-score` gate cannot evaluate \
+                 the complete requested population",
+                styler.error("error:"),
+                merged.identity_incompatible.len(),
+                if merged.identity_incompatible.len() == 1 {
+                    "report was"
+                } else {
+                    "reports were"
+                }
+            )?;
+
+            return Ok(EXIT_GATE_FAILED);
+        }
+
         if merged.never_tested > 0 {
             writeln!(
                 host.error(),
@@ -287,9 +304,21 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
     // Two runs at different shard counts partitioned the population differently, so the coverage
     // number above is not the claim it appears to be.
     for input in &merged.inconsistent {
+        let input = encode_controls(input);
+
         writeln!(
             stream,
             "{} {input} used a different shard count; rotation coverage is not meaningful across it",
+            styler.verb("Warning")
+        )?;
+    }
+
+    for input in &merged.identity_incompatible {
+        let input = encode_controls(input);
+
+        writeln!(
+            stream,
+            "{} {input} used a different mutant-ID scheme and was excluded from this merge",
             styler.verb("Warning")
         )?;
     }
@@ -327,6 +356,7 @@ mod tests {
             files,
             config: Some(RunInfo {
                 started_at: 100 + u64::from(index),
+                mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
                 merged: false,
                 shard: Some(ShardInfo { index, count }),
                 tests: None,
@@ -356,6 +386,7 @@ mod tests {
             files,
             config: Some(RunInfo {
                 started_at,
+                mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
                 merged: false,
                 shard: None,
                 tests: None,
@@ -502,6 +533,35 @@ mod tests {
     }
 
     #[test]
+    fn a_score_gate_refuses_an_identity_incompatible_population() {
+        let dir = workdir("merge-identity-gate-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let legacy_path = root.join("legacy.json");
+        let current_path = root.join("current.json");
+        let mut legacy = report(0, 2, "Survived");
+        legacy.config.as_mut().expect("config").mutant_id_version = Some(crate::model::MUTANT_ID_VERSION - 1);
+        write_report(&legacy_path, &legacy);
+        write_report(&current_path, &report(1, 2, "Killed"));
+        let args = MergeArgs {
+            inputs: vec![legacy_path, current_path],
+            json_report: None,
+            html_report: None,
+            window: 30,
+            min_score: Some(100.0),
+        };
+        let mut host = Sink::default();
+
+        let code = merge(&mut host, &args, Styler::new(false)).expect("merge");
+
+        assert_eq!(code, EXIT_GATE_FAILED);
+        assert!(
+            host.err().contains("cannot evaluate the complete requested population"),
+            "{}",
+            host.err()
+        );
+    }
+
+    #[test]
     fn zero_window_and_clock_failure_are_reported_truthfully() {
         let dir = workdir("merge-clock-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
@@ -554,6 +614,29 @@ mod tests {
             assert!(!host.err().contains(forbidden), "{}", host.err());
             assert!(host.err().contains("1 verdict excluded"), "{}", host.err());
         }
+    }
+
+    #[test]
+    fn inconsistent_report_paths_are_encoded_before_printing() {
+        let args = MergeArgs {
+            inputs: Vec::new(),
+            json_report: None,
+            html_report: None,
+            window: 30,
+            min_score: None,
+        };
+        let merged = crate::merge::Merged {
+            inconsistent: vec!["reports/bad\r\u{1b}[2Kname.json".to_owned()],
+            identity_incompatible: vec!["reports/old\nname.json".to_owned()],
+            ..crate::merge::Merged::default()
+        };
+        let mut host = Sink::default();
+
+        report_merge(&mut host, &args, &merged, Styler::new(false)).expect("summary");
+
+        assert!(host.err().contains("bad\\r\\e[2Kname.json"), "{}", host.err());
+        assert!(host.err().contains("old\\nname.json"), "{}", host.err());
+        assert!(!host.err().contains("\u{1b}[2K"), "{}", host.err());
     }
 
     /// The merge headline names the two halves of the fraction, not two of the ten outcomes.
@@ -718,6 +801,7 @@ mod tests {
             files,
             config: Some(RunInfo {
                 started_at: 100,
+                mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
                 merged: false,
                 shard: None,
                 tests: None,

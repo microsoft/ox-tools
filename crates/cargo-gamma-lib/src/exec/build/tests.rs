@@ -1653,7 +1653,6 @@ fn mutant() -> Mutant {
         column: 3,
         mutator: ("lit.true_to_false".to_owned()).into(),
         item_path: ("pkg::f".to_owned()).into(),
-        trait_impl: None,
         occurrence: 0,
         replacement_index: 0,
         original: "true".to_owned().into(),

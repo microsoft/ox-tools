@@ -12,6 +12,8 @@ use std::thread::{self, JoinHandle};
 #[cfg(target_os = "linux")]
 use cargo_gamma_unsafe::cgroup::Cgroup;
 #[cfg(unix)]
+use cargo_gamma_unsafe::group;
+#[cfg(unix)]
 use cargo_gamma_unsafe::interrupt;
 #[cfg(windows)]
 use cargo_gamma_unsafe::job::{self, Job};
@@ -65,7 +67,7 @@ pub const fn capacity() -> usize {
 pub fn containment() -> Result<(), PlatformError> {
     #[cfg(target_os = "linux")]
     {
-        cargo_gamma_unsafe::support()
+        crate::support()
     }
 
     #[cfg(windows)]
@@ -78,7 +80,7 @@ pub fn containment() -> Result<(), PlatformError> {
     #[cfg(not(any(target_os = "linux", windows)))]
     {
         // #[gamma::skip(result.err_to_ok, literal.str_to_empty, literal.str_to_xyzzy, reason = "this compile-time branch exists only on non-Linux, non-Windows targets and cannot be executed by the Linux mutation run")]
-        Err(PlatformError::new(
+        Err(PlatformError::new_static(
             Situation::Unsupported,
             "this platform offers no unprivileged boundary a test subtree cannot leave, so \
              containment reduces to a process group: a descendant that calls `setsid` escapes it \
@@ -124,7 +126,7 @@ pub(crate) struct SpawnGuard {
 
     /// Whether the caller asked for the leaf's memory accounting to be read back.
     ///
-    /// A leaf now exists for containment alone, so its readings must not be reported as a
+    /// A leaf used for containment alone must not have its readings reported as a
     /// measurement to a run that never asked to be measured.
     #[cfg(target_os = "linux")]
     metered: bool,
@@ -145,7 +147,7 @@ impl SpawnGuard {
     /// Whether the child this guard covers will enter a boundary its descendants cannot leave.
     ///
     /// False means containment reduces to a Unix process group, which a descendant leaves with
-    /// `setsid`. [`containment`] says so once per run, before anything the repository controls has
+    /// `setsid`. [`containment`] reports this per run, before anything the repository controls has
     /// been executed; this reports the same fact for one launch.
     #[must_use]
     #[cfg_attr(
@@ -241,6 +243,10 @@ impl SpawnGuard {
 /// refusal can be retried with the same preparation; success advances to [`SpawnedCommand`], which
 /// has no spawning operation and can only be adopted. That transition makes it impossible to
 /// leave one successful child without adoption and start another from the same boundary.
+///
+/// `PreparedCommand` intentionally does not implement `UnwindSafe` or `RefUnwindSafe`: on Unix,
+/// `std::process::Command` retains `pre_exec` closures whose unwind safety the standard library
+/// does not promise.
 #[derive(Debug)]
 pub struct PreparedCommand {
     /// The prepared command, reachable only by consuming this value through [`Self::spawn`].
@@ -267,7 +273,10 @@ impl PreparedCommand {
             Ok(child) => {
                 let Self { command: _spawned, guard } = self;
 
-                Ok(SpawnedCommand { child, guard })
+                Ok(SpawnedCommand {
+                    child: Some(child),
+                    guard: Some(guard),
+                })
             }
             Err(cause) => Err(SpawnFailure {
                 cause,
@@ -286,10 +295,13 @@ impl PreparedCommand {
         self.guard.sealed()
     }
 
-    /// Closes the interrupt window while a transient spawn refusal backs off, then reopens it.
+    /// Closes the interrupt window while a transient resource-related spawn failure backs off,
+    /// then reopens it.
     ///
     /// Taken and returned by value so that the wait cannot happen with the window still open: the
-    /// caller has nothing to spawn from until the window is back.
+    /// caller has nothing to spawn from until the window is back. The caller must classify
+    /// [`SpawnFailure::cause`] before choosing this path; permanent launch failures must be
+    /// propagated rather than retried.
     ///
     /// # Errors
     ///
@@ -310,27 +322,56 @@ impl PreparedCommand {
 ///
 /// This is the post-spawn state of [`PreparedCommand`]. It owns both the live child and the
 /// containment prepared for that exact launch, so safe code cannot reuse the preparation or pair
-/// the child with another boundary. [`ProcessTree::adopt`] consumes the bundle.
+/// the child with another boundary. [`ProcessTree::adopt`] consumes the bundle; dropping it before
+/// adoption terminates the contained subtree and reaps its leader.
 #[must_use = "a spawned child must be adopted so its process tree remains contained"]
 #[derive(Debug)]
 pub struct SpawnedCommand {
-    child: Child,
-    guard: SpawnGuard,
+    child: Option<Child>,
+    guard: Option<SpawnGuard>,
 }
 
 impl SpawnedCommand {
     /// Returns the operating-system identifier of the child awaiting adoption.
     #[must_use]
     pub fn id(&self) -> u32 {
-        self.child.id()
+        self.child
+            .as_ref()
+            .expect("a spawned command retains its child until adoption consumes it")
+            .id()
+    }
+
+    /// Takes the child and its guard while leaving the cleanup-on-drop state empty.
+    fn into_parts(mut self) -> (Child, SpawnGuard) {
+        let child = self
+            .child
+            .take()
+            .expect("a spawned command retains its child until adoption consumes it");
+        let guard = self
+            .guard
+            .take()
+            .expect("a spawned command retains its containment guard until adoption consumes it");
+
+        (child, guard)
+    }
+}
+
+impl Drop for SpawnedCommand {
+    fn drop(&mut self) {
+        if let (Some(mut child), Some(guard)) = (self.child.take(), self.guard.take()) {
+            abandon(&mut child, &guard);
+        }
     }
 }
 
 /// A failed spawn together with the preparation that can be retried.
 ///
 /// The child does not exist when this is returned. [`Self::into_parts`] recovers both the kernel's
-/// reason and the unchanged [`PreparedCommand`], allowing transient failures to back off and try
-/// the same prepared launch again.
+/// reason and the unchanged [`PreparedCommand`]. Callers classify the reason and may back off and
+/// try the same prepared launch again only for transient resource-related failures.
+///
+/// No unwind-safety auto-trait is promised because the operating-system error representation is
+/// outside this crate's control.
 #[derive(Debug)]
 pub struct SpawnFailure {
     cause: io::Error,
@@ -338,13 +379,13 @@ pub struct SpawnFailure {
 }
 
 impl SpawnFailure {
-    /// Borrows the operating-system error that refused the spawn.
+    /// Borrows the operating-system error that prevented the spawn.
     #[must_use]
     pub const fn cause(&self) -> &io::Error {
         &self.cause
     }
 
-    /// Recovers the refusal and the preparation that can be retried.
+    /// Recovers the failure and the preparation that can be retried when the error is transient.
     #[must_use]
     pub fn into_parts(self) -> (io::Error, PreparedCommand) {
         (self.cause, *self.prepared)
@@ -364,6 +405,9 @@ impl std::error::Error for SpawnFailure {
 }
 
 /// Why a command could not be run to completion inside a process-tree boundary.
+///
+/// No unwind-safety auto-trait is promised because both variants retain platform or
+/// operating-system errors whose representations are outside this crate's control.
 #[derive(Debug)]
 pub enum OutputError {
     /// The boundary could not be prepared or could not adopt the spawned child.
@@ -439,9 +483,12 @@ pub fn output(mut command: Command, request: MemoryRequest) -> Result<Output, Ou
 /// before the child exists.
 ///
 /// Containment is not conditional on `request`. A process group alone is escapable — a descendant
-/// that calls `setsid` leaves it and survives every later signal to it — so a Linux launch enters a
-/// cgroup leaf and a Windows launch enters a job whether or not anything is being measured. What
-/// `request` decides is only whether that boundary's readings are reported as a measurement.
+/// that calls `setsid` leaves it and survives every later signal to it — so every Windows launch
+/// enters a job and every Linux launch attempts to enter a cgroup leaf whether or not anything is
+/// being measured. An unmetered Linux launch may fall back to best-effort process-group containment
+/// only when the host has no supported cgroup facility; [`containment`] reports that host-wide
+/// limitation before repository-controlled code runs. What `request` decides is whether accounting
+/// is required and whether the boundary's readings are reported as a measurement.
 ///
 /// The command is taken by value and returned only as a [`PreparedCommand`], which is what makes a
 /// second preparation of it impossible rather than merely detected: preparation appends a pre-exec
@@ -479,9 +526,13 @@ pub fn output(mut command: Command, request: MemoryRequest) -> Result<Output, Ou
 ///
 /// use cargo_gamma_process::{MemoryRequest, ProcessTree, prepare};
 ///
-/// let prepared = prepare(Command::new("true"), MemoryRequest::default()).expect("containment");
-/// let spawned = prepared.spawn().expect("spawn");
-/// let subtree = ProcessTree::adopt(spawned).expect("adoption");
+/// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// let prepared = prepare(Command::new("true"), MemoryRequest::default())?;
+/// let spawned = prepared.spawn()?;
+/// let subtree = ProcessTree::adopt(spawned)?;
+/// # drop(subtree);
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// Preparing one command twice does not compile, which is what taking it by value buys: after the
@@ -522,7 +573,7 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
 
     #[cfg(any(test, feature = "fault-injection"))]
     if faults::fired(faults::Fault::Prepare) {
-        return Err(PlatformError::new(
+        return Err(PlatformError::new_static(
             Situation::Refused,
             "the containment a test asked to fail could not be installed",
         ));
@@ -532,8 +583,9 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
     {
         use std::os::unix::process::CommandExt as _;
 
-        interrupt::arm()
-            .map_err(|cause| PlatformError::because(Situation::Refused, "terminal-signal protection could not be installed", cause))?;
+        interrupt::arm().map_err(|cause| {
+            PlatformError::because_static(Situation::Refused, "terminal-signal protection could not be installed", cause)
+        })?;
 
         // The child leads its own process group, so a later signal to the negated group id reaches
         // every descendant that has not deliberately left the group. Without this the child shares
@@ -545,7 +597,7 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
     {
         #[cfg(any(test, feature = "fault-injection"))]
         if faults::fired(faults::Fault::Boundary) {
-            return Err(PlatformError::new(
+            return Err(PlatformError::new_static(
                 Situation::Refused,
                 "the accounting boundary a test asked to fail could not be created",
             ));
@@ -554,20 +606,17 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
         // Attempted for every launch, not only for a metered one. Test listing and census asked
         // for no accounting and still run repository-controlled code, and a process group is not a
         // boundary that code cannot leave.
-        let cgroup = match Cgroup::create(request.limit) {
-            Ok(cgroup) => {
-                cgroup.arm(&mut command)?;
-
-                Some(cgroup)
-            }
-
-            // The host cannot seal a subtree at all. A run that asked to be measured or bounded is
-            // refused; one that asked for neither degrades to the process group, which
-            // `containment` reported as best-effort before any repository code ran.
-            Err(cause) if cause.situation() == Situation::Unsupported && !request.wanted() => None,
-
-            Err(cause) => return Err(cause),
+        let cgroup = if request.wanted() {
+            Some(Cgroup::create(request.limit)?)
+        } else {
+            // Unsupported containment is the expected unmetered fallback, so inspect the cached
+            // capability without constructing and discarding a backtrace-bearing error per child.
+            Cgroup::create_unmetered_if_supported()?
         };
+
+        if let Some(cgroup) = cgroup.as_ref() {
+            cgroup.arm(&mut command)?;
+        }
 
         // Opened last, once every fallible piece of setup is behind us. An open window defers the
         // whole run's response to `Ctrl-C`, so it is worth no more than it has to be: creating a
@@ -592,7 +641,7 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
         // Windows 8, so this is a genuine host failure rather than the ordinary case of a run
         // started inside somebody else's job.
         let Some(job) = Job::create(request.limit) else {
-            return Err(PlatformError::new(
+            return Err(PlatformError::new_static(
                 Situation::Refused,
                 "a Windows job object could not be created, so this test binary's descendants could not be contained",
             ));
@@ -622,7 +671,7 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
             // reason and yields `()` — this line did not compile at all until a macOS build was
             // first attempted.
             let Err(reason) = crate::support() else {
-                return Err(PlatformError::new(
+                return Err(PlatformError::new_static(
                     Situation::Unsupported,
                     "this platform cannot bound a test subtree's memory",
                 ));
@@ -675,7 +724,7 @@ fn window() -> Result<interrupt::Spawning, PlatformError> {
 /// The one refusal that is neither the host's fault nor this launch's: the run is already dying.
 #[cfg(unix)]
 fn interrupted() -> PlatformError {
-    PlatformError::new(
+    PlatformError::new_static(
         Situation::Interrupted,
         "the run is being interrupted, so nothing further was started",
     )
@@ -751,13 +800,13 @@ impl ProcessTree {
         )
     )]
     pub fn adopt(spawned: SpawnedCommand) -> Result<Self, PlatformError> {
-        let SpawnedCommand { mut child, mut guard } = spawned;
+        let (mut child, mut guard) = spawned.into_parts();
 
         #[cfg(any(test, feature = "fault-injection"))]
         if faults::fired(faults::Fault::Adopt) {
             abandon(&mut child, &guard);
 
-            return Err(PlatformError::new(
+            return Err(PlatformError::new_static(
                 Situation::Refused,
                 "the accounting boundary a test asked to fail would not take the child",
             ));
@@ -828,7 +877,7 @@ impl ProcessTree {
                 if !job.assign(&child) {
                     abandon(&mut child, &guard);
 
-                    return Err(PlatformError::new(
+                    return Err(PlatformError::new_static(
                         Situation::Refused,
                         "a Windows job object could not be given the test binary it was created for, so its descendants could not be terminated safely",
                     ));
@@ -839,7 +888,7 @@ impl ProcessTree {
                 if !job::release(child.id()) {
                     abandon(&mut child, &guard);
 
-                    return Err(PlatformError::new(
+                    return Err(PlatformError::new_static(
                         Situation::Refused,
                         "a Windows test binary could not be resumed inside the containment boundary holding it",
                     ));
@@ -1052,10 +1101,10 @@ impl ProcessTree {
 
         #[cfg(unix)]
         {
-            let observed = match cargo_gamma_unsafe::group::exited(child.id()) {
+            let observed = match group::exited(child.id()) {
                 Ok(observed) => observed,
                 Err(cause) => {
-                    if cargo_gamma_unsafe::group::reaped_elsewhere(&cause) {
+                    if group::is_no_child_to_wait_for(&cause) {
                         self.revoke_group();
 
                         // Dropped rather than restored. `Child` holds nothing but a pid the kernel
@@ -1187,7 +1236,7 @@ impl ProcessTree {
         // without one, and the descendants are then reparented and unreachable.
         #[cfg(unix)]
         if let Some(group) = self.group {
-            let _killed = cargo_gamma_unsafe::group::kill(group);
+            let _killed = group::kill(group);
         }
 
         #[cfg(windows)]
@@ -1260,7 +1309,7 @@ fn usage_from_reading(reading: Option<(Option<u64>, bool)>) -> MemoryUsage {
 #[cfg(unix)]
 fn group_id(child_id: u32) -> Result<i32, PlatformError> {
     i32::try_from(child_id).map_err(|_out_of_range| {
-        PlatformError::new(
+        PlatformError::new_static(
             Situation::Refused,
             "the child's process id does not fit a process group id, so it could not be watched for interrupts",
         )
@@ -1283,7 +1332,7 @@ fn abandon(child: &mut Child, guard: &SpawnGuard) {
 
     #[cfg(unix)]
     if let Ok(group) = i32::try_from(child.id()) {
-        let _killed = cargo_gamma_unsafe::group::kill(group);
+        let _killed = group::kill(group);
     }
 
     #[cfg(windows)]
@@ -1324,7 +1373,15 @@ impl Drop for ProcessTree {
 #[cfg(test)]
 mod tests {
     use core::cell::RefCell;
+    #[cfg(unix)]
+    use core::mem;
+    #[cfg(unix)]
+    use std::env;
+    use std::error::Error as _;
     use std::fs;
+    #[cfg(unix)]
+    use std::io::{BufRead as _, Write as _};
+    use std::time::Instant;
 
     use camino::Utf8Path;
 
@@ -1743,7 +1800,7 @@ mod tests {
         let spawned = prepared.spawn().expect("spawn");
         let id = i32::try_from(spawned.id()).expect("pid");
 
-        assert_eq!(cargo_gamma_unsafe::group::group_of(id), Some(id));
+        assert_eq!(group::group_of(id), Some(id));
 
         let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
         let _reaped = subtree.terminate();
@@ -1965,12 +2022,11 @@ mod tests {
     fn an_unkilled_grandchild_outlives_its_parent_and_finishes() {
         let work = testing::workdir("gamma-grandchild-control");
         let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
-        let (started, finished) = (base.join("started"), base.join("finished"));
+        let (started, release, finished) = (base.join("started"), base.join("release"), base.join("finished"));
 
-        let began = std::time::Instant::now();
         let mut child = Command::new(testing::helper_binary_path().as_std_path())
             .arg(testing::directive(format_args!(
-                "spawn:touch:{started}|sleep:2000|touch:{finished}"
+                "spawn:touch:{started}|wait:{release}|touch:{finished}"
             )))
             .arg(testing::directive("exit:0"))
             .spawn()
@@ -1978,16 +2034,19 @@ mod tests {
 
         assert!(child.wait().expect("wait").success());
 
-        // The parent is gone well before the grandchild's work is done, which is what makes the
-        // grandchild an orphan rather than a child, and this test a fixture check rather than a
-        // restatement of "a process this run waited for had finished".
-        let waited = began.elapsed();
+        let mut grandchild_started = false;
+        for _attempt in 0..600 {
+            if started.exists() {
+                grandchild_started = true;
+                break;
+            }
 
-        assert!(
-            waited < Duration::from_millis(1500),
-            "the parent outlived the grandchild: {waited:?}"
-        );
-        assert!(!finished.exists(), "the grandchild finished before its parent did");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(!finished.exists(), "the grandchild ignored the release gate");
+        fs::write(release.as_std_path(), "").expect("release the orphaned grandchild");
+        assert!(grandchild_started, "the grandchild never started after its parent exited");
 
         for _attempt in 0..600 {
             if finished.exists() {
@@ -2006,7 +2065,7 @@ mod tests {
     /// killing whoever is running it.
     #[cfg(unix)]
     fn interrupted_run(inner: &str) -> i32 {
-        let program = std::env::args().next().expect("this test binary");
+        let program = env::args().next().expect("this test binary");
         let mut child = Command::new(&program)
             .args(["--exact", "--nocapture", &format!("process_tree::tests::{inner}")])
             .env("GAMMA_INTERRUPT_CHILD", "1")
@@ -2024,8 +2083,6 @@ mod tests {
         // harness running the inner test writes its own progress on the same line when it is
         // running single-threaded, which is what an inherited `RUST_TEST_THREADS` makes it do.
         let reported = {
-            use std::io::BufRead as _;
-
             let said = child.stdout.take().expect("pipe");
 
             io::BufReader::new(said)
@@ -2066,7 +2123,7 @@ mod tests {
     /// nothing — a renamed inner test, say — is also a successful run of zero tests.
     #[cfg(unix)]
     fn isolated_run(inner: &str, marker: &str) {
-        let program = std::env::args().next().expect("this test binary");
+        let program = env::args().next().expect("this test binary");
         let outcome = Command::new(&program)
             .args(["--exact", "--nocapture", &format!("process_tree::tests::{inner}")])
             .env(ISOLATED_CHILD, "1")
@@ -2093,7 +2150,7 @@ mod tests {
     #[cfg(unix)]
     fn gone_soon(pid: i32) -> bool {
         for _attempt in 0..200 {
-            if !cargo_gamma_unsafe::group::exists(pid) {
+            if !group::exists(pid) {
                 return true;
             }
 
@@ -2139,7 +2196,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawns_a_child_then_interrupts_itself() {
-        if std::env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
+        if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
         }
 
@@ -2157,9 +2214,9 @@ mod tests {
 
         // Kept alive so the slot stays claimed, which is exactly the state a run is in when the
         // interrupt arrives.
-        core::mem::forget(subtree);
+        mem::forget(subtree);
 
-        cargo_gamma_unsafe::group::raise_interrupt();
+        group::raise_interrupt();
 
         thread::sleep(Duration::from_secs(30));
     }
@@ -2173,7 +2230,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn interrupts_itself_between_the_spawn_and_the_registration() {
-        if std::env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
+        if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
         }
 
@@ -2188,13 +2245,13 @@ mod tests {
         // closes inside it, and closing the last window of an interrupted run ends this process.
         println!("grandchild {}", spawned.id());
 
-        cargo_gamma_unsafe::group::raise_interrupt();
+        group::raise_interrupt();
 
         // Reached only because the handler deferred rather than re-raising, which is the protocol
         // this test exists for. Registering the group is also what kills it.
         let subtree = ProcessTree::adopt(spawned).expect("adoption");
 
-        core::mem::forget(subtree);
+        mem::forget(subtree);
 
         thread::sleep(Duration::from_secs(30));
     }
@@ -2241,7 +2298,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawns_a_child_then_quits_itself() {
-        if std::env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
+        if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
         }
 
@@ -2257,9 +2314,9 @@ mod tests {
 
         // Kept alive so the slot stays claimed, which is the state a run is in when the signal
         // arrives.
-        core::mem::forget(subtree);
+        mem::forget(subtree);
 
-        cargo_gamma_unsafe::group::raise_quit();
+        group::raise_quit();
 
         thread::sleep(Duration::from_secs(30));
     }
@@ -2274,7 +2331,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn interrupts_itself_twice_with_a_window_open() {
-        if std::env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
+        if env::var_os("GAMMA_INTERRUPT_CHILD").is_none() {
             return;
         }
 
@@ -2295,13 +2352,13 @@ mod tests {
         // Said before either signal, because the run ends inside the drop below.
         println!("grandchild {}", subtree.id());
 
-        core::mem::forget(subtree);
+        mem::forget(subtree);
 
-        cargo_gamma_unsafe::group::raise_interrupt();
+        group::raise_interrupt();
 
         // Reached only because the handler deferred. Under a disposition that reset on delivery,
         // this second raise is the default action and the child below is never swept.
-        cargo_gamma_unsafe::group::raise_interrupt();
+        group::raise_interrupt();
 
         // Closing the last window is what kills the watched group and then this process.
         drop(held);
@@ -2407,7 +2464,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_real_interrupt_closes_the_registry_to_new_windows() {
-        if std::env::var_os(ISOLATED_CHILD).is_none() {
+        if env::var_os(ISOLATED_CHILD).is_none() {
             return;
         }
 
@@ -2415,13 +2472,13 @@ mod tests {
 
         let holding = interrupt::spawning();
 
-        cargo_gamma_unsafe::group::raise_interrupt();
+        group::raise_interrupt();
 
         let reason = window().expect_err("a window must not open once a real interrupt has begun");
 
         assert!(reason.to_string().contains("being interrupted"), "{reason}");
 
-        core::mem::forget(holding);
+        mem::forget(holding);
 
         println!("the window was refused");
     }
@@ -2465,7 +2522,8 @@ mod tests {
             "the missing working directory should prevent the spawn: {failed}"
         );
         assert!(!failed.to_string().is_empty());
-        let source = std::error::Error::source(&failed)
+        let source = failed
+            .source()
             .and_then(|cause| cause.downcast_ref::<io::Error>())
             .expect("the source is the spawn error");
         assert_eq!(source.kind(), failed.cause().kind());
@@ -2523,7 +2581,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_saturated_registry_refuses_an_adoption() {
-        if std::env::var_os(ISOLATED_CHILD).is_none() {
+        if env::var_os(ISOLATED_CHILD).is_none() {
             return;
         }
 
@@ -2626,16 +2684,14 @@ mod tests {
         const INNER: &str = "GAMMA_PROCESS_OUTPUT_CHILD";
         const BYTES: usize = 256 * 1024;
 
-        if std::env::var_os(INNER).is_some() {
-            use std::io::Write as _;
-
+        if env::var_os(INNER).is_some() {
             std::io::stdout().write_all(&vec![b'o'; BYTES]).expect("stdout");
             std::io::stderr().write_all(&vec![b'e'; BYTES]).expect("stderr");
 
             return;
         }
 
-        let program = std::env::current_exe().expect("the test binary has a path");
+        let program = env::current_exe().expect("the test binary has a path");
         let mut command = Command::new(program);
         let _ = command
             .args([
@@ -2661,7 +2717,7 @@ mod tests {
     fn contained_output_does_not_wait_for_a_descendant_holding_its_pipes() {
         let mut command = Command::new(testing::helper_binary_path().as_std_path());
         let _ = command.args([testing::directive("spawn:sleep:10000"), testing::directive("exit:0")]);
-        let started = std::time::Instant::now();
+        let started = Instant::now();
 
         let captured = output(command, MemoryRequest::default()).expect("capture");
 
@@ -2690,13 +2746,13 @@ mod tests {
     /// Both contained-output error variants preserve their source and display text.
     #[test]
     fn contained_output_errors_preserve_their_causes() {
-        let containment = OutputError::from(PlatformError::new(Situation::Refused, "containment failed"));
+        let containment = OutputError::from(PlatformError::new_static(Situation::Refused, "containment failed"));
         assert_eq!(containment.to_string(), "containment failed");
-        assert!(std::error::Error::source(&containment).is_some());
+        assert!(containment.source().is_some());
 
         let io = OutputError::from(io::Error::other("stream failed"));
         assert_eq!(io.to_string(), "stream failed");
-        assert!(std::error::Error::source(&io).is_some());
+        assert!(io.source().is_some());
     }
 
     /// Each pipe is handed over once, and never handed over again once taken.
@@ -2739,6 +2795,21 @@ mod tests {
         let _reaped = subtree.terminate();
     }
 
+    /// Dropping the post-spawn state cannot leave its live child outside the lifecycle.
+    #[cfg(unix)]
+    #[test]
+    fn an_unadopted_spawn_is_terminated_and_reaped_on_drop() {
+        let mut command = Command::new("sleep");
+        let _ = command.arg("30");
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let pid = i32::try_from(spawned.id()).expect("the child id fits a Unix pid");
+
+        drop(spawned);
+
+        assert!(gone_soon(pid), "the unadopted child survived its spawned-state owner");
+    }
+
     /// A survivor is reported as not gone, rather than assumed gone once the poll loop runs out.
     #[cfg(unix)]
     #[test]
@@ -2772,7 +2843,7 @@ mod tests {
         let command = Command::new("true");
         let prepared = prepare(command, MemoryRequest::default()).expect("containment");
         let spawned = prepared.spawn().expect("spawn");
-        let SpawnedCommand { mut child, guard } = spawned;
+        let (mut child, guard) = spawned.into_parts();
         #[cfg(target_os = "linux")]
         let cgroup = guard.cgroup;
         #[cfg(not(target_os = "linux"))]

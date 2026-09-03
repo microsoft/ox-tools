@@ -20,6 +20,8 @@ use crate::error::{Error, error};
 use crate::exec;
 use crate::model::{Mutant, Outcome};
 use crate::report::{Listings, Progress, Styler, quantity};
+#[cfg(any(test, feature = "internals"))]
+use crate::testing::pause_after_cache_adoption;
 
 /// Which of the bulk outcome listings the caller asked for.
 const fn listings(args: &RunArgs, announced: bool) -> Listings {
@@ -91,6 +93,7 @@ fn run_info(args: &RunArgs, tests: Option<usize>, dropped: &[String]) -> crate::
     crate::elements::RunInfo {
         tests,
         started_at: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()),
+        mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: false,
         shard: args
             .select
@@ -747,11 +750,13 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     fs::create_dir_all(&artifact_dir).map_err(|cause| error!("could not create artifact directory `{artifact_dir}`").caused_by(cause))?;
 
     let incremental = context.map(|context| IncrementalPreparation::for_run(args, &survey, context));
-    let cache_locks = if incremental.is_some() && !args.dry_run && args.measure.cache_dir.is_some() {
+    let cache_locks = if incremental.is_some() && !args.dry_run {
         Some(exec::claim_cache(&survey.root, args.measure.cache_dir.as_deref())?)
     } else {
         None
     };
+    #[cfg(any(test, feature = "internals"))]
+    let cache_lock_identity = cache_locks.as_ref().map(exec::cache_lock_identity);
     let (cached, _declined, moved) = incremental.as_ref().map_or_else(
         || (crate::HashMap::default(), 0, Vec::new()),
         |prepared| adopt(args, &mut survey, &prepared.base, Some(&prepared.context), &prepared.inputs),
@@ -795,9 +800,11 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         verdict_log: VerdictLog::default(),
     };
 
-    #[cfg(feature = "internals")]
-    if incremental.is_some() && args.measure.cache_dir.is_some() {
-        crate::testing::pause_after_cache_adoption(&survey.root);
+    // Exposes the post-adoption, pre-preparation boundary so the session test can prove that the
+    // cache lock remains held across both phases.
+    #[cfg(any(test, feature = "internals"))]
+    if let Some(lock_identity) = cache_lock_identity {
+        pause_after_cache_adoption(&survey.root, lock_identity);
     }
     let outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks);
 

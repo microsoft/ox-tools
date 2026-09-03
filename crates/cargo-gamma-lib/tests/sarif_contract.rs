@@ -3,23 +3,26 @@
 
 #![cfg(not(miri))]
 
-//! The complete SARIF 2.1.0 document, against a golden that was read by a person.
+//! The complete SARIF 2.1.0 document, against a committed expected-output fixture (also called a
+//! golden file) that was reviewed by a person.
 //!
-//! SARIF is a wire format for other people's tools. Every field name in it is a hand-written serde
-//! rename over a struct whose Rust name is different — `information_uri` is `informationUri`,
-//! `rule_id` is `ruleId` — and dropping one of those attributes produces a document that is still
-//! valid JSON, still passes every assertion that inspects a field it happens to name, and is
-//! rejected or silently misread by GitHub. The unit tests beside the emitter check the fields they
-//! are about; nothing checked the shape as a whole.
+//! SARIF is a wire format for external tools. Every field whose wire name differs from its Rust
+//! identifier has a hand-written serde rename — `information_uri` is `informationUri`, `rule_id`
+//! is `ruleId` — and dropping one of those attributes produces a document that is still valid
+//! JSON, still passes every assertion that inspects a field it happens to name, and is rejected or
+//! silently misread by GitHub. The unit tests beside the emitter check the fields they are about;
+//! nothing checked the shape as a whole.
 //!
 //! No SARIF schema document is vendored in this repository, and fetching one at test time would
 //! make the suite depend on a network and on whatever is at the other end of it. The alternative
 //! this takes is the same one the report emitter uses: a complete document, committed, reviewed by
 //! hand, and compared field for field. Any rename, omission, addition, retype or value change fails
-//! here until somebody deliberately re-blesses the file.
+//! here until a maintainer intentionally updates the fixture after validating external-consumer
+//! compatibility.
 
+use camino::Utf8Path;
 use cargo_gamma_lib::internals::ci::{Level, sarif};
-use cargo_gamma_lib::internals::model::{MUTANT_ID_VERSION, Outcome};
+use cargo_gamma_lib::internals::model::{MUTANT_ID_HEX_LEN, MUTANT_ID_VERSION, Mutant, Outcome, SiteIndex, mutant_id, normalize_site_text};
 use cargo_gamma_lib::testing::ci_fixture::{mutant, root};
 use serde_json::Value;
 
@@ -33,24 +36,38 @@ const GOLDEN: &str = include_str!("fixtures/sarif.golden.json");
 /// value the emitter is supposed to report, so nothing about the field goes unasserted.
 const VERSION_PLACEHOLDER: &str = "0.0.0-golden";
 
-/// One log with two rules, three results, three of the four message forms, and every wire field
-/// populated.
+/// One log covering repeated rules, representative message forms, and every wire field.
 fn emitted() -> Value {
     let mut arithmetic = mutant("/w/src/b.rs", 12, "arith.add_to_sub", Outcome::NoCoverage);
     arithmetic.original = "a + b".into();
     arithmetic.replacement = "a - b".into();
 
-    let mutants = vec![
+    let mut mutants = vec![
         mutant("/w/src/a.rs", 7, "relational.gt_to_ge", Outcome::Survived),
         arithmetic,
         mutant("/w/src/c.rs", 3, "relational.gt_to_ge", Outcome::Timeout),
     ];
 
+    for mutant in &mut mutants {
+        assign_production_identity(mutant);
+    }
+
     let (text, truncation) = sarif(&mutants, &root(), Level::Warning).expect("the log serializes");
 
-    assert!(truncation.is_none(), "three findings are not near either cap");
+    assert!(truncation.is_none(), "the fixture is not near either cap");
 
     serde_json::from_str(&text).expect("the emitted log is not valid JSON")
+}
+
+/// Assigns the same content-addressed identity that discovery gives a production mutant.
+fn assign_production_identity(mutant: &mut Mutant) {
+    let file = Utf8Path::new(mutant.file.as_str())
+        .strip_prefix(root())
+        .expect("the SARIF fixture file is under its project root");
+    let normalized = normalize_site_text(&mutant.original);
+    let site = SiteIndex::new(mutant.occurrence, mutant.replacement_index);
+
+    mutant.id = mutant_id(file, &mutant.item_path, &mutant.mutator, &normalized, site);
 }
 
 #[test]
@@ -71,9 +88,30 @@ fn the_emitted_log_matches_the_committed_one_field_for_field() {
     assert_eq!(
         actual, expected,
         "the SARIF log no longer matches `tests/fixtures/sarif.golden.json`. If the change is intended, \
-         re-bless that file — and check first that a consumer will still accept it, because every name \
-         in it is a contract with somebody else's tool."
+         intentionally update that fixture after checking that external consumers still accept it, \
+         because every name in it is a wire-format contract."
     );
+}
+
+#[test]
+fn fingerprint_values_have_the_production_identity_shape() {
+    let log = emitted();
+    let results = log["runs"][0]["results"]
+        .as_array()
+        .expect("the emitted SARIF log has a result array");
+
+    for result in results {
+        let fingerprint = result["partialFingerprints"]["gammaMutantId/v5"]
+            .as_str()
+            .expect("each result has a mutant fingerprint");
+
+        assert_eq!(fingerprint.len(), MUTANT_ID_HEX_LEN);
+        assert!(
+            fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+    }
 }
 
 /// The fingerprint key carries the identity scheme's version, and the golden spells it out.

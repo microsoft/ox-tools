@@ -30,9 +30,6 @@ impl Interner {
             mutant.package = self.text(&mutant.package);
             mutant.mutator = self.text(&mutant.mutator);
             mutant.item_path = self.text(&mutant.item_path);
-            if let Some(trait_impl) = mutant.trait_impl.as_deref() {
-                mutant.trait_impl = Some(self.text(trait_impl));
-            }
         }
     }
 }

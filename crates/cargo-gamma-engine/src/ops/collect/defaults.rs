@@ -5,7 +5,8 @@ use std::collections::hash_map::Entry;
 
 use syn::visit::{self, Visit};
 use syn::{
-    File, GenericParam, Generics, ItemEnum, ItemImpl, ItemStruct, ItemType, ItemUnion, Path, Type, TypeParamBound, UseTree, WherePredicate,
+    Attribute, File, GenericParam, Generics, ImplItem, Item, ItemEnum, ItemImpl, ItemStruct, ItemType, ItemUnion, Path, TraitItem, Type,
+    TypeParamBound, UseTree, WherePredicate,
 };
 
 use crate::cfg::CfgSet;
@@ -28,8 +29,8 @@ pub(super) struct DefaultPaths {
 impl DefaultPaths {
     /// Collects standard-trait aliases and local shadows from a parsed file, ignoring `cfg`.
     ///
-    /// Every production caller threads a real [`CfgSet`] through [`Self::of_in`]; this unconditional
-    /// form only remains to let tests build a `DefaultPaths` from bare source without a `CfgSet`.
+    /// Test fixtures use this form to build a `DefaultPaths` from bare source without constructing
+    /// a [`CfgSet`].
     #[cfg(test)]
     pub(super) fn of(file: &File) -> Self {
         Self::of_in(file, &CfgSet::unconditional())
@@ -228,55 +229,55 @@ impl DefaultPaths {
 
 /// Returns the outer attributes of an item.
 ///
-/// `pub(in crate::ops::collect)` so every discovery prepass — the stated-value audit, the
+/// `pub(in crate::ops::collect)` so every discovery pre-pass — the stated-value audit, the
 /// type/import index, and the fused phase-one pass that drives both — can gate its own descent by
 /// the same predicate the collector itself reads before ever offering a mutant, rather than each
-/// prepass reaching its own conclusion about which items the selected build actually contains.
-pub(in crate::ops::collect) fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+/// pre-pass reaching its own conclusion about which items the selected build actually contains.
+pub(in crate::ops::collect) fn item_attrs(item: &Item) -> &[Attribute] {
     match item {
-        syn::Item::Const(node) => &node.attrs,
-        syn::Item::Enum(node) => &node.attrs,
-        syn::Item::ExternCrate(node) => &node.attrs,
-        syn::Item::Fn(node) => &node.attrs,
-        syn::Item::ForeignMod(node) => &node.attrs,
-        syn::Item::Impl(node) => &node.attrs,
-        syn::Item::Macro(node) => &node.attrs,
-        syn::Item::Mod(node) => &node.attrs,
-        syn::Item::Static(node) => &node.attrs,
-        syn::Item::Struct(node) => &node.attrs,
-        syn::Item::Trait(node) => &node.attrs,
-        syn::Item::TraitAlias(node) => &node.attrs,
-        syn::Item::Type(node) => &node.attrs,
-        syn::Item::Union(node) => &node.attrs,
-        syn::Item::Use(node) => &node.attrs,
+        Item::Const(node) => &node.attrs,
+        Item::Enum(node) => &node.attrs,
+        Item::ExternCrate(node) => &node.attrs,
+        Item::Fn(node) => &node.attrs,
+        Item::ForeignMod(node) => &node.attrs,
+        Item::Impl(node) => &node.attrs,
+        Item::Macro(node) => &node.attrs,
+        Item::Mod(node) => &node.attrs,
+        Item::Static(node) => &node.attrs,
+        Item::Struct(node) => &node.attrs,
+        Item::Trait(node) => &node.attrs,
+        Item::TraitAlias(node) => &node.attrs,
+        Item::Type(node) => &node.attrs,
+        Item::Union(node) => &node.attrs,
+        Item::Use(node) => &node.attrs,
         _ => &[],
     }
 }
 
 /// Returns the outer attributes of an associated item inside an `impl` block.
 ///
-/// Shared with the same discovery prepasses [`item_attrs`] serves, so an inactive associated
+/// Shared with the same discovery pre-passes [`item_attrs`] serves, so an inactive associated
 /// constant or method is excluded from the stated-value audit and the type/import index exactly as
 /// the collector already excludes it from candidate collection.
-pub(in crate::ops::collect) fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+pub(in crate::ops::collect) fn impl_item_attrs(item: &ImplItem) -> &[Attribute] {
     match item {
-        syn::ImplItem::Const(node) => &node.attrs,
-        syn::ImplItem::Fn(node) => &node.attrs,
-        syn::ImplItem::Type(node) => &node.attrs,
-        syn::ImplItem::Macro(node) => &node.attrs,
+        ImplItem::Const(node) => &node.attrs,
+        ImplItem::Fn(node) => &node.attrs,
+        ImplItem::Type(node) => &node.attrs,
+        ImplItem::Macro(node) => &node.attrs,
         _ => &[],
     }
 }
 
 /// Returns the outer attributes of an associated item inside a `trait` block.
 ///
-/// Shared with the same discovery prepasses [`item_attrs`] serves; see its documentation.
-pub(in crate::ops::collect) fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+/// Shared with the same discovery pre-passes [`item_attrs`] serves; see its documentation.
+pub(in crate::ops::collect) fn trait_item_attrs(item: &TraitItem) -> &[Attribute] {
     match item {
-        syn::TraitItem::Const(node) => &node.attrs,
-        syn::TraitItem::Fn(node) => &node.attrs,
-        syn::TraitItem::Type(node) => &node.attrs,
-        syn::TraitItem::Macro(node) => &node.attrs,
+        TraitItem::Const(node) => &node.attrs,
+        TraitItem::Fn(node) => &node.attrs,
+        TraitItem::Type(node) => &node.attrs,
+        TraitItem::Macro(node) => &node.attrs,
         _ => &[],
     }
 }
@@ -609,7 +610,8 @@ fn payload_name(ty: &Type, index: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use syn::parse_quote;
+    use proc_macro2::TokenStream;
+    use syn::{parse_file, parse_quote};
 
     use super::*;
 
@@ -617,7 +619,7 @@ mod tests {
         let mut defaults = Defaults::default();
 
         for source in sources {
-            defaults.absorb(Defaults::of(&syn::parse_file(source).unwrap()));
+            defaults.absorb(Defaults::of(&parse_file(source).unwrap()));
         }
 
         defaults
@@ -955,7 +957,7 @@ mod tests {
             }
         ));
 
-        let verbatim = syn::Item::Verbatim(proc_macro2::TokenStream::new());
+        let verbatim = Item::Verbatim(TokenStream::new());
 
         assert!(
             item_attrs(&verbatim).is_empty(),
@@ -965,19 +967,19 @@ mod tests {
 
     #[test]
     fn associated_item_attrs_read_macros_and_fall_back_for_verbatim_tokens() {
-        let implementation: syn::ImplItem = parse_quote!(
+        let implementation: ImplItem = parse_quote!(
             #[allow(dead_code)]
             m!();
         );
-        let declaration: syn::TraitItem = parse_quote!(
+        let declaration: TraitItem = parse_quote!(
             #[allow(dead_code)]
             m!();
         );
 
         assert_eq!(impl_item_attrs(&implementation).len(), 1);
         assert_eq!(trait_item_attrs(&declaration).len(), 1);
-        assert!(impl_item_attrs(&syn::ImplItem::Verbatim(proc_macro2::TokenStream::new())).is_empty());
-        assert!(trait_item_attrs(&syn::TraitItem::Verbatim(proc_macro2::TokenStream::new())).is_empty());
+        assert!(impl_item_attrs(&ImplItem::Verbatim(TokenStream::new())).is_empty());
+        assert!(trait_item_attrs(&TraitItem::Verbatim(TokenStream::new())).is_empty());
     }
 
     /// A `where` clause is read the same way inline bounds are: a plain type bound reports its

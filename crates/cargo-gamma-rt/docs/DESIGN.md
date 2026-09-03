@@ -37,12 +37,25 @@ runtime's fixed failure marker, so a census the coordinator asked for can never
 be silently downgraded into a run that appears to have reached nothing. Signal
 delivery interrupts a read without failing it, so reads are retried under a
 budget spent across the whole capture rather than per read: an endless stream of
-signals is reported as a failure instead of spun on inside a constructor.
+signals is reported as a failure instead of spun on inside a native constructor,
+a loader or C-runtime startup hook that runs before `main`.
 Windows preserves the same distinction by clearing last error before each
 `GetEnvironmentVariableA` or `GetEnvironmentVariableW` call and classifying a
 zero return with `GetLastError`: only `ERROR_ENVVAR_NOT_FOUND` means absence.
 Every other API failure emits the same fixed marker and immediately exits with
 the same infrastructure-failure status used on Unix.
+
+On hosted Unix and Windows targets, the cached selection starts in a transient
+uninstalled state until this crate's native constructor publishes the captured
+environment. If instrumented code in an earlier native constructor reaches a
+guard during that window, the runtime writes a fixed diagnostic and terminates
+through `_exit` or `ExitProcess` with the infrastructure-failure status.
+Termination does not unwind, so constructor code cannot catch the failure,
+continue startup, and let the runtime overwrite the evidence with an ordinary
+selection. The diagnostic marker is part of the parent/runtime protocol so the
+coordinator excludes this infrastructure failure from mutation scoring.
+Targets without a supported constructor mechanism, and Miri
+executions that cannot run one, use the permanent unmutated fallback instead.
 
 On non-Linux Unix targets, `getenv` is used under POSIX's precondition that no
 native environment mutation occurs concurrently. The capture runs before Rust
@@ -54,9 +67,9 @@ safety proof and not proof that forbidden foreign mutation never occurred.
 
 The captured census path lives in a fixed-size buffer the runtime terminates
 itself, rather than relying on the environment image to supply a terminator. A
-name that fills the buffer leaves census mode selected with no path the runtime
-can open, so nothing is written and nothing is sealed and the reader discards
-that binary's census exactly as it discards a truncated one.
+census path that fills the buffer leaves census mode selected with no path the
+runtime can open, so nothing is written and nothing is sealed and the reader
+discards that binary's census exactly as it discards a truncated one.
 
 The vendored standalone crate inherits the workspace edition and minimum Rust
 version from the same manifest values used to build this crate.

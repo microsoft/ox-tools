@@ -44,7 +44,7 @@ mod tests {
 
     use super::*;
 
-    /// A variable the parent gives the child, whose exact value the adapter has to hand back.
+    /// A variable the parent gives the child, whose exact value `RealHost` has to return.
     const PRESENT_VAR: &str = "GAMMA_REAL_HOST_PRESENT";
 
     /// What the parent sets it to, chosen so that no ambient environment could supply it.
@@ -88,7 +88,7 @@ mod tests {
     /// The real host reads the real environment rather than overriding `env`.
     ///
     /// Driven through a child process this test launches itself, because the two states the
-    /// adapter has to tell apart — set, and not set — are properties of a process environment, and
+    /// host has to tell apart — set, and not set — are properties of a process environment, and
     /// this process's own is whatever the developer or the CI runner happened to export. Asserting
     /// against it reads correct code as broken in a sanitized environment, and reads broken code as
     /// correct whenever the ambient process happens to agree. Writing this process's environment to
@@ -96,11 +96,13 @@ mod tests {
     /// which is why nothing in this workspace does it.
     ///
     /// So the states are arranged on the child's `Command` — one variable given a value only this
-    /// test chose, one removed outright — and the child reports what the adapter returned for each.
+    /// test chose, one removed outright — and the child reports what the host returned for each.
     #[test]
     fn the_real_host_reads_the_process_environment() {
         let executable = env::current_exe().expect("the test binary knows its own path");
 
+        // `--exact` confines the child to the reporting helper, and `--nocapture` exposes its
+        // printed protocol to `Command::output()`.
         let output = Command::new(&executable)
             .args(["--exact", "real_host::tests::the_child_reports_what_the_host_read", "--nocapture"])
             .env(PRESENT_VAR, PRESENT_VALUE)
@@ -112,7 +114,7 @@ mod tests {
 
         let text = String::from_utf8_lossy(&output.stdout);
 
-        // The value is compared, not merely its presence: an adapter that answered `Some` with the
+        // The value is compared, not merely its presence: a host that answered `Some` with the
         // name, the empty string, or another variable's value would satisfy a presence check.
         assert!(text.contains(&format!("present={:?}", Some(PRESENT_VALUE))), "{text}");
         assert!(text.contains("absent=None"), "{text}");

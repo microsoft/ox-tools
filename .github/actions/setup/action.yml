@@ -107,7 +107,7 @@ runs:
 
     - name: Install Cargo Tools
       if: inputs.cargo-tools != ''
-      uses: taiki-e/install-action@v2.81.8 # immutable release, the tag cannot be moved
+      uses: taiki-e/install-action@v2.81.8 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
       with:
         tool: ${{ steps.expand.outputs.cargo_tools }}
 

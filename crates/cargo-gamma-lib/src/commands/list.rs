@@ -5,6 +5,7 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use camino::Utf8PathBuf;
+use serde::Serialize;
 use serde_json::Value;
 
 use super::cli::{ListArgs, ListKind};
@@ -42,7 +43,7 @@ pub(super) fn list_with_cargo<H: Host>(host: &mut H, args: &ListArgs, styler: St
 /// # Errors
 ///
 /// Returns an error if `entries` cannot be serialized, or if the stream cannot be written to.
-fn write_json_lines<W: Write, T: serde::Serialize + ?Sized>(stream: &mut W, entries: &T, what: &str) -> crate::Result<()> {
+fn write_pretty_json<W: Write, T: Serialize + ?Sized>(stream: &mut W, entries: &T, what: &str) -> crate::Result<()> {
     serde_json::to_writer_pretty(&mut *stream, entries).map_err(|cause| error!("could not write {what} as JSON").caused_by(cause))?;
 
     writeln!(stream).map_err(|cause| error!("could not write {what} as JSON").caused_by(cause))?;
@@ -72,7 +73,7 @@ fn list_presets<H: Host>(host: &mut H, args: &ListArgs) -> crate::Result<i32> {
             })
             .collect();
 
-        write_json_lines(&mut stream, &entries, "the presets")?;
+        write_pretty_json(&mut stream, &entries, "the presets")?;
 
         return Ok(EXIT_OK);
     }
@@ -112,7 +113,7 @@ fn list_mutators<H: Host>(host: &mut H, args: &ListArgs) -> crate::Result<i32> {
             })
             .collect();
 
-        write_json_lines(&mut stream, &entries, "the mutator registry")?;
+        write_pretty_json(&mut stream, &entries, "the mutator registry")?;
 
         return Ok(EXIT_OK);
     }
@@ -143,7 +144,7 @@ fn list_files<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &Ca
     if args.json {
         let paths: Vec<&Utf8PathBuf> = plan.files.iter().map(|file| &file.path).collect();
 
-        write_json_lines(&mut stream, &paths, "the file list")?;
+        write_pretty_json(&mut stream, &paths, "the file list")?;
 
         return Ok(EXIT_OK);
     }
@@ -170,7 +171,7 @@ fn list_mutants<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &
     let mut stream = host.results();
 
     if args.json {
-        write_json_lines(&mut stream, &plan.mutants, "the mutant list")?;
+        write_pretty_json(&mut stream, &plan.mutants, "the mutant list")?;
 
         return Ok(EXIT_OK);
     }
@@ -223,6 +224,7 @@ fn write_population<H: Host>(
 ) -> crate::Result<()> {
     let info = crate::elements::RunInfo {
         started_at: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()),
+        mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: false,
         shard: shard.map(|(count, index)| crate::elements::ShardInfo { index, count }),
         tests: None,
@@ -267,7 +269,7 @@ mod tests {
 
     #[test]
     fn a_stream_failure_is_reported_as_a_write_failure() {
-        let failure = write_json_lines(&mut Broken, &[1], "the fixture").expect_err("the closed stream must fail");
+        let failure = write_pretty_json(&mut Broken, &[1], "the fixture").expect_err("the closed stream must fail");
 
         assert!(failure.to_string().contains("could not write the fixture as JSON"), "{failure}");
     }

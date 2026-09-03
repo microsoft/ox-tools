@@ -38,10 +38,12 @@
 //! Configuration is managed through a TOML file with two expression lists
 //! (`high_risk`, `eval`) that define the evaluation policy.
 
+mod cache_dir;
 mod common;
 mod config;
 mod crates;
 mod deps;
+mod duration;
 mod host;
 mod init;
 mod progress_reporter;

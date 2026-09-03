@@ -9,13 +9,38 @@
 //! A pull-request-time gate that compares per-package line coverage produced
 //! by [`cargo-llvm-cov`] against per-package thresholds carried in
 //! `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
-//! coverage lcov tracefile, resolves each package's threshold from a small
-//! three-layer lookup, and emits a verdict table to stdout (and,
-//! optionally, to a Markdown summary file for CI step summaries).
+//! coverage lcov tracefile, resolves each package's base policy from a small
+//! three-layer lookup, applies any matching package target policy, and emits a
+//! verdict table to stdout (and,
+//! optionally, to a Markdown summary file for CI step summaries). A failing
+//! verdict includes actionable details without relying on a later
+//! coverage-service upload. A coverable line is a distinct LCOV `DA:` record.
+//! Numeric failures show exact covered/coverable counts and uncovered ranges;
+//! `expect-no-coverable-lines` failures show the unexpected coverable ranges;
+//! and `NO DATA` explains that no records were attributed. Location lists are
+//! bounded, with an exact count of omitted locations.
 //!
-//! ## Threshold resolution
+//! ## Configuration
 //!
-//! For each workspace member, the effective threshold is the first match
+//! ### Numeric thresholds
+//!
+//! A workspace can define the default line-coverage threshold:
+//!
+//! ```toml
+//! # Illustrative workspace policy.
+//! [workspace.metadata.coverage-gate]
+//! min-lines-percent = 80
+//! ```
+//!
+//! Individual packages can override it:
+//!
+//! ```toml
+//! # Illustrative package policy, intentionally stricter than the workspace.
+//! [package.metadata.coverage-gate]
+//! min-lines-percent = 95
+//! ```
+//!
+//! For each workspace member, the base threshold is the first match
 //! among:
 //!
 //! 1. `[package.metadata.coverage-gate] min-lines-percent = N` in the package's
@@ -25,13 +50,67 @@
 //! 3. The built-in default of `100.0` — full coverage required.
 //!
 //! Setting `min-lines-percent = 0.0` explicitly opts a package out of
-//! gating (it always passes, regardless of attributed data). A package
-//! that legitimately contains no coverable lines (pure re-exports, type
-//! definitions, a thin binary shim) instead declares
-//! `expect-no-coverable-lines = true`: the gate passes only while that
-//! holds and fails — as a regression — if coverable lines later appear.
-//! The two keys are mutually exclusive, and `expect-no-coverable-lines`
-//! is package-scoped only.
+//! gating: it always passes, regardless of attributed data. Thresholds must
+//! be in the inclusive range `0.0..=100.0`.
+//!
+//! ### Packages with no coverable lines
+//!
+//! A package that legitimately contains no coverable lines (pure re-exports,
+//! type definitions, or a thin binary shim) can make that invariant explicit:
+//!
+//! ```toml
+//! [package.metadata.coverage-gate]
+//! expect-no-coverable-lines = true
+//! ```
+//!
+//! The gate passes only while the package has no attributed coverable lines
+//! and fails as a regression if coverable code later appears. This differs
+//! from `min-lines-percent = 0`, which keeps passing if the package grows
+//! coverable code. The two keys are mutually exclusive, and
+//! `expect-no-coverable-lines` is package-scoped only.
+//!
+//! ### Target-specific policies
+//!
+//! A package can replace its base policy for a Cargo-style target selector:
+//!
+//! ```toml
+//! [package.metadata.coverage-gate]
+//! min-lines-percent = 100
+//!
+//! [package.metadata.coverage-gate.target.'cfg(not(windows))']
+//! expect-no-coverable-lines = true
+//!
+//! [package.metadata.coverage-gate.target.x86_64-unknown-linux-gnu]
+//! min-lines-percent = 100
+//! ```
+//!
+//! A target-specific no-coverable-lines assertion uses the same nesting:
+//!
+//! ```toml
+//! [package.metadata.coverage-gate.target.thumbv7em-none-eabihf]
+//! expect-no-coverable-lines = true
+//! ```
+//!
+//! Target tables are package-scoped; they are invalid in workspace metadata.
+//! Their keys accept exact Rust target triples or quoted `cfg(...)` expressions
+//! using the target-derived subset of Cargo's target grammar. Target
+//! configuration options such as `windows`, `unix`, `target_os`, and
+//! `target_arch` are supported. Build-context options such as `feature`, `test`,
+//! `debug_assertions`, and `proc_macro` are rejected because a standalone target
+//! query cannot evaluate them. A selected target table sets either
+//! `min-lines-percent` or `expect-no-coverable-lines = true`, completely
+//! replacing the package's base policy to produce its effective policy. Exact
+//! triples take precedence over matching `cfg(...)` expressions. Multiple
+//! matching cfg policies are a configuration error rather than depending on
+//! declaration order.
+//!
+//! A zero target-specific threshold disables gating on the matching target,
+//! but does not disable test execution or instrumentation. Those test binaries
+//! remain instrumented because they may contribute coverage to other packages.
+//! If cargo-llvm-cov reports that an instrumented run produced no coverage
+//! data, automation can supply an empty lcov tracefile: zero-threshold and
+//! `expect-no-coverable-lines` packages pass, while positively gated packages
+//! report `NO DATA`.
 //!
 //! ## Why lcov, not the JSON?
 //!
@@ -51,6 +130,7 @@
 //!
 //! ```text
 //! cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
+//!                      [--target <triple>]
 //!                      [--summary-file <path>] [--quiet]
 //! ```
 //!
@@ -84,13 +164,15 @@
 //!
 //! ## Public API
 //!
-//! The library exposes [`evaluate`], which returns an
-//! [`EvaluatedReport`]. The report can be rendered as plain text via
-//! [`EvaluatedReport::render_text`] or as GitHub-flavored Markdown
-//! via [`EvaluatedReport::render_markdown`], and reduced to a single
-//! [`Verdict`] via [`EvaluatedReport::verdict`]. The accompanying
-//! binary loads the lcov tracefile from disk and orchestrates rendering
-//! plus the appropriate exit code.
+//! [`evaluate`] gates one lcov tracefile for the rustc host target, while
+//! [`evaluate_many`] merges multiple tracefiles at line level.
+//! [`evaluate_many_for_target`] evaluates a selected Rust target, which may be
+//! supplied explicitly or omitted to select the rustc host target.
+//! Evaluation returns an [`EvaluatedReport`], which renders as plain
+//! text via [`EvaluatedReport::render_text`] or GitHub-flavored Markdown via
+//! [`EvaluatedReport::render_markdown`] and reduces to a [`Verdict`] via
+//! [`EvaluatedReport::verdict`]. The accompanying binary loads tracefiles from
+//! disk and orchestrates rendering plus the appropriate exit code.
 //!
 //! [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 
@@ -108,6 +190,7 @@ mod attribute;
 mod error;
 mod lcov_cov;
 mod render;
+mod target;
 mod threshold;
 mod verdict;
 mod workspace;
@@ -196,10 +279,11 @@ impl EvaluatedReport {
 /// # Errors
 ///
 /// Returns a [`CoverageGateError`] when the tracefile does not parse,
-/// workspace discovery fails, an unknown package appears in
-/// `gated_packages`, or a configured `min-lines-percent` value is outside
-/// `[0.0, 100.0]`. The error message identifies which case occurred;
-/// callers usually just propagate it.
+/// workspace discovery fails, a package selector is unknown, coverage
+/// metadata or target policy is invalid or ambiguous, a configured threshold
+/// is out of range, or required Rust target discovery or cfg queries fail.
+/// The error message identifies which case occurred; callers usually just
+/// propagate it.
 ///
 /// [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &[String]) -> Result<EvaluatedReport, CoverageGateError> {
@@ -214,11 +298,11 @@ pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &
 /// counts summed, line sets combined), so passing the `--all-features` and
 /// `--no-default-features` exports yields the same per-package line
 /// coverage as a single merged report — without a platform-specific lcov
-/// merger. An empty slice is treated as an empty report (every gated
-/// package then reports NO DATA). NO DATA is not a passing outcome:
-/// each such package classifies as `NoData`, which rolls the overall
-/// result up to [`Verdict::ConfigError`] (process exit code 2), so an
-/// empty slice never yields a successful verdict.
+/// merger. An empty slice is treated as an empty report. Packages with
+/// positive thresholds then report NO DATA, which rolls the overall result
+/// up to [`Verdict::ConfigError`] (process exit code 2). Packages with zero
+/// thresholds pass, while `expect-no-coverable-lines` packages report EMPTY
+/// and pass.
 ///
 /// `gated_packages` restricts the operation to a named subset; when
 /// empty, every workspace member is in scope.
@@ -230,13 +314,34 @@ pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &
 /// the merge.
 ///
 /// [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
+#[inline]
 pub fn evaluate_many(
     lcov_texts: &[&str],
     manifest_path: Option<&Path>,
     gated_packages: &[String],
 ) -> Result<EvaluatedReport, CoverageGateError> {
+    evaluate_many_for_target(lcov_texts, manifest_path, gated_packages, None)
+}
+
+/// Evaluate one or more lcov tracefiles for a selected Rust target.
+///
+/// `target` is a Rust target triple such as `x86_64-pc-windows-msvc`.
+/// When omitted, the rustc host target is used. Target-specific
+/// package policy is resolved before the gated package set is evaluated.
+///
+/// # Errors
+///
+/// Returns a [`CoverageGateError`] under the same conditions as
+/// [`evaluate_many`]. Target-resolution failures are also reported when target
+/// policy requires a Rust target.
+pub fn evaluate_many_for_target(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+    target: Option<&str>,
+) -> Result<EvaluatedReport, CoverageGateError> {
     let report = lcov_cov::CoverageReport::from_strs(lcov_texts)?;
-    let ws = workspace::Workspace::load(manifest_path)?;
+    let ws = workspace::Workspace::load(manifest_path, target)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
 }

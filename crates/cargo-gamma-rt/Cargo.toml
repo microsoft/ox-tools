@@ -43,6 +43,9 @@ loom = []
 [target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
 
+[target.'cfg(windows)'.dev-dependencies]
+tempfile = { workspace = true }
+
 [[test]]
 name = "loom"
 required-features = ["loom"]

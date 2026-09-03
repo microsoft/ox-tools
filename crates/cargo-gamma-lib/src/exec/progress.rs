@@ -38,7 +38,7 @@ pub(super) struct Progress {
     /// it is what the run would have reported had it read the output to exhaustion.
     pub(super) failed: Option<String>,
 
-    /// Whether the guard runtime reported that it could not acquire the startup environment.
+    /// Whether the guard runtime reported that process startup could not establish a selection.
     pub(super) environment_error: bool,
 
     /// When the harness last said anything at all.
@@ -134,10 +134,7 @@ impl Progress {
         self.quiet = self.quiet.max(now.saturating_duration_since(self.heard));
 
         self.heard = now;
-        self.environment_error |= line
-            .as_bytes()
-            .windows(gamma_rt::ENVIRONMENT_ERROR_MARKER.len())
-            .any(|window| window == gamma_rt::ENVIRONMENT_ERROR_MARKER);
+        self.environment_error |= runtime_startup_failure(line.as_bytes());
     }
 
     /// Remembers the first failure announced, leaving any later one alone.
@@ -146,6 +143,12 @@ impl Progress {
             self.failed = Some(name.to_owned());
         }
     }
+}
+
+pub(super) fn runtime_startup_failure(text: &[u8]) -> bool {
+    [gamma_rt::ENVIRONMENT_ERROR_MARKER, gamma_rt::PRE_INSTALL_ERROR_MARKER]
+        .into_iter()
+        .any(|marker| text.windows(marker.len()).any(|window| window == marker))
 }
 
 #[cfg(all(test, not(miri)))]
@@ -365,6 +368,18 @@ mod tests {
         progress.heard("test tests::ignored ... ignored\n");
 
         assert_eq!(progress.failed, None);
+    }
+
+    #[test]
+    fn either_runtime_startup_marker_disqualifies_live_output() {
+        for marker in [gamma_rt::ENVIRONMENT_ERROR_MARKER, gamma_rt::PRE_INSTALL_ERROR_MARKER] {
+            let mut progress = Progress::new(Watch::Off);
+            let line = core::str::from_utf8(marker).expect("runtime markers are ASCII");
+
+            progress.heard_diagnostic(line);
+
+            assert!(progress.environment_error, "{line:?}");
+        }
     }
 
     #[test]

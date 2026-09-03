@@ -206,7 +206,7 @@ update the recipes or cloud-workflow building blocks.
 A user with only `cargo` (no `just`, no `cargo-anvil`) can still run the basics:
 
 ```sh
-cargo test   --workspace --all-targets --all-features --locked
+cargo test   --workspace --tests --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --check
 ```
@@ -231,7 +231,9 @@ The tool produces a small set of files. They fall into three categories:
   bracketed by sentinel comments. The sentinel pair (`# >>> anvil-managed: <id>` …
   `# <<< anvil-managed: <id>`) delimits the region body and identifies it by stable ID;
   the manifest tracks the last-rendered checksum per `(host, id)`. Outside the
-  sentinels, the user's content is preserved byte-for-byte.
+  sentinels, the user's content is preserved byte-for-byte — except that first
+  introduction into a TOML host may adopt a hand-written table, see
+  [updates.md](./updates.md#adopting-a-hand-written-table-on-first-introduction).
 - **user-authored** — files the user owns; the tool only reads them.
   `rust-toolchain.toml` and `.cargo/config.toml` fall in this category.
 
@@ -294,9 +296,11 @@ Detail on each host:
   becomes `anvil-lints` and contains a single `[lints]` table with the same
   dotted-key layout.
 - **`deny.toml`** — one managed region per top-level section (`[advisories]`, `[licenses]`,
-  `[bans]`, `[sources]`) carrying the tool's baseline license/advisory rules. Splitting the
-  sections into separate regions lets users add their own keys in the gaps between them
-  (the engine composes the co-hosted regions into one file). Users may also add keys
+  `[bans]`, `[sources]`) carrying the tool's baseline license/advisory rules. The bans baseline
+  rejects wildcard registry requirements while allowing versionless path or Git
+  dev-dependencies, which Cargo omits from published packages. Splitting the sections into
+  separate regions lets users add their own keys in the gaps between them (the engine composes
+  the co-hosted regions into one file). Users may also add keys
   outside the regions. Created if absent. Content detailed in [checks.md](./checks.md).
 - **`rustfmt.toml`** — created with the opinionated baseline if absent; managed region at the
   end of the file. The most contested opinion in the catalog; users who want to keep their own

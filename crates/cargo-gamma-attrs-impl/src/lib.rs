@@ -47,4 +47,26 @@
 mod implementation;
 
 #[doc(inline)]
-pub use implementation::{CHAIN_FACTOR, MOST_FACTOR, NESTING_LIMIT, exceeds_nesting_limit, inert, inert_timeout, value};
+pub use implementation::{inert, inert_timeout, value};
+
+/// Development-only access used by the workspace's cross-crate agreement test.
+#[cfg(feature = "agreement")]
+#[doc(hidden)]
+pub mod test_support {
+    use proc_macro2::TokenStream;
+
+    /// The proc-macro parser's nesting limit.
+    pub const NESTING_LIMIT: usize = super::implementation::NESTING_LIMIT;
+
+    /// The relative cost assigned to postfix syntax.
+    pub const CHAIN_FACTOR: usize = super::implementation::CHAIN_FACTOR;
+
+    /// The largest accepted timeout multiplier.
+    pub const MOST_FACTOR: f64 = super::implementation::MOST_FACTOR;
+
+    /// Applies the proc-macro parser's nesting check.
+    #[must_use]
+    pub fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool {
+        super::implementation::exceeds_nesting_limit(stream, limit)
+    }
+}

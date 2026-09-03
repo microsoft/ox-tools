@@ -5,6 +5,8 @@ of a mutation campaign, the boundaries that preserve correctness, and the trade-
 makes. It intentionally does not describe source modules, internal helper types, test fixtures, or
 how to extend the implementation.
 
+Those mechanics are recorded in the [implementation guide](IMPLEMENTATION.md).
+
 For commands, configuration, mutator names, and operational advice, see
 [the README](../README.md).
 
@@ -66,7 +68,7 @@ flowchart LR
     end
 ```
 
-The design therefore optimizes three different costs:
+The design therefore optimizes each component of campaign cost:
 
 1. **Fixed campaign cost:** discovery, copying, instrumentation, and one build.
 2. **Per-mutant cost:** process launch plus the tests capable of observing that mutant.
@@ -75,7 +77,7 @@ The design therefore optimizes three different costs:
 
 ## System boundaries
 
-The architecture has four principal domains.
+The architecture separates responsibilities into the following domains.
 
 ```mermaid
 flowchart TB
@@ -206,23 +208,27 @@ Selection narrows the population before expensive work:
 
 - package, file, mutator, and diff selection decide what may become a mutant;
 - conditional-compilation evidence excludes code absent from this build;
-- explicitly tagged project policy can exclude every implementation with a named lexical terminal
-  trait identifier without coupling selection to path qualification or human-readable report text;
+- explicitly tagged project policy can mark every implementation whose final written trait-path
+  segment is a named unqualified Rust identifier as ignored, without coupling selection to path
+  qualification or human-readable report text;
 - suppressions withdraw explicitly accepted sites;
 - sharding assigns stable portions of the population to separate campaigns.
 
 Trait-name policy is deliberately lexical. `impl Debug`, `impl fmt::Debug`, and
-`impl core::fmt::Debug` share the terminal name `Debug`, while an imported alias retains the alias
-written in the implementation. Without rustc name resolution, discovery cannot semantically
-distinguish identically named imported traits. Each rule records whether it matched during
-discovery, and an unmatched rule is a usage error rather than a silent no-op; this makes a typo in
-selection policy visible before it can quietly change the mutation population.
+`impl core::fmt::Debug` share the final written identifier `Debug`, while an imported alias retains
+the identifier written in the implementation. Without rustc name resolution, discovery cannot
+semantically distinguish identically named imported traits. Matching mutants remain in reports
+with an `ignored` verdict and configuration suppression reason. Each rule records whether it
+matched during discovery, and an unmatched rule is a usage error rather than a silent no-op; this
+makes a typo in selection policy visible before it can quietly change the mutation population.
 
 In-source suppression has two equivalent channels. Whole items can use the inert
 `#[gamma::skip]` attribute supplied by the `cargo-gamma-attrs` package. Statements and expressions,
 where custom attributes remain unstable, can use the comment spelling
 `// #[gamma::skip(...)]`. The source engine interprets the comment form;
 the attribute crate validates the compiled form while expanding to the annotated item unchanged.
+Both channels permit one timeout multiplier per directive across positional and named spellings;
+stating another is a usage error rather than an ordered override.
 For `cfg_attr`, a definitely false predicate leaves the nested directive inactive, a true
 predicate applies it, and an unknown predicate applies it conservatively rather than manufacturing
 a survivor the author believed suppressed.
@@ -359,8 +365,9 @@ Conditional source, configuration, and hints publication uses this lock on every
 Windows never needs persistent sibling lock files in the checkout.
 
 The default cache base lives under the user cache directory as `cargo-gamma/<identity>`, where the
-identity is the first sixty-four bits of the BLAKE3 digest of the absolute workspace root, rendered
-as sixteen hex characters. The algorithm is pinned by cargo-gamma rather than borrowed from the
+identity is the first sixty-four bits of the BLAKE3 digest of the resolved physical workspace root,
+rendered as sixteen hex characters. Filesystem aliases of the same existing root therefore share
+one cache and lock domain. The algorithm is pinned by cargo-gamma rather than borrowed from the
 standard library's default hasher, which is explicitly free to change between releases: this name is
 where the lock serializing every source-changing command for one workspace lives, so two binaries
 that derived different names for one workspace would rewrite one tree concurrently while each
@@ -384,18 +391,19 @@ run. Three refusals apply before anything is written there. The base may not be 
 anything other than a directory, checked both before and after it is created, so a redirect cannot
 be aimed through a link at a target it does not name. On Unix, every directory on the path to the
 base must be owned by the invoking user or by root and must not be group- or world-writable unless
-it is sticky; this is the rule OpenSSH applies to a home directory, and it allows the shared
-temporary directories that are sticky by design. The ownership marker is created exclusively, so a
-marker planted in advance is a refusal rather than something to overwrite, and it is read through
-the same handle its identity was taken from.
+the Unix sticky bit is set, which restricts removal and renaming of entries to their owner, the
+directory owner, or a privileged process. This is the rule OpenSSH applies to a home directory, and
+it allows shared temporary directories that use the sticky bit by design. The ownership marker is
+created exclusively, so a marker planted in advance is a refusal rather than something to
+overwrite, and it is read through the same handle its identity was taken from.
 
 These are ownership checks, not a proof that nothing changed between the check and the use: a
 directory the operating system reports as private cannot be made public by an unprivileged
 stranger, but nothing here makes the sequence atomic, and none of it constrains a privileged user or
 the directory's own owner. On Windows the check does not exist. Its security model is per-object
-ACLs that the standard library does not expose, so cargo-gamma performs no ownership test there and
-claims none; a redirected cache on Windows is trusted exactly as far as the directory the user named
-is.
+access-control lists (ACLs), which the standard library does not expose, so cargo-gamma performs no
+ownership test there and claims none; a redirected cache on Windows is trusted exactly as far as
+the directory the user named is.
 
 Successful campaigns retain the synchronized tree and build artifacts. A later campaign performs a
 delta synchronization:
@@ -408,8 +416,7 @@ delta synchronization:
 `cargo gamma clean` takes the campaign lock and removes the current workspace-specific cache
 contents. It does not remove published reports under `target/cargo-gamma`, durable hints, or source
 suppressions. The cleaned directory is named in the output; a workspace with nothing cached is
-told so. There is no legacy cache-name migration because no cargo-gamma release predates the
-current stable naming scheme.
+told so. Cache identity uses the current stable naming scheme without a migration path.
 
 Correct invalidation is more important than avoiding a copy. Preserving an old timestamp on changed
 bytes could let Cargo reuse an artifact compiled from stale source.
@@ -661,6 +668,13 @@ Mutants are assigned to shards with stable hashing so changing the shard count m
 necessary fraction of the population. Reports merge by mutant identity, keeping freshness and
 withdrawal explicit.
 
+A report records the mutant-ID scheme used to produce its identities. A report that omits this
+metadata is treated as using the current scheme. When inputs explicitly identify different
+schemes, merge isolates the newest scheme and reports every excluded input rather than counting
+identities from different namespaces together. A rotation that spans an identity change must
+therefore be restarted or completed with reports from the new scheme. When `--min-score` is
+requested, any excluded input fails the gate because the requested population is incomplete.
+
 A shard describes only its slice and cannot prove that a missing mutant was withdrawn. Only an
 unsharded, complete population can withdraw identities from an accumulated report.
 
@@ -718,12 +732,8 @@ Command help follows the workspace Cargo-tool convention: green bold headings an
 cyan bold literals, cyan placeholders, and package author/version metadata.
 
 The JSON report is written straight from the verdict model rather than rebuilt through a generic
-tree first, and is validated in that form. Two consequences are visible to whoever reads the file.
-Object keys appear in the order the schema declares them rather than alphabetically, which is
-deterministic in the same way and byte-for-byte reproducible across runs, but is not the order a
-previous release emitted. Per-file entries are ordered by path. Nothing about the set of keys, their
-names, their nesting, or their values changed, so a consumer that parses the document sees exactly
-what it saw before; only a consumer diffing raw bytes against an old file will notice.
+tree first, and is validated in that form. Object keys follow schema declaration order, and
+per-file entries follow path order, making output byte-for-byte reproducible across runs.
 
 Console guidance is labelled `Hint`; incomplete, truncated, or unsaved output is labelled
 `warning`. Routine internal adjustments are silent.
@@ -732,14 +742,15 @@ Everything a rendered artifact shows that the repository controls — paths, sou
 names, mutator notes, and a build tool's own diagnostics — is control-character encoded before it
 reaches a terminal or a CI log. The campaign writes real escape sequences of its own to draw the
 progress display, so a filename able to write them too could erase the line above it, forge a
-verdict, or attach a terminal hyperlink to someone else's URL. Colour that a build tool emits is
-allowed through unchanged, because it moves nothing; everything else — cursor motion, erasure,
-operating-system commands, and the C0/C1 controls including newline — is rendered visibly as an
+verdict, or attach a terminal hyperlink to someone else's URL. A build tool's color and bold SGR
+parameters are allowed through, followed by a trusted reset that contains the style to the relayed
+line. Other presentation effects and every non-SGR terminal control — cursor motion, erasure,
+operating-system commands, and the C0/C1 controls including newline — are rendered visibly as an
 escape rather than executed.
 
 The HTML report loads no code from anywhere: the viewer is embedded, always. A report carries the
-complete source of every file it describes, so a page that fetched its viewer would hand all of it
-to whatever that script happened to be on the day the file was opened. The viewer bundle is
+complete source of every file it describes, so loading an external viewer would allow remotely
+supplied JavaScript to read and disclose the embedded source and results. The viewer bundle is
 vendored, reviewed, and versioned in-tree; a remote artifact could only be trusted if it were
 pinned by an integrity digest established here, which the vendored build cannot establish for a
 published one. No external-viewer mode is exposed.
@@ -750,8 +761,9 @@ cannot enumerate a binary's tests with a mutant active, the campaign confirms th
 before scoring a kill, but the raw enumeration output stays out of every published report: a test
 or a nextest extension inherits this run's environment, and repeating that output verbatim would
 extend a run's secret-retention boundary into every uploaded artifact. That output is still raised
-once, locally, as a console diagnostic, so an operator debugging the mutant can see it without it
-ever leaving this run.
+locally as a best-effort console diagnostic: only a bounded tail is submitted, and the command-wide
+note cap may discard it when earlier diagnostics have filled the queue. Any retained text remains
+local to the run.
 
 Reports are projections, not independent calculations. The console, JSON, HTML, merged report, and
 score gate must agree because they consume the same outcomes and scoring rules.
@@ -800,11 +812,11 @@ quietly ignores user intent can produce a precise score for the wrong population
 
 ### Coverage that a host cannot provide is reported, not skipped
 
-Containment, metering, and terminal-signal handling are the guarantees this tool makes about
-somebody else's machine, and the tests behind them need capabilities no host is obliged to offer.
-Such a test is marked ignored, so that every runner names it as missing coverage, and fails outright
-when it is asked for by name on a host that cannot supply what it needs. A test that returns early
-and reports success hides the absence of the coverage, not just the absence of the capability.
+Containment, metering, and terminal-signal handling depend on capabilities supplied by the host
+environment, and no host is obliged to offer all of them. Such a test is marked ignored, so that
+every runner names it as missing coverage, and fails outright when it is asked for by name on a host
+that cannot supply what it needs. A test that returns early and reports success hides the absence of
+the coverage, not just the absence of the capability.
 
 Tests that change process-wide state which cannot be restored — an interrupt registry that has been
 told a run is ending, a fixed set of watch slots — run in a process of their own. Left in the shared

@@ -201,7 +201,9 @@ The sentinel pair serves two purposes:
    for the opening sentinel — line-number-independent, robust against user edits to
    surrounding content.
 2. **Body delimitation.** Everything between the sentinels (exclusive) is "the region's
-   body." Lines outside the sentinels are user-owned and preserved verbatim.
+   body." Lines outside the sentinels are user-owned and preserved verbatim, with the
+   single exception described in *Adopting a hand-written table on first introduction*
+   below.
 
 For TOML hosts the sentinels are TOML line comments around the affected content. To
 work with TOML's no-duplicate-table rule, anvil writes a single parent-table header
@@ -238,6 +240,33 @@ running anvil for the first time sees warnings rather than a wall of build failu
 while still failing cloud workflows on anything the catalog covers. Users who want stricter local
 behavior set per-lint `"deny"` values inside the region — the dirty-file flow then
 preserves their edit.
+
+### Adopting a hand-written table on first introduction
+
+TOML rejects a duplicate table header, so appending a region that declares `[lints]` to a
+host that already declares `[lints]` by hand does not merely duplicate text — it produces
+a manifest that will not parse. On **first introduction only** (once the region exists,
+in-place replacement applies and there is nothing to adopt), the tool therefore removes
+the hand-written table instead of duplicating it, including any comments and blank lines
+within that table's range.
+
+Adoption is deliberately narrow. A hand-written table is removed only when **every** one
+of its configuration lines already appears in the rendered region body; the body may
+declare further lines of its own. Adoption is declined — the hand-written table stays
+exactly where it is — when any of the following holds:
+
+- the table carries configuration the region body does not (silently discarding a user's
+  settings is a worse outcome than a visible parse failure);
+- either the host or the body contains a multi-line string (`"""` or `'''`), which a
+  line-oriented scanner cannot classify safely;
+- the header is an array of tables (`[[bin]]`), which TOML permits to repeat, so a second
+  one is not a duplicate;
+- the table sits inside an existing managed region, which the tool already owns.
+
+A declined adoption is not a refusal to write: the region is still inserted, so a host
+that declares a conflicting ordinary table still ends up with a duplicate-table parse
+error. `deny.toml` with user-authored `[advisories]` entries is the case that hits this,
+and resolving it is tracked separately.
 
 ### User-extension limits for TOML regions
 

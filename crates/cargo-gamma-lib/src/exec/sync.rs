@@ -19,9 +19,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use ignore::{WalkBuilder, WalkState};
 use walkdir::WalkDir;
 
-use super::copy::{CopyOptions, Reflinks, copy_tree_with, is_pruned, tracked_files};
 use crate::Result;
 use crate::error::{Error, error};
+use crate::exec::copy::{CopyOptions, Reflinks, copy_tree_with, is_pruned, tracked_files};
 
 /// Outcome of a delta synchronization attempt.
 #[derive(Debug)]
@@ -63,7 +63,7 @@ pub(super) fn sync_or_copy(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, 
     // Taken once for the whole operation and shared by both the delta path and the fresh copy it
     // may fall back to: they write to the same tree, so what one of them learns about cloning there
     // is exactly what the other needs to know.
-    let reflinks = Reflinks::for_destination(root);
+    let reflinks = Reflinks::new();
 
     if !root.as_std_path().is_dir() {
         copy_tree_with(source, root, skip, options, &reflinks)?;

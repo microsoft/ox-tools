@@ -19,8 +19,8 @@ use crate::Situation;
 /// [`Situation::Unsupported`](crate::Situation::Unsupported), carrying the reason this host cannot
 /// account for a whole test subtree's memory: no cgroup v2 unified hierarchy, no delegated cgroup,
 /// no memory controller to hand to children, a kernel missing the interface files a leaf needs, or
-/// a Unix that is not Linux. It is a standing fact about the machine rather than about one launch,
-/// so a caller degrades or refuses the whole run once rather than retrying.
+/// a Unix that is not Linux. This classification describes a host-wide capability limitation
+/// rather than the failure of one launch.
 #[cfg_attr(
     windows,
     expect(
@@ -49,7 +49,7 @@ pub fn support() -> Result<(), PlatformError> {
     #[cfg(not(any(target_os = "linux", windows)))]
     {
         // #[gamma::skip(result.err_to_ok, literal.str_to_empty, literal.str_to_xyzzy, reason = "this compile-time branch exists only on unsupported non-Linux, non-Windows targets and cannot be executed by the Linux mutation run")]
-        Err(PlatformError::new(
+        Err(PlatformError::new_static(
             Situation::Unsupported,
             "bounding a test subtree's memory needs cgroup v2 on Linux or a job object on Windows, \
              and this platform offers no unprivileged equivalent that accounts for a whole process \

@@ -16,6 +16,9 @@ use std::sync::mpsc;
 use camino::{Utf8Path, Utf8PathBuf};
 
 const HELPER_SOURCE: &str = r#"
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
+
 thread_local! {
     static HELD: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -49,6 +52,21 @@ fn step(directive: &str) -> Option<i32> {
         "exit" => Some(payload.parse().unwrap_or(0)),
         "touch" => {
             let _ = std::fs::write(payload, b"");
+            None
+        }
+        "wait" => {
+            if payload.is_empty() {
+                return Some(98);
+            }
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !std::path::Path::new(payload).exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Some(98);
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             None
         }
         "spawn" => {
@@ -92,12 +110,11 @@ fn launch(payload: &str, own_group: bool) {
         let _ = child.arg(format!("--gamma-step={inner}"));
     }
 
-    // The escape a process group has no answer to: one unprivileged call and every later signal to
-    // the group misses this process. A cgroup leaf and a job object are not renounceable this way.
+    // Starting a new process group removes this child from the parent's group, so later signals to
+    // that group no longer reach it. The same call cannot remove a child from its cgroup leaf or
+    // Windows job object.
     #[cfg(unix)]
     if own_group {
-        use std::os::unix::process::CommandExt as _;
-
         let _ = child.process_group(0);
     }
 
@@ -111,7 +128,9 @@ fn launch(payload: &str, own_group: bool) {
 pub fn helper_binary_path() -> &'static Utf8Path {
     static BUILT: OnceLock<Utf8PathBuf> = OnceLock::new();
 
-    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-3")).as_path()
+    // The suffix is the helper cache generation. Advance it whenever `HELPER_SOURCE` changes,
+    // because `build_or_reuse_helper` deliberately trusts an existing binary with this name.
+    BUILT.get_or_init(|| build_or_reuse_helper("gamma-process-helper-6")).as_path()
 }
 
 /// Builds the helper binary under `name`, or reuses one already there.
@@ -234,6 +253,16 @@ mod tests {
     #[test]
     fn a_directive_is_formatted_for_the_helper_binary() {
         assert_eq!(directive("exit:0"), "--gamma-step=exit:0");
+    }
+
+    #[test]
+    fn an_empty_wait_path_is_rejected_instead_of_blocking() {
+        let status = Command::new(helper_binary_path().as_std_path())
+            .arg(directive("wait:"))
+            .status()
+            .expect("the helper should run");
+
+        assert_eq!(status.code(), Some(98));
     }
 
     #[test]
