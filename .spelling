@@ -337,6 +337,7 @@ Serde
 Serde-based
 Serde's
 serializable
+serializer
 setsockopt
 shareable
 skimmable
@@ -423,6 +424,7 @@ vec
 versioning
 Vijay
 VMs
+XDG
 vs
 vtable
 w.r.t.
