@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0] - 2026-09-03
+
+- ✨ Features
+
+  - emit a code-review skill for PR reviewers ([#152](https://github.com/microsoft/ox-tools/pull/152))
+
+- 🐛 Bug Fixes
+
+  - stop anvil-msrv-test from executing benchmarks ([#150](https://github.com/microsoft/ox-tools/pull/150))
+  - adopt an unmanaged TOML table instead of duplicating it ([#140](https://github.com/microsoft/ox-tools/pull/140))
+  - preserve recipe failure diagnostics ([#110](https://github.com/microsoft/ox-tools/pull/110))
+
 ## [0.6.0] - 2026-09-01
 
 - ✨ Features
