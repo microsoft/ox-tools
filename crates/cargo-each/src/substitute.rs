@@ -235,6 +235,15 @@ mod tests {
     }
 
     #[test]
+    fn once_rejects_target_token() {
+        let ph = Placeholders::Once {
+            packages: args(&["--workspace"]),
+        };
+        let err = substitute(&args(&["test", "--test", "{target}"]), &ph).expect_err("misuse");
+        assert!(err.to_string().contains("{target}"));
+    }
+
+    #[test]
     fn once_rejects_embedded_packages_token() {
         let ph = Placeholders::Once {
             packages: args(&["--workspace"]),
