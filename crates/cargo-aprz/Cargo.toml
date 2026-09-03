@@ -4,7 +4,7 @@
 [package]
 name = "cargo-aprz"
 description = "A cargo subcommand that appraises the quality of Rust dependencies"
-version = "1.1.1"
+version = "1.1.2"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "quality"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
