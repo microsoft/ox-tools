@@ -196,7 +196,7 @@ Every PR-tier group stage declares `dependsOn: [impact_linux, impact_windows]` s
 
 Note the ADO topology differs from GitHub Actions in two places:
 1. **No reusable workflow indirection**: ADO `extends:` is one-shot; the root pipeline extends a single template. We compensate by putting all stages in `pr.yml` / `scheduled.yml` as direct templates.
-2. **Per-job wrapper**: the `steps/job.yml` template is ADO-specific. GitHub composite actions are uniform; ADO 1ESPT requires per-job extensibility hooks that the wrapper exposes through its `name`/`pool`/`steps`/`artifacts` parameter contract (see §4.1).
+2. **Per-job wrapper**: the `steps/job.yml` template is ADO-specific. GitHub composite actions are uniform; ADO 1ESPT requires per-job extensibility hooks that the wrapper exposes through its `name`/`stage`/`pool`/`steps`/`artifacts` parameter contract (see §4.1).
 
 ## 2. Emitted artifacts
 
@@ -218,7 +218,8 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── impact.yml              owned   (runs `just anvil-impact`; omitted if .delta.toml disabled)
         ├── job.yml                 owned-but-user-customizable
         │                                   (per-job wrapper; takes `name`,
-        │                                    `pool`, `steps`, `artifacts`;
+        │                                    `stage`, `pool`, `steps`,
+        │                                    `inputArtifacts`, `artifacts`;
         │                                    users edit to inject 1ESPT
         │                                    `templateContext:` etc.)
         ├── pr-fast.yml             owned   (one step template per group)
@@ -240,8 +241,15 @@ customized by adopters whose ADO instance requires extension templates
 (1ES PT, SubstratePT, M365PT). Once a user edits it, the standard dirty-file
 flow kicks in — subsequent anvil updates Propose into a `.proposed` sibling
 rather than overwriting. The stages templates address the wrapper only via its
-parameter contract (`name`, `pool`, `steps`, `artifacts`), so the wrapper can
-diverge arbitrarily without blocking stage-shape updates. See §4.1.
+parameter contract (`name`, `stage`, `pool`, `steps`, `inputArtifacts`,
+`artifacts`), so the wrapper *body* can diverge arbitrarily without blocking
+stage-shape updates.
+
+That guarantee covers the body, not a contract that *grows*. ADO rejects a
+parameter the target template does not declare, so a stages update that begins
+passing a new parameter has to be adopted together with the `.proposed` wrapper
+update that declares it — anvil overwrites the owned stages templates but only
+proposes the wrapper. See §4.1.
 
 ## 3. Root pipelines
 
@@ -392,6 +400,7 @@ The contract is intentionally small and stable:
 | Parameter   | Type       | Required | Meaning                                                                                                                                                                                |
 |-------------|------------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `name`      | `string`   | yes      | Job name; ADO derives the display name from it.                                                                                                                                        |
+| `stage`     | `string`   | no       | ADO stage this job belongs to — exactly what the stages template writes after `stage:`, and what `System.StageName` reports at runtime: `impact`, `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`, `pr_mutants`, `scheduled_test`, `scheduled_advisories`, `scheduled_runtime_analysis`, `scheduled_exhaustive`. Per-OS job names repeat across stages, so `name` alone cannot identify one, and `templateContext:` is consumed at template-expansion time so a runtime condition on `System.StageName` is unavailable there. The default wrapper ignores it; it exists so an owned wrapper can apply per-stage settings. Unrelated to `group` in `steps/setup.yml`, which selects a check group's tool catalog. |
 | `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
 | `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
 | `inputArtifacts` | `object` | no  | List of pipeline artifacts to download *before* the steps run. Each item: `{ name: string, path: string }`. Default wrapper prepends one `DownloadPipelineArtifact@2` per entry; 1ESPT wrappers translate the same list into their own download mechanism (e.g. `templateContext.inputs`). This is how the impact set is shared — each PR group job downloads its OS's `anvil-impact-<os>` artifact into `target/anvil/impact` and its checks read the cache exactly as a local run. |
@@ -403,6 +412,7 @@ The default wrapper anvil ships downloads any `inputArtifacts`, splices in the
 ```yaml
 parameters:
   - { name: name, type: string }
+  - { name: stage, type: string, default: '' }
   - { name: pool, type: object }
   - { name: steps, type: stepList }
   - { name: inputArtifacts, type: object, default: [] }
@@ -465,6 +475,12 @@ changes often (new groups, new dependsOn rules, new impact-output wiring). Putti
 the user's customization in a separate file means stages updates flow through
 without merging, and the user's wrapper changes survive every anvil upgrade.
 
+The one exception is a stages update that starts passing a *new* wrapper
+parameter, as the `stage` addition did: ADO rejects a parameter the target
+template does not declare, so that stages update and the `.proposed` wrapper
+have to be taken together. Growing the contract is therefore a breaking change
+for adopters who own the wrapper, and is called out as such in the changelog.
+
 **Why is the wrapper "owned" rather than "proposed-once"?** So that first-time
 adoption needs zero extra steps — a fresh `cargo anvil` writes a
 working wrapper and the pipeline runs. The dirty-file behavior kicks in only
@@ -518,6 +534,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_linux
+          stage: impact
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/impact.yml
@@ -527,6 +544,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_windows
+          stage: impact
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/impact.yml
@@ -547,6 +565,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_fast
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -556,6 +575,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_fast
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
