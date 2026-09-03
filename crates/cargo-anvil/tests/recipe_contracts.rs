@@ -20,6 +20,7 @@ const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
 const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
+const DOC_TEST: &str = include_str!("../templates/justfiles/anvil/checks/doc-test.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const LOOM: &str = include_str!("../templates/justfiles/anvil/checks/loom.just");
 const MSRV_TEST: &str = include_str!("../templates/justfiles/anvil/checks/msrv-test.just");
@@ -129,7 +130,10 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = "$($env:FAKE_SECOND_PACKAGE_NAME) 0.1.0"
             manifest_path = [System.IO.Path]::Combine($root, 'nested', $secondDirLeaf, 'Cargo.toml')
-            targets = @([pscustomobject]@{ name = $env:FAKE_SECOND_PACKAGE_NAME; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $env:FAKE_SECOND_PACKAGE_NAME
+                kind = if ($env:FAKE_SECOND_BIN_ONLY) { @('bin') } else { @('lib') }
+            })
             publish = $null
             metadata = [pscustomobject]@{}
         }
@@ -145,7 +149,10 @@ if ($args -contains 'metadata') {
                 $env:FAKE_THIRD_PACKAGE_NAME,
                 'Cargo.toml'
             )
-            targets = @([pscustomobject]@{ name = $env:FAKE_THIRD_PACKAGE_NAME; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $env:FAKE_THIRD_PACKAGE_NAME
+                kind = if ($env:FAKE_THIRD_PROC_MACRO) { @('proc-macro') } else { @('lib') }
+            })
             publish = @('private-registry')
             metadata = [pscustomobject]@{}
         }
@@ -948,6 +955,45 @@ fn fmt_propagates_cargo_each_failure() {
         &[("FAKE_EACH_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))],
     );
     assert_failed(&output, "anvil-fmt cargo-each failure");
+}
+
+#[test]
+fn doc_test_selects_libraries_and_proc_macros_but_not_bin_only_packages() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+        &[
+            "anvil-tool-rustc-validate-prereqs",
+            "anvil-toolchain-stable-install",
+            "anvil-impact",
+        ],
+    );
+    seed_include(tmp.path(), "affected", "--workspace");
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("bin-only")),
+            ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
+            ("FAKE_THIRD_PROC_MACRO", OsStr::new("1")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "doc-test selection failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = fs::read_to_string(log).unwrap();
+    assert_eq!(commands.matches(" test --doc ").count(), 2, "commands:\n{commands}");
+    assert!(commands.contains("--package fixture"), "commands:\n{commands}");
+    assert!(commands.contains("--package macro-package"), "commands:\n{commands}");
+    assert!(!commands.contains("--package bin-only"), "commands:\n{commands}");
 }
 
 #[test]
