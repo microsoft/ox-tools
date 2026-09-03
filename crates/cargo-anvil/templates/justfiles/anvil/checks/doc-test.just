@@ -17,18 +17,17 @@
 [script("pwsh", "-NoProfile")]
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    & cargo {{_anvil_stable_toolchain_args}} test --doc @pkg --all-features --locked
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} test --doc @pkg --locked
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} test --doc '{packages}' --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} test --doc '{packages}' --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
-anvil-doc-test-setup installer="install": anvil-toolchain-stable-install
+anvil-doc-test-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
-anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
+anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

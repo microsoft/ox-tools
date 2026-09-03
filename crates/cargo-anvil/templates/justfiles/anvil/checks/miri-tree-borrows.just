@@ -18,18 +18,17 @@
 # that tier sets ANVIL_IMPACT=off, so _anvil-impact-include resolves
 # to --workspace. A direct local invocation is impact-scoped like any
 # other affected-tier check -- it reads the anvil-impact cache and
-# honors --skip.
+# honors an empty selection.
 
 # Run Miri tests with the Tree Borrows model.
 [script("pwsh", "-NoProfile")]
 anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { Write-Host 'anvil-miri-tree-borrows: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
-    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo '+{{ rust_nightly }}' miri test --all-features --tests '{packages}'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # The three nightly-miri profiles share the same toolchain prereqs
@@ -39,8 +38,8 @@ anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-miri-tree-borrows` recipe.
 [group("anvil-setup")]
-anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
+anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-miri-tree-borrows` recipe.
 [group("anvil-setup")]
-anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
+anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs

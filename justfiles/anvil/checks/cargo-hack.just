@@ -14,15 +14,15 @@
 [script("pwsh", "-NoProfile")]
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
-    if ($include -eq '--skip') { Write-Host 'anvil-cargo-hack: no affected packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} hack @(if ($include) { -split $include } else { '--workspace' }) --feature-powerset --depth 2 check
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include required)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} hack '{packages}' --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-cargo-hack` recipe.
 [group("anvil-setup")]
-anvil-cargo-hack-setup installer="install": (anvil-tool-cargo-hack-install installer)
+anvil-cargo-hack-setup installer="install": (anvil-tool-cargo-hack-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-cargo-hack` recipe.
 [group("anvil-setup")]
-anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
+anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs anvil-tool-cargo-each-validate-prereqs

@@ -12,15 +12,15 @@
 [script("pwsh", "-NoProfile")]
 anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($include -eq '--skip') { Write-Host 'anvil-license-headers: no modified packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} heather
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include modified)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-license-headers` recipe.
 [group("anvil-setup")]
-anvil-license-headers-setup installer="install": (anvil-tool-cargo-heather-install installer)
+anvil-license-headers-setup installer="install": (anvil-tool-cargo-heather-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-license-headers` recipe.
 [group("anvil-setup")]
-anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereqs
+anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereqs anvil-tool-cargo-each-validate-prereqs

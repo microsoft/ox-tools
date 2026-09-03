@@ -17,15 +17,15 @@
 [script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { Write-Host 'anvil-clippy: no affected packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} clippy @(if ($include) { -split $include } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} clippy '{packages}' --all-targets --all-features --locked '--' '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-clippy` recipe.
 [group("anvil-setup")]
-anvil-clippy-setup installer="install": anvil-component-default-clippy-install
+anvil-clippy-setup installer="install": anvil-component-default-clippy-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-clippy` recipe.
 [group("anvil-setup")]
-anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs
+anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs anvil-tool-cargo-each-validate-prereqs

@@ -18,12 +18,13 @@
 [script("pwsh", "-NoProfile")]
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') {
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($selection -contains '--none') {
         Write-Host 'anvil-llvm-cov: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    $pkg = $selection
     $allTestPkg = $pkg
     # Separate coverage-opted-out packages from the measured set. A crate that
     # is entirely `#![cfg_attr(coverage_nightly, coverage(off))]` (e.g. a
@@ -50,11 +51,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         if ($optedOut.Count -gt 0) {
             $filtered = [System.Collections.Generic.List[string]]::new()
             for ($i = 0; $i -lt $pkg.Count; $i++) {
-                # Impact emits version-qualified specs (name@version);
-                # compare the bare name against the opt-out set, but keep
-                # the full name@version token in $pkg so the llvm-cov
-                # measurement below resolves unambiguously.
-                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains (($pkg[$i + 1] -split '@', 2)[0])) {
+                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains $pkg[$i + 1]) {
                     $testOnlyPkg.Add('--package')
                     $testOnlyPkg.Add($pkg[$i + 1])
                     $i++
@@ -155,14 +152,12 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     # report NO DATA and fail the gate. When unscoped, $pkg is `--workspace`
     # (no gate flag); drop it so the gate defaults to every member.
     #
-    # cargo-coverage-gate keys on bare package names from cargo metadata, so
-    # strip the @version qualifier the measurement used for disambiguation.
     $gateArgs = [System.Collections.Generic.List[string]]::new()
     for ($i = 0; $i -lt $pkg.Count; $i++) {
         if ($pkg[$i] -eq '--workspace') { continue }
         if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
             $gateArgs.Add('--package')
-            $gateArgs.Add(($pkg[$i + 1] -split '@', 2)[0])
+            $gateArgs.Add($pkg[$i + 1])
             $i++
             continue
         }

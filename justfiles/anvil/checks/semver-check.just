@@ -39,7 +39,7 @@
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-metadata
 # filter to publishable library crates (cargo-semver-checks --workspace
-# fails on bin-only workspaces), intersect the affected set ($include) with that
+# fails on bin-only workspaces), intersect the affected selection with that
 # set, verify the PR branch baseline is present, skip newly-added
 # manifest paths, then invoke per-crate against that baseline with
 # special handling for renamed crates ("package `<name>` not found in
@@ -50,14 +50,15 @@
 anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $stableArgs = {{_anvil_stable_toolchain_args}}
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $commentFile = 'target/anvil/comments/semver.md'
-    if ($include -eq '--skip') {
+    if ($selection -contains '--none') {
         Write-Host 'anvil-semver-check: no affected packages; skipping'
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    $pkg = $selection
     # Build the publishable candidate package list. Keep each package's metadata so
     # its manifest path can also be checked in the baseline. Always
     # iterate per-package over library crates only -- cargo-semver-checks
@@ -92,9 +93,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         $packages = @()
         for ($i = 0; $i -lt $pkg.Count; $i++) {
             if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                # Impact emits version-qualified specs (name@version);
-                # strip the @version to recover the bare package name.
-                $name = ($pkg[$i + 1] -split '@', 2)[0]
+                $name = $pkg[$i + 1]
                 if ($libPkgs[$name]) { $packages += $name }
                 $i++
             }
