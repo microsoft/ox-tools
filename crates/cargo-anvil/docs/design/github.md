@@ -990,11 +990,17 @@ the repository is deleted and recreated, and publishing generates a release
 attestation covering the tag, commit SHA and assets. The tag is a stable identifier
 under those rules, and unlike a SHA it stays readable in the diff when the pin is
 bumped. Generated files carry a
-`# immutable release, the tag cannot be moved` comment at each such pin, so the reason
-a tag appears where a SHA is otherwise expected is visible at the use site.
+`# pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)`
+comment at each such pin, so the reason a tag appears where a SHA is otherwise
+expected is visible at the use site. The comment names the mechanism the pin relies
+on rather than asserting that tags are stable in general -- they are not, and a
+reader who takes it that way will draw the wrong conclusion about the other pins.
 
 Every other action is pinned by commit SHA with the version in a trailing comment, for
 example `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`.
+`actions/checkout` and `actions/download-artifact` are in this group not because they
+are less trusted but because immutable releases are opt-in per publisher and theirs
+have not enabled it, so a SHA is the only pin that fixes the code being run.
 
 Immutability is a property of one published release, not a standing guarantee about
 the publisher. When bumping a tag-pinned action, confirm the new release still reports
@@ -1031,7 +1037,7 @@ The upload step:
 ```yaml
 - name: Upload coverage to Codecov
   if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
-  uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
+  uses: codecov/codecov-action@v7.0.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
   with:
     files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
     flags: ${{ matrix.os }}
