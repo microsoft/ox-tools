@@ -585,9 +585,15 @@ fn collect_values(table: &Table, path: &mut Vec<String>, values: &mut TableValue
 /// that the keys beneath it are not attributed to the table above it. Whether
 /// such a header may be *adopted* is a separate question, decided by
 /// [`is_array_of_tables`].
+///
+/// The bracket shape alone is not enough. A whole-line element of a multi-line
+/// array (`[1, 2]`) wears it too, and reading one as a header would split the
+/// table it belongs to and leave both halves unparsable. The candidate is
+/// therefore handed to the TOML parser, which is the only thing that can tell
+/// the two apart.
 fn toml_table_header(line: &str) -> Option<&str> {
     let header = strip_trailing_comment(line);
-    (header.starts_with('[') && header.ends_with(']')).then_some(header)
+    (header.starts_with('[') && header.ends_with(']') && header.parse::<DocumentMut>().is_ok()).then_some(header)
 }
 
 /// Whether a table header declares an array of tables (`[[bin]]`).
@@ -867,6 +873,19 @@ mod tests {
             adopted.contains("# a user comment"),
             "content after the region survives:\n{adopted}"
         );
+    }
+
+    /// A whole-line element of a multi-line array has the shape of a table
+    /// header. Reading it as one splits the table it belongs to: the lines
+    /// above it lose the rest of the array, no longer parse, and the table is
+    /// dropped from the candidates -- leaving the duplicate this exists to
+    /// remove.
+    #[test]
+    fn an_array_element_on_its_own_line_is_not_a_table_header() {
+        let text = "[lints]\nworkspace = true\npairs = [\n  [1, 2]\n]\n";
+        let adopted = adopt_unmanaged_toml_tables(text, text, SYN);
+
+        assert_eq!(adopted, "", "the table is adopted whole:\n{adopted}");
     }
 
     #[test]
