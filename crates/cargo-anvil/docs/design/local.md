@@ -595,7 +595,8 @@ resolve scope themselves; each underlying check reads what it needs.
 (typically a docs-only PR, or a PR touching only files cargo-delta's
 `file_exclude_patterns` ignore). Ordinary recipes pass it directly to cargo-each, which
 exits successfully without spawning the child command. Orchestration-heavy recipes
-detect it before performing setup that would otherwise have side effects.
+detect it before performing setup that would otherwise have side effects or, for `fmt`,
+before starting its separate full-workspace per-manifest cargo-each fan-out.
 
 ### 4.3 Disabling scoping and the escape hatch
 

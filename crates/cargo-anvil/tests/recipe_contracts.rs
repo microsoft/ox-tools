@@ -921,9 +921,7 @@ fn fmt_delegates_workspace_iteration_to_cargo_each() {
     );
     let commands = fs::read_to_string(&log).unwrap();
     assert!(
-        commands.contains(
-            "each --workspace --once -- cargo each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest} --check"
-        ),
+        commands.contains("each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest} --check"),
         "unexpected cargo invocation: {commands}"
     );
     assert!(!commands.contains("fmt --all"));

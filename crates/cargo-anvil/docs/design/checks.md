@@ -376,8 +376,9 @@ Every **impact-scoped** check depends on `anvil-impact` and resolves its categor
 calling `_anvil-impact-include <category>`. Ordinary checks splat those tokens directly
 into `cargo each`; its empty-set success behavior replaces recipe-specific skip guards,
 and `{packages}` injects the resolved package set into a single child Cargo invocation.
-Orchestration-heavy checks capture the same token array and handle `--none` before their
-domain-specific work. The **same** cache is read in cloud workflows — the impact job
+Checks that must perform work before or around cargo-each capture the same token array
+and handle `--none` first; this includes `fmt`, whose modified selector admits a separate
+full-workspace per-manifest fan-out. The **same** cache is read in cloud workflows — the impact job
 uploads `target/anvil/impact/` as an artifact and each group job downloads it — so the
 identical code path runs locally and in CI, with no scoping threaded through environment
 variables. Scoping is on by default both locally and in CI; it is disabled only by
