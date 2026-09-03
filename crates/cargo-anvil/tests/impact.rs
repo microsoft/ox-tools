@@ -314,7 +314,21 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
     );
     assert!(noop.contains("cache hit"), "no-op run should report an impact cache hit:\n{noop}");
 
-    // --- 3. HEAD moves (a new commit): only `current.json` is regenerated. ---
+    // --- 3. An old projection format forces include regeneration. ---
+    let state_file = impact_dir.join("impact.state");
+    let current_state = fs::read_to_string(&state_file).unwrap();
+    fs::write(&state_file, current_state.trim_start_matches("projection-v2 ")).unwrap();
+    let migrated = run_impact(root);
+    assert!(
+        !migrated.contains("impact set up to date (cache hit)"),
+        "an old projection format must not reuse incompatible include files:\n{migrated}"
+    );
+    assert!(
+        fs::read_to_string(&state_file).unwrap().starts_with("projection-v2 "),
+        "regeneration must persist the current projection format"
+    );
+
+    // --- 4. HEAD moves (a new commit): only `current.json` is regenerated. ---
     // A committed change advances HEAD without moving the base ref
     // (origin/master), so current.key changes while the baseline key does
     // not. The tree stays clean, so scoping is NOT widened.
@@ -335,7 +349,7 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
         "a new commit moves HEAD, so the current snapshot is regenerated:\n{edited}"
     );
 
-    // --- 4. Base ref moves: only `baseline.json` is regenerated. ---
+    // --- 5. Base ref moves: only `baseline.json` is regenerated. ---
     // Advance origin/master to a NEW commit without moving HEAD (commit on a
     // throwaway branch, repoint the ref, return to main). The tree stays
     // clean, so `current` is untouched and only the baseline regenerates.

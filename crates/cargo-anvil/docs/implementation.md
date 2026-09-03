@@ -161,7 +161,9 @@ Ordinal (case-sensitive) lookups (package name, lib/proc-macro target, manifest-
 a reported identifier resolves to **zero** packages (an unmapped gap) or **more than one** (an
 ambiguity), the recipe fails hard rather than guessing — under-scoping would silently skip
 affected work. cargo-each resolves those names and version-qualifies package arguments
-before invoking child Cargo commands. Complementarily, a dirty working tree (any uncommitted change outside `target/`,
+before invoking child Cargo commands. The impact state key includes a projection-format
+version, so the first run after an include-format change regenerates cached selectors
+instead of accepting incompatible files from an older catalog. Complementarily, a dirty working tree (any uncommitted change outside `target/`,
 detected via a git `:(exclude)` pathspec) widens *every* tier to `--workspace` locally, because
 cargo-delta scopes on the committed diff and cannot see working-tree edits. Cloud checkouts are clean, so this
 only affects local runs.

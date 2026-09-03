@@ -4392,7 +4392,9 @@ anvil-impact: _anvil-impact-snapshot
     # Content cache key: regenerate the projection only when a snapshot moved
     # or an output is missing. Keyed on the snapshot markers, not mtimes, so a
     # downstream cloud-workflow job that downloaded the artifact recognizes it.
-    $wantState = ("$(Get-Content -Raw $baselineKeyFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentKeyFile)".Trim())
+    # Prefix the projection format so an Anvil upgrade that changes the include
+    # representation cannot accept stale files written by an older catalog.
+    $wantState = 'projection-v2 ' + ("$(Get-Content -Raw $baselineKeyFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentKeyFile)".Trim())
     $includeFiles = @('modified', 'affected', 'required') | ForEach-Object { Join-Path $impactDir "include_$_.txt" }
     $fresh = (Test-Path $impactJson) -and (Test-Path $impactStateFile) -and `
         ("$(Get-Content -Raw $impactStateFile)".Trim() -eq $wantState) -and `
