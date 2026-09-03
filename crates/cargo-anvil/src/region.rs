@@ -13,7 +13,11 @@
 //! # <<< anvil-managed: <id>
 //! ```
 //!
-//! The user's content outside the sentinels is preserved byte-for-byte.
+//! The user's content outside the sentinels is preserved byte-for-byte, with
+//! a single exception: introducing a region into a TOML host removes a
+//! hand-written table whose configuration the region body already covers,
+//! because TOML rejects a duplicate table header outright. See
+//! [`adopt_unmanaged_toml_tables`].
 //! The `id` is globally unique within the catalog (e.g. `anvil-imports`,
 //! `anvil-workspace-lints`).
 //!
@@ -352,23 +356,29 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
     LineIter { text, pos: 0 }
 }
 
-/// Drop an outside-region copy of a TOML table that the region body already
-/// declares **identically**, so introducing the region adopts a hand-written
-/// table instead of appending a duplicate that TOML will not parse.
+/// Drop an outside-region copy of a TOML table whose configuration the region
+/// body already covers, so introducing the region adopts a hand-written table
+/// instead of appending a duplicate that TOML will not parse.
 ///
 /// A managed region body such as `[lints]\nworkspace = true` is a whole table,
 /// and TOML rejects a duplicate table header outright — so appending it beside
-/// an identical hand-written `[lints]` does not produce redundant text, it
-/// produces a manifest that will not parse and takes the workspace with it.
+/// a hand-written `[lints]` does not produce redundant text, it produces a
+/// manifest that will not parse and takes the workspace with it.
 ///
-/// Adoption is deliberately limited to a table whose keys the managed body
-/// **already contains**. A hand-written table carrying anything extra is left
+/// Coverage is **one-way**: a table is adopted when every one of its
+/// configuration lines also appears in the managed table. The managed table
+/// may declare further lines of its own and adoption still applies; it is
+/// unmanaged-only configuration that prevents it. A hand-written table
+/// carrying anything extra is left
 /// exactly where it is: dropping it would silently delete a user's
 /// configuration, which is a worse failure than the duplicate this function
 /// exists to prevent — a `deny.toml` whose `[advisories]` lists the repository's own
 /// `ignore` entries is the case that matters, and it is covered by a fixture.
 /// Comments and blank lines are ignored when comparing, since neither carries
-/// configuration, and an array-of-tables (`[[bin]]`) is never adopted at all:
+/// configuration. The comparison is otherwise textual, so two lines differing
+/// only in spacing around `=` do not match and adoption declines, leaving the
+/// duplicate this function exists to remove. An array-of-tables (`[[bin]]`) is
+/// never adopted at all:
 /// TOML lets those repeat, so a second one is not a duplicate and dropping it
 /// would delete a genuine array element.
 ///
@@ -400,10 +410,10 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
     // Which unmanaged tables are safe to drop, decided up front so the rewrite
     // below is a single pass with no lookahead.
     let mut adoptable: Vec<&str> = Vec::new();
-    for (header, keys) in toml_tables(text, syntax) {
+    for (header, lines) in toml_tables(text, syntax) {
         if !is_array_of_tables(header)
-            && let Some(managed_keys) = managed.iter().find(|(name, _)| *name == header).map(|(_, keys)| keys)
-            && keys.iter().all(|key| managed_keys.contains(key))
+            && let Some(managed_lines) = managed.iter().find(|(name, _)| *name == header).map(|(_, lines)| lines)
+            && lines.iter().all(|line| managed_lines.contains(line))
         {
             adoptable.push(header);
         }
@@ -450,9 +460,10 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 }
 
 /// Collect each top-level TOML table outside any managed region, as its header
-/// and the key lines beneath it. Blank lines and whole-line comments are
-/// dropped and a trailing comment is stripped from every header and key line,
-/// since a comment carries no configuration and must not defeat a comparison.
+/// and the configuration lines beneath it. Blank lines and whole-line comments
+/// are dropped and a trailing comment is stripped from every header and
+/// configuration line, since a comment carries no configuration and must not
+/// defeat a comparison.
 fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
     let prefix = syntax.prefix();
     let open = prefix.to_owned() + " >>> anvil-managed:";
@@ -476,8 +487,8 @@ fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
         }
         if let Some(header) = toml_table_header(trimmed) {
             tables.push((header, Vec::new()));
-        } else if let Some((_, keys)) = tables.last_mut() {
-            keys.push(strip_trailing_comment(trimmed));
+        } else if let Some((_, lines)) = tables.last_mut() {
+            lines.push(strip_trailing_comment(trimmed));
         }
     }
 
@@ -507,9 +518,9 @@ fn is_array_of_tables(header: &str) -> bool {
 /// Whether `text` contains a TOML multi-line string delimiter.
 ///
 /// Both the basic (`"""`) and literal (`'''`) forms count. This is a coarse
-/// test on purpose: it decides only whether the line-oriented scanner is out
-/// of its depth, and being wrong in the cautious direction merely declines an
-/// adoption that would otherwise have been safe.
+/// test on purpose: it decides only whether the line-oriented scanner can
+/// classify the content safely, and being wrong in the cautious direction
+/// merely declines an adoption that would otherwise have been safe.
 fn contains_multi_line_string(text: &str) -> bool {
     text.contains("\"\"\"") || text.contains("'''")
 }
@@ -597,9 +608,9 @@ mod tests {
         assert_eq!(adopted, text, "nothing is adopted while a multi-line string is present:\n{adopted}");
     }
 
-    /// The sharp edge of the same problem: a bracketed line *inside* a
-    /// multi-line string is a value, not a table header. Reading it as one
-    /// would start dropping in the middle of the user's string and mangle it.
+    /// A bracketed line *inside* a multi-line string is a value, not a table
+    /// header. Reading it as one would start dropping in the middle of the
+    /// user's string and remove part of a user-authored value.
     #[test]
     fn a_bracketed_line_inside_a_multi_line_string_is_not_a_table_header() {
         let text = "[package]\ndescription = \"\"\"\n[lints]\nworkspace = true\n\"\"\"\n";
@@ -608,7 +619,7 @@ mod tests {
         assert_eq!(adopted, text, "the string's content is left intact:\n{adopted}");
     }
 
-    /// A single-line literal string uses a different delimiter run and must
+    /// A single-line basic string uses a different delimiter run and must
     /// not be mistaken for a multi-line one, or ordinary adoption would stop
     /// working wherever a quoted value appears.
     #[test]
