@@ -1006,6 +1006,10 @@ fn doc_test_selects_doctest_capable_targets_but_not_bin_only_packages() {
     assert_eq!(commands.matches(" test --doc ").count(), 2, "commands:\n{commands}");
     assert!(commands.contains("--package fixture"), "commands:\n{commands}");
     assert!(commands.contains("--package macro-package"), "commands:\n{commands}");
+    assert!(
+        commands.contains("--package fixture --package macro-package"),
+        "workspace doctest packages must be sorted by name:\n{commands}"
+    );
     assert!(!commands.contains("--package bin-only"), "commands:\n{commands}");
 
     seed_include(tmp.path(), "affected", "--package\nfixture\n--package\nbin-only");
