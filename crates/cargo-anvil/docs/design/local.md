@@ -532,7 +532,9 @@ category's selector tokens directly to `cargo-each`:
 [script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    & cargo each @(& "{{ just_executable() }}" _anvil-impact-include affected) --once '--' cargo clippy '{packages}' --all-targets --all-features --locked '--' '-D' 'warnings'
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo each @selection --once '--' cargo clippy '{packages}' --all-targets --all-features --locked '--' '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
