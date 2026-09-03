@@ -206,7 +206,7 @@ matrix overhead.
 | Check        | Invocation                                                                  | Source |
 |--------------|-----------------------------------------------------------------------------|--------|
 | `llvm-cov`   | Runs tests for every affected package under both feature configurations. Packages with a positive coverage threshold run through self-contained `cargo +<catalog-nightly> llvm-cov nextest --no-report` invocations and produce per-config lcov/cobertura reports. Packages declaring `min-lines-percent = 0` still run through plain `cargo nextest`; the opt-out disables measurement and gating, never tests. Per-config reports avoid Windows command-line overflow and are reconciled downstream by cargo-coverage-gate, Codecov, and ADO. Codecov is display-only; the local coverage gate is authoritative. | oxidizer, oxidizer-github; gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
-| `doc-test`   | Two cargo-test runs over the same affected set: `cargo test --doc --workspace --all-features --locked` and `cargo test --doc --workspace --locked` (default features). Running both catches doctests that only compile under one feature configuration (oxidizer-github runs both). nextest does not run doctests, so this stays a separate cargo-test invocation. | oxidizer, oxidizer-github |
+| `doc-test`   | Two cargo-test runs over affected library and proc-macro packages: `cargo test --doc --all-features --locked` and `cargo test --doc --locked` (default features). Bin-only packages are removed because Cargo errors when they are the only selected packages and they have no rustdoc tests. Running both feature modes catches doctests that only compile under one configuration. nextest does not run doctests, so this stays separate. | oxidizer, oxidizer-github |
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Running each example is intentionally not part of the check (examples are not test scaffolding; their runtime behavior isn't part of what we gate on). | oxidizer, oxidizer-github |
 
 #### `pr-msrv` (minimum-version tests)
@@ -366,29 +366,33 @@ unaffected workspace members. cargo-delta computes three concentric impact tiers
 (`required ⊇ affected ⊇ modified`) from the committed diff against the base ref. The
 shared `anvil-impact` recipe (see [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe))
 runs cargo-delta once, writes `target/anvil/impact/`, and projects each tier — via the
-`_anvil-impact-format` helper — into a pre-built `--package X@ver --package Y@ver` string
-(or the literal sentinel `--skip` when the tier is empty). Each package is a
-version-qualified cargo spec (`name@version`) so `-p` resolves uniquely to the workspace
-member even when a like-named crate is also pulled in as a different-versioned transitive
-dependency.
+`_anvil-impact-format` helper — into one selector token per line: `--package`, a bare
+workspace package name, and so on, or `--none` when the tier is empty. Unscoped tiers
+resolve to `--workspace`. `cargo-each` resolves those workspace names from live Cargo
+metadata and emits version-qualified specs to child Cargo commands, so the impact cache
+does not duplicate package versions.
 
-Every **impact-scoped** per-crate check depends on `anvil-impact` and resolves its
-category's scope by calling `_anvil-impact-include <category>` into a local `$include`
-variable, then consumes it (the unscoped checks below take no such dependency). The
-**same** cache is read in cloud workflows — the impact job uploads `target/anvil/impact/`
-as an artifact and each group job downloads it — so the identical code path runs locally
-and in CI, with no scoping threaded through environment variables. Scoping is on by
-default both locally and in CI; it is disabled only by `ANVIL_IMPACT=off` (the
-scheduled/full tiers), which makes every tier resolve to its full-workspace default.
+Every **impact-scoped** check depends on `anvil-impact` and resolves its category by
+calling `_anvil-impact-include <category>`. Ordinary checks splat those tokens directly
+into `cargo each`; its empty-set success behavior replaces recipe-specific skip guards,
+and `{packages}` injects the resolved package set into a single child Cargo invocation.
+Checks that must perform work before or around cargo-each capture the same token array
+and handle `--none` first; this includes `fmt`, whose modified selector admits a separate
+full-workspace per-manifest fan-out. The **same** cache is read in cloud workflows — the impact job
+uploads `target/anvil/impact/` as an artifact and each group job downloads it — so the
+identical code path runs locally and in CI, with no scoping threaded through environment
+variables. Scoping is on by default both locally and in CI; it is disabled only by
+`ANVIL_IMPACT=off` (the scheduled/full tiers), which makes every tier resolve to
+`--workspace`.
 
 Each catalog check is tagged with one of four buckets:
 
-| Bucket    | `$include` tier               | Behavior when a tier value is present                                        | Behavior when unscoped (`ANVIL_IMPACT=off` / no cache) |
-|-----------|-------------------------------|-----------------------------------------------------------------------------|--------------------------------------|
-| modified  | `_anvil-impact-include modified`   | If `--skip`: exit 0. Otherwise run against the input domain defined by the recipe's own command; do not forward impact-selected package arguments. | Run against the command's normal input domain. |
-| affected  | `_anvil-impact-include affected`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
-| required  | `_anvil-impact-include required`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
-| unscoped  | *(none)*                       | Always run.                                                                  | Always run.                          |
+| Bucket    | Selector source                     | Behavior when scoped                                                        | Behavior when unscoped (`ANVIL_IMPACT=off` / no cache) |
+|-----------|-------------------------------------|-----------------------------------------------------------------------------|--------------------------------------|
+| modified  | `_anvil-impact-include modified`    | `--none` skips through `cargo-each`; otherwise the admitted command uses its normal full input domain. | `--workspace` admits the command. |
+| affected  | `_anvil-impact-include affected`    | `cargo-each` resolves and forwards the selected packages.                    | `--workspace`.                       |
+| required  | `_anvil-impact-include required`    | `cargo-each` resolves and forwards the selected packages.                    | `--workspace`.                       |
+| unscoped  | *(none)*                            | Always run.                                                                  | Always run.                          |
 
 Bucket assignments per check:
 
@@ -419,15 +423,14 @@ template (`crates/README.j2` / `README.j2`) and the root `.spelling` dictionary 
 change to one of those would be silently scoped out. These ignore impact scoping and
 always run.
 
-The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
-is no collision with real package names. Recipes test for it with
-`$include -eq '--skip'` and exit 0 to keep the cloud-workflow job green while signalling that
-nothing in that tier needed to run.
+An empty tier is represented by cargo-each's native `--none` selector. Ordinary recipes
+delegate the successful no-op directly to cargo-each; orchestration-heavy recipes detect
+`--none` before doing domain-specific setup.
 
 Impact and target discovery use three outcomes: work found, proven no work, and
 failure. Only the first two may continue successfully. Malformed impact tiers,
 unknown package names, failed Cargo metadata, unavailable PR metadata in a PR
-build, and failed tool discovery are errors; they never collapse to `--skip`.
+build, and failed tool discovery are errors; they never collapse to `--none`.
 When cargo-delta reports a manifest directory leaf instead of a package or library
 name, Anvil accepts it only if it uniquely identifies one workspace package;
 missing or ambiguous aliases fail rather than silently dropping affected work.

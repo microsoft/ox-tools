@@ -10,10 +10,10 @@
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
+    if ($selection -contains '--none') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
     $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
     $resolverExit = $LASTEXITCODE
     if ($resolverExit -ne 0) { exit $resolverExit }
@@ -22,23 +22,22 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
         Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'
         exit 0
     }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    & cargo "+$toolchain" test @pkg --all-targets --all-features --locked
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" test '{packages}' --all-targets --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo "+$toolchain" test @pkg --all-targets --locked
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" test '{packages}' --all-targets --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install the declared MSRV toolchain only when this check is required.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
-anvil-msrv-test-setup installer="install":
+anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
     & "{{ just_executable() }}" _anvil-resolve-stable install-msrv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Validate the MSRV prerequisite.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
-anvil-msrv-test-validate-prereqs:
+anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
     $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
     $resolverExit = $LASTEXITCODE
     if ($resolverExit -ne 0) { exit $resolverExit }

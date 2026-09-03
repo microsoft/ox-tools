@@ -12,15 +12,15 @@
 [script("pwsh", "-NoProfile")]
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($include -eq '--skip') { Write-Host 'anvil-ensure-no-cyclic-deps: no modified packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} ensure-no-cyclic-deps
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include modified)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} ensure-no-cyclic-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-ensure-no-cyclic-deps` recipe.
 [group("anvil-setup")]
-anvil-ensure-no-cyclic-deps-setup installer="install": (anvil-tool-cargo-ensure-no-cyclic-deps-install installer)
+anvil-ensure-no-cyclic-deps-setup installer="install": (anvil-tool-cargo-ensure-no-cyclic-deps-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-ensure-no-cyclic-deps` recipe.
 [group("anvil-setup")]
-anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs
+anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs anvil-tool-cargo-each-validate-prereqs

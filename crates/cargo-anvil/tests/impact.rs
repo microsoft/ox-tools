@@ -314,7 +314,21 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
     );
     assert!(noop.contains("cache hit"), "no-op run should report an impact cache hit:\n{noop}");
 
-    // --- 3. HEAD moves (a new commit): only `current.json` is regenerated. ---
+    // --- 3. An old projection format forces include regeneration. ---
+    let state_file = impact_dir.join("impact.state");
+    let current_state = fs::read_to_string(&state_file).unwrap();
+    fs::write(&state_file, current_state.trim_start_matches("projection-v2 ")).unwrap();
+    let migrated = run_impact(root);
+    assert!(
+        !migrated.contains("impact set up to date (cache hit)"),
+        "an old projection format must not reuse incompatible include files:\n{migrated}"
+    );
+    assert!(
+        fs::read_to_string(&state_file).unwrap().starts_with("projection-v2 "),
+        "regeneration must persist the current projection format"
+    );
+
+    // --- 4. HEAD moves (a new commit): only `current.json` is regenerated. ---
     // A committed change advances HEAD without moving the base ref
     // (origin/master), so current.key changes while the baseline key does
     // not. The tree stays clean, so scoping is NOT widened.
@@ -335,7 +349,7 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
         "a new commit moves HEAD, so the current snapshot is regenerated:\n{edited}"
     );
 
-    // --- 4. Base ref moves: only `baseline.json` is regenerated. ---
+    // --- 5. Base ref moves: only `baseline.json` is regenerated. ---
     // Advance origin/master to a NEW commit without moving HEAD (commit on a
     // throwaway branch, repoint the ref, return to main). The tree stays
     // clean, so `current` is untouched and only the baseline regenerates.
@@ -488,8 +502,8 @@ fn impact_empty_output_when_head_equals_base() {
     }
     // A clean checkout whose HEAD is exactly the base ref: cargo-delta sees no
     // committed diff and emits no impact JSON. The recipe must still write a
-    // durable, EMPTY impact set -- `{}` to impact.json and the `--skip`
-    // sentinel for every tier -- and treat an unchanged repeat run as a cache
+    // durable, EMPTY impact set -- `{}` to impact.json and the `--none`
+    // selector for every tier -- and treat an unchanged repeat run as a cache
     // hit. (The shared `workspace()` fixture always advances HEAD past the
     // base, so this empty-output path is otherwise never exercised.)
     let tmp = workspace_at_base();
@@ -507,8 +521,8 @@ fn impact_empty_output_when_head_equals_base() {
     for tier in ["modified", "affected", "required"] {
         assert_eq!(
             fs::read_to_string(impact_dir.join(format!("include_{tier}.txt"))).unwrap().trim(),
-            "--skip",
-            "an empty impact set must project tier '{tier}' to the --skip sentinel"
+            "--none",
+            "an empty impact set must project tier '{tier}' to the --none selector"
         );
     }
 
@@ -596,8 +610,10 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
         fs::read_to_string(impact_dir.join("include_required.txt")).unwrap().trim(),
         "--workspace"
     );
-    // modified is empty (not --skip), so its workspace-wide tools still run.
-    assert_eq!(fs::read_to_string(impact_dir.join("include_modified.txt")).unwrap().trim(), "");
+    assert_eq!(
+        fs::read_to_string(impact_dir.join("include_modified.txt")).unwrap().trim(),
+        "--workspace"
+    );
 
     // The warning must fire on EVERY dirty invocation, not just the first --
     // running again with the same dirty tree still warns (the dirty check runs
@@ -620,45 +636,40 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
     // land in the affected tier (guards against a regression that drops it or
     // widens without printing the warning).
     let affected_after = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
+    let affected_tokens = affected_after.lines().collect::<Vec<_>>();
     assert!(
-        affected_after.contains("--package beta@"),
+        affected_tokens.windows(2).any(|pair| pair == ["--package", "beta"]),
         "committing the uncommitted change must scope beta into the affected tier, got: {affected_after}"
     );
 }
 
 #[test]
 #[serial]
-fn impact_include_reads_zero_byte_modified_file_without_throwing() {
+fn impact_include_reads_workspace_selector_for_modified_widen() {
     if !tools_available() {
         return;
     }
-    // The dirty-tree widen writes include_modified.txt as a 0-byte file
-    // (`-Value '' -NoNewline`). `Get-Content -Raw` returns $null for a 0-byte
-    // file, so `_anvil-impact-include` must read it null-safely rather than
-    // throwing on `$null.Trim()` -- which every modified-tier check hits on any
-    // dirty local run.
+    // A dirty-tree widen admits modified-tier workspace-wide commands through
+    // cargo-each with the same concrete --workspace selector as every other
+    // tier.
     let tmp = workspace();
     let root = tmp.path();
-    // Uncommitted edit -> anvil-impact widens and writes the 0-byte include.
+    // Uncommitted edit -> anvil-impact widens every tier.
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn wip() {}\n");
     run_impact(root);
     let modified_file = root.join("target/anvil/impact/include_modified.txt");
-    assert_eq!(
-        fs::metadata(&modified_file).unwrap().len(),
-        0,
-        "the dirty widen must write a 0-byte include_modified.txt for this test to be meaningful"
-    );
+    assert_eq!(fs::read_to_string(&modified_file).unwrap().trim(), "--workspace");
 
     let out = just_cmd(root, &["_anvil-impact-include", "modified"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(
         out.status.success(),
-        "_anvil-impact-include must not throw on a 0-byte include file:\n{combined}"
+        "_anvil-impact-include must resolve the modified selector:\n{combined}"
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
-        "",
-        "an empty modified tier must resolve to '' (run), not crash"
+        "--workspace",
+        "a widened modified tier must admit its command through cargo-each"
     );
 }
 
@@ -907,6 +918,7 @@ fn fake_cargo(dir: &Path, log: &Path) {
              foreach ($argument in $args) {{\n\
              \x20   if ($argument -is [Array]) {{ $effectiveArgs += @($argument) }} else {{ $effectiveArgs += $argument }}\n\
              }}\n\
+             if (($effectiveArgs -contains 'install') -and ($effectiveArgs -contains '--list')) {{ Write-Output 'cargo-each v0.1.0:'; exit 0 }}\n\
              Add-Content -LiteralPath '{}' -Value ($effectiveArgs -join ' ')\n\
              exit 0\n",
             log.display()
@@ -915,7 +927,10 @@ fn fake_cargo(dir: &Path, log: &Path) {
     }
     #[cfg(unix)]
     {
-        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n", log.display());
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = \"install --list\" ]; then printf '%s\\n' 'cargo-each v0.1.0:'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            log.display()
+        );
         let path = dir.join("cargo");
         fs::write(&path, script).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -934,18 +949,14 @@ fn path_with_prefix(dir: &Path) -> OsString {
 
 #[test]
 #[serial]
-fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
+fn scoped_check_delegates_cached_selection_and_empty_set_to_cargo_each() {
     if !tools_available() {
         return;
     }
-    // End-to-end proof of the shared check contract that the 25 rewritten
-    // checks all use: a scoped check resolves its tier from the downloaded
-    // target/anvil/impact cache, splits the `--package name@version` list, and
-    // passes it to its cargo tool -- and short-circuits (never invoking the
-    // tool) on the `--skip` sentinel. `anvil-examples` stands in for the
-    // family; a fake `cargo` on PATH captures the argv the recipe builds. This
-    // guards the PowerShell capture/splitting/short-circuit path that static
-    // text-presence assertions on the emitted recipe cannot.
+    // End-to-end proof of the shared check contract: a scoped check resolves
+    // one selector token per line from the downloaded cache and splats those
+    // tokens into cargo-each. cargo-each owns package resolution, child
+    // expansion, and empty-set success.
     let tmp = workspace();
     let root = tmp.path();
     let impact_dir = root.join("target/anvil/impact");
@@ -955,7 +966,7 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     let affected = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
     let affected = affected.trim().to_owned();
     assert!(
-        affected.contains("--package alpha@"),
+        affected.lines().eq(["--package", "alpha"]),
         "precondition: the affected tier should be a scoped --package list, got: {affected}"
     );
 
@@ -964,9 +975,8 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     fake_cargo(&bin, &log);
     let path = path_with_prefix(&bin);
 
-    // consume mode: anvil-impact no-ops (no snapshot / cargo-delta), so the
-    // ONLY cargo invocation is the recipe's own `cargo build` -- captured by
-    // the shim.
+    // consume mode: anvil-impact no-ops, so the check's cargo-each invocation
+    // is captured by the shim.
     let out = just_cmd(root, &["anvil-examples"])
         .env("ANVIL_IMPACT", "consume")
         .env("PATH", &path)
@@ -976,12 +986,12 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     assert!(out.status.success(), "scoped anvil-examples run failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv.contains("build") && argv.contains(&affected) && argv.contains("--examples"),
-        "the cached --package list must reach the tool; captured argv:\n{argv}\nexpected to contain: build ... {affected} ... --examples"
+        argv.contains("each --package alpha --once -- cargo") && argv.contains("build {packages} --examples"),
+        "the cached selector tokens must reach cargo-each; captured argv:\n{argv}"
     );
 
-    // The `--skip` sentinel must short-circuit: the tool is never invoked.
-    fs::write(impact_dir.join("include_affected.txt"), "--skip").unwrap();
+    // The empty tier is represented in cargo-each's native selector language.
+    fs::write(impact_dir.join("include_affected.txt"), "--none").unwrap();
     fs::write(&log, "").unwrap();
     let skipped = just_cmd(root, &["anvil-examples"])
         .env("ANVIL_IMPACT", "consume")
@@ -996,8 +1006,8 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     assert!(skipped.status.success(), "skipped anvil-examples run failed:\n{skip_combined}");
     let argv_skip = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        !argv_skip.contains("build"),
-        "the --skip sentinel must short-circuit the tool (no cargo build); captured argv:\n{argv_skip}"
+        argv_skip.contains("each --none --once"),
+        "the --none selector must be delegated to cargo-each; captured argv:\n{argv_skip}"
     );
 }
 
@@ -1009,10 +1019,8 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     let tmp = workspace();
     let root = tmp.path();
     run_impact(root);
-    let affected = fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
-        .unwrap()
-        .trim()
-        .to_owned();
+    let affected = fs::read_to_string(root.join("target/anvil/impact/include_affected.txt")).unwrap();
+    let affected = affected.lines().collect::<Vec<_>>().join(" ");
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
@@ -1036,8 +1044,8 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     assert!(output.status.success(), "anvil-msrv-test failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap();
     for expected in [
-        format!("+1.97 test {affected} --all-targets --all-features --locked"),
-        format!("+1.97 test {affected} --all-targets --locked"),
+        format!("each {affected} --once -- cargo +1.97 test {{packages}} --all-targets --all-features --locked"),
+        format!("each {affected} --once -- cargo +1.97 test {{packages}} --all-targets --locked"),
     ] {
         assert!(argv.contains(&expected), "missing MSRV invocation '{expected}' in:\n{argv}");
     }
@@ -1058,8 +1066,8 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     );
     assert!(skipped.status.success(), "no-MSRV invocation failed:\n{skip_combined}");
     assert!(
-        fs::read_to_string(&log).unwrap().is_empty(),
-        "no-MSRV invocation must skip before calling cargo"
+        !fs::read_to_string(&log).unwrap().contains(" each "),
+        "no-MSRV invocation must skip before cargo-each"
     );
 }
 
@@ -1106,7 +1114,7 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
     // Regression guard for the loom `--workspace` path: `anvil-loom` parses its
     // own package set from `cargo metadata`, and a prior bug turned the
     // unscoped `--workspace` value into an empty affected set that silently
-    // skipped every loom target. The representative anvil-examples/`--skip`
+    // skipped every loom target. The representative anvil-examples/`--none`
     // test can't catch this bespoke parsing. Here a fake `cargo metadata`
     // reports a crate with a `required-features = ["loom"]` test target; run
     // under ANVIL_IMPACT=off (so the tier resolves to --workspace), loom must
@@ -1292,8 +1300,8 @@ fn consume_without_downloaded_cache_fails_loudly() {
     // checks their presence, never recomputes.
     let cache = root.join("target/anvil/impact");
     for (file, spec) in [
-        ("include_modified.txt", ""),
-        ("include_affected.txt", "--package alpha@0.1.0"),
+        ("include_modified.txt", "--workspace"),
+        ("include_affected.txt", "--package\nalpha"),
         ("include_required.txt", "--workspace"),
     ] {
         write(&cache.join(file), spec);
@@ -1416,8 +1424,8 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
 
     let (stdout, stderr, ok) = run_format(root, "affected", fixture);
     assert!(ok, "the formatter must exit 0:\nstderr: {stderr}");
-    assert_eq!(
-        stdout, "--package my-macro@0.3.0",
+    assert!(
+        stdout.lines().eq(["--package", "my-macro"]),
         "the proc-macro target `my_macro` must map back to its package `my-macro`:\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
