@@ -32,7 +32,7 @@
     InvalidPredicateError,
     InvalidTargetKindError,
     PlaceholderMisuseError,
-    ChdirRequiresPerPackageError
+    ChdirConflictsWithOnceError
 )]
 pub(crate) struct EachError;
 
@@ -80,7 +80,7 @@ pub(crate) struct PlaceholderMisuseError {
 /// per-package or per-target mode.
 #[ohno::error]
 #[display("`--chdir` cannot be combined with `--once`")]
-pub(crate) struct ChdirRequiresPerPackageError;
+pub(crate) struct ChdirConflictsWithOnceError;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -129,8 +129,8 @@ mod tests {
     }
 
     #[test]
-    fn chdir_requires_per_package_renders() {
-        let err = ChdirRequiresPerPackageError::new();
+    fn chdir_conflict_renders() {
+        let err = ChdirConflictsWithOnceError::new();
         let rendered = err.to_string();
         assert!(rendered.contains("--chdir"));
         assert!(rendered.contains("--once"));

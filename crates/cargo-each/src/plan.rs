@@ -7,7 +7,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::error::{ChdirRequiresPerPackageError, EachError};
+use cargo_metadata::TargetKind;
+
+use crate::error::{ChdirConflictsWithOnceError, EachError};
 use crate::substitute::{Placeholders, substitute, validate_placeholders};
 use crate::workspace::Member;
 
@@ -84,12 +86,12 @@ impl Plan {
         mode: Mode,
         chdir: bool,
         packages: PackagesExpansion,
-        target_kinds: &BTreeSet<String>,
+        target_kinds: &BTreeSet<TargetKind>,
         target_required_features: &BTreeSet<String>,
         command: &[String],
     ) -> Result<Self, EachError> {
         if chdir && mode == Mode::Once {
-            return Err(ChdirRequiresPerPackageError::new().into());
+            return Err(ChdirConflictsWithOnceError::new().into());
         }
         // Validate placeholder/mode consistency up front — before the
         // empty-set short-circuit — so a misused template (e.g. `{name}` under
@@ -320,16 +322,16 @@ mod tests {
         a.targets = vec![
             MemberTarget {
                 name: "ordinary".to_owned(),
-                kinds: std::iter::once("test".to_owned()).collect(),
+                kinds: std::iter::once(TargetKind::Test).collect(),
                 required_features: BTreeSet::new(),
             },
             MemberTarget {
                 name: "loom".to_owned(),
-                kinds: std::iter::once("test".to_owned()).collect(),
+                kinds: std::iter::once(TargetKind::Test).collect(),
                 required_features: std::iter::once("loom".to_owned()).collect(),
             },
         ];
-        let kinds = std::iter::once("test".to_owned()).collect();
+        let kinds = std::iter::once(TargetKind::Test).collect();
         let required = std::iter::once("loom".to_owned()).collect();
         let plan = Plan::build(
             &[&a],
@@ -351,10 +353,10 @@ mod tests {
         let mut a = member("alpha");
         a.targets.push(MemberTarget {
             name: "demo".to_owned(),
-            kinds: std::iter::once("example".to_owned()).collect(),
+            kinds: std::iter::once(TargetKind::Example).collect(),
             required_features: BTreeSet::new(),
         });
-        let kinds = std::iter::once("example".to_owned()).collect();
+        let kinds = std::iter::once(TargetKind::Example).collect();
         let plan = Plan::build(
             &[&a],
             Mode::PerTarget,

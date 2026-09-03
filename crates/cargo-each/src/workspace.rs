@@ -61,8 +61,8 @@ pub(crate) struct Member {
 pub(crate) struct MemberTarget {
     /// Cargo target name.
     pub(crate) name: String,
-    /// Cargo metadata target-kind spellings.
-    pub(crate) kinds: BTreeSet<String>,
+    /// Cargo metadata target kinds.
+    pub(crate) kinds: BTreeSet<TargetKind>,
     /// Features Cargo requires before this target is available.
     pub(crate) required_features: BTreeSet<String>,
 }
@@ -121,7 +121,7 @@ impl Workspace {
                     .iter()
                     .map(|target| MemberTarget {
                         name: target.name.clone(),
-                        kinds: target.kind.iter().map(target_kind_name).collect(),
+                        kinds: target.kind.iter().cloned().collect(),
                         required_features: target.required_features.iter().cloned().collect(),
                     })
                     .collect();
@@ -170,31 +170,41 @@ fn is_bin_target(target: &cargo_metadata::Target) -> bool {
     target.kind.iter().any(|k| matches!(k, TargetKind::Bin))
 }
 
-/// Convert cargo-metadata's typed target kind into its Cargo JSON spelling.
-fn target_kind_name(kind: &TargetKind) -> String {
-    match kind {
-        TargetKind::Bench => "bench",
-        TargetKind::Bin => "bin",
-        TargetKind::CustomBuild => "custom-build",
-        TargetKind::CDyLib => "cdylib",
-        TargetKind::DyLib => "dylib",
-        TargetKind::Example => "example",
-        TargetKind::Lib => "lib",
-        TargetKind::ProcMacro => "proc-macro",
-        TargetKind::RLib => "rlib",
-        TargetKind::StaticLib => "staticlib",
-        TargetKind::Test => "test",
-        TargetKind::Unknown(value) => value,
-        _ => "unknown",
+/// Parse a supported Cargo target-kind spelling.
+#[must_use]
+pub(crate) fn parse_target_kind(kind: &str) -> Option<TargetKind> {
+    match TargetKind::from(kind) {
+        TargetKind::Unknown(_) => None,
+        known => Some(known),
     }
-    .to_owned()
 }
 
-/// Whether a CLI target-kind spelling is one cargo-each supports.
-#[must_use]
-pub(crate) fn is_known_target_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "bench" | "bin" | "custom-build" | "cdylib" | "dylib" | "example" | "lib" | "proc-macro" | "rlib" | "staticlib" | "test"
-    )
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_every_supported_target_kind() {
+        for kind in [
+            "bench",
+            "bin",
+            "custom-build",
+            "cdylib",
+            "dylib",
+            "example",
+            "lib",
+            "proc-macro",
+            "rlib",
+            "staticlib",
+            "test",
+        ] {
+            assert!(parse_target_kind(kind).is_some(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_target_kind() {
+        assert_eq!(parse_target_kind("future-kind"), None);
+    }
 }

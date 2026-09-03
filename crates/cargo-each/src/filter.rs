@@ -16,10 +16,11 @@
 //! - `metadata:<dotted.key>=<value>` — that key equals `<value>` (numeric
 //!   compare when both sides parse as a number, else string compare).
 
+use cargo_metadata::TargetKind;
 use serde_json::Value;
 
 use crate::error::{EachError, InvalidPredicateError};
-use crate::workspace::{Member, is_known_target_kind};
+use crate::workspace::{Member, parse_target_kind};
 
 /// A parsed filter predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub(crate) enum Predicate {
     /// `bin`: member has a `bin` target.
     HasBin,
     /// `target-kind:<kind>`: member has a target of that Cargo kind.
-    HasTargetKind(String),
+    HasTargetKind(TargetKind),
     /// `publishable`: Cargo permits publishing the package.
     Publishable,
     /// `feature:<name>`: member declares the named feature.
@@ -62,13 +63,13 @@ impl Predicate {
             "publishable" => Ok(Self::Publishable),
             _ => {
                 if let Some(kind) = spec.strip_prefix("target-kind:") {
-                    if !is_known_target_kind(kind) {
+                    let Some(kind) = parse_target_kind(kind) else {
                         return Err(invalid(
                             spec,
                             "unknown target kind; expected one of: lib, rlib, dylib, cdylib, staticlib, proc-macro, bin, example, test, bench, custom-build",
                         ));
-                    }
-                    Ok(Self::HasTargetKind(kind.to_owned()))
+                    };
+                    Ok(Self::HasTargetKind(kind))
                 } else if let Some(name) = spec.strip_prefix("feature:") {
                     if name.is_empty() {
                         return Err(invalid(spec, "empty feature name"));
@@ -203,7 +204,7 @@ mod tests {
         assert_eq!(Predicate::parse("bin").expect("bin"), Predicate::HasBin);
         assert_eq!(
             Predicate::parse("target-kind:proc-macro").expect("target kind"),
-            Predicate::HasTargetKind("proc-macro".to_owned())
+            Predicate::HasTargetKind(TargetKind::ProcMacro)
         );
         assert_eq!(Predicate::parse("publishable").expect("publishable"), Predicate::Publishable);
         assert_eq!(
@@ -257,13 +258,13 @@ mod tests {
         let mut m = member_with(&[], Value::Null, true, false);
         m.targets.push(MemberTarget {
             name: "macros".to_owned(),
-            kinds: std::iter::once("proc-macro".to_owned()).collect(),
+            kinds: std::iter::once(TargetKind::ProcMacro).collect(),
             required_features: BTreeSet::new(),
         });
         assert!(Predicate::HasLib.matches(&m));
         assert!(!Predicate::HasBin.matches(&m));
-        assert!(Predicate::HasTargetKind("proc-macro".to_owned()).matches(&m));
-        assert!(!Predicate::HasTargetKind("test".to_owned()).matches(&m));
+        assert!(Predicate::HasTargetKind(TargetKind::ProcMacro).matches(&m));
+        assert!(!Predicate::HasTargetKind(TargetKind::Test).matches(&m));
     }
 
     #[test]

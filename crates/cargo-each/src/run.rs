@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::process::{Command, ExitCode};
 
+use cargo_metadata::TargetKind;
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::EachArgs;
@@ -85,8 +86,8 @@ fn build_selection(args: &EachArgs) -> Selection {
     }
 }
 
-/// Narrow `members` by package keep and drop predicates.
-/// predicates. `--filter` predicates are AND-combined (a member is kept only
+/// Narrow `members` by package keep and drop predicates. `--filter`
+/// predicates are AND-combined (a member is kept only
 /// if it matches *every* one); `--filter-any` predicates form one optional OR
 /// group; and `--exclude-filter` predicates are OR-combined. Exclusion wins.
 fn apply_filters(members: &mut Vec<&Member>, args: &EachArgs) -> Result<(), AppError> {
@@ -108,12 +109,12 @@ fn parse_predicates(specs: &[String]) -> Result<Vec<Predicate>, AppError> {
         .collect()
 }
 
-fn parse_target_kinds(kinds: &[String]) -> Result<BTreeSet<String>, AppError> {
+fn parse_target_kinds(kinds: &[String]) -> Result<BTreeSet<TargetKind>, AppError> {
     kinds
         .iter()
         .map(|kind| {
-            if crate::workspace::is_known_target_kind(kind) {
-                Ok(kind.clone())
+            if let Some(kind) = crate::workspace::parse_target_kind(kind) {
+                Ok(kind)
             } else {
                 Err(InvalidTargetKindError::new(kind.clone()).into())
             }

@@ -320,6 +320,28 @@ fn richer_package_predicates_use_cargo_metadata() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn publishable_filter_excludes_publish_false() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "-p",
+            "alpha",
+            "-p",
+            "gamma",
+            "--filter",
+            "publishable",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo alpha").and(predicate::str::contains("echo gamma").not()));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn multiple_exclude_filters_union() {
     // `--exclude-filter` is OR-combined: dropping `bin` removes {beta, epsilon}
     // and dropping `metadata:role=script-only` removes {gamma}; their union
