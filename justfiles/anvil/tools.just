@@ -185,7 +185,8 @@ _anvil-resolve-stable action="install":
         'install',
         'validate-workspace-msrv',
         'msrv',
-        'install-msrv'
+        'install-msrv',
+        'root-msrv'
     )
     if ($action -notin $validActions) {
         Write-Error "_anvil-resolve-stable: unknown action '$action'"
@@ -201,10 +202,34 @@ _anvil-resolve-stable action="install":
         )
     }
 
-    function Get-RootMsrv([switch] $AllowMissing) {
+    # The declared root MSRV, or $null when the repository declares none.
+    #
+    # Every other version this tree installs is pinned in versions.just, which
+    # travels with the recipes. The MSRV is the one toolchain declaration that
+    # lives in the source instead, and the container image is built with no
+    # source in its context on purpose -- the checkout arrives at run time,
+    # under a different root. So when the manifest is absent the declaration is
+    # taken from ANVIL_ROOT_MSRV, which the image build passes in.
+    #
+    # `none` is a declaration, not an absence: it says the repository has no
+    # MSRV. An unset variable with no manifest stays a hard error, so a build
+    # that fails to pass the value cannot quietly produce an image with no MSRV
+    # toolchain and leave every later run to discover that for itself.
+    #
+    # The variable is only consulted when there is no manifest, so it cannot
+    # shadow one. Inside the image the checkout is the working directory and
+    # answers for itself; nothing stale can win over a real declaration.
+    function Get-RootMsrvDeclaration {
         $manifestPath = Join-Path $repoRoot 'Cargo.toml'
         if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-            throw "anvil: Cargo.toml not found at repository root '$repoRoot'"
+            if ([string]::IsNullOrWhiteSpace($env:ANVIL_ROOT_MSRV)) {
+                throw "anvil: Cargo.toml not found at repository root '$repoRoot' and ANVIL_ROOT_MSRV is unset; a tree without repository source must be told the declared MSRV, or 'none' if the repository declares no MSRV"
+            }
+            $declared = $env:ANVIL_ROOT_MSRV.Trim()
+            if ($declared -eq 'none') {
+                return $null
+            }
+            return $declared
         }
 
         # This bootstrap scan must choose Cargo before Cargo is available to
@@ -229,6 +254,14 @@ _anvil-resolve-stable action="install":
         }
         if ($values.ContainsKey('package')) {
             return $values['package']
+        }
+        return $null
+    }
+
+    function Get-RootMsrv([switch] $AllowMissing) {
+        $declared = Get-RootMsrvDeclaration
+        if (-not [string]::IsNullOrWhiteSpace($declared)) {
+            return $declared
         }
 
         if ($AllowMissing) {
@@ -255,6 +288,15 @@ _anvil-resolve-stable action="install":
 
     function Assert-WorkspaceMsrvCompatibility {
         $manifestPath = Join-Path $repoRoot 'Cargo.toml'
+        # Named here rather than left to cargo. This check reads every member's
+        # resolved rust-version, so it needs the manifest itself, not just the
+        # root MSRV that ANVIL_ROOT_MSRV can stand in for. Without this, a tree
+        # carrying the variable but no source would reach `cargo metadata` and
+        # fail with a path error that says nothing about why the source is
+        # absent.
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "anvil: Cargo.toml not found at repository root '$repoRoot'; workspace MSRV validation reads every member manifest and cannot run without repository source"
+        }
         $rootMsrv = Get-RootMsrv
         if (-not (Test-ToolchainInstalled $rootMsrv)) {
             throw "anvil: root MSRV toolchain '$rootMsrv' is not installed; run 'just anvil-toolchain-stable-install' before validating prerequisites"
@@ -337,6 +379,22 @@ _anvil-resolve-stable action="install":
         } else {
             Assert-WorkspaceMsrvCompatibility
         }
+        exit 0
+    }
+
+    # The declared root MSRV, spoken as the image build's vocabulary rather than
+    # as presence and absence: a version, or `none`. Total on purpose, because
+    # the caller feeds it into the container image tag, where an empty answer
+    # and an unasked question must not hash alike.
+    #
+    # Deliberately the *declared* value, not `Get-MsrvSelection`'s. The mapping
+    # through ANVIL_MSRV_TOOLCHAIN names a toolchain provisioned on the host for
+    # an environment that replaces public rustup; the image has public rustup
+    # and installs the declared version itself, so baking a host mapping into it
+    # would name a toolchain that does not exist there.
+    if ($action -eq 'root-msrv') {
+        $declared = Get-RootMsrv -AllowMissing
+        if ([string]::IsNullOrWhiteSpace($declared)) { 'none' } else { $declared }
         exit 0
     }
 

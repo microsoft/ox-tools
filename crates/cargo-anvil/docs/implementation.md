@@ -76,6 +76,17 @@ cannot auto-install a compiler during validation. Installation uses the same
 anchored toolchain-list match and emits a dedicated rustup bootstrap diagnostic
 when the executable is absent.
 
+`tools.just` additionally accepts the declared root MSRV out of band, through
+`ANVIL_ROOT_MSRV`, and exposes it to callers as the `root-msrv` action. This
+exists for the container image, which is built without repository source and so
+has no root manifest to scan; the variable is read only when the manifest is
+absent, so it can never shadow a real declaration. `versions.just` does not
+mirror it, and the divergence is deliberate rather than drift: its selector
+returns before the manifest scan whenever a root toolchain file is present, and
+the image requires one, so the branch is unreachable there. The scanners
+themselves — accepted syntax and `workspace.package`-before-`package`
+precedence — stay identical and remain bound by the rule above.
+
 Setup dependencies, rather than the cloud templates, route provisioning.
 Cargo-tool installers, default-component installers, and stable-only setup
 leaves depend on `anvil-toolchain-stable-install`; group and tier fan-out lets

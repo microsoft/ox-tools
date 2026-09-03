@@ -32,6 +32,8 @@ const MUTANTS_DIFF: &str = include_str!("../templates/justfiles/anvil/checks/mut
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
 const REGENERATE_WORKFLOW: &str = include_str!("../../../.github/workflows/regenerate-check.yml");
 const CONTAINER: &str = include_str!("../templates/justfiles/anvil/container.just");
+const CONTAINER_SETUP_REGION: &str = include_str!("../templates/anvil/container/Dockerfile.setup.region");
+const CONTAINER_DOCKERIGNORE: &str = include_str!("../templates/anvil/container/Dockerfile.dockerignore");
 // Any nonzero value works; naming it prevents tests from implying an external exit-code contract.
 const ARBITRARY_FAILURE_EXIT: &str = "23";
 
@@ -250,6 +252,21 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     tmp
 }
 
+/// `anvil-container-tag` resolves the declared root MSRV through
+/// `_anvil-resolve-stable`, which the container fixtures do not import. Stubbing
+/// it keeps them focused on the digest, and lets a case vary the value the tag
+/// frames without standing up a manifest.
+fn stub_msrv_resolver(root: &Path) {
+    let justfile_path = root.join("Justfile");
+    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
+    justfile.push_str(
+        "\n[script(\"pwsh\", \"-NoProfile\")]\n\
+         _anvil-resolve-stable action:\n\
+         \x20   if ($env:FAKE_ROOT_MSRV) { Write-Output $env:FAKE_ROOT_MSRV } else { Write-Output 'none' }\n",
+    );
+    write(&justfile_path, &justfile);
+}
+
 fn path_with_fake_bin(root: &Path) -> OsString {
     let mut paths = vec![root.join("fake-bin")];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
@@ -274,6 +291,10 @@ fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> 
     // silently short-circuit the recipe before it did anything. A test that
     // cares about either value passes it explicitly below.
     command.env_remove("ANVIL_IMPACT");
+    // Same hazard, one resolver down: this names the MSRV for a tree with no
+    // root manifest, and a fixture that inherited a developer's exported value
+    // would resolve differently from a clean checkout.
+    command.env_remove("ANVIL_ROOT_MSRV");
     for key in std::env::vars_os().map(|(key, _)| key) {
         if key.to_string_lossy().starts_with("ANVIL_INCLUDE_") {
             command.env_remove(key);
@@ -402,6 +423,147 @@ fn msrv_test_propagates_nested_just_failures() {
     assert!(
         fs::read_to_string(cargo_log).unwrap_or_default().is_empty(),
         "Cargo must not run after resolver failure"
+    );
+}
+
+// The container image is built with no repository source in its context, so the
+// MSRV -- the one version anvil installs that is declared in `Cargo.toml`
+// rather than pinned in `versions.just` -- has to reach the build another way.
+// These cover the contract that carries it: the manifest always wins where
+// there is one, the environment answers only where there is none, and a tree
+// that is told nothing refuses rather than silently installing no toolchain.
+#[test]
+fn root_msrv_prefers_the_manifest_over_the_container_override() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+
+    let output = run_just(
+        tmp.path(),
+        &["_anvil-resolve-stable", "root-msrv"],
+        &[("ANVIL_ROOT_MSRV", OsStr::new("1.60.0"))],
+    );
+
+    assert!(
+        output.status.success(),
+        "root-msrv should resolve from the manifest:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "1.97",
+        "a real declaration must never be shadowed by the value the image build passes in"
+    );
+}
+
+#[test]
+fn root_msrv_reports_none_when_the_repository_declares_no_msrv() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+    write(
+        &tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    );
+
+    let output = run_just(tmp.path(), &["_anvil-resolve-stable", "root-msrv"], &[]);
+
+    assert!(
+        output.status.success(),
+        "root-msrv must answer for a repository with no MSRV:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "none",
+        "the answer must be total, because the caller hashes it into the container image tag"
+    );
+}
+
+#[test]
+fn sourceless_tree_resolves_the_msrv_the_image_build_passes_in() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+    fs::remove_file(tmp.path().join("Cargo.toml")).unwrap();
+
+    let declared = run_just(
+        tmp.path(),
+        &["_anvil-resolve-stable", "msrv"],
+        &[("ANVIL_ROOT_MSRV", OsStr::new("1.93.1"))],
+    );
+    assert!(
+        declared.status.success(),
+        "a tree told its MSRV must resolve it:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&declared.stdout),
+        String::from_utf8_lossy(&declared.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&declared.stdout).trim(), "1.93.1");
+
+    // `none` is an answer, so the install is a clean no-op rather than a
+    // failure: the repository being built genuinely has no MSRV to install.
+    let none = run_just(
+        tmp.path(),
+        &["_anvil-resolve-stable", "install-msrv"],
+        &[("ANVIL_ROOT_MSRV", OsStr::new("none"))],
+    );
+    assert!(
+        none.status.success(),
+        "'none' must be accepted as a declaration:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&none.stdout),
+        String::from_utf8_lossy(&none.stderr)
+    );
+}
+
+#[test]
+fn sourceless_tree_told_nothing_refuses_instead_of_installing_no_toolchain() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+    fs::remove_file(tmp.path().join("Cargo.toml")).unwrap();
+
+    let output = run_just(tmp.path(), &["_anvil-resolve-stable", "install-msrv"], &[]);
+
+    assert_failed(&output, "MSRV install in a tree with neither a manifest nor a declared MSRV");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("ANVIL_ROOT_MSRV"),
+        "the refusal must name the variable that would have answered, or a build that drops \
+         the argument produces an image silently missing the MSRV toolchain:\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn container_build_carries_the_msrv_as_a_value_rather_than_the_manifest() {
+    assert!(
+        CONTAINER_SETUP_REGION.contains("ARG ANVIL_ROOT_MSRV"),
+        "the setup region must declare the build argument the MSRV resolver reads"
+    );
+    assert!(
+        !CONTAINER_SETUP_REGION.contains("ENV ANVIL_ROOT_MSRV"),
+        "it must not persist into the finished image, where the mounted checkout answers instead"
+    );
+    assert!(
+        CONTAINER.contains("'--build-arg', \"ANVIL_ROOT_MSRV=$(\"$rootMsrv\".Trim())\""),
+        "the build driver must pass the resolved MSRV to the engine"
+    );
+    assert!(
+        CONTAINER.contains("'msrv ' + $msrvBytes.Length"),
+        "the image tag must hash the MSRV, because the image installs that toolchain"
+    );
+    // The manifest is the obvious thing to copy and hash, and it is the wrong
+    // one: every dependency edit touches it while `rust-version` moves perhaps
+    // once, so admitting it would rebuild and rename the image for a long
+    // stream of changes that cannot alter a byte the image contains.
+    assert!(
+        !CONTAINER_DOCKERIGNORE.contains("!Cargo.toml"),
+        "the build context must not admit the root manifest"
     );
 }
 
@@ -1614,6 +1776,7 @@ fn the_image_tag_follows_the_executable_bit() {
     write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
     write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
     write(&root.join("justfiles/anvil/setup.sh"), "echo hello\n");
+    stub_msrv_resolver(root);
     write(
         &root.join("fake-bin/git.ps1"),
         "if ($args -contains 'ls-files' -and $env:FAKE_UNTRACKED -ne '1') {\n    \
@@ -1669,6 +1832,51 @@ fn the_image_tag_follows_the_executable_bit() {
     assert_eq!(plain, tag("0"), "the tag must depend on the inputs alone");
 }
 
+/// The image installs the toolchain named by the repository's declared MSRV, so
+/// raising it changes what the image contains and must rename it. The value
+/// reaches the digest out of band, because the manifest declaring it is not in
+/// the build context and deliberately stays out: it is the busiest file in a
+/// workspace, and hashing it would rename the image for a long stream of
+/// dependency edits that cannot alter a byte the image contains.
+#[test]
+fn the_image_tag_follows_the_declared_msrv() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
+    write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+    write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
+    write(&root.join("justfiles/anvil/mod.just"), "# recipes\n");
+    stub_msrv_resolver(root);
+    write(&root.join("fake-bin/git.ps1"), "exit 0\n");
+
+    let tag = |msrv: &str| {
+        let output = run_just(root, &["anvil-container-tag"], &[("FAKE_ROOT_MSRV", OsStr::new(msrv))]);
+        assert!(
+            output.status.success(),
+            "computing the tag failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+
+    let declared = tag("1.93.1");
+    assert_ne!(
+        declared,
+        tag("1.94.0"),
+        "an MSRV bump installs a different toolchain, so it must rename the image"
+    );
+    assert_ne!(
+        declared,
+        tag("none"),
+        "a repository that declares no MSRV gets an image with no MSRV toolchain in it"
+    );
+    assert_eq!(declared, tag("1.93.1"), "the tag must depend on the inputs alone");
+}
+
 /// The tag is computed from the index while the build copies the working tree,
 /// so the two have to agree about the executable bit. Where they do not, the
 /// reference names an image the build does not produce, and the run stops
@@ -1689,6 +1897,7 @@ fn a_working_tree_mode_the_tag_did_not_frame_stops_the_run() {
     write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
     write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
     write(&root.join("justfiles/anvil/setup.sh"), "echo hello\n");
+    stub_msrv_resolver(root);
     // The digest frames this path from `ls-files --stage`, which reports
     // 100644 in every case below -- including the intent-to-add ones, where
     // the raw index mode is zero but the placeholder is a real mode.
@@ -1773,6 +1982,7 @@ fn a_link_among_the_image_inputs_is_refused() {
     ] {
         let tmp = fixture(&[("container.just", CONTAINER)], &[]);
         let root = tmp.path();
+        stub_msrv_resolver(root);
         write(&root.join("elsewhere/target.just"), "# shared\n");
         write(&root.join("elsewhere/Dockerfile"), "FROM scratch\n");
         // Everything the tag needs, except whatever this case replaces with a

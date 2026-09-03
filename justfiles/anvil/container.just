@@ -143,11 +143,11 @@ _anvil-container-dockerfile:
 # Print the exec image reference for the current inputs, without building it.
 #
 # The tag is a SHA-256 over the image's declared inputs: the Dockerfile and its
-# ignore file, the pinned toolchain, the optional hook, and the whole generated
+# ignore file, the pinned toolchain, the optional hook, the whole generated
 # recipe tree -- because the image installs its tools by running
 # `just anvil-setup`, whose dependency chain reaches the tier, group, check and
-# tool recipes alike. Editing any of them can change what the image contains, so
-# any of them can rename it.
+# tool recipes alike -- and the declared root MSRV. Editing any of them can
+# change what the image contains, so any of them can rename it.
 #
 # This is the only recipe that computes the reference; everything else asks it.
 # It is public because a publisher needs the tag before there is an image to
@@ -165,6 +165,21 @@ anvil-container-tag:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $dockerfile = "$dockerfile".Trim()
     $hookRel = '.anvil/container/hooks.ps1'
+
+    # The declared root MSRV is an input the build context cannot carry. The
+    # image installs that toolchain, so a bump changes what the image contains
+    # and has to rename it -- exactly what every other input here is hashed for.
+    #
+    # The value, not the manifest it comes from. `Cargo.toml` would be the
+    # obvious file to admit and hash, but it is the busiest file in a workspace:
+    # dependency edits touch it constantly while `rust-version` moves perhaps
+    # once in a repository's life. Hashing the file would rename the image, and
+    # oblige a publisher to rebuild and republish it, for a stream of changes
+    # that cannot alter a single byte the image contains. Hashing the value
+    # renames it exactly when the contents differ.
+    $rootMsrv = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable root-msrv
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $rootMsrv = "$rootMsrv".Trim()
 
     # Both named rather than left to the walk, so that either one going missing
     # is a hard failure at the check below. The walk cannot notice an absent
@@ -398,6 +413,15 @@ anvil-container-tag:
     # would be a MethodNotFound at tag time, before anything useful happened.
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
+        # Framed with its own record tag, ahead of the files and in a fixed
+        # position, so it cannot be confused with a file named `msrv` and the
+        # order of the stream stays a property of the code rather than of the
+        # filesystem. Length-prefixed like every other record, for the same
+        # reason: the stream has to be self-delimiting.
+        $msrvBytes = [System.Text.Encoding]::UTF8.GetBytes($rootMsrv)
+        $msrvHeader = [System.Text.Encoding]::UTF8.GetBytes('msrv ' + $msrvBytes.Length + ' ')
+        [void]$sha.TransformBlock($msrvHeader, 0, $msrvHeader.Length, $null, 0)
+        [void]$sha.TransformBlock($msrvBytes, 0, $msrvBytes.Length, $null, 0)
         foreach ($rel in $ordered) {
             $path = Join-Path $repoRoot $rel
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -637,6 +661,14 @@ _anvil-container-image:
         # It also keeps the identity scheme honest: without this, two hosts of
         # different architecture compute the same tag for different images.
         $buildCmd = @('build', '--platform', 'linux/amd64', '--file', "$engineRoot/$dockerfile", '--tag', $image)
+        # The one input the context cannot carry, and the same value the tag was
+        # computed from -- resolved here rather than passed down so the two
+        # cannot drift apart silently. `none` is sent verbatim for a repository
+        # that declares no MSRV: the resolver in the image treats it as an
+        # answer, and stops if it arrives with none at all.
+        $rootMsrv = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable root-msrv
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $buildCmd += @('--build-arg', "ANVIL_ROOT_MSRV=$("$rootMsrv".Trim())")
         # BuildKit reads `<dockerfile>.dockerignore` on its own; buildah reads
         # only a context-root ignore file and needs to be pointed at ours. Named
         # rather than probed, because the flag is rejected outright by the engine

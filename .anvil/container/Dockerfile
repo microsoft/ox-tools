@@ -94,7 +94,19 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # volume over each, and an engine seeds a new volume from the image path it
 # covers; a path that does not exist seeds as root-owned 0755, which the
 # `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
+# `ANVIL_ROOT_MSRV` carries the one version this image cannot read for itself.
+# Every other pin travels in `versions.just`, but the MSRV is declared in the
+# repository's root `Cargo.toml`, and no source is in this context by design.
+# Docker puts a declared `ARG` in the environment of the `RUN` below, which is
+# where the MSRV resolver looks when it finds no manifest. It is an `ARG` rather
+# than an `ENV` so it does not persist into the finished image: at run time the
+# checkout is present and answers for itself.
+#
+# The build driver always passes it, sending `none` for a repository that
+# declares no MSRV. Left unset -- a hand-rolled `docker build`, say -- the
+# resolver stops and names the variable rather than installing nothing.
 WORKDIR /opt/anvil
+ARG ANVIL_ROOT_MSRV
 COPY justfiles ./justfiles
 COPY rust-toolchain.toml ./
 RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
