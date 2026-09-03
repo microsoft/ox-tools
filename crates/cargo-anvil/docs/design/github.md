@@ -925,7 +925,9 @@ Recommended root workflow shape:
   avoiding a second skipped `PR Job`; merge-group jobs receive these scopes but
   do not use them.
 - Status publishing is guarded to same-repository `pull_request` events. Fork
-  PR tokens are read-only and never reach the status API step.
+  PRs never reach the status API step regardless of whether administrators keep
+  GitHub's default read-only token policy or enable write tokens for fork
+  workflows.
 - The scheduled reusable-workflow call grants `issues: write` at job scope so its
   publisher can create or comment on the failure issue. The called workflow resets its
   default permissions to `contents: read`, then restores `issues: write` only on the

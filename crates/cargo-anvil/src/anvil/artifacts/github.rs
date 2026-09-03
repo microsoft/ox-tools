@@ -455,7 +455,7 @@ export -f just
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("permissions:").count(),
             0,
-            "the shared implementation must inherit the PR caller's permission ceiling"
+            "the shared implementation must inherit the root caller's permission ceiling"
         );
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),

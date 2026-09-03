@@ -457,8 +457,22 @@ fn validation_disables_auto_install_and_preserves_cargo_failures() {
         "unexpected Cargo-list diagnostic: {diagnostic}"
     );
 
-    write(&tools.path().join("fake-bin/rustc.ps1"), "exit 9\n");
-    let output = run_just(tools.path(), &["_check-component", "default", "rust-src"], &[]);
+    let rustc_auto_install_log = tools.path().join("rustc-auto-install.log");
+    write(
+        &tools.path().join("fake-bin/rustc.ps1"),
+        "if ($env:FAKE_RUSTC_AUTO_INSTALL_LOG) {\n\
+         \x20   Add-Content -LiteralPath $env:FAKE_RUSTC_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL\n\
+         }\n\
+         exit [int]$env:FAKE_RUSTC_EXIT\n",
+    );
+    let output = run_just(
+        tools.path(),
+        &["_check-component", "default", "rust-src"],
+        &[
+            ("FAKE_RUSTC_AUTO_INSTALL_LOG", rustc_auto_install_log.as_os_str()),
+            ("FAKE_RUSTC_EXIT", OsStr::new("9")),
+        ],
+    );
     assert_failed(&output, "unavailable selected stable toolchain");
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -466,6 +480,24 @@ fn validation_disables_auto_install_and_preserves_cargo_failures() {
             && diagnostic.contains("just anvil-toolchain-stable-install")
             && !diagnostic.contains("rustup toolchain install default"),
         "unexpected default-toolchain diagnostic: {diagnostic}"
+    );
+    assert_eq!(fs::read_to_string(&rustc_auto_install_log).unwrap().trim(), "0");
+
+    let cargo_log = tools.path().join("component-cargo.log");
+    let output = run_just(
+        tools.path(),
+        &["_check-component", "default", "clippy"],
+        &[("FAKE_RUSTC_EXIT", OsStr::new("9")), ("FAKE_CARGO_LOG", cargo_log.as_os_str())],
+    );
+    assert_failed(&output, "unavailable selected toolchain for command-backed component");
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("selected stable toolchain") && !diagnostic.contains("component 'clippy' not installed"),
+        "toolchain failure must precede component diagnosis: {diagnostic}"
+    );
+    assert!(
+        fs::read_to_string(cargo_log).unwrap_or_default().is_empty(),
+        "component command must not run when the selected toolchain is unavailable"
     );
 }
 
