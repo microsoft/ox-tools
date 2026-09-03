@@ -569,7 +569,7 @@ runs:
         # target/anvil/impact cache (read via `_anvil-impact-include`), not
         # threaded --package strings. This action only fixes the mode.
         ANVIL_IMPACT: ${{ inputs.impact_mode }}
-        GITHUB_TOKEN: ${{ github.token }}
+        GITHUB_TOKEN: ${{ github.event_name == 'pull_request' && github.token || '' }}
       run: |
         log="$RUNNER_TEMP/anvil-$ANVIL_GROUP.log"
         set +e
@@ -729,7 +729,9 @@ the normal Anvil jobs, annotations, and dynamically named steps but do not
 publish supplemental statuses or advisory comments because those operations are
 event- and repository-guarded. Using one caller removes the skipped duplicate
 `PR Job` from the checks UI; the accepted tradeoff is that merge-group runs
-receive the caller's unused write scopes.
+receive the caller's unused write scopes. The shared group action additionally
+withholds `GITHUB_TOKEN` from the Just process on `merge_group`, so repository
+commands do not receive the write-capable token.
 
 Branch protection and rulesets must select the bounded
 `PR Job / Check Group: <display name> (<platform>)` contexts. Pull-request and

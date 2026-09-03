@@ -256,6 +256,10 @@ mod tests {
         assert!(RUN_GROUP_ACTION.contains("impact_mode:"));
         assert!(RUN_GROUP_ACTION.contains("ANVIL_IMPACT: ${{ inputs.impact_mode }}"));
         assert!(
+            RUN_GROUP_ACTION.contains("GITHUB_TOKEN: ${{ github.event_name == 'pull_request' && github.token || '' }}"),
+            "repository commands must not receive the merge-group token"
+        );
+        assert!(
             !RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_"),
             "the shared executor must not thread ANVIL_INCLUDE_* env vars"
         );

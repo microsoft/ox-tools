@@ -497,7 +497,7 @@ fn validation_disables_auto_install_and_preserves_cargo_failures() {
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     assert!(
         diagnostic.contains("selected stable toolchain")
-            && diagnostic.contains("anvil-toolchain-stable-install")
+            && diagnostic.contains("just anvil-toolchain-stable-install")
             && !diagnostic.contains("rustup toolchain install default"),
         "unexpected default-toolchain diagnostic: {diagnostic}"
     );

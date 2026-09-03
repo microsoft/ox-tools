@@ -6808,9 +6808,9 @@ _check-component toolchain component:
             } else {
                 '(from RUSTUP_TOOLCHAIN or the repository toolchain file)'
             }
-            Write-Error "anvil: selected stable toolchain $selected is unavailable. Run: just anvil-toolchain-stable-install"
+            [Console]::Error.WriteLine("anvil: selected stable toolchain $selected is unavailable. Run: just anvil-toolchain-stable-install")
         } else {
-            Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain"
+            [Console]::Error.WriteLine("anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain")
         }
         exit 1
     }
@@ -6822,7 +6822,7 @@ _check-component toolchain component:
         } else {
             "rustup component add --toolchain $toolchain $component"
         }
-        Write-Error "anvil: component '$component' not installed on toolchain '$toolchain'. Run: $cmd"
+        [Console]::Error.WriteLine("anvil: component '$component' not installed on toolchain '$toolchain'. Run: $cmd")
         exit 1
     }
 
