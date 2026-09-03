@@ -30,5 +30,5 @@ use anyhow::Result;
 fn main() -> Result<ExitCode> {
     // TODO: This could be a main.rs only crate, but CI complains when processing bin-only crates:
     //  https://github.com/rust-lang/cargo/issues/15231.
-    cargo_unused_deps::run()
+    cargo_unused_deps::dispatch(&std::env::args_os().collect::<Vec<_>>())
 }

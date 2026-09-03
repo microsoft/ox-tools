@@ -58,6 +58,92 @@ pub struct ManifestInput {
     pub contents: String,
 }
 
+/// Which manifest table declared a dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    /// `[dependencies]`, including its `[target.'cfg(…)']` forms.
+    Normal,
+
+    /// `[dev-dependencies]`, including its `[target.'cfg(…)']` forms.
+    Development,
+
+    /// `[build-dependencies]`, including its `[target.'cfg(…)']` forms.
+    Build,
+}
+
+impl Section {
+    /// The manifest table name.
+    fn table(self) -> &'static str {
+        match self {
+            Self::Normal => "dependencies",
+            Self::Development => "dev-dependencies",
+            Self::Build => "build-dependencies",
+        }
+    }
+
+    /// The section a table name denotes, if it denotes one.
+    fn of_table(table: &str) -> Option<Self> {
+        [Self::Normal, Self::Development, Self::Build]
+            .into_iter()
+            .find(|section| section.table() == table)
+    }
+}
+
+/// One dependency a member declares.
+#[derive(Debug, Clone)]
+pub struct Declared {
+    /// The declaration's key, as written.
+    pub name: String,
+
+    /// Where it was declared.
+    pub section: Section,
+}
+
+impl Declared {
+    /// The name rustc uses for the crate, which is the key with hyphens
+    /// replaced. Diagnostics are matched on this form.
+    pub fn extern_name(&self) -> String {
+        self.name.replace('-', "_")
+    }
+}
+
+/// Every dependency a member manifest declares, in every section and target table.
+pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
+    let mut declared = Vec::new();
+
+    for table in DEP_TABLES {
+        if let Some(item) = doc.get(table).and_then(Item::as_table_like) {
+            collect_declared(item, table, &mut declared);
+        }
+    }
+
+    if let Some(targets) = doc.get("target").and_then(Item::as_table_like) {
+        for target in targets.iter().filter_map(|(_, target)| target.as_table_like()) {
+            for table in DEP_TABLES {
+                if let Some(item) = target.get(table).and_then(Item::as_table_like) {
+                    collect_declared(item, table, &mut declared);
+                }
+            }
+        }
+    }
+
+    declared
+}
+
+/// Record one dependency table's declarations.
+fn collect_declared(table: &dyn TableLike, name: &str, into: &mut Vec<Declared>) {
+    let Some(section) = Section::of_table(name) else {
+        return;
+    };
+
+    for (key, _) in table.iter() {
+        into.push(Declared {
+            name: key.to_owned(),
+            section,
+        });
+    }
+}
+
 /// Read a manifest's text.
 pub fn read_manifest_text(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))

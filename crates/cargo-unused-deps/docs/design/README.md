@@ -1,8 +1,15 @@
 # cargo-unused-deps — Design
 
-> Status: **Adopted**.
+> Status: **Implemented, except where noted below.**
 > Crate name: `cargo-unused-deps`.
 > Home: `github.com/microsoft/ox-tools`, published to crates.io.
+>
+> Built: the catalog check with `--fix`, the unused and misplaced checks from
+> compile evidence, doctest evidence through the shim, package selection, and the
+> allow-list. Not yet built: the optional/feature check (question 5) and `--fix`
+> for a misplaced dependency; both are reported as designed but unimplemented.
+>
+> Companion docs: [workspace dependency catalog](./workspace-catalog.md).
 
 ## 1. Problem
 

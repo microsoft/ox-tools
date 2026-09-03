@@ -32,6 +32,7 @@ path = "src/main.rs"
 anyhow = { workspace = true, features = ["std"] }
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["std", "derive", "color", "help", "error-context", "usage"] }
+serde_json = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }
 toml_edit = { workspace = true }
 
