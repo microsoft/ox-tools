@@ -22,7 +22,7 @@
 //! `anvil-workspace-lints`).
 //!
 //! Empty body (just the sentinels with no content between them) is the
-//! opt-out signal — see [`updates.md §6`](../../docs/design/updates.md).
+//! opt-out signal — see [`updates.md`](../../docs/design/updates.md).
 
 use std::collections::BTreeMap;
 
@@ -379,7 +379,7 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
 /// `ignore` entries is the case that matters, and it is covered by a fixture.
 /// Comments and blank lines are ignored when comparing, since neither carries
 /// configuration, and both sides are compared through the TOML parser rather
-/// than as source text — so formatting the grammar ignores, such as the
+/// than as source text — so formatting that TOML itself ignores, such as the
 /// spacing in `workspace=true` or the order two entries appear in, cannot
 /// defeat the comparison and leave the duplicate this function exists to
 /// remove. An array-of-tables (`[[bin]]`) is never adopted at all:
@@ -465,10 +465,11 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 }
 
 /// Collect each top-level TOML table outside any managed region, as its header
-/// and the configuration lines beneath it. Blank lines and whole-line comments
-/// are dropped and a trailing comment is stripped from every header and
-/// configuration line, since a comment carries no configuration and must not
-/// defeat a comparison.
+/// and the configuration lines beneath it. Whole-line comments are skipped and
+/// a trailing comment is stripped from every header and configuration line,
+/// since a comment carries no configuration and must not defeat a comparison.
+/// Blank lines need no such handling: they are carried through as empty lines
+/// and the TOML parser that performs the comparison ignores them.
 fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
     let prefix = syntax.prefix();
     let open = prefix.to_owned() + " >>> anvil-managed:";
@@ -487,7 +488,7 @@ fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
             in_managed = false;
             continue;
         }
-        if in_managed || trimmed.is_empty() || trimmed.starts_with(prefix) {
+        if in_managed || trimmed.starts_with(prefix) {
             continue;
         }
         if let Some(header) = toml_table_header(trimmed) {
@@ -884,6 +885,35 @@ mod tests {
 
         assert!(adopted.starts_with("# >>> anvil-managed: existing"));
         assert!(adopted.contains("[lints]\nworkspace = true\n# <<< anvil-managed: existing"));
+    }
+
+    /// A table inside an existing managed region is the region's, not a
+    /// candidate. Were its lines read as though they were the user's, the
+    /// region's own copy would supply the coverage the hand-written table
+    /// lacks, and the extra key beneath the hand-written header would be
+    /// deleted as part of a duplicate it never was.
+    #[test]
+    fn a_table_inside_a_managed_region_does_not_make_an_unmanaged_one_adoptable() {
+        let text = "[lints]\nworkspace = true\nrust.unsafe_code = \"forbid\"\n\n\
+                    # >>> anvil-managed: existing\n\
+                    [lints]\n\
+                    workspace = true\n\
+                    # <<< anvil-managed: existing\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+
+        assert_eq!(adopted, text, "the unmanaged-only key is not deleted:\n{adopted}");
+    }
+
+    /// Two tables under one parent are different tables. Comparing only the
+    /// first segment of a dotted header would make `[workspace.lints]` and
+    /// `[workspace.package]` collide, and adoption would delete a table the
+    /// managed body never declared.
+    #[test]
+    fn a_dotted_header_is_compared_past_its_first_segment() {
+        let text = "[workspace.package]\nedition = \"2024\"\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[workspace.lints]\nedition = \"2024\"\n", SYN);
+
+        assert_eq!(adopted, text, "the differently-named table is preserved:\n{adopted}");
     }
 
     #[test]

@@ -13,7 +13,8 @@
 //! threads an accumulating in-memory host text (seeded from disk) through
 //! every region, and each region splices on top of the previous one's
 //! result instead of re-reading the original disk state. See
-//! [`crate::run`]'s `HostTextCache` and `updates.md §4`.
+//! [`crate::run`]'s `HostTextCache` and
+//! [`updates.md`](../../../docs/design/updates.md).
 
 use ohno::AppError;
 
@@ -371,6 +372,26 @@ mod tests {
         let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new\n")).unwrap();
         // Opt-out remains in place but the user gets a proposed host file.
         assert_eq!(item.decision, Decision::Propose);
+    }
+
+    /// Adoption applies only when the region is first introduced. Once the
+    /// region exists, the host outside the sentinels is untouched and the
+    /// body is replaced in place, so a hand-written table stays exactly where
+    /// it is whatever its relationship to the rendered body.
+    #[test]
+    fn an_existing_region_does_not_re_run_table_adoption() {
+        let host = "[lints]\nworkspace = true\n\n# >>> anvil-managed: r\nold = true\n# <<< anvil-managed: r\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("Cargo.toml", "r", checksum_str("old = true\n"));
+
+        let item = plan_managed_region(&manifest, Some(host), request("Cargo.toml", "r", "[lints]\nworkspace = true\n")).unwrap();
+
+        assert_eq!(item.decision, Decision::Write);
+        let spliced = item.spliced_host.as_deref().unwrap();
+        assert!(
+            spliced.starts_with("[lints]\nworkspace = true\n"),
+            "the hand-written table is left alone:\n{spliced}"
+        );
     }
 
     #[test]
