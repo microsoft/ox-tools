@@ -928,13 +928,28 @@ fn fake_cargo(dir: &Path, log: &Path) {
     #[cfg(unix)]
     {
         let script = format!(
-            "#!/bin/sh\nif [ \"$1 $2\" = \"install --list\" ]; then printf '%s\\n' 'cargo-each v0.1.0:'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+            "#!/bin/sh\nall_args=\"$*\"\ncase \"$1\" in +*) shift ;; esac\nif [ \"$1 $2\" = \"install --list\" ]; then printf '%s\\n' 'cargo-each v0.1.0:'; exit 0; fi\nprintf '%s\\n' \"$all_args\" >> '{}'\nexit 0\n",
             log.display()
         );
         let path = dir.join("cargo");
         fs::write(&path, script).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn fake_cargo_recognizes_toolchain_qualified_install_list() {
+    let tmp = TempDir::new().unwrap();
+    let log = tmp.path().join("cargo.log");
+    fake_cargo(tmp.path(), &log);
+    let output = Command::new(tmp.path().join("cargo"))
+        .args(["+1.97", "install", "--list"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("cargo-each v0.1.0:"));
+    assert!(!log.exists(), "tool discovery probes should not be logged as check invocations");
 }
 
 /// The process `PATH` with `dir` prepended, so an executable in `dir` shadows
