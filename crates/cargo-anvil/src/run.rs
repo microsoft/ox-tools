@@ -1579,6 +1579,7 @@ mod tests {
             ".github/workflows/anvil-scheduled-impl.yml",
             ".github/workflows/anvil-pr.yml",
             ".github/workflows/anvil-scheduled.yml",
+            ".github/skills/code-review/SKILL.md",
         ] {
             assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after github update");
         }
