@@ -287,6 +287,80 @@ fn conflicting_coverage_metadata_exits_2() {
 }
 
 #[test]
+fn target_zero_threshold_opts_package_out_of_gate() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(
+        tmp.path(),
+        &[
+            (
+                "alpha",
+                "min-lines-percent = 100\n\n\
+                 [package.metadata.coverage-gate.target.'cfg(not(windows))']\n\
+                min-lines-percent = 0",
+            ),
+            ("beta", "min-lines-percent = 80"),
+        ],
+    );
+    let lcov_path = write_lcov(tmp.path(), &[("beta/src/lib.rs", 10, 9)]);
+
+    coverage_gate(tmp.path())
+        .args(["--target", "x86_64-unknown-linux-gnu", "--lcov", &lcov_path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("beta"))
+        .stdout(predicate::str::contains("alpha"))
+        .stdout(predicate::str::contains("(no data)"))
+        .stdout(predicate::str::contains("0.0%"));
+}
+
+#[test]
+fn empty_lcov_passes_when_all_effective_policies_allow_no_data() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(
+        tmp.path(),
+        &[
+            (
+                "alpha",
+                "min-lines-percent = 100\n\n\
+                 [package.metadata.coverage-gate.target.'cfg(not(windows))']\n\
+                min-lines-percent = 0",
+            ),
+            ("beta", "expect-no-coverable-lines = true"),
+        ],
+    );
+    let empty_lcov = write_lcov(tmp.path(), &[]);
+
+    coverage_gate(tmp.path())
+        .args(["--target", "x86_64-unknown-linux-gnu", "--lcov", &empty_lcov])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("alpha"))
+        .stdout(predicate::str::contains("beta"))
+        .stdout(predicate::str::contains("all packages meet their threshold"));
+}
+
+#[test]
+fn target_zero_threshold_package_remains_gated_when_override_does_not_match() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(
+        tmp.path(),
+        &[(
+            "alpha",
+            "min-lines-percent = 100\n\n\
+             [package.metadata.coverage-gate.target.'cfg(not(windows))']\n\
+            min-lines-percent = 0",
+        )],
+    );
+    let empty_lcov = write_lcov(tmp.path(), &[]);
+
+    coverage_gate(tmp.path())
+        .args(["--target", "x86_64-pc-windows-msvc", "--lcov", &empty_lcov])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("NO DATA"));
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn package_flag_restricts_scope() {
     let tmp = TempDir::new().expect("tempdir");

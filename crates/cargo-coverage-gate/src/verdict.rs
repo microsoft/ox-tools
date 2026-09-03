@@ -195,7 +195,7 @@ fn diagnostics(files: &[&FileReport], member: &Member, status: Status) -> Vec<Li
 /// Unix shell globs (mirroring `cargo build -p 'tokio-*'`). A selector
 /// that matches no member is a configuration error. Members matched by
 /// multiple selectors appear only once.
-fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -> Result<Vec<&'w Member>, CoverageGateError> {
+pub(crate) fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -> Result<Vec<&'w Member>, CoverageGateError> {
     if packages.is_empty() {
         return Ok(workspace.members.iter().collect());
     }

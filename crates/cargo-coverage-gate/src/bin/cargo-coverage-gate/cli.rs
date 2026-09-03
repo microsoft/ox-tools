@@ -45,6 +45,12 @@ pub(crate) struct CoverageGateArgs {
     #[arg(long = "package", short = 'p', value_name = "SPEC")]
     pub(crate) packages: Vec<String>,
 
+    /// Rust target triple whose coverage policy should be evaluated.
+    ///
+    /// Defaults to the rustc host target.
+    #[arg(long, value_name = "TRIPLE")]
+    pub(crate) target: Option<String>,
+
     /// Write the Markdown verdict table to this file.
     ///
     /// When unset, the tool falls back to `$GITHUB_STEP_SUMMARY` and then
