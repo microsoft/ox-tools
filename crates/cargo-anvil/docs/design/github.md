@@ -180,6 +180,8 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   ├── anvil-run-group/action.yml      owned   (orchestrate any Just group)
 │   ├── anvil-report-status/action.yml  owned   (publish per-job commit statuses)
 │   ├── anvil-impact/action.yml        owned   (runs `just anvil-impact`, uploads impact artifact; omitted if .delta.toml disabled)
+├── skills/
+│   └── code-review/SKILL.md           owned   (review guidance for PR reviewers, incl. Copilot code review)
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)
     ├── anvil-scheduled-impl.yml         owned   (reusable workflow for the scheduled tier)
@@ -191,6 +193,26 @@ All files are regular owned files tracked by the sidecar `.anvil.lock` manifest
 (no in-file checksum line; see [updates.md §1](./updates.md#1-the-manifest)). Users
 who customize the root workflow take ownership through the standard dirty-file
 flow.
+
+### 2.1 The code-review skill
+
+`.github/skills/code-review/SKILL.md` is not part of the CI graph. It is an
+[agent skill](https://docs.github.com/en/copilot) that GitHub Copilot code
+review loads when it reviews a pull request in the repository, and that human
+reviewers can read directly.
+
+Anvil owns it for the same reason it owns the workflows: the guidance is a
+property of how the repository is validated, not of any one pull request. Anvil
+emits a CI pipeline that already decides whether the code compiles, lints, and
+passes its tests — so a reviewer predicting those outcomes is duplicating a
+check that has a definitive answer, and is wrong often enough to cost the author
+a rebuttal. The skill's central rule follows from that: comment on evidence you
+can see, and leave build, lint, and test outcomes to the pipeline anvil
+generated.
+
+The content is derived from an audit of withdrawn review comments across
+anvil-managed repositories; each rule corresponds to a class of finding that was
+filed and then disproved.
 
 ## 3. Root workflows
 
