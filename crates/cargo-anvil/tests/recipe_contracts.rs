@@ -1021,6 +1021,8 @@ fn doc_test_selects_doctest_capable_targets_but_not_bin_only_packages() {
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("bin-only")),
             ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("unselected-doc")),
+            ("FAKE_THIRD_PROC_MACRO", OsStr::new("1")),
         ],
     );
     assert!(scoped.status.success(), "scoped doc-test selection failed");
@@ -1028,6 +1030,7 @@ fn doc_test_selects_doctest_capable_targets_but_not_bin_only_packages() {
     assert_eq!(scoped_commands.matches(" test --doc ").count(), 2);
     assert!(scoped_commands.contains("--package fixture"));
     assert!(!scoped_commands.contains("--package bin-only"));
+    assert!(!scoped_commands.contains("--package unselected-doc"));
 
     seed_include(tmp.path(), "affected", "--package\nbin-only");
     fs::write(&log, "").unwrap();
