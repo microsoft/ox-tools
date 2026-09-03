@@ -1036,11 +1036,18 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     assert!(output.status.success(), "anvil-msrv-test failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap();
     for expected in [
-        format!("+1.97 test {affected} --all-targets --all-features --locked"),
-        format!("+1.97 test {affected} --all-targets --locked"),
+        format!("+1.97 test {affected} --tests --all-features --locked"),
+        format!("+1.97 test {affected} --tests --locked"),
     ] {
         assert!(argv.contains(&expected), "missing MSRV invocation '{expected}' in:\n{argv}");
     }
+    // The MSRV check must not build or execute bench targets: `--all-targets`
+    // expands to include `--benches`, and a `harness = false` bench then runs
+    // through a driver binary the msrv setup chain never installs.
+    assert!(
+        !argv.contains("--all-targets") && !argv.contains("--benches"),
+        "MSRV invocations must not select bench targets; captured argv:\n{argv}"
+    );
 
     let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
     fs::write(

@@ -206,7 +206,7 @@ update the recipes or cloud-workflow building blocks.
 A user with only `cargo` (no `just`, no `cargo-anvil`) can still run the basics:
 
 ```sh
-cargo test   --workspace --all-targets --all-features --locked
+cargo test   --workspace --tests --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --check
 ```
