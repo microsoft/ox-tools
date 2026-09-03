@@ -41,8 +41,11 @@ use crate::{HashMap, HashSet};
 /// interest, and guessing at them would cost a full resolve.
 ///
 /// ```rust,no_run
+/// # #[cfg(feature = "internals")]
 /// # use cargo_gamma_lib::internals::cfg::features::enabled;
+/// # #[cfg(feature = "internals")]
 /// # use cargo_gamma_lib::internals::commands::FeatureArgs;
+/// # #[cfg(feature = "internals")]
 /// # fn example(metadata: &cargo_metadata::Metadata) {
 /// let features = enabled(metadata, &FeatureArgs::default());
 ///
