@@ -26,8 +26,7 @@ pub(crate) enum CargoCli {
     about = "Run a command over a cargo-style selection of workspace members",
     long_about = "Resolve a cargo-style package selection (-p/--package, --workspace, --exclude), \
                   optionally filter it by a metadata predicate, and run a command over the result \
-                  — once per member (with {name}/{spec}/{version}/{manifest} substitution) or once \
-                  for the whole set (--once, with {packages})."
+                  — once per member, once per matching Cargo target, or once for the whole set."
 )]
 #[expect(clippy::struct_excessive_bools, reason = "each bool is an independent clap CLI flag")]
 pub(crate) struct EachArgs {
@@ -52,9 +51,15 @@ pub(crate) struct EachArgs {
     // --- filtering ---
     /// Keep only members matching this predicate. Repeatable; AND-combined
     /// (a member is kept only if it matches every --filter).
-    /// Predicates: `lib`, `bin`, `dep:<name>`, `metadata:<key>[=<value>]`.
+    /// Predicates include `target-kind:<kind>`, `publishable`,
+    /// `feature:<name>`, `dep:<name>`, and `metadata:<key>[=<value>]`.
     #[arg(long = "filter", value_name = "PRED")]
     pub(crate) filters: Vec<String>,
+
+    /// Keep members matching at least one predicate in this OR group.
+    /// Repeatable; the group is combined with every --filter predicate.
+    #[arg(long = "filter-any", value_name = "PRED")]
+    pub(crate) filter_any: Vec<String>,
 
     /// Drop members matching this predicate. Repeatable; OR-combined (a member
     /// is dropped if it matches any --exclude-filter). Same predicate grammar
@@ -68,9 +73,18 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) once: bool,
 
+    /// Run once for each selected Cargo target of this kind. Repeatable;
+    /// kinds are OR-combined. Cannot be combined with --once.
+    #[arg(long = "each-target", value_name = "KIND", conflicts_with = "once")]
+    pub(crate) each_targets: Vec<String>,
+
+    /// Retain targets requiring this feature. Repeatable; AND-combined.
+    #[arg(long, value_name = "FEATURE", requires = "each_targets")]
+    pub(crate) target_required_feature: Vec<String>,
+
     /// Run each per-package command from that member's crate root (the
     /// directory containing its Cargo.toml) instead of the current directory.
-    /// Per-package mode only; cannot be combined with --once.
+    /// Per-package and per-target modes only; cannot be combined with --once.
     #[arg(long)]
     pub(crate) chdir: bool,
 

@@ -7,7 +7,10 @@
 //! every ad-hoc `cargo metadata` filter the recipes currently hand-roll,
 //! and nothing more:
 //!
-//! - `lib` / `bin` — the member has a target of that kind.
+//! - `lib` / `bin` / `target-kind:<kind>` — the member has a target of that
+//!   kind.
+//! - `publishable` — Cargo permits publishing the package.
+//! - `feature:<name>` — the package declares the feature.
 //! - `dep:<name>` — the member declares `<name>` as a dependency.
 //! - `metadata:<dotted.key>` — the `package.metadata.<dotted.key>` key exists.
 //! - `metadata:<dotted.key>=<value>` — that key equals `<value>` (numeric
@@ -16,7 +19,7 @@
 use serde_json::Value;
 
 use crate::error::{EachError, InvalidPredicateError};
-use crate::workspace::Member;
+use crate::workspace::{Member, is_known_target_kind};
 
 /// A parsed filter predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +28,12 @@ pub(crate) enum Predicate {
     HasLib,
     /// `bin`: member has a `bin` target.
     HasBin,
+    /// `target-kind:<kind>`: member has a target of that Cargo kind.
+    HasTargetKind(String),
+    /// `publishable`: Cargo permits publishing the package.
+    Publishable,
+    /// `feature:<name>`: member declares the named feature.
+    HasFeature(String),
     /// `dep:<name>`: member declares `<name>` as a dependency.
     DependsOn(String),
     /// `metadata:<dotted.key>`: the metadata key is present.
@@ -50,8 +59,22 @@ impl Predicate {
         match spec {
             "lib" => Ok(Self::HasLib),
             "bin" => Ok(Self::HasBin),
+            "publishable" => Ok(Self::Publishable),
             _ => {
-                if let Some(name) = spec.strip_prefix("dep:") {
+                if let Some(kind) = spec.strip_prefix("target-kind:") {
+                    if !is_known_target_kind(kind) {
+                        return Err(invalid(
+                            spec,
+                            "unknown target kind; expected one of: lib, rlib, dylib, cdylib, staticlib, proc-macro, bin, example, test, bench, custom-build",
+                        ));
+                    }
+                    Ok(Self::HasTargetKind(kind.to_owned()))
+                } else if let Some(name) = spec.strip_prefix("feature:") {
+                    if name.is_empty() {
+                        return Err(invalid(spec, "empty feature name"));
+                    }
+                    Ok(Self::HasFeature(name.to_owned()))
+                } else if let Some(name) = spec.strip_prefix("dep:") {
                     if name.is_empty() {
                         return Err(invalid(spec, "empty dependency name"));
                     }
@@ -59,7 +82,10 @@ impl Predicate {
                 } else if let Some(rest) = spec.strip_prefix("metadata:") {
                     parse_metadata(spec, rest)
                 } else {
-                    Err(invalid(spec, "expected one of: lib, bin, dep:<name>, metadata:<key>[=<value>]"))
+                    Err(invalid(
+                        spec,
+                        "expected one of: lib, bin, target-kind:<kind>, publishable, feature:<name>, dep:<name>, metadata:<key>[=<value>]",
+                    ))
                 }
             }
         }
@@ -71,6 +97,9 @@ impl Predicate {
         match self {
             Self::HasLib => member.has_lib,
             Self::HasBin => member.has_bin,
+            Self::HasTargetKind(kind) => member.targets.iter().any(|target| target.kinds.contains(kind)),
+            Self::Publishable => member.publishable,
+            Self::HasFeature(name) => member.features.contains(name),
             Self::DependsOn(name) => member.dependencies.contains(name),
             Self::MetadataPresent(key) => lookup(&member.metadata, key).is_some(),
             Self::MetadataEquals { key, value } => lookup(&member.metadata, key).is_some_and(|v| value_equals(v, value)),
@@ -151,12 +180,16 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::workspace::MemberTarget;
 
     fn member_with(deps: &[&str], metadata: Value, has_lib: bool, has_bin: bool) -> Member {
         Member {
             name: "m".to_owned(),
             version: "0.1.0".to_owned(),
             manifest_path: PathBuf::from("/ws/m/Cargo.toml"),
+            publishable: true,
+            features: BTreeSet::new(),
+            targets: Vec::new(),
             has_lib,
             has_bin,
             dependencies: deps.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>(),
@@ -168,6 +201,15 @@ mod tests {
     fn parses_kind_predicates() {
         assert_eq!(Predicate::parse("lib").expect("lib"), Predicate::HasLib);
         assert_eq!(Predicate::parse("bin").expect("bin"), Predicate::HasBin);
+        assert_eq!(
+            Predicate::parse("target-kind:proc-macro").expect("target kind"),
+            Predicate::HasTargetKind("proc-macro".to_owned())
+        );
+        assert_eq!(Predicate::parse("publishable").expect("publishable"), Predicate::Publishable);
+        assert_eq!(
+            Predicate::parse("feature:loom").expect("feature"),
+            Predicate::HasFeature("loom".to_owned())
+        );
     }
 
     #[test]
@@ -194,6 +236,8 @@ mod tests {
     fn rejects_unknown_and_empty() {
         Predicate::parse("nonsense").expect_err("unknown predicate must error");
         Predicate::parse("dep:").expect_err("empty dependency name must error");
+        Predicate::parse("feature:").expect_err("empty feature name must error");
+        Predicate::parse("target-kind:no-such-kind").expect_err("unknown target kind must error");
         Predicate::parse("metadata:").expect_err("empty metadata key must error");
     }
 
@@ -210,9 +254,26 @@ mod tests {
 
     #[test]
     fn kind_predicates_match() {
-        let m = member_with(&[], Value::Null, true, false);
+        let mut m = member_with(&[], Value::Null, true, false);
+        m.targets.push(MemberTarget {
+            name: "macros".to_owned(),
+            kinds: std::iter::once("proc-macro".to_owned()).collect(),
+            required_features: BTreeSet::new(),
+        });
         assert!(Predicate::HasLib.matches(&m));
         assert!(!Predicate::HasBin.matches(&m));
+        assert!(Predicate::HasTargetKind("proc-macro".to_owned()).matches(&m));
+        assert!(!Predicate::HasTargetKind("test".to_owned()).matches(&m));
+    }
+
+    #[test]
+    fn package_fact_predicates_match() {
+        let mut m = member_with(&[], Value::Null, false, false);
+        m.publishable = false;
+        m.features.insert("loom".to_owned());
+        assert!(!Predicate::Publishable.matches(&m));
+        assert!(Predicate::HasFeature("loom".to_owned()).matches(&m));
+        assert!(!Predicate::HasFeature("serde".to_owned()).matches(&m));
     }
 
     #[test]

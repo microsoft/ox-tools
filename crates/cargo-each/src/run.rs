@@ -4,11 +4,13 @@
 //! Implementation of the `cargo each` command: resolve the selection,
 //! apply filters, build the plan, and run it.
 
+use std::collections::BTreeSet;
 use std::process::{Command, ExitCode};
 
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::EachArgs;
+use crate::error::InvalidTargetKindError;
 use crate::filter::Predicate;
 use crate::plan::{Mode, PackagesExpansion, Plan};
 use crate::select::Selection;
@@ -23,17 +25,35 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
 
     // The `{packages}` pass-through only applies when the resolved set is the
     // untouched whole workspace: no per-package narrowing and no filters.
-    let packages = if selection.is_whole_workspace() && args.filters.is_empty() && args.exclude_filters.is_empty() {
-        PackagesExpansion::Workspace
-    } else {
-        PackagesExpansion::Explicit
-    };
+    let packages =
+        if selection.is_whole_workspace() && args.filters.is_empty() && args.filter_any.is_empty() && args.exclude_filters.is_empty() {
+            PackagesExpansion::Workspace
+        } else {
+            PackagesExpansion::Explicit
+        };
 
-    let mode = if args.once { Mode::Once } else { Mode::PerPackage };
-    let plan = Plan::build(&members, mode, args.chdir, packages, &args.command).into_app_err("failed to build command plan")?;
+    let target_kinds = parse_target_kinds(&args.each_targets)?;
+    let target_required_features = args.target_required_feature.iter().cloned().collect();
+    let mode = if args.once {
+        Mode::Once
+    } else if target_kinds.is_empty() {
+        Mode::PerPackage
+    } else {
+        Mode::PerTarget
+    };
+    let plan = Plan::build(
+        &members,
+        mode,
+        args.chdir,
+        packages,
+        &target_kinds,
+        &target_required_features,
+        &args.command,
+    )
+    .into_app_err("failed to build command plan")?;
 
     if plan.invocations.is_empty() {
-        eprintln!("cargo each: selection resolved to no packages; nothing to do");
+        eprintln!("cargo each: selection resolved to no work; nothing to do");
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -65,17 +85,19 @@ fn build_selection(args: &EachArgs) -> Selection {
     }
 }
 
-/// Narrow `members` by the `--filter` (keep) and `--exclude-filter` (drop)
+/// Narrow `members` by package keep and drop predicates.
 /// predicates. `--filter` predicates are AND-combined (a member is kept only
-/// if it matches *every* one); `--exclude-filter` predicates are OR-combined
-/// (a member is dropped if it matches *any* one). Exclusion wins over
-/// inclusion, so a member matching both a keep and a drop predicate is
-/// dropped. This is the natural set pairing: keep is an intersection, drop is
-/// a union.
+/// if it matches *every* one); `--filter-any` predicates form one optional OR
+/// group; and `--exclude-filter` predicates are OR-combined. Exclusion wins.
 fn apply_filters(members: &mut Vec<&Member>, args: &EachArgs) -> Result<(), AppError> {
     let keep = parse_predicates(&args.filters)?;
+    let keep_any = parse_predicates(&args.filter_any)?;
     let drop = parse_predicates(&args.exclude_filters)?;
-    members.retain(|m| keep.iter().all(|p| p.matches(m)) && !drop.iter().any(|p| p.matches(m)));
+    members.retain(|m| {
+        keep.iter().all(|p| p.matches(m))
+            && (keep_any.is_empty() || keep_any.iter().any(|p| p.matches(m)))
+            && !drop.iter().any(|p| p.matches(m))
+    });
     Ok(())
 }
 
@@ -84,6 +106,20 @@ fn parse_predicates(specs: &[String]) -> Result<Vec<Predicate>, AppError> {
         .iter()
         .map(|s| Predicate::parse(s).into_app_err("invalid filter predicate"))
         .collect()
+}
+
+fn parse_target_kinds(kinds: &[String]) -> Result<BTreeSet<String>, AppError> {
+    kinds
+        .iter()
+        .map(|kind| {
+            if crate::workspace::is_known_target_kind(kind) {
+                Ok(kind.clone())
+            } else {
+                Err(InvalidTargetKindError::new(kind.clone()).into())
+            }
+        })
+        .collect::<Result<_, crate::error::EachError>>()
+        .into_app_err("invalid per-target configuration")
 }
 
 /// Run each invocation, honoring the fail-fast / `--keep-going` policy.

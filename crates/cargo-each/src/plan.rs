@@ -2,8 +2,9 @@
 // Licensed under the MIT License.
 
 //! Building the resolved [`Plan`] of command invocations from a selected,
-//! filtered member set, a [`Mode`], and the command template.
+//! filtered member set, an execution [`Mode`], and the command template.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::error::{ChdirRequiresPerPackageError, EachError};
@@ -15,6 +16,8 @@ use crate::workspace::Member;
 pub(crate) enum Mode {
     /// Run the command once per selected member (default).
     PerPackage,
+    /// Run the command once per matching Cargo target.
+    PerTarget,
     /// Run the command exactly once for the whole set (`--once`).
     Once,
 }
@@ -61,9 +64,8 @@ pub(crate) struct Plan {
 impl Plan {
     /// Build the plan.
     ///
-    /// `chdir` runs each per-package invocation from the member's crate root
-    /// (the directory containing its `Cargo.toml`); it is only valid in
-    /// per-package mode — combined with [`Mode::Once`] it is a usage error.
+    /// `chdir` runs each per-package or per-target invocation from the member's
+    /// crate root. Combined with [`Mode::Once`] it is a usage error.
     ///
     /// `packages` controls the `{packages}` expansion in once mode:
     /// [`PackagesExpansion::Workspace`] (the resolved set is the entire
@@ -82,6 +84,8 @@ impl Plan {
         mode: Mode,
         chdir: bool,
         packages: PackagesExpansion,
+        target_kinds: &BTreeSet<String>,
+        target_required_features: &BTreeSet<String>,
         command: &[String],
     ) -> Result<Self, EachError> {
         if chdir && mode == Mode::Once {
@@ -111,6 +115,34 @@ impl Plan {
                         argv: substitute(command, &placeholders)?,
                         work_dir: chdir.then(|| m.manifest_dir().to_path_buf()),
                     })
+                })
+                .collect::<Result<Vec<_>, EachError>>()?,
+            Mode::PerTarget => members
+                .iter()
+                .flat_map(|member| {
+                    member
+                        .targets
+                        .iter()
+                        .filter(|target| {
+                            target.kinds.iter().any(|kind| target_kinds.contains(kind))
+                                && target_required_features
+                                    .iter()
+                                    .all(|feature| target.required_features.contains(feature))
+                        })
+                        .map(|target| {
+                            let placeholders = Placeholders::Target {
+                                name: member.name.clone(),
+                                spec: member.spec(),
+                                version: member.version.clone(),
+                                manifest: member.manifest_path.display().to_string(),
+                                target: target.name.clone(),
+                            };
+                            Ok(Invocation {
+                                label: Some(format!("{}::{}", member.name, target.name)),
+                                argv: substitute(command, &placeholders)?,
+                                work_dir: chdir.then(|| member.manifest_dir().to_path_buf()),
+                            })
+                        })
                 })
                 .collect::<Result<Vec<_>, EachError>>()?,
             Mode::Once => {
@@ -145,17 +177,19 @@ fn packages_flags(members: &[&Member], packages: PackagesExpansion) -> Vec<Strin
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::collections::BTreeSet;
-
     use serde_json::Value;
 
     use super::*;
+    use crate::workspace::MemberTarget;
 
     fn member(name: &str) -> Member {
         Member {
             name: name.to_owned(),
             version: "1.2.3".to_owned(),
             manifest_path: PathBuf::from(format!("/ws/{name}/Cargo.toml")),
+            publishable: true,
+            features: BTreeSet::new(),
+            targets: Vec::new(),
             has_lib: true,
             has_bin: false,
             dependencies: BTreeSet::new(),
@@ -167,9 +201,13 @@ mod tests {
         parts.iter().map(|s| (*s).to_owned()).collect()
     }
 
+    fn build(members: &[&Member], mode: Mode, chdir: bool, packages: PackagesExpansion, command: &[String]) -> Result<Plan, EachError> {
+        Plan::build(members, mode, chdir, packages, &BTreeSet::new(), &BTreeSet::new(), command)
+    }
+
     #[test]
     fn empty_set_yields_empty_plan() {
-        let plan = Plan::build(&[], Mode::PerPackage, false, PackagesExpansion::Explicit, &cmd(&["cargo", "test"])).expect("build");
+        let plan = build(&[], Mode::PerPackage, false, PackagesExpansion::Explicit, &cmd(&["cargo", "test"])).expect("build");
         assert!(plan.invocations.is_empty());
     }
 
@@ -177,7 +215,7 @@ mod tests {
     fn empty_set_still_validates_placeholders() {
         // A per-package token under --once is a usage error even when the
         // selection is empty (rather than a silent no-op).
-        let err = Plan::build(
+        let err = build(
             &[],
             Mode::Once,
             false,
@@ -187,7 +225,7 @@ mod tests {
         .expect_err("misused placeholder must error");
         assert!(err.to_string().contains("{name}"));
         // A valid template over an empty set is still an empty plan.
-        let plan = Plan::build(
+        let plan = build(
             &[],
             Mode::Once,
             false,
@@ -202,7 +240,7 @@ mod tests {
     fn per_package_builds_one_invocation_each() {
         let a = member("alpha");
         let b = member("beta");
-        let plan = Plan::build(
+        let plan = build(
             &[&a, &b],
             Mode::PerPackage,
             false,
@@ -223,14 +261,14 @@ mod tests {
     #[test]
     fn chdir_sets_work_dir_to_crate_root() {
         let a = member("alpha");
-        let plan = Plan::build(&[&a], Mode::PerPackage, true, PackagesExpansion::Explicit, &cmd(&["cargo", "fmt"])).expect("build");
+        let plan = build(&[&a], Mode::PerPackage, true, PackagesExpansion::Explicit, &cmd(&["cargo", "fmt"])).expect("build");
         assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(PathBuf::from("/ws/alpha").as_path()));
     }
 
     #[test]
     fn chdir_with_once_is_a_usage_error() {
         let a = member("alpha");
-        let err = Plan::build(
+        let err = build(
             &[&a],
             Mode::Once,
             true,
@@ -246,7 +284,7 @@ mod tests {
     #[test]
     fn once_whole_workspace_uses_workspace_flag() {
         let a = member("alpha");
-        let plan = Plan::build(
+        let plan = build(
             &[&a],
             Mode::Once,
             false,
@@ -262,7 +300,7 @@ mod tests {
     fn once_subset_uses_explicit_package_flags() {
         let a = member("alpha");
         let b = member("beta");
-        let plan = Plan::build(
+        let plan = build(
             &[&a, &b],
             Mode::Once,
             false,
@@ -274,5 +312,59 @@ mod tests {
             plan.invocations[0].argv,
             ["cargo", "clippy", "--package", "alpha@1.2.3", "--package", "beta@1.2.3"]
         );
+    }
+
+    #[test]
+    fn per_target_filters_and_substitutes_targets() {
+        let mut a = member("alpha");
+        a.targets = vec![
+            MemberTarget {
+                name: "ordinary".to_owned(),
+                kinds: std::iter::once("test".to_owned()).collect(),
+                required_features: BTreeSet::new(),
+            },
+            MemberTarget {
+                name: "loom".to_owned(),
+                kinds: std::iter::once("test".to_owned()).collect(),
+                required_features: std::iter::once("loom".to_owned()).collect(),
+            },
+        ];
+        let kinds = std::iter::once("test".to_owned()).collect();
+        let required = std::iter::once("loom".to_owned()).collect();
+        let plan = Plan::build(
+            &[&a],
+            Mode::PerTarget,
+            false,
+            PackagesExpansion::Explicit,
+            &kinds,
+            &required,
+            &cmd(&["cargo", "test", "-p", "{name}", "--test", "{target}"]),
+        )
+        .expect("build target plan");
+        assert_eq!(plan.invocations.len(), 1);
+        assert_eq!(plan.invocations[0].label.as_deref(), Some("alpha::loom"));
+        assert_eq!(plan.invocations[0].argv, ["cargo", "test", "-p", "alpha", "--test", "loom"]);
+    }
+
+    #[test]
+    fn per_target_supports_chdir() {
+        let mut a = member("alpha");
+        a.targets.push(MemberTarget {
+            name: "demo".to_owned(),
+            kinds: std::iter::once("example".to_owned()).collect(),
+            required_features: BTreeSet::new(),
+        });
+        let kinds = std::iter::once("example".to_owned()).collect();
+        let plan = Plan::build(
+            &[&a],
+            Mode::PerTarget,
+            true,
+            PackagesExpansion::Explicit,
+            &kinds,
+            &BTreeSet::new(),
+            &cmd(&["echo", "{target}"]),
+        )
+        .expect("build target plan");
+        assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(PathBuf::from("/ws/alpha").as_path()));
     }
 }

@@ -6,8 +6,10 @@
 //! A fixed, small set of `{token}` replacements — deliberately not an
 //! expression language:
 //!
-//! - Per-package tokens (valid in per-package mode): `{name}`, `{spec}`,
-//!   `{version}`, `{manifest}`. Replaced textually inside each argument.
+//! - Package tokens (valid in per-package and per-target modes): `{name}`,
+//!   `{spec}`, `{version}`, `{manifest}`. Replaced textually inside each
+//!   argument.
+//! - The per-target token `{target}`.
 //! - The once token (valid only in `--once` mode): `{packages}`. Must stand
 //!   alone as a whole argument; it expands to the resolved selection flags,
 //!   which is several tokens.
@@ -26,6 +28,8 @@ use crate::plan::Mode;
 
 /// Per-package placeholder tokens.
 const PER_PACKAGE_TOKENS: [&str; 4] = ["{name}", "{spec}", "{version}", "{manifest}"];
+/// The per-target placeholder token.
+const TARGET_TOKEN: &str = "{target}";
 /// The once-mode placeholder token.
 const PACKAGES_TOKEN: &str = "{packages}";
 
@@ -42,6 +46,14 @@ pub(crate) enum Placeholders {
         version: String,
         /// `{manifest}` — absolute path to the member's `Cargo.toml`.
         manifest: String,
+    },
+    /// Per-target mode: package facts plus the selected target name.
+    Target {
+        name: String,
+        spec: String,
+        version: String,
+        manifest: String,
+        target: String,
     },
     /// Once mode: `{packages}` expands to these pre-computed selection flags.
     Once {
@@ -71,6 +83,13 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
                     PlaceholderMisuseError::new((*token).to_owned(), "per-package token is not valid in --once mode".to_owned()).into(),
                 );
             }
+            if arg.contains(TARGET_TOKEN) {
+                return Err(PlaceholderMisuseError::new(
+                    TARGET_TOKEN.to_owned(),
+                    "per-target token is not valid in --once mode".to_owned(),
+                )
+                .into());
+            }
             if arg != PACKAGES_TOKEN && arg.contains(PACKAGES_TOKEN) {
                 return Err(PlaceholderMisuseError::new(
                     PACKAGES_TOKEN.to_owned(),
@@ -78,8 +97,13 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
                 )
                 .into());
             }
-        } else if arg.contains(PACKAGES_TOKEN) {
-            return Err(PlaceholderMisuseError::new(PACKAGES_TOKEN.to_owned(), "only valid in --once mode".to_owned()).into());
+        } else {
+            if arg.contains(PACKAGES_TOKEN) {
+                return Err(PlaceholderMisuseError::new(PACKAGES_TOKEN.to_owned(), "only valid in --once mode".to_owned()).into());
+            }
+            if mode == Mode::PerPackage && arg.contains(TARGET_TOKEN) {
+                return Err(PlaceholderMisuseError::new(TARGET_TOKEN.to_owned(), "only valid in per-target mode".to_owned()).into());
+            }
         }
     }
     Ok(())
@@ -95,10 +119,10 @@ pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), E
 /// token under `--once`, or `{packages}` outside `--once`), or if `{packages}`
 /// is embedded in a larger argument rather than standing alone.
 pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result<Vec<String>, EachError> {
-    let mode = if matches!(placeholders, Placeholders::Once { .. }) {
-        Mode::Once
-    } else {
-        Mode::PerPackage
+    let mode = match placeholders {
+        Placeholders::Package { .. } => Mode::PerPackage,
+        Placeholders::Target { .. } => Mode::PerTarget,
+        Placeholders::Once { .. } => Mode::Once,
     };
     validate_placeholders(args, mode)?;
     let mut out = Vec::with_capacity(args.len());
@@ -121,6 +145,25 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                     .replace("{spec}", spec)
                     .replace("{version}", version)
                     .replace("{manifest}", manifest);
+                out.push(replaced);
+            }
+            Placeholders::Target {
+                name,
+                spec,
+                version,
+                manifest,
+                target,
+            } => {
+                #[expect(
+                    clippy::literal_string_with_formatting_args,
+                    reason = "cargo-each placeholder tokens, not format args"
+                )]
+                let replaced = arg
+                    .replace("{name}", name)
+                    .replace("{spec}", spec)
+                    .replace("{version}", version)
+                    .replace("{manifest}", manifest)
+                    .replace(TARGET_TOKEN, target);
                 out.push(replaced);
             }
             Placeholders::Once { packages } => {
@@ -198,5 +241,24 @@ mod tests {
         };
         let err = substitute(&args(&["x={packages}"]), &ph).expect_err("misuse");
         assert!(err.to_string().contains("stand alone"));
+    }
+
+    #[test]
+    fn target_mode_expands_package_and_target_tokens() {
+        let ph = Placeholders::Target {
+            name: "cargo-anvil".to_owned(),
+            spec: "cargo-anvil@0.4.0".to_owned(),
+            version: "0.4.0".to_owned(),
+            manifest: "/ws/cargo-anvil/Cargo.toml".to_owned(),
+            target: "loom".to_owned(),
+        };
+        let out = substitute(&args(&["test", "-p", "{name}", "--test", "{target}"]), &ph).expect("substitute");
+        assert_eq!(out, ["test", "-p", "cargo-anvil", "--test", "loom"]);
+    }
+
+    #[test]
+    fn target_token_is_rejected_in_per_package_mode() {
+        let err = substitute(&args(&["echo", "{target}"]), &pkg()).expect_err("misuse");
+        assert!(err.to_string().contains("per-target"));
     }
 }

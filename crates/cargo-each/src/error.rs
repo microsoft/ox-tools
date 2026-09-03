@@ -30,6 +30,7 @@
     LoadMetadataError,
     UnknownSelectorError,
     InvalidPredicateError,
+    InvalidTargetKindError,
     PlaceholderMisuseError,
     ChdirRequiresPerPackageError
 )]
@@ -57,9 +58,16 @@ pub(crate) struct InvalidPredicateError {
     pub(crate) reason: String,
 }
 
-/// A placeholder token was used in a mode that does not support it (e.g.
-/// a per-package token like `{name}` under `--once`, or `{packages}`
-/// outside `--once`).
+/// A `--each-target` value is not a supported Cargo target kind.
+#[ohno::error]
+#[display(
+    "invalid target kind `{kind}`; expected one of: lib, rlib, dylib, cdylib, staticlib, proc-macro, bin, example, test, bench, custom-build"
+)]
+pub(crate) struct InvalidTargetKindError {
+    pub(crate) kind: String,
+}
+
+/// A placeholder token was used in a mode that does not support it.
 #[ohno::error]
 #[display("placeholder `{token}` cannot be used here: {reason}")]
 pub(crate) struct PlaceholderMisuseError {
@@ -69,9 +77,9 @@ pub(crate) struct PlaceholderMisuseError {
 
 /// `--chdir` was combined with `--once`. Changing into a member's crate root
 /// is only meaningful when there is one member per invocation, i.e. in
-/// per-package mode.
+/// per-package or per-target mode.
 #[ohno::error]
-#[display("`--chdir` requires per-package mode; it cannot be combined with `--once`")]
+#[display("`--chdir` cannot be combined with `--once`")]
 pub(crate) struct ChdirRequiresPerPackageError;
 
 #[cfg(test)]
@@ -102,6 +110,14 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("dep:"));
         assert!(rendered.contains("empty dependency name"));
+    }
+
+    #[test]
+    fn invalid_target_kind_names_value() {
+        let err = InvalidTargetKindError::new("nope".to_owned());
+        let rendered = err.to_string();
+        assert!(rendered.contains("nope"));
+        assert!(rendered.contains("target kind"));
     }
 
     #[test]
