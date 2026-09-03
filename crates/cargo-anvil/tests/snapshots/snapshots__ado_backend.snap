@@ -345,7 +345,7 @@ stages:
   # Each pr-* job downloads its OS's `anvil-impact-<os>` artifact into
   # target/anvil/impact/ (job.yml `inputArtifacts`); the group's scoped checks
   # then read that cache via their `anvil-impact` dependency. An empty tier
-  # resolves to `--skip` and a first-time-adoption fallback to `--workspace`,
+  # resolves to `--none` and a first-time-adoption fallback to `--workspace`,
   # exactly as locally.
   - stage: pr_fast
     displayName: anvil pr-fast
@@ -2795,6 +2795,12 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Preserve MSRV compile coverage for benches and examples without using
+    # `cargo test --all-targets`, which would execute harness-free benches.
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install the declared MSRV toolchain only when this check is required.

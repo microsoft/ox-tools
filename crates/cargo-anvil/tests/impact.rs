@@ -1061,15 +1061,16 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     for expected in [
         format!("each {affected} --once -- cargo +1.97 test {{packages}} --tests --all-features --locked"),
         format!("each {affected} --once -- cargo +1.97 test {{packages}} --tests --locked"),
+        format!("each {affected} --once -- cargo +1.97 check {{packages}} --benches --examples --all-features --locked"),
+        format!("each {affected} --once -- cargo +1.97 check {{packages}} --benches --examples --locked"),
     ] {
         assert!(argv.contains(&expected), "missing MSRV invocation '{expected}' in:\n{argv}");
     }
-    // The MSRV check must not build or execute bench targets: `--all-targets`
-    // expands to include `--benches`, and a `harness = false` bench then runs
-    // through a driver binary the msrv setup chain never installs.
+    // Tests must not execute bench targets; the separate cargo-check commands
+    // retain compile-only MSRV coverage for benches and examples.
     assert!(
-        !argv.contains("--all-targets") && !argv.contains("--benches"),
-        "MSRV invocations must not select bench targets; captured argv:\n{argv}"
+        !argv.lines().any(|line| line.contains(" test ") && line.contains("--benches")),
+        "MSRV test invocations must not select bench targets; captured argv:\n{argv}"
     );
 
     let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
