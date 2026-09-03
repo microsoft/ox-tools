@@ -407,21 +407,23 @@ mod tests {
             .expect("miri.just is registered in CHECK_FILES");
         for needle in [
             "_anvil-miri-test *package_args:",
+            "cargo '+{{ rust_nightly }}' metadata --no-deps --format-version 1",
             "miri test --all-features --tests --no-run --message-format=json-render-diagnostics",
             "$message.profile.test -ne $true",
             "ForEach-Object -Parallel",
             "-ThrottleLimit $jobs",
             "rustc $toolchain --print sysroot",
+            "$toolchainSysrootOutput = @(",
             "anvil miri: ANVIL_MIRI_JOBS must be a positive integer",
-            "Sort-Object PackageId, TargetKind, TargetName, Path",
-            "##[group]Miri artifact",
-            "::group::Miri artifact",
+            "Sort-Object PackageLabel, TargetKind, TargetName, Path",
+            "##[group]Miri executable",
+            "::group::Miri executable",
         ] {
             assert!(miri.contains(needle), "miri runner is missing '{needle}'");
         }
         assert!(
             miri.contains("$env:MIRI_BE_RUSTC = 'host'"),
-            "standalone cargo-miri runner calls need the same ambient rustc mode recorded at build time"
+            "direct cargo-miri runner calls need the same ambient rustc mode recorded at build time"
         );
 
         for check in ["miri", "miri-tree-borrows", "miri-strict-provenance", "miri-race-coverage"] {
@@ -431,7 +433,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{check}.just is registered in CHECK_FILES"));
             assert!(
                 body.contains("& \"{{ just_executable() }}\" _anvil-miri-test @pkg"),
-                "{check}.just must delegate to the shared Miri artifact runner"
+                "{check}.just must delegate to the shared Miri executable runner"
             );
         }
     }

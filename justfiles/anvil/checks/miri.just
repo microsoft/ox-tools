@@ -12,9 +12,9 @@
 # scheduled/full tiers (which force ANVIL_IMPACT=off) or a dirty local tree
 # (which widens for safety).
 
-# Compile all selected packages together, then run their Miri test artifacts in
+# Compile all selected packages together, then run their Miri test executables in
 # parallel. The single Cargo invocation preserves workspace feature unification,
-# while artifact-level parallelism uses host logical processors that
+# while executable-level parallelism uses host logical processors that
 # `cargo miri test` otherwise leaves idle.
 #
 # Packages can opt their own test targets out through:
@@ -28,13 +28,15 @@
 #
 # ANVIL_MIRI_JOBS overrides the default of one artifact worker per logical processor.
 
-# Compile selected packages once and run their Miri test artifacts concurrently.
+# Compile selected packages once and run their Miri test executables concurrently.
 [script("pwsh", "-NoProfile")]
 _anvil-miri-test *package_args:
     $ErrorActionPreference = 'Stop'
     $packageArgs = @('{{ replace(package_args, "'", "''") }}' -split '\s+' | Where-Object { $_ })
 
-    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
+    # The metadata and compiler-artifact streams must come from the same Cargo
+    # version because Cargo changed package-ID formats in 1.78.
+    $metadataJson = & cargo '+{{ rust_nightly }}' metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil miri: cargo metadata failed'
         exit $LASTEXITCODE
@@ -51,12 +53,14 @@ _anvil-miri-test *package_args:
         [void]$workspaceMembers.Add([string]$member)
     }
     $packageDirectories = @{}
+    $packageLabels = @{}
     $excludedPackages = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     $excludedPackageIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($package in $metadata.packages) {
         $packageId = [string]$package.id
         if (-not $workspaceMembers.Contains($packageId)) { continue }
         $packageDirectories[$packageId] = Split-Path -Parent ([string]$package.manifest_path)
+        $packageLabels[$packageId] = "$($package.name) $($package.version)"
         if ($package.metadata.anvil.miri.exclude -eq $true) {
             [void]$excludedPackages.Add([string]$package.name)
             [void]$excludedPackageIds.Add($packageId)
@@ -116,6 +120,10 @@ _anvil-miri-test *package_args:
                 [Console]::Error.Write($message.message.rendered)
                 continue
             }
+            # Cargo's executable compiler-artifact records with profile.test=true
+            # are runnable Miri test executables. Exact-path deduplication is a
+            # defensive guard against repeated JSON records; package exclusion
+            # is Anvil policy applied after Cargo's protocol-level admission.
             if ($message.reason -ne 'compiler-artifact' -or -not $message.executable -or $message.profile.test -ne $true) {
                 continue
             }
@@ -135,19 +143,21 @@ _anvil-miri-test *package_args:
             }
             $targetKind = $targetKinds -join '/'
             $artifactFileName = Split-Path -Leaf $artifactPath
+            $packageLabel = [string]$packageLabels[$packageId]
             $artifacts.Add([pscustomobject]@{
                 Path = $artifactPath
                 PackageId = $packageId
+                PackageLabel = $packageLabel
                 TargetName = $targetName
                 TargetKind = $targetKind
-                Label = "$packageId :: $targetKind $targetName ($artifactFileName)"
+                Label = "$packageLabel :: $targetKind $targetName ($artifactFileName)"
                 WorkingDirectory = $packageDirectories[$packageId]
             })
         }
 
         if ($buildExitCode -ne 0) { exit $buildExitCode }
         if ($artifacts.Count -eq 0) {
-            Write-Host 'anvil miri: Cargo produced no runnable test artifacts; nothing to test'
+            Write-Host 'anvil miri: Cargo produced no runnable test executables; nothing to test'
             exit 0
         }
 
@@ -158,12 +168,20 @@ _anvil-miri-test *package_args:
             exit 1
         }
         $env:MIRI_SYSROOT = $sysrootOutput[-1]
-        $toolchainSysroot = & rustc $toolchain --print sysroot
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($toolchainSysroot)) {
+        $toolchainSysrootOutput = @(& rustc $toolchain --print sysroot)
+        if ($LASTEXITCODE -ne 0) {
             Write-Error "anvil miri: could not resolve the $toolchain toolchain sysroot"
             exit 1
         }
-        $toolchainBin = Join-Path $toolchainSysroot.Trim() 'bin'
+        $toolchainSysroot = @(
+            $toolchainSysrootOutput |
+                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+        ) | Select-Object -Last 1
+        if ([string]::IsNullOrWhiteSpace([string]$toolchainSysroot)) {
+            Write-Error "anvil miri: could not resolve the $toolchain toolchain sysroot"
+            exit 1
+        }
+        $toolchainBin = Join-Path (([string]$toolchainSysroot).Trim()) 'bin'
         $runner = @(
             'cargo-miri.exe', 'cargo-miri', 'cargo-miri.ps1' |
                 ForEach-Object { Join-Path $toolchainBin $_ } |
@@ -173,8 +191,8 @@ _anvil-miri-test *package_args:
             Write-Error "anvil miri: cargo-miri was not found under '$toolchainBin'"
             exit 1
         }
-        # cargo-miri records MIRI_BE_RUSTC=host in each artifact. Keeping the
-        # same value in the standalone runner environment lets phase_runner
+        # cargo-miri records MIRI_BE_RUSTC=host in each test executable. Keeping
+        # the same value in the direct runner environment lets phase_runner
         # suppress that recorded value before launching Miri for interpretation.
         $env:MIRI_BE_RUSTC = 'host'
 
@@ -189,11 +207,11 @@ _anvil-miri-test *package_args:
         }
         $jobs = [Math]::Min($jobs, $artifacts.Count)
 
-        Write-Host "anvil miri: running $($artifacts.Count) test artifacts with $jobs concurrent process(es)"
+        Write-Host "anvil miri: running $($artifacts.Count) test executables with $jobs artifact worker(s)"
 
         # Cargo normally runs each test executable from its owning package root.
         # The direct cargo-miri invocation below restores that working directory.
-        $orderedArtifacts = @($artifacts | Sort-Object PackageId, TargetKind, TargetName, Path)
+        $orderedArtifacts = @($artifacts | Sort-Object PackageLabel, TargetKind, TargetName, Path)
         $work = for ($i = 0; $i -lt $orderedArtifacts.Count; $i++) {
             [pscustomobject]@{
                 Index = $i
@@ -232,11 +250,11 @@ _anvil-miri-test *package_args:
         # stable artifact index keeps diagnostics isolated and deterministic.
         foreach ($result in $results | Sort-Object Index) {
             if ($env:GITHUB_ACTIONS -eq 'true') {
-                Write-Host "::group::Miri artifact $($result.Label)"
+                Write-Host "::group::Miri executable $($result.Label)"
             } elseif ($env:TF_BUILD -eq 'True') {
-                Write-Host "##[group]Miri artifact $($result.Label)"
+                Write-Host "##[group]Miri executable $($result.Label)"
             } else {
-                Write-Host "`n=== Miri artifact $($result.Label) ==="
+                Write-Host "`n=== Miri executable $($result.Label) ==="
             }
             Get-Content -LiteralPath $result.Log | ForEach-Object { Write-Host $_ }
             if ($env:GITHUB_ACTIONS -eq 'true') {
@@ -248,7 +266,7 @@ _anvil-miri-test *package_args:
 
         $failed = @($results | Where-Object ExitCode -ne 0)
         if ($failed.Count -ne 0) {
-            [Console]::Error.WriteLine("anvil miri: failed artifacts: $($failed.Label -join ', ')")
+            [Console]::Error.WriteLine("anvil miri: failed executables: $($failed.Label -join ', ')")
             exit 1
         }
     } finally {
@@ -261,12 +279,12 @@ anvil-miri: anvil-miri-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     if ($include -eq '--skip') { Write-Host 'anvil-miri: no affected packages; skipping'; exit 0 }
-    # Run miri via libtest (`cargo miri test`), NOT `cargo miri nextest
-    # run`. nextest uses a process-per-test model; under miri every
-    # process pays the full cost of re-interpreting std initialization,
-    # so process-per-test roughly DOUBLES miri wall-time on a large suite
-    # (the dominant cost on the PR critical path). libtest runs all tests
-    # of a binary in a single process, matching how upstream runs miri.
+    # The shared helper compiles with `cargo miri test --no-run`, then invokes
+    # each resulting libtest executable directly. It intentionally does not use
+    # nextest: nextest's process-per-test model makes every test pay the cost of
+    # re-interpreting std initialization, roughly doubling Miri wall time on a
+    # large suite. One libtest process runs all tests in an executable, matching
+    # upstream Miri.
     #
     # `--tests` selects the same target set nextest ran -- lib unit tests,
     # bin unit tests, and integration tests -- while excluding doctests

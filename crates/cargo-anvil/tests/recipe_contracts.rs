@@ -103,6 +103,7 @@ if ($args -contains 'metadata') {
     }
     $root = $env:FAKE_WORKSPACE_ROOT
     $packageName = if ($env:FAKE_PACKAGE_NAME) { $env:FAKE_PACKAGE_NAME } else { 'fixture' }
+    $packageId = if ($env:FAKE_PACKAGE_ID) { $env:FAKE_PACKAGE_ID } else { "$packageName 0.1.0" }
     $libName = if ($env:FAKE_LIB_NAME) { $env:FAKE_LIB_NAME } else { 'fixture' }
     $manifestPath = if ($env:FAKE_PACKAGE_DIR_LEAF) {
         [System.IO.Path]::Combine($root, $env:FAKE_PACKAGE_DIR_LEAF, 'Cargo.toml')
@@ -121,7 +122,7 @@ if ($args -contains 'metadata') {
         [pscustomobject]@{
             name = $packageName
             version = '0.1.0'
-            id = "$packageName 0.1.0"
+            id = $packageId
             manifest_path = $manifestPath
             targets = @([pscustomobject]@{ name = $libName; kind = @('lib') })
             publish = if ($env:FAKE_PUBLISH_FALSE) {
@@ -145,10 +146,15 @@ if ($args -contains 'metadata') {
                 [pscustomobject]@{ miri = [pscustomobject]@{ exclude = $true } }
             )
         }
+        $secondPackageId = if ($env:FAKE_SECOND_PACKAGE_ID) {
+            $env:FAKE_SECOND_PACKAGE_ID
+        } else {
+            "$($env:FAKE_SECOND_PACKAGE_NAME) 0.1.0"
+        }
         $packages += [pscustomobject]@{
             name = $env:FAKE_SECOND_PACKAGE_NAME
             version = '0.1.0'
-            id = "$($env:FAKE_SECOND_PACKAGE_NAME) 0.1.0"
+            id = $secondPackageId
             manifest_path = [System.IO.Path]::Combine($root, 'nested', $secondDirLeaf, 'Cargo.toml')
             targets = @([pscustomobject]@{ name = $env:FAKE_SECOND_PACKAGE_NAME; kind = @('lib') })
             publish = $null
@@ -342,6 +348,9 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
         &bin.join("rustc.ps1"),
         r"
 if ($args -contains 'sysroot') {
+    if ($env:FAKE_RUSTC_PREAMBLE) {
+        Write-Output $env:FAKE_RUSTC_PREAMBLE
+    }
     Write-Output ([System.IO.Path]::Combine($env:FAKE_WORKSPACE_ROOT, 'fake-toolchain'))
     exit 0
 }
@@ -435,6 +444,19 @@ fn assert_failed(output: &Output, context: &str) {
     );
 }
 
+fn assert_miri_cargo_calls(cargo_calls: &str) {
+    assert!(
+        cargo_calls.contains("+nightly-test metadata --no-deps --format-version 1"),
+        "metadata and compiler-artifact IDs must use the same pinned nightly Cargo:\n{cargo_calls}"
+    );
+    assert!(
+        cargo_calls.contains(
+            "miri test --all-features --tests --no-run --message-format=json-render-diagnostics --workspace --exclude other-package"
+        ),
+        "workspace Miri compilation must exclude metadata-opted-out packages:\n{cargo_calls}"
+    );
+}
+
 #[test]
 fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     if !tools_available() {
@@ -473,6 +495,7 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
             ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
             ("FAKE_MIRI_RUN_LOG", run_log.as_os_str()),
             ("FAKE_MIRI_SLEEP_MS", OsStr::new("300")),
+            ("FAKE_RUSTC_PREAMBLE", OsStr::new("rustc diagnostic preamble")),
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
             ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("other-package")),
             ("FAKE_SECOND_MIRI_EXCLUDE", OsStr::new("1")),
@@ -486,12 +509,7 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
         String::from_utf8_lossy(&output.stderr)
     );
     let cargo_calls = fs::read_to_string(cargo_log).unwrap();
-    assert!(
-        cargo_calls.contains(
-            "miri test --all-features --tests --no-run --message-format=json-render-diagnostics --workspace --exclude other-package"
-        ),
-        "workspace Miri compilation must exclude metadata-opted-out packages:\n{cargo_calls}"
-    );
+    assert_miri_cargo_calls(&cargo_calls);
     assert!(run_log.with_extension("alpha-test.start").is_file());
     assert!(run_log.with_extension("zeta-test.start").is_file());
     assert!(!run_log.with_extension("ordinary-bin.start").exists());
@@ -536,8 +554,8 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let alpha_group = stdout.find("=== Miri artifact fixture 0.1.0 :: test alpha").unwrap();
-    let zeta_group = stdout.find("=== Miri artifact fixture 0.1.0 :: test zeta").unwrap();
+    let alpha_group = stdout.find("=== Miri executable fixture 0.1.0 :: test alpha").unwrap();
+    let zeta_group = stdout.find("=== Miri executable fixture 0.1.0 :: test zeta").unwrap();
     assert!(alpha_group < zeta_group, "artifact logs must replay deterministically");
 }
 
@@ -563,9 +581,11 @@ fn miri_runner_labels_same_named_artifacts_with_package_identity() {
         "[package]\nname = \"other-package\"\nversion = \"0.1.0\"\n",
     );
     let run_log = tmp.path().join("same-name");
+    let fixture_id = "path+file:///workspace/fixture#fixture@0.1.0";
+    let other_id = "path+file:///workspace/other#other-package@0.1.0";
     let artifacts = r#"[
-        {"name":"shared-test","artifact_dir":"fixture","package_id":"fixture 0.1.0","target_name":"shared","target_kind":"test","test":true},
-        {"name":"shared-test","artifact_dir":"other","package_id":"other-package 0.1.0","target_name":"shared","target_kind":"test","test":true}
+        {"name":"shared-test","artifact_dir":"fixture","package_id":"path+file:///workspace/fixture#fixture@0.1.0","target_name":"shared","target_kind":"test","test":true},
+        {"name":"shared-test","artifact_dir":"other","package_id":"path+file:///workspace/other#other-package@0.1.0","target_name":"shared","target_kind":"test","test":true}
     ]"#;
     let output = run_just(
         tmp.path(),
@@ -574,20 +594,26 @@ fn miri_runner_labels_same_named_artifacts_with_package_identity() {
             ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
             ("FAKE_MIRI_RUN_LOG", run_log.as_os_str()),
             ("ANVIL_MIRI_JOBS", OsStr::new("1")),
+            ("FAKE_PACKAGE_ID", OsStr::new(fixture_id)),
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
+            ("FAKE_SECOND_PACKAGE_ID", OsStr::new(other_id)),
             ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("other-package")),
         ],
     );
 
     assert!(
         output.status.success(),
-        "same-named Miri artifacts should both run:\nstdout:\n{}\nstderr:\n{}",
+        "same-named Miri executables should both run:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Miri artifact fixture 0.1.0 :: test shared (shared-test)"));
-    assert!(stdout.contains("Miri artifact other-package 0.1.0 :: test shared (shared-test)"));
+    assert!(stdout.contains("Miri executable fixture 0.1.0 :: test shared (shared-test)"));
+    assert!(stdout.contains("Miri executable other-package 0.1.0 :: test shared (shared-test)"));
+    assert!(
+        !stdout.contains("path+file:///"),
+        "display labels must not expose Cargo package IDs"
+    );
 }
 
 #[test]
@@ -680,10 +706,10 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
     let no_artifacts = run_just(tmp.path(), &["_anvil-miri-test", "--workspace"], &[]);
     assert!(
         no_artifacts.status.success(),
-        "a selected package set with no test artifacts should succeed:\n{}",
+        "a selected package set with no test executables should succeed:\n{}",
         String::from_utf8_lossy(&no_artifacts.stderr)
     );
-    assert!(String::from_utf8_lossy(&no_artifacts.stdout).contains("no runnable test artifacts"));
+    assert!(String::from_utf8_lossy(&no_artifacts.stdout).contains("no runnable test executables"));
 
     let all_excluded = run_just(
         tmp.path(),
@@ -724,14 +750,14 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
             ("TF_BUILD", OsStr::new("True")),
         ],
     );
-    assert_failed(&failed, "one failed Miri artifact");
+    assert_failed(&failed, "one failed Miri executable");
     let stdout = String::from_utf8_lossy(&failed.stdout);
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(stdout.contains("miri output: fail-test"));
     assert!(stdout.contains("miri output: pass-test"));
-    assert!(stdout.contains("##[group]Miri artifact fixture 0.1.0 :: test fail-test (fail-test)"));
+    assert!(stdout.contains("##[group]Miri executable fixture 0.1.0 :: test fail-test (fail-test)"));
     assert!(stdout.contains("##[endgroup]"));
-    assert!(stderr.contains("failed artifacts: fixture 0.1.0 :: test fail-test (fail-test)"));
+    assert!(stderr.contains("failed executables: fixture 0.1.0 :: test fail-test (fail-test)"));
 
     let invalid_jobs = run_just(
         tmp.path(),
