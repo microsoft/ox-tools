@@ -67,6 +67,6 @@ anvil-msrv-test-validate-prereqs:
         } else {
             'run: just anvil-msrv-test-setup'
         }
-        Write-Error "anvil: MSRV toolchain '$toolchain' is unavailable; $hint"
+        [Console]::Error.WriteLine("anvil: MSRV toolchain '$toolchain' is unavailable; $hint")
         exit $cargoExit
     }

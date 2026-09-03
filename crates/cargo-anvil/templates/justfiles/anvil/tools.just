@@ -499,8 +499,8 @@ _check-tool name version:
         }
     }
     if ($cargoExit -ne 0) {
-        $diagnostic = ($listOutput | Out-String).Trim()
-        Write-Error "anvil: selected stable Cargo is unavailable while checking '$name' (exit $cargoExit). Run: just anvil-toolchain-stable-install`n$diagnostic"
+        $diagnostic = [string]::Join([Environment]::NewLine, [string[]] $listOutput).Trim()
+        [Console]::Error.WriteLine("anvil: selected stable Cargo is unavailable while checking '$name' (exit $cargoExit). Run: just anvil-toolchain-stable-install`n$diagnostic")
         exit $cargoExit
     }
     if (-not $installed) {

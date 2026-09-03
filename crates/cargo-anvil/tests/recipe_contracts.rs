@@ -199,7 +199,7 @@ if ($args -contains 'install' -and $args -contains '--list') {
 if ($args -contains 'install' -and $args -contains '--version') {
     exit [int]$env:FAKE_INSTALL_EXIT
 }
-exit 0
+exit [int]$env:FAKE_CARGO_DEFAULT_EXIT
 "#;
 
 fn write(path: &Path, contents: &str) {
@@ -439,6 +439,21 @@ fn validation_disables_auto_install_and_preserves_cargo_failures() {
     );
     assert_eq!(fs::read_to_string(auto_install_log).unwrap().trim(), "0");
 
+    let output = run_just(
+        msrv.path(),
+        &["anvil-msrv-test-validate-prereqs"],
+        &[("FAKE_CARGO_DEFAULT_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(ARBITRARY_FAILURE_EXIT.parse().unwrap()),
+        "MSRV validation must preserve Cargo's failure status"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("MSRV toolchain '1.97' is unavailable"),
+        "MSRV validation must retain its actionable diagnostic"
+    );
+
     let tools = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
     let output = run_just(
         tools.path(),
@@ -449,6 +464,11 @@ fn validation_disables_auto_install_and_preserves_cargo_failures() {
         ],
     );
     assert_failed(&output, "failed cargo install --list");
+    assert_eq!(
+        output.status.code(),
+        Some(ARBITRARY_FAILURE_EXIT.parse().unwrap()),
+        "tool validation must preserve cargo install --list's failure status"
+    );
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     assert!(
         diagnostic.contains("selected stable Cargo is unavailable")
@@ -477,7 +497,7 @@ fn validation_disables_auto_install_and_preserves_cargo_failures() {
     let diagnostic = String::from_utf8_lossy(&output.stderr);
     assert!(
         diagnostic.contains("selected stable toolchain")
-            && diagnostic.contains("just anvil-toolchain-stable-install")
+            && diagnostic.contains("anvil-toolchain-stable-install")
             && !diagnostic.contains("rustup toolchain install default"),
         "unexpected default-toolchain diagnostic: {diagnostic}"
     );
