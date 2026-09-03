@@ -225,9 +225,9 @@ supersede active failures; they do not add a fresh supplemental status.
 The reporter's API errors are ignored by the composite action because the
 native workflow job is authoritative. The generated root workflow grants the
 required status permission to the shared pull-request/merge-group caller.
-Merge-group runs receive but do not intentionally use that write scope; the
-group action passes an empty `GITHUB_TOKEN` to repository commands for those
-runs. Fork execution retains annotations and the named failure step, while the
+Merge-group runs and their Just processes receive that write-capable token.
+Anvil's status and comment publication remains guarded to pull-request events.
+Fork execution retains annotations and the named failure step, while the
 repository-origin guard prevents status writes regardless of the administrator's
 fork-token policy.
 

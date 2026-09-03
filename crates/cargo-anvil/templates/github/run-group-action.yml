@@ -53,10 +53,10 @@ runs:
         # target/anvil/impact cache (read via `_anvil-impact-include`), not
         # threaded --package strings. This action only fixes the mode.
         ANVIL_IMPACT: ${{ inputs.impact_mode }}
-        # Some checks (e.g. cargo-aprz) call GitHub's API. Expose the built-in
-        # token only to pull-request runs; merge-group validation does not need
-        # API access and must not pass its write-capable token to repository code.
-        GITHUB_TOKEN: ${{ github.event_name == 'pull_request' && github.token || '' }}
+        # Some checks (e.g. cargo-aprz) call GitHub's API. The built-in token
+        # gives them the authenticated quota without adding group knowledge
+        # to this action.
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         # Capture the group result before propagating failure so the
         # best-effort reporter can consume both outputs.
