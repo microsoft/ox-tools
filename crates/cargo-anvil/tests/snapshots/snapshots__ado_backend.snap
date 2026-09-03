@@ -5529,8 +5529,9 @@ anvil-impact: _anvil-impact-snapshot
     }
     if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
     if ($env:ANVIL_IMPACT -eq 'consume') {
-        # consume = trust an already-downloaded cache verbatim, so assert the
-        # cache is actually present. If the CI download ever stops landing at
+        # consume = trust an already-downloaded cache, so assert the cache is
+        # present and each selector file follows the token grammar. If the CI
+        # download ever stops landing at
         # target/anvil/impact/ (renamed artifact, a missing download step, or
         # an adopter invoking the group action directly), every scoped check
         # would otherwise silently widen to --workspace and the pipeline would
@@ -5541,6 +5542,10 @@ anvil-impact: _anvil-impact-snapshot
         if ($missing.Count -gt 0) {
             Write-Error "anvil-impact: ANVIL_IMPACT=consume but the downloaded impact cache is missing ($($missing -join ', ') include file(s) absent under target/anvil/impact/). The impact artifact must be downloaded there before scoped checks run."
             exit 1
+        }
+        foreach ($tier in @('modified', 'affected', 'required')) {
+            & "{{ just_executable() }}" _anvil-impact-include $tier | Out-Null
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
         exit 0
     }
@@ -5808,8 +5813,34 @@ _anvil-impact-include tier:
     if ($env:ANVIL_IMPACT -eq 'off') { Write-Output $default; exit 0 }
     $file = "target/anvil/impact/include_$tier.txt"
     if (Test-Path $file) {
-        Get-Content -LiteralPath $file | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        $tokens = @(Get-Content -LiteralPath $file)
+        $valid = $false
+        if ($tokens.Count -eq 1 -and $tokens[0] -in @('--workspace', '--none')) {
+            $valid = $true
+        } elseif ($tokens.Count -gt 0 -and ($tokens.Count % 2) -eq 0) {
+            $valid = $true
+            for ($i = 0; $i -lt $tokens.Count; $i += 2) {
+                $name = $tokens[$i + 1]
+                if ($tokens[$i] -ne '--package' -or
+                    [string]::IsNullOrWhiteSpace($name) -or
+                    $name -ne $name.Trim() -or
+                    $name -match '\s' -or
+                    $name.StartsWith('--')) {
+                    $valid = $false
+                    break
+                }
+            }
+        }
+        if (-not $valid) {
+            Write-Error "anvil-impact: selector file '$file' is empty or malformed. Expected exactly --workspace, exactly --none, or one token per line as repeated --package/name pairs. Recompute or re-download the impact cache."
+            exit 1
+        }
+        Write-Output $tokens
     } else {
+        if ($env:ANVIL_IMPACT -eq 'consume') {
+            Write-Error "anvil-impact: ANVIL_IMPACT=consume but selector file '$file' is missing"
+            exit 1
+        }
         Write-Output $default
     }
 
