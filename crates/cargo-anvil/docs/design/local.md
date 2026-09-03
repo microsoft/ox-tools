@@ -563,6 +563,12 @@ without string parsing. `cargo-each` resolves the names against live workspace m
 when `{packages}` is used, it forwards version-qualified specs so child Cargo commands
 remain unambiguous.
 
+The helper validates this grammar before returning any cached selector. Empty files,
+mixed single-value and package forms, incomplete pairs, whitespace-bearing names, and
+unknown flag positions fail closed. `ANVIL_IMPACT=consume` validates all three downloaded
+selector files before accepting the artifact, so a malformed cache cannot fall through
+to cargo-each's default-member selection.
+
 `_anvil-impact-format` **fails the recipe** (non-zero exit, aborting `anvil-impact`)
 when at least one name cargo-delta reported cannot be resolved to exactly one workspace
 package. The helper resolves each reported name against three namespaces: the exact cargo

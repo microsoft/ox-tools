@@ -1328,6 +1328,32 @@ fn consume_without_downloaded_cache_fails_loudly() {
         "consume with a present cache must succeed as a no-op:\n{ok_combined}"
     );
 
+    // Presence is not enough: an empty or malformed selector would otherwise
+    // become an empty argv and make cargo-each fall back to default-members.
+    write(&cache.join("include_affected.txt"), "");
+    let empty = consume(&["anvil-impact"]);
+    let empty_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&empty.stdout),
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    assert_ne!(empty.status.code(), Some(0), "empty selector cache must fail:\n{empty_combined}");
+    assert!(empty_combined.contains("empty or malformed") && empty_combined.contains("affected"));
+
+    write(&cache.join("include_affected.txt"), "--package\nalpha\n--workspace");
+    let malformed = consume(&["anvil-impact"]);
+    let malformed_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&malformed.stdout),
+        String::from_utf8_lossy(&malformed.stderr)
+    );
+    assert_ne!(
+        malformed.status.code(),
+        Some(0),
+        "malformed selector cache must fail:\n{malformed_combined}"
+    );
+    assert!(malformed_combined.contains("empty or malformed") && malformed_combined.contains("affected"));
+
     // A partially downloaded cache -- one tier's include file missing -- must
     // also fail loudly and name the missing tier. This guards the
     // all-three-files contract against regressing to a directory or

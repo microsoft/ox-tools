@@ -32,6 +32,8 @@
 //! assert!(set.holds_str("not(windows)"));
 //! assert!(!set.holds_str("all(unix, feature = \"stats\")"));
 //! # }
+//! # #[cfg(feature = "internals")]
+//! # example();
 //! ```
 //!
 //! The names and values come from `rustc --print cfg`, asked about the build cargo will actually
@@ -67,6 +69,8 @@
 //! // And a set that was never resolved holds everything.
 //! assert!(CfgSet::unconditional().holds_str("windows"));
 //! # }
+//! # #[cfg(feature = "internals")]
+//! # example();
 //! ```
 
 mod build;
