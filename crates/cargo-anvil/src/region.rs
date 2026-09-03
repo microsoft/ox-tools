@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 
 use ohno::{AppError, app_err, bail};
-use toml_edit::{DocumentMut, Item, Table};
+use toml_edit::{DocumentMut, Table};
 
 /// Comment syntax used by the host file.
 ///
@@ -534,9 +534,9 @@ fn table_path(header: &str) -> Option<Vec<String>> {
     loop {
         let mut entries = table.iter();
         let (key, item) = entries.next()?;
-        if entries.next().is_some() {
-            return None;
-        }
+        // A header names exactly one table at each level, so a second entry
+        // means this line is not the header it appeared to be.
+        entries.next().is_none().then_some(())?;
         path.push(key.to_owned());
         match item.as_table() {
             Some(inner) if !inner.is_empty() => table = inner,
@@ -561,27 +561,22 @@ fn table_values(lines: &[&str]) -> Option<TableValues> {
 /// keys so `rust.unsafe_op_in_unsafe_fn` is one entry rather than a nested
 /// table.
 ///
-/// Returns `false` for anything that is not a value or a nested table. Neither
-/// can
-/// arise from a table body with its headers already removed, and refusing is
-/// the safe answer for a shape this does not model.
+/// Returns `false` for anything that is neither a value nor a nested table.
+/// Neither can arise from a table body with its headers already removed, and
+/// refusing is the safe answer for a shape this does not model.
 fn collect_values(table: &Table, path: &mut Vec<String>, values: &mut TableValues) -> bool {
-    for (key, item) in table {
+    table.iter().all(|(key, item)| {
         path.push(key.to_owned());
-        let understood = match item {
-            Item::Value(value) => {
+        let understood = match item.as_value() {
+            Some(value) => {
                 values.insert(path.clone(), value.to_string().trim().to_owned());
                 true
             }
-            Item::Table(inner) => collect_values(inner, path, values),
-            Item::ArrayOfTables(_) | Item::None => false,
+            None => item.as_table().is_some_and(|inner| collect_values(inner, path, values)),
         };
         path.pop();
-        if !understood {
-            return false;
-        }
-    }
-    true
+        understood
+    })
 }
 
 /// Return a trimmed TOML table header, without its trailing comment.
