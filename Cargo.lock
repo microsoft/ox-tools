@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-anvil"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-aprz"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "cargo-aprz-lib",
  "mimalloc",
@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-aprz-lib"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "bytes",
  "camino",
