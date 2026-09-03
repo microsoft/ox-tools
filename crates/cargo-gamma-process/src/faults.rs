@@ -21,6 +21,9 @@ pub enum Fault {
 
     /// The spawn window refuses to open.
     Window,
+
+    /// Terminating a contained subtree reports a cleanup failure.
+    Terminate,
 }
 
 /// Arms `fault` on this thread until the returned value is dropped.
@@ -42,8 +45,10 @@ fn ripe_at(fault: Fault, ripe: Instant) -> Armed {
 }
 
 pub(crate) fn fired(fault: Fault) -> bool {
-    let now = Instant::now();
+    fired_at(fault, Instant::now())
+}
 
+fn fired_at(fault: Fault, now: Instant) -> bool {
     ARMED.with_borrow_mut(|armed| {
         armed
             .iter()
@@ -95,6 +100,7 @@ mod tests {
         assert!(!fired(Fault::Prepare));
         assert!(!fired(Fault::Boundary));
         assert!(!fired(Fault::Window));
+        assert!(!fired(Fault::Terminate));
     }
 
     #[test]
@@ -133,12 +139,13 @@ mod tests {
 
     #[test]
     fn a_delayed_fault_waits_and_then_fires_once() {
-        let _armed = arm_late(Fault::Window, Duration::from_millis(25));
+        let now = Instant::now();
+        let ripe = now + Duration::from_millis(25);
+        let _armed = ripe_at(Fault::Window, ripe);
 
-        assert!(!fired(Fault::Window));
-        std::thread::sleep(Duration::from_millis(40));
-        assert!(fired(Fault::Window));
-        assert!(!fired(Fault::Window));
+        assert!(!fired_at(Fault::Window, now));
+        assert!(fired_at(Fault::Window, ripe));
+        assert!(!fired_at(Fault::Window, ripe));
     }
 
     #[test]

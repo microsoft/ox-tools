@@ -4,9 +4,9 @@
 #![doc(hidden)]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-//! The platform calls [`cargo-gamma`](https://crates.io/crates/cargo-gamma) cannot make safely,
-//! behind an interface that is safe to call. This crate is an implementation detail of the tool;
-//! you should never need to depend on it directly.
+//! Platform calls that [`cargo-gamma`](https://crates.io/crates/cargo-gamma) cannot make safely
+//! are concentrated behind an interface that is safe to call. This crate is an implementation
+//! detail of the tool; you should never need to depend on it directly.
 //!
 //! Two things the tool does have no safe expression in `std`: killing a whole process subtree (a
 //! process group on Unix, a job object on Windows) and bounding what that subtree allocates (a

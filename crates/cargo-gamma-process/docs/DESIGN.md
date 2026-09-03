@@ -48,7 +48,22 @@ therefore covers the complete descendant tree.
   stdin and captures stdout and stderr. Both pipes are drained concurrently
   while the child runs, avoiding pipe-capacity deadlocks. When the leader exits,
   descendants are swept before their inherited pipe handles are drained to end
-  of file.
+  of file. Failures to terminate the process group, Linux cgroup, or Windows
+  job are propagated after the leader is reaped. A direct child-kill failure is
+  ignored only when an immediate status observation proves that the child has
+  already exited. Reap errors take precedence over leader-kill errors, which
+  take precedence over surrounding group or boundary sweep errors. Within a
+  Linux sweep, failure of the cgroup kill takes precedence over process-group
+  failure because the cgroup is the boundary that also reaches descendants
+  that called `setsid`. If subsequent cleanup cannot prove that descendants
+  released their pipe handles, its failure takes precedence over an earlier
+  output setup or observation failure. A failure from an output reader already
+  started likewise takes precedence over failure to start the other reader.
+  Reader threads are detached rather than joined indefinitely only when
+  explicit lifecycle state says cleanup could not prove inherited pipe
+  handles were closed. Before detachment, capture is disabled and retained
+  bytes are released; a surviving descendant may keep the bounded drain
+  blocked, but it cannot keep growing an ownerless output buffer.
 - On Windows, each child receives a dedicated job. If an enclosing job refuses
   nested assignment, the spawn is rejected: an inherited job does not provide a
   handle through which this process can later terminate the child's descendants.
@@ -64,7 +79,8 @@ therefore covers the complete descendant tree.
   process-group id — after sweeping the non-numeric containment capability: the
   cgroup directory on Linux or job handle on Windows. That boundary can still be
   proven to reach this run's descendants after numeric identities may have been
-  reused.
+  reused. A failure of that final boundary sweep is included in the observation
+  error while the observation failure retains precedence.
 - The `fault-injection` feature is test-only infrastructure.
 - Tests that need a capability the host may not have are marked ignored and fail
   when asked for by name on a host that cannot supply it, rather than returning

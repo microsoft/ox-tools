@@ -2697,11 +2697,7 @@ fn guarded_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
 
     // The tool's own runtime sources rather than stand-ins, so a change to the guard's signature
     // breaks this fixture rather than leaving it testing a shape nothing generates any more.
-    for (name, source) in [
-        ("lib.rs", include_str!("../../../../cargo-gamma-rt/src/lib.rs")),
-        ("either.rs", include_str!("../../../../cargo-gamma-rt/src/either.rs")),
-        ("runtime.rs", include_str!("../../../../cargo-gamma-rt/src/runtime.rs")),
-    ] {
+    for (name, source) in gamma_rt::embedded::SOURCES {
         fs::write(runtime.join("src").join(name).as_std_path(), source).expect("runtime source");
     }
 

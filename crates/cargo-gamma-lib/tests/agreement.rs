@@ -210,8 +210,32 @@ fn the_two_nesting_guards_agree_on_binary_chains() {
 }
 
 #[test]
+fn the_two_nesting_guards_agree_on_greater_than_chains() {
+    nesting_guards("greater-than chains", CHAIN_CEILING, corpus::greater_than_chain);
+}
+
+#[test]
+fn the_two_nesting_guards_agree_on_shift_chains() {
+    nesting_guards("shift chains", CHAIN_CEILING, corpus::shift_chain);
+}
+
+#[test]
 fn the_two_nesting_guards_agree_on_cast_chains() {
     nesting_guards("cast chains", CHAIN_CEILING, corpus::cast_chain);
+}
+
+#[test]
+fn the_two_nesting_guards_agree_on_mixed_operator_and_cast_chains() {
+    nesting_guards(
+        "mixed operator and cast chains",
+        CHAIN_CEILING,
+        corpus::mixed_operator_and_cast_chain,
+    );
+}
+
+#[test]
+fn the_engine_guards_mixed_postfix_and_cast_chains_no_later_than_the_proc_macro() {
+    nesting_guards_are_ordered("mixed postfix and cast chains", CHAIN_CEILING, corpus::mixed_postfix_and_cast_chain);
 }
 
 #[test]
@@ -395,6 +419,28 @@ mod corpus {
         text
     }
 
+    /// `n` greater-than comparisons: `a > a > a > ...`.
+    pub(super) fn greater_than_chain(n: usize) -> String {
+        let mut text = "a".to_owned();
+
+        for _ in 0..n {
+            text.push_str(" > a");
+        }
+
+        text
+    }
+
+    /// `n` right shifts: `1 >> 1 >> 1 >> ...`.
+    pub(super) fn shift_chain(n: usize) -> String {
+        let mut text = "1".to_owned();
+
+        for _ in 0..n {
+            text.push_str(" >> 1");
+        }
+
+        text
+    }
+
     /// `n` links of `as`-casts: `0 as i64 as i64 as i64...`.
     pub(super) fn cast_chain(n: usize) -> String {
         let mut text = "0".to_owned();
@@ -404,6 +450,16 @@ mod corpus {
         }
 
         text
+    }
+
+    /// `n` additions followed by `n` casts, so neither family owns the combined depth alone.
+    pub(super) fn mixed_operator_and_cast_chain(n: usize) -> String {
+        format!("{}{}", binary_chain(n), " as i64".repeat(n))
+    }
+
+    /// `n` method calls followed by `n` casts, crossing from postfix to cast nesting.
+    pub(super) fn mixed_postfix_and_cast_chain(n: usize) -> String {
+        format!("{}{}", postfix_methods(n), " as i64".repeat(n))
     }
 
     /// An `else if` ladder with `n` middle arms.

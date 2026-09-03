@@ -7,6 +7,7 @@ mod compile_fail;
 mod diff;
 mod glob;
 mod hints;
+mod input;
 mod killers;
 mod modules;
 mod order;
