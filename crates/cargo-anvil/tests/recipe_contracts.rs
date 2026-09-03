@@ -115,7 +115,13 @@ if ($args -contains 'metadata') {
                 $null
             }
             metadata = [pscustomobject]@{
-                'coverage-gate' = [pscustomobject]@{ 'min-lines-percent' = 0 }
+                'coverage-gate' = [pscustomobject]@{
+                    'min-lines-percent' = if ($env:FAKE_COVERAGE_THRESHOLD) {
+                        [double]$env:FAKE_COVERAGE_THRESHOLD
+                    } else {
+                        0
+                    }
+                }
             }
         }
     )
@@ -989,11 +995,49 @@ fn doc_test_selects_libraries_and_proc_macros_but_not_bin_only_packages() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let commands = fs::read_to_string(log).unwrap();
+    let commands = fs::read_to_string(&log).unwrap();
     assert_eq!(commands.matches(" test --doc ").count(), 2, "commands:\n{commands}");
     assert!(commands.contains("--package fixture"), "commands:\n{commands}");
     assert!(commands.contains("--package macro-package"), "commands:\n{commands}");
     assert!(!commands.contains("--package bin-only"), "commands:\n{commands}");
+
+    seed_include(tmp.path(), "affected", "--package\nfixture\n--package\nbin-only");
+    fs::write(&log, "").unwrap();
+    let scoped = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("bin-only")),
+            ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
+        ],
+    );
+    assert!(scoped.status.success(), "scoped doc-test selection failed");
+    let scoped_commands = fs::read_to_string(&log).unwrap();
+    assert_eq!(scoped_commands.matches(" test --doc ").count(), 2);
+    assert!(scoped_commands.contains("--package fixture"));
+    assert!(!scoped_commands.contains("--package bin-only"));
+
+    seed_include(tmp.path(), "affected", "--package\nbin-only");
+    fs::write(&log, "").unwrap();
+    let bin_only = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("bin-only")),
+            ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
+        ],
+    );
+    assert!(bin_only.status.success(), "bin-only doc-test selection must skip cleanly");
+    assert!(
+        String::from_utf8_lossy(&bin_only.stdout).contains("no affected library or proc-macro packages"),
+        "bin-only skip must explain why no doctests ran"
+    );
+    assert!(
+        !fs::read_to_string(&log).unwrap().lines().any(|line| line.contains("each ")),
+        "bin-only selection must not invoke cargo-each"
+    );
 }
 
 #[test]
@@ -1094,6 +1138,52 @@ fn semver_includes_libraries_restricted_to_named_registries() {
         fs::read_to_string(log)
             .unwrap()
             .contains("semver-checks --package named-registry --baseline-rev base")
+    );
+}
+
+#[test]
+fn llvm_cov_qualifies_direct_cargo_selectors_but_not_gate_selectors() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-llvm-tools-validate-prereqs",
+            "anvil-tool-cargo-llvm-cov-validate-prereqs",
+            "anvil-tool-cargo-nextest-validate-prereqs",
+            "anvil-tool-cargo-coverage-gate-validate-prereqs",
+            "anvil-component-nightly-llvm-tools-install",
+            "anvil-tool-cargo-llvm-cov-install installer",
+            "anvil-tool-cargo-nextest-install installer",
+            "anvil-tool-cargo-coverage-gate-install installer",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    seed_include(tmp.path(), "affected", "--package\nfixture");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-llvm-cov"],
+        &[("FAKE_CARGO_LOG", log.as_os_str()), ("FAKE_COVERAGE_THRESHOLD", OsStr::new("100"))],
+    );
+    assert!(
+        output.status.success(),
+        "qualified coverage selection failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(log).unwrap();
+    assert!(
+        calls.contains("llvm-cov nextest --package fixture@0.1.0"),
+        "direct Cargo selectors must be version-qualified:\n{calls}"
+    );
+    assert!(
+        calls.contains("coverage-gate --package fixture --lcov"),
+        "coverage-gate selectors must remain bare workspace names:\n{calls}"
+    );
+    assert!(
+        !calls.contains("coverage-gate --package fixture@0.1.0"),
+        "coverage-gate does not accept version-qualified names:\n{calls}"
     );
 }
 
