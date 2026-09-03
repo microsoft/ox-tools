@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.6.0"
-catalog_checksum = "sha256:aecead1dba65f691c184186bb82773b50336b1f29ca1b287c28b59bc14db6419"
+catalog_checksum = "sha256:52be5f78afe4b3be333e0bbebbeb91b726092c85d24f3011dd8546806d8477c5"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -89,7 +89,7 @@ checksum = "sha256:d2f6a9536d62030db5505c88d510c4114cb0aab81a7af0e995ba8da5ce3a1
 
 [[file]]
 path = "justfiles/anvil/checks/doc-test.just"
-checksum = "sha256:094506c8f0d7a0ba7631d640ba2d22fbd53ad5efd273477b4a268296d1007c36"
+checksum = "sha256:b02381d3d8d33aece84557eecfa510a2be12b2d091c7726b4f63cbcc431eee88"
 
 [[file]]
 path = "justfiles/anvil/checks/ensure-no-cyclic-deps.just"

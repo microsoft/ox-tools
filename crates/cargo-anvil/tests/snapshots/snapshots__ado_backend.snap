@@ -2020,7 +2020,7 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
         }
     }
     $names = if ($selection -contains '--workspace') {
-        @($docPackages.Keys)
+        @($docPackages.Keys | Sort-Object)
     } else {
         @(
             for ($i = 0; $i -lt $selection.Count; $i++) {
