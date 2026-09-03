@@ -592,8 +592,8 @@ threading pre-formatted strings the local run never produces. The chain:
    artifact — export `ANVIL_IMPACT=consume`. In consume mode `anvil-impact` is a pure
    no-op — it trusts the downloaded cache verbatim and **neither snapshots nor
    recomputes**, so it needs neither cargo-delta nor a fetched base ref. Each scoped
-   check reads its category's scope from the cache file via `_anvil-impact-include` (into a
-   local `$include` variable).
+   check reads its category's selector tokens from the cache file via
+   `_anvil-impact-include` (into a local `$selection` array).
 4. **Scheduled stages download nothing** and always validate the full workspace, so the
    group step exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by group
    class at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
@@ -612,7 +612,7 @@ blocking failure.
 
 The wiring never branches on impact's *result*, though. When impact succeeds,
 each group always runs; recipes inside the group decide whether a given check no-ops
-by testing for the literal sentinel `--skip` in the relevant include var. This matters
+primarily by passing `--none` to cargo-each. This matters
 because unscoped checks (`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
 must run on every PR. See
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe) for the
@@ -858,7 +858,7 @@ the coverage of `cfg(target_os = ...)` branches. ADO's `PublishCodeCoverageResul
 coalesces multiple publishes against the same build into one combined report.
 `failIfCoverageEmpty: false` keeps the step from failing the build when no cobertura
 file exists -- which is exactly the "nothing impacted" case (the `anvil-llvm-cov` recipe
-no-ops when its tier is `--skip`, producing no file), as well as a tooling issue. No
+no-ops when its tier is `--none`, producing no file), as well as a tooling issue. No
 impact value is threaded into the condition; the presence of the file is the signal.
 
 The data appears in the ADO build page's "Code Coverage" tab natively — totals, file

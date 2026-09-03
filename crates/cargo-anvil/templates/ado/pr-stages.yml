@@ -70,7 +70,7 @@ stages:
   # Each pr-* job downloads its OS's `anvil-impact-<os>` artifact into
   # target/anvil/impact/ (job.yml `inputArtifacts`); the group's scoped checks
   # then read that cache via their `anvil-impact` dependency. An empty tier
-  # resolves to `--skip` and a first-time-adoption fallback to `--workspace`,
+  # resolves to `--none` and a first-time-adoption fallback to `--workspace`,
   # exactly as locally.
   - stage: pr_fast
     displayName: anvil pr-fast

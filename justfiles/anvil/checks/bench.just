@@ -12,9 +12,9 @@
 [script("pwsh", "-NoProfile")]
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { Write-Host 'anvil-bench: no affected packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} bench @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-run
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} bench '{packages}' --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # bench uses the cargo built-in in compile-only mode; no extra tool install
@@ -22,8 +22,8 @@ anvil-bench: anvil-bench-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
-anvil-bench-setup installer="install": anvil-toolchain-stable-install
+anvil-bench-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
-anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
+anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

@@ -16,8 +16,8 @@
 [script("pwsh", "-NoProfile")]
 anvil-miri: anvil-miri-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { Write-Host 'anvil-miri: no affected packages; skipping'; exit 0 }
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Run miri via libtest (`cargo miri test`), NOT `cargo miri nextest
     # run`. nextest uses a process-per-test model; under miri every
     # process pays the full cost of re-interpreting std initialization,
@@ -43,15 +43,15 @@ anvil-miri: anvil-miri-validate-prereqs anvil-impact
     # whose tests are all `#[cfg_attr(miri, ignore)]` -- the canonical
     # opt-out for build-tooling / CLI crates), so the old nextest
     # `--no-tests=pass` workaround is no longer needed.
-    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @(if ($include) { -split $include } else { '--workspace' })
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo '+{{ rust_nightly }}' miri test --all-features --tests '{packages}'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-runtime-analysis members ---
 
 # Install prerequisites for the `anvil-miri` recipe.
 [group("anvil-setup")]
-anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
+anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-miri` recipe.
 [group("anvil-setup")]
-anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
+anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs

@@ -19,6 +19,8 @@
 //! `cfg_attr` attributes, and answers whether the resulting `#[cfg(...)]` attributes hold:
 //!
 //! ```rust
+//! # #[cfg(feature = "internals")]
+//! # fn example() {
 //! # use cargo_gamma_lib::internals::cfg::CfgSet;
 //! let set = CfgSet::parse("unix\ntarget_arch=\"x86_64\"\n").with_features(["std".to_owned()]);
 //!
@@ -29,6 +31,9 @@
 //! assert!(set.holds_str("any(unix, windows)"));
 //! assert!(set.holds_str("not(windows)"));
 //! assert!(!set.holds_str("all(unix, feature = \"stats\")"));
+//! # }
+//! # #[cfg(feature = "internals")]
+//! # example();
 //! ```
 //!
 //! The names and values come from `rustc --print cfg`, asked about the build cargo will actually
@@ -53,6 +58,8 @@
 //! the code mutable:
 //!
 //! ```rust
+//! # #[cfg(feature = "internals")]
+//! # fn example() {
 //! # use cargo_gamma_lib::internals::cfg::CfgSet;
 //! let set = CfgSet::parse("unix\n");
 //!
@@ -61,6 +68,9 @@
 //!
 //! // And a set that was never resolved holds everything.
 //! assert!(CfgSet::unconditional().holds_str("windows"));
+//! # }
+//! # #[cfg(feature = "internals")]
+//! # example();
 //! ```
 
 mod build;

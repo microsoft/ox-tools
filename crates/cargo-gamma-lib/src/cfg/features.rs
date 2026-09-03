@@ -41,9 +41,10 @@ use crate::{HashMap, HashSet};
 /// interest, and guessing at them would cost a full resolve.
 ///
 /// ```rust,no_run
+/// # #[cfg(feature = "internals")]
+/// # fn example(metadata: &cargo_metadata::Metadata) {
 /// # use cargo_gamma_lib::internals::cfg::features::enabled;
 /// # use cargo_gamma_lib::internals::commands::FeatureArgs;
-/// # fn example(metadata: &cargo_metadata::Metadata) {
 /// let features = enabled(metadata, &FeatureArgs::default());
 ///
 /// // Every member is present, even one with no features at all.

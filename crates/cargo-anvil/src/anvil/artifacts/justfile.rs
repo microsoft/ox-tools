@@ -474,15 +474,15 @@ mod tests {
                         "{path}: declared {policy:?} but its _anvil-impact-include category is {calls:?}"
                     );
                     // A scoped check must depend on anvil-impact so the cache is
-                    // fresh, and capture the scope into a local $include -- no
+                    // fresh, and capture the tokens into a local $selection -- no
                     // ANVIL_INCLUDE_* env-var indirection.
                     assert!(
                         body.contains("-validate-prereqs anvil-impact"),
                         "{path} reads the impact cache but does not depend on anvil-impact"
                     );
                     assert!(
-                        body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
-                        "{path} must capture _anvil-impact-include into a local $include variable"
+                        body.contains("$selection = @(& \"{{ just_executable() }}\" _anvil-impact-include"),
+                        "{path} must capture _anvil-impact-include into a local $selection array"
                     );
                 }
             }
