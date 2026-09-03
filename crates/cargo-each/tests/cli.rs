@@ -725,6 +725,31 @@ fn once_with_filter_uses_explicit_packages_not_workspace() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn once_with_filter_any_uses_explicit_packages_not_workspace() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--filter-any",
+            "feature:loom",
+            "--once",
+            "--dry-run",
+            "--",
+            "cargo",
+            "x",
+            "{packages}",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--package alpha")
+                .and(predicate::str::contains("--workspace").not())
+                .and(predicate::str::contains("--package beta").not()),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn once_with_exclude_filter_uses_explicit_packages_not_workspace() {
     // An `--exclude-filter` also narrows the set, so `{packages}` must expand
     // to an explicit `--package` list, not `--workspace`.
