@@ -107,7 +107,11 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = "$packageName 0.1.0"
             manifest_path = $manifestPath
-            targets = @([pscustomobject]@{ name = $libName; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $libName
+                kind = if ($env:FAKE_FIRST_RLIB) { @('rlib') } else { @('lib') }
+                doctest = $true
+            })
             publish = if ($env:FAKE_PUBLISH_FALSE) {
                 # Preserve the empty array through expression output so JSON emits [] rather than null.
                 Write-Output -NoEnumerate @()
@@ -139,6 +143,7 @@ if ($args -contains 'metadata') {
             targets = @([pscustomobject]@{
                 name = $env:FAKE_SECOND_PACKAGE_NAME
                 kind = if ($env:FAKE_SECOND_BIN_ONLY) { @('bin') } else { @('lib') }
+                doctest = -not [bool]$env:FAKE_SECOND_BIN_ONLY
             })
             publish = $null
             metadata = [pscustomobject]@{}
@@ -158,6 +163,7 @@ if ($args -contains 'metadata') {
             targets = @([pscustomobject]@{
                 name = $env:FAKE_THIRD_PACKAGE_NAME
                 kind = if ($env:FAKE_THIRD_PROC_MACRO) { @('proc-macro') } else { @('lib') }
+                doctest = $true
             })
             publish = @('private-registry')
             metadata = [pscustomobject]@{}
@@ -964,7 +970,7 @@ fn fmt_propagates_cargo_each_failure() {
 }
 
 #[test]
-fn doc_test_selects_libraries_and_proc_macros_but_not_bin_only_packages() {
+fn doc_test_selects_doctest_capable_targets_but_not_bin_only_packages() {
     if !tools_available() {
         return;
     }
@@ -983,6 +989,7 @@ fn doc_test_selects_libraries_and_proc_macros_but_not_bin_only_packages() {
         &["anvil-doc-test"],
         &[
             ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_FIRST_RLIB", OsStr::new("1")),
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("bin-only")),
             ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
             ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
@@ -1031,7 +1038,7 @@ fn doc_test_selects_libraries_and_proc_macros_but_not_bin_only_packages() {
     );
     assert!(bin_only.status.success(), "bin-only doc-test selection must skip cleanly");
     assert!(
-        String::from_utf8_lossy(&bin_only.stdout).contains("no affected library or proc-macro packages"),
+        String::from_utf8_lossy(&bin_only.stdout).contains("no affected doctest-capable packages"),
         "bin-only skip must explain why no doctests ran"
     );
     assert!(

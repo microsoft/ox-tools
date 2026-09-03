@@ -14,8 +14,9 @@
 # of total compile/test time.
 #
 # Cargo errors when `cargo test --doc` selects only bin-only packages. Build
-# the documentation-capable subset (plain libraries and proc macros) from
-# metadata before delegating the two invocations to cargo-each.
+# the subset with at least one Cargo target marked `doctest = true` before
+# delegating the two invocations to cargo-each. This includes explicit library
+# crate types such as rlib/cdylib as well as plain libraries and proc macros.
 
 # Run documentation tests for affected workspace packages.
 [script("pwsh", "-NoProfile")]
@@ -34,7 +35,7 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     }
     $docPackages = @{}
     foreach ($package in $meta.packages) {
-        if ($package.targets | Where-Object { ($_.kind -contains 'lib') -or ($_.kind -contains 'proc-macro') }) {
+        if ($package.targets | Where-Object { $_.doctest -eq $true }) {
             $docPackages[$package.name] = $true
         }
     }
@@ -51,7 +52,7 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
         )
     }
     if ($names.Count -eq 0) {
-        Write-Host 'anvil-doc-test: no affected library or proc-macro packages; skipping'
+        Write-Host 'anvil-doc-test: no affected doctest-capable packages; skipping'
         exit 0
     }
     $docSelection = [System.Collections.Generic.List[string]]::new()
