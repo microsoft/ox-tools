@@ -1174,9 +1174,21 @@ fn llvm_cov_qualifies_direct_cargo_selectors_but_not_gate_selectors() {
     );
     let calls = fs::read_to_string(log).unwrap();
     assert!(
-        calls.contains("llvm-cov nextest --package fixture@0.1.0"),
+        calls.contains("--package fixture@0.1.0"),
         "direct Cargo selectors must be version-qualified:\n{calls}"
     );
+    if cfg!(all(windows, target_arch = "aarch64")) {
+        assert!(
+            calls.contains("nextest run"),
+            "Windows ARM must use the plain-nextest fallback:\n{calls}"
+        );
+        assert!(
+            !calls.contains("coverage-gate"),
+            "Windows ARM does not measure or gate coverage:\n{calls}"
+        );
+        return;
+    }
+    assert!(calls.contains("llvm-cov nextest"), "measured platforms must run llvm-cov:\n{calls}");
     assert!(
         calls.contains("coverage-gate --package fixture --lcov"),
         "coverage-gate selectors must remain bare workspace names:\n{calls}"
