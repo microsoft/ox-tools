@@ -373,7 +373,7 @@ x86_64 jobs and per-OS affected-package impact sets as `pr_test`, and invokes
 `anvil-pr-msrv`. The stage consumes the per-OS impact artifact like the other PR
 groups; when the root manifest declares no MSRV, the recipe exits successfully
 after reporting that it skipped the test. Otherwise it runs affected-package
-`cargo test --all-targets` in all-features and default-features configurations.
+`cargo test --tests` in all-features and default-features configurations.
 Ordinary stable checks honor a caller-provided `RUSTUP_TOOLCHAIN`. The dedicated
 MSRV setup ensures the declared root MSRV is available through rustup.
 

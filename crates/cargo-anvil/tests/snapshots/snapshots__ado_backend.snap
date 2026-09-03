@@ -2790,27 +2790,11 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
         exit 0
     }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    # `--tests`, NOT `--all-targets`. An MSRV check exists to prove the affected
-    # packages still COMPILE and their tests still PASS under the declared
-    # minimum compiler. `--all-targets` expands to
-    # `--lib --bins --tests --benches --examples`, so `cargo test` would also
-    # build and EXECUTE every bench harness. A bench declared `harness = false`
-    # delegates its run to a separate driver binary (criterion's, or a profiler
-    # runner such as `gungraun-runner`, itself usually driving Valgrind). The
-    # `anvil-msrv-test-setup` chain installs only the MSRV toolchain, so that
-    # driver is absent and the check fails on a prerequisite this group never
-    # declares -- a failure unrelated to the minimum-version signal. Benches and
-    # examples are compiled, never run, by `anvil-bench` (`cargo bench --no-run`)
-    # and `anvil-examples` (`cargo build --examples`); this recipe keeps that
-    # same repository-wide policy.
-    #
-    # `--tests` selects exactly the targets that carry `test = true`: lib unit
-    # tests, bin unit tests, and integration tests. It is used in preference to
-    # `--lib --bins --tests` because `--lib` errors with "no library targets
-    # found" on a bin-only affected package under impact scoping, whereas
-    # `--tests` already covers lib unit tests and tolerates libless packages.
-    # No doctest coverage is lost: `--all-targets` suppresses doctests as well,
-    # and `anvil-doc-test` owns them.
+    # `--tests` = lib/bin unit tests + integration tests. NOT `--all-targets`,
+    # which adds `--benches`: `cargo test` EXECUTES bench harnesses, and a
+    # `harness = false` bench needs a driver binary this group never installs.
+    # Benches/examples stay compile-only (`anvil-bench`, `anvil-examples`).
+    # `--tests` over `--lib --bins --tests`: `--lib` fails on bin-only packages.
     & cargo "+$toolchain" test @pkg --tests --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & cargo "+$toolchain" test @pkg --tests --locked

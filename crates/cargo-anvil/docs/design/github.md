@@ -992,15 +992,10 @@ under those rules, and unlike a SHA it stays readable in the diff when the pin i
 bumped. Generated files carry a
 `# pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)`
 comment at each such pin, so the reason a tag appears where a SHA is otherwise
-expected is visible at the use site. The comment names the mechanism the pin relies
-on rather than asserting that tags are stable in general -- they are not, and a
-reader who takes it that way will draw the wrong conclusion about the other pins.
+expected is visible at the use site.
 
 Every other action is pinned by commit SHA with the version in a trailing comment, for
 example `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`.
-`actions/checkout` and `actions/download-artifact` are in this group not because they
-are less trusted but because immutable releases are opt-in per publisher and theirs
-have not enabled it, so a SHA is the only pin that fixes the code being run.
 
 Immutability is a property of one published release, not a standing guarantee about
 the publisher. When bumping a tag-pinned action, confirm the new release still reports

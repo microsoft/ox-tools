@@ -439,9 +439,10 @@ compiler. Anvil does not provision a separate tooling compiler; checks that
 require nightly continue to use their catalog-pinned nightly.
 
 When the root manifest declares an MSRV, `anvil-msrv-test` runs affected-package
-`cargo test --all-targets` in all-features and default-features configurations
-under that compiler. This includes library and binary unit tests, integration
-tests, examples, and benches as test targets. It does not add a
+`cargo test --tests` in all-features and default-features configurations
+under that compiler. This covers library and binary unit tests and integration
+tests; benches and examples are deliberately excluded, because `cargo test`
+would execute bench harnesses. It does not add a
 `--no-default-features` pass. A root toolchain file does not suppress this
 minimum-version run. Without a root MSRV the recipe is a no-op.
 
@@ -690,7 +691,7 @@ exactly the same arguments cloud workflows uses, because cloud workflows invokes
 A user with only `cargo` (no `just`, no `cargo-anvil`) can still run the basics:
 
 ```sh
-cargo test   --workspace --all-targets --all-features --locked
+cargo test   --workspace --tests --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --check
 ```
