@@ -230,39 +230,27 @@ permissions:
 jobs:
   validation:
     name: PR Job
-    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
       contents: read
       statuses: write
       pull-requests: write
     with:
-      base_ref: ${{ github.event.pull_request.base.sha }}
-      publish_commit_statuses: true
-    secrets: inherit
-  merge-validation:
-    name: PR Job
-    if: github.event_name == 'merge_group'
-    uses: ./.github/workflows/anvil-pr-impl.yml
-    permissions:
-      contents: read
+      base_ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+      publish_commit_statuses: ${{ github.event_name == 'pull_request' }}
     secrets: inherit
 ```
 
-The two conditional callers keep the workflow name and reusable implementation
-the same across events while granting write permissions only to pull-request
-runs. Their internal IDs remain `validation` and `merge-validation`, while
-both display names are `PR Job`. Together with the workflow display name,
-GitHub renders the same user-facing `Anvil / PR Job / ...` hierarchy in the
-pull-request checks UI for both event types without exposing implementation
-IDs. The workflow display name is UI grouping rather than part of a check-run
-name; branch protection sees contexts beginning with `PR Job / ...`.
-Merge-group execution does not publish the supplemental status and never
-receives `statuses: write` or `pull-requests: write`. The called PR
-implementation intentionally declares no `permissions` blocks, so its jobs
-inherit the selected caller's ceiling. Static job-level write requests would
-make the read-only merge caller fail workflow validation before any check could
-run.
+One caller handles both events, so GitHub renders only one user-visible `PR Job`
+instead of showing a second skipped caller. The event-specific `base_ref`
+expression selects the pull-request base or merge-group base SHA. The caller
+grants the write scopes needed for pull-request presentation on both event
+types; all status and comment writes remain guarded to same-repository
+`pull_request` events, so merge-group runs receive but do not exercise those
+permissions. The workflow display name is UI grouping rather than part of a
+check-run name; branch protection sees contexts beginning with `PR Job / ...`.
+The called PR implementation intentionally declares no `permissions` blocks, so
+its jobs inherit the caller's ceiling.
 
 The scheduled root workflow adds a schedule and `workflow_dispatch`:
 
@@ -731,18 +719,18 @@ invoked directly from an unsupported event.
 The reusable workflow input defaults to `false`. The generated pull-request
 caller opts in and grants `statuses: write`; a customized root that has not
 accepted the permission continues without supplemental statuses. Publication
-is guarded to same-repository `pull_request` events. Fork PR tokens are
-read-only, so forks retain the annotation and dynamically named step but skip
-the status call.
+is guarded to same-repository `pull_request` events. GitHub makes fork-PR
+tokens read-only by default, but administrators can opt into sending write
+tokens; the repository-origin guard skips the status call in either case.
+Forks retain the annotation and dynamically named step.
 
-Merge-group runs use a separate conditional caller with only `contents: read`.
-Both conditional callers have the display name `PR Job`, so their called jobs
-produce identical required-check contexts on pull-request and merge-group
-commits even though their internal IDs and permissions differ. Merge-group runs
-retain the normal Anvil jobs, annotations, and dynamically named steps but do
-not publish supplemental statuses. This avoids exposing a write-capable token
-while executing a synthetic merge that may contain fork-originated code, and
-avoids redundant statuses on ephemeral merge-group commits.
+Merge-group runs use the same `PR Job` caller as pull-request runs. They retain
+the normal Anvil jobs, annotations, and dynamically named steps but do not
+publish supplemental statuses or advisory comments because those operations are
+event- and repository-guarded. Using one caller removes the skipped duplicate
+`PR Job` from the checks UI; the accepted tradeoff is that merge-group runs
+and their Just processes receive the caller's write-capable token. Actual
+status and comment publication remains guarded to pull-request events.
 
 Branch protection and rulesets must select the bounded
 `PR Job / Check Group: <display name> (<platform>)` contexts. Pull-request and
@@ -953,17 +941,16 @@ Recommended root workflow shape:
 
 - `permissions: contents: read` at the workflow level. anvil's default ships with
   this.
-- The pull-request reusable-workflow call grants `pull-requests: write` for
+- The reusable-workflow call grants `pull-requests: write` for
   advisory comments and `statuses: write` for opt-in supplemental commit statuses. The
   shared called workflow declares no permission overrides and inherits that
-  caller ceiling. This gives its impact jobs the same scopes on trusted
-  same-repository PR runs; the tradeoff avoids duplicating the implementation
-  workflow while allowing the separate merge-group caller to remain read-only.
-- The merge-group caller grants only `contents: read`; it cannot publish
-  comments or statuses. Because the called workflow does not statically request
-  write scopes, GitHub accepts and runs it under that ceiling.
+  caller ceiling. The same caller handles pull-request and merge-group events,
+  avoiding a second skipped `PR Job`; merge-group jobs receive these scopes but
+  do not use them.
 - Status publishing is guarded to same-repository `pull_request` events. Fork
-  PR tokens are read-only and never reach the status API step.
+  PRs never reach the status API step regardless of whether administrators keep
+  GitHub's default read-only token policy or enable write tokens for fork
+  workflows.
 - The scheduled reusable-workflow call grants `issues: write` at job scope so its
   publisher can create or comment on the failure issue. The called workflow resets its
   default permissions to `contents: read`, then restores `issues: write` only on the
@@ -1162,8 +1149,10 @@ Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
 `pull-requests: write` on the `validation` job that calls
 `anvil-pr-impl.yml`. The called workflow declares no permission overrides, so all
 of its jobs inherit that caller ceiling. Only the guarded sticky-comment steps
-use `pull-requests: write`. The separate merge-group caller grants only
-`contents: read`, and fork-PR tokens remain read-only.
+use `pull-requests: write`. Merge-group executions share this caller but cannot
+reach the pull-request-only write steps. Fork PRs cannot reach them either,
+regardless of whether an administrator has enabled write tokens for fork
+workflows.
 
 Adding a new advisory check is a two-step change: the recipe writes
 `target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains

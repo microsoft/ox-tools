@@ -255,6 +255,7 @@ mod tests {
         // the executor only fixes the mode.
         assert!(RUN_GROUP_ACTION.contains("impact_mode:"));
         assert!(RUN_GROUP_ACTION.contains("ANVIL_IMPACT: ${{ inputs.impact_mode }}"));
+        assert!(RUN_GROUP_ACTION.contains("GITHUB_TOKEN: ${{ github.token }}"));
         assert!(
             !RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_"),
             "the shared executor must not thread ANVIL_INCLUDE_* env vars"
@@ -494,7 +495,7 @@ export -f just
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("permissions:").count(),
             0,
-            "the shared implementation must inherit the PR or merge-group caller's permission ceiling"
+            "the shared implementation must inherit the root caller's permission ceiling"
         );
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
@@ -861,32 +862,24 @@ async function scenario(items) {
         assert!(PR_ROOT_WORKFLOW.contains("pull_request:"));
         assert!(PR_ROOT_WORKFLOW.contains("merge_group:"));
         assert!(PR_ROOT_WORKFLOW.contains("statuses: write"));
-        assert!(PR_ROOT_WORKFLOW.contains("publish_commit_statuses: true"));
-        assert!(PR_ROOT_WORKFLOW.contains("base_ref: ${{ github.event.pull_request.base.sha }}"));
-        assert!(PR_ROOT_WORKFLOW.contains("base_ref: ${{ github.event.merge_group.base_sha }}"));
+        assert!(PR_ROOT_WORKFLOW.contains("publish_commit_statuses: ${{ github.event_name == 'pull_request' }}"));
+        assert!(PR_ROOT_WORKFLOW.contains("base_ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}"));
         assert!(PR_ROOT_WORKFLOW.contains("name: Anvil"));
         assert!(PR_ROOT_WORKFLOW.contains("\n  validation:\n"));
         assert!(PR_ROOT_WORKFLOW.contains("name: PR Job"));
-        assert!(PR_ROOT_WORKFLOW.contains("\n  merge-validation:\n"));
+        assert!(!PR_ROOT_WORKFLOW.contains("\n  merge-validation:\n"));
         assert_eq!(
             PR_ROOT_WORKFLOW.matches("name: PR Job").count(),
-            2,
-            "pull-request and merge-group callers must emit identical required-check contexts"
+            1,
+            "one caller must handle both pull-request and merge-group events"
         );
-        assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'pull_request'"));
-        assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'merge_group'"));
-        let (validation_caller, merge_caller) = PR_ROOT_WORKFLOW
+        let validation_caller = PR_ROOT_WORKFLOW
             .split_once("\n  validation:")
             .expect("PR root workflow should contain validation")
-            .1
-            .split_once("\n  merge-validation:")
-            .expect("PR root workflow should contain merge-validation");
+            .1;
         assert!(validation_caller.contains("\n    permissions:\n      contents: read"));
         assert!(validation_caller.contains("statuses: write"));
         assert!(validation_caller.contains("pull-requests: write"));
-        assert!(merge_caller.contains("\n    permissions:\n      contents: read"));
-        assert!(!merge_caller.contains("statuses: write"));
-        assert!(!merge_caller.contains("pull-requests: write"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("issues: write"));

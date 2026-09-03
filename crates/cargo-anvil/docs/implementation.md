@@ -224,9 +224,12 @@ supersede active failures; they do not add a fresh supplemental status.
 
 The reporter's API errors are ignored by the composite action because the
 native workflow job is authoritative. The generated root workflow grants the
-required status permission only to the same-repository pull-request caller.
-Merge-group and fork execution retain annotations and the named failure step
-without a write-capable status token.
+required status permission to the shared pull-request/merge-group caller.
+Merge-group runs and their Just processes receive that write-capable token.
+Anvil's status and comment publication remains guarded to pull-request events.
+Fork execution retains annotations and the named failure step, while the
+repository-origin guard prevents status writes regardless of the administrator's
+fork-token policy.
 
 Tests extract and execute the exact YAML-embedded Bash and JavaScript bodies.
 The Bash harness covers success, both Just diagnostic forms, and a failure

@@ -84,6 +84,9 @@ if ($env:FAKE_CARGO_CWD_LOG) {
 if ($env:FAKE_CARGO_TOOLCHAIN_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_TOOLCHAIN_LOG -Value $env:RUSTUP_TOOLCHAIN
 }
+if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
+    Add-Content -LiteralPath $env:FAKE_CARGO_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL
+}
 if ($args -contains 'each') {
     exit [int]$env:FAKE_EACH_EXIT
 }
@@ -189,10 +192,14 @@ if ($args -contains 'nextest') {
 if ($args -contains 'binstall') {
     exit [int]$env:FAKE_BINSTALL_EXIT
 }
+if ($args -contains 'install' -and $args -contains '--list') {
+    if ($env:FAKE_INSTALL_LIST_OUTPUT) { Write-Output $env:FAKE_INSTALL_LIST_OUTPUT }
+    exit [int]$env:FAKE_INSTALL_LIST_EXIT
+}
 if ($args -contains 'install' -and $args -contains '--version') {
     exit [int]$env:FAKE_INSTALL_EXIT
 }
-exit 0
+exit [int]$env:FAKE_CARGO_DEFAULT_EXIT
 "#;
 
 fn write(path: &Path, contents: &str) {
@@ -402,6 +409,115 @@ fn msrv_test_propagates_nested_just_failures() {
     assert!(
         fs::read_to_string(cargo_log).unwrap_or_default().is_empty(),
         "Cargo must not run after resolver failure"
+    );
+}
+
+#[test]
+fn validation_disables_auto_install_and_preserves_cargo_failures() {
+    if !tools_available() {
+        return;
+    }
+
+    let helper_recipes = "\n[script(\"pwsh\", \"-NoProfile\")]\n\
+         _anvil-resolve-stable action:\n\
+         \x20   Write-Output '1.97'\n";
+    let msrv = fixture(&[("msrv-test.just", MSRV_TEST)], &["anvil-impact"]);
+    let justfile_path = msrv.path().join("Justfile");
+    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
+    justfile.push_str(helper_recipes);
+    write(&justfile_path, &justfile);
+    let auto_install_log = msrv.path().join("auto-install.log");
+    let output = run_just(
+        msrv.path(),
+        &["anvil-msrv-test-validate-prereqs"],
+        &[("FAKE_CARGO_AUTO_INSTALL_LOG", auto_install_log.as_os_str())],
+    );
+    assert!(
+        output.status.success(),
+        "MSRV validation failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(auto_install_log).unwrap().trim(), "0");
+
+    let output = run_just(
+        msrv.path(),
+        &["anvil-msrv-test-validate-prereqs"],
+        &[("FAKE_CARGO_DEFAULT_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(ARBITRARY_FAILURE_EXIT.parse().unwrap()),
+        "MSRV validation must preserve Cargo's failure status"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("MSRV toolchain '1.97' is unavailable"),
+        "MSRV validation must retain its actionable diagnostic"
+    );
+
+    let tools = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+    let output = run_just(
+        tools.path(),
+        &["_check-tool", "cargo-example", "1.2.3"],
+        &[
+            ("FAKE_INSTALL_LIST_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT)),
+            ("FAKE_INSTALL_LIST_OUTPUT", OsStr::new("selected Cargo failed")),
+        ],
+    );
+    assert_failed(&output, "failed cargo install --list");
+    assert_eq!(
+        output.status.code(),
+        Some(ARBITRARY_FAILURE_EXIT.parse().unwrap()),
+        "tool validation must preserve cargo install --list's failure status"
+    );
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("selected stable Cargo is unavailable")
+            && diagnostic.contains("selected Cargo failed")
+            && !diagnostic.contains("required tool 'cargo-example' not found"),
+        "unexpected Cargo-list diagnostic: {diagnostic}"
+    );
+
+    let rustc_auto_install_log = tools.path().join("rustc-auto-install.log");
+    write(
+        &tools.path().join("fake-bin/rustc.ps1"),
+        "if ($env:FAKE_RUSTC_AUTO_INSTALL_LOG) {\n\
+         \x20   Add-Content -LiteralPath $env:FAKE_RUSTC_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL\n\
+         }\n\
+         exit [int]$env:FAKE_RUSTC_EXIT\n",
+    );
+    let output = run_just(
+        tools.path(),
+        &["_check-component", "default", "rust-src"],
+        &[
+            ("FAKE_RUSTC_AUTO_INSTALL_LOG", rustc_auto_install_log.as_os_str()),
+            ("FAKE_RUSTC_EXIT", OsStr::new("9")),
+        ],
+    );
+    assert_failed(&output, "unavailable selected stable toolchain");
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("selected stable toolchain")
+            && diagnostic.contains("just anvil-toolchain-stable-install")
+            && !diagnostic.contains("rustup toolchain install default"),
+        "unexpected default-toolchain diagnostic: {diagnostic}"
+    );
+    assert_eq!(fs::read_to_string(&rustc_auto_install_log).unwrap().trim(), "0");
+
+    let cargo_log = tools.path().join("component-cargo.log");
+    let output = run_just(
+        tools.path(),
+        &["_check-component", "default", "clippy"],
+        &[("FAKE_RUSTC_EXIT", OsStr::new("9")), ("FAKE_CARGO_LOG", cargo_log.as_os_str())],
+    );
+    assert_failed(&output, "unavailable selected toolchain for command-backed component");
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("selected stable toolchain") && !diagnostic.contains("component 'clippy' not installed"),
+        "toolchain failure must precede component diagnosis: {diagnostic}"
+    );
+    assert!(
+        fs::read_to_string(cargo_log).unwrap_or_default().is_empty(),
+        "component command must not run when the selected toolchain is unavailable"
     );
 }
 
