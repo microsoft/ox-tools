@@ -155,6 +155,43 @@ fn a_dependency_only_cfg_test_code_uses_is_misplaced() {
 }
 
 #[test]
+fn evidence_is_counted_per_target_not_per_package() {
+    if !nightly() {
+        return;
+    }
+
+    // A package with a library and two binaries. Each dependency is used in
+    // production by exactly one target, so the *other* targets all report it
+    // unused. Counting per package would convict them; counting per target and
+    // taking the union does not.
+    let fixture = Fixture::new(
+        &["liponly", "binonly", "bintest"],
+        &format!("[dependencies]\n{}{}{}", dep("liponly"), dep("binonly"), dep("bintest")),
+        "pub fn go() { liponly::f(); }\n",
+    )
+    .with_file(
+        "src/bin/one.rs",
+        "fn main() { binonly::f(); }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { bintest::f(); }\n}\n",
+    )
+    .with_file("src/bin/two.rs", "fn main() {}\n");
+
+    let report = fixture.report();
+
+    assert!(
+        !report.contains("liponly"),
+        "used by the library, reported unused by both binaries: {report}"
+    );
+    assert!(
+        !report.contains("binonly"),
+        "used by one binary, reported unused by the library and the other binary: {report}"
+    );
+    assert!(
+        report.contains("bintest: only development units load it"),
+        "used only by one binary's cfg(test) code: {report}"
+    );
+}
+
+#[test]
 fn a_dependency_the_library_uses_is_not_reported() {
     if !nightly() {
         return;
