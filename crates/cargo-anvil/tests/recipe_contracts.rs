@@ -629,17 +629,12 @@ fn miri_runner_labels_same_named_artifacts_with_package_identity() {
 }
 
 #[test]
-fn miri_runner_preserves_profile_flags_and_impact_filtering() {
+fn miri_runner_preserves_impact_filtering() {
     if !tools_available() {
         return;
     }
     let tmp = fixture(
-        &[
-            ("miri.just", MIRI),
-            ("miri-race-coverage.just", MIRI_RACE_COVERAGE),
-            ("miri-strict-provenance.just", MIRI_STRICT_PROVENANCE),
-            ("miri-tree-borrows.just", MIRI_TREE_BORROWS),
-        ],
+        &[("miri.just", MIRI), ("miri-tree-borrows.just", MIRI_TREE_BORROWS)],
         &[
             "anvil-component-nightly-miri-validate-prereqs",
             "anvil-component-nightly-rust-src-validate-prereqs",
@@ -670,16 +665,6 @@ fn miri_runner_preserves_profile_flags_and_impact_filtering() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        fs::read_to_string(run_log.with_extension("profile-test.miriflags"))
-            .unwrap()
-            .contains("-Zmiri-tree-borrows")
-    );
-    assert!(
-        fs::read_to_string(run_log.with_extension("profile-test.rustflags"))
-            .unwrap()
-            .contains("--cfg miri_tree_borrows")
-    );
     let cargo_calls = fs::read_to_string(cargo_log).unwrap();
     let build_call = cargo_calls
         .lines()
@@ -693,22 +678,40 @@ fn miri_runner_preserves_profile_flags_and_impact_filtering() {
         !build_call.contains("excluded@0.1.0"),
         "impact-selected opted-out packages must be filtered:\n{build_call}"
     );
+}
 
-    for (recipe, log_name, expected_miri_flags, expected_rust_flags) in [
+#[test]
+fn miri_profiles_set_expected_flags() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[
+            ("miri.just", MIRI),
+            ("miri-race-coverage.just", MIRI_RACE_COVERAGE),
+            ("miri-strict-provenance.just", MIRI_STRICT_PROVENANCE),
+            ("miri-tree-borrows.just", MIRI_TREE_BORROWS),
+        ],
+        &[
+            "anvil-component-nightly-miri-validate-prereqs",
+            "anvil-component-nightly-rust-src-validate-prereqs",
+            "anvil-component-nightly-miri-install",
+            "anvil-component-nightly-rust-src-install",
+            "anvil-impact",
+        ],
+    );
+    let artifacts = r#"[{"name":"profile-test","package_id":"fixture 0.1.0","test":true}]"#;
+
+    for (recipe, expected_miri_flags, expected_rust_flags) in [
+        ("anvil-miri-tree-borrows", "-Zmiri-tree-borrows", "--cfg miri_tree_borrows"),
         (
             "anvil-miri-strict-provenance",
-            "miri-strict-provenance",
             "-Zmiri-strict-provenance",
             "--cfg miri_strict_provenance",
         ),
-        (
-            "anvil-miri-race-coverage",
-            "miri-race-coverage",
-            "-Zmiri-many-seeds=",
-            "--cfg miri_race_coverage",
-        ),
+        ("anvil-miri-race-coverage", "-Zmiri-many-seeds=", "--cfg miri_race_coverage"),
     ] {
-        let profile_run_log = tmp.path().join(log_name);
+        let profile_run_log = tmp.path().join(recipe);
         let output = run_just(
             tmp.path(),
             &[recipe],
