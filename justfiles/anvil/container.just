@@ -166,17 +166,17 @@ anvil-container-tag:
     $dockerfile = "$dockerfile".Trim()
     $hookRel = '.anvil/container/hooks.ps1'
 
-    # The declared root MSRV is an input the build context cannot carry. The
-    # image installs that toolchain, so a bump changes what the image contains
-    # and has to rename it -- exactly what every other input here is hashed for.
+    # The declared root MSRV is hashed because the image installs that
+    # toolchain: a bump changes what the image contains and has to rename it,
+    # exactly what every other input here is hashed for.
     #
-    # The value, not the manifest it comes from. `Cargo.toml` would be the
-    # obvious file to admit and hash, but it is the busiest file in a workspace:
-    # dependency edits touch it constantly while `rust-version` moves perhaps
-    # once in a repository's life. Hashing the file would rename the image, and
-    # oblige a publisher to rebuild and republish it, for a stream of changes
-    # that cannot alter a single byte the image contains. Hashing the value
-    # renames it exactly when the contents differ.
+    # The value, not the manifest it comes from. The manifest is in the build
+    # context, but it is the busiest file in a workspace: dependency edits touch
+    # it constantly while `rust-version` moves perhaps once in a repository's
+    # life. Hashing the file would rename the image, and oblige a publisher to
+    # rebuild and republish it, for a stream of changes that cannot alter a
+    # single byte the image contains. Hashing the value renames it exactly when
+    # the contents differ.
     $rootMsrv = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable root-msrv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $rootMsrv = "$rootMsrv".Trim()
@@ -661,14 +661,6 @@ _anvil-container-image:
         # It also keeps the identity scheme honest: without this, two hosts of
         # different architecture compute the same tag for different images.
         $buildCmd = @('build', '--platform', 'linux/amd64', '--file', "$engineRoot/$dockerfile", '--tag', $image)
-        # The one input the context cannot carry, and the same value the tag was
-        # computed from -- resolved here rather than passed down so the two
-        # cannot drift apart silently. `none` is sent verbatim for a repository
-        # that declares no MSRV: the resolver in the image treats it as an
-        # answer, and stops if it arrives with none at all.
-        $rootMsrv = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable root-msrv
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        $buildCmd += @('--build-arg', "ANVIL_ROOT_MSRV=$("$rootMsrv".Trim())")
         # BuildKit reads `<dockerfile>.dockerignore` on its own; buildah reads
         # only a context-root ignore file and needs to be pointed at ours. Named
         # rather than probed, because the flag is rejected outright by the engine

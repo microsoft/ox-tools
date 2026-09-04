@@ -25,6 +25,12 @@
 # the image tag digests, so what the context admits and what the tag covers stay
 # the same set -- including the `.anvil-proposed` siblings both exclude, which
 # are anvil's review artifacts rather than build inputs.
+#
+# The root `Cargo.toml` is admitted for one value: the declared MSRV, which the
+# setup installs a toolchain for. It is the only build input that lives in the
+# repository's source rather than in the recipe tree. The workspace members it
+# names are deliberately not admitted, so the context stays a recipe tree plus
+# two declarations rather than a checkout.
 *
 !justfiles
 justfiles/*
@@ -35,3 +41,4 @@ justfiles/anvil/**/*.anvil-proposed
 !.anvil/container
 .anvil/container/**/*.anvil-proposed
 !rust-toolchain.toml
+!Cargo.toml

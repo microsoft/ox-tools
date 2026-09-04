@@ -133,7 +133,7 @@ never read, rewritten or reordered.
 | `anvil-container-base-image` | `ARG BASE_IMAGE`, pinned to a digest. | A second `ARG BASE_IMAGE=…` to build on a different base. |
 | `anvil-container-base` | `FROM`, the version pins for `pwsh`, `just`, `rustup` and `cargo-binstall`, and the `ENV` block. | Anything the first network access needs: a root CA, `http_proxy`, an internal package mirror. |
 | `anvil-container-tools` | System packages and those four tools. | Libraries a catalog tool needs to compile, for tools `binstall` has no prebuilt binary for. |
-| `anvil-container-setup` | `ARG ANVIL_ROOT_MSRV`, `COPY` of the recipe tree, then `just anvil-setup`. | Anything the repository's own checks need at run time. |
+| `anvil-container-setup` | `COPY` of the recipe tree and the root manifest, then `just anvil-setup`. | Anything the repository's own checks need at run time. |
 | `anvil-container-entry` | `ANVIL_IN_CONTAINER`, `WORKDIR`, `CMD`. | — |
 
 Each gap sits at the only point in the build where its kind of addition works: a certificate has to land before the
@@ -186,17 +186,18 @@ generated pins. There is no second tool list to keep synchronized, and consequen
 image (§4.1).
 
 One version that recipe needs is not in the pins. `anvil-msrv-test-setup` installs the toolchain named by the
-repository's declared MSRV, which lives in the root `Cargo.toml` — repository source, which this context deliberately
-does not carry. The build therefore resolves the value on the host and passes it as `ARG ANVIL_ROOT_MSRV`, which
-Docker places in the environment of the setup `RUN`; the MSRV resolver reads it there whenever it finds no root
-manifest. A repository that declares no MSRV sends `none`, which is an answer. An unset variable is not: the resolver
-stops and names it, so a build that loses the argument cannot quietly produce an image missing a toolchain it claims
-to install. It is an `ARG` rather than an `ENV` so it does not survive into the finished image — at run time the
-checkout is mounted and answers for itself, and the variable is consulted only when there is no manifest, so a stale
-value can never shadow a real declaration.
+repository's declared MSRV, which lives in the root `Cargo.toml` rather than in `versions.just`. That manifest is
+therefore admitted to the build context and copied to `/opt/anvil`, which is already the root the recipes resolve
+against: it holds `justfiles/` and `rust-toolchain.toml`, and `justfile_directory()` names it. The MSRV resolver then
+reads the manifest there exactly as it does on a developer's machine, with no container-specific path in it.
 
-`Dockerfile.dockerignore` scopes the build context to `justfiles/anvil/`, `.anvil/container/` and
-`rust-toolchain.toml`, denying everything else. The recipe tree is copied whole because `just` has to parse it to run
+The workspace members that manifest names are deliberately not admitted. They are a checkout, and the image is not
+one; the context stays a recipe tree plus two declarations. The one code path that would need them, workspace MSRV
+validation, reads every member's resolved `rust-version` — and it is unreachable here, because it returns early
+whenever a root toolchain file selects the compiler, which this image requires and copies.
+
+`Dockerfile.dockerignore` scopes the build context to `justfiles/anvil/`, `.anvil/container/`, `rust-toolchain.toml`
+and the root `Cargo.toml`, denying everything else. The recipe tree is copied whole because `just` has to parse it to run
 `anvil-setup`, and it is hashed whole (§4). `.anvil/container/` is admitted so a gap can `COPY` a file placed beside
 the Dockerfile; anvil's own `.anvil-proposed` review artifacts are excluded from both the context and the digest.
 BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`, so the repository neither needs to
@@ -237,15 +238,14 @@ The cost is that editing any recipe renames the image and the next run rebuilds 
 that can name contents the image does not have makes every guarantee below meaningless.
 
 The declared root MSRV is the one input that is not a file. The image installs that toolchain, so raising it changes
-what the image contains and must rename it — but the value is declared in the repository's root `Cargo.toml`, which
-is not in the build context (§3) and cannot be, because the image is built without repository source. The build
-resolves the value on the host, passes it as `ARG ANVIL_ROOT_MSRV`, and hashes it here.
+what the image contains and must rename it. The value is declared in the root `Cargo.toml`, which the context does
+admit (§3), and the digest takes the resolved value rather than the file.
 
-The value is hashed rather than the manifest that carries it, and that is a correctness choice rather than a
-convenience. `Cargo.toml` is the busiest file in a workspace — every dependency edit touches it — while `rust-version`
-moves perhaps once in a repository's life. Admitting the file to the context and the digest would rename the image, and
-oblige a publisher to rebuild and republish it, for a long stream of changes that cannot alter a single byte the image
-contains. A tag must change when the contents change and not otherwise; hashing the value is what makes that true.
+That is a correctness choice rather than a convenience. `Cargo.toml` is the busiest file in a workspace — every
+dependency edit touches it — while `rust-version` moves perhaps once in a repository's life. Hashing the file would
+rename the image, and oblige a publisher to rebuild and republish it, for a long stream of changes that cannot alter a
+single byte the image contains. A tag must change when the contents change and not otherwise; hashing the value is
+what makes that true.
 
 The hook file's **content** is an input, since it determines what the build installs. Its **output** is deliberately
 excluded: a credential must never influence a tag.
