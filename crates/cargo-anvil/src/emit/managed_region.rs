@@ -200,7 +200,7 @@ fn splice(
                 adopted.as_str()
             }
             // Unreachable in the normal path: `run` refuses the host before it
-            // ever plans a conflicting region (see `toml_adoption_refusal`).
+            // ever plans a conflicting region (see `toml_introduction_refusal`).
             // Reported rather than written, because every output available here
             // either repeats a key TOML forbids or discards configuration.
             TomlAdoption::Conflict {
