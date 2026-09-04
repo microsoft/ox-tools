@@ -14,7 +14,7 @@
 # it, so the checks read the cache instead of recomputing.
 #
 # The base ref is resolved by the shared _anvil-base-ref helper (helpers.just,
-# also reused by anvil-mutants-diff). The impact -> `--package name@version`
+# also reused by anvil-mutants-diff). The impact -> cargo selector
 # tier projection is _anvil-impact-format, defined in THIS file next to its
 # sole caller; this recipe orchestrates the snapshots + caching around both so
 # the exact same projection is used locally and in CI.
@@ -324,11 +324,11 @@ _anvil-impact-snapshot:
     }
 
 # Public. Computes the impact set from the two snapshots and projects each
-# tier into a pre-built `--package name@version ...` string (or the sentinel
-# `--skip` when the tier is empty) via the shared _anvil-impact-format
-# helper, written to include_<tier>.txt. Per-crate checks depend on this
-# recipe and read those files via _anvil-impact-include. Cache-aware: no-ops
-# when the snapshots haven't changed.
+# tier into tokenized `--package name` selectors (or `--none` when the tier is
+# empty) via the shared _anvil-impact-format helper, written to
+# include_<tier>.txt. Per-crate checks depend on this recipe and read those
+# files via _anvil-impact-include. Cache-aware: no-ops when the snapshots
+# haven't changed.
 
 # Compute the impact set and write the target/anvil/impact cache.
 [group("anvil")]
@@ -343,8 +343,9 @@ anvil-impact: _anvil-impact-snapshot
     }
     if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
     if ($env:ANVIL_IMPACT -eq 'consume') {
-        # consume = trust an already-downloaded cache verbatim, so assert the
-        # cache is actually present. If the CI download ever stops landing at
+        # consume = trust an already-downloaded cache, so assert the cache is
+        # present and each selector file follows the token grammar. If the CI
+        # download ever stops landing at
         # target/anvil/impact/ (renamed artifact, a missing download step, or
         # an adopter invoking the group action directly), every scoped check
         # would otherwise silently widen to --workspace and the pipeline would
@@ -355,6 +356,10 @@ anvil-impact: _anvil-impact-snapshot
         if ($missing.Count -gt 0) {
             Write-Error "anvil-impact: ANVIL_IMPACT=consume but the downloaded impact cache is missing ($($missing -join ', ') include file(s) absent under target/anvil/impact/). The impact artifact must be downloaded there before scoped checks run."
             exit 1
+        }
+        foreach ($tier in @('modified', 'affected', 'required')) {
+            & "{{ just_executable() }}" _anvil-impact-include $tier | Out-Null
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
         exit 0
     }
@@ -387,7 +392,7 @@ anvil-impact: _anvil-impact-snapshot
     if ($dirty.Count -gt 0) {
         Write-Host "anvil-impact: warning: $($dirty.Count) uncommitted change(s) in the working tree are invisible to cargo-delta (it scopes on the committed diff vs the base ref); widening all tiers to --workspace so nothing you are editing is skipped -- commit to scope by impact, or set ANVIL_IMPACT=off to disable scoping." -ForegroundColor Yellow
         [System.IO.Directory]::CreateDirectory($impactDir) | Out-Null
-        Set-Content -LiteralPath (Join-Path $impactDir 'include_modified.txt') -Value '' -Encoding UTF8 -NoNewline
+        Set-Content -LiteralPath (Join-Path $impactDir 'include_modified.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath (Join-Path $impactDir 'include_affected.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath (Join-Path $impactDir 'include_required.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath $impactJson -Value '{}' -Encoding UTF8
@@ -399,7 +404,9 @@ anvil-impact: _anvil-impact-snapshot
     # Content cache key: regenerate the projection only when a snapshot moved
     # or an output is missing. Keyed on the snapshot markers, not mtimes, so a
     # downstream cloud-workflow job that downloaded the artifact recognizes it.
-    $wantState = ("$(Get-Content -Raw $baselineKeyFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentKeyFile)".Trim())
+    # Prefix the projection format so an Anvil upgrade that changes the include
+    # representation cannot accept stale files written by an older catalog.
+    $wantState = 'projection-v2 ' + ("$(Get-Content -Raw $baselineKeyFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentKeyFile)".Trim())
     $includeFiles = @('modified', 'affected', 'required') | ForEach-Object { Join-Path $impactDir "include_$_.txt" }
     $fresh = (Test-Path $impactJson) -and (Test-Path $impactStateFile) -and `
         ("$(Get-Content -Raw $impactStateFile)".Trim() -eq $wantState) -and `
@@ -411,11 +418,11 @@ anvil-impact: _anvil-impact-snapshot
 
     # First-time anvil adoption: the base predates the cargo workspace, so
     # there is no baseline to diff against. Fall back to full-workspace
-    # validation -- modified runs unconditionally (empty), affected/required
-    # default to --workspace -- rather than failing the impact computation.
+    # validation -- every tier defaults to --workspace rather than failing the
+    # impact computation.
     if (Test-Path (Join-Path $snapDir 'baseline-no-workspace')) {
         Write-Host 'anvil-impact: baseline has no workspace; defaulting all tiers to full-workspace'
-        Set-Content -LiteralPath (Join-Path $impactDir 'include_modified.txt') -Value '' -Encoding UTF8 -NoNewline
+        Set-Content -LiteralPath (Join-Path $impactDir 'include_modified.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath (Join-Path $impactDir 'include_affected.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath (Join-Path $impactDir 'include_required.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath $impactJson -Value '{}' -Encoding UTF8
@@ -440,20 +447,19 @@ anvil-impact: _anvil-impact-snapshot
     if ([string]::IsNullOrWhiteSpace($impactOut)) { $impactOut = '{}' }
     Set-Content -LiteralPath $impactJson -Value $impactOut.Trim() -Encoding UTF8
 
-    # Project each tier into its `--package name@version ...` / `--skip`
-    # string via the shared formatter (version-qualified specs + lib-name ->
-    # package-name translation live there, used identically by the cloud
-    # impact steps).
+    # Project each tier into one selector token per line. The formatter owns
+    # lib-name -> package-name translation; cargo-each resolves package
+    # versions from live metadata before invoking child commands.
     foreach ($tier in @('modified', 'affected', 'required')) {
-        $value = (& "{{ just_executable() }}" _anvil-impact-format $tier $impactJson)
+        $value = @(& "{{ just_executable() }}" _anvil-impact-format $tier $impactJson)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        Set-Content -LiteralPath (Join-Path $impactDir "include_$tier.txt") -Value $value.Trim() -Encoding UTF8 -NoNewline
-        Write-Host "anvil-impact: $tier -> $($value.Trim())"
+        Set-Content -LiteralPath (Join-Path $impactDir "include_$tier.txt") -Value $value -Encoding UTF8
+        Write-Host "anvil-impact: $tier -> $($value -join ' ')"
     }
     Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
 
 # _anvil-impact-format: turns a cargo-delta impact report into the
-# `--package <spec> ...` string the scoped checks consume, projected per
+# selector tokens the scoped checks consume, projected per
 # tier into include_<tier>.txt by `anvil-impact` above -- its only caller,
 # next to which it now lives (impact analysis stays in one place).
 #
@@ -463,14 +469,11 @@ anvil-impact: _anvil-impact-snapshot
 #   impactJson - path to the file the caller produced via
 #                `cargo delta impact --format json`.
 #
-# Output (stdout, exactly one line so the caller can capture it):
-#   * "--package name@version --package name2@version2 ..." when the
-#     tier has members. Each package is a version-qualified cargo spec:
-#     the version (read from `cargo metadata --no-deps`, i.e. workspace
-#     members only) disambiguates a workspace member from a like-named
-#     transitive dependency pulled in at a different version, which a
-#     bare `-p name` cannot do ("multiple packages named name").
-#   * "--skip" when the tier is empty (recipes treat this as a no-op).
+# Output (stdout, one token per line so PowerShell captures a ready-to-splat array):
+#   * repeated "--package" / bare workspace package-name pairs when the
+#     tier has members. cargo-each resolves those names from live metadata
+#     and emits version-qualified specs to child Cargo commands.
+#   * "--none" when the tier is empty (cargo-each treats this as a no-op).
 # Metadata failures and unknown/ambiguous package names are written to
 # STDERR and fail the recipe, so callers never continue with an incomplete
 # package set (which would silently under-scope and skip a check).
@@ -555,7 +558,7 @@ _anvil-impact-format tier impactJson:
     }
     $impact = Get-Content -LiteralPath $impactJson -Raw | ConvertFrom-Json
     $names = @($impact.$tierKey)
-    $specs = [System.Collections.Generic.List[string]]::new()
+    $selectors = [System.Collections.Generic.List[string]]::new()
     foreach ($name in $names) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
         # Union candidates from every namespace, de-duplicated by package id
@@ -591,20 +594,23 @@ _anvil-impact-format tier impactJson:
             exit 1
         }
         $p = $candidates[0]
-        $specs.Add("--package $($p.name)@$($p.version)")
+        $selectors.Add('--package')
+        $selectors.Add($p.name)
     }
-    if ($specs.Count -eq 0) {
-        Write-Output '--skip'
+    if ($selectors.Count -eq 0) {
+        Write-Output '--none'
     } else {
-        Write-Output ($specs -join ' ')
+        Write-Output $selectors
     }
 
 # Private. Resolves an impact category's scope for a check recipe and echoes it on stdout.
 #   1. ANVIL_IMPACT=off            -> tier default (full-workspace / run).
-#   2. include_<tier>.txt present  -> its contents (a --package list or --skip).
-#   3. otherwise                   -> tier default.
-# Tier default: --workspace for affected/required; empty (run) for modified.
-# Each scoped check calls this directly (into a local $include variable) to
+#   2. include_<tier>.txt present  -> validated selector tokens; malformed
+#                                      content fails closed.
+#   3. file missing                -> tier default, except consume mode fails
+#                                      because its downloaded cache is incomplete.
+# Tier default: --workspace for every tier.
+# Each scoped check calls this directly (into a local $selection array) to
 # read its category's scope from the target/anvil/impact cache -- the same cache
 # both locally and in cloud workflows (where the group job downloaded it).
 
@@ -613,7 +619,7 @@ _anvil-impact-format tier impactJson:
 _anvil-impact-include tier:
     $ErrorActionPreference = 'Stop'
     $tier = '{{ tier }}'
-    $default = if ($tier -eq 'modified') { '' } else { '--workspace' }
+    $default = '--workspace'
     # Exit 2 = invalid caller configuration (bad ANVIL_IMPACT), distinct from
     # the generic 1 used for operational failures -- see _anvil-impact-snapshot.
     if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
@@ -623,7 +629,33 @@ _anvil-impact-include tier:
     if ($env:ANVIL_IMPACT -eq 'off') { Write-Output $default; exit 0 }
     $file = "target/anvil/impact/include_$tier.txt"
     if (Test-Path $file) {
-        Write-Output ("$(Get-Content -Raw $file)".Trim())
+        $tokens = @(Get-Content -LiteralPath $file)
+        $valid = $false
+        if ($tokens.Count -eq 1 -and $tokens[0] -in @('--workspace', '--none')) {
+            $valid = $true
+        } elseif ($tokens.Count -gt 0 -and ($tokens.Count % 2) -eq 0) {
+            $valid = $true
+            for ($i = 0; $i -lt $tokens.Count; $i += 2) {
+                $name = $tokens[$i + 1]
+                if ($tokens[$i] -ne '--package' -or
+                    [string]::IsNullOrWhiteSpace($name) -or
+                    $name -ne $name.Trim() -or
+                    $name -match '\s' -or
+                    $name.StartsWith('--')) {
+                    $valid = $false
+                    break
+                }
+            }
+        }
+        if (-not $valid) {
+            Write-Error "anvil-impact: selector file '$file' is empty or malformed. Expected exactly --workspace, exactly --none, or one token per line as repeated --package/name pairs. Recompute or re-download the impact cache."
+            exit 1
+        }
+        Write-Output $tokens
     } else {
+        if ($env:ANVIL_IMPACT -eq 'consume') {
+            Write-Error "anvil-impact: ANVIL_IMPACT=consume but selector file '$file' is missing"
+            exit 1
+        }
         Write-Output $default
     }

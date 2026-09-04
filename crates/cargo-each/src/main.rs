@@ -5,11 +5,10 @@
 //! members.
 //!
 //! `cargo-each` resolves a package selection expressed with the same
-//! selectors as `cargo build`, optionally narrows it with a small metadata
-//! predicate language, and runs a command over the result — either once per
-//! member (with placeholder substitution) or exactly once for the whole set.
-//! It exists to replace hand-rolled for-each-package shell loops with a
-//! single cargo-native, cross-platform command.
+//! selectors as `cargo build`, optionally narrows it with package predicates,
+//! and runs a command over the result — once per member, once per matching
+//! Cargo target, or exactly once for the whole set. It replaces hand-rolled
+//! shell loops with one cargo-native, cross-platform command.
 //!
 //! `cargo-each` ships as an executable only; it is a cargo subcommand, not a
 //! library dependency.
@@ -48,13 +47,15 @@
 //!
 //! ## Filters
 //!
-//! `--filter <PRED>` keeps only members matching `PRED`; `--exclude-filter
-//! <PRED>` drops them. Both are repeatable: `--filter` predicates are
-//! AND-combined (kept only if a member matches every one) and
-//! `--exclude-filter` predicates are OR-combined (dropped if a member matches
-//! any one). Exclusion wins over inclusion. Predicates:
+//! `--filter` accepts Boolean expressions using `not`, `and`, `or`, and
+//! parentheses, with conventional precedence. Repeated `--filter` expressions
+//! are AND-combined. Repeated `--exclude-filter` expressions are OR-combined,
+//! and exclusion wins. Metadata values containing Boolean syntax can be
+//! double-quoted. Expression atoms:
 //!
-//! - `lib` / `bin` — the member has a target of that kind.
+//! - `lib` / `bin` / `target-kind:<kind>` — target-kind membership.
+//! - `publishable` — Cargo permits publishing the package.
+//! - `feature:<name>` — the package declares the feature.
 //! - `dep:<name>` — the member declares `<name>` as a dependency.
 //! - `metadata:<dotted.key>` — `package.metadata.<dotted.key>` is present.
 //! - `metadata:<dotted.key>=<value>` — that key equals `<value>` (numeric
@@ -66,21 +67,25 @@
 //!   name order, substituting the per-package placeholders below.
 //! - `--once`: run the command exactly once when the set is non-empty (skip
 //!   when empty), using the `{packages}` placeholder to inject the selection.
+//! - `--each-target <KIND>`: run once per matching Cargo target, using
+//!   `{target}` plus the package placeholders. Repeated kinds are OR-combined;
+//!   `--target-required-feature` further narrows targets.
 //!
 //! `--keep-going` runs every invocation and exits non-zero if any failed
-//! (default is fail-fast); `--chdir` runs each per-package command from that
-//! member crate root (its `Cargo.toml` directory) instead of the current
-//! directory — per-package mode only, so it cannot be combined with `--once`;
-//! `--dry-run` prints the fully-substituted commands without running them.
+//! (default is fail-fast); `--chdir` runs each per-package or per-target
+//! command from that member crate root; `--dry-run` prints commands without
+//! running them.
 //!
 //! ## Placeholders
 //!
 //! Substituted inside each command argument:
 //!
-//! - `{name}` — bare package name (per-package mode).
-//! - `{spec}` — `name@version` (per-package mode).
-//! - `{version}` — package version (per-package mode).
-//! - `{manifest}` — absolute path to the member `Cargo.toml` (per-package).
+//! - `{name}` — bare package name (per-package and per-target).
+//! - `{spec}` — `name@version` (per-package and per-target).
+//! - `{version}` — package version (per-package and per-target).
+//! - `{manifest}` — absolute member `Cargo.toml` path (per-package and
+//!   per-target).
+//! - `{target}` — Cargo target name (per-target).
 //! - `{packages}` — the cargo selection flags for the resolved set
 //!   (`--workspace` for the whole workspace, else `--package name@version …`);
 //!   valid only in `--once` mode and only as a standalone argument.
@@ -97,7 +102,7 @@
 //! exits 0. This is what lets callers drop bespoke nothing-to-do guards.
 //! Otherwise the exit code is the first failing command code (fail-fast),
 //! `1` under `--keep-going` if any command failed, or `2` for a `cargo-each`
-//! usage error (unknown selector, bad predicate, misused placeholder).
+//! usage error (unknown selector, bad filter expression, misused placeholder).
 //!
 //! # Examples
 //!
@@ -113,6 +118,13 @@
 //! ```text
 //! cargo each -p crate-a -p crate-b --once -- \
 //!     cargo clippy {packages} --all-targets -- -D warnings
+//! ```
+//!
+//! Run every Cargo test target that requires the `loom` feature:
+//!
+//! ```text
+//! cargo each --workspace --each-target test --target-required-feature loom -- \
+//!     cargo test -p {name} --test {target} --features loom
 //! ```
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]

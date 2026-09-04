@@ -14,10 +14,10 @@
 [script("pwsh", "-NoProfile")]
 anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
-    if ($include -eq '--skip') { Write-Host 'anvil-doc-build: no affected packages; skipping'; exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
-    & cargo {{_anvil_stable_toolchain_args}} doc @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-deps
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include required)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} doc '{packages}' --all-features --no-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # doc-build, examples and doc-test are pure cargo built-ins; the rust
@@ -26,8 +26,8 @@ anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
-anvil-doc-build-setup installer="install": anvil-toolchain-stable-install
+anvil-doc-build-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
-anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
+anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs

@@ -4,11 +4,14 @@
 //! Implementation of the `cargo each` command: resolve the selection,
 //! apply filters, build the plan, and run it.
 
+use std::collections::BTreeSet;
 use std::process::{Command, ExitCode};
 
+use cargo_metadata::TargetKind;
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::EachArgs;
+use crate::error::InvalidTargetKindError;
 use crate::filter::Predicate;
 use crate::plan::{Mode, PackagesExpansion, Plan};
 use crate::select::Selection;
@@ -29,11 +32,28 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         PackagesExpansion::Explicit
     };
 
-    let mode = if args.once { Mode::Once } else { Mode::PerPackage };
-    let plan = Plan::build(&members, mode, args.chdir, packages, &args.command).into_app_err("failed to build command plan")?;
+    let target_kinds = parse_target_kinds(&args.each_targets)?;
+    let target_required_features = args.target_required_feature.iter().cloned().collect();
+    let mode = if args.once {
+        Mode::Once
+    } else if target_kinds.is_empty() {
+        Mode::PerPackage
+    } else {
+        Mode::PerTarget
+    };
+    let plan = Plan::build(
+        &members,
+        mode,
+        args.chdir,
+        packages,
+        &target_kinds,
+        &target_required_features,
+        &args.command,
+    )
+    .into_app_err("failed to build command plan")?;
 
     if plan.invocations.is_empty() {
-        eprintln!("cargo each: selection resolved to no packages; nothing to do");
+        eprintln!("cargo each: selection resolved to no work; nothing to do");
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -65,13 +85,9 @@ fn build_selection(args: &EachArgs) -> Selection {
     }
 }
 
-/// Narrow `members` by the `--filter` (keep) and `--exclude-filter` (drop)
-/// predicates. `--filter` predicates are AND-combined (a member is kept only
-/// if it matches *every* one); `--exclude-filter` predicates are OR-combined
-/// (a member is dropped if it matches *any* one). Exclusion wins over
-/// inclusion, so a member matching both a keep and a drop predicate is
-/// dropped. This is the natural set pairing: keep is an intersection, drop is
-/// a union.
+/// Narrow `members` by package keep and drop expressions. Repeated `--filter`
+/// expressions are AND-combined; repeated `--exclude-filter` expressions are
+/// OR-combined, and exclusion wins.
 fn apply_filters(members: &mut Vec<&Member>, args: &EachArgs) -> Result<(), AppError> {
     let keep = parse_predicates(&args.filters)?;
     let drop = parse_predicates(&args.exclude_filters)?;
@@ -82,8 +98,22 @@ fn apply_filters(members: &mut Vec<&Member>, args: &EachArgs) -> Result<(), AppE
 fn parse_predicates(specs: &[String]) -> Result<Vec<Predicate>, AppError> {
     specs
         .iter()
-        .map(|s| Predicate::parse(s).into_app_err("invalid filter predicate"))
+        .map(|s| Predicate::parse(s).into_app_err("invalid filter expression"))
         .collect()
+}
+
+fn parse_target_kinds(kinds: &[String]) -> Result<BTreeSet<TargetKind>, AppError> {
+    kinds
+        .iter()
+        .map(|kind| {
+            if let Some(kind) = crate::workspace::parse_target_kind(kind) {
+                Ok(kind)
+            } else {
+                Err(InvalidTargetKindError::new(kind.clone()).into())
+            }
+        })
+        .collect::<Result<_, crate::error::EachError>>()
+        .into_app_err("invalid per-target configuration")
 }
 
 /// Run each invocation, honoring the fail-fast / `--keep-going` policy.

@@ -8,7 +8,6 @@
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
 
-use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs;
@@ -21,6 +20,7 @@ const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
 const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
+const DOC_TEST: &str = include_str!("../templates/justfiles/anvil/checks/doc-test.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const LOOM: &str = include_str!("../templates/justfiles/anvil/checks/loom.just");
 const MSRV_TEST: &str = include_str!("../templates/justfiles/anvil/checks/msrv-test.just");
@@ -107,7 +107,11 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = "$packageName 0.1.0"
             manifest_path = $manifestPath
-            targets = @([pscustomobject]@{ name = $libName; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $libName
+                kind = if ($env:FAKE_FIRST_RLIB) { @('rlib') } else { @('lib') }
+                doctest = $true
+            })
             publish = if ($env:FAKE_PUBLISH_FALSE) {
                 # Preserve the empty array through expression output so JSON emits [] rather than null.
                 Write-Output -NoEnumerate @()
@@ -115,7 +119,13 @@ if ($args -contains 'metadata') {
                 $null
             }
             metadata = [pscustomobject]@{
-                'coverage-gate' = [pscustomobject]@{ 'min-lines-percent' = 0 }
+                'coverage-gate' = [pscustomobject]@{
+                    'min-lines-percent' = if ($env:FAKE_COVERAGE_THRESHOLD) {
+                        [double]$env:FAKE_COVERAGE_THRESHOLD
+                    } else {
+                        0
+                    }
+                }
             }
         }
     )
@@ -130,7 +140,11 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = "$($env:FAKE_SECOND_PACKAGE_NAME) 0.1.0"
             manifest_path = [System.IO.Path]::Combine($root, 'nested', $secondDirLeaf, 'Cargo.toml')
-            targets = @([pscustomobject]@{ name = $env:FAKE_SECOND_PACKAGE_NAME; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $env:FAKE_SECOND_PACKAGE_NAME
+                kind = if ($env:FAKE_SECOND_BIN_ONLY) { @('bin') } else { @('lib') }
+                doctest = -not [bool]$env:FAKE_SECOND_BIN_ONLY
+            })
             publish = $null
             metadata = [pscustomobject]@{}
         }
@@ -146,7 +160,11 @@ if ($args -contains 'metadata') {
                 $env:FAKE_THIRD_PACKAGE_NAME,
                 'Cargo.toml'
             )
-            targets = @([pscustomobject]@{ name = $env:FAKE_THIRD_PACKAGE_NAME; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $env:FAKE_THIRD_PACKAGE_NAME
+                kind = if ($env:FAKE_THIRD_PROC_MACRO) { @('proc-macro') } else { @('lib') }
+                doctest = $true
+            })
             publish = @('private-registry')
             metadata = [pscustomobject]@{}
         }
@@ -228,6 +246,8 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
         justfile.push_str("cargo_check_external_types_version := \"0.0.0-test\"\n\n");
         justfile.push_str("_anvil_stable_toolchain_args := \"@()\"\n\n");
     }
+    justfile.push_str("anvil-tool-cargo-each-validate-prereqs:\n\n");
+    justfile.push_str("anvil-tool-cargo-each-install installer=\"install\":\n\n");
     for (name, contents) in imports {
         write(&tmp.path().join(name), contents);
         writeln!(justfile, "import '{name}'").unwrap();
@@ -270,7 +290,7 @@ fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> 
     // `ANVIL_IMPACT=consume` and downloads a cache into the real repository;
     // inherited into a temp directory that has no cache, `anvil-impact` fails
     // hard and takes the recipe under test with it. `ANVIL_INCLUDE_*` is the
-    // same hazard one level down: a leg whose scope resolved to `--skip` would
+    // same hazard one level down: a leg whose scope resolved to `--none` would
     // silently short-circuit the recipe before it did anything. A test that
     // cares about either value passes it explicitly below.
     command.env_remove("ANVIL_IMPACT");
@@ -447,9 +467,10 @@ fn impact_format_resolves_directory_aliases_and_fails_hard() {
         "unique manifest directory alias should resolve:\n{}",
         String::from_utf8_lossy(&directory_alias.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&directory_alias.stdout).trim(),
-        "--package fixture-package@0.1.0"
+    assert!(
+        String::from_utf8_lossy(&directory_alias.stdout)
+            .lines()
+            .eq(["--package", "fixture-package"])
     );
 
     let ambiguous_alias = run_just(
@@ -529,7 +550,7 @@ fn bolero_discovery_failure_propagates() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    seed_include(tmp.path(), "affected", "--package\nfixture");
     let output = run_just(
         tmp.path(),
         &["anvil-bolero"],
@@ -620,7 +641,7 @@ fn semver_exit_code_contract_is_executed() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    seed_include(tmp.path(), "affected", "--package\nfixture");
     let common = [("BASE_REF", OsStr::new("base")), ("FAKE_CARGO_LOG", log.as_os_str())];
 
     let findings = run_just(
@@ -870,42 +891,28 @@ fn repository_constants_match_shared_anvil_versions() {
 }
 
 #[test]
-fn public_api_checks_fail_when_metadata_discovery_fails() {
+fn semver_check_fails_when_metadata_discovery_fails() {
     if !tools_available() {
         return;
     }
-    for (recipe_file, contents, recipe, dependencies) in [
-        (
-            "semver.just",
-            SEMVER,
-            "anvil-semver-check",
-            &[
-                "anvil-tool-cargo-semver-checks-validate-prereqs",
-                "anvil-tool-cargo-semver-checks-install installer",
-                "anvil-impact",
-            ][..],
-        ),
-        (
-            "external-types.just",
-            EXTERNAL_TYPES,
-            "anvil-external-types",
-            &[
-                "anvil-tool-cargo-check-external-types-validate-prereqs",
-                "anvil-toolchain-nightly-external-types-validate-prereqs",
-                "anvil-tool-cargo-check-external-types-install installer",
-                "anvil-toolchain-nightly-external-types-install",
-                "anvil-impact",
-            ][..],
-        ),
-    ] {
-        let tmp = fixture(&[(recipe_file, contents), ("impact.just", IMPACT)], dependencies);
-        seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
-        let output = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))]);
-        assert_failed(&output, &format!("{recipe} cargo metadata failure"));
+    let tmp = fixture(
+        &[("semver.just", SEMVER), ("impact.just", IMPACT)],
+        &[
+            "anvil-tool-cargo-semver-checks-validate-prereqs",
+            "anvil-tool-cargo-semver-checks-install installer",
+            "anvil-impact",
+        ],
+    );
+    seed_include(tmp.path(), "affected", "--package\nfixture");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-semver-check"],
+        &[("FAKE_METADATA_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))],
+    );
+    assert_failed(&output, "anvil-semver-check cargo metadata failure");
 
-        let malformed = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_INVALID", OsStr::new("1"))]);
-        assert_failed(&malformed, &format!("{recipe} malformed cargo metadata"));
-    }
+    let malformed = run_just(tmp.path(), &["anvil-semver-check"], &[("FAKE_METADATA_INVALID", OsStr::new("1"))]);
+    assert_failed(&malformed, "anvil-semver-check malformed cargo metadata");
 }
 
 #[test]
@@ -963,7 +970,92 @@ fn fmt_propagates_cargo_each_failure() {
 }
 
 #[test]
-fn external_types_checks_every_library_including_non_publishable_ones() {
+fn doc_test_selects_doctest_capable_targets_but_not_bin_only_packages() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+        &[
+            "anvil-tool-rustc-validate-prereqs",
+            "anvil-toolchain-stable-install",
+            "anvil-impact",
+        ],
+    );
+    seed_include(tmp.path(), "affected", "--workspace");
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_FIRST_RLIB", OsStr::new("1")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("bin-only")),
+            ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
+            ("FAKE_THIRD_PROC_MACRO", OsStr::new("1")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "doc-test selection failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = fs::read_to_string(&log).unwrap();
+    assert_eq!(commands.matches(" test --doc ").count(), 2, "commands:\n{commands}");
+    assert!(commands.contains("--package fixture"), "commands:\n{commands}");
+    assert!(commands.contains("--package macro-package"), "commands:\n{commands}");
+    assert!(
+        commands.contains("--package fixture --package macro-package"),
+        "workspace doctest packages must be sorted by name:\n{commands}"
+    );
+    assert!(!commands.contains("--package bin-only"), "commands:\n{commands}");
+
+    seed_include(tmp.path(), "affected", "--package\nfixture\n--package\nbin-only");
+    fs::write(&log, "").unwrap();
+    let scoped = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("bin-only")),
+            ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("unselected-doc")),
+            ("FAKE_THIRD_PROC_MACRO", OsStr::new("1")),
+        ],
+    );
+    assert!(scoped.status.success(), "scoped doc-test selection failed");
+    let scoped_commands = fs::read_to_string(&log).unwrap();
+    assert_eq!(scoped_commands.matches(" test --doc ").count(), 2);
+    assert!(scoped_commands.contains("--package fixture"));
+    assert!(!scoped_commands.contains("--package bin-only"));
+    assert!(!scoped_commands.contains("--package unselected-doc"));
+
+    seed_include(tmp.path(), "affected", "--package\nbin-only");
+    fs::write(&log, "").unwrap();
+    let bin_only = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("bin-only")),
+            ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
+        ],
+    );
+    assert!(bin_only.status.success(), "bin-only doc-test selection must skip cleanly");
+    assert!(
+        String::from_utf8_lossy(&bin_only.stdout).contains("no affected doctest-capable packages"),
+        "bin-only skip must explain why no doctests ran"
+    );
+    assert!(
+        !fs::read_to_string(&log).unwrap().lines().any(|line| line.contains("each ")),
+        "bin-only selection must not invoke cargo-each"
+    );
+}
+
+#[test]
+fn external_types_delegates_library_selection_and_iteration_to_cargo_each() {
     if !tools_available() {
         return;
     }
@@ -979,17 +1071,7 @@ fn external_types_checks_every_library_including_non_publishable_ones() {
     );
     seed_include(tmp.path(), "affected", "--workspace");
     let log = tmp.path().join("cargo.log");
-    let output = run_just(
-        tmp.path(),
-        &["anvil-external-types"],
-        &[
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_PUBLISH_FALSE", OsStr::new("1")),
-            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("public-default")),
-            ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("public-default")),
-            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("named-registry")),
-        ],
-    );
+    let output = run_just(tmp.path(), &["anvil-external-types"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
     assert!(
         output.status.success(),
         "library selection failed\nstdout:\n{}\nstderr:\n{}",
@@ -997,29 +1079,11 @@ fn external_types_checks_every_library_including_non_publishable_ones() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = fs::read_to_string(log).unwrap();
-    assert!(commands.contains("metadata --no-deps --format-version 1"));
-    let expected_manifests = [
-        tmp.path().join("Cargo.toml").to_string_lossy().into_owned(),
-        tmp.path()
-            .join("nested")
-            .join("public-default")
-            .join("Cargo.toml")
-            .to_string_lossy()
-            .into_owned(),
-        tmp.path()
-            .join("nested")
-            .join("named-registry")
-            .join("Cargo.toml")
-            .to_string_lossy()
-            .into_owned(),
-    ];
-    assert_eq!(
-        commands
-            .lines()
-            .filter_map(|command| { command.strip_prefix("+nightly-test check-external-types --manifest-path ") })
-            .map(str::to_owned)
-            .collect::<HashSet<_>>(),
-        expected_manifests.into_iter().collect()
+    assert!(commands.contains("each --workspace --filter lib --keep-going"));
+    assert!(commands.contains("check-external-types --manifest-path {manifest}"));
+    assert!(
+        !commands.contains("metadata --no-deps"),
+        "the recipe must not duplicate cargo-each metadata filtering"
     );
 }
 
@@ -1036,7 +1100,7 @@ fn semver_skips_non_publishable_libraries() {
             "anvil-impact",
         ],
     );
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    seed_include(tmp.path(), "affected", "--package\nfixture");
     let log = tmp.path().join("cargo.log");
     let output = run_just(
         tmp.path(),
@@ -1066,7 +1130,7 @@ fn semver_includes_libraries_restricted_to_named_registries() {
             "anvil-impact",
         ],
     );
-    seed_include(tmp.path(), "affected", "--package named-registry@0.1.0");
+    seed_include(tmp.path(), "affected", "--package\nnamed-registry");
     let log = tmp.path().join("cargo.log");
     let output = run_just(
         tmp.path(),
@@ -1092,6 +1156,64 @@ fn semver_includes_libraries_restricted_to_named_registries() {
 }
 
 #[test]
+fn llvm_cov_qualifies_direct_cargo_selectors_but_not_gate_selectors() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-llvm-tools-validate-prereqs",
+            "anvil-tool-cargo-llvm-cov-validate-prereqs",
+            "anvil-tool-cargo-nextest-validate-prereqs",
+            "anvil-tool-cargo-coverage-gate-validate-prereqs",
+            "anvil-component-nightly-llvm-tools-install",
+            "anvil-tool-cargo-llvm-cov-install installer",
+            "anvil-tool-cargo-nextest-install installer",
+            "anvil-tool-cargo-coverage-gate-install installer",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    seed_include(tmp.path(), "affected", "--package\nfixture");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-llvm-cov"],
+        &[("FAKE_CARGO_LOG", log.as_os_str()), ("FAKE_COVERAGE_THRESHOLD", OsStr::new("100"))],
+    );
+    assert!(
+        output.status.success(),
+        "qualified coverage selection failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(log).unwrap();
+    assert!(
+        calls.contains("--package fixture@0.1.0"),
+        "direct Cargo selectors must be version-qualified:\n{calls}"
+    );
+    if cfg!(all(windows, target_arch = "aarch64")) {
+        assert!(
+            calls.contains("nextest run"),
+            "Windows ARM must use the plain-nextest fallback:\n{calls}"
+        );
+        assert!(
+            !calls.contains("coverage-gate"),
+            "Windows ARM does not measure or gate coverage:\n{calls}"
+        );
+        return;
+    }
+    assert!(calls.contains("llvm-cov nextest"), "measured platforms must run llvm-cov:\n{calls}");
+    assert!(
+        calls.contains("coverage-gate --package fixture --lcov"),
+        "coverage-gate selectors must remain bare workspace names:\n{calls}"
+    );
+    assert!(
+        !calls.contains("coverage-gate --package fixture@0.1.0"),
+        "coverage-gate does not accept version-qualified names:\n{calls}"
+    );
+}
+
+#[test]
 fn all_coverage_opted_out_packages_run_both_test_configurations() {
     if !tools_available() {
         return;
@@ -1111,7 +1233,7 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    seed_include(tmp.path(), "affected", "--package\nfixture");
     let output = run_just(
         tmp.path(),
         &["anvil-llvm-cov"],
@@ -1166,7 +1288,7 @@ fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    seed_include(tmp.path(), "affected", "--package\nfixture");
     let output = run_just(
         tmp.path(),
         &["anvil-llvm-cov"],
@@ -1351,22 +1473,14 @@ fn mutants_diff_covers_uncommitted_work() {
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("BASE_REF", OsStr::new(&base)),
             ("RUNNER_TEMP", root.as_os_str()),
-            // The other early exit. Impact scoping sets this to `--skip` when a
-            // job has no affected packages, and the value is inherited from
-            // whatever environment the test runs in -- so on a CI leg that
-            // skipped, this test would assert against a recipe that returned
-            // before doing anything. Pin it to a scope that runs.
-            //
             // The architecture guard is deliberately *not* pinned: Windows
             // re-derives PROCESSOR_ARCHITECTURE for each new process from the
             // process's real architecture, so it cannot be overridden across a
             // spawn. That is why this test returns early on ARM64 above rather
             // than faking its way past the branch.
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
             // The recipe depends on `anvil-impact`, which would otherwise
-            // invoke cargo-delta against this fixture. The scope this test
-            // asserts on is pinned above, so computing an impact set would only
-            // add a tool dependency to a contract that does not exercise it.
+            // invoke cargo-delta against this fixture. This contract exercises
+            // diff construction, not impact computation.
             ("ANVIL_IMPACT", OsStr::new("off")),
         ],
     );
@@ -1433,10 +1547,6 @@ fn mutants_diff_skips_on_arm64_windows() {
         &[
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("RUNNER_TEMP", root.as_os_str()),
-            // Not the architecture -- that is the host's, and real here. This
-            // is the *other* early exit, pinned so a skipped impact scope
-            // cannot be mistaken for the architecture bail-out.
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
             // Same reason as the sibling contract: `anvil-mutants-diff` depends
             // on `anvil-impact`, and this test is about the architecture
             // bail-out, not about computing an impact set.

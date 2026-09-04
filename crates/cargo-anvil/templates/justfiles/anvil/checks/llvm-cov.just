@@ -18,12 +18,13 @@
 [script("pwsh", "-NoProfile")]
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') {
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($selection -contains '--none') {
         Write-Host 'anvil-llvm-cov: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    $pkg = $selection
     $allTestPkg = $pkg
     # Separate coverage-opted-out packages from the measured set. A crate that
     # is entirely `#![cfg_attr(coverage_nightly, coverage(off))]` (e.g. a
@@ -42,28 +43,46 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
             Write-Error 'anvil-llvm-cov: cargo metadata failed'
             exit $LASTEXITCODE
         }
+        try {
+            $metadata = $metadataJson | ConvertFrom-Json
+        } catch {
+            Write-Error "anvil-llvm-cov: could not parse cargo metadata output: $_"
+            exit 1
+        }
+        $specsByName = @{}
+        foreach ($package in $metadata.packages) {
+            $specsByName[$package.name] = "$($package.name)@$($package.version)"
+        }
         $optedOut = @(
-            ($metadataJson | ConvertFrom-Json).packages |
+            $metadata.packages |
                 Where-Object { $null -ne $_.metadata.'coverage-gate'.'min-lines-percent' -and [double]$_.metadata.'coverage-gate'.'min-lines-percent' -eq 0 } |
                 ForEach-Object { $_.name }
         )
-        if ($optedOut.Count -gt 0) {
-            $filtered = [System.Collections.Generic.List[string]]::new()
-            for ($i = 0; $i -lt $pkg.Count; $i++) {
-                # Impact emits version-qualified specs (name@version);
-                # compare the bare name against the opt-out set, but keep
-                # the full name@version token in $pkg so the llvm-cov
-                # measurement below resolves unambiguously.
-                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains (($pkg[$i + 1] -split '@', 2)[0])) {
-                    $testOnlyPkg.Add('--package')
-                    $testOnlyPkg.Add($pkg[$i + 1])
-                    $i++
-                    continue
-                }
-                $filtered.Add($pkg[$i])
+        $filtered = [System.Collections.Generic.List[string]]::new()
+        $qualifiedAll = [System.Collections.Generic.List[string]]::new()
+        for ($i = 0; $i -lt $pkg.Count; $i++) {
+            if ($pkg[$i] -ne '--package' -or ($i + 1) -ge $pkg.Count) {
+                Write-Error "anvil-llvm-cov: unsupported affected-package arguments: $($pkg -join ' ')"
+                exit 1
             }
-            $pkg = $filtered.ToArray()
+            $name = $pkg[++$i]
+            if (-not $specsByName.ContainsKey($name)) {
+                Write-Error "anvil-llvm-cov: affected package '$name' is absent from workspace metadata"
+                exit 1
+            }
+            $spec = $specsByName[$name]
+            $qualifiedAll.Add('--package')
+            $qualifiedAll.Add($spec)
+            if ($optedOut -contains $name) {
+                $testOnlyPkg.Add('--package')
+                $testOnlyPkg.Add($spec)
+            } else {
+                $filtered.Add('--package')
+                $filtered.Add($spec)
+            }
         }
+        $pkg = $filtered.ToArray()
+        $allTestPkg = $qualifiedAll.ToArray()
     }
     $configs = @(
         @{ name = 'all-features'; flag = '--all-features' },
@@ -154,9 +173,8 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     # that were actually instrumented -- otherwise unmeasured members would
     # report NO DATA and fail the gate. When unscoped, $pkg is `--workspace`
     # (no gate flag); drop it so the gate defaults to every member.
-    #
-    # cargo-coverage-gate keys on bare package names from cargo metadata, so
-    # strip the @version qualifier the measurement used for disambiguation.
+    # cargo-coverage-gate keys on bare workspace package names, so strip the
+    # version qualifier used to disambiguate the direct Cargo commands.
     $gateArgs = [System.Collections.Generic.List[string]]::new()
     for ($i = 0; $i -lt $pkg.Count; $i++) {
         if ($pkg[$i] -eq '--workspace') { continue }

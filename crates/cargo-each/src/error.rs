@@ -29,9 +29,10 @@
 #[from(
     LoadMetadataError,
     UnknownSelectorError,
-    InvalidPredicateError,
+    InvalidFilterExpressionError,
+    InvalidTargetKindError,
     PlaceholderMisuseError,
-    ChdirRequiresPerPackageError
+    ChdirConflictsWithOnceError
 )]
 pub(crate) struct EachError;
 
@@ -49,17 +50,24 @@ pub(crate) struct UnknownSelectorError {
     pub(crate) selector: String,
 }
 
-/// A `--filter` / `--exclude-filter` predicate could not be parsed.
+/// A `--filter` / `--exclude-filter` expression could not be parsed.
 #[ohno::error]
-#[display("invalid filter predicate `{predicate}`: {reason}")]
-pub(crate) struct InvalidPredicateError {
-    pub(crate) predicate: String,
+#[display("invalid filter expression `{expression}`: {reason}")]
+pub(crate) struct InvalidFilterExpressionError {
+    pub(crate) expression: String,
     pub(crate) reason: String,
 }
 
-/// A placeholder token was used in a mode that does not support it (e.g.
-/// a per-package token like `{name}` under `--once`, or `{packages}`
-/// outside `--once`).
+/// A `--each-target` value is not a supported Cargo target kind.
+#[ohno::error]
+#[display(
+    "invalid target kind `{kind}`; expected one of: lib, rlib, dylib, cdylib, staticlib, proc-macro, bin, example, test, bench, custom-build"
+)]
+pub(crate) struct InvalidTargetKindError {
+    pub(crate) kind: String,
+}
+
+/// A placeholder token was used in a mode that does not support it.
 #[ohno::error]
 #[display("placeholder `{token}` cannot be used here: {reason}")]
 pub(crate) struct PlaceholderMisuseError {
@@ -69,10 +77,10 @@ pub(crate) struct PlaceholderMisuseError {
 
 /// `--chdir` was combined with `--once`. Changing into a member's crate root
 /// is only meaningful when there is one member per invocation, i.e. in
-/// per-package mode.
+/// per-package or per-target mode.
 #[ohno::error]
-#[display("`--chdir` requires per-package mode; it cannot be combined with `--once`")]
-pub(crate) struct ChdirRequiresPerPackageError;
+#[display("`--chdir` cannot be combined with `--once`")]
+pub(crate) struct ChdirConflictsWithOnceError;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -97,11 +105,19 @@ mod tests {
     }
 
     #[test]
-    fn invalid_predicate_renders_reason() {
-        let err = InvalidPredicateError::new("dep:".to_owned(), "empty dependency name".to_owned());
+    fn invalid_filter_expression_renders_reason() {
+        let err = InvalidFilterExpressionError::new("dep:".to_owned(), "empty dependency name".to_owned());
         let rendered = err.to_string();
         assert!(rendered.contains("dep:"));
         assert!(rendered.contains("empty dependency name"));
+    }
+
+    #[test]
+    fn invalid_target_kind_names_value() {
+        let err = InvalidTargetKindError::new("nope".to_owned());
+        let rendered = err.to_string();
+        assert!(rendered.contains("nope"));
+        assert!(rendered.contains("target kind"));
     }
 
     #[test]
@@ -113,8 +129,8 @@ mod tests {
     }
 
     #[test]
-    fn chdir_requires_per_package_renders() {
-        let err = ChdirRequiresPerPackageError::new();
+    fn chdir_conflict_renders() {
+        let err = ChdirConflictsWithOnceError::new();
         let rendered = err.to_string();
         assert!(rendered.contains("--chdir"));
         assert!(rendered.contains("--once"));

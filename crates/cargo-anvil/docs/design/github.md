@@ -300,7 +300,7 @@ a `.anvil-proposed` sibling on the next `update` — see
   `*_runner` inputs.
 - **Different schedule** for the scheduled tier.
 - **Path filters** to skip the workflow on docs-only PRs (though anvil's
-  `cargo delta impact` step already produces a `--skip` sentinel for the include lists
+  `cargo delta impact` step already produces `--none` selectors for empty include lists
   when nothing relevant changed).
 
 anvil ships two defaults in the root workflow that adopters typically keep but can
@@ -461,9 +461,9 @@ blocking failure rather than leaving the run green with a lone red impact job.
 
 The wiring never branches on impact's *output values*, though. When impact succeeds,
 each group always runs; recipes inside the group decide whether a given check no-ops,
-by testing for the literal sentinel `--skip` in the relevant include var. This matters
+primarily by passing `--none` to cargo-each. This matters
 because unscoped checks (`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
-must run on every PR, including docs-only PRs where every tier comes back `--skip`. See
+must run on every PR, including docs-only PRs where every tier comes back `--none`. See
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe) for the recipe-side
 contract.
 
@@ -845,7 +845,7 @@ threading pre-formatted strings that local runs never see. The chain in
    base ref (a group job installs the former and shallow-checks-out without the latter).
    Each scoped check then reads its category's scope from
    `target/anvil/impact/include_<tier>.txt` via `_anvil-impact-include` (into a local
-   `$include` variable). This is why the group jobs stay lean and can't be tripped up by
+   `$selection` array). This is why the group jobs stay lean and can't be tripped up by
    an environmental difference from the impact job.
 4. **Scheduled group jobs download nothing** and always validate the full workspace, so
    their group action exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by
@@ -856,9 +856,9 @@ threading pre-formatted strings that local runs never see. The chain in
    state could ever flip a scheduled job into impact scoping and skip the full-workspace
    backstop.)
 
-The wiring never gates jobs on the impact result — every job runs regardless of `--skip`
+The wiring never gates jobs on the impact result — every job runs regardless of `--none`
 status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
-`mutants-full`) must run on every PR even when every tier reports `--skip`. Steps that
+`mutants-full`) must run on every PR even when every tier reports `--none`. Steps that
 need a per-tier side decision read the downloaded cache file directly (e.g. the Codecov
 upload is gated on both coverage files existing via `hashFiles(...)`), never on a job
 output.

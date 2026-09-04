@@ -4,9 +4,9 @@
 //! Workspace discovery via [`cargo_metadata`].
 //!
 //! Enumerates workspace members and captures, for each, the facts the
-//! selection and filter layers need: name, version, manifest path, whether
-//! it has a `lib` / `bin` target, its declared dependency names, and its
-//! freeform `package.metadata` block.
+//! selection and filter layers need: package identity, publication state,
+//! features, dependencies, targets, and the freeform `package.metadata`
+//! block.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -36,6 +36,12 @@ pub(crate) struct Member {
     pub(crate) version: String,
     /// Absolute path to this member's `Cargo.toml`.
     pub(crate) manifest_path: PathBuf,
+    /// Whether Cargo permits publishing this package.
+    pub(crate) publishable: bool,
+    /// Features declared by this package.
+    pub(crate) features: BTreeSet<String>,
+    /// Cargo targets declared by this package.
+    pub(crate) targets: Vec<MemberTarget>,
     /// Whether the member has a `lib` target.
     pub(crate) has_lib: bool,
     /// Whether the member has a `bin` target.
@@ -48,6 +54,17 @@ pub(crate) struct Member {
     /// evaluation reads it, so it stays out of the public API surface (and
     /// keeps `serde_json` off the public boundary).
     pub(crate) metadata: Value,
+}
+
+/// The target facts used by target-kind predicates and per-target execution.
+#[derive(Debug, Clone)]
+pub(crate) struct MemberTarget {
+    /// Cargo target name.
+    pub(crate) name: String,
+    /// Cargo metadata target kinds.
+    pub(crate) kinds: BTreeSet<TargetKind>,
+    /// Features Cargo requires before this target is available.
+    pub(crate) required_features: BTreeSet<String>,
 }
 
 impl Member {
@@ -99,10 +116,23 @@ impl Workspace {
                 let has_lib = pkg.targets.iter().any(is_lib_target);
                 let has_bin = pkg.targets.iter().any(is_bin_target);
                 let dependencies = pkg.dependencies.iter().map(|d| d.name.clone()).collect();
+                let mut targets: Vec<MemberTarget> = pkg
+                    .targets
+                    .iter()
+                    .map(|target| MemberTarget {
+                        name: target.name.clone(),
+                        kinds: target.kind.iter().cloned().collect(),
+                        required_features: target.required_features.iter().cloned().collect(),
+                    })
+                    .collect();
+                targets.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.kinds.cmp(&b.kinds)));
                 Member {
                     name: pkg.name.to_string(),
                     version: pkg.version.to_string(),
                     manifest_path: pkg.manifest_path.clone().into_std_path_buf(),
+                    publishable: pkg.publish.as_ref().is_none_or(|registries| !registries.is_empty()),
+                    features: pkg.features.keys().cloned().collect(),
+                    targets,
                     has_lib,
                     has_bin,
                     dependencies,
@@ -138,4 +168,43 @@ fn is_lib_target(target: &cargo_metadata::Target) -> bool {
 /// Whether a target is a binary (`bin`).
 fn is_bin_target(target: &cargo_metadata::Target) -> bool {
     target.kind.iter().any(|k| matches!(k, TargetKind::Bin))
+}
+
+/// Parse a supported Cargo target-kind spelling.
+#[must_use]
+pub(crate) fn parse_target_kind(kind: &str) -> Option<TargetKind> {
+    match TargetKind::from(kind) {
+        TargetKind::Unknown(_) => None,
+        known => Some(known),
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_every_supported_target_kind() {
+        for kind in [
+            "bench",
+            "bin",
+            "custom-build",
+            "cdylib",
+            "dylib",
+            "example",
+            "lib",
+            "proc-macro",
+            "rlib",
+            "staticlib",
+            "test",
+        ] {
+            assert!(parse_target_kind(kind).is_some(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_target_kind() {
+        assert_eq!(parse_target_kind("future-kind"), None);
+    }
 }

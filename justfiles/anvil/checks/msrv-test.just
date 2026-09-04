@@ -10,10 +10,10 @@
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
     $impactExit = $LASTEXITCODE
     if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
+    if ($selection -contains '--none') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
     $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
     $resolverExit = $LASTEXITCODE
     if ($resolverExit -ne 0) { exit $resolverExit }
@@ -22,28 +22,33 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
         Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'
         exit 0
     }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # `--tests` = lib/bin unit tests + integration tests. NOT `--all-targets`,
     # which adds `--benches`: `cargo test` EXECUTES bench harnesses, and a
     # `harness = false` bench needs a driver binary this group never installs.
     # Benches/examples stay compile-only (`anvil-bench`, `anvil-examples`).
     # `--tests` over `--lib --bins --tests`: `--lib` fails on bin-only packages.
-    & cargo "+$toolchain" test @pkg --tests --all-features --locked
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo "+$toolchain" test @pkg --tests --locked
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Preserve MSRV compile coverage for benches and examples without using
+    # `cargo test --all-targets`, which would execute harness-free benches.
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install the declared MSRV toolchain only when this check is required.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
-anvil-msrv-test-setup installer="install":
+anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
     & "{{ just_executable() }}" _anvil-resolve-stable install-msrv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Validate the MSRV prerequisite.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
-anvil-msrv-test-validate-prereqs:
+anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
     $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
     $resolverExit = $LASTEXITCODE
     if ($resolverExit -ne 0) { exit $resolverExit }

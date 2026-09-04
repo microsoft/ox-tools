@@ -53,14 +53,18 @@ substitution) or exactly once for the whole set.
    `-p` / `--workspace` / `--none` flags via shell expansion, so cargo-each
    stays agnostic about where the selectors came from and callers never write
    a skip/default conditional.
-3. **Two execution modes.** *per-package* (run the command once per member,
+3. **Three execution modes.** *per-package* (run the command once per member,
    substituting `{name}`/`{spec}`/`{version}`/`{manifest}`) covers per-manifest
    tools; *once* (run the command a single time when the set is non-empty)
    covers workspace-wide tools and single-invocation cargo commands, with a
-   `{packages}` placeholder that expands to the cargo selection flags.
-4. **A small, general filter language** (`--filter` / `--exclude-filter`) over
-   cargo metadata — `lib`, `bin`, `dep:<name>`, `metadata:<dotted.key>[=<value>]`
-   — so the bespoke `cargo metadata` filtering in recipes collapses to one flag.
+   `{packages}` placeholder that expands to the cargo selection flags; and
+   *per-target* runs once for each Cargo target of requested kinds, preserving
+   the package placeholders and adding `{target}`.
+4. **A small, general filter language** (`--filter` and `--exclude-filter`)
+   with `not`, `and`, `or`, and parentheses over cargo metadata — target kinds,
+   publication state, declared features and dependencies, and
+   `metadata:<dotted.key>[=<value>]` — so bespoke `cargo metadata` filtering in
+   recipes collapses to flags.
 5. **Bare names for free.** `{name}` yields the un-qualified package name, so
    `@version` stripping disappears from callers even though the input carries it.
 6. **Works identically locally and in CI**, on any platform, with no shell
@@ -185,23 +189,44 @@ A `-p` selector that matches no member is an error (same policy as
 
 ### 4.2 Filters
 
-`--filter <PRED>` keeps only members matching `PRED`; `--exclude-filter <PRED>`
-drops members matching `PRED`. Both are repeatable: `--filter` predicates are
-AND-combined (a member is kept only if it matches every one) and
-`--exclude-filter` predicates are OR-combined (a member is dropped if it
-matches any one). Exclusion wins over inclusion — the natural set pairing:
-keep is an intersection, drop is a union. Predicates:
+`--filter <EXPR>` keeps only members matching the Boolean expression. Repeated
+`--filter` expressions are AND-combined. `--exclude-filter <EXPR>` drops
+members matching the Boolean expression; repeated exclusions are OR-combined,
+and exclusion wins. Formally:
+
+```
+result = selection
+       ∩ all(--filter)
+       − any(--exclude-filter)
+```
+
+Expressions use `not`, `and`, `or`, and parentheses, with conventional
+precedence (`not` before `and` before `or`). Operators must be lowercase and
+separated from predicates by whitespace or parentheses. A metadata value that
+contains Boolean operators or parentheses can be surrounded with double quotes;
+inside it, `\"` escapes a quote and `\\` escapes a backslash. The expression
+atoms are:
 
 | Predicate | True when the member… |
 |-----------|-----------------------|
 | `lib` | has a plain `lib` target. Proc-macro, `cdylib`, and `staticlib` crates are **not** matched — the predicate means the plain `lib` target kind only. |
 | `bin` | has a `bin` target. |
+| `target-kind:<kind>` | has a target whose Cargo metadata kind is `<kind>`; accepted spellings are `lib`, `rlib`, `dylib`, `cdylib`, `staticlib`, `proc-macro`, `bin`, `example`, `test`, `bench`, and `custom-build`. |
+| `publishable` | may be published: `package.publish` is absent or names at least one registry. `publish = false` is not publishable. |
+| `feature:<name>` | declares the named package feature. |
 | `dep:<name>` | lists `<name>` among its dependencies (any kind). |
 | `metadata:<dotted.key>` | has `package.metadata.<dotted.key>` present. |
 | `metadata:<dotted.key>=<value>` | has `package.metadata.<dotted.key>` equal to `<value>` (numeric compare when both parse as a number, else string compare). |
 
-Filtering runs after selection. If the filtered set is empty, `cargo-each`
-exits 0 (nothing to do), exactly like an empty selection.
+For example:
+
+```
+--filter 'publishable and (target-kind:lib or target-kind:proc-macro)'
+--exclude-filter 'metadata:ox-gen-readme.disable=true or feature:internal-only'
+```
+
+Filtering runs after package selection and before any target selection. If the
+filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 
 ### 4.3 Execution
 
@@ -209,8 +234,10 @@ exits 0 (nothing to do), exactly like an empty selection.
 |------|---------|
 | *(default)* | **per-package**: run `<COMMAND>` once per selected member, in name order, with placeholders substituted. |
 | `--once` | **once**: run `<COMMAND>` exactly once when the set is non-empty (skip when empty). Use `{packages}` to inject the selection. |
+| `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
+| `--target-required-feature <FEATURE>` | In per-target mode, retain targets whose `required-features` contains `FEATURE`. Repeatable; values are AND-combined. Requires `--each-target`. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
-| `--chdir` | Run each per-package command from that member's crate root (the directory containing its `Cargo.toml`) instead of the caller's CWD. Per-package mode only — combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
+| `--chdir` | Run each per-package or per-target command from that member's crate root (the directory containing its `Cargo.toml`) instead of the caller's CWD. Combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
 | `--manifest-path <PATH>` | Workspace root `Cargo.toml`. Defaults to auto-detection from CWD. |
 | `--dry-run` | Print the fully-substituted commands that *would* run, one per line, without executing. |
 
@@ -224,19 +251,26 @@ Substituted inside each `ARG` of the command template:
 | `{spec}` | `name@version` | per-package |
 | `{version}` | package version | per-package |
 | `{manifest}` | absolute path to the member's `Cargo.toml` | per-package |
-| `{packages}` | the cargo selection flags for the resolved set: `--workspace` when the whole workspace was selected via `--workspace`/`--all` with no excludes **and no `--filter`/`--exclude-filter` applied**, else `--package name@version …` (one pair per member). Only valid as a standalone `ARG`; it expands to multiple tokens. | once |
+| `{target}` | Cargo target name | per-target |
+| `{packages}` | the cargo selection flags for the resolved set: `--workspace` when the whole workspace was selected via `--workspace`/`--all` with no excludes **and no package filters applied**, else `--package name@version …` (one pair per member). Only valid as a standalone `ARG`; it expands to multiple tokens. | once |
 
-Using a per-package token in `--once` mode, or `{packages}` outside `--once`, is
-a usage error.
+Per-target mode accepts all per-package placeholders plus `{target}`. Using a
+per-package or per-target token in `--once` mode, `{target}` in per-package
+mode, or `{packages}` outside `--once` is a usage error.
+
+Targets run in package-name order and then target-name order. A target matching
+more than one requested kind runs once. No matching targets is a successful
+no-op.
 
 ## 5. Semantics
 
 - **Exit codes.** `0` when every executed command succeeded *or* the set was
   empty; the failing command's code (fail-fast) or `1` (`--keep-going` with any
   failure — including a command that could not be spawned) otherwise; `2` for a
-  `cargo-each` usage/configuration error (unknown selector, bad predicate,
-  misused placeholder, `--chdir` with `--once`, or — in fail-fast mode — a
-  command that could not be spawned at all).
+  `cargo-each` usage/configuration error (unknown selector, bad filter expression,
+  unknown target kind, invalid mode combination, misused placeholder,
+  `--chdir` with `--once`, or — in fail-fast mode — a command that could not
+  be spawned at all).
 - **Empty set is success.** Both an empty selection (`--none`, or an impact
   variable that resolved to nothing) and an empty *filtered* set exit 0 after a
   one-line note to stderr. This is what lets callers drop their `--skip` guards.

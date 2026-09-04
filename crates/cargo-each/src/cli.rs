@@ -26,8 +26,7 @@ pub(crate) enum CargoCli {
     about = "Run a command over a cargo-style selection of workspace members",
     long_about = "Resolve a cargo-style package selection (-p/--package, --workspace, --exclude), \
                   optionally filter it by a metadata predicate, and run a command over the result \
-                  — once per member (with {name}/{spec}/{version}/{manifest} substitution) or once \
-                  for the whole set (--once, with {packages})."
+                  — once per member, once per matching Cargo target, or once for the whole set."
 )]
 #[expect(clippy::struct_excessive_bools, reason = "each bool is an independent clap CLI flag")]
 pub(crate) struct EachArgs {
@@ -50,16 +49,17 @@ pub(crate) struct EachArgs {
     pub(crate) none: bool,
 
     // --- filtering ---
-    /// Keep only members matching this predicate. Repeatable; AND-combined
-    /// (a member is kept only if it matches every --filter).
-    /// Predicates: `lib`, `bin`, `dep:<name>`, `metadata:<key>[=<value>]`.
-    #[arg(long = "filter", value_name = "PRED")]
+    /// Keep only members matching this Boolean expression. Repeatable;
+    /// expressions are AND-combined. Supports `not`, `and`, `or`, and
+    /// parentheses over predicates such as `target-kind:<kind>`,
+    /// `publishable`, `feature:<name>`, `dep:<name>`, and
+    /// `metadata:<key>[=<value>]`.
+    #[arg(long = "filter", value_name = "EXPR")]
     pub(crate) filters: Vec<String>,
 
-    /// Drop members matching this predicate. Repeatable; OR-combined (a member
-    /// is dropped if it matches any --exclude-filter). Same predicate grammar
-    /// as --filter; exclusion wins over --filter on conflict.
-    #[arg(long = "exclude-filter", value_name = "PRED")]
+    /// Drop members matching this Boolean expression. Repeatable; expressions
+    /// are OR-combined. Same expression grammar as --filter; exclusion wins.
+    #[arg(long = "exclude-filter", value_name = "EXPR")]
     pub(crate) exclude_filters: Vec<String>,
 
     // --- execution ---
@@ -68,9 +68,18 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) once: bool,
 
+    /// Run once for each selected Cargo target of this kind. Repeatable;
+    /// kinds are OR-combined. Cannot be combined with --once.
+    #[arg(long = "each-target", value_name = "KIND", conflicts_with = "once")]
+    pub(crate) each_targets: Vec<String>,
+
+    /// Retain targets requiring this feature. Repeatable; AND-combined.
+    #[arg(long, value_name = "FEATURE", requires = "each_targets")]
+    pub(crate) target_required_feature: Vec<String>,
+
     /// Run each per-package command from that member's crate root (the
     /// directory containing its Cargo.toml) instead of the current directory.
-    /// Per-package mode only; cannot be combined with --once.
+    /// Per-package and per-target modes only; cannot be combined with --once.
     #[arg(long)]
     pub(crate) chdir: bool,
 
