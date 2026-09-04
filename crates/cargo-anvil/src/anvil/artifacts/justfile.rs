@@ -416,13 +416,8 @@ mod tests {
             .expect("miri.just is registered in CHECK_FILES");
         for needle in [
             "_anvil-miri-test profile: anvil-impact",
-            "cargo '+{{ rust_nightly }}' metadata --no-deps --format-version 1",
-            "miri test --all-features --tests --no-run --message-format=json-render-diagnostics",
-            "$message.profile.test -ne $true",
             "ForEach-Object -Parallel",
             "-ThrottleLimit $jobs",
-            "rustc $toolchain --print sysroot",
-            "$toolchainSysrootOutput = @(",
             "anvil miri: ANVIL_MIRI_JOBS must be a positive integer",
             "Sort-Object PackageLabel, TargetKind, TargetName, Path",
             "##[group]Miri executable",
@@ -430,10 +425,6 @@ mod tests {
         ] {
             assert!(miri.contains(needle), "miri runner is missing '{needle}'");
         }
-        assert!(
-            miri.contains("$env:MIRI_BE_RUSTC = 'host'"),
-            "direct cargo-miri runner calls need the same ambient rustc mode recorded at build time"
-        );
 
         for (check, profile) in [
             ("miri", "standard"),

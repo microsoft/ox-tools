@@ -31,7 +31,6 @@ const MIRI_RACE_COVERAGE: &str = include_str!("../templates/justfiles/anvil/chec
 const MIRI_STRICT_PROVENANCE: &str = include_str!("../templates/justfiles/anvil/checks/miri-strict-provenance.just");
 const MIRI_TREE_BORROWS: &str = include_str!("../templates/justfiles/anvil/checks/miri-tree-borrows.just");
 const MSRV_TEST: &str = include_str!("../templates/justfiles/anvil/checks/msrv-test.just");
-const MIRI: &str = include_str!("../templates/justfiles/anvil/checks/miri.just");
 const README: &str = include_str!("../templates/justfiles/anvil/checks/readme-check.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");

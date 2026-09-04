@@ -2146,6 +2146,11 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
             exit 0
         }
 
+        # The compile and execute phases are one pinned cargo-miri protocol.
+        # Compilation serializes run information for each executable; execution
+        # must use the matching prepared sysroot, cargo-miri binary, ambient
+        # rustc-mode sentinel, and package working directory. Revalidate this
+        # bootstrap whenever the catalog's Miri nightly changes.
         $sysrootOutput = @(& cargo '+{{ rust_nightly }}' miri setup --print-sysroot)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         if ($sysrootOutput.Count -eq 0 -or -not $sysrootOutput[-1]) {
@@ -2176,9 +2181,8 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
             Write-Error "anvil miri: cargo-miri was not found under '$toolchainBin'"
             exit 1
         }
-        # cargo-miri records MIRI_BE_RUSTC=host in each test executable. Keeping
-        # the same value in the direct runner environment lets phase_runner
-        # suppress that recorded value before launching Miri for interpretation.
+        # Matching the recorded sentinel lets the runner suppress it before
+        # launching Miri for interpretation.
         $env:MIRI_BE_RUSTC = 'host'
 
         $jobs = 0
