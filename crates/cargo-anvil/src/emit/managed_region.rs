@@ -16,13 +16,17 @@
 //! [`crate::run`]'s `HostTextCache` and
 //! [`updates.md`](../../../docs/design/updates.md).
 
-use ohno::AppError;
+use ohno::{AppError, app_err};
+use toml_edit::DocumentMut;
 
 use crate::checksum::checksum_str;
 use crate::decision::{Decision, DecisionInputs, UpdateDecision, decide};
 use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
-use crate::region::{CommentSyntax, RegionPlacement, adopt_unmanaged_toml_tables, find_region, upsert_region_with_placement};
+use crate::region::{
+    CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_region, insert_after_region,
+    mask_other_managed_regions, upsert_region_with_placement,
+};
 
 /// Inputs that identify and render one managed region.
 #[derive(Clone, Copy)]
@@ -119,6 +123,57 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
     Ok(item)
 }
 
+/// Why introducing `request`'s region into its TOML host would produce a file
+/// TOML cannot read, if it would.
+///
+/// This is the backstop for the whole class of failure behind issue #148:
+/// splicing a region that declares a whole table beside a hand-written copy of
+/// that table yields two identical headers, which TOML rejects outright — and
+/// the generator had already rewritten the file and recorded the region by the
+/// time anything noticed. Adoption resolves the cases it can model; this
+/// catches whatever is left by asking the parser, rather than by enumerating
+/// shapes.
+///
+/// Only an **introduction** is checked. Once the region exists,
+/// `upsert_region_with_placement` replaces it where it stands and cannot
+/// introduce a duplicate header — and a host the repository has since broken by
+/// hand is not anvil's to refuse.
+///
+/// Returns `None` for a host that is not TOML, for a region that is already
+/// present, and for a splice whose result parses.
+#[must_use]
+pub fn toml_introduction_refusal(host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Option<String> {
+    let ManagedRegionRequest {
+        host_relpath,
+        region_id,
+        rendered_body,
+        syntax,
+        placement,
+    } = request;
+    if !is_toml_host(host_relpath) {
+        return None;
+    }
+    let base = host_text.unwrap_or("");
+    // A malformed region is a separate diagnosis, raised by the planner.
+    if !matches!(find_region(base, region_id, syntax), Ok(None)) {
+        return None;
+    }
+
+    match splice(host_relpath, host_text, region_id, rendered_body, syntax, placement) {
+        Err(error) => Some(error.to_string()),
+        Ok(spliced) => mask_other_managed_regions(&spliced, syntax, region_id)
+            .parse::<DocumentMut>()
+            .err()
+            .map(|error| format!("splicing the region would leave {host_relpath} unparsable as TOML: {error}")),
+    }
+}
+
+fn is_toml_host(host_relpath: &str) -> bool {
+    std::path::Path::new(host_relpath)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+}
+
 fn splice(
     host_relpath: &str,
     host_text: Option<&str>,
@@ -135,17 +190,38 @@ fn splice(
     // `upsert_region_with_placement` replaces it in place and there is nothing
     // to adopt.
     let adopted;
-    let is_toml_host = std::path::Path::new(host_relpath)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"));
-    let base = if is_toml_host && find_region(base, region_id, syntax)?.is_none() {
-        adopted = adopt_unmanaged_toml_tables(base, rendered_body, syntax);
-        adopted.as_str()
+    let mut residue = String::new();
+    let base = if is_toml_host(host_relpath) && find_region(base, region_id, syntax)?.is_none() {
+        match adopt_unmanaged_toml_tables(base, rendered_body, syntax) {
+            TomlAdoption::Unchanged => base,
+            TomlAdoption::Adopted { text, residue: kept } => {
+                residue = kept;
+                adopted = text;
+                adopted.as_str()
+            }
+            // Unreachable in the normal path: `run` refuses the host before it
+            // ever plans a conflicting region (see `toml_introduction_refusal`).
+            // Reported rather than written, because every output available here
+            // either repeats a key TOML forbids or discards configuration.
+            TomlAdoption::Conflict {
+                table,
+                key,
+                managed,
+                hand_written,
+            } => {
+                return Err(app_err!(
+                    "{host_relpath} declares `{key}` in `[{table}]` as {hand_written}, but the managed \
+                     region '{region_id}' declares it as {managed}. Adopting the table would discard \
+                     one of them and keeping both would repeat the key, which TOML rejects."
+                ));
+            }
+        }
     } else {
         base
     };
 
-    upsert_region_with_placement(base, region_id, rendered_body, syntax, placement)
+    let spliced = upsert_region_with_placement(base, region_id, rendered_body, syntax, placement)?;
+    insert_after_region(&spliced, region_id, &residue, syntax)
 }
 
 #[cfg(test)]
@@ -157,6 +233,96 @@ mod tests {
 
     fn request<'a>(host_relpath: &'a str, region_id: &'a str, rendered_body: &'a str) -> ManagedRegionRequest<'a> {
         ManagedRegionRequest::at_end(host_relpath, region_id, rendered_body, SYN)
+    }
+
+    /// Issue #148, end to end. A `deny.toml` whose `[advisories]` carries the
+    /// repository's own accepted advisory used to receive a second
+    /// `[advisories]` header — a file `cargo deny` cannot read, written to disk
+    /// and recorded in the manifest before anything noticed, because the
+    /// fixtures only ever asserted on fragments of its text.
+    #[test]
+    fn splicing_beside_a_hand_written_table_produces_parsable_toml() {
+        let host = "[advisories]\n# waiting on upstream\nignore = [\"RUSTSEC-9999-0001\"]\n";
+        let body = "[advisories]\nyanked = \"deny\"\nunmaintained = \"all\"\n";
+
+        let item = plan_managed_region(
+            &Manifest::default(),
+            Some(host),
+            request("deny.toml", "anvil-deny-advisories", body),
+        )
+        .unwrap();
+        let spliced = item.spliced_host.as_deref().unwrap();
+
+        let document = spliced
+            .parse::<DocumentMut>()
+            .unwrap_or_else(|error| panic!("spliced deny.toml must parse: {error}\n---\n{spliced}\n---"));
+        assert_eq!(spliced.matches("[advisories]").count(), 1, "no duplicate header:\n{spliced}");
+        // The kept entry has to stay an `[advisories]` setting: relocated under
+        // the wrong header it is a different setting that cargo-deny ignores.
+        assert_eq!(
+            document["advisories"]["ignore"].as_array().unwrap().len(),
+            1,
+            "the accepted advisory is still an [advisories] entry:\n{spliced}"
+        );
+        assert_eq!(
+            document["advisories"]["yanked"].as_str(),
+            Some("deny"),
+            "the managed keys are present"
+        );
+        assert!(
+            spliced.contains("# waiting on upstream"),
+            "the user's reasoning travels with it:\n{spliced}"
+        );
+    }
+
+    /// A key both sides declare with different values has no safe output: TOML
+    /// forbids repeating it, and choosing either value discards a decision
+    /// somebody made. The run refuses the region and leaves the host alone.
+    #[test]
+    fn a_conflicting_key_is_refused_rather_than_written() {
+        let host = "[advisories]\nyanked = \"warn\"\n";
+        let body = "[advisories]\nyanked = \"deny\"\n";
+
+        let reason = toml_introduction_refusal(Some(host), request("deny.toml", "anvil-deny-advisories", body))
+            .expect("a disagreement over `yanked` must be refused");
+
+        assert!(reason.contains("yanked"), "the refusal names the key: {reason}");
+    }
+
+    /// The refusal is a backstop, not a gate. An ordinary introduction — and an
+    /// adoption that keeps residue — has to pass it, or onboarding stops for
+    /// every repository that ever hand-wrote one of these tables.
+    #[test]
+    fn an_adoptable_host_is_not_refused() {
+        let host = "[advisories]\nignore = [\"RUSTSEC-9999-0001\"]\n";
+        let body = "[advisories]\nyanked = \"deny\"\n";
+
+        assert_eq!(
+            toml_introduction_refusal(Some(host), request("deny.toml", "anvil-deny-advisories", body)),
+            None
+        );
+        assert_eq!(
+            toml_introduction_refusal(None, request("deny.toml", "anvil-deny-advisories", body)),
+            None
+        );
+        assert_eq!(
+            toml_introduction_refusal(Some("recipe:\n"), request("Justfile", "r", "body\n")),
+            None
+        );
+    }
+
+    /// Once the region exists it is replaced where it stands, so it cannot
+    /// introduce a duplicate header — and a host the repository has since
+    /// broken by hand is not anvil's to refuse. Checking an update too would
+    /// turn every such file into a refusal of a region that is already there.
+    #[test]
+    fn an_existing_region_is_not_re_checked() {
+        let host = "# >>> anvil-managed: r\n[advisories]\nyanked = \"deny\"\n# <<< anvil-managed: r\n\n[advisories]\nignore = []\n";
+
+        assert_eq!(
+            toml_introduction_refusal(Some(host), request("deny.toml", "r", "[advisories]\nyanked = \"deny\"\n")),
+            None
+        );
     }
 
     #[test]
@@ -264,11 +430,11 @@ mod tests {
     }
 
     /// The limit on adoption, and the more important half of it: a hand-written
-    /// table carrying a key the managed body does not have is configuration,
-    /// not a duplicate. Dropping it would silently delete a user's settings —
-    /// a worse outcome than the duplicate table adoption exists to prevent.
+    /// entry the managed body does not declare is configuration, not a
+    /// duplicate. It is never deleted — it is kept as residue and re-emitted
+    /// inside the table the region opens, which is where it was written.
     #[test]
-    fn a_table_with_extra_user_keys_is_never_dropped() {
+    fn a_hand_written_entry_is_never_dropped() {
         let host = "[advisories]\nignore = [\"RUSTSEC-9999-0001\"]\n";
         let item = plan_managed_region(
             &Manifest::default(),

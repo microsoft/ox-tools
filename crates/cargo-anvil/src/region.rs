@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 
 use ohno::{AppError, app_err, bail};
-use toml_edit::{DocumentMut, Table};
+use toml_edit::{Item, RawString, Table};
 
 /// Comment syntax used by the host file.
 ///
@@ -359,290 +359,494 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
     LineIter { text, pos: 0 }
 }
 
-/// Drop an outside-region copy of a TOML table whose configuration the region
-/// body already covers, so introducing the region adopts a hand-written table
-/// instead of appending a duplicate that TOML will not parse.
+/// Insert `extra` directly after region `id`'s closing sentinel.
+///
+/// Used to re-emit the hand-written configuration that adoption kept (see
+/// [`TomlAdoption::Adopted`]). The position matters: TOML attributes a key to
+/// whichever table header precedes it, so text placed here belongs to the table
+/// the region just opened, which is exactly the table it was written under.
+///
+/// # Errors
+///
+/// Returns an error if the region is missing or malformed.
+pub fn insert_after_region(text: &str, id: &str, extra: &str, syntax: CommentSyntax) -> Result<String, AppError> {
+    if extra.is_empty() {
+        return Ok(text.to_owned());
+    }
+    let Some(region) = find_region(text, id, syntax)? else {
+        return Err(app_err!("region '{id}' is missing from the host it was just spliced into"));
+    };
+    let at = region.end_line.end;
+
+    let mut out = String::with_capacity(text.len() + extra.len() + 1);
+    out.push_str(&text[..at]);
+    if !text[..at].ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(extra);
+    if !extra.ends_with('\n') {
+        out.push('\n');
+    }
+    let rest = &text[at..];
+    // The gap that followed the region is preserved, but a residue block that
+    // already ends in a newline must not be run straight into the next line of
+    // the file: that would attach the following header's comment to it.
+    if !rest.is_empty() && !rest.starts_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Adopt an outside-region copy of a TOML table whose configuration the region
+/// body already covers, so introducing the region takes over a hand-written
+/// table instead of appending a duplicate that TOML will not parse.
 ///
 /// A managed region body such as `[lints]\nworkspace = true` is a whole table,
 /// and TOML rejects a duplicate table header outright — so appending it beside
 /// a hand-written `[lints]` does not produce redundant text, it produces a
 /// manifest that will not parse and takes the workspace with it.
 ///
-/// Coverage is **one-way**: a table is adopted when every one of its
-/// configuration lines also appears in the managed table. The managed table
-/// may declare further lines of its own and adoption still applies; it is
-/// unmanaged-only configuration that prevents it. A hand-written table
-/// carrying anything extra is left
-/// exactly where it is: dropping it would silently delete a user's
-/// configuration, which is a worse failure than the duplicate this function
-/// exists to prevent — a `deny.toml` whose `[advisories]` lists the repository's own
-/// `ignore` entries is the case that matters, and it is covered by a fixture.
-/// Comments and blank lines are ignored when comparing, since neither carries
-/// configuration, and both sides are compared through the TOML parser rather
-/// than as source text — so formatting that TOML itself ignores, such as the
-/// spacing in `workspace=true` or the order two entries appear in, cannot
-/// defeat the comparison and leave the duplicate this function exists to
-/// remove. An array-of-tables (`[[bin]]`) is never adopted at all:
-/// TOML lets those repeat, so a second one is not a duplicate and dropping it
-/// would delete a genuine array element.
+/// Each hand-written entry is classified against the managed table:
 ///
-/// Text inside an existing managed region is never examined, so a region that
-/// legitimately owns the same table elsewhere in the file is untouched, and a
-/// host containing a multi-line string is left alone entirely — its content is
-/// beyond what a line-oriented scanner can judge.
+/// * declared by both, with the same value — **covered**, and dropped, since
+///   the region re-emits it verbatim.
+/// * declared only by hand — **residue**, which is kept: it is returned
+///   separately so the caller can re-emit it after the region's closing
+///   sentinel, where it continues the very table the region opens. That is
+///   what lets a `deny.toml` whose `[advisories]` carries the repository's own
+///   `ignore` list be adopted at all, rather than declining and leaving a
+///   duplicate header behind.
+/// * declared by both with **different** values — a [`TomlAdoption::Conflict`].
+///   Keeping both would repeat one key inside one table, and dropping either
+///   would lose configuration somebody chose, so this reports rather than
+///   guesses.
+///
+/// Both sides are compared through the TOML parser rather than as source text,
+/// so formatting that TOML itself ignores — the spacing in `workspace=true`,
+/// the order two entries appear in — cannot defeat the comparison. Residue is
+/// carried across as its original source slice, so a user's comments and
+/// spacing survive byte-for-byte.
+///
+/// An array-of-tables (`[[bin]]`) is never adopted: TOML lets those repeat, so
+/// a second one is not a duplicate and dropping it would delete a genuine array
+/// element. Text inside an existing managed region is never examined, so a
+/// region that legitimately owns the same table elsewhere in the file is
+/// untouched.
+///
+/// A host that does not parse is returned untouched: a table this cannot read
+/// is one it must not delete.
 #[must_use]
-pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax) -> String {
-    // A multi-line string is content this line-oriented scanner cannot read.
-    // Its quote state does not survive the line break, so a `#` inside one
-    // looks like a comment and a bracketed line inside one looks like a table
-    // header — either of which would corrupt the comparison and could delete
-    // a table that genuinely differs. Rather than guess, decline adoption
-    // outright: leaving a visible duplicate-table failure is the documented
-    // preference over silently losing user configuration.
-    if contains_multi_line_string(text) || contains_multi_line_string(body) {
-        return text.to_owned();
-    }
-
-    let managed = parsed_tables(body, syntax);
+pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax) -> TomlAdoption {
+    let Some(managed) = headed_tables(body) else {
+        return TomlAdoption::Unchanged;
+    };
     if managed.is_empty() {
-        return text.to_owned();
+        return TomlAdoption::Unchanged;
     }
 
-    let open = syntax.prefix().to_owned() + " >>> anvil-managed:";
-    let close = syntax.prefix().to_owned() + " <<< anvil-managed:";
+    // Parse the host with its managed regions blanked out. Two things fall out
+    // of that. The region's own tables are invisible, so a region that
+    // legitimately owns the same table elsewhere in the file is never a
+    // candidate; and a host that already carries both a region copy and a
+    // hand-written copy still parses, even though as written it is the very
+    // duplicate-header file TOML rejects — which is exactly the file adoption
+    // exists to repair. Masking preserves length, so every span still indexes
+    // the original text.
+    let masked = mask_managed_regions(text, syntax);
+    let Some(candidates) = headed_tables(&masked) else {
+        return TomlAdoption::Unchanged;
+    };
 
-    // Which unmanaged tables are safe to drop, decided up front so the rewrite
-    // below is a single pass with no lookahead.
-    let mut adoptable: Vec<Vec<String>> = Vec::new();
-    for (path, values) in parsed_tables(text, syntax) {
-        if let Some(managed_values) = managed.iter().find(|(name, _)| *name == path).map(|(_, values)| values)
-            && values.iter().all(|(key, value)| managed_values.get(key) == Some(value))
-        {
-            adoptable.push(path);
+    let protected = managed_region_ranges(text, syntax);
+    // Every header in the document, in order, bounds the table above it: a
+    // table's content runs until the next one starts. A managed region's
+    // opening sentinel bounds it too, so an adopted table can never swallow the
+    // sentinel of the region that follows it.
+    let mut boundaries: Vec<usize> = candidates.iter().map(|table| table.header.start).collect();
+    boundaries.extend(protected.iter().map(|range| range.start));
+    boundaries.sort_unstable();
+
+    let mut deletions: Vec<ByteRange> = Vec::new();
+    let mut residue = String::new();
+
+    for candidate in &candidates {
+        if candidate.array_of_tables {
+            continue;
         }
-    }
-    if adoptable.is_empty() {
-        return text.to_owned();
+        let Some(managed_values) = managed
+            .iter()
+            .find(|table| !table.array_of_tables && table.path == candidate.path)
+            .map(|table| &table.values)
+        else {
+            continue;
+        };
+        let end = boundary_after(&boundaries, candidate.header.start, text.len());
+
+        let mut kept = String::new();
+        for entry in &candidate.entries {
+            match managed_values.get(&entry.path) {
+                Some(managed_value) if *managed_value == entry.value => {}
+                Some(managed_value) => {
+                    return TomlAdoption::Conflict {
+                        table: candidate.path.join("."),
+                        key: entry.path.join("."),
+                        managed: managed_value.clone(),
+                        hand_written: entry.value.clone(),
+                    };
+                }
+                None => kept.push_str(&text[entry.span.start..entry.span.end.min(end)]),
+            }
+        }
+
+        deletions.push(ByteRange {
+            start: candidate.header.start,
+            end,
+        });
+        residue.push_str(&kept);
     }
 
+    if deletions.is_empty() {
+        return TomlAdoption::Unchanged;
+    }
+
+    // The output is the gaps between the deletions, copied in order. There is
+    // no streaming state to get wrong: the ranges are non-overlapping by
+    // construction, because each one ends where the next header or sentinel
+    // begins.
+    deletions.sort_unstable_by_key(|range| range.start);
     let mut out = String::with_capacity(text.len());
-    let mut in_managed = false;
-    // Set while skipping an adopted table's body; cleared by the next table
-    // header or by a managed region's opener, so only that table is dropped
-    // and what follows survives.
-    let mut dropping = false;
-
-    for line in iterate_lines(text) {
-        let raw = &text[line.start..line.end];
-        let trimmed = raw.trim();
-        if trimmed.starts_with(&open) {
-            in_managed = true;
-            // An adopted table's body ends here: whatever a managed region
-            // holds is the region's, and whatever follows its closer is the
-            // user's. Leaving the skip set would swallow both.
-            dropping = false;
-        }
-
-        if !in_managed {
-            if let Some(header) = toml_table_header(trimmed) {
-                // An array-of-tables header is never adoptable, but it does end
-                // the table above it, so the skip stops here either way.
-                dropping = !is_array_of_tables(header) && table_path(header).is_some_and(|path| adoptable.contains(&path));
-            }
-            if dropping {
-                continue;
-            }
-        }
-
-        out.push_str(raw);
-
-        if trimmed.starts_with(&close) {
-            in_managed = false;
-        }
+    let mut cursor = 0;
+    for range in &deletions {
+        debug_assert!(range.start >= cursor, "adoption deletion ranges must not overlap");
+        out.push_str(&text[cursor..range.start]);
+        cursor = range.end;
     }
+    out.push_str(&text[cursor..]);
 
-    out
+    TomlAdoption::Adopted {
+        text: out,
+        residue: tidy_residue(&residue),
+    }
 }
 
-/// Collect each top-level TOML table outside any managed region, as its header
-/// and the configuration lines beneath it. Whole-line comments are skipped and
-/// a trailing comment is stripped from every header and configuration line,
-/// since a comment carries no configuration and must not defeat a comparison.
-/// Blank lines need no such handling: they are carried through as empty lines
-/// and the TOML parser that performs the comparison ignores them.
-fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
-    let prefix = syntax.prefix();
-    let open = prefix.to_owned() + " >>> anvil-managed:";
-    let close = prefix.to_owned() + " <<< anvil-managed:";
-
-    let mut tables: Vec<(&str, Vec<&str>)> = Vec::new();
-    let mut in_managed = false;
-
-    for line in iterate_lines(text) {
-        let trimmed = text[line.start..line.end].trim();
-        if trimmed.starts_with(&open) {
-            in_managed = true;
-            continue;
-        }
-        if trimmed.starts_with(&close) {
-            in_managed = false;
-            continue;
-        }
-        if in_managed || trimmed.starts_with(prefix) {
-            continue;
-        }
-        if let Some(header) = toml_table_header(trimmed) {
-            tables.push((header, Vec::new()));
-        } else if let Some((_, lines)) = tables.last_mut() {
-            lines.push(strip_trailing_comment(trimmed));
-        }
+/// Trim the blank lines that bounded the residue inside the table it came
+/// from, leaving exactly one trailing newline when anything is left.
+///
+/// Only the edges are touched: a blank line the user put *between* two of their
+/// own keys is theirs, and survives.
+fn tidy_residue(residue: &str) -> String {
+    let trimmed = trim_leading_blank_lines(residue).trim_end();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        let mut out = String::with_capacity(trimmed.len() + 1);
+        out.push_str(trimmed);
+        out.push('\n');
+        out
     }
+}
 
-    tables
+/// What examining a TOML host for hand-written copies of a region's tables
+/// found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TomlAdoption {
+    /// The host declares none of the body's tables outside a managed region —
+    /// or could not be parsed, and so must not be edited.
+    Unchanged,
+    /// `text` is the host with the adopted tables removed. `residue` is the
+    /// hand-written configuration the managed body does not declare, to be
+    /// re-emitted directly after the region's closing sentinel so that it stays
+    /// inside the table the region opens.
+    Adopted { text: String, residue: String },
+    /// A hand-written entry and a managed entry declare the same key with
+    /// different values. There is no output that keeps both — TOML forbids the
+    /// repeated key — and no way to choose between them, so the caller must
+    /// refuse rather than write.
+    Conflict {
+        /// Dotted path of the table both declare.
+        table: String,
+        /// Dotted path of the key they disagree on.
+        key: String,
+        /// The value the managed region body declares.
+        managed: String,
+        /// The value the host declares by hand.
+        hand_written: String,
+    },
+}
+
+/// One explicitly headed TOML table, with the byte range of its header and the
+/// configuration it declares.
+struct HeadedTable {
+    path: Vec<String>,
+    header: ByteRange,
+    array_of_tables: bool,
+    values: TableValues,
+    entries: Vec<TableEntry>,
+}
+
+/// One key/value entry of a headed table, with the source slice that carries
+/// it — including any comment lines attached above it and its trailing comment.
+struct TableEntry {
+    path: Vec<String>,
+    value: String,
+    span: ByteRange,
 }
 
 /// The configuration a TOML table declares, as canonical path/value pairs.
 type TableValues = BTreeMap<Vec<String>, String>;
 
-/// A TOML table's canonical path and the configuration it declares.
-type ParsedTable = (Vec<String>, TableValues);
-
-/// Each adoption candidate in `text`, as the canonical path its header names
-/// and the configuration it declares.
+/// Every explicitly headed table in `text`, in document order.
 ///
-/// An array-of-tables, and any table whose lines the TOML parser rejects, is
-/// dropped from the result rather than compared: a table this cannot read is
-/// one it must not delete.
-fn parsed_tables(text: &str, syntax: CommentSyntax) -> Vec<ParsedTable> {
-    toml_tables(text, syntax)
+/// Returns `None` when `text` is not valid TOML. Parsing the document rather
+/// than scanning for lines that look like headers is what lets a host
+/// containing a multi-line string be adopted: a bracketed line inside a `"""`
+/// value is a value to the parser, and cannot be mistaken for a header.
+///
+/// The document is parsed immutably, because [`toml_edit::DocumentMut`]
+/// discards the source spans this needs.
+fn headed_tables(text: &str) -> Option<Vec<HeadedTable>> {
+    let document = toml_edit::Document::parse(text).ok()?;
+    let mut tables = Vec::new();
+    collect_headed_tables(document.as_table(), &mut Vec::new(), text, &mut tables);
+    tables.sort_by_key(|table| table.header.start);
+    Some(tables)
+}
+
+/// Walk a table's children, recording every explicitly headed table and
+/// recursing through the implicit ones a nested header creates.
+fn collect_headed_tables(table: &Table, path: &mut Vec<String>, text: &str, out: &mut Vec<HeadedTable>) {
+    for (key, item) in table {
+        path.push(key.to_owned());
+        match item {
+            Item::Table(child) => {
+                // An implicit table was never written as a header of its own —
+                // `[a.b]` creates one for `a` — so it is not a candidate, but
+                // its children still are.
+                if !child.is_implicit()
+                    && let Some(header) = child.span()
+                {
+                    out.push(HeadedTable {
+                        path: path.clone(),
+                        header: ByteRange {
+                            start: header.start,
+                            end: header.end,
+                        },
+                        array_of_tables: false,
+                        values: table_values(child),
+                        entries: table_entries(child, text),
+                    });
+                }
+                collect_headed_tables(child, path, text, out);
+            }
+            Item::ArrayOfTables(array) => {
+                for child in array {
+                    if let Some(header) = child.span() {
+                        out.push(HeadedTable {
+                            path: path.clone(),
+                            header: ByteRange {
+                                start: header.start,
+                                end: header.end,
+                            },
+                            array_of_tables: true,
+                            values: TableValues::new(),
+                            entries: Vec::new(),
+                        });
+                    }
+                }
+            }
+            Item::Value(_) | Item::None => {}
+        }
+        path.pop();
+    }
+}
+
+/// The configuration a table declares, as canonical path/value pairs.
+///
+/// Descends through dotted keys so `rust.unsafe_op_in_unsafe_fn` is one entry
+/// rather than a nested table, and stops at a nested *headed* table, which is
+/// a candidate in its own right rather than part of this one.
+fn table_values(table: &Table) -> TableValues {
+    let mut values = TableValues::new();
+    collect_values(table, &mut Vec::new(), &mut values);
+    values
+}
+
+fn collect_values(table: &Table, path: &mut Vec<String>, values: &mut TableValues) {
+    for (key, item) in table {
+        path.push(key.to_owned());
+        match item {
+            Item::Value(value) => {
+                values.insert(path.clone(), value.to_string().trim().to_owned());
+            }
+            Item::Table(child) if child.is_dotted() => collect_values(child, path, values),
+            _ => {}
+        }
+        path.pop();
+    }
+}
+
+/// The top-level entries of a table, each with the source slice that carries
+/// it.
+///
+/// An entry's slice runs from the start of its own leading trivia — the blank
+/// lines and comments the parser attached to its key — to the start of the next
+/// entry's, so relocating it carries its comments along and leaves nothing of
+/// the next entry behind. The last entry runs to the end of the table, which
+/// the caller clamps to the next header.
+fn table_entries(table: &Table, text: &str) -> Vec<TableEntry> {
+    let mut starts: Vec<(Vec<String>, String, usize)> = Vec::new();
+    for (key, item) in table {
+        // Iteration hands back the key as a `&str`, dropping the `Key` that
+        // carries the decor and span this needs. Looking it straight back up is
+        // infallible — the key came from this very table — and skipping an
+        // entry that failed the lookup would silently drop the user's
+        // configuration, which is the whole failure this module exists to stop.
+        let (key, _) = table.get_key_value(key).expect("a key yielded by a table is present in it");
+        let start = key
+            .leaf_decor()
+            .prefix()
+            .and_then(RawString::span)
+            .map_or_else(|| key.span().map_or(0, |span| span.start), |span| span.start);
+        match item {
+            Item::Value(value) => starts.push((vec![key.get().to_owned()], value.to_string().trim().to_owned(), start)),
+            Item::Table(child) if child.is_dotted() => {
+                let mut nested = TableValues::new();
+                collect_values(child, &mut vec![key.get().to_owned()], &mut nested);
+                for (path, value) in nested {
+                    starts.push((path, value, start));
+                }
+            }
+            _ => {}
+        }
+    }
+    starts.sort_by_key(|(_, _, start)| *start);
+
+    let mut entries = Vec::with_capacity(starts.len());
+    for index in 0..starts.len() {
+        let (path, value, start) = &starts[index];
+        let end = starts.get(index + 1).map_or(text.len(), |(_, _, next)| *next);
+        entries.push(TableEntry {
+            path: path.clone(),
+            value: value.clone(),
+            span: ByteRange { start: *start, end },
+        });
+    }
+    entries
+}
+
+/// The first boundary strictly after `start`, or `fallback` when none follows.
+fn boundary_after(boundaries: &[usize], start: usize, fallback: usize) -> usize {
+    boundaries.iter().copied().find(|boundary| *boundary > start).unwrap_or(fallback)
+}
+
+/// Replace every managed region's bytes with spaces, keeping the newlines and
+/// therefore every byte offset in the file.
+///
+/// The masked copy is what the adoption parser reads. Blanking rather than
+/// deleting is what keeps the spans it reports usable against the original
+/// text.
+fn mask_managed_regions(text: &str, syntax: CommentSyntax) -> String {
+    mask_regions(text, &managed_region_ranges(text, syntax))
+}
+
+/// Blank every managed region except `keep`, so what remains is the region
+/// under consideration plus the repository's own hand-written content.
+///
+/// This is the view a TOML validity check has to take. Two managed regions can
+/// legitimately declare the same key while a migration is in flight — the old
+/// combined region is removed in the same pass that writes the sections
+/// replacing it — so judging the intermediate text as a whole would refuse a
+/// migration that is about to become valid. What matters is whether the region
+/// being introduced collides with text nothing is going to remove.
+#[must_use]
+pub fn mask_other_managed_regions(text: &str, syntax: CommentSyntax, keep: &str) -> String {
+    let ranges: Vec<ByteRange> = managed_region_ranges_with_ids(text, syntax)
         .into_iter()
-        .filter(|(header, _)| !is_array_of_tables(header))
-        .filter_map(|(header, lines)| Some((table_path(header)?, table_values(&lines)?)))
+        .filter_map(|(id, range)| (id != keep).then_some(range))
+        .collect();
+    mask_regions(text, &ranges)
+}
+
+fn mask_regions(text: &str, ranges: &[ByteRange]) -> String {
+    if ranges.is_empty() {
+        return text.to_owned();
+    }
+    // Copied through as text rather than mutated as bytes, so the result is
+    // valid UTF-8 by construction and no fallible conversion is needed. Every
+    // masked byte becomes a one-byte space and the line breaks are kept, so the
+    // copy has the same length as the original and every offset still lands on
+    // the same character.
+    let mut masked = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for range in ranges {
+        masked.push_str(&text[cursor..range.start]);
+        for byte in text[range.start..range.end].bytes() {
+            masked.push(if byte == b'\n' || byte == b'\r' { char::from(byte) } else { ' ' });
+        }
+        cursor = range.end;
+    }
+    masked.push_str(&text[cursor..]);
+    masked
+}
+
+/// Byte ranges of the managed regions in `text`, from opening sentinel line to
+/// closing sentinel line inclusive.
+fn managed_region_ranges(text: &str, syntax: CommentSyntax) -> Vec<ByteRange> {
+    managed_region_ranges_with_ids(text, syntax)
+        .into_iter()
+        .map(|(_, range)| range)
         .collect()
 }
 
-/// The canonical path a table header names: `[ workspace . lints ]` and
-/// `[workspace.lints]` both yield `["workspace", "lints"]`.
-///
-/// The path is kept as segments rather than rejoined into a string so that a
-/// quoted key containing a dot cannot be mistaken for a nested path — `["a.b"]`
-/// and `[a.b]` name different tables and must not compare equal.
-fn table_path(header: &str) -> Option<Vec<String>> {
-    let document = header.parse::<DocumentMut>().ok()?;
-    let mut path = Vec::new();
-    let mut table = document.as_table();
-    loop {
-        let mut entries = table.iter();
-        let (key, item) = entries.next()?;
-        // A header names exactly one table at each level, so a second entry
-        // means this line is not the header it appeared to be.
-        entries.next().is_none().then_some(())?;
-        path.push(key.to_owned());
-        match item.as_table() {
-            Some(inner) if !inner.is_empty() => table = inner,
-            _ => break,
+/// As [`managed_region_ranges`], paired with each region's id.
+fn managed_region_ranges_with_ids(text: &str, syntax: CommentSyntax) -> Vec<(String, ByteRange)> {
+    let open = syntax.prefix().to_owned() + " >>> anvil-managed:";
+    let close = syntax.prefix().to_owned() + " <<< anvil-managed:";
+
+    let mut ranges = Vec::new();
+    let mut start = None;
+    for line in iterate_lines(text) {
+        let trimmed = text[line.start..line.end].trim();
+        if let Some(id) = trimmed.strip_prefix(&open) {
+            start = Some((id.trim().to_owned(), line.start));
+        } else if trimmed.starts_with(&close)
+            && let Some((id, open_at)) = start.take()
+        {
+            ranges.push((
+                id,
+                ByteRange {
+                    start: open_at,
+                    end: line.end,
+                },
+            ));
         }
     }
-    Some(path)
+    // An unterminated region still shields everything below it: its body is the
+    // region's, not the user's, and `find_region` rejects the file separately.
+    if let Some((id, open_at)) = start {
+        ranges.push((
+            id,
+            ByteRange {
+                start: open_at,
+                end: text.len(),
+            },
+        ));
+    }
+    ranges
 }
 
-/// The configuration a table's lines declare, as canonical path/value pairs.
-///
-/// Comparing what the parser produces rather than the source lines themselves
-/// is what makes adoption insensitive to formatting TOML ignores. Returns
-/// `None` when the lines do not parse, which declines adoption for that table.
-fn table_values(lines: &[&str]) -> Option<TableValues> {
-    let document = lines.join("\n").parse::<DocumentMut>().ok()?;
-    let mut values = BTreeMap::new();
-    collect_values(document.as_table(), &mut Vec::new(), &mut values).then_some(values)
-}
-
-/// Flatten a table's entries into path/value pairs, descending through dotted
-/// keys so `rust.unsafe_op_in_unsafe_fn` is one entry rather than a nested
-/// table.
-///
-/// Returns `false` for anything that is neither a value nor a nested table.
-/// Neither can arise from a table body with its headers already removed, and
-/// refusing is the safe answer for a shape this does not model.
-fn collect_values(table: &Table, path: &mut Vec<String>, values: &mut TableValues) -> bool {
-    table.iter().all(|(key, item)| {
-        path.push(key.to_owned());
-        let understood = match item.as_value() {
-            Some(value) => {
-                values.insert(path.clone(), value.to_string().trim().to_owned());
-                true
-            }
-            None => item.as_table().is_some_and(|inner| collect_values(inner, path, values)),
-        };
-        path.pop();
-        understood
-    })
-}
-
-/// Return a trimmed TOML table header, without its trailing comment.
-///
-/// This is a boundary test: an array-of-tables header (`[[bin]]`) counts, so
-/// that the keys beneath it are not attributed to the table above it. Whether
-/// such a header may be *adopted* is a separate question, decided by
-/// [`is_array_of_tables`].
-///
-/// The bracket shape alone is not enough. A whole-line element of a multi-line
-/// array (`[1, 2]`) wears it too, and reading one as a header would split the
-/// table it belongs to and leave both halves unparsable. The candidate is
-/// therefore handed to the TOML parser, which is the only thing that can tell
-/// the two apart.
-fn toml_table_header(line: &str) -> Option<&str> {
-    let header = strip_trailing_comment(line);
-    (header.starts_with('[') && header.ends_with(']') && header.parse::<DocumentMut>().is_ok()).then_some(header)
-}
-
-/// Whether a table header declares an array of tables (`[[bin]]`).
-///
-/// TOML allows these to repeat, so a second one is not a duplicate and there
-/// is no parse failure for adoption to fix. Adopting one would let a later
-/// array element be deleted as though it were a duplicate of the first.
-fn is_array_of_tables(header: &str) -> bool {
-    header.starts_with("[[")
-}
-
-/// Whether `text` contains a TOML multi-line string delimiter.
-///
-/// Both the basic (`"""`) and literal (`'''`) forms count. This is a coarse
-/// test on purpose: it decides only whether the line-oriented scanner can
-/// classify the content safely, and being wrong in the cautious direction
-/// merely declines an adoption that would otherwise have been safe.
-fn contains_multi_line_string(text: &str) -> bool {
-    text.contains("\"\"\"") || text.contains("'''")
-}
-
-/// Return `line` without a trailing TOML comment, if it has one.
-///
-/// A `#` inside a quoted string is data rather than a comment, so quoting is
-/// tracked: truncating there would corrupt the value and could make two
-/// genuinely different keys compare equal.
-fn strip_trailing_comment(line: &str) -> &str {
-    let mut quote = None;
-    let mut escaped = false;
-    let comment = line.char_indices().find_map(|(index, character)| match (quote, character) {
-        (None, '#') => Some(index),
-        (None, '\'' | '"') => {
-            quote = Some(character);
-            None
+/// Drop leading blank lines, so relocated residue does not carry the gap that
+/// separated it from the header it used to sit under.
+fn trim_leading_blank_lines(text: &str) -> &str {
+    let mut rest = text;
+    loop {
+        let trimmed = rest.trim_start_matches([' ', '\t']);
+        match trimmed.strip_prefix('\n').or_else(|| trimmed.strip_prefix("\r\n")) {
+            Some(next) => rest = next,
+            None => return rest,
         }
-        (Some('"'), '\\') if !escaped => {
-            escaped = true;
-            None
-        }
-        (Some(active), character) if character == active && !escaped => {
-            quote = None;
-            None
-        }
-        _ => {
-            escaped = false;
-            None
-        }
-    });
-    line[..comment.unwrap_or(line.len())].trim_end()
+    }
 }
 
 struct LineIter<'a> {
@@ -680,22 +884,49 @@ mod tests {
 
     const SYN: CommentSyntax = CommentSyntax::Hash;
 
+    /// The host text adoption produces, for the cases that expect no residue.
+    ///
+    /// Asserting the residue is empty here rather than discarding it keeps
+    /// these tests honest: a change that started keeping hand-written entries
+    /// would otherwise pass unnoticed.
+    fn adopted_text(text: &str, body: &str) -> String {
+        match adopt_unmanaged_toml_tables(text, body, SYN) {
+            TomlAdoption::Unchanged => text.to_owned(),
+            TomlAdoption::Adopted { text, residue } => {
+                assert_eq!(residue, "", "unexpected residue kept from the hand-written table");
+                text
+            }
+            TomlAdoption::Conflict { table, key, .. } => panic!("unexpected conflict on `{key}` in `[{table}]`"),
+        }
+    }
+
+    /// The host text and the residue adoption kept, for the cases that expect
+    /// hand-written entries to survive.
+    fn adopted_with_residue(text: &str, body: &str) -> (String, String) {
+        match adopt_unmanaged_toml_tables(text, body, SYN) {
+            TomlAdoption::Adopted { text, residue } => (text, residue),
+            other => panic!("expected the table to be adopted, got {other:?}"),
+        }
+    }
+
     #[test]
     fn missing_region_returns_none() {
         assert_eq!(find_region("user content\n", "anvil-x", SYN).unwrap(), None);
     }
 
-    /// A multi-line string is content this line-oriented scanner cannot read:
-    /// its lines are values, not keys, and the quote state does not survive
-    /// the line break. Rather than guess at their meaning, adoption declines
-    /// outright — leaving a visible duplicate-table failure is the documented
-    /// preference over silently deleting user configuration.
+    /// The line-oriented scanner could not read a multi-line string — its quote
+    /// state does not survive the line break — so adoption used to decline for
+    /// the whole host whenever one appeared anywhere in it, disabling the
+    /// feature rather than handling the case. The parser has no such trouble.
     #[test]
-    fn a_multi_line_string_declines_adoption_entirely() {
+    fn a_multi_line_string_no_longer_defeats_adoption() {
         let text = "[lints]\nworkspace = true\n\n[package]\ndescription = \"\"\"\nnote # not a comment\n\"\"\"\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text(text, "[lints]\nworkspace = true\n");
 
-        assert_eq!(adopted, text, "nothing is adopted while a multi-line string is present:\n{adopted}");
+        assert_eq!(
+            adopted, "[package]\ndescription = \"\"\"\nnote # not a comment\n\"\"\"\n",
+            "the adoptable table is taken and the string is left alone:\n{adopted}"
+        );
     }
 
     /// A bracketed line *inside* a multi-line string is a value, not a table
@@ -704,7 +935,7 @@ mod tests {
     #[test]
     fn a_bracketed_line_inside_a_multi_line_string_is_not_a_table_header() {
         let text = "[package]\ndescription = \"\"\"\n[lints]\nworkspace = true\n\"\"\"\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text(text, "[lints]\nworkspace = true\n");
 
         assert_eq!(adopted, text, "the string's content is left intact:\n{adopted}");
     }
@@ -715,59 +946,84 @@ mod tests {
     #[test]
     fn an_ordinary_quoted_value_still_permits_adoption() {
         let text = "[advisories]\nyanked = \"deny\"\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[advisories]\nyanked = \"deny\"\n", SYN);
+        let adopted = adopted_text(text, "[advisories]\nyanked = \"deny\"\n");
 
         assert_eq!(adopted, "", "the table is still adopted:\n{adopted}");
     }
 
-    /// The quote tracking in `strip_trailing_comment` decides whether a `#` is
-    /// a comment or data. Getting it wrong in either direction is harmful: a
-    /// `#` treated as a comment truncates a value, which can make two
-    /// genuinely different keys compare equal and adopt -- delete -- a table
-    /// that differs; a comment treated as data leaves it attached and defeats
-    /// adoption, leaving the duplicate table this module exists to remove.
-    /// Each case below is a distinct piece of that state machine.
-    #[test]
-    fn strip_trailing_comment_tracks_quoting() {
-        // A plain trailing comment goes, with its leading whitespace.
-        assert_eq!(strip_trailing_comment("a = 1 # note"), "a = 1");
-        // No comment at all: the line is returned whole.
-        assert_eq!(strip_trailing_comment("a = 1"), "a = 1");
-        // A `#` inside a quoted value is data, under either quote style.
-        assert_eq!(strip_trailing_comment("a = \"x#y\""), "a = \"x#y\"");
-        assert_eq!(strip_trailing_comment("a = 'x#y'"), "a = 'x#y'");
-        // A quote closes, so a comment after a quoted value is still a comment.
-        assert_eq!(strip_trailing_comment("a = \"x\" # note"), "a = \"x\"");
-        // Only the matching quote character closes: an apostrophe inside a
-        // double-quoted value must not end it and expose the `#`.
-        assert_eq!(strip_trailing_comment("a = \"it's #1\""), "a = \"it's #1\"");
-        // An escaped quote does not close the value either.
-        assert_eq!(strip_trailing_comment("a = \"x\\\"#y\""), "a = \"x\\\"#y\"");
-        // ...but an escaped backslash is not itself an escape, so the quote
-        // that follows it does close, and the comment after it is a comment.
-        assert_eq!(strip_trailing_comment("a = \"x\\\\\" # note"), "a = \"x\\\\\"");
-    }
-
-    /// The consequence of that tracking, at the level that matters: two values
-    /// differing only inside a quoted `#` must not be judged equal. Were the
-    /// `#` treated as a comment, both would truncate to the same prefix and
-    /// the hand-written table would be dropped -- deleting a real setting.
+    /// A value differing only inside a quoted `#` is a genuine disagreement,
+    /// not a comment to be stripped. Treating the `#` as a comment would
+    /// truncate both values to the same prefix and adopt — that is, delete —
+    /// a table that declares something else.
     #[test]
     fn a_quoted_hash_keeps_two_differing_values_distinct() {
-        let text = "[advisories]\nignore = [\"a#b\"]\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[advisories]\nignore = [\"a#c\"]\n", SYN);
+        let adoption = adopt_unmanaged_toml_tables("[advisories]\nignore = [\"a#b\"]\n", "[advisories]\nignore = [\"a#c\"]\n", SYN);
 
-        assert_eq!(adopted, text, "the differing table is preserved:\n{adopted}");
+        assert_eq!(
+            adoption,
+            TomlAdoption::Conflict {
+                table: "advisories".to_owned(),
+                key: "ignore".to_owned(),
+                managed: "[\"a#c\"]".to_owned(),
+                hand_written: "[\"a#b\"]".to_owned(),
+            },
+            "the disagreement is reported rather than resolved"
+        );
     }
 
-    /// The case that motivated moving the comparison onto the TOML parser: a
+    /// The defect behind issue #148: a hand-written table carrying
+    /// configuration the managed body does not declare cannot simply be
+    /// deleted, and appending the region beside it produces two identical
+    /// headers, which TOML rejects. The hand-written entry is kept and handed
+    /// back for the caller to re-emit after the region, inside the table the
+    /// region opens.
+    #[test]
+    fn a_hand_written_entry_the_body_does_not_declare_is_kept_as_residue() {
+        let text = "[advisories]\nignore = [\"RUSTSEC-9999-0001\"]\n";
+        let (adopted, residue) = adopted_with_residue(text, "[advisories]\nyanked = \"deny\"\n");
+
+        assert_eq!(adopted, "", "the hand-written header is adopted:\n{adopted}");
+        assert_eq!(residue, "ignore = [\"RUSTSEC-9999-0001\"]\n", "the user's entry survives");
+    }
+
+    /// Residue is carried across as its original source slice, so the comments
+    /// a user wrote to explain a setting travel with the setting. Rebuilding it
+    /// from parsed values would silently discard the reasoning and leave a bare
+    /// key behind.
+    #[test]
+    fn residue_keeps_the_comments_written_around_it() {
+        let text = "[advisories]\nyanked = \"deny\"\n# waiting on upstream\nignore = [\"RUSTSEC-9999-0001\"] # ours\n";
+        let (_, residue) = adopted_with_residue(text, "[advisories]\nyanked = \"deny\"\n");
+
+        assert_eq!(
+            residue, "# waiting on upstream\nignore = [\"RUSTSEC-9999-0001\"] # ours\n",
+            "both the leading and the trailing comment travel with the entry"
+        );
+    }
+
+    /// Residue stops at the table it came from. An entry belonging to a later
+    /// table must not be dragged along, or it would silently change meaning:
+    /// relocated under the region's header it becomes a setting of a different
+    /// table entirely.
+    #[test]
+    fn residue_does_not_reach_past_the_adopted_table() {
+        let text = "[advisories]\nignore = [\"X\"]\n\n[bans]\nmultiple-versions = \"warn\"\n";
+        let (adopted, residue) = adopted_with_residue(text, "[advisories]\nyanked = \"deny\"\n");
+
+        assert_eq!(residue, "ignore = [\"X\"]\n", "only the adopted table's entry is taken");
+        assert_eq!(
+            adopted, "[bans]\nmultiple-versions = \"warn\"\n",
+            "the following table is left where it is:\n{adopted}"
+        );
+    }
+
     /// hand-written `workspace=true` declares exactly what the rendered
     /// `workspace = true` does, and TOML does not care about the spacing. A
     /// source-text comparison judged them different, declined adoption, and
     /// appended the duplicate header this module exists to remove.
     #[test]
     fn spacing_around_the_assignment_does_not_defeat_adoption() {
-        let adopted = adopt_unmanaged_toml_tables("[lints]\nworkspace=true\n", "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text("[lints]\nworkspace=true\n", "[lints]\nworkspace = true\n");
 
         assert_eq!(adopted, "", "the table is adopted despite the spacing:\n{adopted}");
     }
@@ -778,7 +1034,7 @@ mod tests {
     #[test]
     fn entry_order_does_not_defeat_adoption() {
         let text = "[advisories]\nyanked = \"deny\"\nunmaintained = \"warn\"\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[advisories]\nunmaintained = \"warn\"\nyanked = \"deny\"\n", SYN);
+        let adopted = adopted_text(text, "[advisories]\nunmaintained = \"warn\"\nyanked = \"deny\"\n");
 
         assert_eq!(adopted, "", "the table is adopted despite the order:\n{adopted}");
     }
@@ -790,20 +1046,23 @@ mod tests {
     #[test]
     fn a_quoted_dotted_key_is_not_a_nested_path() {
         let text = "[\"a.b\"]\nx = 1\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[a.b]\nx = 1\n", SYN);
+        let adopted = adopted_text(text, "[a.b]\nx = 1\n");
 
         assert_eq!(adopted, text, "the differently-named table is preserved:\n{adopted}");
     }
 
-    /// Comparing canonical paths rather than raw header text makes `[bin]` and
-    /// `[[bin]]` share a path, so the array-of-tables exclusion has to hold in
-    /// the rewrite as well as in candidate selection. Were it dropped, the
-    /// array element would be deleted along with the adopted table.
+    /// `[bin]` beside `[[bin]]` is not a file TOML accepts at all — the second
+    /// header is a duplicate key — so the parser cannot read it and adoption
+    /// declines. That is the safe answer: the array element is never deleted,
+    /// which is what the exclusion exists to guarantee. The line scanner this
+    /// replaced did read such a file, and had to carry the array-of-tables
+    /// exclusion into the rewrite to avoid deleting the element.
     #[test]
-    fn an_array_of_tables_survives_adoption_of_a_table_sharing_its_name() {
-        let adopted = adopt_unmanaged_toml_tables("[bin]\nname = \"x\"\n\n[[bin]]\nname = \"x\"\n", "[bin]\nname = \"x\"\n", SYN);
+    fn an_array_of_tables_survives_a_table_sharing_its_name() {
+        let text = "[bin]\nname = \"x\"\n\n[[bin]]\nname = \"x\"\n";
+        let adopted = adopted_text(text, "[bin]\nname = \"x\"\n");
 
-        assert_eq!(adopted, "[[bin]]\nname = \"x\"\n", "the array element survives:\n{adopted}");
+        assert_eq!(adopted, text, "the array element survives:\n{adopted}");
     }
 
     /// A trailing comment on a key line carries no configuration, so it must
@@ -814,7 +1073,7 @@ mod tests {
     #[test]
     fn a_key_line_with_a_trailing_comment_is_still_adoptable() {
         let text = "[lints]\nworkspace = true # our policy\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text(text, "[lints]\nworkspace = true\n");
 
         assert_eq!(adopted, "", "the hand-written table is adopted whole:\n{adopted}");
     }
@@ -824,10 +1083,16 @@ mod tests {
     /// equal, adopting -- and therefore deleting -- a table that differs.
     #[test]
     fn a_hash_inside_a_quoted_value_is_not_treated_as_a_comment() {
-        let text = "[advisories]\nignore = [\"RUSTSEC-1#1\"]\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[advisories]\nignore = [\"RUSTSEC-2#2\"]\n", SYN);
+        let adoption = adopt_unmanaged_toml_tables(
+            "[advisories]\nignore = [\"RUSTSEC-1#1\"]\n",
+            "[advisories]\nignore = [\"RUSTSEC-2#2\"]\n",
+            SYN,
+        );
 
-        assert_eq!(adopted, text, "differing quoted values are not adoptable:\n{adopted}");
+        assert!(
+            matches!(adoption, TomlAdoption::Conflict { ref key, .. } if key == "ignore"),
+            "differing quoted values are a conflict, not a match: {adoption:?}"
+        );
     }
 
     /// TOML allows an array-of-tables header to repeat, so a second `[[bin]]`
@@ -836,7 +1101,7 @@ mod tests {
     #[test]
     fn an_array_of_tables_is_never_adopted() {
         let text = "[[bin]]\nname = \"a\"\n\n[[bin]]\nname = \"b\"\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[[bin]]\nname = \"a\"\n", SYN);
+        let adopted = adopted_text(text, "[[bin]]\nname = \"a\"\n");
 
         assert_eq!(adopted, text, "every array element survives:\n{adopted}");
     }
@@ -848,7 +1113,7 @@ mod tests {
     #[test]
     fn an_array_of_tables_bounds_the_table_above_it() {
         let text = "[lints]\nworkspace = true\n\n[[bin]]\nname = \"a\"\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text(text, "[lints]\nworkspace = true\n");
 
         assert_eq!(
             adopted, "[[bin]]\nname = \"a\"\n",
@@ -867,7 +1132,7 @@ mod tests {
                     other = true\n\
                     # <<< anvil-managed: other\n\
                     # a user comment\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text(text, "[lints]\nworkspace = true\n");
 
         assert!(
             adopted.contains("# a user comment"),
@@ -883,7 +1148,7 @@ mod tests {
     #[test]
     fn an_array_element_on_its_own_line_is_not_a_table_header() {
         let text = "[lints]\nworkspace = true\npairs = [\n  [1, 2]\n]\n";
-        let adopted = adopt_unmanaged_toml_tables(text, text, SYN);
+        let adopted = adopted_text(text, text);
 
         assert_eq!(adopted, "", "the table is adopted whole:\n{adopted}");
     }
@@ -895,7 +1160,7 @@ mod tests {
                     [lints]\n\
                     workspace = true\n\
                     # <<< anvil-managed: existing\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text(text, "[lints]\nworkspace = true\n");
 
         assert!(adopted.starts_with("# >>> anvil-managed: existing"));
         assert!(adopted.contains("[lints]\nworkspace = true\n# <<< anvil-managed: existing"));
@@ -913,9 +1178,16 @@ mod tests {
                     [lints]\n\
                     workspace = true\n\
                     # <<< anvil-managed: existing\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let (adopted, residue) = adopted_with_residue(text, "[lints]\nworkspace = true\n");
 
-        assert_eq!(adopted, text, "the unmanaged-only key is not deleted:\n{adopted}");
+        assert_eq!(
+            residue, "rust.unsafe_code = \"forbid\"\n",
+            "the unmanaged-only key is kept, not deleted"
+        );
+        assert!(
+            adopted.contains("# >>> anvil-managed: existing"),
+            "the existing region survives:\n{adopted}"
+        );
     }
 
     /// Two tables under one parent are different tables. Comparing only the
@@ -925,7 +1197,7 @@ mod tests {
     #[test]
     fn a_dotted_header_is_compared_past_its_first_segment() {
         let text = "[workspace.package]\nedition = \"2024\"\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[workspace.lints]\nedition = \"2024\"\n", SYN);
+        let adopted = adopted_text(text, "[workspace.lints]\nedition = \"2024\"\n");
 
         assert_eq!(adopted, text, "the differently-named table is preserved:\n{adopted}");
     }
@@ -1263,5 +1535,154 @@ mod tests {
         let text = "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x";
         let region = find_region(text, "x", SYN).unwrap().unwrap();
         assert_eq!(region.body_str(), "body\n");
+    }
+
+    /// Residue is inserted after the region the same pass spliced it in, so a
+    /// region that is not there means the splice did not do what it reported.
+    /// Reporting that is what keeps the user's configuration from being
+    /// dropped in silence.
+    #[test]
+    fn residue_insertion_reports_a_region_the_splice_did_not_leave_behind() {
+        let err = insert_after_region("user content\n", "x", "ignore = []\n", SYN).unwrap_err();
+
+        assert!(err.to_string().contains("region 'x' is missing"), "the region is named:\n{err}");
+    }
+
+    /// A host whose last line is the closing sentinel, and a residue block
+    /// written without one, both lack the newline the next line needs. Without
+    /// them the residue would be appended to the sentinel and to whatever
+    /// follows it, turning two lines into one.
+    #[test]
+    fn residue_insertion_supplies_the_newlines_the_host_and_the_residue_lack() {
+        let text = "# >>> anvil-managed: x\nyanked = \"deny\"\n# <<< anvil-managed: x";
+        let out = insert_after_region(text, "x", "ignore = []", SYN).unwrap();
+
+        assert_eq!(
+            out,
+            "# >>> anvil-managed: x\nyanked = \"deny\"\n# <<< anvil-managed: x\nignore = []\n"
+        );
+    }
+
+    /// Residue that already ends in a newline still needs a blank line before
+    /// the content that followed the region. Run straight together, the next
+    /// line's leading comment would read as part of the relocated entry.
+    #[test]
+    fn residue_insertion_separates_the_residue_from_what_followed_the_region() {
+        let text = "# >>> anvil-managed: x\nyanked = \"deny\"\n# <<< anvil-managed: x\n[bans]\nmultiple-versions = \"warn\"\n";
+        let out = insert_after_region(text, "x", "ignore = []\n", SYN).unwrap();
+
+        assert_eq!(
+            out,
+            "# >>> anvil-managed: x\nyanked = \"deny\"\n# <<< anvil-managed: x\nignore = []\n\n[bans]\nmultiple-versions = \"warn\"\n"
+        );
+    }
+
+    /// A region left unterminated still owns everything below it — that text is
+    /// the region's, not the user's. Masking only as far as a closing sentinel
+    /// that never arrives would expose the region's own tables to adoption as
+    /// though a human had written them.
+    #[test]
+    fn an_unterminated_region_is_masked_to_the_end_of_the_file() {
+        let text = "[advisories]\n# >>> anvil-managed: x\nyanked = \"deny\"\n";
+        let masked = mask_managed_regions(text, SYN);
+
+        assert_eq!(masked.len(), text.len(), "masking leaves every byte offset where it was");
+        assert!(
+            masked.starts_with("[advisories]\n"),
+            "text above the region is untouched:\n{masked}"
+        );
+        assert_eq!(
+            masked["[advisories]\n".len()..].trim(),
+            "",
+            "everything from the opening sentinel down is blanked:\n{masked}"
+        );
+    }
+
+    /// An entry's source slice starts at its leading trivia, so it carries the
+    /// blank lines that separated it from the header it used to sit under.
+    /// Kept, that gap would push the relocated entry away from the region whose
+    /// table now owns it.
+    #[test]
+    fn relocated_residue_loses_the_blank_lines_above_it() {
+        assert_eq!(trim_leading_blank_lines("\n  \n\tignore = []\n"), "\tignore = []\n");
+    }
+
+    /// A dotted key is configuration like any other. Not descending into it
+    /// would hide a genuine disagreement, and the hand-written value would be
+    /// deleted in favour of the managed one instead of being reported.
+    #[test]
+    fn a_differing_dotted_key_is_reported_as_a_conflict() {
+        let adoption = adopt_unmanaged_toml_tables(
+            "[lints]\nrust.unsafe_code = \"forbid\"\n",
+            "[lints]\nrust.unsafe_code = \"allow\"\n",
+            SYN,
+        );
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Conflict {
+                table: "lints".to_owned(),
+                key: "rust.unsafe_code".to_owned(),
+                managed: "\"allow\"".to_owned(),
+                hand_written: "\"forbid\"".to_owned(),
+            },
+            "the dotted key is compared rather than skipped"
+        );
+    }
+
+    /// `[workspace.package]` declares table `package`, not a key of
+    /// `[workspace]`. Folding its values into the parent's would make the
+    /// managed table look as though it already declared `package.edition`, and
+    /// the hand-written copy of that key would be deleted instead of kept.
+    #[test]
+    fn a_nested_headed_table_is_not_part_of_the_table_that_declares_it() {
+        let text = "[workspace]\nmembers = []\npackage.edition = \"2024\"\n";
+        let body = "[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\n";
+        let (adopted, residue) = adopted_with_residue(text, body);
+
+        assert_eq!(residue, "package.edition = \"2024\"\n", "the hand-written dotted key is kept");
+        assert_eq!(adopted, "", "the hand-written table is adopted:\n{adopted}");
+    }
+
+    /// The same distinction seen from the host: a nested headed table is not an
+    /// entry of the table above it. Counted as one, it would be relocated out
+    /// from under its own header and become a setting of a different table.
+    #[test]
+    fn a_nested_headed_table_is_not_an_entry_of_the_table_above_it() {
+        let text = "[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\n";
+        let adopted = adopted_text(text, "[workspace]\nmembers = []\n");
+
+        assert_eq!(
+            adopted, "[workspace.package]\nedition = \"2024\"\n",
+            "the nested table stays where it was written:\n{adopted}"
+        );
+    }
+
+    /// The refusal check masks every managed region except the one being
+    /// introduced, which has to stay readable for the check to judge it. The
+    /// blanking keeps every line break, so the parser reports the same spans
+    /// against the copy as against the original.
+    #[test]
+    fn masking_keeps_the_named_region_and_every_line_break() {
+        let text = "[advisories]\n\
+                    # >>> anvil-managed: a\n\
+                    yanked = \"deny\"\n\
+                    # <<< anvil-managed: a\n\
+                    # >>> anvil-managed: b\n\
+                    unmaintained = \"warn\"\n\
+                    # <<< anvil-managed: b\n";
+        let masked = mask_other_managed_regions(text, SYN, "b");
+
+        assert_eq!(masked.len(), text.len(), "every byte offset is where it was");
+        assert_eq!(
+            masked.matches('\n').count(),
+            text.matches('\n').count(),
+            "the line breaks survive the blanking:\n{masked}"
+        );
+        assert!(
+            masked.contains("unmaintained = \"warn\""),
+            "the region under consideration is left readable:\n{masked}"
+        );
+        assert!(!masked.contains("yanked = \"deny\""), "the other region is blanked:\n{masked}");
     }
 }

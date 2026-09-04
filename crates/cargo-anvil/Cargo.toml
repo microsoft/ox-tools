@@ -43,6 +43,7 @@ insta = { workspace = true, features = ["filters"] }
 predicates = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
+toml_edit = { workspace = true }
 walkdir = { workspace = true }
 
 # >>> anvil-managed: anvil-lints

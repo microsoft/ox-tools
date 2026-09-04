@@ -1,0 +1,7 @@
+# Pre-existing user deny.toml that disagrees with the managed body: it sets
+# `yanked` to something other than what anvil declares. There is no output that
+# keeps both -- TOML forbids repeating the key inside one table -- so anvil must
+# refuse the region rather than pick a winner.
+
+[advisories]
+yanked = "warn"
