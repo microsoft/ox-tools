@@ -256,12 +256,18 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
 /// `_anvil-resolve-stable`, which the container fixtures do not import. Stubbing
 /// it keeps them focused on the digest, and lets a case vary the value the tag
 /// frames without standing up a manifest.
+///
+/// The stub rejects any other action, so a caller that asks for the wrong one --
+/// `msrv`, say, which answers with the *mapped* toolchain rather than the
+/// declared version -- fails here instead of silently digesting a value the
+/// image never installs.
 fn stub_msrv_resolver(root: &Path) {
     let justfile_path = root.join("Justfile");
     let mut justfile = fs::read_to_string(&justfile_path).unwrap();
     justfile.push_str(
         "\n[script(\"pwsh\", \"-NoProfile\")]\n\
          _anvil-resolve-stable action:\n\
+         \x20   if ('{{action}}' -ne 'root-msrv') { Write-Error \"stub: expected action 'root-msrv', got '{{action}}'\"; exit 2 }\n\
          \x20   if ($env:FAKE_ROOT_MSRV) { Write-Output $env:FAKE_ROOT_MSRV } else { Write-Output 'none' }\n",
     );
     write(&justfile_path, &justfile);
@@ -441,6 +447,38 @@ fn root_msrv_reports_the_declared_version() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1.97");
+}
+
+#[test]
+fn root_msrv_reads_workspace_package_ahead_of_package() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+    // The shape a real workspace root has, and the one the container image
+    // resolves against: both tables present, and `workspace.package` winning.
+    // The fixture default declares only `[package]`, so without this the
+    // precedence half of the scanner is never exercised.
+    write(
+        &tmp.path().join("Cargo.toml"),
+        "[workspace.package]\nrust-version = \"1.93\"\n\n\
+         [package]\nname = \"fixture\"\nversion = \"0.1.0\"\nrust-version = \"1.97\"\n",
+    );
+
+    let output = run_just(tmp.path(), &["_anvil-resolve-stable", "root-msrv"], &[]);
+
+    assert!(
+        output.status.success(),
+        "root-msrv should resolve from a workspace root:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "1.93",
+        "the workspace declaration is what cargo resolves members against, so it is what the \
+         image must install"
+    );
 }
 
 #[test]
