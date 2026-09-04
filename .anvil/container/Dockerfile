@@ -107,10 +107,17 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # members it names are not admitted and are not needed: the one path that reads
 # them is workspace MSRV validation, which hangs off the `-validate-prereqs`
 # recipes, and `anvil-setup` depends on none of them.
+#
+# It is deleted once the setup has read it, so it does not survive into the
+# finished image. It is the one thing the context carries that the tag does not
+# hash -- the declared MSRV is hashed instead, so an unrelated dependency edit
+# computes the same tag -- and a manifest left in place would make that tag name
+# two different filesystems.
 WORKDIR /opt/anvil
 COPY . ./
 RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && just anvil-setup binstall \
+    && rm -f Cargo.toml \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME:-/root}/.netrc" /root/.netrc \
     && mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \

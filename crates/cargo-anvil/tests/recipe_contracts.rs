@@ -291,10 +291,6 @@ fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> 
     // silently short-circuit the recipe before it did anything. A test that
     // cares about either value passes it explicitly below.
     command.env_remove("ANVIL_IMPACT");
-    // Same hazard, one resolver down: this names the MSRV for a tree with no
-    // root manifest, and a fixture that inherited a developer's exported value
-    // would resolve differently from a clean checkout.
-    command.env_remove("ANVIL_ROOT_MSRV");
     for key in std::env::vars_os().map(|(key, _)| key) {
         if key.to_string_lossy().starts_with("ANVIL_INCLUDE_") {
             command.env_remove(key);
@@ -482,6 +478,14 @@ fn container_build_carries_the_manifest_that_declares_the_msrv() {
     assert!(
         CONTAINER_SETUP_REGION.contains("COPY . ./"),
         "the setup region must copy the scoped context to the root the recipes resolve against"
+    );
+    // The tag hashes the declared MSRV, not the file, so an unrelated dependency
+    // edit computes the same tag. A manifest left in the image would make that
+    // tag name two different filesystems.
+    assert!(
+        CONTAINER_SETUP_REGION.contains("rm -f Cargo.toml"),
+        "the setup region must delete the manifest once read, or the tag describes an image that \
+         can differ from it"
     );
     // The members it names are a checkout, and the image is not one.
     assert!(

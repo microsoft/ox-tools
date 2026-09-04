@@ -196,6 +196,10 @@ would need them is workspace MSRV validation, which the image never reaches: it 
 `anvil-tool-rustc-validate-prereqs`, and no `-setup` recipe depends on a `-validate-prereqs` recipe. Inside a running
 container that validation does execute, against `/workspace` — a real checkout, with its members.
 
+The manifest is deleted once the setup has read it, so it is in the build context but not in the finished image. That
+keeps the tag honest: it hashes the declared MSRV rather than the file, so a dependency edit computes the same tag,
+and nothing is left behind for that tag to misdescribe.
+
 The setup region copies the context whole rather than naming each input, because one input is optional. A repository
 that pins its compiler by other means owns no root toolchain file, and a `COPY` of a path that may not exist is not
 portable across the engines anvil supports, so naming the file would leave exactly those repositories unable to build
@@ -253,7 +257,8 @@ The declared root MSRV is the one input that is not a file. The image installs t
 what the image contains and must rename it. The digest takes the resolved value rather than the manifest declaring it:
 `Cargo.toml` is the busiest file in a workspace while `rust-version` moves perhaps once, so hashing the file would
 rename the image, and oblige a publisher to rebuild and republish, for a stream of edits that cannot alter a byte the
-image contains.
+image contains. That last clause is what the setup region's `rm` buys: the manifest is read and deleted, so an edit
+unrelated to `rust-version` computes the same tag for a filesystem that really is identical.
 
 The hook file's **content** is an input, since it determines what the build installs. Its **output** is deliberately
 excluded: a credential must never influence a tag.
@@ -657,8 +662,9 @@ manual `ANVIL_CONTAINER_NO_CACHE=1`.
 catalog-owned files. The reason is legibility rather than identity: the directory is the recipe tree, `just` parses
 every file the image copies, and a catalog that hides an installer script there makes the tool set harder to reason
 about than one that keeps it in `.anvil/`. Identity is safe either way, because the digest covers every file the build
-context admits (§4.1), not only the recipes — a repository that adds a non-recipe file by hand still renames the tag
-when it edits it.
+context admits and the image keeps (§4.1), not only the recipes — a repository that adds a non-recipe file by hand
+still renames the tag when it edits it. The root `Cargo.toml` is the one admitted file the digest does not cover as
+bytes, and it is also the one the setup deletes once read, so it is in no image for the tag to misdescribe.
 
 A fork inherits everything else: the recipes, the identity scheme, the cache volumes, the mounts, and the re-entry
 guard. A different base OS with a different toolchain source is two region replacements plus one hook.
