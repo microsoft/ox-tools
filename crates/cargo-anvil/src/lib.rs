@@ -41,6 +41,8 @@
 //!   configuration;
 //! - repository-wide agent instructions for setup, complete PR validation,
 //!   and efficient iteration on individual failures;
+//! - a repository skill for completing adoption in an existing Rust codebase,
+//!   including policy migration and removal of duplicate build infrastructure;
 //! - safe update metadata that distinguishes generated content from
 //!   repository-owned customization.
 //!

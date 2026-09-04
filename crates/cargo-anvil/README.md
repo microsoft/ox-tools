@@ -41,6 +41,8 @@ A generated setup includes:
   configuration;
 * repository-wide agent instructions for setup, complete PR validation,
   and efficient iteration on individual failures;
+* a repository skill for completing adoption in an existing Rust codebase,
+  including policy migration and removal of duplicate build infrastructure;
 * safe update metadata that distinguishes generated content from
   repository-owned customization.
 
@@ -375,7 +377,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbLWH4W5BHNskbie4mnQoeuX4bATuTcxHMFGAbnkJHpis_GnRhYvRhcoQbfwKnpCfYspUb4NWI9bKnpi8bM8O_p0ovp3EbxjyK4cgWbiphZIGDa2NhcmdvLWFudmlsZTAuOC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbLWH4W5BHNskbie4mnQoeuX4bATuTcxHMFGAbnkJHpis_GnRhYvRhcoQbXe4PnWTu85Ib10GiyWh-tuYbERjIBzLQ8KEbyEgrTEJoYQFhZIGDa2NhcmdvLWFudmlsZTAuOC4wa2NhcmdvX2Fudmls
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://embarkstudios.github.io/cargo-deny/
