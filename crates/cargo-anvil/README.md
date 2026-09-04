@@ -298,7 +298,7 @@ both locally and in cloud workflows. `pr-fast` is one job, while the
     <tr><td rowspan="9"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
     <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td>runs both feature configs</td></tr>
     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td>compile-only</td></tr>
-    <tr><td><code>pr-msrv</code></td><td>msrv-test</td><td>dual feature-config, all-target tests under the declared MSRV</td></tr>
+    <tr><td><code>pr-msrv</code></td><td>msrv-test</td><td>dual feature-config; lib/bin/integration tests under the declared MSRV (benches and examples are not run)</td></tr>
     <tr><td rowspan="4"><code>pr-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td>libtest, not nextest</td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-careful">careful</a></td><td>self-cleans on a toolchain bump</td></tr>
     <tr><td><a href="https://crates.io/crates/loom">loom</a></td><td>opt-in targets only</td></tr>
@@ -491,15 +491,15 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbLvVGTNtetQUbnp9vX0Ew7_gbkZEyxfXZXyMbltL72AXa-o1hZIGDa2NhcmdvLWFudmlsZTAuNi4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbVqn03OrTnSYblGjeKgXeGVgb6z3iwQiK18Abc5kLxsXto9xhZIGDa2NhcmdvLWFudmlsZTAuNy4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
- [__link1]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=artifacts::container
- [__link10]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=artifacts
+ [__link1]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts::container
+ [__link10]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts
  [__link2]: https://crates.io/crates/cargo-spellcheck
  [__link3]: https://crates.io/crates/cargo-coverage-gate
- [__link4]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=Catalog
- [__link5]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=Catalog::anvil
- [__link6]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=CliMeta
- [__link7]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=CatalogBuilder::with_artifact
- [__link8]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
- [__link9]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=CatalogBuilder::without_artifact
+ [__link4]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=Catalog
+ [__link5]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=Catalog::anvil
+ [__link6]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=CliMeta
+ [__link7]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link8]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link9]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=CatalogBuilder::without_artifact

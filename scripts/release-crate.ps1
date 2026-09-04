@@ -455,6 +455,7 @@ function Update-CrateVersion {
 function Write-Changelog {
     param(
         [string]$crateName,
+        [string]$oldVersion,
         [string]$newVersion,
         [string]$crateFolder,
         [string]$changelogFile,
@@ -463,22 +464,41 @@ function Write-Changelog {
 
     $tags = Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
     $latestTag = $null
+    $initialCommit = $null
+    $previousReleaseCommit = $null
     if ($null -eq $tags -or $tags.Count -eq 0) {
-        Write-Warning "No tags found for crate '$crateName'. Generating changelog from all history."
+        Write-Warning "No tags found for crate '$crateName'. Generating changelog from the available repository history."
     } else {
         $filteredTags = @($tags | Where-Object { $_ -match "^${crateName}-v\d+\.\d+\.\d+$" })
         if ($filteredTags.Count -gt 0) {
             $sortedTags = @($filteredTags | Sort-Object { [version]($_ -replace "${crateName}-v", '') })
             $latestTag = $sortedTags[-1]
+            $previousReleaseCommit = Invoke-GitCommand -Command "rev-list -n 1 $latestTag" -ErrorMessage "Failed to resolve latest release tag"
         } else {
-            Write-Warning "No valid semantic version tags found for crate '$crateName'. Generating changelog from all history."
+            Write-Warning "No valid semantic version tags found for crate '$crateName'. Generating changelog from the available repository history."
         }
     }
 
     $currentDate = (Get-Date).ToString('yyyy-MM-dd')
 
     # Get commits since the latest tag (unreleased commits)
-    $range = if ($latestTag) { "$latestTag..HEAD" } else { "HEAD" }
+    if (-not $latestTag) {
+        $crateCommits = @(Invoke-GitCommand -Command "log --reverse --format=`"%H`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve crate history")
+        if ($crateCommits.Count -gt 0) {
+            $initialCommit = $crateCommits[0]
+            $previousReleaseCommit = $initialCommit
+        }
+    }
+
+    # A newly introduced crate may have shipped before its first release tag was created. Its
+    # introduction belongs to that initial version, not to the next release generated from HEAD.
+    $range = if ($latestTag) {
+        "$latestTag..HEAD"
+    } elseif ($initialCommit -and $oldVersion -ne "0.0.0") {
+        "$initialCommit..HEAD"
+    } else {
+        "HEAD"
+    }
     $rawCommits = Invoke-GitCommand -Command "log $range --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for unreleased commits"
     if ($null -eq $rawCommits -or $rawCommits.Count -eq 0) {
         $rawCommits = @()
@@ -506,12 +526,43 @@ function Write-Changelog {
     if (Test-Path $changelogFile) {
         $existingContent = Get-Content $changelogFile -Raw
         if ($existingContent) {
-            # Find the position after "# Changelog" header and any blank lines
-            # Insert the new version section there
-            $headerPattern = '^# Changelog\s*\r?\n(\r?\n)*'
-            if ($existingContent -match $headerPattern) {
-                $headerMatch = [regex]::Match($existingContent, $headerPattern)
-                $insertPosition = $headerMatch.Index + $headerMatch.Length
+            # Rerunning a release replaces that version's generated section rather than duplicating
+            # it. This also repairs output produced before initial-release history was separated.
+            $escapedNewVersion = [regex]::Escape($newVersion)
+            $targetSectionPattern = "(?ms)^## \[$escapedNewVersion\].*?(?=^## \[|\z)"
+            $existingContent = [regex]::Replace($existingContent, $targetSectionPattern, '').TrimEnd() + "`n"
+            $existingContent = [regex]::Replace($existingContent, '(?m)^# Changelog\s*\r?\n(?=## \[)', "# Changelog`n`n")
+
+            $initialReleasePattern = '(?s)## \[Unreleased\]\s*-\s*Initial release\.\s*\z'
+            $wasInitialRelease = $existingContent -match $initialReleasePattern
+
+            if ($wasInitialRelease -and $previousReleaseCommit) {
+                $initialDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $previousReleaseCommit" -ErrorMessage "Failed to retrieve initial release date"
+                $initialSection = "## [$oldVersion] - $initialDate`n`n- Initial release.`n"
+                $existingContent = [regex]::Replace($existingContent, $initialReleasePattern, $initialSection)
+            }
+
+            $escapedOldVersion = [regex]::Escape($oldVersion)
+            $hasInitialVersion = $existingContent -match "(?m)^## \[$escapedOldVersion\]"
+            if ($oldVersion -ne "0.0.0" -and -not $hasInitialVersion -and $previousReleaseCommit) {
+                $initialDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $previousReleaseCommit" -ErrorMessage "Failed to retrieve initial release date"
+                $existingContent = $existingContent.TrimEnd() + "`n`n## [$oldVersion] - $initialDate`n`n- Initial release.`n"
+            }
+
+            # Keep the explanatory preamble directly below the title and `Unreleased` first.
+            $unreleasedMatch = [regex]::Match($existingContent, '(?m)^## \[Unreleased\]\s*\r?\n(?:\r?\n)*')
+            $sectionMatch = [regex]::Match($existingContent, '(?m)^## \[')
+            if (-not $unreleasedMatch.Success) {
+                $insertPosition = if ($sectionMatch.Success) { $sectionMatch.Index } else { $existingContent.Length }
+                $separator = if ($insertPosition -eq $existingContent.Length) { "`n" } else { "" }
+                $existingContent = $existingContent.Substring(0, $insertPosition) +
+                                   $separator + "## [Unreleased]`n`n" +
+                                   $existingContent.Substring($insertPosition)
+                $unreleasedMatch = [regex]::Match($existingContent, '(?m)^## \[Unreleased\]\s*\r?\n(?:\r?\n)*')
+            }
+
+            if ($unreleasedMatch.Success) {
+                $insertPosition = $unreleasedMatch.Index + $unreleasedMatch.Length
                 $newContent = $existingContent.Substring(0, $insertPosition) +
                               ($newVersionSection -join "`n") + "`n" +
                               $existingContent.Substring($insertPosition)
@@ -692,7 +743,7 @@ try {
         Exit 1
     }
 
-    Write-Changelog -crateName $CrateName -newVersion $newVersion -crateFolder $crateFolder -changelogFile $changelogFile -prBaseUrl $prBaseUrl
+    Write-Changelog -crateName $CrateName -oldVersion $oldVersion -newVersion $newVersion -crateFolder $crateFolder -changelogFile $changelogFile -prBaseUrl $prBaseUrl
     Update-Readme -crateName $CrateName -crateFolder $crateFolder
 
     if (Test-SemverIncompatibleBump -oldVersion $oldVersion -newVersion $newVersion) {

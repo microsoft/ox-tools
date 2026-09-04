@@ -49,6 +49,13 @@ pub const CHAIN_FACTOR: usize = 4;
 enum Previous {
     Other,
     Expression,
+    Operator,
+}
+
+impl Previous {
+    const fn can_end_expression(self) -> bool {
+        matches!(self, Self::Expression | Self::Operator)
+    }
 }
 
 /// The offset of the token that first takes `text` past what `limit` allows.
@@ -153,7 +160,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             }
 
             previous = if matches!(byte, b'?' | b'>') {
-                Previous::Expression
+                Previous::Operator
             } else {
                 Previous::Other
             };
@@ -163,7 +170,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
 
         match byte {
             b'(' | b'[' => {
-                let is_postfix = previous == Previous::Expression;
+                let is_postfix = previous.can_end_expression();
 
                 if is_postfix && link(&mut path, &mut peak, depth, path_limit) {
                     return Some(at);

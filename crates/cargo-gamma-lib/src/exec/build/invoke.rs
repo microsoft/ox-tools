@@ -149,9 +149,9 @@ pub(super) fn supervise_with_limits(
 
             Ok(None) => {
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                    collect(&mut subtree);
-
-                    break Ok(None);
+                    break collect(&mut subtree).map(|()| None).map_err(|cause| {
+                        error!("cargo in `{root}` could not be terminated after its build budget expired").caused_by(cause)
+                    });
                 }
 
                 thread::sleep(BUILD_POLL_INTERVAL);
@@ -160,9 +160,12 @@ pub(super) fn supervise_with_limits(
             Err(cause) => {
                 // Nothing more can be asked of this child, and dropping it would leave the whole
                 // build tree running with no handle on it at all.
-                collect(&mut subtree);
-
-                break Err(error!("could not wait for cargo in `{root}`").caused_by(cause));
+                break match collect(&mut subtree) {
+                    Ok(()) => Err(error!("could not wait for cargo in `{root}`").caused_by(cause)),
+                    Err(cleanup) => {
+                        Err(error!("cargo in `{root}` could not be terminated after it stopped being observable").caused_by(cleanup))
+                    }
+                };
             }
         }
     };
@@ -227,14 +230,14 @@ pub(super) fn supervise_with_limits(
 ///
 /// The ordinary-exit path uses the same order through [`ProcessTree::observe`], which observes an exit
 /// without reaping it before sweeping and finally waiting.
-fn collect(subtree: &mut ProcessTree) {
+fn collect(subtree: &mut ProcessTree) -> io::Result<()> {
     #[cfg(unix)]
     debug_assert!(
         !subtree.released(),
         "the subtree is signalled while it still holds its leader and its watch slot"
     );
 
-    let _reaped = subtree.terminate();
+    subtree.terminate().map(|_status| ())
 }
 
 /// How wide cargo is asked to draw its progress bar.

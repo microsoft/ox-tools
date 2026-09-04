@@ -609,7 +609,7 @@ runs:
 
     # cargo-binstall keeps the cold bootstrap path fast.
     - name: Install cargo-binstall
-      uses: cargo-bins/cargo-binstall@v1.21.0 # immutable release, the tag cannot be moved
+      uses: cargo-bins/cargo-binstall@v1.21.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
 
     - name: Install just
       shell: bash
@@ -1009,13 +1009,13 @@ jobs:
       # write tokens).
       - name: Upsert anvil-semver advisory
         if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') != ''
-        uses: marocchino/sticky-pull-request-comment@v3.0.5 # immutable release, the tag cannot be moved
+        uses: marocchino/sticky-pull-request-comment@v3.0.5 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
         with:
           header: anvil-semver
           path: target/anvil/comments/semver.md
       - name: Clear anvil-semver advisory
         if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') == ''
-        uses: marocchino/sticky-pull-request-comment@v3.0.5 # immutable release, the tag cannot be moved
+        uses: marocchino/sticky-pull-request-comment@v3.0.5 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
         with:
           header: anvil-semver
           delete: true
@@ -1071,7 +1071,7 @@ jobs:
         # fails. The separate hashFiles predicates require both feature
         # configurations; one multi-pattern call would accept a partial pair.
         if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
-        uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
+        uses: codecov/codecov-action@v7.0.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
           flags: ${{ matrix.os }}
@@ -1304,7 +1304,7 @@ jobs:
         # the Codecov UI can distinguish PR-tier uploads from scheduled
         # uploads while still tracking each platform separately.
         if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
-        uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
+        uses: codecov/codecov-action@v7.0.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
           flags: scheduled,${{ matrix.os }}
@@ -2939,9 +2939,14 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
         exit 0
     }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    & cargo "+$toolchain" test @pkg --all-targets --all-features --locked
+    # `--tests` = lib/bin unit tests + integration tests. NOT `--all-targets`,
+    # which adds `--benches`: `cargo test` EXECUTES bench harnesses, and a
+    # `harness = false` bench needs a driver binary this group never installs.
+    # Benches/examples stay compile-only (`anvil-bench`, `anvil-examples`).
+    # `--tests` over `--lib --bins --tests`: `--lib` fails on bin-only packages.
+    & cargo "+$toolchain" test @pkg --tests --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo "+$toolchain" test @pkg --all-targets --locked
+    & cargo "+$toolchain" test @pkg --tests --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install the declared MSRV toolchain only when this check is required.

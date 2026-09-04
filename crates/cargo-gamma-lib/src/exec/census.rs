@@ -592,7 +592,9 @@ fn listed(mut command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
 
     // Whatever the child spawned goes with it when no normal exit was observed: a listing that
     // started a server leaves it holding the pipe this is about to read, and the reader would then
-    // wait out the whole run for an end of file that never comes.
+    // wait out the whole run for an end of file that never comes. Cleanup failure stays fail-open:
+    // census is an optimization, and the bounded drain below turns an unclosed pipe into a missing
+    // census rather than failing mutation testing before the ordinary discovery path can run.
     if status.is_none() {
         let _reaped = subtree.terminate();
     } else {
