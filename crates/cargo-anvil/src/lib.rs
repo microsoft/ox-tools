@@ -158,12 +158,52 @@
 //! Tool installation is explicit:
 //!
 //! ```console
-//! just anvil-setup
-//! just anvil-pr-fast-setup
+//! just anvil-setup         # install every tool and toolchain in the catalog
+//! just anvil-pr-fast-setup # install only prerequisites for the fast PR group
 //! ```
 //!
 //! Generated checks validate their prerequisites before executing and provide
 //! an installation hint when something is missing.
+//!
+//! ## Check catalog
+//!
+//! Every check is available independently as `just anvil-<name>`. The tiers
+//! above compose these recipes into the default policy:
+//!
+//! - **Source and package hygiene:** [`rustfmt`](https://rust-lang.github.io/rustfmt/)
+//!   (`fmt`), [`Clippy`](https://doc.rust-lang.org/clippy/) (`clippy`),
+//!   [`cargo-sort`](https://crates.io/crates/cargo-sort), license headers with
+//!   [`cargo-heather`](https://crates.io/crates/cargo-heather),
+//!   [`cargo-ensure-no-cyclic-deps`](https://crates.io/crates/cargo-ensure-no-cyclic-deps),
+//!   and [`cargo-ensure-no-default-features`](https://crates.io/crates/cargo-ensure-no-default-features).
+//! - **Documentation and repository policy:** Cargo documentation
+//!   (`doc-build`), documentation tests (`doc-test`), generated README checks
+//!   with [`cargo-doc2readme`](https://crates.io/crates/cargo-doc2readme),
+//!   [`cargo-spellcheck`](https://crates.io/crates/cargo-spellcheck), and
+//!   [Conventional Commits](https://www.conventionalcommits.org/) pull-request
+//!   titles.
+//! - **Dependencies and public API:** [`cargo-deny`](https://embarkstudios.github.io/cargo-deny/),
+//!   [`cargo-audit`](https://crates.io/crates/cargo-audit),
+//!   [`cargo-aprz`](https://crates.io/crates/cargo-aprz),
+//!   [`cargo-udeps`](https://crates.io/crates/cargo-udeps),
+//!   [`cargo-semver-checks`](https://crates.io/crates/cargo-semver-checks), and
+//!   [`cargo-check-external-types`](https://crates.io/crates/cargo-check-external-types).
+//! - **Tests and coverage:** tests under the declared MSRV, coverage with
+//!   [`cargo-llvm-cov`](https://crates.io/crates/cargo-llvm-cov) and
+//!   [`cargo-coverage-gate`](https://crates.io/crates/cargo-coverage-gate),
+//!   documentation tests, and example compilation or optional execution.
+//! - **Runtime analysis:** [`Miri`](https://github.com/rust-lang/miri),
+//!   [`cargo-careful`](https://crates.io/crates/cargo-careful),
+//!   [`Loom`](https://crates.io/crates/loom), and
+//!   [`Bolero`](https://crates.io/crates/bolero).
+//! - **Broader validation:** diff-scoped and full
+//!   [`cargo-mutants`](https://mutants.rs/) runs,
+//!   [`cargo-hack`](https://crates.io/crates/cargo-hack) feature-powerset
+//!   checks, and benchmark compilation.
+//!
+//! `docs/design/checks.md` records the exact commands, impact scope, feature
+//! configurations, operating-system matrix, tier placement, and rationale for
+//! each check.
 //!
 //! ## Safe updates and customization
 //!
@@ -183,6 +223,92 @@
 //! generated scripts. Examples include per-package coverage thresholds,
 //! spelling dictionaries, tests ignored by a specific Miri profile, Loom test
 //! targets, and examples excluded from automatic execution.
+//!
+//! There are four levels of structural customization:
+//!
+//! 1. **Compose around Anvil.** Add repository-owned recipes or workflows.
+//!    cargo-anvil only owns the generated `anvil-` surface.
+//! 2. **Extend a managed file.** Add repository policy outside the
+//!    `anvil-managed` sentinels. Updates preserve that text.
+//! 3. **Disable generated content.** Empty an owned file or managed region.
+//!    Future runs leave it disabled and propose new catalog content separately.
+//! 4. **Take ownership.** Edit generated content directly. cargo-anvil keeps
+//!    the edit and writes changed catalog content to an `.anvil-proposed`
+//!    sibling instead of overwriting it.
+//!
+//! ### Spelling
+//!
+//! Add project names, acronyms, and domain terms to the repository's
+//! `.spelling` file, one term per line. `anvil-spellcheck` converts it to the
+//! dictionary format expected by cargo-spellcheck.
+//!
+//! ### Coverage
+//!
+//! [`cargo-coverage-gate`](https://crates.io/crates/cargo-coverage-gate)
+//! metadata controls workspace and package thresholds, target-specific policy,
+//! and intentional exclusions. Coverage enforcement is local to the generated
+//! check; a hosted coverage service is optional reporting rather than the
+//! source of the verdict.
+//!
+//! ### Miri
+//!
+//! Tests that cannot run in the interpreter can carry an ordinary ignore:
+//!
+//! ```text
+//! #[cfg_attr(miri, ignore = "spawns a process")]
+//! ```
+//!
+//! The scheduled Tree Borrows, strict-provenance, and race-coverage profiles
+//! each define their own cfg so a test can opt out of one profile without
+//! disappearing from the others:
+//!
+//! ```text
+//! #[cfg_attr(miri_tree_borrows, ignore = "exceeds the runner memory limit")]
+//! #[cfg_attr(miri_strict_provenance, ignore = "uses an intentional integer-to-pointer cast")]
+//! #[cfg_attr(miri_race_coverage, ignore = "not deterministic across seeds")]
+//! ```
+//!
+//! ### Loom
+//!
+//! A crate opts into concurrency model checking with a `loom` feature, a
+//! dedicated test target, and a cfg-gated dependency:
+//!
+//! ```toml
+//! [features]
+//! loom = []
+//!
+//! [[test]]
+//! name = "loom"
+//! required-features = ["loom"]
+//!
+//! [target.'cfg(loom)'.dependencies]
+//! loom = "0.7"
+//! ```
+//!
+//! Source can then select Loom synchronization primitives with `#[cfg(loom)]`.
+//! Anvil detects the target from Cargo metadata and fails loudly when a crate
+//! declares Loom support but exposes no matching test target.
+//!
+//! ### Examples
+//!
+//! `anvil-examples` always compiles selected examples. An unfiltered
+//! `--run` skips interactive, credentialed, or otherwise unsuitable examples
+//! declared by their package:
+//!
+//! ```toml
+//! [package.metadata.anvil.examples]
+//! no-run = ["interactive-demo", "needs-production-credentials"]
+//! ```
+//!
+//! Explicit `--package` and `--example` selection overrides the default
+//! exclusion because the caller has deliberately chosen that example.
+//!
+//! ### Scheduled failure reporting
+//!
+//! The generated GitHub scheduled workflow creates or updates an
+//! `[Anvil] Scheduled checks failed` issue. Set the Actions repository
+//! variable `ANVIL_PUBLISH_FAILURE_ISSUE` to `false` to disable publication
+//! without taking ownership of the workflow.
 //!
 //! ## Containerized local execution
 //!
@@ -237,18 +363,8 @@
 //! The engine format remains `anvil`-named on disk so tools built on it can
 //! coexist safely and share the same update rules.
 //!
-//! ## Further reading
-//!
-//! The design documentation under `docs/design/` covers:
-//!
-//! - `checks.md` — every check, its scope, and its rationale;
-//! - `local.md` — generated recipes and tool installation;
-//! - `updates.md` — ownership, drift detection, and opt-outs;
-//! - `github.md` and `ado.md` — cloud workflow architecture;
-//! - `containers.md` — container execution;
-//! - `extensibility.md` — downstream catalogs.
-//!
-//! `docs/verification.md` describes how cargo-anvil itself is tested.
+//! More detailed design and operational guidance is available in the
+//! `docs/design/` folder.
 
 #![deny(unsafe_code)]
 
