@@ -62,6 +62,7 @@ flowchart LR
     pr_msrv_job["pr-msrv<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_runtime_analysis_job["pr-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_mutants_job["pr-mutants<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
+    required_checks["required-checks<br/>(single branch-protection context)"]:::job
     impact_act[".github/actions/<br/>anvil-impact"]:::action
     setup_act[".github/actions/<br/>anvil-setup"]:::action
     run_group_act[".github/actions/<br/>anvil-run-group"]:::action
@@ -82,6 +83,12 @@ flowchart LR
     pr_impl --> pr_msrv_job
     pr_impl --> pr_runtime_analysis_job
     pr_impl --> pr_mutants_job
+    impact --> required_checks
+    pr_fast_job --> required_checks
+    pr_test_job --> required_checks
+    pr_msrv_job --> required_checks
+    pr_runtime_analysis_job --> required_checks
+    pr_mutants_job --> required_checks
 
     impact ==> impact_act
     pr_fast_job ==> run_group_act
@@ -744,11 +751,19 @@ not publish supplemental statuses. This avoids exposing a write-capable token
 while executing a synthetic merge that may contain fork-originated code, and
 avoids redundant statuses on ephemeral merge-group commits.
 
-Branch protection and rulesets must select the bounded
-`PR Job / Check Group: <display name> (<platform>)` contexts. Pull-request and
-merge-queue runs intentionally emit the same contexts, so one required-check
-configuration applies to both event types. Supplemental
-`Anvil / <recipe> [<group>] (<runner>)` statuses must never be selected.
+The reusable PR workflow ends with `required-checks`, an `always()` job that
+depends on both impact jobs and every check-group matrix. It succeeds only when
+all seven logical dependencies report `success`; failure, cancellation, or
+skipping in any dependency fails the aggregate. GitHub renders its stable
+branch-protection context as `PR Job / Required Anvil checks` for both
+pull-request and merge-group runs.
+
+Branch protection and rulesets should require only that aggregate Anvil
+context rather than enumerating every matrix leaf. Individual
+`PR Job / Check Group: <display name> (<platform>)` contexts remain visible for
+diagnosis but are implementation details that may grow as the catalog evolves.
+Supplemental `Anvil / <recipe> [<group>] (<runner>)` statuses must never be
+selected.
 
 Commit statuses are intentionally preferred over custom Check Runs for this
 contract. GitHub Actions has no native workflow field for the inline status

@@ -97,6 +97,17 @@
 //! $ just anvil-full     # both, sequentially
 //! ```
 //!
+//! Generic developer operations use the same generated recipe tree:
+//!
+//! ```text
+//! $ just anvil-build
+//! $ just anvil-doc-build --open
+//! $ just anvil-examples --run
+//! $ just anvil-fmt --fix
+//! $ just anvil-miri --package my-crate --example basic
+//! $ just anvil-readme --fix
+//! ```
+//!
 //! cloud workflows invoke the same recipes, so a check behaves identically
 //! locally and in cloud workflows — they share one implementation in the
 //! imported `.just` files, including impact scoping: a local `just anvil-pr`

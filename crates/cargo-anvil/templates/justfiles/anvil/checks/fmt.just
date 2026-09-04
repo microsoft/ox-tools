@@ -18,12 +18,13 @@
 # every member while retaining a bounded rustfmt command line per invocation.
 
 # Check Rust source formatting.
+[arg("fix", long, value="true")]
 [script("pwsh", "-NoProfile")]
-anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
+anvil-fmt fix="false": anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     if ($include -eq '--skip') { Write-Host 'anvil-fmt: no modified packages; skipping'; exit 0 }
-    cargo {{_anvil_stable_toolchain_args}} each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
+    cargo {{_anvil_stable_toolchain_args}} each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' {{ if fix == "true" { "" } else { "--check" } }}
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Per-check setup + validate-prereqs

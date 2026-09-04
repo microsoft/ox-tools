@@ -78,7 +78,8 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         region::gitattributes(),
     ];
 
-    // One owned file per check and per group (the split recipe tree).
+    // One owned file per developer utility, check, and group.
+    out.extend(justfile::dev_files());
     out.extend(justfile::check_files());
     out.extend(justfile::group_files());
     out.extend(container::all());
@@ -205,7 +206,11 @@ mod tests {
             assert!(present(artifact), "backend artifact is not in Catalog::anvil(): {artifact:?}");
         }
 
-        for artifact in justfile::check_files().iter().chain(justfile::group_files().iter()) {
+        for artifact in justfile::dev_files()
+            .iter()
+            .chain(justfile::check_files().iter())
+            .chain(justfile::group_files().iter())
+        {
             assert!(present(artifact), "split recipe file is not in Catalog::anvil(): {artifact:?}");
         }
         for artifact in container::all() {

@@ -11,8 +11,7 @@
 # `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions when it
 # instruments on nightly. On stable those exclusions are inert and
 # untestable code (process-shelling error paths, script-only crates,
-# etc.) wrongly counts against coverage. This matches the repo's own
-# `coverage-measure` recipe, which also runs on nightly.
+# etc.) wrongly counts against coverage.
 
 # Measure test coverage and enforce the coverage gate.
 [script("pwsh", "-NoProfile")]

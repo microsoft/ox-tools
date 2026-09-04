@@ -317,3 +317,48 @@ jobs:
           impact_mode: consume
         env:
           BASE_REF: ${{ inputs.base_ref }}
+
+  required-checks:
+    # This display name is the repository-ruleset context. Keep it stable
+    # across pull-request and merge-group callers.
+    name: Required Anvil checks
+    if: always()
+    needs:
+      - impact-linux
+      - impact-windows
+      - pr-fast
+      - pr-test
+      - pr-msrv
+      - pr-runtime-analysis
+      - pr-mutants
+    runs-on: ${{ inputs.linux_runner }}
+    steps:
+      - name: Verify every Anvil job family succeeded
+        shell: bash
+        env:
+          IMPACT_LINUX: ${{ needs.impact-linux.result }}
+          IMPACT_WINDOWS: ${{ needs.impact-windows.result }}
+          PR_FAST: ${{ needs.pr-fast.result }}
+          PR_TEST: ${{ needs.pr-test.result }}
+          PR_MSRV: ${{ needs.pr-msrv.result }}
+          PR_RUNTIME_ANALYSIS: ${{ needs.pr-runtime-analysis.result }}
+          PR_MUTANTS: ${{ needs.pr-mutants.result }}
+        run: |
+          status=0
+          for result in \
+            "impact-linux=$IMPACT_LINUX" \
+            "impact-windows=$IMPACT_WINDOWS" \
+            "pr-fast=$PR_FAST" \
+            "pr-test=$PR_TEST" \
+            "pr-msrv=$PR_MSRV" \
+            "pr-runtime-analysis=$PR_RUNTIME_ANALYSIS" \
+            "pr-mutants=$PR_MUTANTS"
+          do
+            name="${result%%=*}"
+            conclusion="${result#*=}"
+            if [[ "$conclusion" != "success" ]]; then
+              echo "::error::$name concluded $conclusion"
+              status=1
+            fi
+          done
+          exit "$status"

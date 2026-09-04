@@ -3,7 +3,7 @@
 
 # The Oxidizer Tools Project
 
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-pr.yml/badge.svg?event=pull_request)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-pr.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
@@ -98,34 +98,65 @@ automation processes:
 - The `CHANGELOG.md` file in each crate's directory is auto-generated from the commits to a crate's directory by the
   `scripts/release-crate.ps1` script.
 
-To generate documentation locally with all features enabled (including feature-gated items), run:
+To generate and open documentation locally with all features enabled, run:
 
 ```shell
-just docs
+just anvil-doc-build --open
 ```
 
-This requires the Rust nightly toolchain to be installed. The script will generate documentation
-and open it in your default browser.
+The recipe generates documentation and opens it in your default browser.
 
 ### CI Workflows
 
-We have two primary workflows:
+We use the workflows generated and maintained by `cargo-anvil`:
 
-- `main`. Runs on all pull requests and commits to the main branch. This
-  performs quite a bit of validation to ensure high-quality outcomes. Any issues
-  found by this workflow blocks the pull request from being merged.
+- `Anvil`. Runs impact-scoped validation on pull requests and merge-queue
+  commits. Its aggregate `PR Job / Required Anvil checks` context blocks a
+  merge when impact analysis or any check-group matrix does not succeed.
 
-- `nightly`. Runs nightly on the main branch. This executes repo-wide mutation testing
-  (as opposed to the main workflow which does incremental testing). Any issues
-  found by this workflow result in an issue being opened reporting the problem.
+- `anvil-scheduled`. Runs full-workspace tests, advisory checks, runtime
+  analysis, mutation testing, feature-powerset checks, and benchmark
+  compilation. Failures are published to a durable tracking issue.
 
 ### Pull Request Gates
 
 We strive to deliver high-quality code and as such, we've put in place a number of PR gates, described here:
 
-- **Build**. We build all the crates in the repo for Windows and Linux.
-  We use [`cargo-hack`](https://crates.io/crates/cargo-hack) to iterate through
-  different crate feature combinations to make sure everything builds properly.
+Before submitting source, build, configuration, or CI changes, run the complete
+local PR tier:
+
+```shell
+just anvil-pr
+```
+
+For documentation-only changes that cannot affect executable behavior, run the
+fast tier instead:
+
+```shell
+just anvil-pr-fast
+```
+
+The fast tier includes formatting, generated README, spelling, metadata,
+dependency-policy, and static-analysis checks. It deliberately omits tests and
+coverage, runtime analysis, and mutation testing. Generic developer operations
+are also provided by Anvil:
+
+```shell
+just anvil-build
+just anvil-build --package cargo-anvil
+just anvil-doc-build --open
+just anvil-examples --run
+just anvil-fmt --fix
+just anvil-miri --package cargo-anvil --example basic
+just anvil-readme --fix
+```
+
+These focused operations are not substitutes for either verification tier.
+
+- **Build**. We build affected crates for Windows and Linux on x86_64 and
+  aarch64. The scheduled tier uses
+  [`cargo-hack`](https://crates.io/crates/cargo-hack) to check the feature
+  powerset across the full workspace.
 
 - **Testing**. We run `cargo nextest --all-features` to run every normal test and documentation test in the repo.
 
@@ -177,8 +208,8 @@ We strive to deliver high-quality code and as such, we've put in place a number 
 - **Dependency Validation**. We use [`cargo-deny`](https://crates.io/crates/cargo-deny) to ensure our dependencies
   have acceptable licenses and don't contain known vulnerabilities.
 
-- **Semantic Version Compatibility**. We use [`cargo-semver-checks`](https://crates.io/crates/cargo-semver-checks) to ensure
-  our API surface maintains the compatibility guarantees implies by semantic versioning.
+- **Semantic Version Compatibility**. We use [`cargo-semver-checks`](https://crates.io/crates/cargo-semver-checks) to report
+  advisory findings about API compatibility against the pull request target.
 
 - **PR Title**. Every PR submitted to this repo must follow
   the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
@@ -195,12 +226,13 @@ We strive to deliver high-quality code and as such, we've put in place a number 
 
 ### Tool Versions
 
-We pin the version of the tools we use in CI to ensure hermetic builds as much as possible. We routinely update
-the versions of everything to stay up to date using three scripts:
-
-- `scripts/update_rust_toolchain.ps1` which updates the version of the Rust toolchain in the `constants.env` file and in `rust-toolchain.toml`.
-- `scripts/update_tool_versions.ps1` which updates the version of tools in the `constants.env` file.
-- `scripts/update_action_versions.ps1` which updates the version of GitHub actions in the various files in `.github/workflows`.
+Anvil's Rust nightly and cargo-tool pins live exclusively in
+[`justfiles/anvil/versions.just`](./justfiles/anvil/versions.just). Because this
+repository develops cargo-anvil itself, catalog updates start in
+`crates/cargo-anvil/templates/justfiles/anvil/versions.just` and are applied by
+running `cargo anvil`. The default stable toolchain remains in
+[`rust-toolchain.toml`](./rust-toolchain.toml), while the workspace MSRV remains
+the `rust-version` in [`Cargo.toml`](./Cargo.toml).
 
 ## Trademarks
 

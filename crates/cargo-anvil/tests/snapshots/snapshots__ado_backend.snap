@@ -1957,13 +1957,15 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 # crate that wasn't itself modified.
 
 # Build documentation for required workspace packages.
+[arg("open", long, value="true")]
 [script("pwsh", "-NoProfile")]
-anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact
+anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include required)
     if ($include -eq '--skip') { Write-Host 'anvil-doc-build: no affected packages; skipping'; exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
-    & cargo {{_anvil_stable_toolchain_args}} doc @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-deps
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    & cargo {{_anvil_stable_toolchain_args}} doc @pkg --all-features --no-deps {{ if open == "true" { "--open" } else { "" } }}
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # doc-build, examples and doc-test are pure cargo built-ins; the rust
@@ -2081,14 +2083,121 @@ anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-de
 
 # Affected tier.
 
-# Build all workspace examples.
+# Build examples, or run selected examples locally with `--run`.
+[arg("run", long, value="true")]
+[arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
+[arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
+[arg("timeout", long, pattern='[1-9][0-9]{0,3}')]
 [script("pwsh", "-NoProfile")]
-anvil-examples: anvil-examples-validate-prereqs anvil-impact
+anvil-examples run="false" package="" example="" timeout="30": anvil-examples-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $run = [bool]::Parse('{{run}}')
+    $package = '{{package}}'
+    $example = '{{example}}'
+    $timeout = [int]'{{timeout}}'
+    if ($timeout -gt 3600) { Write-Error 'anvil-examples: --timeout must not exceed 3600 seconds'; exit 2 }
+    if ($example -and -not $package) {
+        Write-Error 'anvil-examples: --example requires --package to avoid workspace ambiguity'
+        exit 2
+    }
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} build @(if ($include) { -split $include } else { '--workspace' }) --examples --all-features --locked
+    if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
+    $pkgArgs = @(if ($package) { '--package'; $package } elseif ($include) { -split $include } else { '--workspace' })
+    $exampleArgs = @(if ($example) { '--example'; $example } else { '--examples' })
+    $stableArgs = {{_anvil_stable_toolchain_args}}
+    & cargo @stableArgs build @pkgArgs @exampleArgs --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if (-not $run) { exit 0 }
+
+    $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-examples: cargo metadata failed'; exit $LASTEXITCODE }
+    try {
+        $meta = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil-examples: could not parse cargo metadata output: $_"
+        exit 1
+    }
+    $selectedPackages = if ($package) {
+        @($package)
+    } elseif ($include -and $include -ne '--workspace') {
+        $names = [System.Collections.Generic.List[string]]::new()
+        $parts = @(-split $include)
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            if ($parts[$i] -eq '--package' -and ++$i -lt $parts.Count) {
+                $names.Add(($parts[$i] -split '@', 2)[0])
+            }
+        }
+        @($names)
+    } else {
+        @($meta.packages | Where-Object { $meta.workspace_members -contains $_.id } | ForEach-Object { $_.name })
+    }
+    $targets = @(
+        foreach ($p in $meta.packages) {
+            if ($p.name -notin $selectedPackages) { continue }
+            $noRun = @($p.metadata.anvil.examples.'no-run')
+            foreach ($target in $p.targets) {
+                if ($target.kind -notcontains 'example') { continue }
+                if ($example -and $target.name -ne $example) { continue }
+                if (-not $example -and $target.name -in $noRun) {
+                    Write-Host "anvil-examples: $($p.name)::$($target.name) skipped by package metadata"
+                    continue
+                }
+                [pscustomobject]@{ package = $p.name; example = $target.name }
+            }
+        }
+    )
+    if ($example -and $targets.Count -eq 0) {
+        Write-Error "anvil-examples: package '$package' has no example named '$example'"
+        exit 2
+    }
+    if ($targets.Count -eq 0) {
+        Write-Host 'anvil-examples: no runnable examples selected'
+        exit 0
+    }
+
+    $cargo = (Get-Command cargo -ErrorAction Stop).Source
+    $failed = $false
+    foreach ($target in $targets) {
+        Write-Host "anvil-examples: running $($target.package)::$($target.example)"
+        $start = [System.Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = $cargo
+        $start.UseShellExecute = $false
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $start.Environment['ANVIL_EXAMPLE'] = '1'
+        foreach ($arg in @($stableArgs) + @(
+            'run', '--package', $target.package, '--example', $target.example,
+            '--all-features', '--locked'
+        )) {
+            $start.ArgumentList.Add($arg)
+        }
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $start
+        if (-not $process.Start()) {
+            Write-Error "anvil-examples: failed to start $($target.package)::$($target.example)"
+            exit 1
+        }
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $timedOut = $false
+        if (-not $process.WaitForExit($timeout * 1000)) {
+            $process.Kill($true)
+            $process.WaitForExit()
+            [Console]::Error.WriteLine("anvil-examples: $($target.package)::$($target.example) timed out after $timeout seconds")
+            $failed = $true
+            $timedOut = $true
+        }
+        $out = $stdout.GetAwaiter().GetResult()
+        $err = $stderr.GetAwaiter().GetResult()
+        if ($out) { Write-Host $out.TrimEnd() }
+        if ($err) { [Console]::Error.WriteLine($err.TrimEnd()) }
+        if (-not $timedOut -and $process.ExitCode -ne 0) {
+            [Console]::Error.WriteLine("anvil-examples: $($target.package)::$($target.example) exited with code $($process.ExitCode)")
+            $failed = $true
+        }
+        $process.Dispose()
+    }
+    if ($failed) { exit 1 }
 
 # Install prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]
@@ -2216,12 +2325,13 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 # every member while retaining a bounded rustfmt command line per invocation.
 
 # Check Rust source formatting.
+[arg("fix", long, value="true")]
 [script("pwsh", "-NoProfile")]
-anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
+anvil-fmt fix="false": anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     if ($include -eq '--skip') { Write-Host 'anvil-fmt: no modified packages; skipping'; exit 0 }
-    cargo {{_anvil_stable_toolchain_args}} each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
+    cargo {{_anvil_stable_toolchain_args}} each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' {{ if fix == "true" { "" } else { "--check" } }}
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Per-check setup + validate-prereqs
@@ -2289,8 +2399,7 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 # `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions when it
 # instruments on nightly. On stable those exclusions are inert and
 # untestable code (process-shelling error paths, script-only crates,
-# etc.) wrongly counts against coverage. This matches the repo's own
-# `coverage-measure` recipe, which also runs on nightly.
+# etc.) wrongly counts against coverage.
 
 # Measure test coverage and enforce the coverage gate.
 [script("pwsh", "-NoProfile")]
@@ -2721,11 +2830,28 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 # (which widens for safety).
 
 # Run Miri tests for affected workspace packages.
+[arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
+[arg("test", long, pattern='(?:[A-Za-z0-9_.:-]+)?')]
+[arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [script("pwsh", "-NoProfile")]
-anvil-miri: anvil-miri-validate-prereqs anvil-impact
+anvil-miri package="" test="" example="": anvil-miri-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $package = '{{package}}'
+    $testFilter = '{{test}}'
+    $example = '{{example}}'
+    if ($testFilter -and $example) { Write-Error 'anvil-miri: choose exactly one of --test or --example'; exit 2 }
+    if ($example -and -not $package) {
+        Write-Error 'anvil-miri: --example requires --package to avoid workspace ambiguity'
+        exit 2
+    }
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { Write-Host 'anvil-miri: no affected packages; skipping'; exit 0 }
+    if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-miri: no affected packages; skipping'; exit 0 }
+    $pkg = @(if ($package) { '--package'; $package } elseif ($include) { -split $include } else { '--workspace' })
+    if ($example) {
+        & cargo '+{{ rust_nightly }}' miri run --all-features --locked @pkg --example $example
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        exit 0
+    }
     # Run miri via libtest (`cargo miri test`), NOT `cargo miri nextest
     # run`. nextest uses a process-per-test model; under miri every
     # process pays the full cost of re-interpreting std initialization,
@@ -2751,7 +2877,8 @@ anvil-miri: anvil-miri-validate-prereqs anvil-impact
     # whose tests are all `#[cfg_attr(miri, ignore)]` -- the canonical
     # opt-out for build-tooling / CLI crates), so the old nextest
     # `--no-tests=pass` workaround is no longer needed.
-    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @(if ($include) { -split $include } else { '--workspace' })
+    $filter = @(if ($testFilter) { '--'; $testFilter })
+    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg @filter
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-runtime-analysis members ---
@@ -3123,6 +3250,10 @@ _anvil-readme mode: anvil-readme-check-validate-prereqs
         }
     }
     if ($hadFailure) { exit 1 }
+
+# Check README files, or regenerate them with `--fix`.
+[arg("fix", long, value="true")]
+anvil-readme fix="false": (_anvil-readme if fix == "true" { "generate" } else { "check" })
 
 # Check that crate README files are up to date.
 anvil-readme-check: (_anvil-readme "check")
@@ -4647,6 +4778,30 @@ anvil-container-down:
     }
     exit 0
 
+=== justfiles/anvil/dev/build.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.
+# Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# Build all targets and features for local development.
+[arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
+[arg("profile", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
+[script("pwsh", "-NoProfile")]
+anvil-build package="" profile="": anvil-build-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    cargo {{_anvil_stable_toolchain_args}} build {{ if package == "" { "--workspace" } else { "--package " + package } }} {{ if profile == "" { "" } else { "--profile " + profile } }} --all-features --all-targets --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Install prerequisites for the `anvil-build` recipe.
+[group("anvil-setup")]
+anvil-build-setup installer="install": anvil-toolchain-stable-install
+
+# Validate prerequisites for the `anvil-build` recipe.
+[group("anvil-setup")]
+anvil-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
+
 === justfiles/anvil/groups/pr-fast.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -5868,6 +6023,7 @@ _anvil-impact-include tier:
 
 import 'helpers.just'
 import 'impact.just'
+import 'dev/build.just'
 import 'checks/aprz.just'
 import 'checks/audit.just'
 import 'checks/bench.just'

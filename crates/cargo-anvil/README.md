@@ -6,7 +6,7 @@
 [![crates.io](https://img.shields.io/crates/v/cargo-anvil.svg)](https://crates.io/crates/cargo-anvil)
 [![docs.rs](https://docs.rs/cargo-anvil/badge.svg)](https://docs.rs/cargo-anvil)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-anvil)](https://crates.io/crates/cargo-anvil)
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-pr.yml/badge.svg?event=pull_request)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-pr.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 <a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>
@@ -94,6 +94,17 @@ $ just anvil          # alias for `just anvil-pr`
 $ just anvil-pr       # the PR tier
 $ just anvil-scheduled  # the scheduled tier
 $ just anvil-full     # both, sequentially
+```
+
+Generic developer operations use the same generated recipe tree:
+
+```text
+$ just anvil-build
+$ just anvil-doc-build --open
+$ just anvil-examples --run
+$ just anvil-fmt --fix
+$ just anvil-miri --package my-crate --example basic
+$ just anvil-readme --fix
 ```
 
 cloud workflows invoke the same recipes, so a check behaves identically
@@ -491,15 +502,15 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbVqn03OrTnSYblGjeKgXeGVgb6z3iwQiK18Abc5kLxsXto9xhZIGDa2NhcmdvLWFudmlsZTAuNy4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbLWH4W5BHNskbie4mnQoeuX4bATuTcxHMFGAbnkJHpis_GnRhYvRhcoQbCIV8CgpzBUobHb2QAspwaTIbyPcXhoVFNlobJP7DkITmYFxhZIGDa2NhcmdvLWFudmlsZTAuOC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
- [__link1]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts::container
- [__link10]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts
+ [__link1]: https://docs.rs/cargo-anvil/0.8.0/cargo_anvil/?search=artifacts::container
+ [__link10]: https://docs.rs/cargo-anvil/0.8.0/cargo_anvil/?search=artifacts
  [__link2]: https://crates.io/crates/cargo-spellcheck
  [__link3]: https://crates.io/crates/cargo-coverage-gate
- [__link4]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=Catalog
- [__link5]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=Catalog::anvil
- [__link6]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=CliMeta
- [__link7]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=CatalogBuilder::with_artifact
- [__link8]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
- [__link9]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=CatalogBuilder::without_artifact
+ [__link4]: https://docs.rs/cargo-anvil/0.8.0/cargo_anvil/?search=Catalog
+ [__link5]: https://docs.rs/cargo-anvil/0.8.0/cargo_anvil/?search=Catalog::anvil
+ [__link6]: https://docs.rs/cargo-anvil/0.8.0/cargo_anvil/?search=CliMeta
+ [__link7]: https://docs.rs/cargo-anvil/0.8.0/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link8]: https://docs.rs/cargo-anvil/0.8.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link9]: https://docs.rs/cargo-anvil/0.8.0/cargo_anvil/?search=CatalogBuilder::without_artifact
