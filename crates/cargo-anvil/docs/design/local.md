@@ -681,6 +681,12 @@ count is always clamped to the number of discovered executables. Use the overrid
 when a runner needs a lower memory footprint; containerized runs forward the
 setting unchanged.
 
+The four public Miri recipes inherit one parameterized private recipe. Its
+profile parameter selects the standard, Tree Borrows, strict-provenance, or
+race-coverage environment before the shared compile-and-run body executes.
+Keeping that main path in Just's dependency graph preserves recipe-level failure
+attribution instead of launching the runner through a nested Just process.
+
 Packages whose own test targets are inherently unsuitable or unproductive under
 Miri can declare:
 

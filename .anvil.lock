@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.7.0"
-catalog_checksum = "sha256:b5fe80381a7b0e0e57b499886e88565a78e76930fd3211c7cc8300c0be06b627"
+catalog_checksum = "sha256:530730be20817eab0ff8856c2abeefcbd481f9a170f0f45be5ce84299058f00b"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -125,19 +125,19 @@ checksum = "sha256:f4822a8f9cb282bc426790355ba83b63e778db9327e986ba3c86ae6205cfd
 
 [[file]]
 path = "justfiles/anvil/checks/miri-race-coverage.just"
-checksum = "sha256:eb6d41a49ccd72ec533aeb336103835383b81fc07c9ed38329eb09bcdc807444"
+checksum = "sha256:56693b4851dea7dc4e707076d48d8cb369055d5352f5703375a3033af1950abb"
 
 [[file]]
 path = "justfiles/anvil/checks/miri-strict-provenance.just"
-checksum = "sha256:cc5fa94c7eb0f6cef28a885c3e72ea4277b5b42e3cbe8e2d750fa91d9a579109"
+checksum = "sha256:bab029c5ca3be78fcea2d6af02763a0e0640722dfe1431a0eaa541801a9811df"
 
 [[file]]
 path = "justfiles/anvil/checks/miri-tree-borrows.just"
-checksum = "sha256:1df669672fb1a507ae087750a3d7872a96990d5b2410c4843217152939963375"
+checksum = "sha256:ea3349941fd3cf3811bce48a679490fe466dddafdb6d0955c1f5471155669f79"
 
 [[file]]
 path = "justfiles/anvil/checks/miri.just"
-checksum = "sha256:0716b7b9edf2c83505eb0872986d2965e37bd5580dbe6094108687dcd7289821"
+checksum = "sha256:7d338ea3a5c3e8e17626d667ce3d4fde0623c59b891ebad139ae1936a1e5ee15"
 
 [[file]]
 path = "justfiles/anvil/checks/msrv-test.just"
