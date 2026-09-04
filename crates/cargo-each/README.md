@@ -57,9 +57,11 @@ of its own.
 
 ### Filters
 
-`--filter` predicates are AND-combined. Repeated `--filter-any` predicates
-form one OR group, combined with every `--filter`. `--exclude-filter`
-predicates are OR-combined and exclusion wins. Predicates:
+`--filter` accepts Boolean expressions using `not`, `and`, `or`, and
+parentheses, with conventional precedence. Repeated `--filter` expressions
+are AND-combined. Repeated `--exclude-filter` expressions are OR-combined,
+and exclusion wins. Metadata values containing Boolean syntax can be
+double-quoted. Expression atoms:
 
 * `lib` / `bin` / `target-kind:<kind>` — target-kind membership.
 * `publishable` — Cargo permits publishing the package.
@@ -110,7 +112,7 @@ member) is a **successful no-op**: `cargo-each` prints a one-line note and
 exits 0. This is what lets callers drop bespoke nothing-to-do guards.
 Otherwise the exit code is the first failing command code (fail-fast),
 `1` under `--keep-going` if any command failed, or `2` for a `cargo-each`
-usage error (unknown selector, bad predicate, misused placeholder).
+usage error (unknown selector, bad filter expression, misused placeholder).
 
 ## Examples
 

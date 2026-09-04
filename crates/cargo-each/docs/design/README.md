@@ -60,10 +60,11 @@ substitution) or exactly once for the whole set.
    `{packages}` placeholder that expands to the cargo selection flags; and
    *per-target* runs once for each Cargo target of requested kinds, preserving
    the package placeholders and adding `{target}`.
-4. **A small, general filter language** (`--filter`, `--filter-any`, and
-   `--exclude-filter`) over cargo metadata — target kinds, publication state,
-   declared features and dependencies, and `metadata:<dotted.key>[=<value>]` —
-   so bespoke `cargo metadata` filtering in recipes collapses to flags.
+4. **A small, general filter language** (`--filter` and `--exclude-filter`)
+   with `not`, `and`, `or`, and parentheses over cargo metadata — target kinds,
+   publication state, declared features and dependencies, and
+   `metadata:<dotted.key>[=<value>]` — so bespoke `cargo metadata` filtering in
+   recipes collapses to flags.
 5. **Bare names for free.** `{name}` yields the un-qualified package name, so
    `@version` stripping disappears from callers even though the input carries it.
 6. **Works identically locally and in CI**, on any platform, with no shell
@@ -188,20 +189,23 @@ A `-p` selector that matches no member is an error (same policy as
 
 ### 4.2 Filters
 
-`--filter <PRED>` keeps only members matching every ordinary keep predicate.
-`--filter-any <PRED>` is repeatable and forms one OR group: when present, a
-member must match at least one of its predicates in addition to every
-`--filter`. `--exclude-filter <PRED>` drops members matching any exclusion.
-Exclusion wins. Formally:
+`--filter <EXPR>` keeps only members matching the Boolean expression. Repeated
+`--filter` expressions are AND-combined. `--exclude-filter <EXPR>` drops
+members matching the Boolean expression; repeated exclusions are OR-combined,
+and exclusion wins. Formally:
 
 ```
 result = selection
        ∩ all(--filter)
-       ∩ any(--filter-any)  # omitted when no --filter-any is present
        − any(--exclude-filter)
 ```
 
-Predicates:
+Expressions use `not`, `and`, `or`, and parentheses, with conventional
+precedence (`not` before `and` before `or`). Operators must be lowercase and
+separated from predicates by whitespace or parentheses. A metadata value that
+contains Boolean operators or parentheses can be surrounded with double quotes;
+inside it, `\"` escapes a quote and `\\` escapes a backslash. The expression
+atoms are:
 
 | Predicate | True when the member… |
 |-----------|-----------------------|
@@ -213,6 +217,13 @@ Predicates:
 | `dep:<name>` | lists `<name>` among its dependencies (any kind). |
 | `metadata:<dotted.key>` | has `package.metadata.<dotted.key>` present. |
 | `metadata:<dotted.key>=<value>` | has `package.metadata.<dotted.key>` equal to `<value>` (numeric compare when both parse as a number, else string compare). |
+
+For example:
+
+```
+--filter 'publishable and (target-kind:lib or target-kind:proc-macro)'
+--exclude-filter 'metadata:ox-gen-readme.disable=true or feature:internal-only'
+```
 
 Filtering runs after package selection and before any target selection. If the
 filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
@@ -256,7 +267,7 @@ no-op.
 - **Exit codes.** `0` when every executed command succeeded *or* the set was
   empty; the failing command's code (fail-fast) or `1` (`--keep-going` with any
   failure — including a command that could not be spawned) otherwise; `2` for a
-  `cargo-each` usage/configuration error (unknown selector, bad predicate,
+  `cargo-each` usage/configuration error (unknown selector, bad filter expression,
   unknown target kind, invalid mode combination, misused placeholder,
   `--chdir` with `--once`, or — in fail-fast mode — a command that could not
   be spawned at all).

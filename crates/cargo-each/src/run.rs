@@ -26,12 +26,11 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
 
     // The `{packages}` pass-through only applies when the resolved set is the
     // untouched whole workspace: no per-package narrowing and no filters.
-    let packages =
-        if selection.is_whole_workspace() && args.filters.is_empty() && args.filter_any.is_empty() && args.exclude_filters.is_empty() {
-            PackagesExpansion::Workspace
-        } else {
-            PackagesExpansion::Explicit
-        };
+    let packages = if selection.is_whole_workspace() && args.filters.is_empty() && args.exclude_filters.is_empty() {
+        PackagesExpansion::Workspace
+    } else {
+        PackagesExpansion::Explicit
+    };
 
     let target_kinds = parse_target_kinds(&args.each_targets)?;
     let target_required_features = args.target_required_feature.iter().cloned().collect();
@@ -86,26 +85,20 @@ fn build_selection(args: &EachArgs) -> Selection {
     }
 }
 
-/// Narrow `members` by package keep and drop predicates. `--filter`
-/// predicates are AND-combined (a member is kept only
-/// if it matches *every* one); `--filter-any` predicates form one optional OR
-/// group; and `--exclude-filter` predicates are OR-combined. Exclusion wins.
+/// Narrow `members` by package keep and drop expressions. Repeated `--filter`
+/// expressions are AND-combined; repeated `--exclude-filter` expressions are
+/// OR-combined, and exclusion wins.
 fn apply_filters(members: &mut Vec<&Member>, args: &EachArgs) -> Result<(), AppError> {
     let keep = parse_predicates(&args.filters)?;
-    let keep_any = parse_predicates(&args.filter_any)?;
     let drop = parse_predicates(&args.exclude_filters)?;
-    members.retain(|m| {
-        keep.iter().all(|p| p.matches(m))
-            && (keep_any.is_empty() || keep_any.iter().any(|p| p.matches(m)))
-            && !drop.iter().any(|p| p.matches(m))
-    });
+    members.retain(|m| keep.iter().all(|p| p.matches(m)) && !drop.iter().any(|p| p.matches(m)));
     Ok(())
 }
 
 fn parse_predicates(specs: &[String]) -> Result<Vec<Predicate>, AppError> {
     specs
         .iter()
-        .map(|s| Predicate::parse(s).into_app_err("invalid filter predicate"))
+        .map(|s| Predicate::parse(s).into_app_err("invalid filter expression"))
         .collect()
 }
 

@@ -29,7 +29,7 @@
 #[from(
     LoadMetadataError,
     UnknownSelectorError,
-    InvalidPredicateError,
+    InvalidFilterExpressionError,
     InvalidTargetKindError,
     PlaceholderMisuseError,
     ChdirConflictsWithOnceError
@@ -50,11 +50,11 @@ pub(crate) struct UnknownSelectorError {
     pub(crate) selector: String,
 }
 
-/// A `--filter` / `--exclude-filter` predicate could not be parsed.
+/// A `--filter` / `--exclude-filter` expression could not be parsed.
 #[ohno::error]
-#[display("invalid filter predicate `{predicate}`: {reason}")]
-pub(crate) struct InvalidPredicateError {
-    pub(crate) predicate: String,
+#[display("invalid filter expression `{expression}`: {reason}")]
+pub(crate) struct InvalidFilterExpressionError {
+    pub(crate) expression: String,
     pub(crate) reason: String,
 }
 
@@ -105,8 +105,8 @@ mod tests {
     }
 
     #[test]
-    fn invalid_predicate_renders_reason() {
-        let err = InvalidPredicateError::new("dep:".to_owned(), "empty dependency name".to_owned());
+    fn invalid_filter_expression_renders_reason() {
+        let err = InvalidFilterExpressionError::new("dep:".to_owned(), "empty dependency name".to_owned());
         let rendered = err.to_string();
         assert!(rendered.contains("dep:"));
         assert!(rendered.contains("empty dependency name"));

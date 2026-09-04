@@ -49,22 +49,17 @@ pub(crate) struct EachArgs {
     pub(crate) none: bool,
 
     // --- filtering ---
-    /// Keep only members matching this predicate. Repeatable; AND-combined
-    /// (a member is kept only if it matches every --filter).
-    /// Predicates include `target-kind:<kind>`, `publishable`,
-    /// `feature:<name>`, `dep:<name>`, and `metadata:<key>[=<value>]`.
-    #[arg(long = "filter", value_name = "PRED")]
+    /// Keep only members matching this Boolean expression. Repeatable;
+    /// expressions are AND-combined. Supports `not`, `and`, `or`, and
+    /// parentheses over predicates such as `target-kind:<kind>`,
+    /// `publishable`, `feature:<name>`, `dep:<name>`, and
+    /// `metadata:<key>[=<value>]`.
+    #[arg(long = "filter", value_name = "EXPR")]
     pub(crate) filters: Vec<String>,
 
-    /// Keep members matching at least one predicate in this OR group.
-    /// Repeatable; the group is combined with every --filter predicate.
-    #[arg(long = "filter-any", value_name = "PRED")]
-    pub(crate) filter_any: Vec<String>,
-
-    /// Drop members matching this predicate. Repeatable; OR-combined (a member
-    /// is dropped if it matches any --exclude-filter). Same predicate grammar
-    /// as --filter; exclusion wins over --filter on conflict.
-    #[arg(long = "exclude-filter", value_name = "PRED")]
+    /// Drop members matching this Boolean expression. Repeatable; expressions
+    /// are OR-combined. Same expression grammar as --filter; exclusion wins.
+    #[arg(long = "exclude-filter", value_name = "EXPR")]
     pub(crate) exclude_filters: Vec<String>,
 
     // --- execution ---

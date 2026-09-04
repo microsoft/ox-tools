@@ -270,17 +270,13 @@ fn multiple_filters_intersect() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
-fn filter_any_forms_one_or_group_combined_with_filters() {
+fn boolean_filter_supports_grouped_or() {
     let (_tmp, manifest) = fixture();
     each(&manifest)
         .args([
             "--workspace",
             "--filter",
-            "publishable",
-            "--filter-any",
-            "feature:loom",
-            "--filter-any",
-            "target-kind:bin",
+            "publishable and (feature:loom or target-kind:bin)",
             "--dry-run",
             "--",
             "echo",
@@ -558,14 +554,14 @@ fn unknown_selector_is_a_usage_error() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
-fn bad_predicate_is_a_usage_error() {
+fn bad_filter_expression_is_a_usage_error() {
     let (_tmp, manifest) = fixture();
     each(&manifest)
         .args(["--workspace", "--filter", "nonsense", "--dry-run", "--", "echo", "{name}"])
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("invalid filter predicate"));
+        .stderr(predicate::str::contains("invalid filter expression"));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -725,12 +721,12 @@ fn once_with_filter_uses_explicit_packages_not_workspace() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
-fn once_with_filter_any_uses_explicit_packages_not_workspace() {
+fn once_with_boolean_filter_uses_explicit_packages_not_workspace() {
     let (_tmp, manifest) = fixture();
     each(&manifest)
         .args([
             "--workspace",
-            "--filter-any",
+            "--filter",
             "feature:loom",
             "--once",
             "--dry-run",

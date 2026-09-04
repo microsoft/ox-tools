@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! The `--filter` / `--exclude-filter` metadata predicate language.
+//! The `--filter` / `--exclude-filter` Boolean expression language.
 //!
-//! A small, fixed set of predicates over cargo metadata — enough to express
-//! every ad-hoc `cargo metadata` filter the recipes currently hand-roll,
-//! and nothing more:
+//! Expressions combine a small, fixed set of predicates over cargo metadata
+//! with `not`, `and`, `or`, and parentheses. This is enough to express every
+//! ad-hoc `cargo metadata` filter the recipes currently hand-roll:
 //!
 //! - `lib` / `bin` / `target-kind:<kind>` — the member has a target of that
 //!   kind.
@@ -19,12 +19,18 @@
 use cargo_metadata::TargetKind;
 use serde_json::Value;
 
-use crate::error::{EachError, InvalidPredicateError};
+use crate::error::{EachError, InvalidFilterExpressionError};
 use crate::workspace::{Member, parse_target_kind};
 
 /// A parsed filter predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Predicate {
+    /// `left and right`: both operands match.
+    And(Vec<Self>),
+    /// `left or right`: at least one operand matches.
+    Or(Vec<Self>),
+    /// `not operand`: the operand does not match.
+    Not(Box<Self>),
     /// `lib`: member has a `lib` target.
     HasLib,
     /// `bin`: member has a `bin` target.
@@ -49,14 +55,18 @@ pub(crate) enum Predicate {
 }
 
 impl Predicate {
-    /// Parse a predicate from its command-line spelling.
+    /// Parse a Boolean filter expression.
     ///
     /// # Errors
     ///
-    /// Returns [`EachError`] if `spec` is not one of the recognized predicate
-    /// forms (`lib`, `bin`, `dep:<name>`, `metadata:<key>[=<value>]`) or has an
-    /// empty dependency name / metadata key.
+    /// Returns [`EachError`] if the Boolean syntax is malformed, an atom is not
+    /// a recognized predicate, or a predicate argument is invalid.
     pub(crate) fn parse(spec: &str) -> Result<Self, EachError> {
+        ExpressionParser::new(spec)?.parse()
+    }
+
+    /// Parse one atomic predicate from its command-line spelling.
+    fn parse_atom(spec: &str) -> Result<Self, EachError> {
         match spec {
             "lib" => Ok(Self::HasLib),
             "bin" => Ok(Self::HasBin),
@@ -96,6 +106,9 @@ impl Predicate {
     #[must_use]
     pub(crate) fn matches(&self, member: &Member) -> bool {
         match self {
+            Self::And(predicates) => predicates.iter().all(|predicate| predicate.matches(member)),
+            Self::Or(predicates) => predicates.iter().any(|predicate| predicate.matches(member)),
+            Self::Not(predicate) => !predicate.matches(member),
             Self::HasLib => member.has_lib,
             Self::HasBin => member.has_bin,
             Self::HasTargetKind(kind) => member.targets.iter().any(|target| target.kinds.contains(kind)),
@@ -114,12 +127,43 @@ fn parse_metadata(spec: &str, rest: &str) -> Result<Predicate, EachError> {
         validate_key(spec, key)?;
         Ok(Predicate::MetadataEquals {
             key: key.to_owned(),
-            value: value.to_owned(),
+            value: parse_metadata_value(spec, value)?,
         })
     } else {
         validate_key(spec, rest)?;
         Ok(Predicate::MetadataPresent(rest.to_owned()))
     }
+}
+
+fn parse_metadata_value(spec: &str, value: &str) -> Result<String, EachError> {
+    if !value.starts_with('"') {
+        if value.contains('"') {
+            return Err(invalid(spec, "double quotes must surround the complete metadata value"));
+        }
+        return Ok(value.to_owned());
+    }
+    let Some(inner) = value.strip_prefix('"').and_then(|value| value.strip_suffix('"')) else {
+        return Err(invalid(spec, "unclosed double-quoted metadata value"));
+    };
+    let mut parsed = String::with_capacity(inner.len());
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            parsed.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some(escaped @ ('"' | '\\')) => parsed.push(escaped),
+            Some(other) => {
+                return Err(invalid(
+                    spec,
+                    &format!("unsupported escape `\\{other}` in metadata value; expected `\\\"` or `\\\\`"),
+                ));
+            }
+            None => return Err(invalid(spec, "trailing `\\` in metadata value")),
+        }
+    }
+    Ok(parsed)
 }
 
 /// Reject metadata keys that are not a valid dotted path — empty, or with any
@@ -137,7 +181,182 @@ fn validate_key(spec: &str, key: &str) -> Result<(), EachError> {
 }
 
 fn invalid(spec: &str, reason: &str) -> EachError {
-    InvalidPredicateError::new(spec.to_owned(), reason.to_owned()).into()
+    InvalidFilterExpressionError::new(spec.to_owned(), reason.to_owned()).into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Token<'a> {
+    Atom(&'a str),
+    And,
+    Or,
+    Not,
+    LeftParen,
+    RightParen,
+}
+
+impl Token<'_> {
+    fn display(self) -> &'static str {
+        match self {
+            Self::Atom(_) => "predicate",
+            Self::And => "`and`",
+            Self::Or => "`or`",
+            Self::Not => "`not`",
+            Self::LeftParen => "`(`",
+            Self::RightParen => "`)`",
+        }
+    }
+}
+
+struct ExpressionParser<'a> {
+    spec: &'a str,
+    tokens: Vec<Token<'a>>,
+    position: usize,
+}
+
+impl<'a> ExpressionParser<'a> {
+    const MAX_NESTING: usize = 64;
+
+    fn new(spec: &'a str) -> Result<Self, EachError> {
+        Ok(Self {
+            spec,
+            tokens: tokenize(spec)?,
+            position: 0,
+        })
+    }
+
+    fn parse(mut self) -> Result<Predicate, EachError> {
+        if self.tokens.is_empty() {
+            return Err(invalid(self.spec, "empty expression"));
+        }
+        if self.tokens.iter().all(|token| matches!(token, Token::Atom(_))) {
+            return Predicate::parse_atom(self.spec.trim());
+        }
+        let expression = self.parse_or(0)?;
+        if let Some(token) = self.peek() {
+            return Err(invalid(
+                self.spec,
+                &format!("unexpected {}; expected `and`, `or`, or end of expression", token.display()),
+            ));
+        }
+        Ok(expression)
+    }
+
+    fn parse_or(&mut self, depth: usize) -> Result<Predicate, EachError> {
+        let mut operands = vec![self.parse_and(depth)?];
+        while self.peek() == Some(Token::Or) {
+            self.position += 1;
+            operands.push(self.parse_and(depth)?);
+        }
+        Ok(if operands.len() == 1 {
+            operands.pop().expect("length checked above to contain exactly one operand")
+        } else {
+            Predicate::Or(operands)
+        })
+    }
+
+    fn parse_and(&mut self, depth: usize) -> Result<Predicate, EachError> {
+        let mut operands = vec![self.parse_unary(depth)?];
+        while self.peek() == Some(Token::And) {
+            self.position += 1;
+            operands.push(self.parse_unary(depth)?);
+        }
+        Ok(if operands.len() == 1 {
+            operands.pop().expect("length checked above to contain exactly one operand")
+        } else {
+            Predicate::And(operands)
+        })
+    }
+
+    fn parse_unary(&mut self, depth: usize) -> Result<Predicate, EachError> {
+        if depth > Self::MAX_NESTING {
+            return Err(invalid(self.spec, "expression nesting exceeds 64 levels"));
+        }
+        match self.peek() {
+            Some(Token::Atom(atom)) => {
+                self.position += 1;
+                Predicate::parse_atom(atom)
+            }
+            Some(Token::Not) => {
+                self.position += 1;
+                Ok(Predicate::Not(Box::new(self.parse_unary(depth + 1)?)))
+            }
+            Some(Token::LeftParen) => {
+                self.position += 1;
+                let expression = self.parse_or(depth + 1)?;
+                if self.peek() != Some(Token::RightParen) {
+                    return Err(invalid(self.spec, "unclosed `(`"));
+                }
+                self.position += 1;
+                Ok(expression)
+            }
+            Some(token) => Err(invalid(
+                self.spec,
+                &format!("unexpected {}; expected a predicate, `not`, or `(`", token.display()),
+            )),
+            None => Err(invalid(
+                self.spec,
+                "unexpected end of expression; expected a predicate, `not`, or `(`",
+            )),
+        }
+    }
+
+    fn peek(&self) -> Option<Token<'a>> {
+        self.tokens.get(self.position).copied()
+    }
+}
+
+fn tokenize(spec: &str) -> Result<Vec<Token<'_>>, EachError> {
+    let mut tokens = Vec::new();
+    let mut atom_start = None;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in spec.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        if character == '"' {
+            quoted = true;
+            if atom_start.is_none() {
+                atom_start = Some(index);
+            }
+            continue;
+        }
+        if character.is_whitespace() || matches!(character, '(' | ')') {
+            if let Some(start) = atom_start.take() {
+                tokens.push(classify_token(&spec[start..index]));
+            }
+            match character {
+                '(' => tokens.push(Token::LeftParen),
+                ')' => tokens.push(Token::RightParen),
+                _ => {}
+            }
+        } else if atom_start.is_none() {
+            atom_start = Some(index);
+        }
+    }
+    if let Some(start) = atom_start {
+        tokens.push(classify_token(&spec[start..]));
+    }
+    if quoted {
+        return Err(invalid(spec, "unclosed double quote"));
+    }
+    Ok(tokens)
+}
+
+fn classify_token(token: &str) -> Token<'_> {
+    match token {
+        "and" => Token::And,
+        "or" => Token::Or,
+        "not" => Token::Not,
+        atom => Token::Atom(atom),
+    }
 }
 
 /// Walk a dotted key path (`coverage-gate.min-lines-percent`) into a JSON
@@ -234,6 +453,80 @@ mod tests {
     }
 
     #[test]
+    fn parses_boolean_operators_with_conventional_precedence() {
+        assert_eq!(
+            Predicate::parse("lib or bin and not publishable").expect("expression"),
+            Predicate::Or(vec![
+                Predicate::HasLib,
+                Predicate::And(vec![Predicate::HasBin, Predicate::Not(Box::new(Predicate::Publishable)),]),
+            ])
+        );
+    }
+
+    #[test]
+    fn parentheses_override_boolean_precedence() {
+        assert_eq!(
+            Predicate::parse("(lib or bin) and publishable").expect("expression"),
+            Predicate::And(vec![
+                Predicate::Or(vec![Predicate::HasLib, Predicate::HasBin]),
+                Predicate::Publishable,
+            ])
+        );
+    }
+
+    #[test]
+    fn atomic_metadata_value_may_contain_spaces() {
+        assert_eq!(
+            Predicate::parse("metadata:role=script only").expect("atomic predicate"),
+            Predicate::MetadataEquals {
+                key: "role".to_owned(),
+                value: "script only".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn quoted_metadata_value_may_contain_boolean_syntax() {
+        assert_eq!(
+            Predicate::parse(r#"metadata:role="research and (development)" and lib"#).expect("expression"),
+            Predicate::And(vec![
+                Predicate::MetadataEquals {
+                    key: "role".to_owned(),
+                    value: "research and (development)".to_owned(),
+                },
+                Predicate::HasLib,
+            ])
+        );
+        assert_eq!(
+            Predicate::parse(r#"metadata:role="quoted \"value\" and \\ path""#).expect("quoted atom"),
+            Predicate::MetadataEquals {
+                key: "role".to_owned(),
+                value: "quoted \"value\" and \\ path".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_boolean_expressions() {
+        for expression in [
+            "",
+            "lib and",
+            "or lib",
+            "lib bin",
+            "(lib or bin",
+            "lib or )",
+            "()",
+            "lib AND bin",
+            r#"metadata:role="unclosed"#,
+            r#"metadata:role="unsupported\q""#,
+        ] {
+            Predicate::parse(expression).expect_err(expression);
+        }
+        let too_deep = format!("{}lib{}", "(".repeat(66), ")".repeat(66));
+        Predicate::parse(&too_deep).expect_err("excessive nesting");
+    }
+
+    #[test]
     fn rejects_unknown_and_empty() {
         Predicate::parse("nonsense").expect_err("unknown predicate must error");
         Predicate::parse("dep:").expect_err("empty dependency name must error");
@@ -275,6 +568,22 @@ mod tests {
         assert!(!Predicate::Publishable.matches(&m));
         assert!(Predicate::HasFeature("loom".to_owned()).matches(&m));
         assert!(!Predicate::HasFeature("serde".to_owned()).matches(&m));
+    }
+
+    #[test]
+    fn boolean_expression_matches_member() {
+        let mut m = member_with(&[], Value::Null, true, false);
+        m.features.insert("loom".to_owned());
+        assert!(
+            Predicate::parse("publishable and (bin or feature:loom)")
+                .expect("expression")
+                .matches(&m)
+        );
+        assert!(
+            !Predicate::parse("not lib or metadata:role=script-only")
+                .expect("expression")
+                .matches(&m)
+        );
     }
 
     #[test]
