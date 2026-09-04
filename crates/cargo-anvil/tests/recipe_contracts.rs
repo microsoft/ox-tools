@@ -1018,12 +1018,23 @@ version = "0.1.0"
 edition = "2024"
 
 [package.metadata.anvil.examples]
-no-run = ["blocked"]
+no-run = ["blocked", "sleeping"]
 "#,
     );
     write(&tmp.path().join("src/lib.rs"), "");
-    write(&tmp.path().join("examples/ok.rs"), "fn main() {}\n");
+    write(
+        &tmp.path().join("examples/ok.rs"),
+        r#"fn main() {
+    assert_eq!(std::env::var("ANVIL_EXAMPLE").as_deref(), Ok("1"));
+    std::fs::write("example-ran", "yes").unwrap();
+}
+"#,
+    );
     write(&tmp.path().join("examples/blocked.rs"), "fn main() { std::process::exit(7); }\n");
+    write(
+        &tmp.path().join("examples/sleeping.rs"),
+        "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }\n",
+    );
     let lock = Command::new("cargo")
         .arg("generate-lockfile")
         .current_dir(tmp.path())
@@ -1039,11 +1050,41 @@ no-run = ["blocked"]
         String::from_utf8_lossy(&default_run.stdout),
         String::from_utf8_lossy(&default_run.stderr)
     );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("example-ran")).unwrap(),
+        "yes",
+        "the runnable example must execute with ANVIL_EXAMPLE=1"
+    );
     let explicit = run_just_with_real_cargo(
         tmp.path(),
         &["anvil-examples", "--run", "--package", "fixture", "--example", "blocked"],
     );
     assert_failed(&explicit, "explicitly selected excluded example");
+
+    let started = std::time::Instant::now();
+    let timeout = run_just_with_real_cargo(
+        tmp.path(),
+        &[
+            "anvil-examples",
+            "--run",
+            "--package",
+            "fixture",
+            "--example",
+            "sleeping",
+            "--timeout",
+            "1",
+        ],
+    );
+    assert_failed(&timeout, "sleeping example timeout");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the one-second timeout must terminate promptly"
+    );
+    assert!(
+        String::from_utf8_lossy(&timeout.stderr).contains("fixture::sleeping timed out after 1 seconds"),
+        "timeout must identify the selected target\nstderr:\n{}",
+        String::from_utf8_lossy(&timeout.stderr)
+    );
 }
 
 #[test]
