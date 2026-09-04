@@ -20,8 +20,17 @@ verdicts, incremental reuse, reporting, and command dispatch.
   process-output lifecycle as later builds and tests. Their stdout and stderr
   are drained concurrently, and descendants are swept before inherited pipe
   handles are allowed to keep capture open.
+- Build and verdict supervision surface a failure to terminate a timed-out or
+  otherwise abandoned subtree instead of continuing as though cleanup
+  succeeded. Verdict cleanup failure abandons the remaining mutation campaign
+  because surviving descendants can interfere with later mutants. Census
+  remains deliberately fail-open: it is an optimization, and its bounded
+  output drain converts cleanup failure into a missing census so ordinary
+  discovery can still proceed.
 - The injected guard protocol is provided by dependency-free
-  `cargo-gamma-rt`.
+  `cargo-gamma-rt`. Its package-local source bundle is exposed only through an
+  internal feature used by the coordinator, so published `cargo-gamma-lib`
+  packages never depend on repository-relative source paths.
 - The `internals` feature exists only for this crate's integration tests and
   is not a supported downstream API.
 - The agreement tests use `cargo-gamma-attrs-impl` through a versionless path
@@ -51,6 +60,22 @@ Runtime startup failures are infrastructure failures, not mutant kills. This
 includes both failure to acquire the startup environment and a guard reached
 before the runtime constructor installed its selection; either fixed marker
 disqualifies the process as mutation-score evidence.
+
+Diff paths are resolved to the workspace-relative Rust files discovered by the
+survey. Absolute or rooted paths inside the workspace are normalized to those
+candidates; one from another checkout is normalized only when its suffix
+uniquely identifies one candidate. Paths that traverse outside the workspace
+are never accepted as source selections; this includes parent traversal and
+Windows drive-relative prefixes. Non-source paths count as understood only
+when they name regular workspace files. Diffs, checked-in hints, and
+incremental records are read under a 256 MiB bound. An oversized diff is a
+usage error, while oversized optimization artifacts are ignored under the same
+fail-open contract as corrupt or foreign-version artifacts.
+
+Reports use the same source generation from which their mutant spans were
+derived. If an analyzed source changes before report construction, the run
+refuses to publish reports that would combine the completed verdicts with the
+new source.
 
 ### Redirected cache security
 

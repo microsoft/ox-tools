@@ -12,7 +12,9 @@ equivalent to the original program.
 ## Hard constraints
 
 - Zero ordinary dependencies.
-- No features and no build script.
+- No build script and no feature that changes injected runtime behavior. The
+  internal `embedding` feature exposes package-local source text only to
+  `cargo-gamma-lib`; the vendored crate never enables it.
 - `no_std` compatibility.
 - The library target remains named `gamma_rt`.
 - Rustdoc is hidden, and the hand-written README warns downstream users not to
@@ -71,5 +73,10 @@ census path that fills the buffer leaves census mode selected with no path the
 runtime can open, so nothing is written and nothing is sealed and the reader
 discards that binary's census exactly as it discards a truncated one.
 
-The vendored standalone crate inherits the workspace edition and minimum Rust
-version from the same manifest values used to build this crate.
+The package owns the source bundle, edition, and minimum Rust version used to
+write the vendored standalone crate. This keeps the coordinator's published
+package self-contained while ensuring the copied runtime is the exact source
+compiled as `cargo-gamma-rt`. The edition is deliberately explicit because
+Cargo exposes no `CARGO_PKG_EDITION` compile-time variable, and a workspace
+edition bump must not silently reinterpret source injected into another
+repository.

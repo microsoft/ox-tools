@@ -769,14 +769,32 @@ impl Cgroup {
     }
 
     /// Kills everything in the cgroup, including anything that left the process group.
-    pub fn kill(&self) {
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's reason when the cgroup kill switch could not be written.
+    pub fn kill(&self) -> io::Result<()> {
         if let Some(kill) = self.kill.as_ref() {
             let fd = kill.as_raw_fd();
-            // SAFETY: the descriptor is owned by `self`, remains open for this call, and the byte
-            // is static initialized storage whose exact length is supplied.
-            let _killed = unsafe { libc::write(fd, b"1".as_ptr().cast(), 1) };
+            loop {
+                // SAFETY: the descriptor is owned by `self`, remains open for this call, and the
+                // byte is static initialized storage whose exact length is supplied.
+                let written = unsafe { libc::write(fd, b"1".as_ptr().cast(), 1) };
+
+                if written == 1 {
+                    return Ok(());
+                }
+                if written >= 0 {
+                    return Err(io::Error::new(io::ErrorKind::WriteZero, "the cgroup kill switch accepted no byte"));
+                }
+
+                let cause = io::Error::last_os_error();
+                if cause.kind() != io::ErrorKind::Interrupted {
+                    return Err(cause);
+                }
+            }
         } else {
-            let _killed = self.set("cgroup.kill", "1");
+            fs::write(self.path.join("cgroup.kill"), "1")
         }
     }
 
@@ -1431,7 +1449,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let path = directory.path();
 
-        over(path).kill();
+        over(path).kill().expect("the temporary cgroup kill switch is writable");
 
         assert_eq!(fs::read_to_string(path.join("cgroup.kill")).expect("written"), "1");
     }

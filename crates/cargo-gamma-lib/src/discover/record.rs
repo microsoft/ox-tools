@@ -3,17 +3,20 @@
 
 //! Build facts and checked hints from the last run.
 
+use std::env;
+#[cfg(test)]
+use std::fs;
+use std::fs::File;
 use std::process::Command;
 use std::slice::Iter;
-use std::{env, fs};
 
 use blake3::Hasher;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
-use super::Plan;
 use super::killers::Killers;
 use super::workspace_snapshot::WorkspaceSnapshot;
+use super::{Plan, input};
 use crate::cfg::Build;
 use crate::model::{Mutant, MutantId, Outcome};
 use crate::{HashMap, HashSet};
@@ -583,7 +586,7 @@ impl RunRecord {
 
     /// Reads the record from disk, or nothing when it is absent, unreadable or a foreign format.
     fn load_raw(base: &Utf8Path) -> Option<Self> {
-        let text = fs::read_to_string(base.join(FILE)).ok()?;
+        let text = input::text(File::open(base.join(FILE)).ok()?).ok()??;
         let record = serde_json::from_str::<Self>(&text).ok()?;
 
         (record.version == VERSION).then_some(record)

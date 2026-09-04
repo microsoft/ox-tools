@@ -4,7 +4,7 @@
 [package]
 name = "cargo-gamma-lib"
 description = "Internal library for cargo-gamma"
-version = "0.1.0"
+version = "0.2.0"
 readme = "README.md"
 keywords = ["cargo", "mutation-testing", "testing"]
 categories = ["development-tools::testing"]
@@ -41,7 +41,7 @@ blake3 = { workspace = true, features = ["std"] }
 camino = { workspace = true }
 cargo-gamma-engine = { workspace = true }
 cargo-gamma-process = { workspace = true }
-cargo-gamma-rt = { workspace = true }
+cargo-gamma-rt = { workspace = true, features = ["embedding"] }
 cargo-gamma-unsafe = { workspace = true }
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["std", "derive", "color", "help", "error-context", "usage", "suggestions", "env", "wrap_help"] }

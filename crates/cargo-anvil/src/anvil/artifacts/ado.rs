@@ -307,6 +307,7 @@ mod tests {
     fn job_wrapper_declares_expected_contract() {
         for needle in [
             "name: name",
+            "name: stage",
             "name: pool",
             "name: steps",
             "type: stepList",
@@ -316,6 +317,58 @@ mod tests {
             "PublishPipelineArtifact@1",
         ] {
             assert!(JOB_WRAPPER.contains(needle), "wrapper missing '{needle}'");
+        }
+    }
+
+    /// Every `steps/job.yml` invocation identifies the ADO stage it renders.
+    ///
+    /// The expected stages are DERIVED from [`GROUPS`] rather than restated as
+    /// a third hardcoded list: a group added to `GROUPS` but never threaded
+    /// into a stages template has to fail here, which a literal list copied
+    /// alongside it cannot do. `impact` is the one stage with no check group
+    /// of its own, so it is the only literal.
+    #[test]
+    fn stages_identify_the_stage_for_every_job() {
+        let mut pr_stages = vec!["impact".to_owned()];
+        let mut scheduled_stages = Vec::new();
+        for group in GROUPS {
+            // The identifier is the ADO stage name, i.e. the group with `-`
+            // swapped for `_` -- what the template writes after `stage:` and
+            // what `System.StageName` reports at runtime.
+            let stage = group.replace('-', "_");
+            if group.starts_with("pr-") {
+                pr_stages.push(stage);
+            } else {
+                assert!(group.starts_with("scheduled-"), "group '{group}' has no known tier prefix");
+                scheduled_stages.push(stage);
+            }
+        }
+
+        for (template, label, expected) in [
+            (PR_STAGES, "pr-stages.yml", &pr_stages),
+            (SCHEDULED_STAGES, "scheduled-stages.yml", &scheduled_stages),
+        ] {
+            for stage in expected {
+                // The 10-space indent is the `parameters:` form; it does not
+                // match the `  - stage:` declaration that opens the stage.
+                assert_eq!(
+                    template.matches(&format!("\n          stage: {stage}\n")).count(),
+                    2,
+                    "{label} must pass `stage: {stage}` on both per-OS jobs"
+                );
+            }
+            let jobs = template.matches("- template: steps/job.yml").count();
+            assert_eq!(
+                jobs,
+                expected.len() * 2,
+                "{label} renders {jobs} jobs but {} stages are expected",
+                expected.len()
+            );
+            assert_eq!(
+                template.matches("\n          stage: ").count(),
+                jobs,
+                "{label} leaves a steps/job.yml invocation without a stage"
+            );
         }
     }
 
