@@ -20,7 +20,7 @@ use crate::catalog::artifact::{Artifact, ComposedHost, HostSelector, RegionSpec}
 use crate::checksum::{checksum_str, normalize_line_endings};
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
-use crate::emit::{ManagedRegionRequest, plan_managed_region, plan_owned_file};
+use crate::emit::{ManagedRegionRequest, plan_managed_region, plan_owned_file, toml_introduction_refusal};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
@@ -461,17 +461,23 @@ fn push_region_at(
             return Ok(());
         }
     };
-    let item = plan_managed_region(
-        manifest,
-        current.as_deref(),
-        ManagedRegionRequest {
-            host_relpath: &host,
-            region_id: spec.id.as_str(),
-            rendered_body: body,
-            syntax: spec.syntax,
-            placement,
-        },
-    )?;
+    let request = ManagedRegionRequest {
+        host_relpath: &host,
+        region_id: spec.id.as_str(),
+        rendered_body: body,
+        syntax: spec.syntax,
+        placement,
+    };
+    // Introducing a region into a TOML host that already declares the same
+    // table by hand can produce a file TOML cannot read. Refuse the region
+    // rather than write it: `cargo deny` and `cargo` itself fail on the whole
+    // file, so a silent rewrite breaks the repository the generator was
+    // onboarding, and the manifest would record a region nothing can use.
+    if let Some(reason) = toml_introduction_refusal(current.as_deref(), request) {
+        refuse_region(plan, host, spec.id.as_str(), &reason);
+        return Ok(());
+    }
+    let item = plan_managed_region(manifest, current.as_deref(), request)?;
     // Only a `Write` mutates the live host on disk; fold its spliced
     // output back into the accumulator so sibling regions compose. A
     // `Propose` writes a sibling, not the host, so it must not advance the
@@ -483,6 +489,21 @@ fn push_region_at(
     }
     plan.push(item);
     Ok(())
+}
+
+/// Record that one region was refused: a diagnostic naming the host, and a
+/// no-op so the plan still accounts for it.
+///
+/// The refusal is scoped to the region, not the run — every other artifact is
+/// still planned, which is what makes refusing an acceptable answer rather than
+/// a wall in front of onboarding.
+fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str) {
+    plan.refusal(format!(
+        "Refused to manage {host} [{id}]: {reason}. Nothing was written to it, and other \
+         artifacts were still planned. Reconcile the hand-written table with the managed \
+         one -- or empty the region to opt out of it."
+    ));
+    plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
 }
 
 /// Where a region belongs inside a composed host whose order is semantic.

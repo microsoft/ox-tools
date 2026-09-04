@@ -1,0 +1,8 @@
+# Pre-existing user Justfile. Ox-check should splice its imports
+# region without touching these recipes.
+
+default:
+    @echo "user default recipe"
+
+my-custom-recipe:
+    @echo "user content preserved"
