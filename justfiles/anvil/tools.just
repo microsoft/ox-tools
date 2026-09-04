@@ -341,16 +341,13 @@ _anvil-resolve-stable action="install":
         exit 0
     }
 
-    # The declared root MSRV, spoken as the image build's vocabulary rather than
-    # as presence and absence: a version, or `none`. Total on purpose, because
-    # the caller feeds it into the container image tag, where an empty answer
-    # and an unasked question must not hash alike.
+    # A version or `none`, never empty: the caller hashes this into the image
+    # tag, where an absent answer and an unasked question must not agree.
     #
-    # Deliberately the *declared* value, not `Get-MsrvSelection`'s. The mapping
-    # through ANVIL_MSRV_TOOLCHAIN names a toolchain provisioned on the host for
-    # an environment that replaces public rustup; the image installs the
-    # declared version itself, so baking a host mapping into its tag would name
-    # a toolchain that need not exist there.
+    # The declared value, not `Get-MsrvSelection`'s. That mapping names a
+    # toolchain provisioned on the host; the image installs the declared version
+    # itself, so hashing the mapping would name a toolchain that need not exist
+    # there.
     if ($action -eq 'root-msrv') {
         $declared = Get-RootMsrv -AllowMissing
         if ([string]::IsNullOrWhiteSpace($declared)) { 'none' } else { $declared }

@@ -426,13 +426,9 @@ fn msrv_test_propagates_nested_just_failures() {
     );
 }
 
-// The container image is built without a checkout, but the MSRV -- the one
-// version anvil installs that is declared in `Cargo.toml` rather than pinned in
-// `versions.just` -- has to reach the build. The root manifest is admitted into
-// the build context for exactly that, so the resolver reads it there the same
-// way it does anywhere else. These cover the two ends: the resolver answers
-// totally enough to be hashed, and the context and the setup region carry the
-// manifest that lets it answer at all.
+// The MSRV is the one version anvil installs that is declared in `Cargo.toml`
+// rather than pinned in `versions.just`. The manifest is admitted to the build
+// context so the resolver reads it there as it does anywhere else.
 #[test]
 fn root_msrv_reports_the_declared_version() {
     if !tools_available() {
@@ -487,17 +483,13 @@ fn container_build_carries_the_manifest_that_declares_the_msrv() {
         CONTAINER_SETUP_REGION.contains("COPY Cargo.toml ./"),
         "the setup region must copy the manifest to the root the recipes resolve against"
     );
-    // The members it names are a checkout, and the image is not one. Admitting
-    // them would make the context a source tree and rebuild the image on every
-    // commit.
+    // The members it names are a checkout, and the image is not one.
     assert!(
         !CONTAINER_DOCKERIGNORE.contains("!sources") && !CONTAINER_DOCKERIGNORE.contains("!crates"),
         "the context must stay a recipe tree plus declarations, not a checkout"
     );
     // The manifest is in the context but must not be in the identity: every
-    // dependency edit touches it while `rust-version` moves perhaps once, so
-    // hashing the file would rename the image for a long stream of changes that
-    // cannot alter a byte it contains.
+    // dependency edit touches it while `rust-version` moves perhaps once.
     assert!(
         CONTAINER.contains("'msrv ' + $msrvBytes.Length"),
         "the image tag must hash the declared MSRV value, because the image installs that toolchain"
@@ -1780,10 +1772,8 @@ fn the_image_tag_follows_the_executable_bit() {
 
 /// The image installs the toolchain named by the repository's declared MSRV, so
 /// raising it changes what the image contains and must rename it. The digest
-/// takes the value rather than the manifest that declares it: the manifest is in
-/// the build context, but it is the busiest file in a workspace, and hashing it
-/// would rename the image for a long stream of dependency edits that cannot
-/// alter a byte the image contains.
+/// takes the resolved value rather than the manifest declaring it: dependency
+/// edits touch that file constantly while `rust-version` moves perhaps once.
 #[test]
 fn the_image_tag_follows_the_declared_msrv() {
     if !tools_available() {

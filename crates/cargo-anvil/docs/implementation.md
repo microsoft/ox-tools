@@ -76,13 +76,11 @@ cannot auto-install a compiler during validation. Installation uses the same
 anchored toolchain-list match and emits a dedicated rustup bootstrap diagnostic
 when the executable is absent.
 
-`tools.just` additionally exposes the declared root MSRV to callers as the
-`root-msrv` action, answering with the version or `none`. It exists for the
-container image tag, which hashes that value rather than the manifest carrying
-it, and being total matters there: an empty answer and an unasked question must
-not hash alike. The action reads the manifest through the same scanner as every
-other path, so accepted syntax and `workspace.package`-before-`package`
-precedence stay bound by the rule above.
+`tools.just` additionally exposes the declared root MSRV as the `root-msrv`
+action, answering with the version or `none`. It exists for the container image
+tag, which hashes that value, and being total matters there: an empty answer and
+an unasked question must not hash alike. It reads the manifest through the same
+scanner as every other path.
 
 Setup dependencies, rather than the cloud templates, route provisioning.
 Cargo-tool installers, default-component installers, and stable-only setup

@@ -96,22 +96,12 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # volume over each, and an engine seeds a new volume from the image path it
 # covers; a path that does not exist seeds as root-owned 0755, which the
 # `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
-# The root manifest is copied because the MSRV is declared there. Every other
-# pin travels in `versions.just`, which is part of the recipe tree; the MSRV is
-# the one toolchain declaration that lives in the repository's source instead,
-# and the resolver reads it from the repository root.
-#
-# `/opt/anvil` is already that root as far as the recipes are concerned: it is
-# `justfile_directory()`, and it holds `justfiles/` and the toolchain pin.
-# Copying the manifest alongside them completes it for the one question the
-# setup asks. The workspace members are not here and are not needed: the
-# toolchain file above selects the compiler, which is the branch that skips
-# workspace MSRV validation.
-#
-# It is copied after `justfiles`, so an MSRV edit invalidates no layer the
-# recipes alone would not. The image tag hashes the declared value rather than
-# this file, so the constant churn of dependency edits does not rename an image
-# whose contents they cannot change.
+# The root manifest is copied for the MSRV, the one version `anvil-setup`
+# installs that is declared in repository source rather than pinned in
+# `versions.just`. `/opt/anvil` is the root the recipes already resolve against,
+# so the resolver reads it there with no container-specific path. The workspace
+# members it names are not copied and are not needed: the toolchain file selects
+# the compiler, which is the branch that skips workspace MSRV validation.
 WORKDIR /opt/anvil
 COPY justfiles ./justfiles
 COPY rust-toolchain.toml ./
@@ -162,11 +152,9 @@ CMD ["bash"]
 # the same set -- including the `.anvil-proposed` siblings both exclude, which
 # are anvil's review artifacts rather than build inputs.
 #
-# The root `Cargo.toml` is admitted for one value: the declared MSRV, which the
-# setup installs a toolchain for. It is the only build input that lives in the
-# repository's source rather than in the recipe tree. The workspace members it
-# names are deliberately not admitted, so the context stays a recipe tree plus
-# two declarations rather than a checkout.
+# The root `Cargo.toml` is admitted for the declared MSRV, the only build input
+# that lives in repository source rather than in the recipe tree. The workspace
+# members it names stay out: they are a checkout, and the image is not one.
 *
 !justfiles
 justfiles/*
@@ -3688,17 +3676,11 @@ anvil-container-tag:
     $dockerfile = "$dockerfile".Trim()
     $hookRel = '.anvil/container/hooks.ps1'
 
-    # The declared root MSRV is hashed because the image installs that
-    # toolchain: a bump changes what the image contains and has to rename it,
-    # exactly what every other input here is hashed for.
-    #
-    # The value, not the manifest it comes from. The manifest is in the build
-    # context, but it is the busiest file in a workspace: dependency edits touch
-    # it constantly while `rust-version` moves perhaps once in a repository's
-    # life. Hashing the file would rename the image, and oblige a publisher to
-    # rebuild and republish it, for a stream of changes that cannot alter a
-    # single byte the image contains. Hashing the value renames it exactly when
-    # the contents differ.
+    # Hashed because the image installs this toolchain, so a bump changes what
+    # the image contains. The resolved value rather than the manifest carrying
+    # it: dependency edits touch that file constantly while `rust-version` moves
+    # perhaps once, and hashing it would rename the image for a stream of
+    # changes that cannot alter a byte it contains.
     $rootMsrv = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable root-msrv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $rootMsrv = "$rootMsrv".Trim()
@@ -3935,11 +3917,9 @@ anvil-container-tag:
     # would be a MethodNotFound at tag time, before anything useful happened.
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        # Framed with its own record tag, ahead of the files and in a fixed
-        # position, so it cannot be confused with a file named `msrv` and the
-        # order of the stream stays a property of the code rather than of the
-        # filesystem. Length-prefixed like every other record, for the same
-        # reason: the stream has to be self-delimiting.
+        # Own record tag, length-prefixed and in a fixed position ahead of the
+        # files, so it cannot collide with a file named `msrv` and the stream
+        # stays self-delimiting.
         $msrvBytes = [System.Text.Encoding]::UTF8.GetBytes($rootMsrv)
         $msrvHeader = [System.Text.Encoding]::UTF8.GetBytes('msrv ' + $msrvBytes.Length + ' ')
         [void]$sha.TransformBlock($msrvHeader, 0, $msrvHeader.Length, $null, 0)
@@ -6442,16 +6422,13 @@ _anvil-resolve-stable action="install":
         exit 0
     }
 
-    # The declared root MSRV, spoken as the image build's vocabulary rather than
-    # as presence and absence: a version, or `none`. Total on purpose, because
-    # the caller feeds it into the container image tag, where an empty answer
-    # and an unasked question must not hash alike.
+    # A version or `none`, never empty: the caller hashes this into the image
+    # tag, where an absent answer and an unasked question must not agree.
     #
-    # Deliberately the *declared* value, not `Get-MsrvSelection`'s. The mapping
-    # through ANVIL_MSRV_TOOLCHAIN names a toolchain provisioned on the host for
-    # an environment that replaces public rustup; the image installs the
-    # declared version itself, so baking a host mapping into its tag would name
-    # a toolchain that need not exist there.
+    # The declared value, not `Get-MsrvSelection`'s. That mapping names a
+    # toolchain provisioned on the host; the image installs the declared version
+    # itself, so hashing the mapping would name a toolchain that need not exist
+    # there.
     if ($action -eq 'root-msrv') {
         $declared = Get-RootMsrv -AllowMissing
         if ([string]::IsNullOrWhiteSpace($declared)) { 'none' } else { $declared }

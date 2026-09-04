@@ -94,22 +94,12 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # volume over each, and an engine seeds a new volume from the image path it
 # covers; a path that does not exist seeds as root-owned 0755, which the
 # `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
-# The root manifest is copied because the MSRV is declared there. Every other
-# pin travels in `versions.just`, which is part of the recipe tree; the MSRV is
-# the one toolchain declaration that lives in the repository's source instead,
-# and the resolver reads it from the repository root.
-#
-# `/opt/anvil` is already that root as far as the recipes are concerned: it is
-# `justfile_directory()`, and it holds `justfiles/` and the toolchain pin.
-# Copying the manifest alongside them completes it for the one question the
-# setup asks. The workspace members are not here and are not needed: the
-# toolchain file above selects the compiler, which is the branch that skips
-# workspace MSRV validation.
-#
-# It is copied after `justfiles`, so an MSRV edit invalidates no layer the
-# recipes alone would not. The image tag hashes the declared value rather than
-# this file, so the constant churn of dependency edits does not rename an image
-# whose contents they cannot change.
+# The root manifest is copied for the MSRV, the one version `anvil-setup`
+# installs that is declared in repository source rather than pinned in
+# `versions.just`. `/opt/anvil` is the root the recipes already resolve against,
+# so the resolver reads it there with no container-specific path. The workspace
+# members it names are not copied and are not needed: the toolchain file selects
+# the compiler, which is the branch that skips workspace MSRV validation.
 WORKDIR /opt/anvil
 COPY justfiles ./justfiles
 COPY rust-toolchain.toml ./
