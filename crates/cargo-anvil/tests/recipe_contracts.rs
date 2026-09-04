@@ -553,8 +553,8 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let cargo_calls = fs::read_to_string(cargo_log).unwrap();
-    assert_miri_cargo_calls(&cargo_calls);
+    let cargo_log = fs::read_to_string(cargo_log).unwrap();
+    assert_miri_cargo_calls(&cargo_log);
     assert!(run_log.with_extension("alpha-test.start").is_file());
     assert!(run_log.with_extension("zeta-test.start").is_file());
     assert!(!run_log.with_extension("ordinary-bin.start").exists());
@@ -698,8 +698,8 @@ fn miri_runner_preserves_impact_filtering() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let cargo_calls = fs::read_to_string(cargo_log).unwrap();
-    let build_call = cargo_calls
+    let cargo_log = fs::read_to_string(cargo_log).unwrap();
+    let build_call = cargo_log
         .lines()
         .find(|call| call.contains("miri test"))
         .expect("the profile must compile its selected Miri targets");
