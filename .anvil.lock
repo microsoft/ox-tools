@@ -117,7 +117,7 @@ checksum = "sha256:7e67d90a9d8bd8cd5c8adb68baf41fdd4625bff4d425b5bf18b75baee6289
 
 [[file]]
 path = "justfiles/anvil/checks/fmt.just"
-checksum = "sha256:692e388c44f3c0de2c6bff873ea3440ee25cd6e56b48e0424ebf9c9b1bda4e66"
+checksum = "sha256:3e833fb76d4ad23508721927c2e26c95b7d6a9b80df9f09338c32a85614cf62f"
 
 [[file]]
 path = "justfiles/anvil/checks/license-headers.just"
