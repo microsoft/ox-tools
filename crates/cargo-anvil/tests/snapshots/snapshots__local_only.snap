@@ -254,8 +254,9 @@ license: MIT
 
 Use this skill after the first `cargo anvil` run in a repository that already
 contained Rust build and CI infrastructure. The goal is a clean, reviewable
-Anvil installation with repository policy preserved, duplicate capabilities
-removed, and the generated checks passing.
+Anvil installation that adopts the Anvil catalog as its default build and
+validation contract, removes duplicate capabilities, and passes the generated
+checks.
 
 Do the work in the repository. Do not stop at an audit or plan unless a
 decision genuinely requires the user.
@@ -265,13 +266,18 @@ decision genuinely requires the user.
 - Read the repository's instructions and design documentation before editing.
 - Preserve unrelated working-tree changes. Never discard or rewrite user work.
 - Treat existing CI, scripts, configuration, and branch policies as evidence of
-  intended behavior, not as clutter.
-- Never delete a capability merely because Anvil has a similarly named check.
-  Compare command arguments, operating systems, feature sets, toolchains,
-  failure policy, outputs, schedules, permissions, and downstream consumers.
-- Migrate repository policy before deleting its old implementation.
+  prior behavior to evaluate, not as behavior that must be preserved.
+- Compare legacy and Anvil behavior across command arguments, operating systems,
+  feature sets, toolchains, failure policy, outputs, schedules, permissions,
+  and downstream consumers. Call out meaningful differences, then prefer the
+  Anvil behavior unless a concrete repository requirement justifies divergence.
+- Migrate justified repository requirements to Anvil-supported configuration
+  before deleting their old implementation. Do not preserve historical
+  customization solely to maintain exact legacy behavior.
 - Keep release, deployment, packaging, compliance, code-signing, and
-  repository-specific test automation unless Anvil demonstrably replaces it.
+  other capabilities outside Anvil's scope. Keep repository-specific test
+  automation only when it covers a documented requirement that the Anvil
+  catalog does not satisfy.
 - Change cargo-anvil templates rather than generated copies when working in the
   cargo-anvil source repository, then regenerate.
 
@@ -305,9 +311,11 @@ Search for all local and cloud build surfaces:
   required contexts, and merge queues.
 
 Build a capability map from each legacy entry point to its Anvil counterpart.
-Record unmatched behavior and every retained repository-specific capability.
+Record meaningful differences and unmatched behavior. For every retained
+repository-specific capability, document the requirement that prevents using
+the Anvil behavior.
 
-## 3. Align repository policy with Anvil
+## 3. Align the repository to Anvil
 
 Resolve differences at the policy source:
 
@@ -332,6 +340,9 @@ Resolve differences at the policy source:
 
 Prefer changing repository configuration or code to weakening a generated
 check. Never convert discovery errors or unsupported states into silent skips.
+When the legacy and Anvil behaviors differ, explain the resulting behavior
+change and recommend the Anvil standard. Preserve the legacy behavior only when
+the repository has a current, explicit requirement that Anvil cannot represent.
 
 ## 4. Resolve generated-content conflicts
 
@@ -339,7 +350,8 @@ For every Anvil-owned file or managed region:
 
 1. Determine whether the repository edit encodes real policy or is an obsolete
    implementation detail.
-2. Move real policy to the supported configuration surface where possible.
+2. Prefer the catalog behavior. Move only justified repository policy to the
+   supported configuration surface where possible.
 3. Revert the generated content to the catalog form by running `cargo anvil`.
 4. Take ownership of generated content only when the repository has a durable
    requirement the catalog cannot represent. Document why it must diverge.
@@ -348,7 +360,7 @@ For every Anvil-owned file or managed region:
 
 Do not hand-edit emitted files when their source template is available.
 
-## 5. Prove equivalence before deleting duplicates
+## 5. Evaluate differences before deleting duplicates
 
 Run the narrow Anvil recipe corresponding to each legacy capability and resolve
 its failures first. Examples:
@@ -366,8 +378,11 @@ repeating the entire tier. Install missing prerequisites with the matching
 `*-setup` recipe or `just anvil-setup`.
 
 Compare results with the legacy command where behavior is not obviously
-identical. Account for impact scoping: use `ANVIL_IMPACT=off` when a deliberate
-full-workspace comparison is required.
+identical. Treat disagreements as migration decisions, not automatic Anvil
+defects: describe the impact and adopt Anvil's behavior unless the legacy
+behavior serves a current requirement outside the catalog. Account for impact
+scoping by using `ANVIL_IMPACT=off` when a deliberate full-workspace comparison
+is required.
 
 ## 6. Remove duplicate infrastructure
 
@@ -379,8 +394,8 @@ After equivalence is established:
   `justfiles/anvil/versions.just` is the authoritative list;
 - update badges, contributor documentation, and agent instructions to name the
   Anvil workflows and recipes;
-- retain scripts and pipelines with repository-specific responsibilities, and
-  document why each remains;
+- retain scripts and pipelines only for requirements outside Anvil's scope, and
+  document the unmet requirement and why the catalog behavior is insufficient;
 - identify required status contexts or external rulesets that must change
   before the cleanup can merge.
 
@@ -407,7 +422,8 @@ Finish with:
 
 - what Anvil now owns;
 - what legacy infrastructure was removed;
-- what repository-specific infrastructure remains and why;
+- what repository-specific infrastructure remains, which requirement it serves,
+  and why the Anvil behavior is insufficient;
 - any intentional behavioral differences;
 - any branch-policy or ruleset action required before merge;
 - the exact validation completed and anything left to cloud CI.
