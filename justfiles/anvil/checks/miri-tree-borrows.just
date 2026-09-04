@@ -21,16 +21,7 @@
 # honors --skip.
 
 # Run Miri tests with the Tree Borrows model.
-[script("pwsh", "-NoProfile")]
-anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { Write-Host 'anvil-miri-tree-borrows: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
-    $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
-    & "{{ just_executable() }}" _anvil-miri-test @pkg
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-test "tree-borrows")
 
 # The three nightly-miri profiles share the same toolchain prereqs
 # as anvil-miri; they only differ in the MIRIFLAGS / RUSTFLAGS the

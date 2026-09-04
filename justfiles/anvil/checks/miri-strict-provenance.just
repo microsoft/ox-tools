@@ -7,16 +7,7 @@
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run Miri tests with strict provenance checks.
-[script("pwsh", "-NoProfile")]
-anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { Write-Host 'anvil-miri-strict-provenance: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
-    $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
-    & "{{ just_executable() }}" _anvil-miri-test @pkg
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_anvil-miri-test "strict-provenance")
 
 # Install prerequisites for the `anvil-miri-strict-provenance` recipe.
 [group("anvil-setup")]

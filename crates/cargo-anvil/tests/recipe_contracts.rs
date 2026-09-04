@@ -27,6 +27,8 @@ const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const LOOM: &str = include_str!("../templates/justfiles/anvil/checks/loom.just");
 const MIRI: &str = include_str!("../templates/justfiles/anvil/checks/miri.just");
+const MIRI_RACE_COVERAGE: &str = include_str!("../templates/justfiles/anvil/checks/miri-race-coverage.just");
+const MIRI_STRICT_PROVENANCE: &str = include_str!("../templates/justfiles/anvil/checks/miri-strict-provenance.just");
 const MIRI_TREE_BORROWS: &str = include_str!("../templates/justfiles/anvil/checks/miri-tree-borrows.just");
 const MSRV_TEST: &str = include_str!("../templates/justfiles/anvil/checks/msrv-test.just");
 const MIRI: &str = include_str!("../templates/justfiles/anvil/checks/miri.just");
@@ -357,6 +359,16 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
         writeln!(justfile, "import '{name}'").unwrap();
     }
     justfile.push('\n');
+    if imports.iter().any(|(name, _)| *name == "miri.just") {
+        justfile.push_str(
+            r#"
+[script("pwsh", "-NoProfile")]
+_anvil-impact-include tier:
+    Write-Output $(if ($env:FAKE_INCLUDE) { $env:FAKE_INCLUDE } else { '--workspace' })
+
+"#,
+        );
+    }
     for recipe in dependency_recipes {
         justfile.push_str(recipe);
         justfile.push_str(":\n\n");
@@ -522,7 +534,7 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     ]"#;
     let output = run_just(
         tmp.path(),
-        &["_anvil-miri-test", "--workspace"],
+        &["_anvil-miri-test", "standard"],
         &[
             ("ANVIL_MIRI_JOBS", OsStr::new("2")),
             ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
@@ -623,7 +635,7 @@ fn miri_runner_labels_same_named_artifacts_with_package_identity() {
     ]"#;
     let output = run_just(
         tmp.path(),
-        &["_anvil-miri-test", "--workspace"],
+        &["_anvil-miri-test", "standard"],
         &[
             ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
             ("FAKE_MIRI_RUN_LOG", run_log.as_os_str()),
@@ -656,7 +668,12 @@ fn miri_runner_preserves_profile_flags_and_impact_filtering() {
         return;
     }
     let tmp = fixture(
-        &[("miri.just", MIRI), ("miri-tree-borrows.just", MIRI_TREE_BORROWS)],
+        &[
+            ("miri.just", MIRI),
+            ("miri-race-coverage.just", MIRI_RACE_COVERAGE),
+            ("miri-strict-provenance.just", MIRI_STRICT_PROVENANCE),
+            ("miri-tree-borrows.just", MIRI_TREE_BORROWS),
+        ],
         &[
             "anvil-component-nightly-miri-validate-prereqs",
             "anvil-component-nightly-rust-src-validate-prereqs",
@@ -665,16 +682,6 @@ fn miri_runner_preserves_profile_flags_and_impact_filtering() {
             "anvil-impact",
         ],
     );
-    let justfile_path = tmp.path().join("Justfile");
-    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
-    justfile.push_str(
-        r#"
-[script("pwsh", "-NoProfile")]
-_anvil-impact-include tier:
-    Write-Output $env:FAKE_INCLUDE
-"#,
-    );
-    write(&justfile_path, &justfile);
     let run_log = tmp.path().join("miri-profile");
     let cargo_log = tmp.path().join("miri-profile-cargo.log");
     let artifacts = r#"[{"name":"profile-test","package_id":"fixture 0.1.0","test":true}]"#;
@@ -720,6 +727,48 @@ _anvil-impact-include tier:
         !build_call.contains("excluded@0.1.0"),
         "impact-selected opted-out packages must be filtered:\n{build_call}"
     );
+
+    for (recipe, log_name, expected_miri_flags, expected_rust_flags) in [
+        (
+            "anvil-miri-strict-provenance",
+            "miri-strict-provenance",
+            "-Zmiri-strict-provenance",
+            "--cfg miri_strict_provenance",
+        ),
+        (
+            "anvil-miri-race-coverage",
+            "miri-race-coverage",
+            "-Zmiri-many-seeds=",
+            "--cfg miri_race_coverage",
+        ),
+    ] {
+        let profile_run_log = tmp.path().join(log_name);
+        let output = run_just(
+            tmp.path(),
+            &[recipe],
+            &[
+                ("FAKE_INCLUDE", OsStr::new("--package fixture@0.1.0")),
+                ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
+                ("FAKE_MIRI_RUN_LOG", profile_run_log.as_os_str()),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{recipe} should inherit the shared runner:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            fs::read_to_string(profile_run_log.with_extension("profile-test.miriflags"))
+                .unwrap()
+                .contains(expected_miri_flags)
+        );
+        assert!(
+            fs::read_to_string(profile_run_log.with_extension("profile-test.rustflags"))
+                .unwrap()
+                .contains(expected_rust_flags)
+        );
+    }
 }
 
 #[test]
@@ -737,7 +786,7 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
             "anvil-impact",
         ],
     );
-    let no_artifacts = run_just(tmp.path(), &["_anvil-miri-test", "--workspace"], &[]);
+    let no_artifacts = run_just(tmp.path(), &["_anvil-miri-test", "standard"], &[]);
     assert!(
         no_artifacts.status.success(),
         "a selected package set with no test executables should succeed:\n{}",
@@ -747,8 +796,11 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
 
     let all_excluded = run_just(
         tmp.path(),
-        &["_anvil-miri-test", "--package", "fixture@0.1.0"],
-        &[("FAKE_MIRI_EXCLUDE", OsStr::new("1"))],
+        &["_anvil-miri-test", "standard"],
+        &[
+            ("FAKE_INCLUDE", OsStr::new("--package fixture@0.1.0")),
+            ("FAKE_MIRI_EXCLUDE", OsStr::new("1")),
+        ],
     );
     assert!(all_excluded.status.success());
     assert!(String::from_utf8_lossy(&all_excluded.stdout).contains("all selected packages are excluded"));
@@ -756,7 +808,7 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
     let workspace_cargo_log = tmp.path().join("all-excluded-workspace-cargo.log");
     let all_workspace_excluded = run_just(
         tmp.path(),
-        &["_anvil-miri-test", "--workspace"],
+        &["_anvil-miri-test", "standard"],
         &[
             ("FAKE_CARGO_LOG", workspace_cargo_log.as_os_str()),
             ("FAKE_MIRI_EXCLUDE", OsStr::new("1")),
@@ -776,7 +828,7 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
     ]"#;
     let failed = run_just(
         tmp.path(),
-        &["_anvil-miri-test", "--workspace"],
+        &["_anvil-miri-test", "standard"],
         &[
             ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
             ("FAKE_MIRI_RUN_LOG", run_log.as_os_str()),
@@ -795,7 +847,7 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
 
     let invalid_jobs = run_just(
         tmp.path(),
-        &["_anvil-miri-test", "--workspace"],
+        &["_anvil-miri-test", "standard"],
         &[
             (
                 "FAKE_MIRI_ARTIFACTS",
@@ -810,7 +862,7 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
 
     let invalid_json = run_just(
         tmp.path(),
-        &["_anvil-miri-test", "--workspace"],
+        &["_anvil-miri-test", "standard"],
         &[("FAKE_MIRI_INVALID_JSON", OsStr::new("1"))],
     );
     assert_failed(&invalid_json, "malformed Cargo JSON");

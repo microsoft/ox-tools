@@ -28,12 +28,99 @@
 #
 # ANVIL_MIRI_JOBS overrides the default of one artifact worker per logical processor.
 
+# Run Miri tests for affected workspace packages.
+[arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
+[arg("test", long, pattern='(?:[A-Za-z0-9_.:-]+)?')]
+[arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
+anvil-miri package="" test="" example="": anvil-miri-validate-prereqs (_anvil-miri-test "standard" package test example)
+
+# The shared helper compiles with `cargo miri test --no-run`, then invokes
+# each resulting libtest executable directly. It intentionally does not use
+# nextest: nextest's process-per-test model makes every test pay the cost of
+# re-interpreting std initialization, roughly doubling Miri wall time on a
+# large suite. One libtest process runs all tests in an executable, matching
+# upstream Miri.
+#
+# `--tests` selects the same target set nextest ran -- lib unit tests,
+# bin unit tests, and integration tests -- while excluding doctests
+# (miri cannot run them) and benches/examples. We use `--tests` rather
+# than `--lib --tests` because `--lib` errors with "no library targets
+# found" on a bin-only affected package under impact scoping; `--tests`
+# already covers lib unit tests and tolerates libless packages. We do
+# NOT use `--all-targets`: it would add `--benches` (criterion benches
+# have `harness = false` and run a full measurement loop -- ruinously
+# slow under miri) and `--examples` (runs each example's `main`, often
+# miri-incompatible I/O), without adding doctest coverage.
+#
+# `--all-features` exercises feature-gated code so UB hidden behind an
+# optional feature is caught, matching how upstream runs miri.
+#
+# libtest exits 0 when a binary has zero runnable tests (e.g. a crate
+# whose tests are all `#[cfg_attr(miri, ignore)]` -- the canonical
+# opt-out for build-tooling / CLI crates), so the old nextest
+# `--no-tests=pass` workaround is no longer needed.
+
 # Compile selected packages once and run their Miri test executables concurrently.
 [script("pwsh", "-NoProfile")]
-_anvil-miri-test test_filter *package_args:
+_anvil-miri-test profile package="" test_filter="" example="": anvil-impact
     $ErrorActionPreference = 'Stop'
+    $profile = '{{ replace(profile, "'", "''") }}'
+    $package = '{{ replace(package, "'", "''") }}'
     $testFilter = '{{ replace(test_filter, "'", "''") }}'
-    $packageArgs = @('{{ replace(package_args, "'", "''") }}' -split '\s+' | Where-Object { $_ })
+    $example = '{{ replace(example, "'", "''") }}'
+    $recipeNames = @{
+        standard = 'anvil-miri'
+        'tree-borrows' = 'anvil-miri-tree-borrows'
+        'strict-provenance' = 'anvil-miri-strict-provenance'
+        'race-coverage' = 'anvil-miri-race-coverage'
+    }
+    if (-not $recipeNames.ContainsKey($profile)) {
+        Write-Error "anvil miri: unknown profile '$profile'"
+        exit 1
+    }
+    $recipeName = $recipeNames[$profile]
+
+    if ($testFilter -and $example) {
+        Write-Error "$recipeName`: choose exactly one of --test or --example"
+        exit 2
+    }
+    if ($example -and -not $package) {
+        Write-Error "$recipeName`: --example requires --package to avoid workspace ambiguity"
+        exit 2
+    }
+
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if (-not $package -and $include -eq '--skip') {
+        Write-Host "$recipeName`: no affected packages; skipping"
+        exit 0
+    }
+    $packageArgs = @(if ($package) { '--package'; $package } elseif ($include) { -split $include } else { '--workspace' })
+
+    switch ($profile) {
+        'tree-borrows' {
+            $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
+            $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
+        }
+        'strict-provenance' {
+            $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
+            $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
+        }
+        'race-coverage' {
+            $day = (Get-Date).Day
+            $low = (2 * $day) - 1
+            $high = (2 * $day) + 1
+            $env:MIRIFLAGS = "-Zmiri-many-seeds=$low..$high $($env:MIRIFLAGS)".Trim()
+            $env:RUSTFLAGS = "--cfg miri_race_coverage $($env:RUSTFLAGS)".Trim()
+            Write-Host "$recipeName`: seed window $low..$high (day $day)"
+        }
+    }
+
+    if ($example) {
+        & cargo '+{{ rust_nightly }}' miri run --all-features --locked @packageArgs --example $example
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        exit 0
+    }
 
     # The metadata and compiler-artifact streams must come from the same Cargo
     # version because Cargo changed package-ID formats in 1.78.
@@ -274,57 +361,6 @@ _anvil-miri-test test_filter *package_args:
     } finally {
         Remove-Item -LiteralPath $logRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
-
-# Run Miri tests for affected workspace packages.
-[arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
-[arg("test", long, pattern='(?:[A-Za-z0-9_.:-]+)?')]
-[arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
-[script("pwsh", "-NoProfile")]
-anvil-miri package="" test="" example="": anvil-miri-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $package = '{{package}}'
-    $testFilter = '{{test}}'
-    $example = '{{example}}'
-    if ($testFilter -and $example) { Write-Error 'anvil-miri: choose exactly one of --test or --example'; exit 2 }
-    if ($example -and -not $package) {
-        Write-Error 'anvil-miri: --example requires --package to avoid workspace ambiguity'
-        exit 2
-    }
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-miri: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($package) { '--package'; $package } elseif ($include) { -split $include } else { '--workspace' })
-    if ($example) {
-        & cargo '+{{ rust_nightly }}' miri run --all-features --locked @pkg --example $example
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        exit 0
-    }
-    # The shared helper compiles with `cargo miri test --no-run`, then invokes
-    # each resulting libtest executable directly. It intentionally does not use
-    # nextest: nextest's process-per-test model makes every test pay the cost of
-    # re-interpreting std initialization, roughly doubling Miri wall time on a
-    # large suite. One libtest process runs all tests in an executable, matching
-    # upstream Miri.
-    #
-    # `--tests` selects the same target set nextest ran -- lib unit tests,
-    # bin unit tests, and integration tests -- while excluding doctests
-    # (miri cannot run them) and benches/examples. We use `--tests` rather
-    # than `--lib --tests` because `--lib` errors with "no library targets
-    # found" on a bin-only affected package under impact scoping; `--tests`
-    # already covers lib unit tests and tolerates libless packages. We do
-    # NOT use `--all-targets`: it would add `--benches` (criterion benches
-    # have `harness = false` and run a full measurement loop -- ruinously
-    # slow under miri) and `--examples` (runs each example's `main`, often
-    # miri-incompatible I/O), without adding doctest coverage.
-    #
-    # `--all-features` exercises feature-gated code so UB hidden behind an
-    # optional feature is caught, matching how upstream runs miri.
-    #
-    # libtest exits 0 when a binary has zero runnable tests (e.g. a crate
-    # whose tests are all `#[cfg_attr(miri, ignore)]` -- the canonical
-    # opt-out for build-tooling / CLI crates), so the old nextest
-    # `--no-tests=pass` workaround is no longer needed.
-    & "{{ just_executable() }}" _anvil-miri-test $testFilter @pkg
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-runtime-analysis members ---
 
