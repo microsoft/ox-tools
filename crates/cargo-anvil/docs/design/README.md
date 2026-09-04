@@ -62,8 +62,10 @@ missed, and onboarding new Rust repos requires copying-and-praying.
    `.github/instructions/cargo-anvil.instructions.md` with `applyTo: "**"` so
    coding agents use the same setup, complete validation, fast fallback, and
    targeted-rerun workflow in every adopter repository. Also emit the
-   `cargo-anvil-adoption` repository skill, which guides policy-preserving
-   cleanup after the first Anvil run in an existing Rust repository.
+   `cargo-anvil-adoption` repository skill, which guides cleanup after the first
+   Anvil run in an existing Rust repository. It compares legacy behavior,
+   defaults migrations to the Anvil catalog, and retains a customization only
+   for a documented requirement the catalog cannot satisfy.
 7. **Deterministic ordinary-check compiler selection**: use the caller's
    `RUSTUP_TOOLCHAIN`, otherwise defer to either root toolchain-file spelling,
    otherwise use the root manifest MSRV explicitly. Never inherit a
