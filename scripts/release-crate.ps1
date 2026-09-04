@@ -69,17 +69,17 @@ $script:TypeGroupMapping = @{
 
 # Maps the final group key to a user-friendly header in the changelog.
 $script:HeaderNameMapping = @{
-    'breaking'      = '⚠️ Breaking';
-    'build'         = '🏗️ Build System';
-    'ci'            = '🔄 Continuous Integration';
-    'docs'          = '📚 Documentation';
-    'feat'          = '✨ Features';
-    'fix'           = '🐛 Bug Fixes';
-    'miscellaneous' = '🧩 Miscellaneous';
-    'perf'          = '⚡ Performance';
-    'refactor'      = '♻️ Code Refactoring';
-    'style'         = '🎨 Styling';
-    'task'          = '✔️ Tasks';
+    'breaking'      = 'Breaking';
+    'build'         = 'Build System';
+    'ci'            = 'Continuous Integration';
+    'docs'          = 'Documentation';
+    'feat'          = 'Features';
+    'fix'           = 'Bug Fixes';
+    'miscellaneous' = 'Miscellaneous';
+    'perf'          = 'Performance';
+    'refactor'      = 'Code Refactoring';
+    'style'         = 'Styling';
+    'task'          = 'Tasks';
 }
 
 # Defines the preferred order for commit type sections in the changelog.
@@ -422,17 +422,17 @@ function Update-CrateVersion {
         }
 
         $newVersion = $versionParts -join '.'
-        Write-Host "✅ Incrementing $bumpType version from $currentVersion to $newVersion."
+        Write-Host "Incrementing $bumpType version from $currentVersion to $newVersion."
     }
     else {
         $newVersion = $version
-        Write-Host "✅ Using specified version: $newVersion."
+        Write-Host "Using specified version: $newVersion."
     }
 
-    Write-Host "📝 Updating '$crateCargoToml'..."
+    Write-Host "Updating '$crateCargoToml'..."
     (Get-Content $crateCargoToml -Raw) -replace '(?<=version\s*=\s*")[^"]+', $newVersion | Set-Content $crateCargoToml -NoNewline
 
-    Write-Host "📝 Updating '$rootCargoToml'..."
+    Write-Host "Updating '$rootCargoToml'..."
 
     function Get-EscapedRegexSpecialChars($str) {
         # Escape all regex metacharacters: . $ ^ { [ ( | ) * + ? \ /
@@ -567,7 +567,7 @@ function Write-Changelog {
                               ($newVersionSection -join "`n") + "`n" +
                               $existingContent.Substring($insertPosition)
                 $newContent | Set-Content $changelogFile -NoNewline
-                Write-Host "✅ Changelog updated at '$changelogFile'."
+                Write-Host "Changelog updated at '$changelogFile'."
                 return
             }
         }
@@ -577,7 +577,7 @@ function Write-Changelog {
     $changelogContent = @("# Changelog", "")
     $changelogContent += $newVersionSection
     $changelogContent | Out-File -FilePath $changelogFile -Encoding utf8
-    Write-Host "✅ Changelog created at '$changelogFile'."
+    Write-Host "Changelog created at '$changelogFile'."
 }
 
 function Update-Readme {
@@ -597,14 +597,14 @@ function Update-Readme {
         return
     }
 
-    Write-Host "📝 Updating README.md..."
+    Write-Host "Updating README.md..."
     Push-Location $crateFolder
     try {
         $result = cargo doc2readme --lib --template ../README.j2 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Failed to generate README: $result"
         } else {
-            Write-Host "✅ README.md updated."
+            Write-Host "README.md updated."
         }
     }
     finally {
@@ -626,7 +626,7 @@ function Show-DependentCratesWarning {
     )
 
     Write-Host ""
-    Write-Host "⚠️  SEMVER-INCOMPATIBLE RELEASE DETECTED" -ForegroundColor Yellow
+    Write-Host "WARNING: SEMVER-INCOMPATIBLE RELEASE DETECTED" -ForegroundColor Yellow
     Write-Host "The version bump from $oldVersion to $newVersion is semver-incompatible." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "The following workspace crates have a direct dependency on '$crateName'" -ForegroundColor Yellow
@@ -652,7 +652,7 @@ function Show-FinalMessage {
     )
 
     Write-Host "---" -ForegroundColor Green
-    Write-Host "🎉 Success! Next steps:" -ForegroundColor Green
+    Write-Host "Success! Next steps:" -ForegroundColor Green
     Write-Host "1. Review the changes in the updated files." -ForegroundColor Green
     Write-Host "2. Commit the changes and push the changes:" -ForegroundColor Green
     Write-Host "   git add ." -ForegroundColor DarkGray

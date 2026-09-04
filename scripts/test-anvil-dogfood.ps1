@@ -153,8 +153,8 @@ function Invoke-Native {
                 -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
             $result = [pscustomobject]@{
                 ExitCode = $process.ExitCode
-                StdOut   = (Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue) ?? ''
-                StdErr   = (Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue) ?? ''
+                StdOut   = [string](Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue)
+                StdErr   = [string](Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue)
             }
         } finally {
             Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue

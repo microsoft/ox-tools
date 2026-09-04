@@ -8,7 +8,7 @@
 .DESCRIPTION
     Creates a throwaway repository in a temp directory, generates the anvil tree
     into it with the locally-built cargo-anvil, and then does only what a
-    developer would do: run `just anvil-container <command…>` and observe what
+    developer would do: run `just anvil-container <command...>` and observe what
     happens.
 
     The setup phase is held to that standard deliberately. If this script has to
@@ -22,7 +22,7 @@
       2. The first run builds an image and runs the recipe inside it.
       3. A second run reuses the image (the tag resolves, nothing is built),
          no cache volume masks the tools the image installed, and a host
-         GITHUB_TOKEN is forwarded — from the environment, or from the gh CLI
+         GITHUB_TOKEN is forwarded -- from the environment, or from the gh CLI
          when the environment has none.
       3b. A recipe run from a linked worktree can still reach git history.
       4. Changing a hashed input (the pinned toolchain) selects a new tag.
@@ -123,8 +123,8 @@ function Invoke-Native {
                 -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
             $result = [pscustomobject]@{
                 ExitCode = $process.ExitCode
-                StdOut   = (Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue) ?? ''
-                StdErr   = (Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue) ?? ''
+                StdOut   = [string](Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue)
+                StdErr   = [string](Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue)
             }
         } finally {
             Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
@@ -217,7 +217,7 @@ function Test-ImagePresent([string]$Reference) {
 
 function Remove-AnvilImages([string]$Prefix) {
     $images = Invoke-Engine -Arguments @('images', '--format', '{{.Repository}}:{{.Tag}}') -AllowFailure
-    # Podman reports images fully qualified (`localhost/anvil-…`), docker does
+    # Podman reports images fully qualified (`localhost/anvil-...`), docker does
     # not, so match anywhere in the reference rather than at the start.
     $matching = ($images.StdOut -split "`r?`n") | Where-Object { $_ -like "*$Prefix*" }
     foreach ($image in $matching) {
@@ -579,7 +579,7 @@ Assert-That 'content in a gap survives regeneration' ($afterRegen -match 'a repo
 Assert-Equal 'the composed tag is unchanged by regeneration' $editedReference (Get-ImageReference -Repo $repo)
 
 # Anvil never overwrites repository content, and a region body is no exception:
-# an edit inside one is preserved, exactly as `updates.md` §2 preserves an
+# an edit inside one is preserved, exactly as `updates.md` section 2 preserves an
 # edited owned file. That is why the gaps matter -- editing inside a region
 # silently freezes the base digest and the tool pins at today's values while
 # the tag keeps resolving, so the layout has to make the gaps the obvious place
