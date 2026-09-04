@@ -257,13 +257,13 @@ mod tests {
 
     #[test]
     fn setup_step_quotes_inline_command_values_containing_colons() {
-        // An inline `- bash: echo "x: y"` is a YAML *plain scalar*; the inner
+        // An inline `- pwsh: Write-Host "x: y"` is a YAML *plain scalar*; the inner
         // `: ` is parsed as a mapping separator ("Mapping values are not
         // allowed in this context"), which ADO rejects at compile time. Such
         // values must be wrapped in quotes. Guard every inline command scalar
         // in the setup step (and catch the specific group=none echo).
         assert!(
-            SETUP_STEP.contains(r#"- bash: 'echo "anvil-setup: group=none, skipping tool install"'"#),
+            SETUP_STEP.contains(r#"- pwsh: 'Write-Host "anvil-setup: group=none, skipping tool install"'"#),
             "the group=none echo must be single-quoted so its colon stays literal",
         );
         for line in SETUP_STEP.lines() {
@@ -286,6 +286,17 @@ mod tests {
                 !value.contains(": "),
                 "unquoted inline command scalar with a colon will break ADO YAML compilation: {line}",
             );
+        }
+    }
+
+    #[test]
+    fn ado_artifacts_do_not_require_bash() {
+        for artifact in all() {
+            let has_bash_step = artifact.body().lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("- bash:") || line.starts_with("- task: Bash@")
+            });
+            assert!(!has_bash_step, "ADO artifact contains a Bash step:\n{}", artifact.body());
         }
     }
 
@@ -385,9 +396,9 @@ mod tests {
         );
         // A PR group always downloads the artifact, so it consumes it. The mode
         // is fixed by tier -- not probed at runtime from a marker file.
-        assert!(body.contains("export ANVIL_IMPACT=consume"));
+        assert!(body.contains(r#"ANVIL_IMPACT: "consume""#));
         assert!(
-            !body.contains("ANVIL_IMPACT=off"),
+            !body.contains(r#"ANVIL_IMPACT: "off""#),
             "a PR group must not fall back to off (it always has the artifact)"
         );
         assert!(
@@ -417,9 +428,9 @@ mod tests {
         // target/anvil/impact/impact.state, so no leftover state on the agent
         // can wrongly enable scoping and skip the full-workspace backstop.
         let body = render_group_step("scheduled-test");
-        assert!(body.contains("export ANVIL_IMPACT=off"));
+        assert!(body.contains(r#"ANVIL_IMPACT: "off""#));
         assert!(
-            !body.contains("ANVIL_IMPACT=consume"),
+            !body.contains(r#"ANVIL_IMPACT: "consume""#),
             "scheduled group must never consume the impact cache"
         );
         assert!(
