@@ -697,9 +697,12 @@ fn collect_values(table: &Table, path: &mut Vec<String>, values: &mut TableValue
 fn table_entries(table: &Table, text: &str) -> Vec<TableEntry> {
     let mut starts: Vec<(Vec<String>, String, usize)> = Vec::new();
     for (key, item) in table {
-        let Some((key, _)) = table.get_key_value(key) else {
-            continue;
-        };
+        // Iteration hands back the key as a `&str`, dropping the `Key` that
+        // carries the decor and span this needs. Looking it straight back up is
+        // infallible — the key came from this very table — and skipping an
+        // entry that failed the lookup would silently drop the user's
+        // configuration, which is the whole failure this module exists to stop.
+        let (key, _) = table.get_key_value(key).expect("a key yielded by a table is present in it");
         let start = key
             .leaf_decor()
             .prefix()
@@ -769,17 +772,22 @@ fn mask_regions(text: &str, ranges: &[ByteRange]) -> String {
     if ranges.is_empty() {
         return text.to_owned();
     }
-    let mut masked = text.as_bytes().to_vec();
+    // Copied through as text rather than mutated as bytes, so the result is
+    // valid UTF-8 by construction and no fallible conversion is needed. Every
+    // masked byte becomes a one-byte space and the line breaks are kept, so the
+    // copy has the same length as the original and every offset still lands on
+    // the same character.
+    let mut masked = String::with_capacity(text.len());
+    let mut cursor = 0;
     for range in ranges {
-        for byte in &mut masked[range.start..range.end] {
-            if *byte != b'\n' && *byte != b'\r' {
-                *byte = b' ';
-            }
+        masked.push_str(&text[cursor..range.start]);
+        for byte in text[range.start..range.end].bytes() {
+            masked.push(if byte == b'\n' || byte == b'\r' { char::from(byte) } else { ' ' });
         }
+        cursor = range.end;
     }
-    // Every replaced byte became an ASCII space and every retained byte is
-    // unchanged, so the result is still valid UTF-8.
-    String::from_utf8(masked).unwrap_or_else(|_| text.to_owned())
+    masked.push_str(&text[cursor..]);
+    masked
 }
 
 /// Byte ranges of the managed regions in `text`, from opening sentinel line to
@@ -1527,5 +1535,75 @@ mod tests {
         let text = "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x";
         let region = find_region(text, "x", SYN).unwrap().unwrap();
         assert_eq!(region.body_str(), "body\n");
+    }
+
+    /// Residue is inserted after the region the same pass spliced it in, so a
+    /// region that is not there means the splice did not do what it reported.
+    /// Reporting that is what keeps the user's configuration from being
+    /// dropped in silence.
+    #[test]
+    fn residue_insertion_reports_a_region_the_splice_did_not_leave_behind() {
+        let err = insert_after_region("user content\n", "x", "ignore = []\n", SYN).unwrap_err();
+
+        assert!(err.to_string().contains("region 'x' is missing"), "the region is named:\n{err}");
+    }
+
+    /// A host whose last line is the closing sentinel, and a residue block
+    /// written without one, both lack the newline the next line needs. Without
+    /// them the residue would be appended to the sentinel and to whatever
+    /// follows it, turning two lines into one.
+    #[test]
+    fn residue_insertion_supplies_the_newlines_the_host_and_the_residue_lack() {
+        let text = "# >>> anvil-managed: x\nyanked = \"deny\"\n# <<< anvil-managed: x";
+        let out = insert_after_region(text, "x", "ignore = []", SYN).unwrap();
+
+        assert_eq!(
+            out,
+            "# >>> anvil-managed: x\nyanked = \"deny\"\n# <<< anvil-managed: x\nignore = []\n"
+        );
+    }
+
+    /// Residue that already ends in a newline still needs a blank line before
+    /// the content that followed the region. Run straight together, the next
+    /// line's leading comment would read as part of the relocated entry.
+    #[test]
+    fn residue_insertion_separates_the_residue_from_what_followed_the_region() {
+        let text = "# >>> anvil-managed: x\nyanked = \"deny\"\n# <<< anvil-managed: x\n[bans]\nmultiple-versions = \"warn\"\n";
+        let out = insert_after_region(text, "x", "ignore = []\n", SYN).unwrap();
+
+        assert_eq!(
+            out,
+            "# >>> anvil-managed: x\nyanked = \"deny\"\n# <<< anvil-managed: x\nignore = []\n\n[bans]\nmultiple-versions = \"warn\"\n"
+        );
+    }
+
+    /// A region left unterminated still owns everything below it — that text is
+    /// the region's, not the user's. Masking only as far as a closing sentinel
+    /// that never arrives would expose the region's own tables to adoption as
+    /// though a human had written them.
+    #[test]
+    fn an_unterminated_region_is_masked_to_the_end_of_the_file() {
+        let text = "[advisories]\n# >>> anvil-managed: x\nyanked = \"deny\"\n";
+        let masked = mask_managed_regions(text, SYN);
+
+        assert_eq!(masked.len(), text.len(), "masking leaves every byte offset where it was");
+        assert!(
+            masked.starts_with("[advisories]\n"),
+            "text above the region is untouched:\n{masked}"
+        );
+        assert_eq!(
+            masked["[advisories]\n".len()..].trim(),
+            "",
+            "everything from the opening sentinel down is blanked:\n{masked}"
+        );
+    }
+
+    /// An entry's source slice starts at its leading trivia, so it carries the
+    /// blank lines that separated it from the header it used to sit under.
+    /// Kept, that gap would push the relocated entry away from the region whose
+    /// table now owns it.
+    #[test]
+    fn relocated_residue_loses_the_blank_lines_above_it() {
+        assert_eq!(trim_leading_blank_lines("\n  \n\tignore = []\n"), "\tignore = []\n");
     }
 }
