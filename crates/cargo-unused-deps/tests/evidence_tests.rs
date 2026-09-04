@@ -192,6 +192,64 @@ fn evidence_is_counted_per_target_not_per_package() {
 }
 
 #[test]
+fn several_development_targets_each_testify_separately() {
+    if !nightly() {
+        return;
+    }
+
+    // Each dependency is used by exactly one development target, so every other
+    // target reports it unused. Only the one nothing uses should be reported.
+    let fixture = Fixture::new(
+        &["bya", "byb", "bybench", "byexample", "dead"],
+        &format!(
+            "[dev-dependencies]\n{}{}{}{}{}",
+            dep("bya"),
+            dep("byb"),
+            dep("bybench"),
+            dep("byexample"),
+            dep("dead")
+        ),
+        "pub fn go() {}\n",
+    )
+    .with_file("tests/a.rs", "#[test]\nfn t() { bya::f(); }\n")
+    .with_file("tests/b.rs", "#[test]\nfn t() { byb::f(); }\n")
+    .with_file("benches/bench.rs", "fn main() { bybench::f(); }\n")
+    .with_file("examples/ex.rs", "fn main() { byexample::f(); }\n");
+
+    let report = fixture.report();
+
+    for used in ["bya", "byb", "bybench", "byexample"] {
+        assert!(!report.contains(used), "{used} is used by one development target: {report}");
+    }
+    assert!(report.contains("dead: no compiled unit loaded it"), "unexpected report: {report}");
+}
+
+#[test]
+fn a_development_target_compiled_twice_is_counted_like_a_library() {
+    if !nightly() {
+        return;
+    }
+
+    // An example declared `test = true` is compiled twice, exactly as a library
+    // is. Treating any report at all as "unused" would convict a dependency its
+    // `cfg(test)` code uses, because the plain unit reports while the
+    // test-profile unit does not.
+    let fixture = Fixture::new(
+        &["excfg"],
+        &format!("[dev-dependencies]\n{}\n[[example]]\nname = \"ex\"\ntest = true\n", dep("excfg")),
+        "pub fn go() {}\n",
+    )
+    .with_file(
+        "examples/ex.rs",
+        "fn main() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { excfg::f(); }\n}\n",
+    );
+
+    let report = fixture.report();
+
+    assert!(!report.contains("excfg"), "the example's cfg(test) unit loaded it: {report}");
+}
+
+#[test]
 fn a_dependency_the_library_uses_is_not_reported() {
     if !nightly() {
         return;

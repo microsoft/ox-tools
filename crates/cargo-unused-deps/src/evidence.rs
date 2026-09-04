@@ -112,9 +112,17 @@ impl Evidence {
         });
 
         in_code_target
-            || self
-                .targets_of(manifest_path, TargetKind::Development)
-                .any(|target| self.reports_for(target, name) == 0)
+            || self.targets_of(manifest_path, TargetKind::Development).any(|target| {
+                // Development targets are usually compiled once, but a test,
+                // bench or example declared `test = true` is compiled twice like
+                // a library. The same monotonicity argument applies: fewer
+                // reports than units means one of them loaded the dependency.
+                // Both units have dev-dependencies in scope, so no distinction
+                // by scope is needed here.
+                let units = self.units.get(target).copied().unwrap_or_default();
+
+                self.reports_for(target, name) < units
+            })
     }
 
     /// Whether the build script loaded `name`.

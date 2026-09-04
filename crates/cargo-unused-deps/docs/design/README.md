@@ -461,10 +461,18 @@ counting, **per target**:
   signal that a dependency is used from `#[cfg(test)]` code and belongs in
   `[dev-dependencies]`.
 
-Per target matters. A package with a library and two binaries has three counters, not
-one: a dependency used in production by a single binary is reported unused by the
-library and by the other binary, and pooling those reports would convict it. The
-verdicts take the **union** across targets — used anywhere is used.
+The rule is the same for every target, because "compiled twice" is not a property of
+libraries. A test, bench or example declared `test = true` is also built plainly and
+under `cfg(test)`, and reading a single report there as "unused" would convict a
+dependency the target's own `cfg(test)` code uses. The one distinction that does matter
+is scope: a dev-dependency is in scope only for the `cfg(test)` unit of a library or
+binary, so there a lone report is that unit's and means unused.
+
+Per target matters too. A package with a library and two binaries has three counters,
+not one: a dependency used in production by a single binary is reported unused by the
+library and by the other binary, and pooling those reports would convict it. The same
+holds across several tests, benches and examples. The verdicts take the **union** across
+targets — used anywhere is used.
 
 Doctest evidence joins here, gathered per package because rustdoc feeds each snippet to
 the test builder on stdin and the shim cannot tell which crate it came from. Cargo can,
