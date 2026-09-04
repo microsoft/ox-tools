@@ -1785,14 +1785,31 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
             "anvil-impact",
         ],
     );
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
     let log = tmp.path().join("cargo.log");
-    let default_output = run_just(tmp.path(), &["anvil-miri"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
+    let default_output = run_just(
+        tmp.path(),
+        &["anvil-miri"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_INCLUDE", OsStr::new("--package fixture@0.1.0")),
+        ],
+    );
     assert!(
         default_output.status.success(),
         "default anvil-miri failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&default_output.stdout),
         String::from_utf8_lossy(&default_output.stderr)
+    );
+    let filtered_output = run_just(
+        tmp.path(),
+        &["anvil-miri", "--package", "fixture", "--test", "module::test_name"],
+        &[("FAKE_CARGO_LOG", log.as_os_str())],
+    );
+    assert!(
+        filtered_output.status.success(),
+        "filtered anvil-miri failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&filtered_output.stdout),
+        String::from_utf8_lossy(&filtered_output.stderr)
     );
     let example_output = run_just(
         tmp.path(),
@@ -1801,8 +1818,22 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
     );
     assert!(example_output.status.success());
     let commands = fs::read_to_string(log).unwrap();
-    assert!(commands.contains("+nightly-test miri test --all-features --tests --package fixture@0.1.0"));
-    assert!(commands.contains("+nightly-test miri run --all-features --locked --package fixture --example basic"));
+    assert!(
+        commands.contains(
+            "+nightly-test miri test --all-features --tests --no-run --message-format=json-render-diagnostics --package fixture@0.1.0"
+        ),
+        "default Miri target selection was not preserved:\n{commands}"
+    );
+    assert!(
+        commands.contains(
+            "+nightly-test miri test --all-features --tests --no-run --message-format=json-render-diagnostics --package fixture -- module::test_name"
+        ),
+        "explicit package and test selection was not forwarded:\n{commands}"
+    );
+    assert!(
+        commands.contains("+nightly-test miri run --all-features --locked --package fixture --example basic"),
+        "explicit example selection was not forwarded:\n{commands}"
+    );
 }
 
 #[test]

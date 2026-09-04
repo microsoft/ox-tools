@@ -319,22 +319,29 @@ mod tests {
         GROUP_FILES.iter().map(|(_, b)| *b).collect::<Vec<_>>().join("\n")
     }
 
+    fn defines_recipe(body: &str, recipe: &str) -> bool {
+        body.lines().any(|line| {
+            line.strip_prefix(recipe)
+                .is_some_and(|suffix| suffix.starts_with(':') || suffix.starts_with(' '))
+        })
+    }
+
     #[test]
     fn checks_just_template_includes_all_catalog_checks() {
         let checks = all_check_bodies();
         for needle in [
-            "anvil-fmt:",
-            "anvil-clippy:",
-            "anvil-license-headers:",
-            "anvil-pr-title:",
-            "anvil-llvm-cov:",
-            "anvil-doc-test:",
-            "anvil-mutants-diff:",
-            "anvil-miri:",
-            "anvil-mutants-full:",
-            "anvil-bench:",
+            "anvil-fmt",
+            "anvil-clippy",
+            "anvil-license-headers",
+            "anvil-pr-title",
+            "anvil-llvm-cov",
+            "anvil-doc-test",
+            "anvil-mutants-diff",
+            "anvil-miri",
+            "anvil-mutants-full",
+            "anvil-bench",
         ] {
-            assert!(checks.contains(needle), "checks tree missing recipe '{needle}'");
+            assert!(defines_recipe(&checks, needle), "checks tree missing recipe '{needle}'");
         }
     }
 
@@ -396,15 +403,15 @@ mod tests {
 
     #[test]
     fn each_check_file_defines_its_own_check_recipe() {
-        // The file `checks/<name>.just` must define `anvil-<name>:` -- guards
+        // The file `checks/<name>.just` must define `anvil-<name>` -- guards
         // against a mis-split that files a check's recipe under the wrong name.
         for (path, body) in CHECK_FILES {
             let stem = path
                 .strip_prefix("justfiles/anvil/checks/")
                 .and_then(|p| p.strip_suffix(".just"))
                 .expect("check file path has the expected shape");
-            let needle = format!("anvil-{stem}:");
-            assert!(body.contains(&needle), "{path} must define '{needle}'");
+            let recipe = format!("anvil-{stem}");
+            assert!(defines_recipe(body, &recipe), "{path} must define '{recipe}'");
         }
     }
 
@@ -415,7 +422,7 @@ mod tests {
             .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
             .expect("miri.just is registered in CHECK_FILES");
         for needle in [
-            "_anvil-miri-test profile: anvil-impact",
+            "_anvil-miri-test profile package=\"\" test_filter=\"\" example=\"\": anvil-impact",
             "ForEach-Object -Parallel",
             "-ThrottleLimit $jobs",
             "anvil miri: ANVIL_MIRI_JOBS must be a positive integer",
@@ -436,8 +443,13 @@ mod tests {
                 .iter()
                 .find_map(|(path, body)| path.ends_with(&format!("/{check}.just")).then_some(*body))
                 .unwrap_or_else(|| panic!("{check}.just is registered in CHECK_FILES"));
+            let dependency = if check == "miri" {
+                format!("(_anvil-miri-test \"{profile}\" package test example)")
+            } else {
+                format!("(_anvil-miri-test \"{profile}\")")
+            };
             assert!(
-                body.contains(&format!("(_anvil-miri-test \"{profile}\")")),
+                body.contains(&dependency),
                 "{check}.just must inherit the shared Miri executable runner with its profile"
             );
             assert!(

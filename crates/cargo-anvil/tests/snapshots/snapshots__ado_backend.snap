@@ -3194,13 +3194,13 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
 
     # The metadata and compiler-artifact streams must come from the same Cargo
     # version because Cargo changed package-ID formats in 1.78.
-    $metadataJson = & cargo '+{{ rust_nightly }}' metadata --no-deps --format-version 1
+    $metadata = & cargo '+{{ rust_nightly }}' metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil miri: cargo metadata failed'
         exit $LASTEXITCODE
     }
     try {
-        $metadata = $metadataJson | ConvertFrom-Json -ErrorAction Stop
+        $metadata = $metadata | ConvertFrom-Json -ErrorAction Stop
     } catch {
         Write-Error "anvil miri: could not parse cargo metadata output: $($_.Exception.Message)"
         exit 1
@@ -3374,13 +3374,13 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
 
         # Cargo normally runs each test executable from its owning package root.
         # The direct cargo-miri invocation below restores that working directory.
-        $orderedArtifacts = @($artifacts | Sort-Object PackageLabel, TargetKind, TargetName, Path)
-        $work = for ($i = 0; $i -lt $orderedArtifacts.Count; $i++) {
+        $artifacts = @($artifacts | Sort-Object PackageLabel, TargetKind, TargetName, Path)
+        $work = for ($i = 0; $i -lt $artifacts.Count; $i++) {
             [pscustomobject]@{
                 Index = $i
-                Artifact = $orderedArtifacts[$i].Path
-                Label = $orderedArtifacts[$i].Label
-                WorkingDirectory = $orderedArtifacts[$i].WorkingDirectory
+                Artifact = $artifacts[$i].Path
+                Label = $artifacts[$i].Label
+                WorkingDirectory = $artifacts[$i].WorkingDirectory
             }
         }
         $results = @(
