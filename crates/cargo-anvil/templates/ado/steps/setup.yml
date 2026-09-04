@@ -50,10 +50,23 @@ steps:
         $(HOME)/.cargo/.crates2.json
     displayName: anvil setup (cache cargo home)
 
-  - bash: |
-      if ! command -v just >/dev/null 2>&1 ; then
-        cargo install --locked just
-      fi
+  - pwsh: |
+      $minimum = [version]'1.46.0'
+      $installed = if (Get-Command just -ErrorAction SilentlyContinue) {
+        [version]((& just --version) -replace '^just\s+', '')
+      } else {
+        $null
+      }
+      if ($null -eq $installed -or $installed -lt $minimum) {
+        Write-Host "Installing just >= $minimum (installed: $(if ($installed) { $installed } else { 'not found' }))"
+        & cargo install --locked --version ">=$minimum" just
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      }
+      $installed = [version]((& just --version) -replace '^just\s+', '')
+      if ($installed -lt $minimum) {
+        Write-Error "cargo-anvil requires just >= $minimum for recipe options; found '$installed'. Install with: cargo install --locked --version '>=$minimum' just"
+        exit 1
+      }
     displayName: anvil setup (install just)
 
   # Hand everything else off to the catalog recipe. Idempotent. ADO

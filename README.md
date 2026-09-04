@@ -3,7 +3,7 @@
 
 # The Oxidizer Tools Project
 
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-pr.yml/badge.svg?event=pull_request)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-pr.yml)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml/badge.svg)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
@@ -158,13 +158,18 @@ These focused operations are not substitutes for either verification tier.
   [`cargo-hack`](https://crates.io/crates/cargo-hack) to check the feature
   powerset across the full workspace.
 
-- **Testing**. We run `cargo nextest --all-features` to run every normal test and documentation test in the repo.
+- **Testing**. We run affected unit and integration tests through
+  [`cargo-nextest`](https://nexte.st/) in both `--all-features` and
+  `--no-default-features` configurations. Documentation tests run separately
+  through `cargo test --doc` with all features and default features.
 
-- **Code Coverage**. We calculate code coverage for the whole repo using [
-  `cargo-llvm-cov`](https://crates.io/crates/cargo-llvm-cov).
-  We capture coverage for Windows and Linux, with `--all-features` and `--no-features`. Coverage is collected using
-  the nightly Rust compiler which makes it possible to use `coverage(off)` annotations in the source code to suppress
-  coverage collection for a chunk of code. We require 100% coverage for any checked in code.
+- **Code Coverage**. We collect coverage using
+  [`cargo-llvm-cov`](https://crates.io/crates/cargo-llvm-cov) on Windows and
+  Linux under the same all-features and no-default-features configurations.
+  Pull requests measure affected packages; the scheduled tier measures the
+  full workspace. The nightly compiler enables `coverage(off)` annotations,
+  and the local cargo-coverage-gate verdict enforces each package's configured
+  threshold.
 
 - **Mutation Testing**. We use [`cargo-mutants`](https://crates.io/crates/cargo-mutants) to help maintain
   high test quality.

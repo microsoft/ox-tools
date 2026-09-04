@@ -236,6 +236,8 @@ mod tests {
         assert!(!SETUP_STEP.contains("Cargo.toml | Cargo.lock"));
         assert!(SETUP_STEP.contains("'rust-toolchain.toml'"));
         assert!(!SETUP_STEP.contains("restoreKeys:"));
+        assert!(SETUP_STEP.contains("$minimum = [version]'1.46.0'"));
+        assert!(SETUP_STEP.contains("cargo-anvil requires just >= $minimum"));
         let fingerprint = SETUP_STEP
             .find("anvil setup (fingerprint repository toolchain)")
             .expect("setup must fingerprint optional repository toolchain files");

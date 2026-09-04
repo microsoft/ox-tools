@@ -47,7 +47,7 @@ After installing the Rust toolchain, we setup repository-specific tooling:
 ## Validate Windows environment
 
 1. Execute `just anvil-build` to build all workspace targets and features.
-1. Execute `just anvil-pr-test` to run the PR test and coverage group.
+1. Execute `just anvil-pr-test` to run tests, coverage, documentation tests, and example compilation.
 1. Validate that debugging works by opening `crates/tick/examples/basic.rs` and pressing the `Debug` link that appears above `main()`. This should successfully launch the example app under the debugger.
 
 # Linux (WSL) environment setup
@@ -91,7 +91,7 @@ After installing the Rust toolchains, we setup the build target directory for fa
 ## Validate Linux (WSL) environment
 
 1. Execute `just anvil-build` to build all workspace targets and features.
-1. Execute `just anvil-pr-test` to run the PR test and coverage group.
+1. Execute `just anvil-pr-test` to run tests, coverage, documentation tests, and example compilation.
 
 ## Setup Visual Studio Code integration
 
