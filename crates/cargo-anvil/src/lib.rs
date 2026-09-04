@@ -205,36 +205,37 @@
 //! configurations, operating-system matrix, tier placement, and rationale for
 //! each check.
 //!
-//! ## Safe updates and customization
+//! ## Configuring checks
 //!
-//! cargo-anvil manages two kinds of content:
+//! Customize behavior through the configuration understood by each underlying
+//! tool, package metadata, and source attributes. This keeps policy close to
+//! the code it governs and lets the same configuration work with Anvil,
+//! direct Cargo commands, and editor integrations.
 //!
-//! - **owned files**, such as recipes and workflow implementations;
-//! - **managed regions** inside repository files such as `Cargo.toml`,
-//!   `rustfmt.toml`, and `deny.toml`.
+//! cargo-anvil updates owned recipe and workflow files, plus marked regions in
+//! shared configuration files. Checksums in `.anvil.lock` record the generated
+//! state. Repository configuration outside `anvil-managed` regions is
+//! preserved. If generated content is edited directly, cargo-anvil preserves
+//! the edit and writes changed catalog content to an `.anvil-proposed` sibling
+//! rather than overwriting it.
 //!
-//! Checksums in `.anvil.lock` record the last generated state. Unmodified
-//! content updates automatically. Repository-owned text outside managed
-//! regions is preserved. If managed content was edited, cargo-anvil preserves
-//! it and writes an `.anvil-proposed` sibling when the catalog changes, making
-//! the conflict visible instead of overwriting the customization.
+//! For normal repository policy, configure the tool instead of editing the
+//! generated recipe.
 //!
-//! Common repository policy remains in source and configuration rather than
-//! generated scripts. Examples include per-package coverage thresholds,
-//! spelling dictionaries, tests ignored by a specific Miri profile, Loom test
-//! targets, and examples excluded from automatic execution.
+//! ### Formatting and linting
 //!
-//! There are four levels of structural customization:
+//! Rust formatting follows `rustfmt.toml`. Rust and Clippy lint policy lives in
+//! workspace and package `Cargo.toml` lint tables, with Clippy-specific
+//! configuration in `clippy.toml`. Add repository rules outside the generated
+//! regions so catalog updates can continue to maintain the shared baseline.
 //!
-//! 1. **Compose around Anvil.** Add repository-owned recipes or workflows.
-//!    cargo-anvil only owns the generated `anvil-` surface.
-//! 2. **Extend a managed file.** Add repository policy outside the
-//!    `anvil-managed` sentinels. Updates preserve that text.
-//! 3. **Disable generated content.** Empty an owned file or managed region.
-//!    Future runs leave it disabled and propose new catalog content separately.
-//! 4. **Take ownership.** Edit generated content directly. cargo-anvil keeps
-//!    the edit and writes changed catalog content to an `.anvil-proposed`
-//!    sibling instead of overwriting it.
+//! ### Dependencies and public API
+//!
+//! License, source, advisory, and duplicate-dependency policy lives in
+//! `deny.toml`. Dependency features and version requirements remain ordinary
+//! `Cargo.toml` declarations. Intentional public exposure of third-party types
+//! is recorded with `cargo-check-external-types` package metadata, next to the
+//! API surface that requires the exception.
 //!
 //! ### Spelling
 //!
