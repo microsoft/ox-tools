@@ -193,6 +193,10 @@ container-specific path in it.
 The workspace members it names are not admitted: they are a checkout, and the image is not one. The one path that
 would need them, workspace MSRV validation, returns early whenever a root toolchain file selects the compiler.
 
+The manifest is deleted once the setup has read it, so it is in the build context but not in the finished image. That
+keeps the tag honest: it hashes the declared MSRV rather than the file, so a dependency edit computes the same tag,
+and nothing is left behind for that tag to misdescribe.
+
 That makes the toolchain file a precondition of this design rather than a convenience: the image requires one, copies
 it, and relies on it to keep workspace validation out of reach of a context that has no members. A repository without
 one cannot build the image today, because the `COPY` above is unconditional. Should that become conditional, this
@@ -243,7 +247,8 @@ The declared root MSRV is the one input that is not a file. The image installs t
 what the image contains and must rename it. The digest takes the resolved value rather than the manifest declaring it:
 `Cargo.toml` is the busiest file in a workspace while `rust-version` moves perhaps once, so hashing the file would
 rename the image, and oblige a publisher to rebuild and republish, for a stream of edits that cannot alter a byte the
-image contains.
+image contains. That last clause is what the setup region's `rm` buys: the manifest is read and deleted, so an edit
+unrelated to `rust-version` computes the same tag for a filesystem that really is identical.
 
 The hook file's **content** is an input, since it determines what the build installs. Its **output** is deliberately
 excluded: a credential must never influence a tag.
@@ -632,8 +637,9 @@ private-environment catalog rewrites the base and tool layers and nothing else. 
 second tool list the design exists to avoid, and is almost never right.
 
 **A replacement must keep the ignore file in step.** A region that `COPY`s anything outside `justfiles/anvil/`,
-`.anvil/container/` and `rust-toolchain.toml` must also replace `artifacts::container::dockerignore()` (§3), or the
-added paths never reach the build context and the build fails on a missing file.
+`.anvil/container/`, `rust-toolchain.toml` and the root `Cargo.toml` must also replace
+`artifacts::container::dockerignore()` (§3), or the added paths never reach the build context and the build fails on a
+missing file.
 
 **Anything extra it copies is digested, provided it lives under `.anvil/container/`.** The hashed set is that whole
 directory (§4.1), so an installer script, a config file or a certificate placed beside the Dockerfile is an input:
@@ -645,8 +651,9 @@ manual `ANVIL_CONTAINER_NO_CACHE=1`.
 catalog-owned files. The reason is legibility rather than identity: the directory is the recipe tree, `just` parses
 every file the image copies, and a catalog that hides an installer script there makes the tool set harder to reason
 about than one that keeps it in `.anvil/`. Identity is safe either way, because the digest covers every file the build
-context admits (§4.1), not only the recipes — a repository that adds a non-recipe file by hand still renames the tag
-when it edits it.
+context admits and the image keeps (§4.1), not only the recipes — a repository that adds a non-recipe file by hand
+still renames the tag when it edits it. The root `Cargo.toml` is the one admitted file the digest does not cover as
+bytes, and it is also the one the setup deletes once read, so it is in no image for the tag to misdescribe.
 
 A fork inherits everything else: the recipes, the identity scheme, the cache volumes, the mounts, and the re-entry
 guard. A different base OS with a different toolchain source is two region replacements plus one hook.
