@@ -480,8 +480,8 @@ fn container_build_carries_the_manifest_that_declares_the_msrv() {
         "the build context must admit the root manifest, or the setup cannot resolve the MSRV"
     );
     assert!(
-        CONTAINER_SETUP_REGION.contains("COPY Cargo.toml ./"),
-        "the setup region must copy the manifest to the root the recipes resolve against"
+        CONTAINER_SETUP_REGION.contains("COPY . ./"),
+        "the setup region must copy the scoped context to the root the recipes resolve against"
     );
     // The members it names are a checkout, and the image is not one.
     assert!(
@@ -503,16 +503,36 @@ fn container_build_carries_the_manifest_that_declares_the_msrv() {
         !CONTAINER_SETUP_REGION.contains("ANVIL_ROOT_MSRV"),
         "the setup region must not reintroduce the build argument"
     );
-    // Load-bearing for the two assertions above rather than incidental. The
-    // resolver's workspace MSRV validation reads every member manifest, which
-    // this context does not carry -- and it is unreachable only because a root
-    // toolchain file selects the compiler, which makes it return early. Making
-    // this COPY conditional, so a repository without one can build, would put
-    // that branch back in reach of a partial workspace.
+}
+
+/// A repository may pin its compiler by means other than a root toolchain file,
+/// and such a repository must still be able to build an image. No engine anvil
+/// supports offers a portable `COPY` of a path that may not exist, so the setup
+/// region names no input at all and the ignore file decides what the context --
+/// and therefore the image -- contains.
+#[test]
+fn the_container_build_does_not_require_a_root_toolchain_file() {
     assert!(
-        CONTAINER_SETUP_REGION.contains("COPY rust-toolchain.toml ./"),
-        "the setup region must copy a root toolchain file: the MSRV design depends on one being \
-         present to keep workspace validation out of reach of a context with no members"
+        !CONTAINER_SETUP_REGION.contains("COPY rust-toolchain"),
+        "naming the toolchain file makes the image unbuildable in exactly the repositories that \
+         have nothing to pin"
+    );
+    // Both spellings, because neither is named by a `COPY`: admitting only the
+    // TOML would leave a repository that pins with the extensionless file
+    // building an image whose compiler disagreed with its own checkout.
+    assert!(
+        CONTAINER_DOCKERIGNORE.contains("!rust-toolchain.toml") && CONTAINER_DOCKERIGNORE.contains("!rust-toolchain\n"),
+        "the context must admit a root toolchain file in either spelling"
+    );
+    // The digest still has to follow the file where one exists, so it is
+    // discovered rather than required.
+    assert!(
+        CONTAINER.contains("$toolchainFiles"),
+        "the tag must hash a root toolchain file when the repository owns one"
+    );
+    assert!(
+        !CONTAINER.contains("$inputs = @('rust-toolchain.toml'"),
+        "the tag must not fail on a repository that owns no root toolchain file"
     );
 }
 
@@ -1822,6 +1842,63 @@ fn the_image_tag_follows_the_declared_msrv() {
         "a repository that declares no MSRV gets an image with no MSRV toolchain in it"
     );
     assert_eq!(declared, tag("1.93.1"), "the tag must depend on the inputs alone");
+}
+
+/// A repository may pin its compiler by means other than a root toolchain file,
+/// so the tag has to answer for one that owns none rather than refusing it. The
+/// two states must still be distinguishable: the image selects its compiler
+/// from that file where it exists and from the declared MSRV where it does not,
+/// so they cannot share a reference. Both spellings count, because the context
+/// admits both and rustup reads both.
+#[test]
+fn the_image_tag_treats_a_root_toolchain_file_as_optional() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+    write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
+    write(&root.join("justfiles/anvil/mod.just"), "# recipes\n");
+    stub_msrv_resolver(root);
+    write(&root.join("fake-bin/git.ps1"), "exit 0\n");
+
+    let tag = || {
+        let output = run_just(root, &["anvil-container-tag"], &[]);
+        assert!(
+            output.status.success(),
+            "computing the tag failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+
+    let none = tag();
+
+    write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.90\"\n");
+    let toml = tag();
+    assert_ne!(
+        none, toml,
+        "owning a toolchain file changes the image's compiler, so it must rename it"
+    );
+
+    write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.91\"\n");
+    assert_ne!(
+        toml,
+        tag(),
+        "the image installs the toolchain the file selects, so an edit must rename it"
+    );
+
+    fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
+    write(&root.join("rust-toolchain"), "[toolchain]\nchannel = \"1.90\"\n");
+    let extensionless = tag();
+    assert_ne!(none, extensionless, "the extensionless spelling is an image input too");
+    assert_ne!(
+        toml, extensionless,
+        "the same bytes under the other spelling are a different input, and rustup reads them in a \
+         different order"
+    );
 }
 
 /// The tag is computed from the index while the build copies the working tree,

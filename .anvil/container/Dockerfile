@@ -78,6 +78,17 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # <<< anvil-managed: anvil-container-tools
 
 # >>> anvil-managed: anvil-container-setup
+# The context is copied whole rather than input by input, because one of the
+# inputs is optional: a repository that pins its compiler by other means owns no
+# root `rust-toolchain`/`rust-toolchain.toml`, and a `COPY` of a path that may
+# not exist is not portable across the engines anvil supports. Naming the file
+# would make an image unbuildable in exactly the repositories that have nothing
+# to pin. `Dockerfile.dockerignore` already scopes the context to precisely the
+# image's inputs, so deferring to it costs no breadth and makes what the context
+# admits and what the image contains the same set by construction. What rides
+# along -- `.anvil/container/` -- is the committed input the gaps below `COPY`
+# from, and the image never runs it.
+#
 # The whole recipe tree is copied because `just` parses it to reach the install
 # recipes.
 #
@@ -94,16 +105,15 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # volume over each, and an engine seeds a new volume from the image path it
 # covers; a path that does not exist seeds as root-owned 0755, which the
 # `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
-# The root manifest is copied for the MSRV, the one version `anvil-setup`
+# The root manifest is admitted for the MSRV, the one version `anvil-setup`
 # installs that is declared in repository source rather than pinned in
 # `versions.just`. `/opt/anvil` is the root the recipes already resolve against,
 # so the resolver reads it there with no container-specific path. The workspace
-# members it names are not copied and are not needed: the toolchain file selects
-# the compiler, which is the branch that skips workspace MSRV validation.
+# members it names are not admitted and are not needed: the one path that reads
+# them is workspace MSRV validation, which hangs off the `-validate-prereqs`
+# recipes, and `anvil-setup` depends on none of them.
 WORKDIR /opt/anvil
-COPY justfiles ./justfiles
-COPY rust-toolchain.toml ./
-COPY Cargo.toml ./
+COPY . ./
 RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && just anvil-setup binstall \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
