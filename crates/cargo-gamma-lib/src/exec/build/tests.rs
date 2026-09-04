@@ -2991,12 +2991,12 @@ fn the_probe_set_is_ordered_by_the_plan_rather_than_by_the_hint_set() {
     assert_eq!(held, vec![6, 7], "only the unhinted mutants are held back from the probe round");
 }
 
-/// A probe round only defers mutants in the packages the build actually compiles.
+/// A probe round defers every mutant outside its attribution scope.
 ///
-/// Deferring a mutant outside the selection buys nothing — it contributes no diagnostic to this
-/// build — and costs a rewrite of a file a later stage is about to want instrumented again.
+/// A workspace-scoped stage compiles packages outside that scope, so leaving their mutants spliced
+/// would mean the hinted candidates were not actually offered alone.
 #[test]
-fn a_probe_leaves_mutants_outside_the_selection_where_they_are() {
+fn a_probe_defers_mutants_outside_the_attribution_scope() {
     let (_dir, work) = guarded_workspace("build-probe-selection-");
     let mut plan = probe_plan(&work, 5, 2);
 
@@ -3009,5 +3009,37 @@ fn a_probe_leaves_mutants_outside_the_selection_where_they_are() {
     let (candidates, deferred) = converger.probe_sets(&plan, Some(&select));
 
     assert_eq!(candidates, vec![1, 2, 3, 4, 5]);
-    assert!(deferred.is_empty(), "another package's mutants stay spliced: {deferred:?}");
+    assert_eq!(deferred, HashSet::from_iter([6, 7]));
+}
+
+#[test]
+fn diagnostic_blame_is_limited_to_the_stage_being_judged() {
+    let (_dir, work) = guarded_workspace("build-blame-scope-");
+    let mut plan = probe_plan(&work, 1, 1);
+    plan.mutants[1].package = "elsewhere".to_owned().into();
+    let mut blamed = HashMap::from_iter([(1, "E0308".to_owned()), (2, "E0277".to_owned())]);
+    let packages = vec![plan.mutants[0].package.to_string()];
+
+    retain_blamed(&mut blamed, &plan, Some(&packages));
+
+    assert_eq!(blamed, HashMap::from_iter([(1, "E0308".to_owned())]));
+}
+
+/// Widening Cargo's roots must not widen the mutant population physically present in the tree.
+///
+/// Filtering diagnostics alone cannot provide this isolation: a deferred mutant can prevent the
+/// compiler from reaching the current stage or mask its diagnostics. The instrumentation exclusion
+/// set therefore includes both previously withdrawn mutants and every mutant outside the stage.
+#[test]
+fn workspace_stage_withdraws_mutants_outside_the_attribution_scope() {
+    let (_dir, work) = guarded_workspace("build-stage-selection-");
+    let mut plan = probe_plan(&work, 0, 3);
+    plan.mutants[1].package = "elsewhere".to_owned().into();
+    let packages = vec![plan.mutants[0].package.to_string()];
+    let mut converger = Converger::default();
+    let _ = converger.withdrawn.insert(plan.mutants[2].ordinal);
+
+    let withdrawn = converger.scoped_withdrawn(&plan, Some(&packages));
+
+    assert_eq!(withdrawn, HashSet::from_iter([plan.mutants[1].ordinal, plan.mutants[2].ordinal]));
 }

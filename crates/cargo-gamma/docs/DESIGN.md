@@ -131,7 +131,10 @@ unification in the workspace under test and change what the tests prove.
 Every instrumented package is linked to the same runtime vendored for the campaign. An existing
 dependency on cargo-gamma's implementation crate is redirected to that copy; an unrelated
 dependency occupying the `gamma_rt` crate name is refused. This keeps every guard in one test
-process on the same active-mutant and census state.
+process on the same active-mutant and census state. Redirecting an existing dependency preserves
+its `features` and `default-features` settings — including a workspace-level declaration and a
+member's own override of a `workspace = true` dependency — so a package that already opted into a
+runtime feature keeps that selection after the redirect.
 
 ## A campaign from start to finish
 

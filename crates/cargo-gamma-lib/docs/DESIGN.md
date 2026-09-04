@@ -61,6 +61,38 @@ includes both failure to acquire the startup environment and a guard reached
 before the runtime constructor installed its selection; either fixed marker
 disqualifies the process as mutation-score evidence.
 
+Interactive build progress reuses Cargo's progress text while cargo-gamma owns
+the terminal redraw. Cargo's leading erase control is consumed rather than
+rendered visibly, and its color styling remains intact.
+
+Each Cargo output stream is retained up to 256 MiB for artifact and diagnostic
+processing, and each logical line is bounded at 1 MiB. The buffers grow with
+observed output rather than reserving those ceilings for every invocation.
+
+Each failed baseline observation retains a bounded 64 KiB, 200-line tail from
+stdout and stderr, along with the process exit code or signal when available.
+The baseline error identifies the package, target, runner, executable, working
+directory, elapsed time, resource failure, and failing or last-observed test.
+It points to the generated diagnostics instead of printing captured test output
+to the console. Successful observations retain none of this output. Before
+early failure cleanup, the command writes the structured record, including
+safely encoded output tails, to `baseline-failure.json` and writes the ordinary
+`gamma-diagnostics.json` bundle; only environment values cargo-gamma explicitly
+controls are eligible for diagnostic records, never the inherited process
+environment.
+
+When Cargo's resolved package selection covers the whole workspace, every stage
+checks mutation viability with that constant Cargo root set. Packages with no
+mutable files may be omitted from preflight, but do not narrow the staged
+checks. This keeps dependency feature unification identical across stages
+instead of compiling a new dependency variant for each downstream package
+selection. Only the current stage's mutants are instrumented; mutants belonging
+to other stages are restored before each ordinary, probe, or isolation build.
+Diagnostic blame, isolation, and withdrawal therefore remain limited to the
+current stage even though Cargo checks the wider graph. The final test-target
+build retains its reachability-based package selection; runs whose original
+Cargo selection is a package subset retain their narrowed graph throughout.
+
 Diff paths are resolved to the workspace-relative Rust files discovered by the
 survey. Absolute or rooted paths inside the workspace are normalized to those
 candidates; one from another checkout is normalized only when its suffix

@@ -564,6 +564,43 @@ fn an_empty_library_yields_no_mutants() {
     assert!(host.out().trim().is_empty());
 }
 
+/// A redirected runtime dependency must keep the `features` it already carried.
+///
+/// `cargo-gamma-lib`'s own manifest depends on the runtime with `features = ["embedding"]`, which
+/// gates a real API (`gamma_rt::embedded`). Redirecting that dependency to the run's vendored copy
+/// used to rebuild it as a bare `{ package, path }` table, silently dropping the feature and
+/// breaking any package — this crate included — whose code needs it.
+#[test]
+fn a_redirected_runtime_dependency_keeps_the_feature_gating_its_own_api() {
+    let dir = TempDir::new().expect("could not create a temporary directory");
+    let root = dir.path();
+
+    let runtime = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate lives one level below `crates`")
+        .join("cargo-gamma-rt");
+
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ngamma_rt = {{ package = \"cargo-gamma-rt\", path = \"{runtime}\", features = [\"embedding\"] }}\n",
+        ),
+    )
+    .expect("could not write the manifest");
+
+    fs::create_dir_all(root.join("src")).expect("could not create src");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
+    )
+    .expect("could not write the library");
+
+    let (code, host) = invoke(&dir, &["run", "--whole-test-binaries", "--jobs", "1"]);
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+}
+
 /// The ids and files of every mutant the tool finds in a workspace, in the order it reports them.
 fn population(dir: &TempDir) -> Vec<(String, String)> {
     let (code, host) = invoke(dir, &["list", "mutants", "--json"]);

@@ -138,7 +138,9 @@ impl Manifest {
     ///
     /// An existing dependency on the implementation crate is replaced rather than retained. Every
     /// instrumented package must share one runtime instance: two package identities would carry
-    /// independent active-mutant and census state into the same test executable.
+    /// independent active-mutant and census state into the same test executable. The replacement
+    /// still carries forward any `features` and `default-features` the replaced entry declared,
+    /// so a package that opted into a runtime feature keeps that selection.
     ///
     /// The path written is absolute. Cargo resolves a dependency path against the manifest holding
     /// it, and this manifest is the copy rather than the original, so a relative path would be
@@ -191,10 +193,16 @@ impl Manifest {
             return Err(Self::runtime_name_reserved(&self.path));
         }
 
+        // Preserve whatever feature selection either the aliased or the canonical entry already
+        // carried before either is discarded — the aliased entry (the one instrumented code
+        // actually resolves) wins a conflict, since it is the one in effect today.
+        let feature_settings = FeatureSettings::extract(table.get(RUNTIME_CRATE)).or(FeatureSettings::extract(table.get("cargo-gamma-rt")));
+
         let _existing_runtime = table.remove("cargo-gamma-rt");
         let mut entry = toml_edit::InlineTable::new();
         let _package = entry.insert("package", Value::from(RUNTIME_PACKAGE));
         let _replaced = entry.insert("path", Value::from(runtime.as_str()));
+        feature_settings.apply(&mut entry);
         let _added = table.insert(RUNTIME_CRATE, Item::Value(Value::InlineTable(entry)));
 
         self.changed = true;
@@ -246,17 +254,24 @@ impl Manifest {
         }
 
         if aliased.is_some() || dependencies.contains_key(RUNTIME_PACKAGE) {
+            // Each key is its own workspace dependency declaration, so its feature settings are
+            // carried onto its own replacement rather than merged across the two keys.
+            let aliased_features = FeatureSettings::extract(dependencies.get(RUNTIME_CRATE));
+            let canonical_features = FeatureSettings::extract(dependencies.get(RUNTIME_PACKAGE));
+
             let _aliased = dependencies.remove(RUNTIME_CRATE);
             let _canonical = dependencies.remove(RUNTIME_PACKAGE);
             let mut aliased_entry = toml_edit::InlineTable::new();
             let _package = aliased_entry.insert("package", Value::from(RUNTIME_PACKAGE));
             let _path = aliased_entry.insert("path", Value::from(runtime.as_str()));
+            aliased_features.apply(&mut aliased_entry);
             let _runtime = dependencies.insert(RUNTIME_CRATE, Item::Value(Value::InlineTable(aliased_entry)));
 
             // Keep the canonical workspace key resolvable for dev- and build-dependencies, which
             // are not rewritten to the guard's reserved crate name.
             let mut canonical_entry = toml_edit::InlineTable::new();
             let _path = canonical_entry.insert("path", Value::from(runtime.as_str()));
+            canonical_features.apply(&mut canonical_entry);
             let _runtime = dependencies.insert(RUNTIME_PACKAGE, Item::Value(Value::InlineTable(canonical_entry)));
             self.changed = true;
         }
@@ -270,6 +285,52 @@ impl Manifest {
              Rename that dependency so cargo-gamma can instrument this package."
         )
         .usage()
+    }
+}
+
+/// The `features` and `default-features` carried by an existing dependency specification.
+///
+/// Redirecting a dependency to the vendored runtime replaces its whole specification with a
+/// fresh path dependency, which would otherwise silently drop any feature selection the manifest
+/// already made — including a member's own override of a `workspace = true` dependency, which
+/// Cargo allows to add `features` alongside the inherited entry.
+#[derive(Default)]
+struct FeatureSettings {
+    features: Option<Value>,
+    default_features: Option<Value>,
+}
+
+impl FeatureSettings {
+    /// Reads the feature settings off an existing dependency specification, if any.
+    fn extract(item: Option<&Item>) -> Self {
+        let specification = item.and_then(Item::as_table_like);
+
+        Self {
+            features: specification.and_then(|table| table.get("features")).and_then(Item::as_value).cloned(),
+            default_features: specification
+                .and_then(|table| table.get("default-features"))
+                .and_then(Item::as_value)
+                .cloned(),
+        }
+    }
+
+    /// Prefers this side's settings, falling back to `other`'s where this side left a gap.
+    fn or(self, other: Self) -> Self {
+        Self {
+            features: self.features.or(other.features),
+            default_features: self.default_features.or(other.default_features),
+        }
+    }
+
+    /// Writes the carried settings onto a freshly built replacement entry.
+    fn apply(self, entry: &mut toml_edit::InlineTable) {
+        if let Some(features) = self.features {
+            let _features = entry.insert("features", features);
+        }
+
+        if let Some(default_features) = self.default_features {
+            let _default_features = entry.insert("default-features", default_features);
+        }
     }
 }
 
@@ -743,6 +804,37 @@ mod tests {
     }
 
     #[test]
+    fn a_direct_dependencys_features_survive_being_linked_to_the_vendored_runtime() {
+        let linked = linked("[dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", version = \"0.1\", features = [\"embedding\"] }\n");
+
+        assert!(linked.contains("features = [\"embedding\"]"), "{linked}");
+        assert!(linked.contains("package = \"cargo-gamma-rt\""), "{linked}");
+    }
+
+    #[test]
+    fn a_member_level_feature_override_survives_being_linked_to_the_vendored_runtime() {
+        let linked = linked("[dependencies]\ngamma_rt = { workspace = true, features = [\"embedding\"] }\n");
+
+        assert!(linked.contains("features = [\"embedding\"]"), "{linked}");
+        assert!(linked.contains("package = \"cargo-gamma-rt\""), "{linked}");
+    }
+
+    #[test]
+    fn default_features_false_survives_being_linked_to_the_vendored_runtime() {
+        let linked = linked("[dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", version = \"0.1\", default-features = false }\n");
+
+        assert!(linked.contains("default-features = false"), "{linked}");
+    }
+
+    #[test]
+    fn a_dependency_without_feature_settings_produces_the_existing_output() {
+        let linked = linked("[dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", version = \"0.1\" }\n");
+
+        assert!(!linked.contains("features"), "{linked}");
+        assert!(!linked.contains("default-features"), "{linked}");
+    }
+
+    #[test]
     fn an_existing_runtime_is_redirected_before_its_package_is_instrumented() {
         let temporary = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(temporary.path().join("Cargo.toml")).unwrap();
@@ -783,6 +875,27 @@ mod tests {
         assert!(text.contains("gamma_rt = { package = \"cargo-gamma-rt\""), "{text}");
         assert!(text.contains("cargo-gamma-rt = { path"), "{text}");
         assert!(text.contains(runtime.as_str()), "{text}");
+    }
+
+    #[test]
+    fn workspace_dependency_features_survive_being_redirected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(temporary.path().join("Cargo.toml")).unwrap();
+        let runtime = absolute(Utf8Path::new("/scratch/rt"));
+
+        fs::write(
+            path.as_std_path(),
+            "[workspace]\nmembers = []\n\n\
+             [workspace.dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", version = \"0.1\", features = [\"embedding\"] }\n",
+        )
+        .unwrap();
+
+        let mut manifest = Manifest::read(&path).unwrap();
+        manifest.redirect_runtime(&runtime).unwrap();
+        let text = manifest.document.to_string();
+
+        assert!(text.contains("gamma_rt = { package = \"cargo-gamma-rt\""), "{text}");
+        assert!(text.contains("features = [\"embedding\"]"), "{text}");
     }
 
     #[test]

@@ -352,8 +352,8 @@ pub(super) struct OutputLimits {
 
 /// The normal build-output budget, per stream.
 const OUTPUT_LIMITS: OutputLimits = OutputLimits {
-    retained: 4 * 1024 * 1024,
-    line: 64 * 1024,
+    retained: 256 * 1024 * 1024,
+    line: 1024 * 1024,
     backlog: 64,
 };
 
@@ -406,9 +406,9 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
     }
 
     thread::Builder::new().name("cargo-gamma-build-output".to_owned()).spawn(move || {
-        let mut text = Vec::with_capacity(limits.retained);
+        let mut text = Vec::new();
         let mut buffer = [0_u8; 8192];
-        let mut line = Vec::with_capacity(limits.line);
+        let mut line = Vec::new();
         let mut complete = true;
         let mut within_limits = true;
         let mut line_limited = false;
