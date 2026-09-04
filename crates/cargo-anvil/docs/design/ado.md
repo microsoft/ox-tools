@@ -609,13 +609,13 @@ threading pre-formatted strings the local run never produces. The chain:
    by a 1ESPT `job.yml`).
 3. **The group step template** runs `just anvil-<group>` with an impact mode fixed **by
    group class at emit time** (never probed from a file). PR groups — which always download the
-   artifact — export `ANVIL_IMPACT=consume`. In consume mode `anvil-impact` is a pure
+   artifact — set `ANVIL_IMPACT=consume` in the step environment. In consume mode `anvil-impact` is a pure
    no-op — it trusts the downloaded cache verbatim and **neither snapshots nor
    recomputes**, so it needs neither cargo-delta nor a fetched base ref. Each scoped
    check reads its category's scope from the cache file via `_anvil-impact-include` (into a
    local `$include` variable).
 4. **Scheduled stages download nothing** and always validate the full workspace, so the
-   group step exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by group
+   group step sets `ANVIL_IMPACT=off` in the step environment. Like the PR `consume`, this is fixed by group
    class at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
    mode is a property of the group class, not something probed at runtime. (`setup.yml` no
    longer caches `target/` at all, so the durable `impact.state` never travels through the
@@ -681,15 +681,16 @@ steps:
     catch { Write-Error "Could not resolve PR title for PR $prId"; exit 1 }
   env:
     SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-- script: just anvil-pr-fast
+- pwsh: just anvil-pr-fast
   displayName: anvil pr-fast
   env:
     PR_TITLE: $(PR_TITLE)
     # Scope comes from the downloaded target/anvil/impact cache: a PR group
-    # always downloads the artifact, so it exports ANVIL_IMPACT=consume (trust
+    # always downloads the artifact, so it sets ANVIL_IMPACT=consume (trust
     # the cache; no snapshot/cargo-delta/base ref), whereas a scheduled group
-    # exports ANVIL_IMPACT=off. The mode is fixed by group class at emit time -- never
+    # sets ANVIL_IMPACT=off. The mode is fixed by group class at emit time -- never
     # probed from the cacheable impact.state marker. See §4.3.
+    ANVIL_IMPACT: "consume"
 ```
 
 The generated per-group step templates take no parameters. Only `pr-fast.yml`
@@ -734,8 +735,10 @@ takes a single `group` parameter that controls which recipes run:
   `pr-fast` matrix leg never installs cargo-mutants.
 
 The template expects the caller to provide the Rust/rustup bootstrap and
-`cargo` on PATH (see §6). ADO uses the default `install` backend (source
-builds) so adopters do not need to approve a binary-installation service.
+`cargo` on PATH (see §6). Command steps use `pwsh`, which is already required
+by the template's toolchain fingerprinting step, so Windows agents do not need
+Bash. ADO uses the default `install` backend (source builds) so adopters do not
+need to approve a binary-installation service.
 
 `impact.yml` invokes `setup.yml` with `group: none`, then installs `cargo-delta`
 via `anvil-tool-cargo-delta-install` and runs the shared **`just anvil-impact`**
@@ -900,7 +903,7 @@ files into upserts/deletions of a sticky PR comment via the Azure DevOps REST AP
 path is the supported way).
 
 The wiring lives in the `pr_fast` stage of `pr-stages.yml`, as a pwsh step that runs
-on the canonical Linux leg after the `pr-fast` group's `bash: just anvil-pr-fast`
+on the canonical Linux leg after the `pr-fast` group's `pwsh: just anvil-pr-fast`
 step:
 
 ```yaml

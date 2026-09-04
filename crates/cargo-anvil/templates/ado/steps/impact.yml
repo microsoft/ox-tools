@@ -17,9 +17,9 @@ steps:
   - template: setup.yml
     parameters:
       group: none
-  - bash: just anvil-tool-cargo-delta-install install
+  - pwsh: just anvil-tool-cargo-delta-install install
     displayName: anvil impact (install cargo-delta)
-  - bash: just anvil-impact
+  - pwsh: just anvil-impact
     # Run the shared anvil-impact recipe -- the same impact building block
     # adopters run locally. It resolves the base ref (_anvil-base-ref),
     # snapshots the base ref in a throwaway worktree and the working
