@@ -2,27 +2,6 @@
 
 Code in this repository should follow the guidelines specified in the [Microsoft Rust Guidelines](https://microsoft.github.io/rust-guidelines/agents/all.txt).
 
-## README Files
-
-Crate README files are auto-generated via `just anvil-readme --fix`. Do not manually update them.
-
-## Executing `just` commands
-
-If you only touch one crate, you may use `just package=crate_name command` to narrow command scope to one crate.
-
-## Verifying Changes
-
-- Run `just anvil-pr` for source, build, configuration, or CI changes. It
-  executes the complete local PR tier, including fast checks, tests and
-  coverage, runtime analysis, and mutation testing.
-- Run `just anvil-pr-fast` only when the change cannot affect executable
-  behavior, such as documentation-only edits. It includes formatting,
-  generated README, spelling, metadata, dependency-policy, and static-analysis
-  checks, but deliberately omits tests, coverage, runtime analysis, and
-  mutation testing.
-- Do not substitute individual developer-convenience recipes for either
-  verification tier.
-
 ## Spelling
 
 The spell checker dictionary is in the `.spelling` file, one word per line in arbitrary order.

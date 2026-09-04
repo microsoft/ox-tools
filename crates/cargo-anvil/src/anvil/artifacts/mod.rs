@@ -21,6 +21,7 @@
 pub mod ado;
 pub mod container;
 pub mod github;
+pub mod instructions;
 pub mod justfile;
 pub mod region;
 
@@ -63,6 +64,7 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         justfile::helpers(),
         justfile::impact(),
         justfile::tiers(),
+        instructions::cargo_anvil(),
         region::justfile_imports(),
         region::workspace_lints(),
         region::single_crate_lints(),
@@ -164,6 +166,7 @@ mod tests {
             justfile::helpers(),
             justfile::impact(),
             justfile::tiers(),
+            instructions::cargo_anvil(),
             region::justfile_imports(),
             region::workspace_lints(),
             region::single_crate_lints(),

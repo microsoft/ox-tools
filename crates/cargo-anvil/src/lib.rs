@@ -39,6 +39,8 @@
 //! - GitHub Actions workflows, Azure DevOps pipelines, or both;
 //! - shared formatting, lint, dependency, spelling, and impact-analysis
 //!   configuration;
+//! - repository-wide agent instructions for setup, complete PR validation,
+//!   and efficient iteration on individual failures;
 //! - safe update metadata that distinguishes generated content from
 //!   repository-owned customization.
 //!

@@ -39,6 +39,8 @@ A generated setup includes:
 * GitHub Actions workflows, Azure DevOps pipelines, or both;
 * shared formatting, lint, dependency, spelling, and impact-analysis
   configuration;
+* repository-wide agent instructions for setup, complete PR validation,
+  and efficient iteration on individual failures;
 * safe update metadata that distinguishes generated content from
   repository-owned customization.
 
@@ -373,7 +375,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbLWH4W5BHNskbie4mnQoeuX4bATuTcxHMFGAbnkJHpis_GnRhYvRhcoQby95IE7unZSwbkx5xJFYa4x0bzt418x7PUk4bg31UFzXD2hFhZIGDa2NhcmdvLWFudmlsZTAuOC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbLWH4W5BHNskbie4mnQoeuX4bATuTcxHMFGAbnkJHpis_GnRhYvRhcoQbfwKnpCfYspUb4NWI9bKnpi8bM8O_p0ovp3EbxjyK4cgWbiphZIGDa2NhcmdvLWFudmlsZTAuOC4wa2NhcmdvX2Fudmls
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://embarkstudios.github.io/cargo-deny/
