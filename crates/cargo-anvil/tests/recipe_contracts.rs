@@ -13,7 +13,8 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -407,12 +408,21 @@ $env:MIRI_SYSROOT | Set-Content -LiteralPath "$prefix.sysroot"
 $env:MIRI_BE_RUSTC | Set-Content -LiteralPath "$prefix.miri-be-rustc"
 $env:MIRIFLAGS | Set-Content -LiteralPath "$prefix.miriflags"
 $env:RUSTFLAGS | Set-Content -LiteralPath "$prefix.rustflags"
-(Get-Date).ToUniversalTime().Ticks | Set-Content -LiteralPath "$prefix.start"
-if ($env:FAKE_MIRI_SLEEP_MS) {
-    Start-Sleep -Milliseconds ([int]$env:FAKE_MIRI_SLEEP_MS)
+if ($env:FAKE_MIRI_BARRIER_DIR) {
+    $ready = Join-Path $env:FAKE_MIRI_BARRIER_DIR "$artifact.ready"
+    $release = Join-Path $env:FAKE_MIRI_BARRIER_DIR 'release'
+    Set-Content -LiteralPath $ready -Value 'ready'
+
+    $watchdog = [Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $release)) {
+        if ($watchdog.Elapsed.TotalSeconds -ge 60) {
+            Write-Error "timed out at Miri concurrency barrier: $artifact"
+            exit 98
+        }
+        Start-Sleep -Milliseconds 10
+    }
 }
 Write-Output "miri output: $artifact"
-(Get-Date).ToUniversalTime().Ticks | Set-Content -LiteralPath "$prefix.end"
 if ($artifact -like '*fail*') { exit 9 }
 exit 0
 "#,
@@ -447,7 +457,7 @@ fn path_with_fake_bin(root: &Path) -> OsString {
     std::env::join_paths(paths).unwrap()
 }
 
-fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Output {
+fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Command {
     let mut command = Command::new("just");
     command
         .arg("--justfile")
@@ -470,7 +480,13 @@ fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> 
     for &(key, value) in environment {
         command.env(key, value);
     }
-    command.output().expect("just is required to verify generated recipe behavior")
+    command
+}
+
+fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Output {
+    just_command(root, arguments, environment)
+        .output()
+        .expect("just is required to verify generated recipe behavior")
 }
 
 fn run_just_with_real_cargo(root: &Path, arguments: &[&str]) -> Output {
@@ -525,27 +541,41 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     );
     let cargo_log = tmp.path().join("cargo.log");
     let run_log = tmp.path().join("miri-run");
+    let barrier = tmp.path().join("miri-barrier");
+    fs::create_dir(&barrier).unwrap();
     let artifacts = r#"[
         {"name":"zeta-test","package_id":"fixture 0.1.0","target_name":"zeta","target_kind":"test","test":true},
         {"name":"alpha-test","package_id":"fixture 0.1.0","target_name":"alpha","target_kind":"test","test":true,"duplicate":true},
         {"name":"ordinary-bin","package_id":"fixture 0.1.0","test":false},
         {"name":"excluded-test","package_id":"other-package 0.1.0","test":true}
     ]"#;
-    let output = run_just(
+    let mut command = just_command(
         tmp.path(),
         &["_anvil-miri-test", "standard"],
         &[
             ("ANVIL_MIRI_JOBS", OsStr::new("2")),
             ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
             ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
+            ("FAKE_MIRI_BARRIER_DIR", barrier.as_os_str()),
             ("FAKE_MIRI_RUN_LOG", run_log.as_os_str()),
-            ("FAKE_MIRI_SLEEP_MS", OsStr::new("300")),
             ("FAKE_RUSTC_PREAMBLE", OsStr::new("rustc diagnostic preamble")),
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
             ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("other-package")),
             ("FAKE_SECOND_MIRI_EXCLUDE", OsStr::new("1")),
         ],
     );
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command.spawn().expect("just is required to verify generated recipe behavior");
+
+    let alpha_ready = barrier.join("alpha-test.ready");
+    let zeta_ready = barrier.join("zeta-test.ready");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !(alpha_ready.is_file() && zeta_ready.is_file()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let both_workers_admitted = alpha_ready.is_file() && zeta_ready.is_file();
+    write(&barrier.join("release"), "");
+    let output = child.wait_with_output().unwrap();
 
     assert!(
         output.status.success(),
@@ -555,10 +585,12 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     );
     let cargo_log = fs::read_to_string(cargo_log).unwrap();
     assert_miri_cargo_calls(&cargo_log);
-    assert!(run_log.with_extension("alpha-test.start").is_file());
-    assert!(run_log.with_extension("zeta-test.start").is_file());
-    assert!(!run_log.with_extension("ordinary-bin.start").exists());
-    assert!(!run_log.with_extension("excluded-test.start").exists());
+    assert!(
+        both_workers_admitted,
+        "both Miri workers must reach the barrier before either is released"
+    );
+    assert!(!barrier.join("ordinary-bin.ready").exists());
+    assert!(!barrier.join("excluded-test.ready").exists());
 
     let recorded_cwd = fs::read_to_string(run_log.with_extension("alpha-test.cwd")).unwrap();
     let expected_cwd = fs::canonicalize(tmp.path()).unwrap();
@@ -572,30 +604,6 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
             .unwrap()
             .trim(),
         "host"
-    );
-    let alpha_started = fs::read_to_string(run_log.with_extension("alpha-test.start"))
-        .unwrap()
-        .trim()
-        .parse::<i64>()
-        .unwrap();
-    let zeta_started = fs::read_to_string(run_log.with_extension("zeta-test.start"))
-        .unwrap()
-        .trim()
-        .parse::<i64>()
-        .unwrap();
-    let alpha_ended = fs::read_to_string(run_log.with_extension("alpha-test.end"))
-        .unwrap()
-        .trim()
-        .parse::<i64>()
-        .unwrap();
-    let zeta_ended = fs::read_to_string(run_log.with_extension("zeta-test.end"))
-        .unwrap()
-        .trim()
-        .parse::<i64>()
-        .unwrap();
-    assert!(
-        alpha_started < zeta_ended && zeta_started < alpha_ended,
-        "two workers should overlap: alpha {alpha_started}..{alpha_ended}, zeta {zeta_started}..{zeta_ended}"
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
