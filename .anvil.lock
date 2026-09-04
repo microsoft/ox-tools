@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.8.0"
-catalog_checksum = "sha256:3a67e3db35350cfc2cb00d47a903a1288c29888aa4bb2b5358d5dea2f4d9ed00"
+catalog_checksum = "sha256:9c4e21a992448e8fe674ef02fc448397ea92cf2766026cb2011b2489f6cffbf4"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -29,11 +29,11 @@ checksum = "sha256:ea44d5e1a2cb1471cf2cef05eceab846d8afa45cf691be800f21fec1218da
 
 [[file]]
 path = ".github/instructions/cargo-anvil.instructions.md"
-checksum = "sha256:878d1cd06fc1ffbc1c84e7194b111368e7aad1d7fdbf5cb618b23dbf70bb0e59"
+checksum = "sha256:cf59c434d6486248f6ebc16a450b88f64651969b7de6e904f14d383db1decfa5"
 
 [[file]]
 path = ".github/skills/cargo-anvil-adoption/SKILL.md"
-checksum = "sha256:2586bc764992b6fd438edc360fec7299d515aaa5714dc3124d8aa640f1f37e54"
+checksum = "sha256:b4b473755fb039840feffd782c38d6fe97dba28bc99e976ba8fad7c87240f11c"
 
 [[file]]
 path = ".github/skills/code-review/SKILL.md"

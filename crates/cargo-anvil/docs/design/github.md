@@ -178,8 +178,14 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 
 ## 2. Emitted artifacts
 
+Two host-neutral agent artifacts also live under `.github/` by convention and
+are emitted for GitHub, ADO, and local-only installations. They are shown here
+alongside the GitHub-gated files so the on-disk tree is complete.
+
 ```text
 .github/
+├── instructions/
+│   └── cargo-anvil.instructions.md    owned   (repository-wide setup and verification guidance; all backends)
 ├── actions/
 │   ├── anvil-setup/action.yml         owned   (install just + group-scoped catalog tools)
 │   ├── anvil-setup/just-problem-matcher.json
@@ -188,7 +194,8 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   ├── anvil-report-status/action.yml  owned   (publish per-job commit statuses)
 │   ├── anvil-impact/action.yml        owned   (runs `just anvil-impact`, uploads impact artifact; omitted if .delta.toml disabled)
 ├── skills/
-│   └── code-review/SKILL.md           owned   (review guidance for PR reviewers, incl. Copilot code review)
+│   ├── cargo-anvil-adoption/SKILL.md  owned   (post-generation cleanup workflow; all backends)
+│   └── code-review/SKILL.md           owned   (GitHub PR review guidance)
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)
     ├── anvil-scheduled-impl.yml         owned   (reusable workflow for the scheduled tier)

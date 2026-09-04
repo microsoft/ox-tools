@@ -36,6 +36,7 @@ mod tests {
         assert!(CARGO_ANVIL_INSTRUCTIONS.contains("just anvil-pr-fast"));
         assert!(CARGO_ANVIL_INSTRUCTIONS.contains("just anvil-<check>"));
         assert!(CARGO_ANVIL_INSTRUCTIONS.contains("just` 1.46.0 or newer"));
+        assert!(CARGO_ANVIL_INSTRUCTIONS.contains("In a local-only installation"));
     }
 
     #[test]
@@ -48,5 +49,6 @@ mod tests {
         assert!(CARGO_ANVIL_ADOPTION_SKILL.contains("Migrate repository policy before deleting"));
         assert!(CARGO_ANVIL_ADOPTION_SKILL.contains("Prove equivalence before deleting duplicates"));
         assert!(CARGO_ANVIL_ADOPTION_SKILL.contains("cargo anvil --dry-run"));
+        assert!(CARGO_ANVIL_ADOPTION_SKILL.contains("local-only installation must run"));
     }
 }

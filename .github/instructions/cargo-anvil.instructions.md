@@ -17,9 +17,11 @@ as the source of truth for local verification.
   retry the failed command.
 - The complete tier includes tests, coverage, runtime analysis, MSRV testing,
   and mutation testing, so it can take a long time. When turnaround time
-  matters, offer to run only `just anvil-pr-fast` locally and let the pull
-  request checks execute the remaining groups. Make clear that the fast tier is
-  partial verification.
+  matters and this repository has a generated CI backend that will validate
+  the current change, offer to run only `just anvil-pr-fast` locally and let
+  the pull request checks execute the remaining groups. Make clear that the
+  fast tier is partial verification. In a local-only installation, run the
+  remaining groups locally before reporting verification complete.
 - When a specific Anvil check fails, fix the issue and rerun its individual
   `just anvil-<check>` recipe first. Use the recipe named in the failure output
   rather than repeating the whole tier during iteration.

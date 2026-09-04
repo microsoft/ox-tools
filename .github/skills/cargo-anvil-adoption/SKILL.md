@@ -150,8 +150,10 @@ maintainer when an atomic external update is necessary.
    clean.
 2. Run `just anvil-pr-fast`.
 3. Run `just anvil-pr` for the complete local PR tier. If that is impractical,
-   ask whether to stop after the fast tier and rely on PR checks for the
-   remaining groups; do not describe partial validation as complete.
+   and a generated CI backend will validate the current change, ask whether to
+   stop after the fast tier and rely on PR checks for the remaining groups. A
+   local-only installation must run the remaining groups locally. Never
+   describe partial validation as complete.
 4. Confirm generated README files and documentation are current.
 5. Search again for deleted workflow names, stale badges, old recipe names,
    duplicate version lists, and orphaned scripts.

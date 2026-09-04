@@ -188,6 +188,11 @@ exposes the **artifacts themselves**, content and identity together, in an `arti
 
 ```rust
 pub mod artifacts {
+    // Host-neutral agent guidance emitted for every backend selection.
+    pub mod instructions {
+        pub fn cargo_anvil() -> Artifact;      // .github/instructions/cargo-anvil.instructions.md
+        pub fn adoption_skill() -> Artifact;  // .github/skills/cargo-anvil-adoption/SKILL.md
+    }
     // The `justfiles/anvil/` recipe tree — every member is an owned `.just` file.
     pub mod justfile {
         pub fn entry() -> Artifact;     // justfiles/anvil/mod.just (imports the siblings)
