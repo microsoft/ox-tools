@@ -1606,4 +1606,83 @@ mod tests {
     fn relocated_residue_loses_the_blank_lines_above_it() {
         assert_eq!(trim_leading_blank_lines("\n  \n\tignore = []\n"), "\tignore = []\n");
     }
+
+    /// A dotted key is configuration like any other. Not descending into it
+    /// would hide a genuine disagreement, and the hand-written value would be
+    /// deleted in favour of the managed one instead of being reported.
+    #[test]
+    fn a_differing_dotted_key_is_reported_as_a_conflict() {
+        let adoption = adopt_unmanaged_toml_tables(
+            "[lints]\nrust.unsafe_code = \"forbid\"\n",
+            "[lints]\nrust.unsafe_code = \"allow\"\n",
+            SYN,
+        );
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Conflict {
+                table: "lints".to_owned(),
+                key: "rust.unsafe_code".to_owned(),
+                managed: "\"allow\"".to_owned(),
+                hand_written: "\"forbid\"".to_owned(),
+            },
+            "the dotted key is compared rather than skipped"
+        );
+    }
+
+    /// `[workspace.package]` declares table `package`, not a key of
+    /// `[workspace]`. Folding its values into the parent's would make the
+    /// managed table look as though it already declared `package.edition`, and
+    /// the hand-written copy of that key would be deleted instead of kept.
+    #[test]
+    fn a_nested_headed_table_is_not_part_of_the_table_that_declares_it() {
+        let text = "[workspace]\nmembers = []\npackage.edition = \"2024\"\n";
+        let body = "[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\n";
+        let (adopted, residue) = adopted_with_residue(text, body);
+
+        assert_eq!(residue, "package.edition = \"2024\"\n", "the hand-written dotted key is kept");
+        assert_eq!(adopted, "", "the hand-written table is adopted:\n{adopted}");
+    }
+
+    /// The same distinction seen from the host: a nested headed table is not an
+    /// entry of the table above it. Counted as one, it would be relocated out
+    /// from under its own header and become a setting of a different table.
+    #[test]
+    fn a_nested_headed_table_is_not_an_entry_of_the_table_above_it() {
+        let text = "[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\n";
+        let adopted = adopted_text(text, "[workspace]\nmembers = []\n");
+
+        assert_eq!(
+            adopted, "[workspace.package]\nedition = \"2024\"\n",
+            "the nested table stays where it was written:\n{adopted}"
+        );
+    }
+
+    /// The refusal check masks every managed region except the one being
+    /// introduced, which has to stay readable for the check to judge it. The
+    /// blanking keeps every line break, so the parser reports the same spans
+    /// against the copy as against the original.
+    #[test]
+    fn masking_keeps_the_named_region_and_every_line_break() {
+        let text = "[advisories]\n\
+                    # >>> anvil-managed: a\n\
+                    yanked = \"deny\"\n\
+                    # <<< anvil-managed: a\n\
+                    # >>> anvil-managed: b\n\
+                    unmaintained = \"warn\"\n\
+                    # <<< anvil-managed: b\n";
+        let masked = mask_other_managed_regions(text, SYN, "b");
+
+        assert_eq!(masked.len(), text.len(), "every byte offset is where it was");
+        assert_eq!(
+            masked.matches('\n').count(),
+            text.matches('\n').count(),
+            "the line breaks survive the blanking:\n{masked}"
+        );
+        assert!(
+            masked.contains("unmaintained = \"warn\""),
+            "the region under consideration is left readable:\n{masked}"
+        );
+        assert!(!masked.contains("yanked = \"deny\""), "the other region is blanked:\n{masked}");
+    }
 }
