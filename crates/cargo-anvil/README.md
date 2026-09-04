@@ -380,11 +380,11 @@ metadata conventions — see its documentation.
 
 #### Undefined-behavior checking (`miri`)
 
-The PR-tier `miri` check compiles `cargo miri test --all-features --tests`
-once, then runs the resulting Miri test executables concurrently. Each
-artifact worker invokes `cargo-miri runner` for one executable at a time.
-Set `ANVIL_MIRI_JOBS` to a positive integer to override the default of one
-worker per logical processor.
+The PR-tier `miri` check compiles
+`cargo miri test --all-features --tests --no-run` once, then runs the
+resulting Miri test executables concurrently. Each artifact worker invokes
+`cargo-miri runner` for one executable at a time. Set `ANVIL_MIRI_JOBS` to a
+positive integer to override the default of one worker per logical processor.
 Opt a test out of miri when it touches the filesystem, spawns
 subprocesses, or otherwise can’t run under the interpreter:
 
@@ -506,7 +506,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb8BB-IcOmdhYbgADvBGWK0GkbgVbvzZL86csbC7dtKtnRLxhhZIGDa2NhcmdvLWFudmlsZTAuNy4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbwOFJtCJT_70bA-34oRc-e-obCxEe-6OTM7Eb3-Jyfz7Am-RhZIGDa2NhcmdvLWFudmlsZTAuNy4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts

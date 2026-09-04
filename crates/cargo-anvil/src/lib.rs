@@ -381,11 +381,11 @@
 //!
 //! ### Undefined-behavior checking (`miri`)
 //!
-//! The PR-tier `miri` check compiles `cargo miri test --all-features --tests`
-//! once, then runs the resulting Miri test executables concurrently. Each
-//! artifact worker invokes `cargo-miri runner` for one executable at a time.
-//! Set `ANVIL_MIRI_JOBS` to a positive integer to override the default of one
-//! worker per logical processor.
+//! The PR-tier `miri` check compiles
+//! `cargo miri test --all-features --tests --no-run` once, then runs the
+//! resulting Miri test executables concurrently. Each artifact worker invokes
+//! `cargo-miri runner` for one executable at a time. Set `ANVIL_MIRI_JOBS` to a
+//! positive integer to override the default of one worker per logical processor.
 //! Opt a test out of miri when it touches the filesystem, spawns
 //! subprocesses, or otherwise can't run under the interpreter:
 //!
