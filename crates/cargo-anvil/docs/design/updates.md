@@ -246,27 +246,37 @@ preserves their edit.
 TOML rejects a duplicate table header, so appending a region that declares `[lints]` to a
 host that already declares `[lints]` by hand does not merely duplicate text — it produces
 a manifest that will not parse. On **first introduction only** (once the region exists,
-in-place replacement applies and there is nothing to adopt), the tool therefore removes
-the hand-written table instead of duplicating it, including any comments and blank lines
-within that table's range.
+in-place replacement applies and there is nothing to adopt), the tool therefore takes over
+the hand-written table instead of duplicating it.
 
-Adoption is deliberately narrow. A hand-written table is removed only when **every** one
-of its configuration lines already appears in the rendered region body; the body may
-declare further lines of its own. Adoption is declined — the hand-written table stays
-exactly where it is — when any of the following holds:
+The host is read with the TOML parser, with any existing managed regions blanked out, so
+table headers are located by parsing rather than by scanning for a bracketed line. A
+bracketed line inside a `"""` value is a value to the parser and can no longer be mistaken
+for a header, and a host that already carries both a region copy and a hand-written copy —
+the very duplicate-header file this repairs — still parses in that masked view.
 
-- the table carries configuration the region body does not (silently discarding a user's
-  settings is a worse outcome than a visible parse failure);
-- either the host or the body contains a multi-line string (`"""` or `'''`), which a
-  line-oriented scanner cannot classify safely;
-- the header is an array of tables (`[[bin]]`), which TOML permits to repeat, so a second
-  one is not a duplicate;
-- the table sits inside an existing managed region, which the tool already owns.
+Each hand-written entry is then classified against the rendered region body:
 
-A declined adoption is not a refusal to write: the region is still inserted, so a host
-that declares a conflicting ordinary table still ends up with a duplicate-table parse
-error. `deny.toml` with user-authored `[advisories]` entries is the case that hits this,
-and resolving it is tracked separately.
+- **declared by both with the same value** — covered, and dropped, since the region
+  re-emits it;
+- **declared only by hand** — kept as *residue*, and re-emitted directly after the
+  region's closing sentinel, where it continues the table the region opens. The entry's
+  original source slice is moved, so its comments and spacing survive byte-for-byte;
+- **declared by both with different values** — a conflict. There is no output that keeps
+  both, because TOML forbids repeating the key inside one table, and no basis for choosing
+  between them, so the region is refused rather than written (see below).
+
+Adoption never touches an array of tables (`[[bin]]`), which TOML permits to repeat, so a
+second one is not a duplicate; nor a table inside an existing managed region, which the
+tool already owns; nor anything in a host the parser cannot read at all.
+
+Whatever adoption concludes, the spliced result is parsed before it is planned, with every
+*other* managed region masked out. Two managed regions may legitimately declare the same
+key while a migration is in flight — the old combined region is removed in the same pass
+that writes the sections replacing it — so only collisions with text nothing is going to
+remove count. If the result would not parse, the region is **refused**: the host is left
+alone, a diagnostic naming the host and the reason is recorded, and every other artifact is
+still planned. Refusing is scoped to the region, not the run.
 
 ### User-extension limits for TOML regions
 

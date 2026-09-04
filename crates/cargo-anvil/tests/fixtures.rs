@@ -85,6 +85,21 @@ fn region_decision(outcome: &RunOutcome, host: &str, id: &str) -> Decision {
         .decision
 }
 
+/// Read a TOML host anvil wrote and assert it **parses**.
+///
+/// Substring assertions are what let a broken host survive: a `deny.toml`
+/// carrying two `[advisories]` headers contains every string these fixtures
+/// look for and still fails the first `cargo deny` that reads it. Anything
+/// anvil writes to a `.toml` host has to be a file TOML accepts.
+fn read_parsing_toml(tmp: &TempDir, relpath: &str) -> String {
+    let path = tmp.path().join(relpath);
+    let text = std::fs::read_to_string(&path).unwrap();
+    if let Err(error) = text.parse::<toml_edit::DocumentMut>() {
+        panic!("{relpath} is not valid TOML: {error}\n---\n{text}\n---");
+    }
+    text
+}
+
 /// `single-crate`: a manifest with a bare `[package]` and no
 /// `[workspace]` should still get the per-crate lints region (not the
 /// workspace one), the Justfile imports region, and the full
@@ -175,6 +190,54 @@ fn user_edit_inside_region_is_left_alone() {
     );
 }
 
+/// `deny-conflict`: a `deny.toml` whose hand-written `[advisories]` sets
+/// `yanked` to something other than the managed body's value. No output keeps
+/// both — TOML forbids the repeated key — so the region is refused, the host is
+/// left byte-for-byte alone, and the rest of the onboarding still happens.
+#[test]
+fn a_conflicting_toml_host_is_refused_not_corrupted() {
+    let tmp = stage_fixture("deny-conflict");
+
+    let outcome = run(&tmp);
+
+    let after = read_parsing_toml(&tmp, "deny.toml");
+    assert!(
+        after.contains("yanked = \"warn\""),
+        "the repository's own value is never overwritten;\ngot:\n{after}"
+    );
+    assert!(
+        !after.contains("anvil-deny-advisories"),
+        "the conflicting region is not spliced in;\ngot:\n{after}"
+    );
+    assert_eq!(
+        after.matches("[advisories]").count(),
+        1,
+        "and no duplicate header is produced;\ngot:\n{after}"
+    );
+    assert_eq!(
+        region_decision(&outcome, "deny.toml", "anvil-deny-advisories"),
+        Decision::LeaveAlone,
+        "the conflicting region is planned as a no-op"
+    );
+    assert!(
+        outcome.plan.refusals().iter().any(|reason| reason.contains("yanked")),
+        "the refusal names the key that disagrees; got: {:#?}",
+        outcome.plan.refusals()
+    );
+
+    // The refusal is scoped to the region it applies to. The rest of the host,
+    // and the rest of the onboarding, still happens -- which is what makes
+    // refusing tolerable rather than a wall.
+    assert!(
+        after.contains("anvil-deny-licenses"),
+        "the non-conflicting sections are still written;\ngot:\n{after}"
+    );
+    assert!(
+        tmp.path().join("justfiles/anvil/mod.just").is_file(),
+        "other artifacts are still written"
+    );
+}
+
 /// `migration`: a workspace that already has a hand-written
 /// `Justfile`, a `[workspace.lints]` block, and a `deny.toml` should
 /// get anvil's regions spliced in without losing any user content.
@@ -193,7 +256,7 @@ fn migration_preserves_user_content() {
         "anvil imports region must be spliced into the existing Justfile"
     );
 
-    let cargo = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    let cargo = read_parsing_toml(&tmp, "Cargo.toml");
     assert!(
         cargo.contains("lto = \"thin\""),
         "user-authored [profile.release] must survive migration; got:\n{cargo}"
@@ -203,12 +266,32 @@ fn migration_preserves_user_content() {
         "anvil workspace lints region must be spliced into Cargo.toml"
     );
 
-    let deny = std::fs::read_to_string(tmp.path().join("deny.toml")).unwrap();
+    // The defect this fixture used to hide: the hand-written `[advisories]`
+    // declares an `ignore` list the managed body does not, so adoption cannot
+    // simply delete the table. Appending the region regardless produced a
+    // second `[advisories]` header, which TOML rejects outright -- and every
+    // assertion below still passed, because they only ever looked for a
+    // substring of its text.
+    let deny = read_parsing_toml(&tmp, "deny.toml");
     assert!(
         deny.contains("RUSTSEC-9999-0001"),
         "user-authored deny.toml content must survive migration; got:\n{deny}"
     );
     assert!(deny.contains("anvil-deny"), "anvil deny region must be spliced into deny.toml");
+    assert_eq!(
+        deny.matches("[advisories]").count(),
+        1,
+        "the hand-written table must be adopted, not duplicated; got:\n{deny}"
+    );
+    // Kept configuration has to land *inside* the table the region opens, or
+    // it silently changes meaning -- a relocated `ignore` that ends up under
+    // `[bans]` is a different setting that cargo-deny will not honor.
+    let advisories = deny.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(
+        advisories["advisories"]["ignore"].as_array().unwrap().len(),
+        1,
+        "the user's accepted advisory must still be an [advisories] entry; got:\n{deny}"
+    );
 
     // Idempotence: re-run leaves everything alone.
     let outcome2 = run(&tmp);
