@@ -19,11 +19,16 @@ use tempfile::TempDir;
 
 const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
 const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
+const BUILD: &str = include_str!("../templates/justfiles/anvil/dev/build.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
+const DOC_BUILD: &str = include_str!("../templates/justfiles/anvil/checks/doc-build.just");
+const EXAMPLES: &str = include_str!("../templates/justfiles/anvil/checks/examples.just");
 const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const LOOM: &str = include_str!("../templates/justfiles/anvil/checks/loom.just");
 const MSRV_TEST: &str = include_str!("../templates/justfiles/anvil/checks/msrv-test.just");
+const MIRI: &str = include_str!("../templates/justfiles/anvil/checks/miri.just");
+const README: &str = include_str!("../templates/justfiles/anvil/checks/readme-check.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
@@ -64,6 +69,21 @@ fn bolero_uses_its_supported_release_profile_option() {
         !BOLERO.contains("bolero test --release"),
         "cargo-bolero 0.13.4 does not accept Cargo's --release shorthand"
     );
+}
+
+#[test]
+fn developer_options_are_explicit_and_cloud_defaults_stay_non_interactive() {
+    assert!(BUILD.contains("[arg(\"package\", long"));
+    assert!(BUILD.contains("anvil-build package=\"\" profile=\"\""));
+    assert!(BUILD.contains("--all-features --all-targets --locked"));
+    assert!(DOC_BUILD.contains("[arg(\"open\", long, value=\"true\")]"));
+    assert!(EXAMPLES.contains("[arg(\"run\", long, value=\"true\")]"));
+    assert!(EXAMPLES.contains(".'no-run'"));
+    assert!(EXAMPLES.contains("if (-not $run) { exit 0 }"));
+    assert!(FMT.contains("[arg(\"fix\", long, value=\"true\")]"));
+    assert!(MIRI.contains("[arg(\"test\", long"));
+    assert!(MIRI.contains("[arg(\"example\", long"));
+    assert!(README.contains("[arg(\"fix\", long, value=\"true\")]"));
 }
 
 const FAKE_CARGO_PS1: &str = r#"
@@ -305,6 +325,13 @@ fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> 
     for &(key, value) in environment {
         command.env(key, value);
     }
+    command.output().expect("just is required to verify generated recipe behavior")
+}
+
+fn run_just_with_real_cargo(root: &Path, arguments: &[&str]) -> Output {
+    let mut command = Command::new("just");
+    command.args(["--justfile", "Justfile"]).args(arguments).current_dir(root);
+    command.env_remove("ANVIL_IMPACT");
     command.output().expect("just is required to verify generated recipe behavior")
 }
 
@@ -949,80 +976,6 @@ source-prereq:
 }
 
 #[test]
-fn repository_constants_match_shared_anvil_versions() {
-    let constants_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../constants.env");
-    if !constants_path.is_file() {
-        return;
-    }
-
-    let repository_constants = fs::read_to_string(constants_path).unwrap();
-    let constants = repository_constants.lines().filter_map(|line| {
-        let (name, value) = line.split_once('=')?;
-        Some((name.to_ascii_lowercase(), value.trim().to_owned()))
-    });
-    let anvil_versions = VERSIONS.lines().filter_map(|line| {
-        let (name, value) = line.split_once(":=")?;
-        Some((name.trim().to_owned(), value.trim().trim_matches('"').to_owned()))
-    });
-    let constants = constants.collect::<std::collections::HashMap<_, _>>();
-    let anvil_versions = anvil_versions.collect::<std::collections::HashMap<_, _>>();
-
-    let shared_keys = [
-        "rust_nightly_external_types",
-        "cargo_careful_version",
-        "cargo_check_external_types_version",
-        "cargo_deny_version",
-        "cargo_doc2readme_version",
-        "cargo_ensure_no_cyclic_deps_version",
-        "cargo_ensure_no_default_features_version",
-        "cargo_hack_version",
-        "cargo_llvm_cov_version",
-        "cargo_mutants_version",
-        "cargo_nextest_version",
-        "cargo_semver_checks_version",
-        "cargo_sort_version",
-        "cargo_spellcheck_version",
-        "cargo_udeps_version",
-    ];
-    let intentionally_unshared_keys = [
-        "rust_msrv",
-        "rust_latest",
-        // The legacy workflow's broad nightly follows rust-toolchain.toml,
-        // while Anvil's general-purpose nightly has its own compatibility cadence.
-        "rust_nightly",
-        "just_version",
-        "sccache_version",
-    ];
-    let mut mismatches = shared_keys
-        .iter()
-        .filter_map(|name| match (constants.get(*name), anvil_versions.get(*name)) {
-            (Some(constant), Some(anvil)) if constant == anvil => None,
-            (Some(constant), Some(anvil)) => Some(format!("{name}: constants.env={constant}, anvil={anvil}")),
-            (None, Some(_)) => Some(format!("{name}: missing from constants.env")),
-            (Some(_), None) => Some(format!("{name}: missing from versions.just")),
-            (None, None) => Some(format!("{name}: missing from constants.env and versions.just")),
-        })
-        .collect::<Vec<_>>();
-    let known_constants = shared_keys
-        .iter()
-        .chain(intentionally_unshared_keys.iter())
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
-    mismatches.extend(
-        constants
-            .keys()
-            .filter(|name| !known_constants.contains(name.as_str()))
-            .map(|name| format!("{name}: constants.env key is not classified as shared or intentionally unshared")),
-    );
-
-    assert!(
-        mismatches.is_empty(),
-        "the explicit shared repository and Anvil version set must be present and match:\n{}",
-        mismatches.join("\n")
-    );
-}
-
-#[test]
 fn public_api_checks_fail_when_metadata_discovery_fails() {
     if !tools_available() {
         return;
@@ -1090,6 +1043,201 @@ fn fmt_delegates_workspace_iteration_to_cargo_each() {
         "unexpected cargo invocation: {commands}"
     );
     assert!(!commands.contains("fmt --all"));
+}
+
+#[test]
+fn fmt_fix_removes_the_check_flag() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("fmt.just", FMT), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-rustfmt-validate-prereqs",
+            "anvil-component-nightly-rustfmt-install",
+            "anvil-tool-cargo-each-validate-prereqs",
+            "anvil-tool-cargo-each-install installer",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(tmp.path(), &["anvil-fmt", "--fix"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
+    assert!(output.status.success());
+    let commands = fs::read_to_string(log).unwrap();
+    assert!(commands.contains("each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest}"));
+    assert!(!commands.contains("--check"));
+}
+
+#[test]
+fn build_and_doc_options_produce_the_expected_cargo_commands() {
+    if !tools_available() {
+        return;
+    }
+    let build = fixture(
+        &[("build.just", BUILD)],
+        &["anvil-tool-rustc-validate-prereqs", "anvil-toolchain-stable-install"],
+    );
+    let build_log = build.path().join("cargo.log");
+    let build_output = run_just(
+        build.path(),
+        &["anvil-build", "--package", "fixture", "--profile", "release"],
+        &[("FAKE_CARGO_LOG", build_log.as_os_str())],
+    );
+    assert!(
+        build_output.status.success(),
+        "anvil-build failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build_output.stdout),
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+    let build_commands = fs::read_to_string(build_log).unwrap();
+    assert!(build_commands.contains("build --package fixture --profile release --all-features --all-targets --locked"));
+
+    let docs = fixture(
+        &[("doc-build.just", DOC_BUILD), ("impact.just", IMPACT)],
+        &[
+            "anvil-tool-rustc-validate-prereqs",
+            "anvil-toolchain-stable-install",
+            "anvil-impact",
+        ],
+    );
+    seed_include(docs.path(), "required", "--workspace");
+    let docs_log = docs.path().join("cargo.log");
+    let docs_output = run_just(
+        docs.path(),
+        &["anvil-doc-build", "--open"],
+        &[("FAKE_CARGO_LOG", docs_log.as_os_str())],
+    );
+    assert!(docs_output.status.success());
+    let docs_commands = fs::read_to_string(docs_log).unwrap();
+    assert!(
+        docs_commands.contains("doc --workspace --all-features --no-deps --open"),
+        "unexpected cargo invocation: {docs_commands}"
+    );
+}
+
+#[test]
+fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("miri.just", MIRI), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-miri-install",
+            "anvil-component-nightly-rust-src-install",
+            "anvil-component-nightly-miri-validate-prereqs",
+            "anvil-component-nightly-rust-src-validate-prereqs",
+            "anvil-impact",
+        ],
+    );
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    let log = tmp.path().join("cargo.log");
+    let default_output = run_just(tmp.path(), &["anvil-miri"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
+    assert!(
+        default_output.status.success(),
+        "default anvil-miri failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&default_output.stdout),
+        String::from_utf8_lossy(&default_output.stderr)
+    );
+    let example_output = run_just(
+        tmp.path(),
+        &["anvil-miri", "--package", "fixture", "--example", "basic"],
+        &[("FAKE_CARGO_LOG", log.as_os_str())],
+    );
+    assert!(example_output.status.success());
+    let commands = fs::read_to_string(log).unwrap();
+    assert!(commands.contains("+nightly-test miri test --all-features --tests --package fixture@0.1.0"));
+    assert!(commands.contains("+nightly-test miri run --all-features --locked --package fixture --example basic"));
+}
+
+#[test]
+fn examples_run_honors_default_exclusions_and_explicit_selection() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("examples.just", EXAMPLES), ("impact.just", IMPACT)],
+        &[
+            "anvil-tool-rustc-validate-prereqs",
+            "anvil-toolchain-stable-install",
+            "anvil-impact",
+        ],
+    );
+    write(
+        &tmp.path().join("Cargo.toml"),
+        r#"[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.anvil.examples]
+no-run = ["blocked", "sleeping"]
+"#,
+    );
+    write(&tmp.path().join("src/lib.rs"), "");
+    write(
+        &tmp.path().join("examples/ok.rs"),
+        r#"fn main() {
+    assert_eq!(std::env::var("ANVIL_EXAMPLE").as_deref(), Ok("1"));
+    std::fs::write("example-ran", "yes").unwrap();
+}
+"#,
+    );
+    write(&tmp.path().join("examples/blocked.rs"), "fn main() { std::process::exit(7); }\n");
+    write(
+        &tmp.path().join("examples/sleeping.rs"),
+        "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }\n",
+    );
+    let lock = Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(tmp.path())
+        .output()
+        .expect("cargo is required to prepare the example fixture");
+    assert!(lock.status.success(), "failed to create fixture lockfile");
+    seed_include(tmp.path(), "affected", "--workspace");
+
+    let default_run = run_just_with_real_cargo(tmp.path(), &["anvil-examples", "--run"]);
+    assert!(
+        default_run.status.success(),
+        "default example run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&default_run.stdout),
+        String::from_utf8_lossy(&default_run.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("example-ran")).unwrap(),
+        "yes",
+        "the runnable example must execute with ANVIL_EXAMPLE=1"
+    );
+    let explicit = run_just_with_real_cargo(
+        tmp.path(),
+        &["anvil-examples", "--run", "--package", "fixture", "--example", "blocked"],
+    );
+    assert_failed(&explicit, "explicitly selected excluded example");
+
+    let started = std::time::Instant::now();
+    let timeout = run_just_with_real_cargo(
+        tmp.path(),
+        &[
+            "anvil-examples",
+            "--run",
+            "--package",
+            "fixture",
+            "--example",
+            "sleeping",
+            "--timeout",
+            "1",
+        ],
+    );
+    assert_failed(&timeout, "sleeping example timeout");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the one-second timeout must terminate promptly"
+    );
+    assert!(
+        String::from_utf8_lossy(&timeout.stderr).contains("fixture::sleeping timed out after 1 seconds"),
+        "timeout must identify the selected target\nstderr:\n{}",
+        String::from_utf8_lossy(&timeout.stderr)
+    );
 }
 
 #[test]

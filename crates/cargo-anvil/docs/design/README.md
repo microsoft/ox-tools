@@ -58,15 +58,23 @@ missed, and onboarding new Rust repos requires copying-and-praying.
    full tier are all reproducible locally with a single `just` invocation, using the exact same
    arguments cloud workflows uses. The three commands `just anvil-pr`, `just anvil-scheduled`, and
    `just anvil-full` (= pr + scheduled) are first-class local entry points.
-6. **Deterministic ordinary-check compiler selection**: use the caller's
+6. **Repository-wide agent guidance**: emit an owned
+   `.github/instructions/cargo-anvil.instructions.md` with `applyTo: "**"` so
+   coding agents use the same setup, complete validation, fast fallback, and
+   targeted-rerun workflow in every adopter repository. Also emit the
+   `cargo-anvil-adoption` repository skill, which guides cleanup after the first
+   Anvil run in an existing Rust repository. It compares legacy behavior,
+   defaults migrations to the Anvil catalog, and retains a customization only
+   for a documented requirement the catalog cannot satisfy.
+7. **Deterministic ordinary-check compiler selection**: use the caller's
    `RUSTUP_TOOLCHAIN`, otherwise defer to either root toolchain-file spelling,
    otherwise use the root manifest MSRV explicitly. Never inherit a
    runner-default compiler when none of those sources exists.
-7. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
+8. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
    `cargo-anvil`) can still build and run tests.
-8. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
+9. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
    modified it, and updates only the unmodified bits.
-9. **Open source**: the crate ships from `github.com/microsoft/ox-tools` and publishes to
+10. **Open source**: the crate ships from `github.com/microsoft/ox-tools` and publishes to
    crates.io. The binary contains no Microsoft-internal dependencies; everything it can install
    on the user's behalf comes from crates.io.
 
@@ -256,7 +264,11 @@ repo/
 ├── rust-toolchain[.toml]                          optional, user-authored (read only)
 ├── .cargo/config.toml                             user-authored (read only)
 │
-├── .github/                                       only if --backend github (or autodetected) — see github.md
+├── .github/
+│   ├── instructions/cargo-anvil.instructions.md    owned, emitted for every backend
+│   ├── skills/cargo-anvil-adoption/SKILL.md        owned, emitted for every backend
+│   │
+│   ├── actions/ and workflows/                    only if --backend github (or autodetected) — see github.md
 │   ├── actions/anvil-setup/                         owned   (setup action and Just problem matcher)
 │   ├── actions/anvil-run-group/                     owned   (shared group action and capture script)
 │   ├── actions/anvil-report-status/                 owned   (supplemental commit-status reporter)
@@ -264,7 +276,8 @@ repo/
 │   ├── workflows/anvil-pr-impl.yml                  owned   (reusable workflow doing the wiring)
 │   ├── workflows/anvil-scheduled-impl.yml             owned
 │   ├── workflows/anvil-pr.yml                       owned   (root workflow: triggers/permissions/runner)
-│   └── workflows/anvil-scheduled.yml                  owned
+│   ├── workflows/anvil-scheduled.yml                  owned
+│   └── skills/code-review/SKILL.md                  owned   (GitHub PR review guidance)
 │
 └── .pipelines/                                    only if --backend ado (or autodetected) — see ado.md
     ├── anvil/pr.yml                                 owned   (stages template doing the wiring)

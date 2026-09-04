@@ -6,7 +6,7 @@
 [![crates.io](https://img.shields.io/crates/v/cargo-coverage-gate.svg)](https://crates.io/crates/cargo-coverage-gate)
 [![docs.rs](https://docs.rs/cargo-coverage-gate/badge.svg)](https://docs.rs/cargo-coverage-gate)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-coverage-gate)](https://crates.io/crates/cargo-coverage-gate)
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml/badge.svg)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 <a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>
@@ -187,7 +187,7 @@ disk and orchestrates rendering plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb3wjNoVxGaCAbpkmpjr98NCcbw-HRsqJQXfkb8-afvWiSredhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb3wjNoVxGaCAbpkmpjr98NCcbw-HRsqJQXfkb8-afvWiSredhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
  [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many.html
