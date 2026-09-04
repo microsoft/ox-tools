@@ -9,6 +9,14 @@ use std::backtrace::Backtrace;
 use std::io;
 
 use cargo_gamma_engine::{Error as EngineError, Parts as EngineParts};
+use serde_json::Value;
+
+/// A machine-readable diagnostic that should be persisted before an error unwinds its run state.
+#[derive(Debug)]
+pub(crate) struct Artifact {
+    pub(crate) file_name: &'static str,
+    pub(crate) value: Value,
+}
 
 /// An error carrying a human-readable message and an optional cause.
 ///
@@ -20,6 +28,7 @@ pub struct Error {
     cause: Option<Box<dyn StdError + Send + Sync>>,
     usage: bool,
     skippable: bool,
+    artifact: Option<Box<Artifact>>,
 
     /// Captured at construction, unconditionally.
     ///
@@ -39,6 +48,7 @@ impl Error {
             cause: None,
             usage: false,
             skippable: false,
+            artifact: None,
             backtrace: Backtrace::capture(),
         }
     }
@@ -79,6 +89,23 @@ impl Error {
     #[must_use]
     pub const fn is_skippable(&self) -> bool {
         self.skippable
+    }
+
+    /// Attaches a machine-readable diagnostic for the command layer to persist.
+    #[must_use]
+    pub(crate) fn with_artifact(mut self, file_name: &'static str, value: Value) -> Self {
+        self.artifact = Some(Box::new(Artifact { file_name, value }));
+        self
+    }
+
+    /// Returns the diagnostic attached to this failure, when it has one.
+    pub(crate) fn artifact(&self) -> Option<&Artifact> {
+        self.artifact.as_deref()
+    }
+
+    /// Appends command-layer context that was not available where the error originated.
+    pub(crate) fn append_message(&mut self, suffix: &str) {
+        self.message.push_str(suffix);
     }
 
     /// Attaches an underlying cause.
@@ -148,6 +175,7 @@ impl From<EngineError> for Error {
             cause,
             usage,
             skippable,
+            artifact: None,
             backtrace,
         }
     }

@@ -35,6 +35,28 @@ use splices::Splices;
 /// Where each live mutant's guard landed, by ordinal, paired with the file it landed in.
 type Guards = HashMap<u32, (Utf8PathBuf, Guard)>;
 
+#[derive(Clone, Copy)]
+struct BuildScope<'a> {
+    roots: Option<&'a [String]>,
+    mutants: Option<&'a [String]>,
+}
+
+fn retain_blamed(blamed: &mut HashMap<u32, String>, plan: &Plan, packages: Option<&[String]>) {
+    let Some(packages) = packages else {
+        return;
+    };
+
+    let packages: HashSet<&str> = packages.iter().map(String::as_str).collect();
+    let ordinals: HashSet<u32> = plan
+        .mutants
+        .iter()
+        .filter(|mutant| packages.contains(&*mutant.package))
+        .map(|mutant| mutant.ordinal)
+        .collect();
+
+    blamed.retain(|ordinal, _code| ordinals.contains(ordinal));
+}
+
 /// A test-only stand-in for one proof build: a verdict on which spliced ordinals fail to compile.
 ///
 /// Mirrors [`Converger::subset_fails`]'s own return: `Some(true)` failed, `Some(false)` compiled,
@@ -229,8 +251,8 @@ pub(super) struct Converger {
 
     /// How long the first build of the run took, which every later budget is scaled from.
     ///
-    /// Set once and never reset. A stage builds a fraction of the workspace, so letting a small
-    /// stage set this reference would leave every later stage — and the whole-workspace build that
+    /// Set once and never reset. A narrowed stage can build a fraction of the workspace, so letting
+    /// one set this reference would leave every later stage — and the whole-workspace build that
     /// follows them — with a budget derived from a build that was never comparable.
     first_round: Option<Duration>,
 
@@ -276,12 +298,17 @@ pub(super) struct Converger {
 
     /// Whether every build this run makes must compile the whole workspace.
     ///
-    /// Set when the preflight check could only be made to pass by widening: the tree the run works
-    /// in compiles under cargo's feature unification over every member and does not compile under
-    /// any subset of them. A narrowed build after that is a build already known to fail, and its
-    /// failure would be attributed to whichever mutants the rollback loop happened to blame — so
-    /// the same feature unification the preflight proved is what every later build asks for.
+    /// Set when preflight checked the whole workspace, either initially or after widening. Every
+    /// later build retains that root set so Cargo's feature unification stays constant. Narrowing
+    /// after a wide-only success would reproduce a known failure; narrowing an initially wide
+    /// build would compile dependency variants that the final workspace build cannot reuse.
     whole_workspace: bool,
+
+    /// Whether staged checks retain every workspace member as a Cargo root.
+    ///
+    /// Unlike [`Self::whole_workspace`], this does not widen the final test-target build. It only
+    /// keeps feature unification constant while mutation viability is checked stage by stage.
+    workspace_stages: bool,
 
     /// A test-only stand-in for the proof build in [`Self::subset_fails`].
     ///
@@ -334,6 +361,11 @@ impl Converger {
         self.whole_workspace = true;
     }
 
+    /// Keeps a whole-workspace Cargo graph during staged checks.
+    pub(super) const fn require_workspace_stages(&mut self) {
+        self.workspace_stages = true;
+    }
+
     /// Invalidates position-based splice indexes after the plan is sorted.
     pub(super) fn plan_reordered(&mut self) {
         self.splices.plan_reordered();
@@ -347,20 +379,46 @@ impl Converger {
         if self.whole_workspace { None } else { select }
     }
 
+    /// The mutants that must be absent while one attribution scope is being judged.
+    ///
+    /// Cargo's roots may be wider than the stage to keep feature unification stable. Mutants from
+    /// those additional packages still have to be restored to pristine source: filtering their
+    /// diagnostics after compilation is too late, because they may already have broken or masked
+    /// the build.
+    fn scoped_withdrawn(&self, plan: &Plan, packages: Option<&[String]>) -> HashSet<u32> {
+        let mut withdrawn = self.withdrawn.clone();
+        let Some(packages) = packages else {
+            return withdrawn;
+        };
+
+        let packages: HashSet<&str> = packages.iter().map(String::as_str).collect();
+
+        withdrawn.extend(
+            plan.mutants
+                .iter()
+                .filter(|mutant| !packages.contains(&*mutant.package))
+                .map(|mutant| mutant.ordinal),
+        );
+
+        withdrawn
+    }
+
     /// Instruments the tree and builds it until it compiles, withdrawing whatever stands in the way.
     ///
-    /// `select` names the packages to build, or is `None` for the whole workspace. `verb` is the
-    /// cargo command and its flags.
+    /// The scope's roots name the packages Cargo compiles, while its mutants limit what convergence
+    /// may withdraw. They normally agree; staged workspace checks use every member as a Cargo root
+    /// without making already-settled mutants part of the current stage. `verb` is the cargo
+    /// command and its flags.
     ///
     /// Returns cargo's JSON stream from the build that finally succeeded, or the diagnostic for a
     /// build that could not be made to compile at all. That second case is returned rather than
     /// raised because it is a result: the run can withdraw the population it belongs to, keep every
     /// verdict it has already reached, and still produce a report.
-    fn converge(
+    fn converge_scoped(
         &mut self,
         work: &Workspace,
         plan: &Plan,
-        select: Option<&[String]>,
+        scope: BuildScope<'_>,
         verb: &[&str],
         limits: BuildLimits,
         events: &mut dyn Events,
@@ -375,16 +433,17 @@ impl Converger {
         // Before the first ordinary round, and only ever before it. Whatever the probe withdraws is
         // withdrawn by the compiler's own accusation in a real build, so the loop below starts from
         // a tree the compiler has already ruled on rather than from a guess.
-        self.probe(work, plan, select, verb, limits, events)?;
+        self.probe(work, plan, scope, verb, limits, events)?;
 
         loop {
             self.rounds = self.rounds.saturating_add(1);
             self.total_rounds = self.total_rounds.saturating_add(1);
 
-            let guards = self.splices.instrument(work, plan, &self.withdrawn)?;
+            let withdrawn = self.scoped_withdrawn(plan, scope.mutants);
+            let guards = self.splices.instrument(work, plan, &withdrawn)?;
 
             let started = Instant::now();
-            let outcome = run_cargo(work, plan, verb, select, limits, self.first_round, events)?;
+            let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
             let elapsed = started.elapsed();
 
             let Some(stdout) = outcome.stdout else {
@@ -403,10 +462,11 @@ impl Converger {
                 return Ok(Convergence::Built(stdout));
             }
 
-            let blamed = blame(&stdout, &work.root, &guards);
+            let mut blamed = blame(&stdout, &work.root, &guards);
+            retain_blamed(&mut blamed, plan, scope.mutants);
 
             if blamed.is_empty() {
-                if let Some(isolated) = self.isolate(work, plan, select, verb, limits, events)? {
+                if let Some(isolated) = self.isolate_scoped(work, plan, scope, verb, limits, events)? {
                     let ordinals = match &isolated {
                         Isolation::Blamed(ordinals) | Isolation::Item(ordinals) => ordinals,
                     };
@@ -462,6 +522,29 @@ impl Converger {
         }
     }
 
+    #[cfg(test)]
+    fn converge(
+        &mut self,
+        work: &Workspace,
+        plan: &Plan,
+        select: Option<&[String]>,
+        verb: &[&str],
+        limits: BuildLimits,
+        events: &mut dyn Events,
+    ) -> Result<Convergence> {
+        self.converge_scoped(
+            work,
+            plan,
+            BuildScope {
+                roots: select,
+                mutants: select,
+            },
+            verb,
+            limits,
+            events,
+        )
+    }
+
     /// Uses proof builds to isolate a failure whose diagnostic spans name no guard.
     ///
     /// The pristine stage is tried first so a linker, build script or native dependency failure is
@@ -469,11 +552,11 @@ impl Converger {
     /// narrowed by enclosing item and finally by ordinal. The extra builds are rare, warm, and
     /// logarithmic for the ordinary single-mutant case; their cost is preferable to discarding a
     /// package's entire population.
-    fn isolate(
+    fn isolate_scoped(
         &mut self,
         work: &Workspace,
         plan: &Plan,
-        select: Option<&[String]>,
+        scope: BuildScope<'_>,
         verb: &[&str],
         limits: BuildLimits,
         events: &mut dyn Events,
@@ -484,11 +567,13 @@ impl Converger {
             .filter(|mutant| {
                 mutant.ordinal > 0
                     && !self.withdrawn.contains(&mutant.ordinal)
-                    && select.is_none_or(|packages| packages.iter().any(|package| package.as_str() == &*mutant.package))
+                    && scope
+                        .mutants
+                        .is_none_or(|packages| packages.iter().any(|package| package.as_str() == &*mutant.package))
             })
             .collect();
 
-        if candidates.is_empty() || self.subset_fails(work, plan, select, verb, limits, events, &candidates, &[])? != Some(false) {
+        if candidates.is_empty() || self.subset_fails(work, plan, scope, verb, limits, events, &candidates, &[])? != Some(false) {
             return Ok(None);
         }
 
@@ -517,12 +602,12 @@ impl Converger {
             let left = items[..middle].concat();
             let right = items[middle..].concat();
 
-            if self.subset_fails(work, plan, select, verb, limits, events, &population, &left)? == Some(true) {
+            if self.subset_fails(work, plan, scope, verb, limits, events, &population, &left)? == Some(true) {
                 items.truncate(middle);
                 continue;
             }
 
-            if self.subset_fails(work, plan, select, verb, limits, events, &population, &right)? == Some(true) {
+            if self.subset_fails(work, plan, scope, verb, limits, events, &population, &right)? == Some(true) {
                 drop(items.drain(..middle));
                 continue;
             }
@@ -536,7 +621,7 @@ impl Converger {
                     .filter(|candidate| !item.iter().any(|removed| removed.ordinal == candidate.ordinal))
                     .collect();
 
-                if self.subset_fails(work, plan, select, verb, limits, events, &population, &active)? == Some(false) {
+                if self.subset_fails(work, plan, scope, verb, limits, events, &population, &active)? == Some(false) {
                     return Ok(Some(Isolation::Item(item.iter().map(|mutant| mutant.ordinal).collect())));
                 }
             }
@@ -552,9 +637,9 @@ impl Converger {
             let left = &narrowed[..middle];
             let right = &narrowed[middle..];
 
-            if self.subset_fails(work, plan, select, verb, limits, events, &population, left)? == Some(true) {
+            if self.subset_fails(work, plan, scope, verb, limits, events, &population, left)? == Some(true) {
                 narrowed.truncate(middle);
-            } else if self.subset_fails(work, plan, select, verb, limits, events, &population, right)? == Some(true) {
+            } else if self.subset_fails(work, plan, scope, verb, limits, events, &population, right)? == Some(true) {
                 drop(narrowed.drain(..middle));
             } else {
                 return Ok(Some(Isolation::Item(item.iter().map(|mutant| mutant.ordinal).collect())));
@@ -562,6 +647,29 @@ impl Converger {
         }
 
         Ok(Some(Isolation::Blamed(narrowed.iter().map(|mutant| mutant.ordinal).collect())))
+    }
+
+    #[cfg(test)]
+    fn isolate(
+        &mut self,
+        work: &Workspace,
+        plan: &Plan,
+        select: Option<&[String]>,
+        verb: &[&str],
+        limits: BuildLimits,
+        events: &mut dyn Events,
+    ) -> Result<Option<Isolation>> {
+        self.isolate_scoped(
+            work,
+            plan,
+            BuildScope {
+                roots: select,
+                mutants: select,
+            },
+            verb,
+            limits,
+            events,
+        )
     }
 
     /// Builds one chosen subset of a candidate population.
@@ -573,7 +681,7 @@ impl Converger {
         &mut self,
         work: &Workspace,
         plan: &Plan,
-        select: Option<&[String]>,
+        scope: BuildScope<'_>,
         verb: &[&str],
         limits: BuildLimits,
         events: &mut dyn Events,
@@ -587,7 +695,7 @@ impl Converger {
             return Ok(oracle(&active));
         }
 
-        let mut withdrawn = self.withdrawn.clone();
+        let mut withdrawn = self.scoped_withdrawn(plan, scope.mutants);
 
         for mutant in population {
             if !active.contains(&mutant.ordinal) {
@@ -597,7 +705,7 @@ impl Converger {
 
         let _guards = self.splices.instrument(work, plan, &withdrawn)?;
         let started = Instant::now();
-        let outcome = run_cargo(work, plan, verb, select, limits, self.first_round, events)?;
+        let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
         let elapsed = started.elapsed();
 
         self.total_rounds = self.total_rounds.saturating_add(1);
@@ -628,12 +736,12 @@ impl Converger {
         &mut self,
         work: &Workspace,
         plan: &Plan,
-        select: Option<&[String]>,
+        scope: BuildScope<'_>,
         verb: &[&str],
         limits: BuildLimits,
         events: &mut dyn Events,
     ) -> Result<()> {
-        let (candidates, deferred) = self.probe_sets(plan, select);
+        let (candidates, deferred) = self.probe_sets(plan, scope.mutants);
 
         if candidates.len() < PROBE_FLOOR {
             return Ok(());
@@ -654,7 +762,7 @@ impl Converger {
         let guards = self.splices.instrument(work, plan, &deferred)?;
 
         let started = Instant::now();
-        let outcome = run_cargo(work, plan, verb, select, limits, self.first_round, events)?;
+        let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
         let elapsed = started.elapsed();
 
         // Counted as a round of this run's build time because that is what it is, and hiding it
@@ -686,7 +794,8 @@ impl Converger {
             return Ok(());
         }
 
-        let blamed = blame(&stdout, &work.root, &guards);
+        let mut blamed = blame(&stdout, &work.root, &guards);
+        retain_blamed(&mut blamed, plan, scope.mutants);
 
         self.history.push(Round {
             elapsed,
@@ -705,10 +814,9 @@ impl Converger {
 
     /// The mutants to probe, and the exclusion set that leaves only them in the tree.
     ///
-    /// Restricted to the packages this build actually compiles. A mutant outside the selection
-    /// contributes no diagnostic to this build, so deferring it would buy nothing and would rewrite
-    /// a file some later stage is about to want instrumented again — churn that costs rebuilds
-    /// without answering anything.
+    /// Restricted to the packages this probe may judge. Every other live mutant is deferred even
+    /// when Cargo's roots are wider, so an error from another stage cannot mask or be mistaken for
+    /// evidence about a hinted candidate.
     fn probe_sets(&self, plan: &Plan, select: Option<&[String]>) -> (Vec<u32>, HashSet<u32>) {
         let mine = |mutant: &Mutant| select.is_none_or(|names| names.iter().any(|name| name.as_str() == &*mutant.package));
 
@@ -716,7 +824,12 @@ impl Converger {
         let mut deferred = self.withdrawn.clone();
 
         for mutant in &plan.mutants {
-            if mutant.ordinal == 0 || self.withdrawn.contains(&mutant.ordinal) || !mine(mutant) {
+            if mutant.ordinal == 0 || self.withdrawn.contains(&mutant.ordinal) {
+                continue;
+            }
+
+            if !mine(mutant) {
+                let _ = deferred.insert(mutant.ordinal);
                 continue;
             }
 
@@ -968,14 +1081,12 @@ impl Converger {
         ))
     }
 
-    /// Compiles one stage's libraries, so its mutants are ruled on before anything downstream.
+    /// Checks one stage's mutants before anything downstream.
     ///
-    /// Only libraries and binaries are built, never test targets. Every mutant lives in one of
-    /// those, so this sees every diagnostic a mutant can cause, and it avoids the one thing a
-    /// subset build cannot reproduce: cargo resolves features over the packages being built, so a
-    /// test target that relies on a feature some other package switches on does not compile on its
-    /// own. Those targets are left to the whole-workspace build, where the features are the real
-    /// ones.
+    /// A narrowed run builds the stage's libraries and binaries. A workspace run checks every
+    /// member under a constant feature graph, which avoids producing a succession of differently
+    /// featured codegen artifacts; only the current stage's mutants may be blamed. The final build
+    /// still performs code generation and catches link- or monomorphization-only failures.
     /// A stage that cannot be made to compile does not stop the run. Its own mutants are taken out
     /// of the tree — which restores exactly the sources the preflight check already proved compile
     /// — and what it gave up on is returned so the run can report it. See [`Self::abandon`].
@@ -990,7 +1101,25 @@ impl Converger {
         // Nothing is narrated from inside a stage: the stage reports what it found and what it
         // withdrew as one line when it is done, and a round-by-round commentary underneath that
         // would bury the sequence the whole arrangement exists to show.
-        match self.converge(work, plan, self.scoped(Some(packages)), &["build", "--keep-going"], limits, events)? {
+        let workspace = self.whole_workspace || self.workspace_stages;
+        let roots = if workspace { None } else { Some(packages) };
+        let verb: &[&str] = if workspace {
+            &["check", "--keep-going"]
+        } else {
+            &["build", "--keep-going"]
+        };
+
+        match self.converge_scoped(
+            work,
+            plan,
+            BuildScope {
+                roots,
+                mutants: Some(packages),
+            },
+            verb,
+            limits,
+            events,
+        )? {
             Convergence::Built(stdout) => {
                 self.remember_compiled(&stdout, &work.root);
                 Ok(None)
@@ -1064,10 +1193,13 @@ impl Converger {
         // `cargo build --tests` emits the same compiler-artifact executable messages consumed by
         // `test_binaries`, while `--keep-going` lets convergence collect diagnostics from siblings
         // after one target fails. Reusing this stream avoids a second cache-hit Cargo invocation.
-        self.converge(
+        self.converge_scoped(
             work,
             plan,
-            select,
+            BuildScope {
+                roots: select,
+                mutants: select,
+            },
             &["build", "--tests", "--examples", "--keep-going"],
             limits,
             events,
