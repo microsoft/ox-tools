@@ -2263,6 +2263,15 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 # Iterate workspace members rather than every local path dependency that
 # `cargo fmt --all` discovers. `--keep-going` reports formatting failures from
 # every member while retaining a bounded rustfmt command line per invocation.
+#
+# Select the nightly through RUSTUP_TOOLCHAIN, not `+toolchain`. `cargo fmt`
+# only dispatches: cargo-fmt runs `rustfmt` as a child process through the
+# rustup shim, which reads RUSTUP_TOOLCHAIN and inherits it from any outer
+# `+`-selected cargo. So an inner `cargo +nightly fmt` still ran STABLE
+# rustfmt, which downgrades every unstable option above to a warning and exits
+# 0 -- a green check enforcing nothing. The `cargo each` wrapper is left
+# unpinned for the same reason: that pin is what leaks, and the wrapper only
+# enumerates members, it compiles nothing.
 
 # Check Rust source formatting.
 [script("pwsh", "-NoProfile")]
@@ -2270,7 +2279,8 @@ anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     if ($include -eq '--skip') { Write-Host 'anvil-fmt: no modified packages; skipping'; exit 0 }
-    cargo {{_anvil_stable_toolchain_args}} each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
+    $env:RUSTUP_TOOLCHAIN = '{{ rust_nightly }}'
+    cargo each --workspace --keep-going '--' cargo fmt --manifest-path '{manifest}' --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Per-check setup + validate-prereqs
