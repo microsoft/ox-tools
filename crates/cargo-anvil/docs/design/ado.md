@@ -686,9 +686,9 @@ steps:
   env:
     PR_TITLE: $(PR_TITLE)
     # Scope comes from the downloaded target/anvil/impact cache: a PR group
-    # always downloads the artifact, so it sets ANVIL_IMPACT=consume (trust
+    # always downloads the artifact, so it sets ANVIL_IMPACT to consume (trust
     # the cache; no snapshot/cargo-delta/base ref), whereas a scheduled group
-    # sets ANVIL_IMPACT=off. The mode is fixed by group class at emit time -- never
+    # sets ANVIL_IMPACT to off. The mode is fixed by group class at emit time -- never
     # probed from the cacheable impact.state marker. See §4.3.
     ANVIL_IMPACT: "consume"
 ```
