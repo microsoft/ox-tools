@@ -336,6 +336,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_linux
+          stage: impact
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/impact.yml
@@ -345,6 +346,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_windows
+          stage: impact
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/impact.yml
@@ -377,6 +379,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_fast
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -396,6 +399,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_fast
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -430,6 +434,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_test
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -445,6 +450,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_test
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -465,6 +471,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_msrv
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -474,6 +481,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_msrv
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -488,6 +496,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_runtime_analysis
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -497,6 +506,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_runtime_analysis
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -513,6 +523,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_mutants
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -522,6 +533,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_mutants
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -555,6 +567,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: scheduled_test
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-test.yml
@@ -567,6 +580,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: scheduled_test
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-test.yml
@@ -586,12 +600,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: scheduled_advisories
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-advisories.yml
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: scheduled_advisories
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-advisories.yml
@@ -607,12 +623,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: scheduled_runtime_analysis
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-runtime-analysis.yml
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: scheduled_runtime_analysis
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-runtime-analysis.yml
@@ -629,12 +647,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: scheduled_exhaustive
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-exhaustive.yml
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: scheduled_exhaustive
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-exhaustive.yml
@@ -777,15 +797,41 @@ steps:
 # Owns the per-job *shape*: how `pool`, `steps`, and `artifacts` map onto the
 # concrete `job:` block. Pipelines that use extension templates (1ES PT,
 # SubstratePT, M365PT, etc.) take ownership of THIS file once and add their
-# required `templateContext:` block — the owned stages templates
+# required `templateContext:` block -- the owned stages templates
 # (pr-stages.yml / scheduled-stages.yml) then continue to update normally
-# because they only know about this wrapper's parameter contract.
+# because they address this wrapper only through its parameter contract.
+#
+# That promise covers the wrapper's *body*, which may diverge arbitrarily. It
+# does not cover a contract that GROWS: ADO rejects a parameter the target
+# template does not declare, so a stages update that starts passing a new
+# parameter has to be taken together with the matching wrapper update, which
+# anvil offers as a `.proposed` sibling. `stage` below is the first such growth.
 #
 # Once you edit this file, cargo-anvil treats it as user-owned: subsequent
 # updates Propose into a `.proposed` sibling rather than overwriting.
 #
 # Contract (intentionally small and stable):
 #   - name      (string)   Job name; ADO derives the display name from it.
+#   - stage     (string)   ADO stage this job belongs to, e.g. `pr_mutants`.
+#                          Exists so an owned wrapper can discriminate between
+#                          stages; the default wrapper ignores it. Per-OS job
+#                          names repeat (`linux` / `windows` in every pr-* and
+#                          scheduled-* stage, `compute_linux` /
+#                          `compute_windows` in impact), so `name` alone does
+#                          not identify the stage -- and `templateContext:` is
+#                          consumed at template-expansion time, so a runtime
+#                          condition on `System.StageName` is not available
+#                          there either. The value is exactly what the stages
+#                          template writes after `stage:`, one of:
+#                            impact
+#                            pr_fast   pr_test   pr_msrv
+#                            pr_runtime_analysis   pr_mutants
+#                            scheduled_test   scheduled_advisories
+#                            scheduled_runtime_analysis   scheduled_exhaustive
+#                          Unrelated to `group` in steps/setup.yml, which
+#                          selects a check group's tool catalog.
+#                          Defaults to '' so a caller that passes no stage
+#                          still renders.
 #   - pool      (object)   Pool block, passed verbatim to ADO's `pool:` key.
 #   - steps     (stepList) Body of the job. Templated step lists are fine.
 #   - inputArtifacts (object) Optional list of pipeline artifacts to download
@@ -809,6 +855,9 @@ steps:
 parameters:
   - name: name
     type: string
+  - name: stage
+    type: string
+    default: ''
   - name: pool
     type: object
   - name: steps
