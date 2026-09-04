@@ -80,14 +80,9 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # >>> anvil-managed: anvil-container-setup
 # The context is copied whole rather than input by input, because one of the
 # inputs is optional: a repository that pins its compiler by other means owns no
-# root `rust-toolchain`/`rust-toolchain.toml`, and a `COPY` of a path that may
-# not exist is not portable across the engines anvil supports. Naming the file
-# would make an image unbuildable in exactly the repositories that have nothing
-# to pin. `Dockerfile.dockerignore` already scopes the context to precisely the
-# image's inputs, so deferring to it costs no breadth and makes what the context
-# admits and what the image contains the same set by construction. What rides
-# along -- `.anvil/container/` -- is the committed input the gaps below `COPY`
-# from, and the image never runs it.
+# root toolchain file, and a `COPY` of a path that may not exist is not portable
+# across the engines anvil supports. `.anvil/container/` rides along as a
+# consequence; the image never reads it.
 #
 # The whole recipe tree is copied because `just` parses it to reach the install
 # recipes.

@@ -82,14 +82,9 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # >>> anvil-managed: anvil-container-setup
 # The context is copied whole rather than input by input, because one of the
 # inputs is optional: a repository that pins its compiler by other means owns no
-# root `rust-toolchain`/`rust-toolchain.toml`, and a `COPY` of a path that may
-# not exist is not portable across the engines anvil supports. Naming the file
-# would make an image unbuildable in exactly the repositories that have nothing
-# to pin. `Dockerfile.dockerignore` already scopes the context to precisely the
-# image's inputs, so deferring to it costs no breadth and makes what the context
-# admits and what the image contains the same set by construction. What rides
-# along -- `.anvil/container/` -- is the committed input the gaps below `COPY`
-# from, and the image never runs it.
+# root toolchain file, and a `COPY` of a path that may not exist is not portable
+# across the engines anvil supports. `.anvil/container/` rides along as a
+# consequence; the image never reads it.
 #
 # The whole recipe tree is copied because `just` parses it to reach the install
 # recipes.
@@ -146,8 +141,8 @@ CMD ["bash"]
 # The build context is the repository root but the image needs a small, named
 # set out of it. Excluding everything else keeps a cold build from streaming the
 # whole worktree (and every stale `target/`) to the daemon -- and, because the
-# setup region copies the context whole, this file is also the definition of
-# what the image contains.
+# setup region copies the context whole, this file decides what the image
+# contains.
 #
 # The context is narrowed to `justfiles/anvil/` rather than all of `justfiles/`
 # so that a cold build does not stream unrelated trees to the daemon. The
@@ -168,12 +163,10 @@ CMD ["bash"]
 # that lives in repository source rather than in the recipe tree. The workspace
 # members it names stay out: they are a checkout, and the image is not one.
 #
-# Both toolchain-file spellings are admitted, and neither is required. A
-# repository that owns one has its compiler selected from it, in the image as on
-# a host; one that pins by other means builds an image whose compiler is the
-# declared MSRV, which is what a host would resolve there too. Admitting only
-# `rust-toolchain.toml` would give the second repository an image that silently
-# disagreed with its own checkout.
+# Neither toolchain-file spelling is required, and both are admitted: a
+# repository that pins by other means builds an image whose compiler is the
+# declared MSRV, and admitting only the TOML would give one that pins with the
+# extensionless file an image that silently disagreed with its own checkout.
 *
 !justfiles
 justfiles/*
@@ -3714,12 +3707,9 @@ anvil-container-tag:
     # `COPY` puts in the image.
     $inputs = @("$dockerfile.dockerignore")
 
-    # A root toolchain file is optional -- a repository may pin its compiler by
-    # other means -- so it is discovered rather than required, and absence is
-    # simply one fewer record in the stream. Both spellings are checked because
-    # the context admits both and rustup reads both. The digest still has to
-    # follow it: the image installs the toolchain it selects, so an edit to it
-    # changes what the image contains.
+    # Discovered rather than required: a repository may pin its compiler by
+    # other means and own neither spelling, and both are checked because the
+    # context admits both.
     $toolchainFiles = @(
         @('rust-toolchain.toml', 'rust-toolchain') |
             Where-Object { Test-Path -LiteralPath (Join-Path $repoRoot $_) -PathType Leaf }

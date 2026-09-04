@@ -10,8 +10,8 @@
 # The build context is the repository root but the image needs a small, named
 # set out of it. Excluding everything else keeps a cold build from streaming the
 # whole worktree (and every stale `target/`) to the daemon -- and, because the
-# setup region copies the context whole, this file is also the definition of
-# what the image contains.
+# setup region copies the context whole, this file decides what the image
+# contains.
 #
 # The context is narrowed to `justfiles/anvil/` rather than all of `justfiles/`
 # so that a cold build does not stream unrelated trees to the daemon. The
@@ -32,12 +32,10 @@
 # that lives in repository source rather than in the recipe tree. The workspace
 # members it names stay out: they are a checkout, and the image is not one.
 #
-# Both toolchain-file spellings are admitted, and neither is required. A
-# repository that owns one has its compiler selected from it, in the image as on
-# a host; one that pins by other means builds an image whose compiler is the
-# declared MSRV, which is what a host would resolve there too. Admitting only
-# `rust-toolchain.toml` would give the second repository an image that silently
-# disagreed with its own checkout.
+# Neither toolchain-file spelling is required, and both are admitted: a
+# repository that pins by other means builds an image whose compiler is the
+# declared MSRV, and admitting only the TOML would give one that pins with the
+# extensionless file an image that silently disagreed with its own checkout.
 *
 !justfiles
 justfiles/*

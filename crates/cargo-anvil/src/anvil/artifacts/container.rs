@@ -346,10 +346,6 @@ mod tests {
         // the same recipe the checks use, from the same generated pins.
         let composed = composed_dockerfile();
         assert!(composed.contains("just anvil-setup binstall"));
-        // The context is copied whole, so the recipe tree and the declarations
-        // reach the image through the ignore file rather than by name. A root
-        // toolchain file is optional, and no engine offers a portable `COPY` of
-        // a path that may not exist.
         assert!(composed.contains("COPY . ./"));
         assert!(
             !composed.contains("COPY rust-toolchain"),
@@ -430,10 +426,6 @@ mod tests {
     fn build_context_admits_only_what_the_image_copies() {
         assert!(DOCKERIGNORE.contains("!justfiles"));
         assert!(DOCKERIGNORE.contains("!Cargo.toml"));
-        // Both spellings, because the setup region names neither: admitting
-        // only the TOML would give a repository that pins with the
-        // extensionless file an image whose compiler silently disagreed with
-        // its own checkout.
         assert!(DOCKERIGNORE.contains("!rust-toolchain.toml"));
         assert!(DOCKERIGNORE.contains("!rust-toolchain\n"));
     }

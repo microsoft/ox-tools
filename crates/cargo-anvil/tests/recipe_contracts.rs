@@ -505,11 +505,9 @@ fn container_build_carries_the_manifest_that_declares_the_msrv() {
     );
 }
 
-/// A repository may pin its compiler by means other than a root toolchain file,
-/// and such a repository must still be able to build an image. No engine anvil
-/// supports offers a portable `COPY` of a path that may not exist, so the setup
-/// region names no input at all and the ignore file decides what the context --
-/// and therefore the image -- contains.
+/// No engine anvil supports offers a portable `COPY` of a path that may not
+/// exist, so the setup region names no input and the ignore file decides what
+/// the context, and therefore the image, contains.
 #[test]
 fn the_container_build_does_not_require_a_root_toolchain_file() {
     assert!(
@@ -517,15 +515,10 @@ fn the_container_build_does_not_require_a_root_toolchain_file() {
         "naming the toolchain file makes the image unbuildable in exactly the repositories that \
          have nothing to pin"
     );
-    // Both spellings, because neither is named by a `COPY`: admitting only the
-    // TOML would leave a repository that pins with the extensionless file
-    // building an image whose compiler disagreed with its own checkout.
     assert!(
         CONTAINER_DOCKERIGNORE.contains("!rust-toolchain.toml") && CONTAINER_DOCKERIGNORE.contains("!rust-toolchain\n"),
         "the context must admit a root toolchain file in either spelling"
     );
-    // The digest still has to follow the file where one exists, so it is
-    // discovered rather than required.
     assert!(
         CONTAINER.contains("$toolchainFiles"),
         "the tag must hash a root toolchain file when the repository owns one"
@@ -1844,12 +1837,10 @@ fn the_image_tag_follows_the_declared_msrv() {
     assert_eq!(declared, tag("1.93.1"), "the tag must depend on the inputs alone");
 }
 
-/// A repository may pin its compiler by means other than a root toolchain file,
-/// so the tag has to answer for one that owns none rather than refusing it. The
-/// two states must still be distinguishable: the image selects its compiler
-/// from that file where it exists and from the declared MSRV where it does not,
-/// so they cannot share a reference. Both spellings count, because the context
-/// admits both and rustup reads both.
+/// The tag has to answer for a repository that owns no toolchain file rather
+/// than refusing it, and the two states must not share a reference: the image
+/// takes its compiler from that file where it exists and from the declared MSRV
+/// where it does not.
 #[test]
 fn the_image_tag_treats_a_root_toolchain_file_as_optional() {
     if !tools_available() {
@@ -1894,11 +1885,7 @@ fn the_image_tag_treats_a_root_toolchain_file_as_optional() {
     write(&root.join("rust-toolchain"), "[toolchain]\nchannel = \"1.90\"\n");
     let extensionless = tag();
     assert_ne!(none, extensionless, "the extensionless spelling is an image input too");
-    assert_ne!(
-        toml, extensionless,
-        "the same bytes under the other spelling are a different input, and rustup reads them in a \
-         different order"
-    );
+    assert_ne!(toml, extensionless, "the same bytes under the other spelling are a different input");
 }
 
 /// The tag is computed from the index while the build copies the working tree,

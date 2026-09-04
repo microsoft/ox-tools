@@ -184,12 +184,9 @@ anvil-container-tag:
     # `COPY` puts in the image.
     $inputs = @("$dockerfile.dockerignore")
 
-    # A root toolchain file is optional -- a repository may pin its compiler by
-    # other means -- so it is discovered rather than required, and absence is
-    # simply one fewer record in the stream. Both spellings are checked because
-    # the context admits both and rustup reads both. The digest still has to
-    # follow it: the image installs the toolchain it selects, so an edit to it
-    # changes what the image contains.
+    # Discovered rather than required: a repository may pin its compiler by
+    # other means and own neither spelling, and both are checked because the
+    # context admits both.
     $toolchainFiles = @(
         @('rust-toolchain.toml', 'rust-toolchain') |
             Where-Object { Test-Path -LiteralPath (Join-Path $repoRoot $_) -PathType Leaf }

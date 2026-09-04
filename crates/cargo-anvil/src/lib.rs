@@ -169,8 +169,8 @@
 //!
 //! The tag *is* a SHA-256 digest over the inputs that define the image:
 //! everything under `.anvil/container/`, a root `rust-toolchain` file where the
-//! repository owns one, and the whole
-//! generated `justfiles/anvil/` tree. The container directory is walked rather
+//! repository owns one, and the whole generated `justfiles/anvil/` tree. The
+//! container directory is walked rather
 //! than named file by file, because the Dockerfile is composed and a
 //! repository can `COPY` a certificate or an install script it places there.
 //! The recipe tree is included in
@@ -261,10 +261,10 @@
 //! A downstream catalog that needs a different base OS for every repository it
 //! manages replaces the base and tool regions instead, inheriting the catalog
 //! install and the entry contract. A replacement that needs more of the tree
-//! must replace the ignore file with it, since that file is what scopes the
-//! build context — and, because the setup region copies the context whole, what
-//! the image contains: `justfiles/anvil/`, `.anvil/container/`, a root
-//! `rust-toolchain` file and the root `Cargo.toml`. See
+//! must replace the ignore file with it: the setup region copies the context
+//! whole, so that file decides what the image contains, which today is
+//! `justfiles/anvil/`, `.anvil/container/`, a root `rust-toolchain` file and
+//! the root `Cargo.toml`. See
 //! [`artifacts::container`] and the design document for the full contract, the
 //! host setup for each engine, and the known limitations.
 //!

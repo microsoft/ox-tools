@@ -168,8 +168,8 @@ ARM64 hosts it is emulated and is substantially slower.
 
 The tag *is* a SHA-256 digest over the inputs that define the image:
 everything under `.anvil/container/`, a root `rust-toolchain` file where the
-repository owns one, and the whole
-generated `justfiles/anvil/` tree. The container directory is walked rather
+repository owns one, and the whole generated `justfiles/anvil/` tree. The
+container directory is walked rather
 than named file by file, because the Dockerfile is composed and a
 repository can `COPY` a certificate or an install script it places there.
 The recipe tree is included in
@@ -260,10 +260,10 @@ those pins at the moment of the edit, which is why the gaps exist.
 A downstream catalog that needs a different base OS for every repository it
 manages replaces the base and tool regions instead, inheriting the catalog
 install and the entry contract. A replacement that needs more of the tree
-must replace the ignore file with it, since that file is what scopes the
-build context — and, because the setup region copies the context whole, what
-the image contains: `justfiles/anvil/`, `.anvil/container/`, a root
-`rust-toolchain` file and the root `Cargo.toml`. See
+must replace the ignore file with it: the setup region copies the context
+whole, so that file decides what the image contains, which today is
+`justfiles/anvil/`, `.anvil/container/`, a root `rust-toolchain` file and
+the root `Cargo.toml`. See
 [`artifacts::container`][__link1] and the design document for the full contract, the
 host setup for each engine, and the known limitations.
 
@@ -495,7 +495,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbmvEgSYsFVgkbCDtjnkoqqhgbgmvgMGS3gq0b1832bIf3mOhhZIGDa2NhcmdvLWFudmlsZTAuNy4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb1SwbqKADGLgb2SUB5pyIW5AbZYWAp-o-cjIb3p-idO-iZi1hZIGDa2NhcmdvLWFudmlsZTAuNy4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts
