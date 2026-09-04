@@ -143,11 +143,11 @@ _anvil-container-dockerfile:
 # Print the exec image reference for the current inputs, without building it.
 #
 # The tag is a SHA-256 over the image's declared inputs: the Dockerfile and its
-# ignore file, the pinned toolchain, the optional hook, and the whole generated
+# ignore file, the pinned toolchain, the optional hook, the whole generated
 # recipe tree -- because the image installs its tools by running
 # `just anvil-setup`, whose dependency chain reaches the tier, group, check and
-# tool recipes alike. Editing any of them can change what the image contains, so
-# any of them can rename it.
+# tool recipes alike -- and the declared root MSRV. Editing any of them can
+# change what the image contains, so any of them can rename it.
 #
 # This is the only recipe that computes the reference; everything else asks it.
 # It is public because a publisher needs the tag before there is an image to
@@ -165,6 +165,15 @@ anvil-container-tag:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $dockerfile = "$dockerfile".Trim()
     $hookRel = '.anvil/container/hooks.ps1'
+
+    # Hashed because the image installs this toolchain, so a bump changes what
+    # the image contains. The resolved value rather than the manifest carrying
+    # it: dependency edits touch that file constantly while `rust-version` moves
+    # perhaps once, and hashing it would rename the image for a stream of
+    # changes that cannot alter a byte it contains.
+    $rootMsrv = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable root-msrv
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $rootMsrv = "$rootMsrv".Trim()
 
     # Both named rather than left to the walk, so that either one going missing
     # is a hard failure at the check below. The walk cannot notice an absent
@@ -398,6 +407,13 @@ anvil-container-tag:
     # would be a MethodNotFound at tag time, before anything useful happened.
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
+        # Own record tag, length-prefixed and in a fixed position ahead of the
+        # files, so it cannot collide with a file named `msrv` and the stream
+        # stays self-delimiting.
+        $msrvBytes = [System.Text.Encoding]::UTF8.GetBytes($rootMsrv)
+        $msrvHeader = [System.Text.Encoding]::UTF8.GetBytes('msrv ' + $msrvBytes.Length + ' ')
+        [void]$sha.TransformBlock($msrvHeader, 0, $msrvHeader.Length, $null, 0)
+        [void]$sha.TransformBlock($msrvBytes, 0, $msrvBytes.Length, $null, 0)
         foreach ($rel in $ordered) {
             $path = Join-Path $repoRoot $rel
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
