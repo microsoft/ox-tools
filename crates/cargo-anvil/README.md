@@ -380,8 +380,11 @@ metadata conventions — see its documentation.
 
 #### Undefined-behavior checking (`miri`)
 
-The PR-tier `miri` check runs `cargo miri test --all-features --tests`
-(libtest, not nextest — process-per-test is roughly twice as slow under miri).
+The PR-tier `miri` check compiles
+`cargo miri test --all-features --tests --no-run` once, then runs the
+resulting Miri test executables concurrently. Each artifact worker invokes
+`cargo-miri runner` for one executable at a time. Set `ANVIL_MIRI_JOBS` to a
+positive integer to override the default of one worker per logical processor.
 Opt a test out of miri when it touches the filesystem, spawns
 subprocesses, or otherwise can’t run under the interpreter:
 
@@ -399,6 +402,18 @@ under tree-borrows):
 #[cfg_attr(miri_strict_provenance, ignore = "int-to-ptr cast by design")]
 #[cfg_attr(miri_race_coverage,     ignore = "nondeterministic across seeds")]
 ```
+
+A package whose own test targets should not run under Miri can opt out while
+remaining available as a dependency:
+
+```toml
+[package.metadata.anvil.miri]
+exclude = true
+```
+
+Reserve this package-wide switch for constraints that apply to every test
+target. Prefer per-test ignores with reasons for narrower or temporary
+suppressions.
 
 #### Concurrency model checking (`loom`)
 
@@ -491,7 +506,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbVqn03OrTnSYblGjeKgXeGVgb6z3iwQiK18Abc5kLxsXto9xhZIGDa2NhcmdvLWFudmlsZTAuNy4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbwOFJtCJT_70bA-34oRc-e-obCxEe-6OTM7Eb3-Jyfz7Am-RhZIGDa2NhcmdvLWFudmlsZTAuNy4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts

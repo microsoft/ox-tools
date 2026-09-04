@@ -381,8 +381,11 @@
 //!
 //! ### Undefined-behavior checking (`miri`)
 //!
-//! The PR-tier `miri` check runs `cargo miri test --all-features --tests`
-//! (libtest, not nextest — process-per-test is roughly twice as slow under miri).
+//! The PR-tier `miri` check compiles
+//! `cargo miri test --all-features --tests --no-run` once, then runs the
+//! resulting Miri test executables concurrently. Each artifact worker invokes
+//! `cargo-miri runner` for one executable at a time. Set `ANVIL_MIRI_JOBS` to a
+//! positive integer to override the default of one worker per logical processor.
 //! Opt a test out of miri when it touches the filesystem, spawns
 //! subprocesses, or otherwise can't run under the interpreter:
 //!
@@ -400,6 +403,18 @@
 //! #[cfg_attr(miri_strict_provenance, ignore = "int-to-ptr cast by design")]
 //! #[cfg_attr(miri_race_coverage,     ignore = "nondeterministic across seeds")]
 //! ```
+//!
+//! A package whose own test targets should not run under Miri can opt out while
+//! remaining available as a dependency:
+//!
+//! ```toml
+//! [package.metadata.anvil.miri]
+//! exclude = true
+//! ```
+//!
+//! Reserve this package-wide switch for constraints that apply to every test
+//! target. Prefer per-test ignores with reasons for narrower or temporary
+//! suppressions.
 //!
 //! ### Concurrency model checking (`loom`)
 //!

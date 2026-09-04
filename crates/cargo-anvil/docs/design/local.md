@@ -672,7 +672,37 @@ baseline — so an environment without the base ref must either provide it, run 
 `ANVIL_IMPACT=off`, or (in CI) download the cache and set `ANVIL_IMPACT=consume`.
 
 
-## 5. Daily driver
+## 5. Miri execution customization
+
+Miri compiles the selected package scope once, then executes each compiled Miri
+test executable concurrently. `ANVIL_MIRI_JOBS` overrides the default of one
+artifact worker per logical processor and must be a positive integer. The worker
+count is always clamped to the number of discovered executables. Use the override
+when a runner needs a lower memory footprint; containerized runs forward the
+setting unchanged.
+
+The four public Miri recipes inherit one parameterized private recipe. Its
+profile parameter selects the standard, Tree Borrows, strict-provenance, or
+race-coverage environment before the shared compile-and-run body executes.
+Keeping that main path in Just's dependency graph preserves recipe-level failure
+attribution instead of launching the runner through a nested Just process.
+
+Packages whose own test targets are inherently unsuitable or unproductive under
+Miri can declare:
+
+```toml
+[package.metadata.anvil.miri]
+exclude = true
+```
+
+This Boolean disables every Miri test target owned by the package, in both
+impact-scoped and full-workspace runs, although the package can still compile as
+a dependency of another selected package. Because the metadata has no place to
+record a reason, reserve it for package-wide constraints. Prefer per-test
+`cfg_attr(miri, ignore = "<reason>")` or the profile-specific cfgs when a narrower
+or temporary suppression can keep its rationale beside the affected test.
+
+## 6. Daily driver
 
 ```text
 $ just anvil
@@ -686,7 +716,7 @@ anvil OK
 (`anvil-pr`, `anvil-scheduled`, `anvil-full`) are first-class -- locally reproducible with
 exactly the same arguments cloud workflows uses, because cloud workflows invokes the same `just` recipes.
 
-## 6. No-tooling fallback
+## 7. No-tooling fallback
 
 A user with only `cargo` (no `just`, no `cargo-anvil`) can still run the basics:
 
@@ -701,7 +731,7 @@ The same commands appear as the body of the corresponding `just` recipes under
 covers core hygiene only — coverage, miri, mutants, etc. still require their respective
 tools.
 
-## 7. Customization at the recipe level
+## 8. Customization at the recipe level
 
 Per the four customization tiers in [README.md §7](./README.md#7-customization):
 
