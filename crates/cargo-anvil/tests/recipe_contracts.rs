@@ -503,6 +503,17 @@ fn container_build_carries_the_manifest_that_declares_the_msrv() {
         !CONTAINER_SETUP_REGION.contains("ANVIL_ROOT_MSRV"),
         "the setup region must not reintroduce the build argument"
     );
+    // Load-bearing for the two assertions above rather than incidental. The
+    // resolver's workspace MSRV validation reads every member manifest, which
+    // this context does not carry -- and it is unreachable only because a root
+    // toolchain file selects the compiler, which makes it return early. Making
+    // this COPY conditional, so a repository without one can build, would put
+    // that branch back in reach of a partial workspace.
+    assert!(
+        CONTAINER_SETUP_REGION.contains("COPY rust-toolchain.toml ./"),
+        "the setup region must copy a root toolchain file: the MSRV design depends on one being \
+         present to keep workspace validation out of reach of a context with no members"
+    );
 }
 
 #[test]

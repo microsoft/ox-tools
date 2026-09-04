@@ -191,8 +191,12 @@ and copied to `/opt/anvil`, the root the recipes already resolve against, so the
 container-specific path in it.
 
 The workspace members it names are not admitted: they are a checkout, and the image is not one. The one path that
-would need them, workspace MSRV validation, returns early whenever a root toolchain file selects the compiler, which
-this image requires and copies.
+would need them, workspace MSRV validation, returns early whenever a root toolchain file selects the compiler.
+
+That makes the toolchain file a precondition of this design rather than a convenience: the image requires one, copies
+it, and relies on it to keep workspace validation out of reach of a context that has no members. A repository without
+one cannot build the image today, because the `COPY` above is unconditional. Should that become conditional, this
+design needs revisiting alongside it.
 
 `Dockerfile.dockerignore` scopes the build context to `justfiles/anvil/`, `.anvil/container/`, `rust-toolchain.toml`
 and the root `Cargo.toml`, denying everything else. The recipe tree is copied whole because `just` has to parse it to run
