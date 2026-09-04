@@ -143,11 +143,12 @@ _anvil-container-dockerfile:
 # Print the exec image reference for the current inputs, without building it.
 #
 # The tag is a SHA-256 over the image's declared inputs: the Dockerfile and its
-# ignore file, the pinned toolchain, the optional hook, the whole generated
-# recipe tree -- because the image installs its tools by running
-# `just anvil-setup`, whose dependency chain reaches the tier, group, check and
-# tool recipes alike -- and the declared root MSRV. Editing any of them can
-# change what the image contains, so any of them can rename it.
+# ignore file, the root toolchain file where the repository owns one, the
+# optional hook, the whole generated recipe tree -- because the image installs
+# its tools by running `just anvil-setup`, whose dependency chain reaches the
+# tier, group, check and tool recipes alike -- and the declared root MSRV.
+# Editing any of them can change what the image contains, so any of them can
+# rename it.
 #
 # This is the only recipe that computes the reference; everything else asks it.
 # It is public because a publisher needs the tag before there is an image to
@@ -175,22 +176,32 @@ anvil-container-tag:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $rootMsrv = "$rootMsrv".Trim()
 
-    # Both named rather than left to the walk, so that either one going missing
-    # is a hard failure at the check below. The walk cannot notice an absent
-    # file, and the ignore file's absence is the worse of the two: the build
-    # still succeeds, but BuildKit falls back to a root ignore file or none, so
-    # the context widens to files the digest does not hash and the tag stops
-    # covering what `COPY` puts in the image.
-    $inputs = @('rust-toolchain.toml', "$dockerfile.dockerignore")
+    # The ignore file is named rather than left to the walk, so that it going
+    # missing is a hard failure at the check below. The walk cannot notice an
+    # absent file, and this absence is the quiet kind: the build still succeeds,
+    # but BuildKit falls back to a root ignore file or none, so the context
+    # widens to files the digest does not hash and the tag stops covering what
+    # `COPY` puts in the image.
+    $inputs = @("$dockerfile.dockerignore")
+
+    # Discovered rather than required: a repository may pin its compiler by
+    # other means and own neither spelling, and both are checked because the
+    # context admits both.
+    $toolchainFiles = @(
+        @('rust-toolchain.toml', 'rust-toolchain') |
+            Where-Object { Test-Path -LiteralPath (Join-Path $repoRoot $_) -PathType Leaf }
+    )
+    $inputs += $toolchainFiles
+
     $links = @()
-    # The declared input and every directory on the way to a walk root are
+    # The declared inputs and every directory on the way to a walk root are
     # checked here, because a walk only ever reports descendants: a link that
     # *is* a root, or that is a parent of one, is traversed through and never
-    # appears in its own output. `COPY justfiles ./justfiles` copies from
-    # `justfiles`, not from `justfiles/anvil`, so a link at the parent is copied
-    # as a link while everything here reads through it -- the same divergence
-    # this guard exists to refuse, reached one level up.
-    foreach ($declared in @('rust-toolchain.toml', '.anvil', '.anvil/container', 'justfiles', 'justfiles/anvil')) {
+    # appears in its own output. `COPY . ./` copies from the context root, so a
+    # link at `justfiles` is copied as a link while everything here reads
+    # through it -- the same divergence this guard exists to refuse, reached one
+    # level up.
+    foreach ($declared in @('rust-toolchain.toml', 'rust-toolchain', '.anvil', '.anvil/container', 'justfiles', 'justfiles/anvil')) {
         $item = Get-Item -LiteralPath (Join-Path $repoRoot $declared) -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
             $links += $item.FullName
@@ -351,7 +362,7 @@ anvil-container-tag:
     # file admits, so an unstaged `chmod` on one of those would refuse a build
     # it cannot affect.
     $indexMode = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
-    $tracked = @('.anvil/container', 'justfiles/anvil', 'rust-toolchain.toml')
+    $tracked = @('.anvil/container', 'justfiles/anvil', 'rust-toolchain.toml', 'rust-toolchain')
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Write-Error 'anvil: git is required to compute the container image tag, because the image inputs are framed with the file modes git records. Without it two hosts would compute different tags for identical content. Install git, or set ANVIL_CONTAINER_ENGINE aside and build the image where git is available.'
         exit 1

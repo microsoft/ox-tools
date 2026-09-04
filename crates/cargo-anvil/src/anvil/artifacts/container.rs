@@ -346,8 +346,11 @@ mod tests {
         // the same recipe the checks use, from the same generated pins.
         let composed = composed_dockerfile();
         assert!(composed.contains("just anvil-setup binstall"));
-        assert!(composed.contains("COPY justfiles"));
-        assert!(composed.contains("COPY rust-toolchain.toml"));
+        assert!(composed.contains("COPY . ./"));
+        assert!(
+            !composed.contains("COPY rust-toolchain"),
+            "naming the toolchain file would leave a repository without one unable to build"
+        );
         // The re-entry guard the recipe relies on to avoid nesting.
         assert!(composed.contains("ENV ANVIL_IN_CONTAINER=1"));
     }
@@ -422,7 +425,9 @@ mod tests {
     #[test]
     fn build_context_admits_only_what_the_image_copies() {
         assert!(DOCKERIGNORE.contains("!justfiles"));
+        assert!(DOCKERIGNORE.contains("!Cargo.toml"));
         assert!(DOCKERIGNORE.contains("!rust-toolchain.toml"));
+        assert!(DOCKERIGNORE.contains("!rust-toolchain\n"));
     }
 
     #[test]
