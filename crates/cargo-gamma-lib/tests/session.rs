@@ -492,7 +492,11 @@ fn a_red_baseline_is_reported_rather_than_measured() {
     let (code, output) = session(&dir, &["--mutators", "relational"]);
 
     assert_ne!(code, EXIT_OK, "{output}");
-    assert!(output.contains("baseline is not green"), "{output}");
+    assert!(output.contains("the baseline could not be measured"), "{output}");
+    assert!(output.contains("test `always_fails` failed"), "{output}");
+    assert!(output.contains("baseline-failure.json"), "{output}");
+    assert!(output.contains("gamma-diagnostics.json"), "{output}");
+    assert!(!output.contains("nope"), "{output}");
 }
 
 #[test]

@@ -3,6 +3,7 @@
 
 use core::time::Duration;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::{self, BufReader, Read};
 use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -12,6 +13,7 @@ use std::{fmt, thread};
 
 use camino::Utf8Path;
 use cargo_gamma_process::{MemoryRequest, MemoryUsage, PlatformError, PreparedCommand, ProcessTree, SpawnedCommand, prepare};
+use serde::Serialize;
 
 mod hubs;
 
@@ -222,6 +224,38 @@ pub(super) enum Verdict {
     /// that mutant, and lets the sweep continue. Conflating them lets one transient `EMFILE` discard
     /// every verdict an hours-long run had already reached.
     Unjudged(String),
+}
+
+/// How a test process ended when the host supplied that information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "value")]
+pub(super) enum Termination {
+    ExitCode(i32),
+    #[cfg(unix)]
+    Signal(i32),
+    Unknown,
+}
+
+impl fmt::Display for Termination {
+    #[expect(clippy::renamed_function_params, reason = "`formatter` is clearer than `f`")]
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExitCode(code) => write!(formatter, "exit code {code}"),
+            #[cfg(unix)]
+            Self::Signal(signal) => write!(formatter, "signal {signal}"),
+            Self::Unknown => formatter.write_str("an unknown process termination"),
+        }
+    }
+}
+
+/// Bounded process output retained only when an observation fails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FailureEvidence {
+    pub(super) termination: Option<Termination>,
+    pub(super) stdout_tail: String,
+    pub(super) stderr_tail: String,
+    pub(super) output_truncated: bool,
 }
 
 /// Runs one test binary with an optional active mutant, under a wall-clock budget.
@@ -673,6 +707,31 @@ fn nextest_runner_failure(code: Option<i32>, output: &str) -> String {
     reason
 }
 
+/// The controlled environment changes applied to a baseline process.
+///
+/// This deliberately excludes the inherited environment and the loader path's value. The latter
+/// contains inherited path entries, while the fact that cargo-gamma configured it is enough to
+/// diagnose a loader mismatch without copying ambient process data into an artifact.
+pub(super) fn baseline_environment(work: &Workspace) -> serde_json::Value {
+    let launch = work.launch();
+    let mut set = BTreeMap::from([
+        (UNDER_GAMMA_VAR, "1".to_owned()),
+        (INSTA_UPDATE_VAR, "no".to_owned()),
+        (INSTA_FORCE_PASS_VAR, "0".to_owned()),
+    ]);
+
+    if let Some(threads) = work.harness_threads() {
+        let _ = set.insert(TEST_THREADS_VAR, threads.to_owned());
+    }
+
+    serde_json::json!({
+        "set": set,
+        "removed": [gamma_rt::ACTIVE_VAR, gamma_rt::CENSUS_VAR],
+        "valuesOmitted": [STACK_VAR],
+        "loaderPathConfigured": launch.loader.is_some(),
+    })
+}
+
 /// Sets everything a test binary is run with, beyond the command itself.
 ///
 /// Split out from [`run_with`] because it is a long, linear list of decisions that each carry
@@ -746,21 +805,31 @@ fn configure(
 }
 
 /// Runs one binary, publishing the harness's progress into `progress` as it goes.
-fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progress: &Arc<Mutex<Progress>>) -> (Verdict, MemoryUsage) {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one process lifecycle keeps launch, supervision, evidence collection, and cleanup in order"
+)]
+fn run_with(
+    work: &Workspace,
+    binary: &TestBinary,
+    attempt: Attempt<'_>,
+    progress: &Arc<Mutex<Progress>>,
+    retain_failure: bool,
+) -> (Verdict, MemoryUsage, Option<FailureEvidence>) {
     let (active, timeout, stall, request) = (attempt.active, attempt.timeout, attempt.stall, attempt.request);
 
     macro_rules! cut_short {
         ($subtree:expr, $verdict_settled:expr) => {
             match cut_short($subtree, request, binary, $verdict_settled) {
                 Ok(stopped) => stopped,
-                Err(unjudged) => return unjudged,
+                Err((verdict, usage)) => return (verdict, usage, None),
             }
         };
     }
 
     let mut command = match launcher(work, binary, attempt.only) {
         Ok(command) => command,
-        Err(reason) => return (Verdict::Unmetered(reason), MemoryUsage::default()),
+        Err(reason) => return (Verdict::Unmetered(reason), MemoryUsage::default(), None),
     };
 
     let launch = work.launch();
@@ -777,7 +846,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
 
     let spawned = match start_or_verdict(command, binary, request) {
         Ok(started) => started,
-        Err(verdict) => return verdict,
+        Err((verdict, usage)) => return (verdict, usage, None),
     };
 
     // Adopted before anything is read from the child, so the typestate bundle cannot sit with its
@@ -789,12 +858,12 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
         // boundary the host will never provide — `prepare` above answers that question, and it
         // succeeded.
         Err(reason) => {
-            return (Verdict::Unjudged(reason.to_string()), MemoryUsage::default());
+            return (Verdict::Unjudged(reason.to_string()), MemoryUsage::default(), None);
         }
     };
 
     let pulse = Arc::new(Pulse::default());
-    let drained = match readers(&mut subtree, progress, &pulse, under_nextest) {
+    let drained = match readers(&mut subtree, progress, &pulse, under_nextest, retain_failure) {
         Ok(drained) => drained,
         Err(cause) => {
             let (usage, _ceiling) = cut_short!(&mut subtree, false);
@@ -802,6 +871,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
             return (
                 Verdict::Unjudged(format!("`{}` output could not be supervised: {cause}", binary.path)),
                 usage,
+                None,
             );
         }
     };
@@ -822,13 +892,15 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 let collected = collected(&drained, DRAIN_GRACE);
                 let usage = subtree.usage();
                 let ceiling = request.limit.filter(|_limit| exhausted(&usage, status.success()));
+                let code = status.code();
+                let evidence = retain_failure.then(|| collected.failure_evidence(Some(termination(status))));
 
                 if let Some(verdict) = environment_verdict(progress) {
-                    return (verdict, usage);
+                    return (verdict, usage, evidence);
                 }
 
                 if status.success() {
-                    return (Verdict::Passed, usage);
+                    return (Verdict::Passed, usage, None);
                 }
 
                 // Said before the text is read rather than after, because what follows draws a
@@ -844,16 +916,17 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 // report is the more useful of the two: a named test is somewhere a reader can go,
                 // and a memory verdict that pre-empted it would leave them with a number and no
                 // idea which of the suite's tests to open.
-                let (verdict, usage) = settle_collected(under_nextest, active, status.code(), &collected, usage);
+                let (verdict, usage) = settle_collected(under_nextest, active, code, &collected, usage);
 
-                return (prefer_named(verdict, usage.peak, ceiling), usage);
+                return (prefer_named(verdict, usage.peak, ceiling), usage, evidence);
             }
 
             Ok(None) => {
                 if let Some(verdict) = environment_verdict(progress) {
                     let (usage, _ceiling) = cut_short!(&mut subtree, true);
+                    let collected = collected(&drained, DRAIN_GRACE);
 
-                    return (verdict, usage);
+                    return (verdict, usage, retain_failure.then(|| collected.failure_evidence(None)));
                 }
 
                 // A direct libtest failure settles the verdict, so every test after it would be
@@ -861,33 +934,35 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 // replaying the failed child's captured output, which may hold the guard runtime's
                 // environment-error marker. Cutting there would convict a mutant before the
                 // evidence that the test never started was available.
-                if let Some(name) = failure_to_cut_short(under_nextest, progress) {
+                if !retain_failure && let Some(name) = failure_to_cut_short(under_nextest, progress) {
                     let (usage, ceiling) = cut_short!(&mut subtree, true);
 
-                    return (cut_by_named_failure(name, usage.peak, ceiling), usage);
+                    return (cut_by_named_failure(name, usage.peak, ceiling), usage, None);
                 }
 
                 let stalled = stall.exceeded(progress);
 
                 if stalled || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     let (usage, ceiling) = cut_short!(&mut subtree, true);
+                    let collected = collected(&drained, DRAIN_GRACE);
+                    let evidence = retain_failure.then(|| collected.failure_evidence(None));
 
                     if let Some(verdict) = unfinished_nextest_failure(under_nextest, progress) {
-                        return (verdict, usage);
+                        return (verdict, usage, evidence);
                     }
 
                     // No name was announced on this path, so there is nothing for the ceiling to
                     // outrank: a workload thrashing against its limit runs out of time as well, and
                     // the memory is the cause of both. See [`cut_short`].
                     if let Some(limit) = ceiling {
-                        return (Verdict::MemoryLimit { peak: usage.peak, limit }, usage);
+                        return (Verdict::MemoryLimit { peak: usage.peak, limit }, usage, evidence);
                     }
 
                     // The text is not read on this path, so there is nothing to wait for.
                     return if stalled {
-                        (Verdict::Stalled(last_test(progress)), usage)
+                        (Verdict::Stalled(last_test(progress)), usage, evidence)
                     } else {
-                        (Verdict::TimedOut, usage)
+                        (Verdict::TimedOut, usage, evidence)
                     };
                 }
 
@@ -917,16 +992,19 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 // reader threads reach end of file and end, rather than being left holding pipes
                 // for the rest of the run. Whether it was complete is discarded with it — nothing
                 // was going to be concluded from the text either way.
-                let _discarded = collected(&drained, DRAIN_GRACE);
+                let collected = collected(&drained, DRAIN_GRACE);
 
                 let (usage, _ceiling) = match stopped {
                     Ok(stopped) => stopped,
-                    Err(unmetered) => return unmetered,
+                    Err((verdict, usage)) => {
+                        return (verdict, usage, retain_failure.then(|| collected.failure_evidence(None)));
+                    }
                 };
 
                 return (
                     Verdict::Unjudged(format!("`{}` could not be asked whether it had finished: {cause}", binary.path)),
                     usage,
+                    retain_failure.then(|| collected.failure_evidence(None)),
                 );
             }
         }
@@ -954,19 +1032,28 @@ fn deadline_after(timeout: Duration) -> Instant {
 /// `FAIL` line never arrived convict a mutant with no killer named and warn about nothing.
 struct Drained {
     text: Vec<u8>,
+    tail: Vec<u8>,
+    tail_truncated: bool,
     complete: bool,
     authoritative: bool,
+    stream: ReaderStream,
 }
 
 struct Collected {
     text: Vec<u8>,
     authoritative: Vec<u8>,
+    stdout_tail: Vec<u8>,
+    stderr_tail: Vec<u8>,
+    tail_truncated: bool,
     whole: bool,
 }
 
 fn collected(drained: &Receiver<Drained>, grace: Duration) -> Collected {
     let mut text = Vec::new();
     let mut authoritative = Vec::new();
+    let mut stdout_tail = Vec::new();
+    let mut stderr_tail = Vec::new();
+    let mut tail_truncated = false;
     let mut whole = true;
 
     loop {
@@ -976,12 +1063,20 @@ fn collected(drained: &Receiver<Drained>, grace: Duration) -> Collected {
                     authoritative.extend_from_slice(&chunk.text);
                 }
                 text.extend_from_slice(&chunk.text);
+                match chunk.stream {
+                    ReaderStream::Stdout => stdout_tail = chunk.tail,
+                    ReaderStream::Stderr => stderr_tail = chunk.tail,
+                }
+                tail_truncated |= chunk.tail_truncated;
                 whole &= chunk.complete;
             }
             Err(RecvTimeoutError::Disconnected) => {
                 return Collected {
                     text,
                     authoritative,
+                    stdout_tail,
+                    stderr_tail,
+                    tail_truncated,
                     whole,
                 };
             }
@@ -989,11 +1084,52 @@ fn collected(drained: &Receiver<Drained>, grace: Duration) -> Collected {
                 return Collected {
                     text,
                     authoritative,
+                    stdout_tail,
+                    stderr_tail,
+                    tail_truncated,
                     whole: false,
                 };
             }
         }
     }
+}
+
+impl Collected {
+    fn failure_evidence(&self, termination: Option<Termination>) -> FailureEvidence {
+        let (stdout_tail, stdout_lines_truncated) = diagnostic_tail(&self.stdout_tail);
+        let (stderr_tail, stderr_lines_truncated) = diagnostic_tail(&self.stderr_tail);
+
+        FailureEvidence {
+            termination,
+            stdout_tail,
+            stderr_tail,
+            output_truncated: !self.whole || self.tail_truncated || stdout_lines_truncated || stderr_lines_truncated,
+        }
+    }
+}
+
+fn diagnostic_tail(bytes: &[u8]) -> (String, bool) {
+    let text = String::from_utf8_lossy(bytes);
+    let truncated = text.lines().count() > OUTPUT_TAIL_LINES;
+
+    (tail(&text, OUTPUT_TAIL_LINES).into_owned(), truncated)
+}
+
+fn termination(status: ExitStatus) -> Termination {
+    if let Some(code) = status.code() {
+        return Termination::ExitCode(code);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        if let Some(signal) = status.signal() {
+            return Termination::Signal(signal);
+        }
+    }
+
+    Termination::Unknown
 }
 
 /// Asks whether the child has finished, without giving cleanup a reused group id.
@@ -1127,6 +1263,9 @@ const DRAIN_GRACE: Duration = Duration::from_secs(5);
 pub(super) struct Observation {
     pub(super) verdict: Verdict,
 
+    /// Process termination and bounded output, retained only for a failed observation.
+    pub(super) failure: Option<FailureEvidence>,
+
     /// The longest the harness went quiet, for calibrating later runs.
     pub(super) quiet: Duration,
 
@@ -1149,7 +1288,7 @@ pub(super) struct Observation {
 ///
 /// Falls back to the workspace root when cargo did not say where the manifest was, which is the
 /// behaviour that was always there.
-fn working_directory<'work>(work: &'work Workspace, binary: &'work TestBinary) -> &'work Utf8Path {
+pub(super) fn working_directory<'work>(work: &'work Workspace, binary: &'work TestBinary) -> &'work Utf8Path {
     if binary.manifest_dir.as_str().is_empty() {
         &work.root
     } else {
@@ -1159,8 +1298,17 @@ fn working_directory<'work>(work: &'work Workspace, binary: &'work TestBinary) -
 
 /// Runs one binary and reports what the harness said as well as how it ended.
 pub(super) fn observe(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>) -> Observation {
+    observe_with(work, binary, attempt, false)
+}
+
+/// Runs one baseline binary while retaining bounded diagnostics if it fails.
+pub(super) fn observe_baseline(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>) -> Observation {
+    observe_with(work, binary, attempt, true)
+}
+
+fn observe_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, retain_failure: bool) -> Observation {
     let progress = Arc::new(Mutex::new(Progress::new(watch(work))));
-    let (verdict, usage) = run_with(work, binary, attempt, &progress);
+    let (verdict, usage, failure) = run_with(work, binary, attempt, &progress, retain_failure);
     let quiet = quiet_of(&progress);
 
     #[expect(clippy::unwrap_used, reason = "the reader only panics if the whole process is unwinding")]
@@ -1168,6 +1316,7 @@ pub(super) fn observe(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_
 
     Observation {
         verdict,
+        failure,
         quiet,
         tests,
         peak: usage.peak,
@@ -1273,7 +1422,7 @@ fn quiet_of(progress: &Mutex<Progress>) -> Duration {
 const OUTPUT_CAP: usize = 4 * 1024 * 1024;
 
 /// Which of a child's two piped streams a reader is draining.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReaderStream {
     Stdout,
     Stderr,
@@ -1330,6 +1479,7 @@ fn readers(
     progress: &Arc<Mutex<Progress>>,
     pulse: &Arc<Pulse>,
     under_nextest: bool,
+    retain_tail: bool,
 ) -> Result<Receiver<Drained>, ReaderStartError> {
     let (sink, drained) = mpsc::channel::<Drained>();
 
@@ -1360,15 +1510,18 @@ fn readers(
             thread::Builder::new().name("cargo-gamma-output".to_owned()).spawn(move || {
                 READERS.started();
 
-                let (text, complete) = match pipe {
-                    Either::Out(pipe) => drain(pipe, &published, &pulse, authoritative),
-                    Either::Err(pipe) => drain(pipe, &published, &pulse, authoritative),
+                let (text, tail, tail_truncated, complete) = match pipe {
+                    Either::Out(pipe) => drain(pipe, &published, &pulse, authoritative, retain_tail),
+                    Either::Err(pipe) => drain(pipe, &published, &pulse, authoritative, retain_tail),
                 };
 
                 let _sent = sink.send(Drained {
                     text,
+                    tail,
+                    tail_truncated,
                     complete,
                     authoritative,
+                    stream,
                 });
 
                 // End of stream. A child that exits closes its pipes, so this is how the waiting thread
@@ -1404,7 +1557,7 @@ enum Either {
 /// Reading continues past the cap even though the excess is discarded: the point is to keep the
 /// pipe empty so the child can run to completion, not to collect the text.
 ///
-/// The second half of the pair says whether the stream really ended. A failed read leaves a prefix
+/// The final value says whether the stream really ended. A failed read leaves a prefix
 /// of what the binary said, and a prefix reads exactly like the whole of a quiet suite: the
 /// first-failure scan finds no announcement and the mutant is recorded as killed by a test nobody
 /// can name. This loop is the only place that can still tell the two apart, so it says so, and the
@@ -1412,11 +1565,19 @@ enum Either {
 ///
 /// An interrupted read is not truncation and does not reach the failing arm: `read_until` retries
 /// `EINTR` itself, and nothing was taken out of the pipe when it fired.
-fn drain<R: Read>(pipe: R, progress: &Mutex<Progress>, pulse: &Pulse, authoritative: bool) -> (Vec<u8>, bool) {
+fn drain<R: Read>(
+    pipe: R,
+    progress: &Mutex<Progress>,
+    pulse: &Pulse,
+    authoritative: bool,
+    retain_tail: bool,
+) -> (Vec<u8>, Vec<u8>, bool, bool) {
     use std::io::BufRead as _;
 
     let mut reader = BufReader::new(pipe);
     let mut kept = Vec::new();
+    let mut tail = Vec::new();
+    let mut tail_truncated = false;
     let mut line = Vec::new();
     let mut whole = true;
 
@@ -1424,12 +1585,12 @@ fn drain<R: Read>(pipe: R, progress: &Mutex<Progress>, pulse: &Pulse, authoritat
         line.clear();
 
         match reader.read_until(b'\n', &mut line) {
-            Ok(0) => return (kept, whole),
+            Ok(0) => return (kept, tail, tail_truncated, whole),
 
             // The partial line this read was building goes with the bytes it lost: half a line is
             // not something the watcher should be shown, and it could as easily be half an
             // announcement as half a progress bar.
-            Err(_truncated) => return (kept, false),
+            Err(_truncated) => return (kept, tail, tail_truncated, false),
 
             Ok(_read) => {
                 // Published before the text is kept, so a binary past the cap still counts as
@@ -1460,6 +1621,9 @@ fn drain<R: Read>(pipe: R, progress: &Mutex<Progress>, pulse: &Pulse, authoritat
 
                 let kept_now = line.len().min(room);
                 kept.extend_from_slice(&line[..kept_now]);
+                if retain_tail {
+                    tail_truncated |= retain_output_tail(&mut tail, &line);
+                }
 
                 if kept_now < line.len() {
                     whole = false;
@@ -1467,6 +1631,33 @@ fn drain<R: Read>(pipe: R, progress: &Mutex<Progress>, pulse: &Pulse, authoritat
             }
         }
     }
+}
+
+/// Bytes retained from the end of each test-process stream for failure diagnostics.
+const OUTPUT_TAIL_CAP: usize = 64 * 1024;
+
+/// Lines retained from the byte-bounded tail for failure diagnostics.
+///
+/// A shared fixture failure can make every test report a short secondary
+/// poison panic. Keep enough lines for the original panic to survive alongside
+/// those follow-on failures; the 64 KiB byte cap remains the hard bound.
+const OUTPUT_TAIL_LINES: usize = 2_000;
+
+fn retain_output_tail(tail: &mut Vec<u8>, bytes: &[u8]) -> bool {
+    if bytes.len() >= OUTPUT_TAIL_CAP {
+        tail.clear();
+        tail.extend_from_slice(&bytes[bytes.len() - OUTPUT_TAIL_CAP..]);
+        return true;
+    }
+
+    let excess = tail.len().saturating_add(bytes.len()).saturating_sub(OUTPUT_TAIL_CAP);
+    if excess > 0 {
+        tail.drain(..excess);
+    }
+
+    tail.extend_from_slice(bytes);
+
+    excess > 0
 }
 
 /// Extracts the name of the first failing test from libtest's output.
@@ -1625,7 +1816,7 @@ mod tests {
         let progress = Mutex::new(Progress::new(Watch::Libtest));
         let pulse = Pulse::default();
 
-        let (kept, whole) = drain(Faltering(false), &progress, &pulse, true);
+        let (kept, _tail, _tail_truncated, whole) = drain(Faltering(false), &progress, &pulse, true, false);
 
         assert!(!whole, "a severed pipe was reported as the end of the stream");
         assert_eq!(String::from_utf8_lossy(&kept), "running 1 test\n");
@@ -1639,11 +1830,35 @@ mod tests {
         let progress = Mutex::new(Progress::new(Watch::Libtest));
         let pulse = Pulse::default();
 
-        let (kept, whole) = drain(io::Cursor::new(output), &progress, &pulse, true);
+        let (kept, tail, tail_truncated, whole) = drain(io::Cursor::new(output), &progress, &pulse, true, true);
 
         assert_eq!(kept.len(), OUTPUT_CAP);
         assert!(!whole, "discarding bytes past the cap was reported as a whole stream");
+        assert!(tail_truncated, "the bounded diagnostic tail was reported as complete");
+        assert!(
+            String::from_utf8_lossy(&tail).contains("test meaningful::killer ... FAILED"),
+            "the diagnostic tail did not retain the evidence discarded from the parsing prefix"
+        );
         assert!(environment_failure(&progress), "the marker remains visible outside the output cap");
+    }
+
+    #[test]
+    fn diagnostic_line_limit_marks_output_truncated() {
+        let output = format!("discarded\n{}", "kept\n".repeat(OUTPUT_TAIL_LINES));
+        let collected = Collected {
+            text: Vec::new(),
+            authoritative: Vec::new(),
+            stdout_tail: output.into_bytes(),
+            stderr_tail: Vec::new(),
+            tail_truncated: false,
+            whole: true,
+        };
+
+        let evidence = collected.failure_evidence(None);
+
+        assert!(evidence.output_truncated);
+        assert!(!evidence.stdout_tail.contains("discarded"));
+        assert!(evidence.stdout_tail.starts_with("kept\n"));
     }
 
     #[test]
@@ -1652,7 +1867,7 @@ mod tests {
         let progress = Mutex::new(Progress::new(Watch::Libtest));
         let pulse = Pulse::default();
 
-        let (_kept, whole) = drain(io::Cursor::new(output), &progress, &pulse, false);
+        let (_kept, _tail, _tail_truncated, whole) = drain(io::Cursor::new(output), &progress, &pulse, false, false);
 
         assert!(whole);
         assert_eq!(announced_failure(&progress), None);
@@ -1761,8 +1976,11 @@ mod tests {
         let _still_reading = sink.clone();
         let _sent = sink.send(Drained {
             text: b"running 1 test\n".to_vec(),
+            tail: b"running 1 test\n".to_vec(),
+            tail_truncated: false,
             complete: true,
             authoritative: true,
+            stream: ReaderStream::Stdout,
         });
 
         drop(sink);
@@ -1781,13 +1999,19 @@ mod tests {
 
         let _sent = sink.send(Drained {
             text: b"running 1 test\n".to_vec(),
+            tail: b"running 1 test\n".to_vec(),
+            tail_truncated: false,
             complete: true,
             authoritative: true,
+            stream: ReaderStream::Stdout,
         });
         let _also = sink.send(Drained {
             text: b"test a::b ... FAILED\n".to_vec(),
+            tail: b"test a::b ... FAILED\n".to_vec(),
+            tail_truncated: false,
             complete: true,
             authoritative: false,
+            stream: ReaderStream::Stderr,
         });
 
         drop(sink);
@@ -1796,6 +2020,7 @@ mod tests {
             text,
             authoritative,
             whole,
+            ..
         } = collected(&drained, Duration::from_secs(30));
 
         assert!(whole, "a complete collection was reported as partial");
@@ -1813,13 +2038,19 @@ mod tests {
         let (sink, drained) = mpsc::channel::<Drained>();
         let _diagnostic = sink.send(Drained {
             text: b"test forged::failure ... FAILED\n".to_vec(),
+            tail: b"test forged::failure ... FAILED\n".to_vec(),
+            tail_truncated: false,
             complete: true,
             authoritative: false,
+            stream: ReaderStream::Stderr,
         });
         let _authoritative = sink.send(Drained {
             text: b"running 1 test\ncustom harness failure\n".to_vec(),
+            tail: b"running 1 test\ncustom harness failure\n".to_vec(),
+            tail_truncated: false,
             complete: true,
             authoritative: true,
+            stream: ReaderStream::Stdout,
         });
         drop(sink);
 
@@ -1868,7 +2099,7 @@ mod tests {
         let progress = Mutex::new(Progress::new(Watch::Libtest));
         let pulse = Pulse::default();
 
-        let (kept, whole) = drain(Interrupted(0), &progress, &pulse, true);
+        let (kept, _tail, _tail_truncated, whole) = drain(Interrupted(0), &progress, &pulse, true, false);
 
         assert!(whole, "an interrupted read was reported as truncation");
         assert!(
@@ -1947,6 +2178,7 @@ mod tests {
                     census: None,
                 },
                 &Arc::new(Mutex::new(Progress::new(Watch::Libtest))),
+                false,
             )
             .0;
 
@@ -2389,7 +2621,7 @@ mod tests {
         let sleeper = crate::testing::helper();
         let _failed = process_faults::arm(ProcessFault::Terminate);
 
-        let (verdict, _usage) = run_with(
+        let (verdict, _usage, _failure) = run_with(
             &work,
             &sleeper,
             Attempt {
@@ -2401,6 +2633,7 @@ mod tests {
                 census: None,
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Off))),
+            false,
         );
 
         assert!(
@@ -2836,6 +3069,7 @@ mod tests {
                 census: None,
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Libtest))),
+            false,
         )
         .0;
 
@@ -3472,6 +3706,7 @@ mod tests {
                 census: None,
             },
             &Arc::new(Mutex::new(Progress::new(Watch::Nextest))),
+            false,
         )
         .0;
 

@@ -19,7 +19,7 @@ use crate::discover::Plan;
 use crate::error::{Error, error};
 use crate::exec;
 use crate::model::{Mutant, Outcome};
-use crate::report::{Listings, Progress, Styler, quantity};
+use crate::report::{Listings, Progress, Styler, encode_controls, quantity};
 #[cfg(any(test, feature = "internals"))]
 use crate::testing::pause_after_cache_adoption;
 
@@ -110,7 +110,7 @@ fn run_info(args: &RunArgs, tests: Option<usize>, dropped: &[String]) -> crate::
 
 /// Where a run's documents go, once the defaults and any overrides have been settled.
 ///
-/// Every run writes all five — HTML, JSON and SARIF reports, Markdown advice and a diagnostics bundle.
+/// Every completed run writes all five — HTML, JSON and SARIF reports, Markdown advice and a diagnostics bundle.
 /// The reason they are produced by default rather than on request is
 /// that the flags were a trap: a run that takes an hour and answers a question about your test
 /// suite is exactly the run you do not want to repeat because you forgot to ask for the artifact
@@ -806,7 +806,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     if let Some(lock_identity) = cache_lock_identity {
         pause_after_cache_adoption(&survey.root, lock_identity);
     }
-    let outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks);
+    let mut outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks);
 
     // A phase that failed never got to say what it found, so the line it opened is still waiting
     // for an ending. Close it before the error is printed, or the error arrives as the rest of
@@ -816,6 +816,10 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     }
 
     let log_result = events.finish_verdict_log();
+
+    if let Err(failure) = &mut outcome {
+        emit_failure_artifacts(&mut events, args, &survey.skeleton(), failure, &artifact_dir, started, styler);
+    }
 
     let exec::Measured {
         plan,
@@ -926,6 +930,66 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     }
 
     Ok(Executed { plan: Some(plan), stuck })
+}
+
+fn emit_failure_artifacts<H: Host>(
+    events: &mut ConsoleEvents<'_, H>,
+    args: &RunArgs,
+    plan: &Plan,
+    failure: &mut Error,
+    artifact_dir: &Utf8Path,
+    started: Instant,
+    styler: Styler,
+) {
+    let Some(artifact) = failure.artifact() else {
+        return;
+    };
+
+    let path = artifact_dir.join(artifact.file_name);
+    let diagnostics = Documents::resolve(args, &plan.root).diag;
+    let written = serde_json::to_string_pretty(&artifact.value)
+        .map_err(|cause| error!("could not encode `{path}`").caused_by(cause))
+        .and_then(|contents| crate::elements::write(&path, &contents));
+
+    let baseline_written = match written {
+        Ok(()) => {
+            let _announced = writeln!(events.host.error(), "{} {path}", styler.verb("Wrote"));
+            true
+        }
+        Err(artifact_failure) => {
+            crate::exec::Events::warn(
+                events,
+                &format!("could not preserve the baseline failure record: {artifact_failure}"),
+            );
+            false
+        }
+    };
+
+    let diagnostics_written = match emit_diag(events.host, args, plan, None, started, styler) {
+        Ok(()) => true,
+        Err(diag_failure) => {
+            crate::exec::Events::warn(
+                events,
+                &format!("could not preserve the diagnostics bundle after the baseline failure: {diag_failure}"),
+            );
+            false
+        }
+    };
+
+    match (baseline_written, diagnostics_written) {
+        (true, true) => failure.append_message(&format!(
+            "\nDiagnostics:   {}\n               {}",
+            encode_controls(path.as_str()),
+            encode_controls(diagnostics.as_str()),
+        )),
+        (true, false) => {
+            failure.append_message(&format!("\nDiagnostics:   {}", encode_controls(path.as_str())));
+        }
+        (false, true) => {
+            failure.append_message(&format!("\nDiagnostics:   {}", encode_controls(diagnostics.as_str())));
+        }
+        (false, false) => {}
+    }
 }
 
 fn warn_auxiliary<H: Host>(host: &mut H, failure: Option<&Error>, styler: Styler) {
@@ -1737,6 +1801,45 @@ mod tests {
         assert!(parsed["phases"]["census"].is_null(), "no census ran, so it is omitted: {text}");
 
         assert!(String::from_utf8(host.err).expect("utf-8").contains(path.as_str()));
+    }
+
+    #[test]
+    fn a_baseline_error_writes_its_record_and_the_diagnostics_bundle() {
+        let dir = workdir("run-baseline-failure-artifacts-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let args = RunArgs {
+            artifact_dir: Some(root.clone()),
+            ..Default::default()
+        };
+        let plan = plan();
+        let mut failure = Error::new("baseline failed").with_artifact(
+            "baseline-failure.json",
+            serde_json::json!({
+                "schemaVersion": 1,
+                "kind": "testFailure",
+                "stderrTail": "assertion failed",
+            }),
+        );
+        let mut host = Sink::default();
+        let mut events = ConsoleEvents {
+            host: &mut host,
+            progress: Progress::new(false, Styler::new(false), Some(80)),
+            styler: Styler::new(false),
+            estimate: false,
+            show_build: false,
+            verdict_log: VerdictLog::default(),
+        };
+
+        emit_failure_artifacts(&mut events, &args, &plan, &mut failure, &root, Instant::now(), Styler::new(false));
+
+        let baseline = fs::read_to_string(root.join("baseline-failure.json")).expect("baseline record");
+        let diagnostics = fs::read_to_string(root.join("gamma-diagnostics.json")).expect("diagnostics bundle");
+
+        assert!(baseline.contains("assertion failed"), "{baseline}");
+        assert!(diagnostics.contains("\"schemaVersion\": \"3\""), "{diagnostics}");
+        assert!(failure.to_string().contains("Diagnostics:"), "{failure}");
+        assert!(failure.to_string().contains("baseline-failure.json"), "{failure}");
+        assert!(failure.to_string().contains("gamma-diagnostics.json"), "{failure}");
     }
 
     /// A run that censused says so in its bundle: the phase carries its own elapsed time, the tests

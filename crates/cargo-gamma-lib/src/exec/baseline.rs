@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use std::sync::mpsc;
@@ -8,13 +9,15 @@ use std::thread;
 use std::time::Instant;
 
 use cargo_gamma_process::MemoryRequest;
+use serde_json::json;
 
 use super::stall::Stall;
 use super::test_binary::TestBinary;
-use super::verdict::{Attempt, Observation, Only, Verdict, observe};
+use super::verdict::{Attempt, FailureEvidence, Observation, Only, Verdict, baseline_environment, observe_baseline, working_directory};
 use super::workspace::Workspace;
 use crate::Result;
-use crate::error::error;
+use crate::error::{Error, error};
+use crate::report::encode_controls;
 
 /// What the baseline measured.
 #[derive(Debug, Clone, Copy)]
@@ -129,60 +132,15 @@ fn measure_within_reporting(
             tests = Some(tests.unwrap_or(0).saturating_add(counted));
         }
 
+        let failure = observed.failure.as_ref();
+
         match observed.verdict {
             Verdict::Passed => {}
-            Verdict::Failed(name) => {
-                let which = name.map_or_else(|| "a test".to_owned(), |test| format!("test `{test}`"));
-                let path = &entry.path;
-
-                return Err(error!(
-                    "the baseline is not green: {which} in `{path}` fails before any mutant is applied.\n\
-                     Every verdict in a run is a comparison against the baseline, so there is nothing to \
-                     measure until the suite passes."
-                ));
-            }
-            Verdict::TestEnumerationFailed(_) => {
-                return Err(error!(
-                    "the baseline could not be measured because `cargo nextest` could not enumerate \
-                     its tests.\nNothing was measured, so the run stops here rather than judge every \
-                     mutant against a baseline it never took."
-                ));
-            }
-            Verdict::TimedOut | Verdict::Stalled(_) => {
-                return Err(baseline_timeout_error(&entry.path));
-            }
-            Verdict::MemoryLimit { peak, limit } => {
-                return Err(baseline_memory_error(&entry.path, peak, limit));
-            }
-            // The baseline runs with no mutant active, so there is nothing to re-run it without
-            // and no confirmation is attempted. A flake here is an ordinary red baseline.
-            Verdict::Flaky(name) => {
-                let which = name.map_or_else(|| "a test".to_owned(), |test| format!("test `{test}`"));
-                let path = &entry.path;
-
-                return Err(error!(
-                    "the baseline is not green: {which} in `{path}` fails before any mutant is applied.\n\
-                     Every verdict in a run is a comparison against the baseline, so there is nothing to \
-                     measure until the suite passes."
-                ));
-            }
-            Verdict::Unmetered(reason) => {
-                return Err(error!(
-                    "the baseline could not be measured as this run was configured: {reason}.\n\
-                     Nothing was measured, so the run stops here rather than judge every mutant \
-                     against a baseline it never took."
-                ));
-            }
-
-            // Fatal here where it is not during the sweep: there is no mutant to record it against,
-            // and a baseline binary that went unmeasured leaves every mutant that binary covers
-            // without a budget to be judged against.
-            Verdict::Unjudged(reason) => {
-                return Err(error!(
-                    "the baseline could not be measured because the machine would not run it: {reason}.\n\
-                     Nothing was measured, so the run stops here rather than judge every mutant \
-                     against a baseline it never took."
-                ));
+            // Every non-passing observation is fatal here where some are not during the sweep:
+            // there is no mutant to record it against, and a baseline binary that went unmeasured
+            // leaves every mutant that binary covers without a budget to be judged against.
+            verdict => {
+                return Err(baseline_failure_error(work, entry, took, budget, &verdict, failure));
             }
         }
     }
@@ -208,7 +166,7 @@ fn sweep_binaries(
     jobs: usize,
     completed: impl FnMut(),
 ) -> Vec<Option<(Duration, Observation)>> {
-    sweep_binaries_with(work, binaries, budget, request, jobs, observe, completed)
+    sweep_binaries_with(work, binaries, budget, request, jobs, observe_baseline, completed)
 }
 
 fn sweep_binaries_with<O>(
@@ -281,32 +239,149 @@ where
     measured
 }
 
-fn baseline_timeout_error(binary: &camino::Utf8Path) -> crate::error::Error {
-    error!("the baseline run of `{binary}` did not finish within ten minutes")
+fn baseline_failure_error(
+    work: &Workspace,
+    binary: &TestBinary,
+    elapsed: Duration,
+    budget: Duration,
+    verdict: &Verdict,
+    evidence: Option<&FailureEvidence>,
+) -> Error {
+    let runner = if work.runner().is_some() { "nextest" } else { "libtest" };
+    let directory = working_directory(work, binary);
+    let (kind, test, last_test, reason, limit) = match verdict {
+        Verdict::Failed(test) | Verdict::Flaky(test) => ("testFailure", test.as_deref(), None, None, None),
+        Verdict::TestEnumerationFailed(reason) => ("enumerationFailure", None, None, Some(reason.as_str()), None),
+        Verdict::TimedOut => (
+            "timeout",
+            None,
+            None,
+            Some("the test binary exceeded its baseline time budget"),
+            None,
+        ),
+        Verdict::Stalled(test) => (
+            "stall",
+            None,
+            test.as_deref(),
+            Some("the test binary stopped reporting progress"),
+            None,
+        ),
+        Verdict::MemoryLimit { limit, .. } => (
+            "memoryLimit",
+            None,
+            None,
+            Some("the test workload exceeded its configured baseline memory ceiling"),
+            Some(*limit),
+        ),
+        Verdict::Unmetered(reason) | Verdict::Unjudged(reason) => ("infrastructureFailure", None, None, Some(reason.as_str()), None),
+        Verdict::Passed => unreachable!("a passing baseline never constructs a failure"),
+    };
+
+    let peak = match verdict {
+        Verdict::MemoryLimit { peak, .. } => *peak,
+        _other => None,
+    };
+    let termination = evidence.and_then(|evidence| evidence.termination);
+    let stdout = evidence.map_or("", |evidence| evidence.stdout_tail.as_str());
+    let stderr = evidence.map_or("", |evidence| evidence.stderr_tail.as_str());
+    let artifact_stdout = encode_controls(stdout);
+    let artifact_stderr = encode_controls(stderr);
+    let output_truncated = evidence.is_some_and(|evidence| evidence.output_truncated);
+    let elapsed_ms = duration_ms(elapsed);
+    let budget_ms = duration_ms(budget);
+    let artifact = json!({
+        "schemaVersion": 1,
+        "kind": kind,
+        "package": binary.package,
+        "packageId": binary.package_id,
+        "target": binary.target,
+        "runner": runner,
+        "executable": binary.path,
+        "workingDirectory": directory,
+        "environmentOverrides": baseline_environment(work),
+        "test": test,
+        "lastObservedTest": last_test,
+        "termination": termination,
+        "elapsedMs": elapsed_ms,
+        "budgetMs": budget_ms,
+        "peakBytes": peak,
+        "memoryLimitBytes": limit,
+        "reason": reason,
+        "stdoutTail": artifact_stdout,
+        "stderrTail": artifact_stderr,
+        "outputTruncated": output_truncated,
+    });
+
+    let mut message = format!(
+        "the baseline could not be measured\n\n\
+         Every verdict in a run is a comparison against the baseline, so there is nothing to \
+         measure until this failure is resolved.\n\n\
+         Package:       {}\n\
+         Target:        {}\n\
+         Runner:        {runner}\n\
+         Executable:    {}\n\
+         Working dir:   {}\n\
+         Failure:       {}",
+        encode_controls(&binary.package),
+        encode_controls(&binary.target),
+        encode_controls(binary.path.as_str()),
+        encode_controls(directory.as_str()),
+        baseline_failure_description(verdict, budget),
+    );
+
+    if let Some(termination) = termination {
+        let _ = write!(message, "\nTermination:   {termination}");
+    }
+
+    let _ = write!(message, "\nElapsed:       {elapsed:.2?}");
+
+    match verdict {
+        Verdict::MemoryLimit { .. } => {
+            message.push_str("\nGuidance:      Raise `--baseline-memory-limit` if this workload is expected.");
+        }
+        _other => {}
+    }
+
+    error!("{message}").with_artifact("baseline-failure.json", artifact)
 }
 
-/// Explains a baseline that hit the explicit ceiling put around the calibration itself.
-///
-/// A ceiling derived from the baseline cannot protect the machine from a baseline that is itself
-/// runaway, so a ceiling may be placed around the calibration. When that one fires, no mutant is
-/// involved: the suite needs more memory than the run was told to allow it, and the number to
-/// change is the one the user supplied.
-fn baseline_memory_error(binary: &camino::Utf8Path, peak: Option<u64>, limit: u64) -> crate::error::Error {
-    let reached = peak.map_or_else(String::new, |peak| format!(", reaching {}", crate::report::bytes(peak)));
+fn baseline_failure_description(verdict: &Verdict, budget: Duration) -> String {
+    match verdict {
+        Verdict::Failed(Some(test)) | Verdict::Flaky(Some(test)) => {
+            format!("test `{}` failed", encode_controls(test))
+        }
+        Verdict::Failed(None) | Verdict::Flaky(None) => "a test failed without naming itself".to_owned(),
+        Verdict::TestEnumerationFailed(_) => "nextest could not enumerate the selected tests".to_owned(),
+        Verdict::TimedOut => format!("the binary did not finish within {budget:.0?}"),
+        Verdict::Stalled(Some(test)) => {
+            format!("the binary stopped reporting progress after `{}`", encode_controls(test))
+        }
+        Verdict::Stalled(None) => "the binary stopped reporting progress".to_owned(),
+        Verdict::MemoryLimit { peak, limit } => {
+            let reached = peak.map_or_else(String::new, |peak| format!(", reaching {}", crate::report::bytes(peak)));
 
-    error!(
-        "the baseline run of `{binary}` exceeded the {} it was allowed{reached}.\n\
-         Every mutant is judged against this run, so there is nothing to measure until the suite \
-         fits within the ceiling `--baseline-memory-limit` set, or that ceiling is raised.",
-        crate::report::bytes(limit)
-    )
+            format!("the workload exceeded its {} memory ceiling{reached}", crate::report::bytes(*limit))
+        }
+        Verdict::Unmetered(reason) => {
+            format!(
+                "the baseline could not be measured as this run was configured: {}",
+                encode_controls(reason)
+            )
+        }
+        Verdict::Unjudged(reason) => {
+            format!("the machine would not run the baseline: {}", encode_controls(reason))
+        }
+        Verdict::Passed => unreachable!("a passing baseline has no failure description"),
+    }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
-    use camino::Utf8Path;
-
     use super::*;
 
     #[test]
@@ -326,6 +401,7 @@ mod tests {
 
                     Observation {
                         verdict: Verdict::Passed,
+                        failure: None,
                         quiet: Duration::ZERO,
                         tests: Some(1),
                         peak: None,
@@ -358,6 +434,17 @@ mod tests {
         (directory, work, binaries)
     }
 
+    fn diagnostic_harness() -> (tempfile::TempDir, Workspace, Vec<TestBinary>) {
+        let (directory, work) = crate::testing::helper_workspace("baseline-diagnostic", &["exit:0"]);
+        let binaries = vec![TestBinary {
+            package: "subject".to_owned(),
+            target: "unit".to_owned(),
+            ..crate::testing::helper()
+        }];
+
+        (directory, work, binaries)
+    }
+
     /// A suite that hangs before any mutant is applied stops the run.
     #[test]
     #[cfg(unix)]
@@ -375,13 +462,41 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_red_baseline_stops_the_run_and_names_the_failing_test() {
-        let (_directory, work, mut binaries) = harness("echo 'test a::b ... FAILED'\nexit 101");
+        let (_directory, work, mut binaries) = harness(
+            "echo 'test a::b ... FAILED'\n\
+             echo 'assertion failed: left != right' >&2\n\
+             exit 101",
+        );
         let failure =
             measure_within(&work, &mut binaries, Duration::from_secs(30), MemoryRequest::default(), 1).expect_err("the baseline must fail");
 
         // Every verdict is a comparison against the baseline, so a red one makes every mutant
         // look killed by a failure that was there before mutation started.
-        assert!(failure.to_string().contains("test `a::b`"), "{failure}");
+        let message = failure.to_string();
+
+        assert!(message.contains("test `a::b`"), "{message}");
+        assert!(message.contains("exit code 101"), "{message}");
+        assert!(!message.contains("test a::b ... FAILED"), "{message}");
+        assert!(!message.contains("assertion failed: left != right"), "{message}");
+
+        let artifact = failure.artifact().expect("a baseline failure carries a durable record");
+
+        assert_eq!(artifact.file_name, "baseline-failure.json");
+        assert_eq!(artifact.value["package"], "subject");
+        assert_eq!(artifact.value["test"], "a::b");
+        assert_eq!(artifact.value["termination"]["kind"], "exitCode");
+        assert_eq!(artifact.value["termination"]["value"], 101);
+        assert!(
+            artifact.value["environmentOverrides"]["set"].get("RUST_MIN_STACK").is_none(),
+            "an inherited stack value must not be serialized"
+        );
+        assert_eq!(artifact.value["environmentOverrides"]["valuesOmitted"][0], "RUST_MIN_STACK");
+        assert!(artifact.value["stdoutTail"].as_str().is_some_and(|text| text.contains("FAILED")));
+        assert!(
+            artifact.value["stderrTail"]
+                .as_str()
+                .is_some_and(|text| text.contains("assertion failed"))
+        );
     }
 
     /// A green suite yields the elapsed time and the harness's own test count.
@@ -609,10 +724,17 @@ mod tests {
     /// A baseline that outgrows its own explicit ceiling stops the run and says which number to move.
     #[test]
     fn a_baseline_that_outgrows_its_ceiling_names_the_ceiling() {
-        let cause = baseline_memory_error(
-            Utf8Path::new("/workspace/target/debug/deps/unit"),
-            Some(300 * 1024 * 1024),
-            256 * 1024 * 1024,
+        let (_directory, work, binaries) = diagnostic_harness();
+        let cause = baseline_failure_error(
+            &work,
+            &binaries[0],
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+            &Verdict::MemoryLimit {
+                peak: Some(300 * 1024 * 1024),
+                limit: 256 * 1024 * 1024,
+            },
+            None,
         )
         .to_string();
 
@@ -626,11 +748,30 @@ mod tests {
 
     #[test]
     fn a_baseline_timeout_names_the_binary_that_stopped_progress() {
-        let cause = baseline_timeout_error(Utf8Path::new("/workspace/target/debug/deps/unit")).to_string();
+        let (_directory, work, binaries) = diagnostic_harness();
+        let evidence = FailureEvidence {
+            termination: None,
+            stdout_tail: "\u{1b}[31mred\u{1b}[0m".to_owned(),
+            stderr_tail: String::new(),
+            output_truncated: false,
+        };
+        let failure = baseline_failure_error(
+            &work,
+            &binaries[0],
+            Duration::from_secs(10),
+            Duration::from_mins(10),
+            &Verdict::TimedOut,
+            Some(&evidence),
+        );
+        let cause = failure.to_string();
 
         // A timeout before mutants run is a property of the fixed suite, so the message must point
         // at the binary the user can run directly.
         assert!(cause.contains("unit"), "{cause}");
-        assert!(cause.contains("ten minutes"), "{cause}");
+        assert!(cause.contains("600s"), "{cause}");
+        assert_eq!(
+            failure.artifact().expect("a baseline timeout carries a durable record").value["stdoutTail"],
+            "\\e[31mred\\e[0m"
+        );
     }
 }

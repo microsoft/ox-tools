@@ -7,7 +7,7 @@ use core::fmt::Write as _;
 use core::time::Duration;
 use std::time::Instant;
 
-use cargo_gamma_process::{MemoryRequest, containment};
+use cargo_gamma_process::MemoryRequest;
 
 use super::baseline::{Baseline, measure_baseline};
 use super::build::{Abandoned, Converger};
@@ -30,7 +30,6 @@ use crate::error::error;
 use crate::estimate::project;
 use crate::model::Outcome;
 use crate::ops::registry::Selection;
-use crate::report::encode_controls;
 use crate::{HashMap, HashSet, Result};
 
 /// How many groups a "not run, by …" line names before it starts counting the rest.
@@ -376,10 +375,15 @@ fn preflight(
     events.end("");
     let dropped = cleared.dropped;
 
-    // The narrowed check failed and only the whole workspace passed, so every build this run makes
-    // asks for the same feature unification. Narrowing again would rebuild the failure the check
-    // has already shown belongs to the scope rather than to any mutant, and the rollback loop would
-    // charge it to whichever mutants it happened to blame.
+    // Staged checks retain a whole-workspace feature scope whenever Cargo's original selection
+    // covers every member, even when packages with no mutable files made preflight narrower. A
+    // check that only passed after widening requires the final build to stay wide too; narrowing
+    // there would reproduce a failure already shown to belong to the scope rather than to any
+    // mutant.
+    if workspace_stages(&survey.selected, &survey.reach) {
+        converger.require_workspace_stages();
+    }
+
     if cleared.whole_workspace {
         converger.require_whole_workspace();
     }
@@ -401,6 +405,15 @@ fn preflight(
         whole_workspace: config.test_workspace,
         dropped,
     })
+}
+
+/// Whether staged checks need every workspace member as a Cargo root.
+///
+/// Preflight may omit members that contain no mutable files, so its package list alone cannot
+/// identify a whole-workspace invocation. The resolved Cargo selection can: [`Survey::selected`]
+/// contains every package Cargo would act on, while `reach` is keyed by every workspace member.
+fn workspace_stages(selected: &[String], reach: &HashMap<String, HashSet<String>>) -> bool {
+    selected.len() == reach.len() && selected.iter().all(|package| reach.contains_key(package.as_str()))
 }
 
 /// The oracle a preflight retreat leaves behind: what was asked for, less what would not compile.
@@ -470,10 +483,6 @@ pub fn measure(survey: &Survey, selection: &Selection, config: &Config, events: 
     measure_with_locks(survey, selection, config, events, None)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one ordered pass: admission, copy, build, and baseline share borrowed state"
-)]
 fn measure_with_locks(
     survey: &Survey,
     selection: &Selection,
@@ -484,20 +493,6 @@ fn measure_with_locks(
     let started = Instant::now();
 
     let (memory, unbounded) = admit_memory_control(config)?;
-
-    // Said here, before the tree is copied and long before a build script or a test binary runs.
-    // Containment is what keeps a test's descendants from outliving the run, and on a host that
-    // cannot seal a subtree it falls back to a process group that any descendant can leave with an
-    // unprivileged call. That is a fact about the machine rather than about this run, so it is
-    // reported once, up front, rather than discovered when an orphan holds a scratch tree open.
-    if let Err(reason) = containment() {
-        let reason = reason.to_string();
-
-        events.warn(&format!(
-            "this host cannot fully contain a test's descendants, so cleanup is best-effort: {}",
-            encode_controls(&reason)
-        ));
-    }
 
     // Checked against what the workspace declares, before anything is copied or compiled. A typo
     // here changes which tests get to convict a mutant, so it should cost a second rather than a
@@ -1133,6 +1128,31 @@ mod tests {
     use crate::fixtures;
     use crate::model::Mutant;
     use crate::testing::Recorder;
+
+    #[test]
+    fn whole_workspace_selection_keeps_wide_stages_when_preflight_omits_an_immutable_member() {
+        let selected = vec!["mutable".to_owned(), "immutable".to_owned()];
+        let reach = [
+            ("mutable".to_owned(), HashSet::default()),
+            ("immutable".to_owned(), HashSet::default()),
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(workspace_stages(&selected, &reach));
+    }
+
+    #[test]
+    fn package_selection_keeps_narrow_stages_even_after_unrestricted_preflight() {
+        let selected = vec!["mutable".to_owned()];
+        let reach = [
+            ("mutable".to_owned(), HashSet::default()),
+            ("unselected".to_owned(), HashSet::default()),
+        ]
+        .into_iter()
+        .collect();
+        assert!(!workspace_stages(&selected, &reach));
+    }
 
     /// A baseline with the given elapsed time and quiet period, and nothing else measured.
     ///
