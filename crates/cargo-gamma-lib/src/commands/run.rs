@@ -806,7 +806,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     if let Some(lock_identity) = cache_lock_identity {
         pause_after_cache_adoption(&survey.root, lock_identity);
     }
-    let mut outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks);
+    let mut failed_work = None;
+    let mut outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks, &mut failed_work);
 
     // A phase that failed never got to say what it found, so the line it opened is still waiting
     // for an ending. Close it before the error is printed, or the error arrives as the rest of
@@ -819,6 +820,13 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
 
     if let Err(failure) = &mut outcome {
         emit_failure_artifacts(&mut events, args, &survey.skeleton(), failure, &artifact_dir, started, styler);
+    }
+
+    if let Some(mut work) = failed_work
+        && let Err(cleanup) = work.teardown()
+        && let Err(failure) = &mut outcome
+    {
+        failure.append_message(&format!("\nCleanup:       {cleanup}"));
     }
 
     let exec::Measured {

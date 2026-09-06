@@ -578,11 +578,12 @@ fn a_redirected_runtime_dependency_keeps_the_feature_gating_its_own_api() {
     let runtime = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("this crate lives one level below `crates`")
-        .join("cargo-gamma-rt");
+        .join("cargo-gamma-rt")
+        .into_string()
+        .replace('\\', "/");
 
     // Cargo paths are portable when written with `/`, including on Windows; a native path with
     // `\` is a string-escape sequence to a TOML parser, so writing it verbatim breaks on Windows.
-    let runtime = runtime.as_str().replace('\\', "/");
 
     fs::write(
         root.join("Cargo.toml"),
@@ -599,6 +600,52 @@ fn a_redirected_runtime_dependency_keeps_the_feature_gating_its_own_api() {
         "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
     )
     .expect("could not write the library");
+
+    let (code, host) = invoke(&dir, &["run", "--whole-test-binaries", "--jobs", "1"]);
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+}
+
+/// A member that inherits the runtime dependency with `workspace = true` must keep the `features`
+/// declared by the workspace's own `[workspace.dependencies]` entry — those settings live in a
+/// different manifest than the one `link_runtime` edits, and used to be dropped once that entry
+/// was rebuilt as a bare `{ package, path }` table, breaking any member whose code gates on them.
+#[test]
+fn a_workspace_inherited_runtime_dependency_keeps_the_feature_gating_its_own_api() {
+    let dir = TempDir::new().expect("could not create a temporary directory");
+    let root = dir.path();
+
+    let runtime = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate lives one level below `crates`")
+        .join("cargo-gamma-rt")
+        .into_string()
+        .replace('\\', "/");
+
+    // Cargo paths are portable when written with `/`, including on Windows; a native path with
+    // `\` is a string-escape sequence to a TOML parser, so writing it verbatim breaks on Windows.
+
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[workspace]\nmembers = [\"subject\"]\nresolver = \"2\"\n\n\
+             [workspace.dependencies]\ngamma_rt = {{ package = \"cargo-gamma-rt\", path = \"{runtime}\", features = [\"embedding\"] }}\n",
+        ),
+    )
+    .expect("could not write the workspace manifest");
+
+    fs::create_dir_all(root.join("subject/src")).expect("could not create the member's src");
+    fs::write(
+        root.join("subject/Cargo.toml"),
+        "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [dependencies]\ngamma_rt = { workspace = true }\n",
+    )
+    .expect("could not write the member manifest");
+    fs::write(
+        root.join("subject/src/lib.rs"),
+        "pub fn embedded_source_count() -> usize {\n    gamma_rt::embedded::SOURCES.len()\n}\n",
+    )
+    .expect("could not write the member's library");
 
     let (code, host) = invoke(&dir, &["run", "--whole-test-binaries", "--jobs", "1"]);
 

@@ -3,7 +3,7 @@
 
 use core::time::Duration;
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, BufReader, Read};
 use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -934,10 +934,12 @@ fn run_with(
                 // replaying the failed child's captured output, which may hold the guard runtime's
                 // environment-error marker. Cutting there would convict a mutant before the
                 // evidence that the test never started was available.
-                if !retain_failure && let Some(name) = failure_to_cut_short(under_nextest, progress) {
+                if let Some(name) = failure_to_cut_short(under_nextest, progress) {
                     let (usage, ceiling) = cut_short!(&mut subtree, true);
+                    let collected = collected(&drained, DRAIN_GRACE);
+                    let evidence = retain_failure.then(|| collected.failure_evidence(None));
 
-                    return (cut_by_named_failure(name, usage.peak, ceiling), usage, None);
+                    return (cut_by_named_failure(name, usage.peak, ceiling), usage, evidence);
                 }
 
                 let stalled = stall.exceeded(progress);
@@ -1576,7 +1578,7 @@ fn drain<R: Read>(
 
     let mut reader = BufReader::new(pipe);
     let mut kept = Vec::new();
-    let mut tail = Vec::new();
+    let mut tail = VecDeque::new();
     let mut tail_truncated = false;
     let mut line = Vec::new();
     let mut whole = true;
@@ -1585,12 +1587,12 @@ fn drain<R: Read>(
         line.clear();
 
         match reader.read_until(b'\n', &mut line) {
-            Ok(0) => return (kept, tail, tail_truncated, whole),
+            Ok(0) => return (kept, tail.into_iter().collect(), tail_truncated, whole),
 
             // The partial line this read was building goes with the bytes it lost: half a line is
             // not something the watcher should be shown, and it could as easily be half an
             // announcement as half a progress bar.
-            Err(_truncated) => return (kept, tail, tail_truncated, false),
+            Err(_truncated) => return (kept, tail.into_iter().collect(), tail_truncated, false),
 
             Ok(_read) => {
                 // Published before the text is kept, so a binary past the cap still counts as
@@ -1643,10 +1645,10 @@ const OUTPUT_TAIL_CAP: usize = 64 * 1024;
 /// those follow-on failures; the 64 KiB byte cap remains the hard bound.
 const OUTPUT_TAIL_LINES: usize = 2_000;
 
-fn retain_output_tail(tail: &mut Vec<u8>, bytes: &[u8]) -> bool {
+fn retain_output_tail(tail: &mut VecDeque<u8>, bytes: &[u8]) -> bool {
     if bytes.len() >= OUTPUT_TAIL_CAP {
         tail.clear();
-        tail.extend_from_slice(&bytes[bytes.len() - OUTPUT_TAIL_CAP..]);
+        tail.extend(bytes[bytes.len() - OUTPUT_TAIL_CAP..].iter().copied());
         return true;
     }
 
@@ -1655,7 +1657,7 @@ fn retain_output_tail(tail: &mut Vec<u8>, bytes: &[u8]) -> bool {
         tail.drain(..excess);
     }
 
-    tail.extend_from_slice(bytes);
+    tail.extend(bytes.iter().copied());
 
     excess > 0
 }
@@ -2793,6 +2795,45 @@ mod tests {
 
         assert_eq!(verdict, Verdict::Failed(Some("a::b".to_owned())));
         assert!(took < Duration::from_secs(15), "the run waited for the whole binary: {took:?}");
+    }
+
+    /// Baseline diagnostics retain their bounded output without giving up direct libtest's early cut.
+    #[test]
+    fn a_baseline_failure_retains_evidence_without_waiting_for_the_binary() {
+        let (_directory, work) = scripted(&[
+            "print:running 2 tests",
+            "print:test a::b ... FAILED",
+            "print:failure detail",
+            "sleep:30000",
+            "exit:101",
+        ]);
+        let binary = crate::testing::helper();
+        let started = Instant::now();
+
+        let observed = observe_baseline(
+            &work,
+            &binary,
+            Attempt {
+                active: None,
+                timeout: Some(Duration::from_mins(2)),
+                stall: Stall::NONE,
+                request: MemoryRequest::default(),
+                only: Only::All,
+                census: None,
+            },
+        );
+        let took = started.elapsed();
+
+        assert_eq!(observed.verdict, Verdict::Failed(Some("a::b".to_owned())));
+        assert!(
+            observed
+                .failure
+                .as_ref()
+                .is_some_and(|evidence| evidence.stdout_tail.contains("test a::b ... FAILED")),
+            "{:?}",
+            observed.failure
+        );
+        assert!(took < Duration::from_secs(15), "the baseline waited for the whole binary: {took:?}");
     }
 
     /// The name reported is the one the run would have reported had it read the binary to the end.

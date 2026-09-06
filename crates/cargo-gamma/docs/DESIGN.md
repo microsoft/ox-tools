@@ -132,9 +132,9 @@ Every instrumented package is linked to the same runtime vendored for the campai
 dependency on cargo-gamma's implementation crate is redirected to that copy; an unrelated
 dependency occupying the `gamma_rt` crate name is refused. This keeps every guard in one test
 process on the same active-mutant and census state. Redirecting an existing dependency preserves
-its `features` and `default-features` settings — including a workspace-level declaration and a
-member's own override of a `workspace = true` dependency — so a package that already opted into a
-runtime feature keeps that selection after the redirect.
+its `features` and `default-features` settings — including workspace-level declarations, member
+overrides of `workspace = true`, and target-specific declarations — so a package that already opted
+into a runtime feature keeps that selection after the redirect.
 
 ## A campaign from start to finish
 
@@ -336,7 +336,8 @@ meaningful only when its excluded population remains visible.
 
 Workspace packages are handled in dependency order so that failures are localized and useful work
 can progress without waiting for one global rollback loop. A final workspace build applies Cargo's
-real feature unification and produces the test binaries.
+real feature unification and produces the test binaries. Example and benchmark targets are not
+built: cargo-gamma does not execute them, so they are not part of its compilation oracle.
 
 Diagnostic attribution uses guard locations in the instrumented text, not original line numbers.
 Instrumentation changes line positions, and nested mutations can share original spans. The mutated
@@ -357,6 +358,14 @@ Normal runs publish `gamma-report.json`, `gamma-report.html`, `gamma-report.sari
 `target/cargo-gamma/`. `last-gamma-run.json` and `gamma-progress.log` remain cache state. An explicit
 `--cache-dir` relocates only reusable cache state. `--artifact-dir` relocates all five published
 artifacts together, and its directory is created when absent.
+
+Those five files are the completed-run set. A baseline that fails before a campaign can complete
+instead publishes `baseline-failure.json` and `gamma-diagnostics.json`. The baseline record uses
+`schemaVersion: 1` and records the failure kind and reason; package, target, runner, executable, and
+working directory; cargo-gamma's explicit environment overrides; failing and last-observed tests;
+termination, elapsed time, budget, peak, and memory limit; and safely encoded stdout and stderr
+tails. Each stream retains at most 64 KiB and 2,000 lines, and the record says when output was
+truncated. Both early-failure artifacts are written before the failed scratch workspace is removed.
 
 The source tree preserves symlinks and honors workspace ignore rules. Relative path dependencies
 that leave the workspace are anchored to their original locations so moving the workspace does not
@@ -561,10 +570,8 @@ This yields exactly three outcomes, with no silent fourth:
 - **Refused.** The host can seal a subtree but this launch could not be given one. The launch does
   not happen; one mutant is recorded as unjudged rather than run unreachable.
 - **Best effort.** The host offers no unprivileged process-tree boundary at all — every Unix that
-  is not Linux, and any Linux without a usable delegated cgroup. Containment falls back to the
-  process group, and the run says so once, before it copies, builds, or executes anything the
-  repository controls, rather than leaving the absence to be discovered from an orphan holding the
-  scratch tree open.
+  is not Linux, and any Linux without a usable delegated cgroup. Containment silently falls back to
+  the process group; absence of a warning does not prove that sealed containment was available.
 
 Containment is active before user code can escape into an untracked descendant. Cleanup follows an
 observe, terminate, release, and reap lifecycle so that slots and platform resources cannot be
@@ -848,11 +855,10 @@ The mutant-schema design makes large campaigns practical, but it is not free.
   layout, and may expose stack or compiler limits in unusually deep code.
 - **Resource containment depends on the host.** Linux and Windows provide strong process-tree
   facilities; other environments may provide less, and requested guarantees are refused when they
-  cannot be honored. Where no sealed boundary exists, containment is announced as best effort at
-  the start of the run rather than silently degraded, and a descendant that deliberately leaves its
-  process group can still outlive the run. Linux additionally treats the memory interface as part
-  of the same capability, so a kernel too old to expose it falls back to best effort even though
-  its cgroup could have held the subtree.
+  cannot be honored. Where no sealed boundary exists, containment silently falls back to best
+  effort, and a descendant that deliberately leaves its process group can still outlive the run.
+  Linux additionally treats the memory interface as part of the same capability, so a kernel too
+  old to expose it falls back to best effort even though its cgroup could have held the subtree.
 - **The workspace environment must be sound on platforms without an immutable startup image.**
   Linux reads the environment snapshot captured by `exec`; other Unix targets rely on constructor-
   time capture and therefore cannot support an earlier native initializer concurrently mutating

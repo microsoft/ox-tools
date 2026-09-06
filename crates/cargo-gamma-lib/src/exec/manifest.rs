@@ -151,6 +151,22 @@ impl Manifest {
     /// run cannot honour `--locked` or `--frozen` as written: those flags forbid exactly this edit.
     /// The build substitutes `--offline` for them and says so once.
     pub(super) fn link_runtime(&mut self, runtime: &Utf8Path) -> Result<()> {
+        self.link_runtime_inheriting(runtime, &WorkspaceRuntimeFeatures::default())
+    }
+
+    /// Same as [`link_runtime`](Self::link_runtime), but also merges in feature settings the
+    /// caller already resolved from the workspace's own `[workspace.dependencies]` declaration for
+    /// the runtime crate.
+    ///
+    /// A member entry that says `workspace = true` carries none of the `features` or
+    /// `default-features` its inherited declaration set — those live in the workspace's manifest,
+    /// a different file this method never opens — so the caller resolves them once, before any
+    /// manifest in the tree is edited, and threads the result through here. A declaration that
+    /// does *not* say `workspace = true` — a direct path, version, or git dependency — never
+    /// inherits from `workspace_features`, whatever it carries: that table only ever describes
+    /// what a `workspace = true` entry would otherwise be missing, not a default every member
+    /// picks up regardless of its own declaration.
+    pub(super) fn link_runtime_inheriting(&mut self, runtime: &Utf8Path, workspace_features: &WorkspaceRuntimeFeatures) -> Result<()> {
         let runtime = absolute(runtime);
 
         let conflicting_target = self
@@ -168,6 +184,13 @@ impl Manifest {
             return Err(Self::runtime_name_reserved(&self.path));
         }
 
+        // Every target-specific table can name the runtime under either key, and each is
+        // discarded once the single canonical entry below takes its place — so whatever
+        // `features` and `default-features` it declared are read and merged in before that
+        // removal, rather than lost with it. Each key only inherits the workspace's matching key,
+        // and only when that key's own entry actually says `workspace = true`.
+        let mut target_features = FeatureSettings::default();
+
         if let Some(targets) = self.document.get_mut("target").and_then(Item::as_table_like_mut) {
             for (_platform, target) in targets.iter_mut() {
                 let Some(dependencies) = target
@@ -178,8 +201,12 @@ impl Manifest {
                     continue;
                 };
 
+                target_features = target_features
+                    .merge(workspace_features.resolve_aliased(dependencies.get(RUNTIME_CRATE)))
+                    .merge(workspace_features.resolve_canonical(dependencies.get(RUNTIME_PACKAGE)));
+
                 self.changed |= dependencies.remove(RUNTIME_CRATE).is_some();
-                self.changed |= dependencies.remove("cargo-gamma-rt").is_some();
+                self.changed |= dependencies.remove(RUNTIME_PACKAGE).is_some();
             }
         }
 
@@ -193,10 +220,18 @@ impl Manifest {
             return Err(Self::runtime_name_reserved(&self.path));
         }
 
-        // Preserve whatever feature selection either the aliased or the canonical entry already
-        // carried before either is discarded — the aliased entry (the one instrumented code
-        // actually resolves) wins a conflict, since it is the one in effect today.
-        let feature_settings = FeatureSettings::extract(table.get(RUNTIME_CRATE)).or(FeatureSettings::extract(table.get("cargo-gamma-rt")));
+        // Preserve whatever feature selection every declaration that already named this
+        // dependency carried before each is discarded: the member's own top-level entry (whether
+        // a direct declaration or a `workspace = true` override, which wins a genuine
+        // `default-features` conflict as the most specific and the one in effect today), the
+        // workspace's own matching-key declaration that entry inherits from when — and only when
+        // — it says `workspace = true`, and any target-specific declaration. `features` from
+        // every source are unioned rather than one replacing another, since Cargo would have
+        // unified them across the same crate instance anyway.
+        let own_features = workspace_features
+            .resolve_aliased(table.get(RUNTIME_CRATE))
+            .merge(workspace_features.resolve_canonical(table.get(RUNTIME_PACKAGE)));
+        let feature_settings = own_features.merge(target_features);
 
         let _existing_runtime = table.remove("cargo-gamma-rt");
         let mut entry = toml_edit::InlineTable::new();
@@ -211,7 +246,13 @@ impl Manifest {
     }
 
     /// Redirects a runtime dependency already present in this package to the campaign's copy.
-    pub(super) fn redirect_runtime(&mut self, runtime: &Utf8Path) -> Result<()> {
+    ///
+    /// `workspace_features` carries feature settings the caller already resolved from the
+    /// workspace's own `[workspace.dependencies]` declaration for the runtime crate — settings a
+    /// member entry that says `workspace = true` cannot see for itself, since that declaration
+    /// lives in a different manifest than the one this method edits. A caller with nothing to
+    /// contribute passes [`WorkspaceRuntimeFeatures::default`].
+    pub(super) fn redirect_runtime(&mut self, runtime: &Utf8Path, workspace_features: &WorkspaceRuntimeFeatures) -> Result<()> {
         let runtime = absolute(runtime);
         self.redirect_workspace_runtime(&runtime)?;
 
@@ -230,7 +271,7 @@ impl Manifest {
             .any(|dependencies| dependencies.contains_key(RUNTIME_CRATE) || dependencies.contains_key("cargo-gamma-rt"));
 
         if top_level || targeted {
-            self.link_runtime(&runtime)?;
+            self.link_runtime_inheriting(&runtime, workspace_features)?;
         }
 
         Ok(())
@@ -293,9 +334,10 @@ impl Manifest {
 /// Redirecting a dependency to the vendored runtime replaces its whole specification with a
 /// fresh path dependency, which would otherwise silently drop any feature selection the manifest
 /// already made — including a member's own override of a `workspace = true` dependency, which
-/// Cargo allows to add `features` alongside the inherited entry.
-#[derive(Default)]
-struct FeatureSettings {
+/// Cargo allows to add `features` alongside the inherited entry, and any target-specific
+/// declaration.
+#[derive(Default, Clone)]
+pub(super) struct FeatureSettings {
     features: Option<Value>,
     default_features: Option<Value>,
 }
@@ -317,10 +359,13 @@ impl FeatureSettings {
         }
     }
 
-    /// Prefers this side's settings, falling back to `other`'s where this side left a gap.
-    fn or(self, other: Self) -> Self {
+    /// Merges this side's settings with `other`'s: `features` are unioned rather than one side's
+    /// array replacing the other's, since Cargo would have unified them across the same crate
+    /// instance anyway, while `default-features` prefers this side's explicit choice and falls
+    /// back to `other`'s only where this side left a gap.
+    fn merge(self, other: Self) -> Self {
         Self {
-            features: self.features.or(other.features),
+            features: merge_feature_arrays(self.features, other.features),
             default_features: self.default_features.or(other.default_features),
         }
     }
@@ -334,6 +379,109 @@ impl FeatureSettings {
         if let Some(default_features) = self.default_features {
             let _default_features = entry.insert("default-features", default_features);
         }
+    }
+}
+
+/// The feature settings a workspace's own `[workspace.dependencies]` table declares for the
+/// runtime crate, kept separate per key.
+///
+/// The aliased and canonical keys are two independent declarations that just happen to name the
+/// same crate: a member that inherits one with `workspace = true` must not acquire settings the
+/// *other* key declares, so the two are never merged with each other here — only [`resolve_aliased`](Self::resolve_aliased)
+/// or [`resolve_canonical`](Self::resolve_canonical) combine one of them with a specific entry,
+/// and only when that entry actually inherits from the workspace.
+#[derive(Default, Clone)]
+pub(super) struct WorkspaceRuntimeFeatures {
+    aliased: FeatureSettings,
+    canonical: FeatureSettings,
+}
+
+impl WorkspaceRuntimeFeatures {
+    /// Reads the settings a workspace's own `[workspace.dependencies]` table declares for the
+    /// runtime crate, under both its aliased and canonical keys, before anything redirects them.
+    ///
+    /// A member that inherits the runtime with `workspace = true` names it by key alone, carrying
+    /// none of these settings itself — they have to be read from the workspace's own manifest
+    /// before that member's entry is replaced, since that replacement is the last point at which
+    /// the workspace-level declaration is still reachable by name.
+    pub(super) fn from_workspace(root: &Utf8Path) -> Result<Self> {
+        let manifest = Manifest::read(root)?;
+
+        let dependencies = manifest
+            .document
+            .get("workspace")
+            .and_then(Item::as_table_like)
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(Item::as_table_like);
+
+        Ok(Self {
+            aliased: dependencies.map_or_else(FeatureSettings::default, |table| FeatureSettings::extract(table.get(RUNTIME_CRATE))),
+            canonical: dependencies.map_or_else(FeatureSettings::default, |table| {
+                FeatureSettings::extract(table.get(RUNTIME_PACKAGE))
+            }),
+        })
+    }
+
+    /// Resolves the effective feature settings for a dependency-table entry named by the aliased
+    /// key (`gamma_rt`): its own settings, merged with the workspace's aliased-key declaration
+    /// only when `item` itself says `workspace = true`. An `item` that inherits nothing of its
+    /// own — no entry at all, or one that does not say `workspace = true` — never acquires the
+    /// workspace's settings, whatever they are.
+    fn resolve_aliased(&self, item: Option<&Item>) -> FeatureSettings {
+        Self::resolve(item, &self.aliased)
+    }
+
+    /// Same as [`resolve_aliased`](Self::resolve_aliased), but for the canonical key
+    /// (`cargo-gamma-rt`) and the workspace's canonical-key declaration.
+    fn resolve_canonical(&self, item: Option<&Item>) -> FeatureSettings {
+        Self::resolve(item, &self.canonical)
+    }
+
+    fn resolve(item: Option<&Item>, inherited: &FeatureSettings) -> FeatureSettings {
+        let own = FeatureSettings::extract(item);
+
+        if inherits_workspace_true(item) {
+            own.merge(inherited.clone())
+        } else {
+            own
+        }
+    }
+}
+
+/// Whether a dependency specification declares `workspace = true`, meaning it inherits from the
+/// matching `[workspace.dependencies]` key rather than declaring its own path, version, or git
+/// source.
+///
+/// A direct declaration that merely sits alongside a workspace with its own `[workspace.dependencies]`
+/// entry never reads that entry — only a `workspace = true` declaration names it at all.
+fn inherits_workspace_true(item: Option<&Item>) -> bool {
+    item.and_then(Item::as_table_like)
+        .and_then(|table| table.get("workspace"))
+        .and_then(Item::as_value)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Unions two `features` array values rather than letting one replace the other.
+///
+/// A malformed `features` value that is not an array is left as whichever side already has one,
+/// rather than guessing how to combine it with something that is not a list.
+fn merge_feature_arrays(left: Option<Value>, right: Option<Value>) -> Option<Value> {
+    match (left, right) {
+        (Some(Value::Array(mut merged)), Some(Value::Array(additional))) => {
+            for feature in additional {
+                let already_present = merged.iter().any(|existing| existing.as_str() == feature.as_str());
+
+                if !already_present {
+                    merged.push_formatted(feature);
+                }
+            }
+
+            Some(Value::Array(merged))
+        }
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (Some(preferred), Some(_not_an_array)) => Some(preferred),
+        (None, None) => None,
     }
 }
 
@@ -740,6 +888,34 @@ mod tests {
         manifest.document.to_string()
     }
 
+    /// Same as `linked`, but folds in feature settings resolved separately from a workspace's own
+    /// `[workspace.dependencies]` declaration, the way `anchor_manifests` does for a real tree.
+    fn linked_inheriting(text: &str, workspace_features: &WorkspaceRuntimeFeatures) -> String {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(temporary.path().join("Cargo.toml")).unwrap();
+
+        fs::write(path.as_std_path(), text).unwrap();
+
+        let mut manifest = Manifest::read(&path).unwrap();
+
+        manifest
+            .link_runtime_inheriting(Utf8Path::new("/scratch/rt"), workspace_features)
+            .unwrap();
+
+        manifest.document.to_string()
+    }
+
+    /// Reads the `features`/`default-features` a workspace manifest's text declares for the
+    /// runtime crate, the way `anchor_manifests` resolves them before editing any member.
+    fn workspace_features(text: &str) -> WorkspaceRuntimeFeatures {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(temporary.path().join("Cargo.toml")).unwrap();
+
+        fs::write(path.as_std_path(), text).unwrap();
+
+        WorkspaceRuntimeFeatures::from_workspace(&path).unwrap()
+    }
+
     #[test]
     fn the_runtime_is_added_to_a_package_without_it() {
         let text = linked("[package]\nname = \"x\"\n");
@@ -837,6 +1013,114 @@ mod tests {
         assert!(!linked.contains("default-features"), "{linked}");
     }
 
+    /// A member overriding `workspace = true` with its own `features` does not replace whatever
+    /// the workspace's own `[workspace.dependencies]` declaration already listed — Cargo unions
+    /// both onto the one shared crate instance, so losing either half would compile a runtime
+    /// missing a feature some guard actually needs.
+    #[test]
+    fn combined_workspace_and_member_features_survive_being_linked_to_the_vendored_runtime() {
+        let workspace = workspace_features(
+            "[workspace]\nmembers = []\n\n\
+             [workspace.dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", version = \"0.1\", features = [\"base\"] }\n",
+        );
+
+        let linked = linked_inheriting(
+            "[dependencies]\ngamma_rt = { workspace = true, features = [\"embedding\"] }\n",
+            &workspace,
+        );
+
+        assert!(linked.contains("package = \"cargo-gamma-rt\""), "{linked}");
+        assert!(linked.contains("\"embedding\""), "{linked}");
+        assert!(linked.contains("\"base\""), "{linked}");
+        assert_eq!(linked.matches("features").count(), 1, "{linked}");
+    }
+
+    /// The workspace's own `default-features` setting has to reach a member that inherits the
+    /// dependency bare — `link_runtime` only ever sees that member's own entry, which carries no
+    /// override to fall back on.
+    #[test]
+    fn a_workspace_declared_default_features_false_survives_a_bare_workspace_true_inheritance() {
+        let workspace = workspace_features(
+            "[workspace]\nmembers = []\n\n\
+             [workspace.dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", version = \"0.1\", default-features = false }\n",
+        );
+
+        let linked = linked_inheriting("[dependencies]\ngamma_rt = { workspace = true }\n", &workspace);
+
+        assert!(linked.contains("default-features = false"), "{linked}");
+    }
+
+    /// A target-specific declaration is discarded once folded into the single canonical entry;
+    /// its features have to be read out first or they vanish along with the table that named them.
+    #[test]
+    fn target_specific_features_survive_being_linked_to_the_vendored_runtime() {
+        let linked = linked("[target.'cfg(unix)'.dependencies]\ngamma_rt = { workspace = true, features = [\"only-target\"] }\n");
+
+        assert!(linked.contains("package = \"cargo-gamma-rt\""), "{linked}");
+        assert!(linked.contains("features = [\"only-target\"]"), "{linked}");
+        // The target-specific entry itself is gone, folded into the one canonical entry below —
+        // even though the (now empty) table header that held it is left in place, the same way
+        // removing an ordinary dependency does.
+        assert_eq!(linked.matches("gamma_rt").count(), 1, "{linked}");
+    }
+
+    /// Guards against the target-specific and workspace-inheritance merging above inventing an
+    /// empty `features`/`default-features` key when nothing anywhere actually declared one.
+    #[test]
+    fn no_feature_settings_from_any_source_produce_the_existing_output() {
+        let linked = linked_inheriting(
+            "[target.'cfg(unix)'.dependencies]\ngamma_rt = { workspace = true }\n\n\
+             [dependencies]\ngamma_rt = { workspace = true }\n",
+            &WorkspaceRuntimeFeatures::default(),
+        );
+
+        assert!(!linked.contains("features"), "{linked}");
+        assert!(!linked.contains("default-features"), "{linked}");
+    }
+
+    /// A direct dependency — one that names its own path or version rather than saying
+    /// `workspace = true` — must not acquire `features` the workspace's own
+    /// `[workspace.dependencies]` entry happens to declare for the same key: that entry is
+    /// irrelevant to a member that never named it, and inheriting from it anyway would silently
+    /// add a feature the member's own declaration never asked for.
+    #[test]
+    fn a_direct_dependency_does_not_acquire_unrelated_workspace_features() {
+        let workspace = workspace_features(
+            "[workspace]\nmembers = []\n\n\
+             [workspace.dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", version = \"0.1\", features = [\"unrelated\"] }\n",
+        );
+
+        let linked = linked_inheriting(
+            "[dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"../rt\", features = [\"direct\"] }\n",
+            &workspace,
+        );
+
+        assert!(linked.contains("\"direct\""), "{linked}");
+        assert!(!linked.contains("unrelated"), "{linked}");
+    }
+
+    /// A target-specific entry that says `workspace = true` under the canonical key must inherit
+    /// only the workspace's canonical-key declaration, not whatever the aliased key happens to
+    /// declare — the two keys are independent declarations even though both ultimately name the
+    /// same crate.
+    #[test]
+    fn target_specific_workspace_true_inherits_only_its_own_key() {
+        let workspace = workspace_features(
+            "[workspace]\nmembers = []\n\n\
+             [workspace.dependencies]\n\
+             gamma_rt = { package = \"cargo-gamma-rt\", version = \"0.1\", features = [\"aliased-only\"] }\n\
+             cargo-gamma-rt = { version = \"0.1\", features = [\"canonical-only\"] }\n",
+        );
+
+        let linked = linked_inheriting(
+            "[target.'cfg(unix)'.dependencies]\ncargo-gamma-rt = { workspace = true }\n",
+            &workspace,
+        );
+
+        assert!(linked.contains("\"canonical-only\""), "{linked}");
+        assert!(!linked.contains("aliased-only"), "{linked}");
+    }
+
     #[test]
     fn an_existing_runtime_is_redirected_before_its_package_is_instrumented() {
         let temporary = tempfile::tempdir().unwrap();
@@ -850,7 +1134,7 @@ mod tests {
         .unwrap();
 
         let mut manifest = Manifest::read(&path).unwrap();
-        manifest.redirect_runtime(&runtime).unwrap();
+        manifest.redirect_runtime(&runtime, &WorkspaceRuntimeFeatures::default()).unwrap();
         let text = manifest.document.to_string();
 
         assert!(text.contains("package = \"cargo-gamma-rt\""), "{text}");
@@ -871,7 +1155,7 @@ mod tests {
         .unwrap();
 
         let mut manifest = Manifest::read(&path).unwrap();
-        manifest.redirect_runtime(&runtime).unwrap();
+        manifest.redirect_runtime(&runtime, &WorkspaceRuntimeFeatures::default()).unwrap();
         let text = manifest.document.to_string();
 
         assert_eq!(text.matches("\ngamma_rt =").count(), 1, "{text}");
@@ -894,7 +1178,7 @@ mod tests {
         .unwrap();
 
         let mut manifest = Manifest::read(&path).unwrap();
-        manifest.redirect_runtime(&runtime).unwrap();
+        manifest.redirect_runtime(&runtime, &WorkspaceRuntimeFeatures::default()).unwrap();
         let text = manifest.document.to_string();
 
         assert!(text.contains("gamma_rt = { package = \"cargo-gamma-rt\""), "{text}");
@@ -915,7 +1199,7 @@ mod tests {
         .unwrap();
 
         let mut manifest = Manifest::read(&path).unwrap();
-        manifest.redirect_runtime(&runtime).unwrap();
+        manifest.redirect_runtime(&runtime, &WorkspaceRuntimeFeatures::default()).unwrap();
         let text = manifest.document.to_string();
 
         assert!(text.contains("gamma_rt = { package = \"cargo-gamma-rt\", path"), "{text}");
@@ -938,7 +1222,7 @@ mod tests {
 
         let mut manifest = Manifest::read(&path).unwrap();
         let failure = manifest
-            .redirect_runtime(&runtime)
+            .redirect_runtime(&runtime, &WorkspaceRuntimeFeatures::default())
             .expect_err("the generated guard's crate name must be reserved workspace-wide");
 
         assert!(failure.is_usage(), "{failure}");

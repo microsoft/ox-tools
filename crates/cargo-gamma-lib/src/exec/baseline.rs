@@ -296,8 +296,8 @@ fn baseline_failure_error(
         "packageId": binary.package_id,
         "target": binary.target,
         "runner": runner,
-        "executable": binary.path,
-        "workingDirectory": directory,
+        "executable": binary.path.as_str(),
+        "workingDirectory": directory.as_str(),
         "environmentOverrides": baseline_environment(work),
         "test": test,
         "lastObservedTest": last_test,
@@ -483,6 +483,8 @@ mod tests {
 
         assert_eq!(artifact.file_name, "baseline-failure.json");
         assert_eq!(artifact.value["package"], "subject");
+        assert_eq!(artifact.value["executable"], binaries[0].path.as_str());
+        assert_eq!(artifact.value["workingDirectory"], working_directory(&work, &binaries[0]).as_str());
         assert_eq!(artifact.value["test"], "a::b");
         assert_eq!(artifact.value["termination"]["kind"], "exitCode");
         assert_eq!(artifact.value["termination"]["value"], 101);

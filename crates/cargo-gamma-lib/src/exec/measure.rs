@@ -43,7 +43,9 @@ const GROUP_LIMIT: usize = 5;
 /// baseline does not pass — a failing baseline means every comparison in the run has nothing to
 /// compare against.
 pub fn run(survey: &Survey, selection: &Selection, config: &Config, events: &mut impl Events) -> Result<Measured> {
-    run_with_locks(survey, selection, config, events, None)
+    let mut failed_work = None;
+
+    run_with_locks(survey, selection, config, events, None, &mut failed_work)
 }
 
 pub(crate) fn run_with_locks(
@@ -52,13 +54,14 @@ pub(crate) fn run_with_locks(
     config: &Config,
     events: &mut impl Events,
     locks: Option<super::workspace::CacheLocks>,
+    failed_work: &mut Option<Workspace>,
 ) -> Result<Measured> {
     let Measured {
         mut plan,
         built,
         stuck,
         dropped,
-    } = measure_with_locks(survey, selection, config, events, locks)?;
+    } = measure_with_locks(survey, selection, config, events, locks, failed_work)?;
 
     // Nothing was live, so nothing was copied, built or measured. The plan still describes every
     // mutant that was found and why each one is not being run, which is what the caller reports.
@@ -370,8 +373,18 @@ fn preflight(
 
     let intended = survey.packages();
     let intending: crate::HashSet<&str> = intended.iter().map(String::as_str).collect();
+    let wide_stages = workspace_stages(&survey.selected, &survey.reach);
     let checking = reaching_packages(&survey.reach, &intending, &scope);
     let cleared = Converger::preflight(work, plan, checking.as_deref(), &intended, config.build, events)?;
+
+    // A narrow-first check still matters: when only Cargo's whole-workspace feature unification
+    // makes it pass, the final test-target build must stay wide rather than rediscovering that
+    // failure. If the narrow check passed (or retreated), validate the wider roots separately
+    // because every staged check will compile them.
+    if wide_stages && !cleared.whole_workspace {
+        let _wide = Converger::preflight(work, plan, None, &intended, config.build, events)?;
+    }
+
     events.end("");
     let dropped = cleared.dropped;
 
@@ -380,7 +393,7 @@ fn preflight(
     // check that only passed after widening requires the final build to stay wide too; narrowing
     // there would reproduce a failure already shown to belong to the scope rather than to any
     // mutant.
-    if workspace_stages(&survey.selected, &survey.reach) {
+    if wide_stages {
         converger.require_workspace_stages();
     }
 
@@ -480,7 +493,9 @@ struct Cleared {
 /// made to succeed, or the baseline does not pass — a failing baseline means every comparison in
 /// the run has nothing to compare against.
 pub fn measure(survey: &Survey, selection: &Selection, config: &Config, events: &mut impl Events) -> Result<Measured> {
-    measure_with_locks(survey, selection, config, events, None)
+    let mut failed_work = None;
+
+    measure_with_locks(survey, selection, config, events, None, &mut failed_work)
 }
 
 fn measure_with_locks(
@@ -489,6 +504,7 @@ fn measure_with_locks(
     config: &Config,
     events: &mut impl Events,
     locks: Option<super::workspace::CacheLocks>,
+    failed_work: &mut Option<Workspace>,
 ) -> Result<Measured> {
     let started = Instant::now();
 
@@ -611,7 +627,8 @@ fn measure_with_locks(
         work.arm_nextest(&build.binaries)?;
     }
 
-    let baseline = take_baseline(&work, &mut build.binaries, config, &memory, events)?;
+    let baseline = take_baseline(&work, &mut build.binaries, config, &memory, events);
+    let (baseline, work) = retain_workspace_on_failure(baseline, work, failed_work)?;
 
     warn_about_an_empty_oracle(&plan, &build.binaries, &scope, config.test_packages.is_empty(), &dropped, events);
 
@@ -656,6 +673,18 @@ fn measure_with_locks(
         stuck,
         dropped,
     })
+}
+
+/// Keeps a failed run's workspace alive until the command layer has persisted its diagnostics.
+fn retain_workspace_on_failure<T>(outcome: Result<T>, work: Workspace, failed_work: &mut Option<Workspace>) -> Result<(T, Workspace)> {
+    match outcome {
+        Ok(value) => Ok((value, work)),
+        Err(failure) => {
+            *failed_work = Some(work);
+
+            Err(failure)
+        }
+    }
 }
 
 /// Renders what a build that could not be made to compile cost, and where it got stuck.
@@ -1130,7 +1159,7 @@ mod tests {
     use crate::testing::Recorder;
 
     #[test]
-    fn whole_workspace_selection_keeps_wide_stages_when_preflight_omits_an_immutable_member() {
+    fn whole_workspace_selection_requires_wide_stages() {
         let selected = vec!["mutable".to_owned(), "immutable".to_owned()];
         let reach = [
             ("mutable".to_owned(), HashSet::default()),
@@ -1138,8 +1167,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
+        let wide_stages = workspace_stages(&selected, &reach);
 
-        assert!(workspace_stages(&selected, &reach));
+        assert!(wide_stages);
     }
 
     #[test]
@@ -1151,7 +1181,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        assert!(!workspace_stages(&selected, &reach));
+        let wide_stages = workspace_stages(&selected, &reach);
+
+        assert!(!wide_stages);
     }
 
     /// A baseline with the given elapsed time and quiet period, and nothing else measured.

@@ -203,10 +203,10 @@ pub(super) struct Abandoned {
 
 /// Drives the build, withdrawing mutants that cannot compile until what is asked for compiles.
 ///
-/// A run converges the workspace one stage at a time and then once as a whole, and every one of
-/// those builds shares the same withdrawal set and budget reference. Sharing the withdrawal set is
-/// what lets a stage inherit what earlier stages already ruled out: a mutant already known to be
-/// unbuildable stays withdrawn for the rest of the run.
+/// A run converges the workspace one stage at a time and then once as a whole. The withdrawal set is
+/// shared, which lets a stage inherit what earlier stages already ruled out: a mutant already known
+/// to be unbuildable stays withdrawn for the rest of the run. Timeout calibration is reset for each
+/// build so only comparable Cargo commands and root sets share a reference.
 ///
 /// The round counter is not shared. `--rollback-rounds` caps the rounds one build may spend
 /// converging, so it is reset for each build; a cumulative counter would let early stages spend the
@@ -249,11 +249,11 @@ pub(super) struct Converger {
     /// wants to know is where the run's build time went, not where one stage's did.
     history: Vec<Round>,
 
-    /// How long the first build of the run took, which every later budget is scaled from.
+    /// How long the first ordinary round of the current build took.
     ///
-    /// Set once and never reset. A narrowed stage can build a fraction of the workspace, so letting
-    /// one set this reference would leave every later stage — and the whole-workspace build that
-    /// follows them — with a budget derived from a build that was never comparable.
+    /// Reset before each convergence. Subsequent rollback and isolation rounds repeat that build's
+    /// Cargo command and roots, so they are comparable; a later stage or final test-target build is
+    /// not.
     first_round: Option<Duration>,
 
     /// What the tree already holds, so a round rewrites only the files it changed.
@@ -403,6 +403,13 @@ impl Converger {
         withdrawn
     }
 
+    /// Resets state that describes one Cargo command and root set.
+    fn begin_convergence(&mut self) {
+        self.rounds = 0;
+        self.per_round.clear();
+        self.first_round = None;
+    }
+
     /// Instruments the tree and builds it until it compiles, withdrawing whatever stands in the way.
     ///
     /// The scope's roots name the packages Cargo compiles, while its mutants limit what convergence
@@ -427,8 +434,7 @@ impl Converger {
         // to answer for, and the withdrawal series the limit error reads has to describe the build
         // that failed. The withdrawal set is deliberately left alone — a mutant already known not
         // to compile stays withdrawn for the rest of the run.
-        self.rounds = 0;
-        self.per_round.clear();
+        self.begin_convergence();
 
         // Before the first ordinary round, and only ever before it. Whatever the probe withdraws is
         // withdrawn by the compiler's own accusation in a real build, so the loop below starts from
@@ -779,11 +785,8 @@ impl Converger {
             return Ok(());
         };
 
-        // Deliberately not allowed to set `first_round`, which every later build timeout is scaled
-        // from. A probe compiles a fraction of the mutants and usually stops on the first errors,
-        // so its elapsed time is not what a full round of this build costs — adopting it as the
-        // reference would set every later budget from a build that was never comparable, and the
-        // run would start timing out builds that are merely honest about their size.
+        // A probe compiles a fraction of the mutants and usually stops on the first errors, so it
+        // cannot calibrate the ordinary rounds that follow.
 
         if outcome.succeeded {
             // Every hint was wrong: nothing here is unviable now. Nothing is withdrawn and nothing
@@ -1200,7 +1203,7 @@ impl Converger {
                 roots: select,
                 mutants: select,
             },
-            &["build", "--tests", "--examples", "--keep-going"],
+            &["build", "--tests", "--keep-going"],
             limits,
             events,
         )

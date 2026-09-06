@@ -69,7 +69,7 @@ Each Cargo output stream is retained up to 256 MiB for artifact and diagnostic
 processing, and each logical line is bounded at 1 MiB. The buffers grow with
 observed output rather than reserving those ceilings for every invocation.
 
-Each failed baseline observation retains a bounded 64 KiB, 200-line tail from
+Each failed baseline observation retains a bounded 64 KiB, 2,000-line tail from
 stdout and stderr, along with the process exit code or signal when available.
 The baseline error identifies the package, target, runner, executable, working
 directory, elapsed time, resource failure, and failing or last-observed test.
@@ -81,10 +81,20 @@ safely encoded output tails, to `baseline-failure.json` and writes the ordinary
 controls are eligible for diagnostic records, never the inherited process
 environment.
 
+Completed runs publish the five ordinary `gamma-report.json`, HTML, SARIF,
+performance-advice, and diagnostics artifacts. An early baseline failure
+instead publishes `baseline-failure.json` and `gamma-diagnostics.json` before
+the scratch workspace is removed. The baseline record uses `schemaVersion: 1`
+and records the failure kind and reason; package, target, runner, executable,
+and working directory; cargo-gamma's explicit environment overrides; failing
+and last-observed tests; termination, elapsed time, budget, peak, and memory
+limit; and control-character-encoded stdout and stderr tails with a truncation
+flag.
+
 When Cargo's resolved package selection covers the whole workspace, every stage
-checks mutation viability with that constant Cargo root set. Packages with no
-mutable files may be omitted from preflight, but do not narrow the staged
-checks. This keeps dependency feature unification identical across stages
+checks mutation viability with that constant Cargo root set, and preflight
+validates the same roots even when some packages contain no mutable files. This
+keeps dependency feature unification identical across validation and stages
 instead of compiling a new dependency variant for each downstream package
 selection. Only the current stage's mutants are instrumented; mutants belonging
 to other stages are restored before each ordinary, probe, or isolation build.
