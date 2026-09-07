@@ -32,10 +32,10 @@
 # that lives in repository source rather than in the recipe tree. The workspace
 # members it names stay out: they are a checkout, and the image is not one.
 #
-# Neither toolchain-file spelling is required, and both are admitted: a
-# repository that pins by other means builds an image whose compiler is the
-# declared MSRV, and admitting only the TOML would give one that pins with the
-# extensionless file an image that silently disagreed with its own checkout.
+# Both spellings are admitted and neither is required: a repository that pins
+# by other means gets an image whose compiler is the declared MSRV, and
+# admitting only the TOML would give one that pins with the extensionless file
+# an image that disagreed with its own checkout.
 *
 !justfiles
 justfiles/*

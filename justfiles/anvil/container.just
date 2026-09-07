@@ -178,15 +178,15 @@ anvil-container-tag:
 
     # The ignore file is named rather than left to the walk, so that it going
     # missing is a hard failure at the check below. The walk cannot notice an
-    # absent file, and this absence is the quiet kind: the build still succeeds,
-    # but BuildKit falls back to a root ignore file or none, so the context
-    # widens to files the digest does not hash and the tag stops covering what
-    # `COPY` puts in the image.
+    # absent file, and this absence is silent: the build still succeeds, but
+    # BuildKit falls back to a root ignore file or none, so the context widens
+    # to files the digest does not hash and the tag stops covering what `COPY`
+    # puts in the image.
     $inputs = @("$dockerfile.dockerignore")
 
-    # Discovered rather than required: a repository may pin its compiler by
-    # other means and own neither spelling, and both are checked because the
-    # context admits both.
+    # A repository may pin its compiler by other means and own neither
+    # spelling, so absence is legal here. Both are checked because the context
+    # admits both.
     $toolchainFiles = @(
         @('rust-toolchain.toml', 'rust-toolchain') |
             Where-Object { Test-Path -LiteralPath (Join-Path $repoRoot $_) -PathType Leaf }

@@ -203,9 +203,9 @@ and nothing is left behind for that tag to misdescribe.
 The setup region copies the context whole rather than naming each input, because one input is optional. A repository
 that pins its compiler by other means owns no root toolchain file, and a `COPY` of a path that may not exist is not
 portable across the engines anvil supports, so naming the file would leave exactly those repositories unable to build
-an image at all. Deferring to the ignore file costs no breadth — it already scopes the context to precisely the image's
-inputs — and makes what the context admits and what the image contains the same set by construction. `.anvil/container/`
-rides along with it; that is the committed input a gap `COPY`s from, and the image never runs it.
+an image at all. The ignore file already scopes the context to precisely the image's inputs, so deferring to it makes
+what the context admits and what the image contains the same set. `.anvil/container/` rides along with it; that is the
+committed input a gap `COPY`s from, and the image never runs it.
 
 `Dockerfile.dockerignore` scopes the build context to `justfiles/anvil/`, `.anvil/container/`, a root toolchain file in
 either spelling, and the root `Cargo.toml`, denying everything else. The recipe tree is copied whole because `just` has
@@ -236,9 +236,8 @@ Dockerfile is still a hard error, checked by name: the walk alone would let it c
 tag for an image that cannot be built.
 
 The root toolchain file is the one input whose absence is not an error. It is discovered rather than required, in both
-spellings, and a repository that owns none simply contributes one fewer record to the digest — a state distinct from
-owning one, so the two cannot share a tag. The ignore file is still required by name, for the reason above: it
-contributes nothing to the digest but decides what the context, and therefore the image, contains.
+spellings, and a repository that owns none contributes one fewer record to the digest — a state distinct from owning
+one, so the two cannot share a tag.
 
 The recipe tree is hashed in full. `just anvil-setup` reaches the install recipes through the tier, group and check
 recipes, so the routing decides *whether* a tool is installed just as surely as `tools.just` decides *how*: dropping an

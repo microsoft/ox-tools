@@ -170,10 +170,10 @@ CMD ["bash"]
 # that lives in repository source rather than in the recipe tree. The workspace
 # members it names stay out: they are a checkout, and the image is not one.
 #
-# Neither toolchain-file spelling is required, and both are admitted: a
-# repository that pins by other means builds an image whose compiler is the
-# declared MSRV, and admitting only the TOML would give one that pins with the
-# extensionless file an image that silently disagreed with its own checkout.
+# Both spellings are admitted and neither is required: a repository that pins
+# by other means gets an image whose compiler is the declared MSRV, and
+# admitting only the TOML would give one that pins with the extensionless file
+# an image that disagreed with its own checkout.
 *
 !justfiles
 justfiles/*
@@ -2927,15 +2927,15 @@ anvil-container-tag:
 
     # The ignore file is named rather than left to the walk, so that it going
     # missing is a hard failure at the check below. The walk cannot notice an
-    # absent file, and this absence is the quiet kind: the build still succeeds,
-    # but BuildKit falls back to a root ignore file or none, so the context
-    # widens to files the digest does not hash and the tag stops covering what
-    # `COPY` puts in the image.
+    # absent file, and this absence is silent: the build still succeeds, but
+    # BuildKit falls back to a root ignore file or none, so the context widens
+    # to files the digest does not hash and the tag stops covering what `COPY`
+    # puts in the image.
     $inputs = @("$dockerfile.dockerignore")
 
-    # Discovered rather than required: a repository may pin its compiler by
-    # other means and own neither spelling, and both are checked because the
-    # context admits both.
+    # A repository may pin its compiler by other means and own neither
+    # spelling, so absence is legal here. Both are checked because the context
+    # admits both.
     $toolchainFiles = @(
         @('rust-toolchain.toml', 'rust-toolchain') |
             Where-Object { Test-Path -LiteralPath (Join-Path $repoRoot $_) -PathType Leaf }

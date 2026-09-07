@@ -575,9 +575,6 @@ fn container_build_carries_the_manifest_that_declares_the_msrv() {
     );
 }
 
-/// No engine anvil supports offers a portable `COPY` of a path that may not
-/// exist, so the setup region names no input and the ignore file decides what
-/// the context, and therefore the image, contains.
 #[test]
 fn the_container_build_does_not_require_a_root_toolchain_file() {
     assert!(
@@ -606,11 +603,11 @@ fn the_container_build_does_not_require_a_root_toolchain_file() {
 /// `anvil-tool-rustc-validate-prereqs`, and no `-setup` recipe depends on a
 /// `-validate-prereqs` recipe.
 ///
-/// Nothing declares that, so this pins it. A dependency edge added later, or a
-/// recipe body that shells out to one, would surface as a cargo path error
-/// inside an image build, naming a manifest instead of the edge that reached
-/// it. The whole emitted tree is planned rather than a fixture subset, because
-/// the edge could be added in any tier, group or check file.
+/// Nothing else declares this. A dependency edge added later, or a recipe body
+/// that shells out to one, would surface as a cargo path error inside an image
+/// build, naming a manifest instead of the edge that reached it. The whole
+/// emitted tree is planned rather than a fixture subset, because the edge could
+/// be added in any tier, group or check file.
 #[test]
 fn setup_never_reaches_workspace_msrv_validation() {
     if !tools_available() {
@@ -647,9 +644,8 @@ fn setup_never_reaches_workspace_msrv_validation() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    // `just` writes the plan to stderr; the resolver's own body reaches stdout
-    // under other actions and names the action in a list, so the invocation
-    // spelling is matched rather than the bare word.
+    // The needle is the invocation, not the bare action name, which the
+    // resolver's own body lists among the actions it accepts.
     let plan = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -2095,10 +2091,8 @@ fn the_image_tag_follows_the_declared_msrv() {
     assert_eq!(declared, tag("1.93.1"), "the tag must depend on the inputs alone");
 }
 
-/// The tag has to answer for a repository that owns no toolchain file rather
-/// than refusing it, and the two states must not share a reference: the image
-/// takes its compiler from that file where it exists and from the declared MSRV
-/// where it does not.
+/// The tag must answer for a repository that owns no toolchain file rather than
+/// refusing it, and must not hand it the same reference as one that owns one.
 #[test]
 fn the_image_tag_treats_a_root_toolchain_file_as_optional() {
     if !tools_available() {
