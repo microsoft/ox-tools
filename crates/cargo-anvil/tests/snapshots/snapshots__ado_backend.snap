@@ -2772,13 +2772,16 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         # private object discovery result is exposed. Keep displaying it so a
         # non-retriable failure has the same evidence as a direct invocation.
         $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
         $reportOutput = @()
-        & cargo '+{{ rust_nightly }}' llvm-cov report --lcov --output-path $OutputPath 2>&1 |
-            Tee-Object -Variable reportOutput |
-            ForEach-Object { Write-Host $_.ToString() }
-        $reportExitCode = $LASTEXITCODE
-        $ErrorActionPreference = $previousErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & cargo '+{{ rust_nightly }}' llvm-cov report --lcov --output-path $OutputPath 2>&1 |
+                Tee-Object -Variable reportOutput |
+                ForEach-Object { Write-Host $_.ToString() }
+            $reportExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         if ($reportExitCode -eq 0) { return 0 }
 
         $reportText = ($reportOutput | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
@@ -2825,10 +2828,13 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
             )
             Write-Host 'anvil-llvm-cov: retrying Windows error 206 with an LLVM response file'
             $previousErrorActionPreference = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
-            & $llvmCov export "@$responsePath" > $OutputPath 2> $retryErrorPath
-            $retryExitCode = $LASTEXITCODE
-            $ErrorActionPreference = $previousErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                & $llvmCov export "@$responsePath" > $OutputPath 2> $retryErrorPath
+                $retryExitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
             if (Test-Path -LiteralPath $retryErrorPath) {
                 Get-Content -LiteralPath $retryErrorPath | ForEach-Object { Write-Host $_ }
             }
