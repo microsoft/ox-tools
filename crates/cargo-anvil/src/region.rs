@@ -391,7 +391,7 @@ pub fn insert_after_region(text: &str, id: &str, extra: &str, syntax: CommentSyn
     // The gap that followed the region is preserved, but a residue block that
     // already ends in a newline must not be run straight into the next line of
     // the file: that would attach the following header's comment to it.
-    if !rest.is_empty() && !rest.starts_with('\n') {
+    if !rest.is_empty() && !rest.starts_with('\n') && !rest.starts_with("\r\n") {
         out.push('\n');
     }
     out.push_str(rest);
@@ -1575,6 +1575,22 @@ mod tests {
             out,
             "# >>> anvil-managed: x\nyanked = \"deny\"\n# <<< anvil-managed: x\nignore = []\n\n[bans]\nmultiple-versions = \"warn\"\n"
         );
+    }
+
+    #[test]
+    fn residue_insertion_preserves_existing_lf_and_crlf_gaps() {
+        for newline in ["\n", "\r\n"] {
+            for blank_lines in [1, 2] {
+                let prefix = format!("# >>> anvil-managed: x{newline}[advisories]{newline}# <<< anvil-managed: x{newline}");
+                let residue = format!("ignore = []{newline}");
+                let rest = format!("{}# User bans{newline}[bans]{newline}", newline.repeat(blank_lines));
+                let text = format!("{prefix}{rest}");
+
+                let out = insert_after_region(&text, "x", &residue, SYN).unwrap();
+
+                assert_eq!(out, format!("{prefix}{residue}{rest}"));
+            }
+        }
     }
 
     /// A region left unterminated still owns everything below it — that text is

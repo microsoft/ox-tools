@@ -279,6 +279,11 @@ unchanged, and a diagnostic names the host and the reason. The diagnostic also e
 that other regions in the same file and other artifacts may still be updated. Refusing
 is scoped to the region, not the host or the run.
 
+The diagnostic asks the user to reconcile the hand-written table with the managed one
+before retrying. No managed region was introduced on refusal, so there is no region to
+empty at that point. When adoption succeeds, residue insertion preserves any existing
+LF or CRLF blank-line gap before the content that followed the region.
+
 ### User-extension limits for TOML regions
 
 Three constraints follow from TOML's no-duplicate-tables rule and anvil's chosen

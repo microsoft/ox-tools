@@ -230,6 +230,8 @@ fn a_conflicting_toml_host_is_refused_not_corrupted() {
             reason.contains("deny.toml [anvil-deny-advisories]")
                 && reason.contains("This region was left unchanged; other regions in the same file")
                 && reason.contains("and other artifacts may still be updated.")
+                && reason.contains("Reconcile the hand-written table with the managed one before retrying.")
+                && !reason.contains("empty the region")
         }),
         "the refusal must not claim that the whole host was left unchanged; got: {:#?}",
         outcome.plan.refusals()
@@ -246,6 +248,16 @@ fn a_conflicting_toml_host_is_refused_not_corrupted() {
         tmp.path().join("justfiles/anvil/mod.just").is_file(),
         "other artifacts are still written"
     );
+
+    let reconciled = after.replace("yanked = \"warn\"", "yanked = \"deny\"");
+    std::fs::write(tmp.path().join("deny.toml"), reconciled).unwrap();
+    let retried = run(&tmp);
+    assert!(retried.plan.refusals().is_empty(), "reconciling the conflict clears the refusal");
+    assert_eq!(region_decision(&retried, "deny.toml", "anvil-deny-advisories"), Decision::Write);
+    let adopted = read_parsing_toml(&tmp, "deny.toml");
+    assert!(adopted.contains("# >>> anvil-managed: anvil-deny-advisories"));
+    assert_eq!(adopted.matches("[advisories]").count(), 1);
+    assert!(adopted.contains("yanked = \"deny\""));
 }
 
 /// `migration`: a workspace that already has a hand-written
