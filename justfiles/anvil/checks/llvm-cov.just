@@ -93,6 +93,13 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         Write-Host 'anvil-llvm-cov: all affected packages opted out of coverage; tests completed'
         exit 0
     }
+    # cargo-llvm-cov passes every instrumented object to llvm-cov on one
+    # command line. Keep its private Windows build directory compact so the
+    # repeated object paths leave enough room under CreateProcess's 32,767
+    # character limit. Preserve an explicit caller override.
+    if ($IsWindows -and -not $env:CARGO_LLVM_COV_TARGET_DIR) {
+        $env:CARGO_LLVM_COV_TARGET_DIR = 'target/c'
+    }
     # The *report* output directory (target/coverage/) is something we
     # choose and must exist before --output-path runs.
     [System.IO.Directory]::CreateDirectory('target/coverage') | Out-Null
@@ -104,11 +111,12 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     #
     # Crucially this does NOT merge both configs' objects into one report.
     # A single `llvm-cov report` over the union shells one `--object=` per
-    # test binary and, on a large workspace, overflows the Windows
+    # test binary and, on a large workspace, can overflow the Windows
     # CreateProcess command-line limit (os error 206, "filename or extension
-    # is too long"). Each per-config report references only ~half the
-    # objects and stays under the limit. The two configs are reconciled
-    # *downstream* instead of via a merged report:
+    # is too long"). Per-config reports reduce the object count, while the
+    # compact Windows target directory above shortens every remaining object
+    # path. The two configs are reconciled *downstream* instead of via a
+    # merged report:
     #   * cargo-coverage-gate merges the two lcov files at the line level
     #     (per-line counts summed) -- this is the gate;
     #   * Codecov ingests both lcov files (it coalesces uploads);

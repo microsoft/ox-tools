@@ -72,6 +72,12 @@ fn bolero_uses_its_supported_release_profile_option() {
 }
 
 #[test]
+fn llvm_cov_shortens_its_private_windows_target_directory() {
+    assert!(LLVM_COV.contains("if ($IsWindows -and -not $env:CARGO_LLVM_COV_TARGET_DIR)"));
+    assert!(LLVM_COV.contains("$env:CARGO_LLVM_COV_TARGET_DIR = 'target/c'"));
+}
+
+#[test]
 fn developer_options_are_explicit_and_cloud_defaults_stay_non_interactive() {
     assert!(BUILD.contains("[arg(\"package\", long"));
     assert!(BUILD.contains("anvil-build package=\"\" profile=\"\""));
@@ -108,6 +114,9 @@ if ($env:FAKE_CARGO_TOOLCHAIN_LOG) {
 }
 if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL
+}
+if ($env:FAKE_CARGO_LLVM_COV_TARGET_DIR_LOG) {
+    Add-Content -LiteralPath $env:FAKE_CARGO_LLVM_COV_TARGET_DIR_LOG -Value $env:CARGO_LLVM_COV_TARGET_DIR
 }
 if ($args -contains 'each') {
     exit [int]$env:FAKE_EACH_EXIT
@@ -1560,6 +1569,54 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
         &[("FAKE_NEXTEST_EXIT", OsStr::new("7")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
     assert_failed(&failed, "plain nextest failure for an opted-out package");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_coverage_uses_the_compact_target_directory() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-llvm-tools-validate-prereqs",
+            "anvil-tool-cargo-llvm-cov-validate-prereqs",
+            "anvil-tool-cargo-nextest-validate-prereqs",
+            "anvil-tool-cargo-coverage-gate-validate-prereqs",
+            "anvil-component-nightly-llvm-tools-install",
+            "anvil-tool-cargo-llvm-cov-install installer",
+            "anvil-tool-cargo-nextest-install installer",
+            "anvil-tool-cargo-coverage-gate-install installer",
+            "anvil-impact",
+        ],
+    );
+    let target_dir_log = tmp.path().join("target-dir.log");
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0 --package measured@0.1.0");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-llvm-cov"],
+        &[
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")),
+            ("FAKE_CARGO_LLVM_COV_TARGET_DIR_LOG", target_dir_log.as_os_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "Windows coverage path should succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let configured_dirs: Vec<_> = fs::read_to_string(target_dir_log)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    assert!(!configured_dirs.is_empty());
+    assert!(
+        configured_dirs.iter().all(|dir| dir == "target/c"),
+        "unexpected coverage target directories: {configured_dirs:?}"
+    );
 }
 
 #[cfg(windows)]
