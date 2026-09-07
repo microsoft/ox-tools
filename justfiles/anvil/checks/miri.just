@@ -13,11 +13,28 @@
 # (which widens for safety).
 
 # Run Miri tests for affected workspace packages.
+[arg("package", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
+[arg("test", long, pattern='(?:[A-Za-z0-9_.:-]+)?')]
+[arg("example", long, pattern='(?:[A-Za-z0-9_.-]+)?')]
 [script("pwsh", "-NoProfile")]
-anvil-miri: anvil-miri-validate-prereqs anvil-impact
+anvil-miri package="" test="" example="": anvil-miri-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $package = '{{package}}'
+    $testFilter = '{{test}}'
+    $example = '{{example}}'
+    if ($testFilter -and $example) { Write-Error 'anvil-miri: choose exactly one of --test or --example'; exit 2 }
+    if ($example -and -not $package) {
+        Write-Error 'anvil-miri: --example requires --package to avoid workspace ambiguity'
+        exit 2
+    }
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { Write-Host 'anvil-miri: no affected packages; skipping'; exit 0 }
+    if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-miri: no affected packages; skipping'; exit 0 }
+    $pkg = @(if ($package) { '--package'; $package } elseif ($include) { -split $include } else { '--workspace' })
+    if ($example) {
+        & cargo '+{{ rust_nightly }}' miri run --all-features --locked @pkg --example $example
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        exit 0
+    }
     # Run miri via libtest (`cargo miri test`), NOT `cargo miri nextest
     # run`. nextest uses a process-per-test model; under miri every
     # process pays the full cost of re-interpreting std initialization,
@@ -43,7 +60,8 @@ anvil-miri: anvil-miri-validate-prereqs anvil-impact
     # whose tests are all `#[cfg_attr(miri, ignore)]` -- the canonical
     # opt-out for build-tooling / CLI crates), so the old nextest
     # `--no-tests=pass` workaround is no longer needed.
-    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @(if ($include) { -split $include } else { '--workspace' })
+    $filter = @(if ($testFilter) { '--'; $testFilter })
+    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg @filter
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-runtime-analysis members ---

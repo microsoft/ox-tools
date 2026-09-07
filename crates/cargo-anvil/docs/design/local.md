@@ -686,6 +686,50 @@ anvil OK
 (`anvil-pr`, `anvil-scheduled`, `anvil-full`) are first-class -- locally reproducible with
 exactly the same arguments cloud workflows uses, because cloud workflows invokes the same `just` recipes.
 
+### Developer options
+
+Anvil also owns generic local-development capabilities so adopters do not need
+repository wrappers for common Cargo operations:
+
+```console
+just anvil-build
+just anvil-build --package my-crate
+just anvil-doc-build --open
+just anvil-examples --run
+just anvil-examples --run --package my-crate --example basic
+just anvil-fmt --fix
+just anvil-miri --package my-crate --test test_name
+just anvil-miri --package my-crate --example basic
+just anvil-readme --fix
+```
+
+`anvil-build` is a developer utility rather than a check-group member; by
+default it runs `cargo build --workspace --all-features --all-targets --locked`.
+The other options extend existing checks without changing their no-option cloud
+behavior. Every recipe accepts only its documented options and rejects unknown,
+duplicate, incomplete, or conflicting input.
+
+An unfiltered `anvil-examples --run` skips examples listed by their package:
+
+```toml
+[package.metadata.anvil.examples]
+no-run = ["interactive-demo", "needs-production-credentials"]
+```
+
+The metadata affects execution only: `anvil-examples` still compiles every
+example. Explicitly selecting an excluded example with `--example` runs it,
+because the user has supplied the missing intent. Runs default to a 30-second
+per-example timeout, configurable with `--timeout <seconds>`.
+
+`anvil-miri` continues to run affected test targets by default. `--test`
+adds a libtest name filter, while `--example` switches the invocation to one
+example and requires `--package` to avoid ambiguity across workspace members.
+Explicit `--package` selection overrides the impact-derived package list for
+local targeted iteration.
+
+`anvil-readme` checks by default and regenerates with `--fix`;
+`anvil-readme-check` remains the stable check-group member.
+
 ## 6. No-tooling fallback
 
 A user with only `cargo` (no `just`, no `cargo-anvil`) can still run the basics:

@@ -109,10 +109,10 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # recipes, and `anvil-setup` depends on none of them.
 #
 # It is deleted once the setup has read it, so it does not survive into the
-# finished image. It is the one thing the context carries that the tag does not
-# hash -- the declared MSRV is hashed instead, so an unrelated dependency edit
-# computes the same tag -- and a manifest left in place would make that tag name
-# two different filesystems.
+# finished image. The tag hashes the declared MSRV rather than the file, so an
+# unrelated dependency edit computes the same tag; a manifest left in place
+# would make that tag name two different filesystems, and a reused or published
+# image would carry a manifest that does not match any checkout.
 WORKDIR /opt/anvil
 COPY . ./
 RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \

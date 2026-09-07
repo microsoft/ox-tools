@@ -6,7 +6,7 @@
 [![crates.io](https://img.shields.io/crates/v/cargo-aprz.svg)](https://crates.io/crates/cargo-aprz)
 [![docs.rs](https://docs.rs/cargo-aprz/badge.svg)](https://docs.rs/cargo-aprz)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-aprz)](https://crates.io/crates/cargo-aprz)
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml/badge.svg)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 <a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>

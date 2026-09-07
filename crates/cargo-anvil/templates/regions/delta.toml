@@ -12,7 +12,6 @@ trip_wire_patterns = [
     "Justfile",
     "clippy.toml",
     "codecov.yml",
-    "constants.env",
     "deny.toml",
     "justfile",
     "justfiles/**",
