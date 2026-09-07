@@ -549,16 +549,31 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 /// from, leaving exactly one trailing newline when anything is left.
 ///
 /// Only the edges are touched: a blank line the user put *between* two of their
-/// own keys is theirs, and survives.
+/// own keys is theirs, and survives. The terminator restored is the one the
+/// residue itself was written with, so relocating a block out of a CRLF host
+/// does not leave it ending in a lone `\n`.
 fn tidy_residue(residue: &str) -> String {
+    let newline = residue_newline(residue);
     let trimmed = trim_leading_blank_lines(residue).trim_end();
     if trimmed.is_empty() {
         String::new()
     } else {
-        let mut out = String::with_capacity(trimmed.len() + 1);
+        let mut out = String::with_capacity(trimmed.len() + newline.len());
         out.push_str(trimmed);
-        out.push('\n');
+        out.push_str(newline);
         out
+    }
+}
+
+/// The line ending `text` uses, read from its first line break.
+///
+/// The residue's own terminator is trimmed before the block is re-emitted, and
+/// a single-line residue keeps no other line break to copy — so the style has
+/// to be taken from the text as it arrived.
+fn residue_newline(text: &str) -> &'static str {
+    match text.find('\n') {
+        Some(at) if text[..at].ends_with('\r') => "\r\n",
+        _ => "\n",
     }
 }
 
@@ -1758,6 +1773,40 @@ mod tests {
     #[test]
     fn relocated_residue_loses_the_blank_lines_above_it() {
         assert_eq!(trim_leading_blank_lines("\n  \n\tignore = []\n"), "\tignore = []\n");
+    }
+
+    /// The terminator `tidy_residue` restores is the one the residue was
+    /// written with. A lone `\n` appended to a CRLF block would leave the
+    /// relocated configuration with a line ending the rest of the file does not
+    /// use, in a host `insert_after_region` already goes out of its way to keep
+    /// consistent.
+    #[test]
+    fn relocated_residue_keeps_the_line_ending_it_was_written_with() {
+        assert_eq!(
+            tidy_residue("\r\n\r\nignore = []\r\nyanked = \"warn\"\r\n"),
+            "ignore = []\r\nyanked = \"warn\"\r\n",
+            "a CRLF residue stays CRLF to its last line"
+        );
+        assert_eq!(
+            tidy_residue("\n\nignore = []\nyanked = \"warn\"\n"),
+            "ignore = []\nyanked = \"warn\"\n",
+            "an LF residue is unaffected"
+        );
+    }
+
+    /// A single-line CRLF residue carries no interior `\r\n` once its own
+    /// terminator is trimmed, so the newline style has to be read from the
+    /// residue as it arrived rather than from what survives trimming.
+    #[test]
+    fn a_single_line_crlf_residue_keeps_its_terminator() {
+        assert_eq!(tidy_residue("\r\nignore = []\r\n"), "ignore = []\r\n");
+    }
+
+    /// A residue with no line ending at all — the host's last line, unterminated
+    /// — gets the plain `\n` the file would have used.
+    #[test]
+    fn an_unterminated_residue_is_given_a_plain_newline() {
+        assert_eq!(tidy_residue("ignore = []"), "ignore = []\n");
     }
 
     /// A dotted key is configuration like any other. Not descending into it

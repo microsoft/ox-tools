@@ -293,7 +293,9 @@ is scoped to the region, not the host or the run.
 The diagnostic asks the user to reconcile the hand-written table with the managed one
 before retrying. No managed region was introduced on refusal, so there is no region to
 empty at that point. When adoption succeeds, residue insertion preserves any existing
-LF or CRLF blank-line gap before the content that followed the region.
+LF or CRLF blank-line gap before the content that followed the region, and the relocated
+residue keeps the line ending it was written with rather than being terminated with a
+lone LF.
 
 ### User-extension limits for TOML regions
 
