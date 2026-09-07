@@ -1006,6 +1006,8 @@ fn scoped_check_delegates_cached_selection_and_empty_set_to_cargo_each() {
     );
 
     // The empty tier is represented in cargo-each's native selector language.
+    // The interactive examples recipe inspects it before cargo-each because it
+    // has additional build/run orchestration after the scoped build.
     fs::write(impact_dir.join("include_affected.txt"), "--none").unwrap();
     fs::write(&log, "").unwrap();
     let skipped = just_cmd(root, &["anvil-examples"])
@@ -1021,8 +1023,8 @@ fn scoped_check_delegates_cached_selection_and_empty_set_to_cargo_each() {
     assert!(skipped.status.success(), "skipped anvil-examples run failed:\n{skip_combined}");
     let argv_skip = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv_skip.contains("each --none --once"),
-        "the --none selector must be delegated to cargo-each; captured argv:\n{argv_skip}"
+        argv_skip.is_empty() && skip_combined.contains("no affected packages; skipping"),
+        "the --none selector must skip examples before cargo-each; captured argv:\n{argv_skip}\noutput:\n{skip_combined}"
     );
 }
 

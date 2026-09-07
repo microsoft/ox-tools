@@ -27,15 +27,15 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     # `harness = false` bench needs a driver binary this group never installs.
     # Benches/examples stay compile-only (`anvil-bench`, `anvil-examples`).
     # `--tests` over `--lib --bins --tests`: `--lib` fails on bin-only packages.
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --all-features --locked
+    & cargo "+$toolchain" each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --locked
+    & cargo "+$toolchain" each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Preserve MSRV compile coverage for benches and examples without using
     # `cargo test --all-targets`, which would execute harness-free benches.
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --all-features --locked
+    & cargo "+$toolchain" each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --locked
+    & cargo "+$toolchain" each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install the declared MSRV toolchain only when this check is required.
@@ -54,13 +54,24 @@ anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
     if ($resolverExit -ne 0) { exit $resolverExit }
     $toolchain = $toolchainOutput.Trim()
     if ([string]::IsNullOrWhiteSpace($toolchain)) { exit 0 }
-    & cargo "+$toolchain" --version
-    if ($LASTEXITCODE -ne 0) {
+    $previousAutoInstall = $env:RUSTUP_AUTO_INSTALL
+    try {
+        $env:RUSTUP_AUTO_INSTALL = '0'
+        & cargo "+$toolchain" --version
+        $cargoExit = $LASTEXITCODE
+    } finally {
+        if ($null -eq $previousAutoInstall) {
+            Remove-Item Env:RUSTUP_AUTO_INSTALL -ErrorAction SilentlyContinue
+        } else {
+            $env:RUSTUP_AUTO_INSTALL = $previousAutoInstall
+        }
+    }
+    if ($cargoExit -ne 0) {
         $hint = if ($env:ANVIL_MSRV_TOOLCHAIN) {
             'provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV'
         } else {
             'run: just anvil-msrv-test-setup'
         }
-        Write-Error "anvil: MSRV toolchain '$toolchain' is unavailable; $hint"
-        exit $LASTEXITCODE
+        [Console]::Error.WriteLine("anvil: MSRV toolchain '$toolchain' is unavailable; $hint")
+        exit $cargoExit
     }

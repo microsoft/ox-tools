@@ -66,7 +66,7 @@ anvil-careful: anvil-careful-validate-prereqs anvil-impact
     # there is nothing to clean). Written after the clean so it survives it.
     New-Item -ItemType Directory -Force -Path (Split-Path $marker) | Out-Null
     Set-Content -LiteralPath $marker -Value $idHash
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo '+{{ rust_nightly }}' careful test '{packages}' --all-features --locked
+    & cargo '+{{ rust_nightly }}' each @selection --once '--' cargo '+{{ rust_nightly }}' careful test '{packages}' --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-careful` recipe.

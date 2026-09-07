@@ -42,6 +42,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_linux
+          stage: impact
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/impact.yml
@@ -51,6 +52,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_windows
+          stage: impact
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/impact.yml
@@ -83,6 +85,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_fast
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -102,6 +105,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_fast
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -136,6 +140,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_test
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -151,6 +156,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_test
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -171,6 +177,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_msrv
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -180,6 +187,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_msrv
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -194,6 +202,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_runtime_analysis
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -203,6 +212,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_runtime_analysis
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -219,6 +229,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_mutants
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -228,6 +239,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_mutants
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows

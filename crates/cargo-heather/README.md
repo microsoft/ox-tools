@@ -6,7 +6,7 @@
 [![crates.io](https://img.shields.io/crates/v/cargo-heather.svg)](https://crates.io/crates/cargo-heather)
 [![docs.rs](https://docs.rs/cargo-heather/badge.svg)](https://docs.rs/cargo-heather)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-heather)](https://crates.io/crates/cargo-heather)
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml/badge.svg)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 <a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>
@@ -193,7 +193,7 @@ is supplied.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-heather">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbtpJMWoUHDG0bJGvg_sbiCH8b66-weBRIetcbfF7fD5ccBythZIGDbWNhcmdvLWhlYXRoZXJlMC4zLjBtY2FyZ29faGVhdGhlcg
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbtpJMWoUHDG0bJGvg_sbiCH8b66-weBRIetcbfF7fD5ccBythZIGDbWNhcmdvLWhlYXRoZXJlMC4zLjBtY2FyZ29faGVhdGhlcg
  [__link0]: https://doc.rust-lang.org/stable/std/?search=io::Read
  [__link1]: https://doc.rust-lang.org/stable/std/?search=io::Write
  [__link10]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=FileKind::detect

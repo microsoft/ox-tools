@@ -478,6 +478,16 @@ pub fn build(plan: &Plan, thresholds: Thresholds, run: Option<RunInfo>) -> Resul
             .map_err(|cause| error!("could not read `{}`", file.absolute).caused_by(cause))?;
         let has_bom = original.starts_with('\u{feff}');
         let source = SourceFile::parse(file.absolute.clone(), original.clone())?;
+
+        if let Some(expected) = plan.digests.get(&file.path)
+            && crate::discover::digest(source.text().as_bytes()) != *expected
+        {
+            return Err(error!(
+                "`{}` changed after its mutants were discovered; rerun cargo-gamma so discovery, verdicts, and report source use the same generation",
+                file.path
+            ));
+        }
+
         let rendered = mutants
             .iter()
             .map(|mutant| render_with_first_line_offset(mutant, &source, usize::from(has_bom)))
@@ -1907,6 +1917,51 @@ mod tests {
         expected.sort();
 
         assert_eq!(emitted, expected);
+    }
+
+    #[test]
+    fn a_report_refuses_source_changed_after_discovery() {
+        let directory = crate::testing::workdir("elements-source-generation");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the scratch path is UTF-8");
+        let path = Utf8PathBuf::from("lib.rs");
+        let absolute = root.join(&path);
+        let discovered = "fn f() { a < b; }\n";
+
+        fs::write(&absolute, discovered).expect("discovered source");
+
+        let mut digests = HashMap::default();
+        let _previous = digests.insert(path.clone(), crate::discover::digest(discovered.as_bytes()));
+        let plan = Plan {
+            skipped: Vec::new(),
+            digests,
+            root,
+            files: vec![TargetFile {
+                path: path.clone(),
+                absolute: absolute.clone(),
+                package: "subject".to_owned(),
+            }],
+            mutants: vec![Mutant {
+                file: path.into(),
+                ..mutant(Outcome::Killed, 9..14)
+            }],
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            reach: HashMap::default(),
+            specs: HashMap::default(),
+        };
+
+        fs::write(&absolute, "fn f() { a > b; }\n").expect("edited source");
+
+        let error = build(&plan, Thresholds::default(), None).expect_err("mixed source generations must be refused");
+
+        assert!(
+            error
+                .to_string()
+                .contains("rerun cargo-gamma so discovery, verdicts, and report source use the same generation"),
+            "{error}"
+        );
     }
 
     /// A mutant in a file the plan does not list would vanish from the denominator without a word.

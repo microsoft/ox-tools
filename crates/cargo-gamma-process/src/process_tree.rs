@@ -7,6 +7,8 @@ use core::fmt;
 use core::time::Duration;
 use std::io;
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 #[cfg(target_os = "linux")]
@@ -359,7 +361,7 @@ impl SpawnedCommand {
 impl Drop for SpawnedCommand {
     fn drop(&mut self) {
         if let (Some(mut child), Some(guard)) = (self.child.take(), self.guard.take()) {
-            abandon(&mut child, &guard);
+            let _abandoned = abandon(&mut child, &guard);
         }
     }
 }
@@ -738,6 +740,9 @@ pub struct ProcessTree {
     /// The leader retained until this subtree is observed or terminated.
     child: Option<Child>,
 
+    /// Whether cleanup failed or lost the leader before proving inherited pipes were closed.
+    output_cleanup_unproven: bool,
+
     /// The process group the child leads, on the platform that has them.
     ///
     /// Absent when the child's id does not fit a signal's idea of one, which cannot happen on any
@@ -804,11 +809,13 @@ impl ProcessTree {
 
         #[cfg(any(test, feature = "fault-injection"))]
         if faults::fired(faults::Fault::Adopt) {
-            abandon(&mut child, &guard);
-
-            return Err(PlatformError::new_static(
-                Situation::Refused,
-                "the accounting boundary a test asked to fail would not take the child",
+            return Err(abandoning(
+                PlatformError::new_static(
+                    Situation::Refused,
+                    "the accounting boundary a test asked to fail would not take the child",
+                ),
+                &mut child,
+                &guard,
             ));
         }
 
@@ -817,9 +824,7 @@ impl ProcessTree {
             let group = match group_id(child.id()) {
                 Ok(group) => group,
                 Err(reason) => {
-                    abandon(&mut child, &guard);
-
-                    return Err(reason);
+                    return Err(abandoning(reason, &mut child, &guard));
                 }
             };
 
@@ -842,11 +847,15 @@ impl ProcessTree {
             let watched = guard.spawning.watch(group);
 
             let Some(slot) = watched else {
-                abandon(&mut child, &guard);
-
-                return Err(PlatformError::new(
-                    Situation::Refused,
-                    format!("process group {group} could not be watched for interrupts, so the child would have outlived a cancelled run"),
+                return Err(abandoning(
+                    PlatformError::new(
+                        Situation::Refused,
+                        format!(
+                            "process group {group} could not be watched for interrupts, so the child would have outlived a cancelled run"
+                        ),
+                    ),
+                    &mut child,
+                    &guard,
                 ));
             };
 
@@ -854,6 +863,7 @@ impl ProcessTree {
             {
                 Ok(Self {
                     child: Some(child),
+                    output_cleanup_unproven: false,
                     group: Some(group),
                     slot: Some(slot),
                     cgroup: guard.cgroup,
@@ -865,6 +875,7 @@ impl ProcessTree {
             {
                 Ok(Self {
                     child: Some(child),
+                    output_cleanup_unproven: false,
                     group: Some(group),
                     slot: Some(slot),
                 })
@@ -875,28 +886,33 @@ impl ProcessTree {
         {
             if let Some(job) = guard.job.as_ref() {
                 if !job.assign(&child) {
-                    abandon(&mut child, &guard);
-
-                    return Err(PlatformError::new_static(
-                        Situation::Refused,
-                        "a Windows job object could not be given the test binary it was created for, so its descendants could not be terminated safely",
+                    return Err(abandoning(
+                        PlatformError::new_static(
+                            Situation::Refused,
+                            "a Windows job object could not be given the test binary it was created for, so its descendants could not be terminated safely",
+                        ),
+                        &mut child,
+                        &guard,
                     ));
                 }
 
                 // The child has been waiting since it was created. It is now inside the new job,
                 // where termination can reach every descendant it creates.
                 if !job::release(child.id()) {
-                    abandon(&mut child, &guard);
-
-                    return Err(PlatformError::new_static(
-                        Situation::Refused,
-                        "a Windows test binary could not be resumed inside the containment boundary holding it",
+                    return Err(abandoning(
+                        PlatformError::new_static(
+                            Situation::Refused,
+                            "a Windows test binary could not be resumed inside the containment boundary holding it",
+                        ),
+                        &mut child,
+                        &guard,
                     ));
                 }
             }
 
             Ok(Self {
                 child: Some(child),
+                output_cleanup_unproven: false,
                 job: guard.job,
                 metered: guard.metered,
             })
@@ -906,7 +922,10 @@ impl ProcessTree {
         {
             let SpawnGuard {} = guard;
 
-            Ok(Self { child: Some(child) })
+            Ok(Self {
+                child: Some(child),
+                output_cleanup_unproven: false,
+            })
         }
     }
 
@@ -932,25 +951,43 @@ impl ProcessTree {
     /// # Errors
     ///
     /// Returns the operating system's reason when a reader thread could not be created, an output
-    /// stream could not be read, or the child could not be observed or reaped. A reader-thread
-    /// panic is reported as [`io::ErrorKind::Other`].
+    /// stream could not be read, the platform's subtree boundary or Unix process group could not
+    /// be terminated, or the child could not be observed or reaped. A reader-thread panic is
+    /// reported as [`io::ErrorKind::Other`].
     pub fn wait_with_output(mut self) -> io::Result<Output> {
         let stdout = output_reader(self.take_stdout(), "cargo-gamma-process-stdout")?;
         let stderr = match output_reader(self.take_stderr(), "cargo-gamma-process-stderr") {
             Ok(stderr) => stderr,
             Err(cause) => {
-                let _terminated = self.terminate();
-                let _drained = join_output_reader(stdout, "stdout");
+                if let Err(cleanup) = self.terminate() {
+                    discard_output_reader(stdout.as_ref());
+                    return Err(cleanup);
+                }
+                let _stdout = join_output_reader(stdout, "stdout")?;
 
                 return Err(cause);
             }
         };
 
-        let status = wait_for_output(&mut self);
+        let status = match wait_for_output(&mut self) {
+            Ok(status) => Ok(status),
+            Err(cause) => {
+                if self.output_cleanup_unproven {
+                    // Cleanup could not prove that descendants released their pipe handles.
+                    discard_output_reader(stdout.as_ref());
+                    discard_output_reader(stderr.as_ref());
+                    return Err(cause);
+                }
 
-        if status.is_err() {
-            let _terminated = self.terminate();
-        }
+                if let Err(cleanup) = self.terminate() {
+                    discard_output_reader(stdout.as_ref());
+                    discard_output_reader(stderr.as_ref());
+                    return Err(cleanup);
+                }
+
+                Err(cause)
+            }
+        };
 
         // Both joins are attempted before either result is returned. If one reader failed, the
         // other must still be allowed to finish rather than being detached from this lifecycle.
@@ -1066,14 +1103,18 @@ impl ProcessTree {
     /// only capability that can still reach a descendant of the subtree that really was this run's
     /// — and this is the last moment at which that remains true.
     #[cfg(unix)]
-    fn revoke_group(&mut self) {
+    fn revoke_group(&mut self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
-        if let Some(cgroup) = self.cgroup.as_ref() {
-            cgroup.kill();
-        }
+        let boundary_killed = self.cgroup.as_ref().map_or(Ok(()), Cgroup::kill);
 
         self.release();
         self.group = None;
+
+        #[cfg(target_os = "linux")]
+        return boundary_killed;
+
+        #[cfg(not(target_os = "linux"))]
+        Ok(())
     }
 
     /// Observes a completed child, kills survivors, and only then reaps its leader.
@@ -1105,7 +1146,8 @@ impl ProcessTree {
                 Ok(observed) => observed,
                 Err(cause) => {
                     if group::is_no_child_to_wait_for(&cause) {
-                        self.revoke_group();
+                        self.output_cleanup_unproven = true;
+                        let revoked = self.revoke_group();
 
                         // Dropped rather than restored. `Child` holds nothing but a pid the kernel
                         // has already released, and every later lifecycle step — `terminate`,
@@ -1113,7 +1155,7 @@ impl ProcessTree {
                         // steps report an already-reaped leader instead of reaching a stranger.
                         drop(child);
 
-                        return Err(cause);
+                        return Err(with_cleanup_failure(cause, revoked));
                     }
 
                     self.child = Some(child);
@@ -1122,20 +1164,37 @@ impl ProcessTree {
                 }
             };
 
-            let status = cleanup_after_observation(
+            match cleanup_after_observation(
                 observed,
                 || {
-                    self.sweep();
+                    let swept = self.sweep();
                     self.release();
+
+                    swept
                 },
                 || child.wait(),
-            )?;
-
-            if status.is_none() {
-                self.child = Some(child);
+            ) {
+                Observation::Pending => {
+                    self.child = Some(child);
+                    Ok(None)
+                }
+                Observation::Reaped(status) => Ok(Some(status)),
+                Observation::CleanupFailed(cause) => {
+                    self.output_cleanup_unproven = true;
+                    Err(cause)
+                }
+                Observation::ReapFailed(cause) => {
+                    if group::is_no_child_to_wait_for(&cause) {
+                        self.output_cleanup_unproven = true;
+                        let revoked = self.revoke_group();
+                        drop(child);
+                        Err(with_cleanup_failure(cause, revoked))
+                    } else {
+                        self.child = Some(child);
+                        Err(cause)
+                    }
+                }
             }
-
-            Ok(status)
         }
 
         #[cfg(not(unix))]
@@ -1152,8 +1211,13 @@ impl ProcessTree {
             if status.is_some() {
                 // Windows jobs retain object handles rather than numeric process identifiers, and
                 // platforms without groups have no identifier that a sweep could reuse.
-                self.sweep();
+                let swept = self.sweep();
                 self.release();
+
+                if let Err(cause) = swept {
+                    self.output_cleanup_unproven = true;
+                    return Err(cause);
+                }
             } else {
                 self.child = Some(child);
             }
@@ -1189,14 +1253,16 @@ impl ProcessTree {
 
     /// Kills the child and every process descended from it.
     ///
-    /// Falls back to killing the child alone whenever the subtree cannot be reached, because a run
-    /// that cut off one process is still better than one that cut off none.
-    fn kill(&self, child: &mut Child) {
-        self.sweep();
+    /// The child is still killed when sweeping the surrounding subtree fails. A direct child-kill
+    /// failure takes precedence over the sweep failure after both cleanup attempts complete.
+    fn kill(&self, child: &mut Child) -> io::Result<()> {
+        let swept = self.sweep();
 
         // The group or job may not have covered the child — the id could not be converted, the job
         // could not be created — and in any case this is what makes `wait` return.
-        let _killed = child.kill();
+        let killed = kill_if_running(child);
+
+        killed.and(swept)
     }
 
     /// Ends the subtree and reaps its leader without exposing its group id to reuse.
@@ -1205,17 +1271,26 @@ impl ProcessTree {
     ///
     /// Returns [`io::ErrorKind::Other`] when this subtree's leader has already been reaped —
     /// through an earlier [`Self::terminate`], or because [`Self::observe`] found it consumed
-    /// elsewhere — and the operating system's reason when the reap itself fails.
+    /// elsewhere — and the operating system's reason when cleanup or reaping fails. A reap
+    /// failure takes precedence when both operations fail.
     pub fn terminate(&mut self) -> io::Result<ExitStatus> {
         let mut child = self
             .child
             .take()
             .ok_or_else(|| io::Error::other("the subtree leader was already reaped"))?;
 
-        self.kill(&mut child);
+        let killed = self.kill(&mut child);
         self.release();
 
-        child.wait()
+        let reaped = child.wait()?;
+        killed?;
+
+        #[cfg(any(test, feature = "fault-injection"))]
+        if faults::fired(faults::Fault::Terminate) {
+            return Err(io::Error::other("subtree termination failed as requested by a test"));
+        }
+
+        Ok(reaped)
     }
 
     /// Ends descendants while their leader's process-group id is still reserved.
@@ -1223,26 +1298,32 @@ impl ProcessTree {
     /// An exited leader can leave servers and inherited pipe handles behind. This private
     /// primitive is reachable only from [`Self::observe`] and [`Self::terminate`], which signal
     /// before reaping that leader, so `killpg` cannot name a replacement group.
-    fn sweep(&self) {
+    fn sweep(&self) -> io::Result<()> {
         // The cgroup reaches further than the process group does: a descendant that called
         // `setsid` has left the group but cannot leave the cgroup, so this goes first where it
         // exists.
         #[cfg(target_os = "linux")]
-        if let Some(cgroup) = self.cgroup.as_ref() {
-            cgroup.kill();
-        }
+        let boundary_killed = self.cgroup.as_ref().map_or(Ok(()), Cgroup::kill);
 
         // Signalling the group has to come first: killing the leader on its own leaves the group
         // without one, and the descendants are then reparented and unreachable.
         #[cfg(unix)]
-        if let Some(group) = self.group {
-            let _killed = group::kill(group);
-        }
+        let killed = self.group.map_or(Ok(()), group::kill);
 
         #[cfg(windows)]
-        if let Some(job) = self.job.as_ref() {
-            job.terminate();
-        }
+        let boundary_killed = self.job.as_ref().map_or(Ok(()), Job::terminate);
+
+        #[cfg(target_os = "linux")]
+        return boundary_killed.and(killed);
+
+        #[cfg(all(unix, not(target_os = "linux")))]
+        return killed;
+
+        #[cfg(windows)]
+        return boundary_killed;
+
+        #[cfg(not(any(unix, windows)))]
+        Ok(())
     }
 
     #[cfg(all(test, unix))]
@@ -1256,27 +1337,67 @@ impl ProcessTree {
     }
 }
 
-fn output_reader<R>(pipe: Option<R>, name: &'static str) -> io::Result<Option<JoinHandle<io::Result<Vec<u8>>>>>
+struct OutputReader {
+    thread: JoinHandle<io::Result<()>>,
+    bytes: Arc<Mutex<Vec<u8>>>,
+    retaining: Arc<AtomicBool>,
+}
+
+fn output_reader<R>(pipe: Option<R>, name: &'static str) -> io::Result<Option<OutputReader>>
 where
     R: io::Read + Send + 'static,
 {
     pipe.map(|mut pipe| {
-        thread::Builder::new().name(name.to_owned()).spawn(move || {
-            let mut bytes = Vec::new();
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let retaining = Arc::new(AtomicBool::new(true));
+        let captured = Arc::clone(&bytes);
+        let capture_enabled = Arc::clone(&retaining);
+        let thread = thread::Builder::new().name(name.to_owned()).spawn(move || {
+            let mut chunk = [0_u8; 8192];
 
-            pipe.read_to_end(&mut bytes)?;
+            loop {
+                let read = match pipe.read(&mut chunk) {
+                    Ok(read) => read,
+                    Err(cause) if cause.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(cause) => return Err(cause),
+                };
+                if read == 0 {
+                    return Ok(());
+                }
 
-            Ok(bytes)
-        })
+                let mut captured = captured.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if capture_enabled.load(Ordering::Acquire) {
+                    captured.extend_from_slice(&chunk[..read]);
+                }
+            }
+        })?;
+
+        Ok(OutputReader { thread, bytes, retaining })
     })
     .transpose()
 }
 
-fn join_output_reader(reader: Option<JoinHandle<io::Result<Vec<u8>>>>, stream: &str) -> io::Result<Vec<u8>> {
+fn discard_output_reader(reader: Option<&OutputReader>) {
+    if let Some(reader) = reader {
+        reader.retaining.store(false, Ordering::Release);
+        let mut bytes = reader.bytes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        bytes.clear();
+        bytes.shrink_to_fit();
+    }
+}
+
+fn join_output_reader(reader: Option<OutputReader>, stream: &str) -> io::Result<Vec<u8>> {
     match reader {
-        Some(reader) => reader
-            .join()
-            .map_err(|_panic| io::Error::other(format!("the {stream} reader thread panicked")))?,
+        Some(reader) => {
+            reader
+                .thread
+                .join()
+                .map_err(|_panic| io::Error::other(format!("the {stream} reader thread panicked")))??;
+            Ok(Arc::try_unwrap(reader.bytes)
+                .expect("the reader thread is joined, so it released the only other capture reference")
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner))
+        }
         None => Ok(Vec::new()),
     }
 }
@@ -1316,6 +1437,18 @@ fn group_id(child_id: u32) -> Result<i32, PlatformError> {
     })
 }
 
+/// Preserves a containment refusal while reporting failure to clean up its child.
+fn abandoning(refusal: PlatformError, child: &mut Child, guard: &SpawnGuard) -> PlatformError {
+    match abandon(child, guard) {
+        Ok(()) => refusal,
+        Err(cause) => PlatformError::because(
+            Situation::Refused,
+            format!("{refusal}; cleanup of the refused child also failed"),
+            cause,
+        ),
+    }
+}
+
 /// Ends a child that failed containment before it can escape its unregistered subtree.
 #[cfg_attr(
     not(any(target_os = "linux", windows)),
@@ -1324,24 +1457,49 @@ fn group_id(child_id: u32) -> Result<i32, PlatformError> {
         reason = "only Linux cgroups and Windows jobs carry containment state needed during abandonment"
     )
 )]
-fn abandon(child: &mut Child, guard: &SpawnGuard) {
+fn abandon(child: &mut Child, guard: &SpawnGuard) -> io::Result<()> {
     #[cfg(target_os = "linux")]
-    if let Some(cgroup) = guard.cgroup.as_ref() {
-        cgroup.kill();
-    }
+    let boundary_killed = guard.cgroup.as_ref().map_or(Ok(()), Cgroup::kill);
 
     #[cfg(unix)]
-    if let Ok(group) = i32::try_from(child.id()) {
-        let _killed = group::kill(group);
+    let group_killed = i32::try_from(child.id()).map_or(Ok(()), group::kill);
+
+    #[cfg(windows)]
+    let boundary_killed = guard.job.as_ref().map_or(Ok(()), Job::terminate);
+
+    let child_killed = kill_if_running(child);
+    let reaped = child.wait().map(|_status| ());
+
+    #[cfg(target_os = "linux")]
+    {
+        reaped.and(child_killed).and(boundary_killed).and(group_killed)
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        reaped.and(child_killed).and(group_killed)
     }
 
     #[cfg(windows)]
-    if let Some(job) = guard.job.as_ref() {
-        job.terminate();
+    {
+        reaped.and(child_killed).and(boundary_killed)
     }
 
-    let _killed = child.kill();
-    let _reaped = child.wait();
+    #[cfg(not(any(unix, windows)))]
+    {
+        reaped.and(child_killed)
+    }
+}
+
+/// Kills a child unless the failed kill proves to have raced with its exit.
+fn kill_if_running(child: &mut Child) -> io::Result<()> {
+    match child.kill() {
+        Ok(()) => Ok(()),
+        Err(kill_error) => match child.try_wait() {
+            Ok(Some(_status)) => Ok(()),
+            Ok(None) | Err(_) => Err(kill_error),
+        },
+    }
 }
 
 /// Performs the only safe order after an exit observation.
@@ -1349,19 +1507,49 @@ fn abandon(child: &mut Child, guard: &SpawnGuard) {
 /// Kept separate so the regression can run the exact order against a fake process-group backend
 /// that reuses the group's numeric identifier as soon as its leader is reaped.
 #[cfg(any(unix, test))]
-fn cleanup_after_observation<T>(observed: bool, cleanup: impl FnOnce(), reap: impl FnOnce() -> io::Result<T>) -> io::Result<Option<T>> {
+enum Observation<T> {
+    Pending,
+    Reaped(T),
+    CleanupFailed(io::Error),
+    ReapFailed(io::Error),
+}
+
+#[cfg(unix)]
+fn with_cleanup_failure(primary: io::Error, cleanup: io::Result<()>) -> io::Error {
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup) => io::Error::new(
+            primary.kind(),
+            format!("{primary}; cleanup after the leader was reaped also failed: {cleanup}"),
+        ),
+    }
+}
+
+#[cfg(any(unix, test))]
+fn cleanup_after_observation<T>(
+    observed: bool,
+    cleanup: impl FnOnce() -> io::Result<()>,
+    reap: impl FnOnce() -> io::Result<T>,
+) -> Observation<T> {
     if !observed {
-        return Ok(None);
+        return Observation::Pending;
     }
 
-    cleanup();
-    reap().map(Some)
+    let cleaned = cleanup();
+    let reaped = reap();
+
+    match (cleaned, reaped) {
+        (Ok(()), Ok(status)) => Observation::Reaped(status),
+        (Err(cause), Ok(_status)) => Observation::CleanupFailed(cause),
+        (Ok(()), Err(cause)) => Observation::ReapFailed(cause),
+        (Err(_cleanup), Err(reap)) => Observation::ReapFailed(reap),
+    }
 }
 
 impl Drop for ProcessTree {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            self.kill(&mut child);
+            let _killed = self.kill(&mut child);
             self.release();
             let _reaped = child.wait();
         } else {
@@ -1387,6 +1575,117 @@ mod tests {
 
     use super::*;
     use crate::testing;
+
+    struct PausedReader {
+        reads: usize,
+        ready: std::sync::mpsc::SyncSender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl io::Read for PausedReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            match self.reads {
+                1 => {
+                    buf.fill(b'x');
+                    self.ready.send(()).expect("the watchdog is waiting for captured output");
+                    Ok(buf.len())
+                }
+                2 => {
+                    self.resume.recv().expect("the watchdog releases the inherited-pipe stand-in");
+                    buf.fill(b'y');
+                    Ok(buf.len())
+                }
+                _ => Ok(0),
+            }
+        }
+    }
+
+    #[test]
+    fn detached_output_capture_releases_bytes_and_stops_retaining() {
+        let (ready, started) = std::sync::mpsc::sync_channel(0);
+        let (resume, continue_reading) = std::sync::mpsc::sync_channel(0);
+        let reader = output_reader(
+            Some(PausedReader {
+                reads: 0,
+                ready,
+                resume: continue_reading,
+            }),
+            "bounded-output-capture",
+        )
+        .expect("the output reader starts")
+        .expect("the stand-in pipe is present");
+
+        started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the watchdog observes the first captured chunk");
+        discard_output_reader(Some(&reader));
+        assert!(
+            reader.bytes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty(),
+            "detachment retained bytes already captured"
+        );
+
+        resume.send(()).expect("the blocked reader is released");
+        assert!(
+            join_output_reader(Some(reader), "stand-in")
+                .expect("the reader finishes")
+                .is_empty(),
+            "capture resumed after detachment"
+        );
+    }
+
+    struct FailingReader;
+
+    impl io::Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "injected read failure"))
+        }
+    }
+
+    struct InterruptedReader(u8);
+
+    impl io::Read for InterruptedReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0 {
+                0 => {
+                    self.0 = 1;
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, "injected interruption"));
+                }
+                1 => self.0 = 2,
+                _ => return Ok(0),
+            }
+
+            let text = b"complete";
+            buf[..text.len()].copy_from_slice(text);
+            Ok(text.len())
+        }
+    }
+
+    #[test]
+    fn output_reader_preserves_absence_and_read_failures() {
+        let absent = output_reader::<io::Empty>(None, "absent-output").expect("absence needs no thread");
+        discard_output_reader(absent.as_ref());
+        assert_eq!(join_output_reader(absent, "absent").expect("absence is empty"), Vec::<u8>::new());
+
+        let failed = output_reader(Some(FailingReader), "failing-output")
+            .expect("the failing reader thread starts")
+            .expect("the stand-in pipe is present");
+        let error = join_output_reader(Some(failed), "failing").expect_err("the injected read failure is preserved");
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn output_reader_retries_interrupted_reads() {
+        let reader = output_reader(Some(InterruptedReader(0)), "interrupted-output")
+            .expect("the interrupted reader thread starts")
+            .expect("the stand-in pipe is present");
+
+        assert_eq!(
+            join_output_reader(Some(reader), "interrupted").expect("the reader retries"),
+            b"complete"
+        );
+    }
 
     /// Why the containment tests below are ignored by default, and how to run them.
     ///
@@ -1483,14 +1782,17 @@ mod tests {
         let group = RefCell::new(FakeGroup::default());
         let result = cleanup_after_observation(
             true,
-            || group.borrow_mut().sweep(),
+            || {
+                group.borrow_mut().sweep();
+                Ok(())
+            },
             || {
                 group.borrow_mut().reap();
                 Ok(())
             },
         );
 
-        assert!(matches!(result, Ok(Some(()))));
+        assert!(matches!(result, Observation::Reaped(())));
 
         let group = group.into_inner();
 
@@ -1499,6 +1801,39 @@ mod tests {
             !group.replacement_signalled,
             "cleanup signalled the replacement group after the leader's id was reused"
         );
+    }
+
+    #[test]
+    fn a_cleanup_failure_is_reported_after_the_leader_is_reaped() {
+        let reaped = RefCell::new(false);
+        let result = cleanup_after_observation(
+            true,
+            || Err(io::Error::new(io::ErrorKind::PermissionDenied, "group kill failed")),
+            || {
+                *reaped.borrow_mut() = true;
+                Ok(())
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Observation::CleanupFailed(ref cause) if cause.kind() == io::ErrorKind::PermissionDenied
+        ));
+        assert!(*reaped.borrow(), "cleanup failure must not leave the child unreaped");
+    }
+
+    #[test]
+    fn a_reap_failure_is_distinguished_from_a_cleanup_failure() {
+        let result = cleanup_after_observation(
+            true,
+            || Ok(()),
+            || Err::<(), _>(io::Error::new(io::ErrorKind::Interrupted, "reap failed")),
+        );
+
+        assert!(matches!(
+            result,
+            Observation::ReapFailed(ref cause) if cause.kind() == io::ErrorKind::Interrupted
+        ));
     }
 
     /// A request that asks for nothing gets containment without an accounting boundary.
@@ -1621,6 +1956,7 @@ mod tests {
 
         let subtree = ProcessTree {
             child: None,
+            output_cleanup_unproven: false,
             group: None,
             slot: None,
             #[cfg(target_os = "linux")]
@@ -1629,7 +1965,9 @@ mod tests {
             metered: false,
         };
 
-        subtree.kill(&mut child);
+        subtree
+            .kill(&mut child)
+            .expect("the live shell fixture must be killable without a process group");
 
         let status = child.wait().expect("wait");
 
@@ -1653,11 +1991,14 @@ mod tests {
         let mut child = command.spawn().expect("spawn");
         let subtree = ProcessTree {
             child: None,
+            output_cleanup_unproven: false,
             job: None,
             metered: false,
         };
 
-        subtree.kill(&mut child);
+        subtree
+            .kill(&mut child)
+            .expect("the live helper fixture must be killable without a job");
 
         let status = child.wait().expect("wait");
 
@@ -1697,6 +2038,7 @@ mod tests {
     fn a_subtree_with_no_watched_slot_drops_without_touching_the_registry() {
         let subtree = ProcessTree {
             child: None,
+            output_cleanup_unproven: false,
             group: None,
             slot: None,
             #[cfg(target_os = "linux")]
@@ -1722,6 +2064,7 @@ mod tests {
 
         let mut subtree = ProcessTree {
             child: None,
+            output_cleanup_unproven: false,
             group: Some(group),
             slot: Some(slot),
             #[cfg(target_os = "linux")]
@@ -1762,6 +2105,7 @@ mod tests {
         let slot = spawning.watch(group).expect("a free slot");
         let mut subtree = ProcessTree {
             child: None,
+            output_cleanup_unproven: false,
             group: Some(group),
             slot: Some(slot),
             #[cfg(target_os = "linux")]
@@ -1770,10 +2114,25 @@ mod tests {
             metered: false,
         };
 
-        subtree.revoke_group();
+        subtree.revoke_group().expect("there is no sealed boundary to revoke");
 
         assert!(subtree.released(), "the stale interrupt slot remains active");
         assert_eq!(subtree.group, None, "drop could still signal a reused process-group id");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reaped_elsewhere_error_includes_a_boundary_cleanup_failure() {
+        let error = with_cleanup_failure(
+            io::Error::from(io::ErrorKind::NotFound),
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "cgroup kill failed")),
+        );
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            error.to_string().contains("cgroup kill failed"),
+            "the boundary cleanup failure was hidden: {error}"
+        );
     }
 
     /// Forgetting a slot past the end of the registry does nothing, rather than panicking.
@@ -2829,6 +3188,15 @@ mod tests {
         let _reaped = child.wait();
     }
 
+    /// A kill that races with natural exit has already achieved its cleanup goal.
+    #[test]
+    fn killing_an_exited_child_succeeds() {
+        let mut child = no_op_command().spawn().expect("spawn");
+        let _status = child.wait().expect("the child exits");
+
+        kill_if_running(&mut child).expect("an exited child is no longer running");
+    }
+
     /// `observe` reports the reap race it cannot recover from, and revokes what it must.
     ///
     /// The leader is reaped through the standard library's own path before `observe` is asked
@@ -2856,6 +3224,7 @@ mod tests {
         let slot = spawning.watch(group).expect("a free slot");
         let mut subtree = ProcessTree {
             child: Some(child),
+            output_cleanup_unproven: false,
             group: Some(group),
             slot: Some(slot),
             #[cfg(target_os = "linux")]

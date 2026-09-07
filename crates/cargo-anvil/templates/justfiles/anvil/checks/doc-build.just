@@ -11,13 +11,14 @@
 # crate that wasn't itself modified.
 
 # Build documentation for required workspace packages.
+[arg("open", long, value="true")]
 [script("pwsh", "-NoProfile")]
-anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact
+anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $env:RUSTDOCFLAGS = '-D warnings'
     $selection = @(& "{{ just_executable() }}" _anvil-impact-include required)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} doc '{packages}' --all-features --no-deps
+    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} doc '{packages}' --all-features --no-deps {{ if open == "true" { "--open" } else { "" } }}
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # doc-build, examples and doc-test are pure cargo built-ins; the rust

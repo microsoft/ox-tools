@@ -22,7 +22,7 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Host "anvil-external-types: catalog tool minimum cargo-check-external-types {{ cargo_check_external_types_version }}; rustdoc toolchain {{ rust_nightly_external_types }}"
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --filter lib --keep-going '--' cargo '+{{ rust_nightly_external_types }}' check-external-types --manifest-path '{manifest}'
+    & cargo '+{{ rust_nightly_external_types }}' each @selection --filter lib --keep-going '--' cargo '+{{ rust_nightly_external_types }}' check-external-types --manifest-path '{manifest}'
     if ($LASTEXITCODE -ne 0) {
         Write-Error "anvil-external-types: one or more crates failed. The installed tool may be newer than the catalog minimum; it must remain compatible with rustdoc from {{ rust_nightly_external_types }}."
         exit $LASTEXITCODE

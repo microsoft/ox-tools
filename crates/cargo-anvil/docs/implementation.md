@@ -76,6 +76,12 @@ cannot auto-install a compiler during validation. Installation uses the same
 anchored toolchain-list match and emits a dedicated rustup bootstrap diagnostic
 when the executable is absent.
 
+`tools.just` additionally exposes the declared root MSRV as the `root-msrv`
+action, answering with the version or `none`. It exists for the container image
+tag, which hashes that value, and being total matters there: an empty answer and
+an unasked question must not hash alike. It reads the manifest through the same
+scanner as every other path.
+
 Setup dependencies, rather than the cloud templates, route provisioning.
 Cargo-tool installers, default-component installers, and stable-only setup
 leaves depend on `anvil-toolchain-stable-install`; group and tier fan-out lets
@@ -227,9 +233,12 @@ supersede active failures; they do not add a fresh supplemental status.
 
 The reporter's API errors are ignored by the composite action because the
 native workflow job is authoritative. The generated root workflow grants the
-required status permission only to the same-repository pull-request caller.
-Merge-group and fork execution retain annotations and the named failure step
-without a write-capable status token.
+required status permission to the shared pull-request/merge-group caller.
+Merge-group runs and their Just processes receive that write-capable token.
+Anvil's status and comment publication remains guarded to pull-request events.
+Fork execution retains annotations and the named failure step, while the
+repository-origin guard prevents status writes regardless of the administrator's
+fork-token policy.
 
 Tests extract and execute the exact YAML-embedded Bash and JavaScript bodies.
 The Bash harness covers success, both Just diagnostic forms, and a failure

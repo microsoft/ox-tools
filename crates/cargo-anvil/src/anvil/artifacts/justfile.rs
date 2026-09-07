@@ -74,6 +74,9 @@ macro_rules! split_recipe_files {
     };
 }
 
+/// Generic local-development recipes that are not cloud check-group members.
+const DEV_FILES: &[(&str, &str)] = split_recipe_files!("dev", ["build"]);
+
 #[test]
 fn aprz_forwards_a_github_token_into_the_container() {
     let aprz = CHECK_FILES
@@ -192,6 +195,12 @@ pub fn helpers() -> Artifact {
 #[must_use]
 pub fn impact() -> Artifact {
     Artifact::owned_file(IMPACT_JUST_PATH, IMPACT_JUST)
+}
+
+/// Generic local-development recipe files.
+#[must_use]
+pub fn dev_files() -> Vec<Artifact> {
+    DEV_FILES.iter().map(|&(path, body)| Artifact::owned_file(path, body)).collect()
 }
 
 /// The `justfiles/anvil/checks/<check>.just` files — one owned artifact
@@ -387,15 +396,20 @@ mod tests {
 
     #[test]
     fn each_check_file_defines_its_own_check_recipe() {
-        // The file `checks/<name>.just` must define `anvil-<name>:` -- guards
-        // against a mis-split that files a check's recipe under the wrong name.
+        // The file `checks/<name>.just` must define `anvil-<name>`, optionally
+        // with public arguments before its colon. This guards against a
+        // mis-split that files a check's recipe under the wrong name.
         for (path, body) in CHECK_FILES {
             let stem = path
                 .strip_prefix("justfiles/anvil/checks/")
                 .and_then(|p| p.strip_suffix(".just"))
                 .expect("check file path has the expected shape");
-            let needle = format!("anvil-{stem}:");
-            assert!(body.contains(&needle), "{path} must define '{needle}'");
+            let recipe = format!("anvil-{stem}");
+            let defines_recipe = body.lines().map(str::trim).any(|line| {
+                line.strip_prefix(&recipe)
+                    .is_some_and(|remainder| remainder.starts_with(':') || (remainder.starts_with(' ') && remainder.contains(':')))
+            });
+            assert!(defines_recipe, "{path} must define '{recipe}'");
         }
     }
 
@@ -806,6 +820,34 @@ mod tests {
                         "{path} invokes Cargo without an explicit toolchain selection: {line}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn cargo_each_dispatchers_match_their_child_toolchain() {
+        for (path, body) in CHECK_FILES {
+            for line in body.lines().map(str::trim) {
+                let invokes_cargo_each =
+                    (line.starts_with("cargo ") || line.starts_with("& cargo ")) && line.contains(" each ") && line.contains("'--' cargo ");
+                if !invokes_cargo_each {
+                    continue;
+                }
+                let (_, after_outer_cargo) = line
+                    .split_once("cargo ")
+                    .expect("invokes_cargo_each requires an outer cargo invocation");
+                let (outer_toolchain, after_each) = after_outer_cargo
+                    .split_once(" each ")
+                    .expect("invokes_cargo_each requires an each subcommand");
+                let (_, after_child_cargo) = after_each
+                    .split_once("'--' cargo ")
+                    .expect("invokes_cargo_each requires a child cargo command");
+                assert!(
+                    after_child_cargo
+                        .strip_prefix(outer_toolchain)
+                        .is_some_and(|child_command| child_command.starts_with(' ')),
+                    "{path} selects different toolchains for cargo-each and its child Cargo: {line}"
+                );
             }
         }
     }

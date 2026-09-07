@@ -51,16 +51,6 @@ pub(crate) const fn cache_lock_identity(locks: &CacheLocks) -> usize {
     locks.identity
 }
 
-/// The guard runtime's sources, embedded so that the vendored copy cannot drift from the real one.
-const RUNTIME_SOURCES: [(&str, &str); 3] = [
-    ("lib.rs", include_str!("../../../cargo-gamma-rt/src/lib.rs")),
-    ("either.rs", include_str!("../../../cargo-gamma-rt/src/either.rs")),
-    ("runtime.rs", include_str!("../../../cargo-gamma-rt/src/runtime.rs")),
-];
-
-/// The workspace package contract inherited by the real runtime crate.
-const WORKSPACE_MANIFEST: &str = include_str!("../../../../Cargo.toml");
-
 /// Identifies the workspace allowed to reuse a cache directory.
 const CACHE_OWNER: &str = ".cargo-gamma-owner";
 
@@ -1607,31 +1597,18 @@ fn vendor_runtime(at: &Utf8Path) -> Result<()> {
 
     fs::create_dir_all(source.as_std_path()).map_err(|cause| error!("could not create `{source}`").caused_by(cause))?;
 
-    let workspace: toml::Value = toml::from_str(WORKSPACE_MANIFEST)
-        .map_err(|cause| error!("could not read the embedded workspace package contract").caused_by(cause))?;
-    let package = workspace
-        .get("workspace")
-        .and_then(|workspace| workspace.get("package"))
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| error!("the embedded workspace manifest has no `[workspace.package]` table"))?;
-    let inherited = |name| {
-        package
-            .get(name)
-            .and_then(toml::Value::as_str)
-            .ok_or_else(|| error!("the embedded workspace package contract has no string `{name}`"))
-    };
-    let edition = inherited("edition")?;
-    let rust_version = inherited("rust-version")?;
     let manifest = format!(
-        "[package]\nname = \"{RUNTIME_PACKAGE}\"\nversion = \"0.0.0\"\nedition = \"{edition}\"\nrust-version = \"{rust_version}\"\npublish = false\n\n\
-         [features]\nloom = []\n\n[lints.rust]\nunexpected_cfgs = {{ level = \"warn\", check-cfg = ['cfg(coverage_nightly)', 'cfg(loom)'] }}\n\n\
-         [lib]\nname = \"{RUNTIME_CRATE}\"\npath = \"src/lib.rs\"\n\n[workspace]\n"
+        "[package]\nname = \"{RUNTIME_PACKAGE}\"\nversion = \"0.0.0\"\nedition = \"{}\"\nrust-version = \"{}\"\npublish = false\n\n\
+         [features]\nembedding = []\nloom = []\n\n[lints.rust]\nunexpected_cfgs = {{ level = \"warn\", check-cfg = ['cfg(coverage_nightly)', 'cfg(loom)'] }}\n\n\
+         [lib]\nname = \"{RUNTIME_CRATE}\"\npath = \"src/lib.rs\"\n\n[workspace]\n",
+        gamma_rt::embedded::EDITION,
+        gamma_rt::embedded::RUST_VERSION
     );
 
     fs::write(at.join("Cargo.toml").as_std_path(), manifest)
         .map_err(|cause| error!("could not write the runtime manifest in `{at}`").caused_by(cause))?;
 
-    for (name, contents) in RUNTIME_SOURCES {
+    for (name, contents) in gamma_rt::embedded::SOURCES {
         let path = source.join(name);
 
         fs::write(path.as_std_path(), contents).map_err(|cause| error!("could not write the runtime source `{path}`").caused_by(cause))?;
@@ -2131,7 +2108,7 @@ mod tests {
     fn the_vendored_runtime_is_the_real_one() {
         // If these ever diverge, guards would be compiled against a runtime that is not the one
         // this build was tested with.
-        let runtime = RUNTIME_SOURCES
+        let runtime = gamma_rt::embedded::SOURCES
             .iter()
             .find_map(|(name, source)| (*name == "runtime.rs").then_some(*source))
             .expect("runtime.rs is one of the embedded runtime sources");
@@ -2157,7 +2134,7 @@ mod tests {
 
         // The `[workspace]` table keeps it from being adopted by whatever workspace it lands near.
         assert!(manifest.contains("[workspace]"));
-        for (name, _contents) in RUNTIME_SOURCES {
+        for (name, _contents) in gamma_rt::embedded::SOURCES {
             assert!(at.join("src").join(name).as_std_path().is_file(), "{name} was not vendored");
         }
 
