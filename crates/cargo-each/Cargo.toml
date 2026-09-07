@@ -4,7 +4,7 @@
 [package]
 name = "cargo-each"
 description = "A cargo subcommand that runs a command over a cargo-style selection of workspace members"
-version = "0.1.0"
+version = "0.2.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "workspace", "ci"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
