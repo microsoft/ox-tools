@@ -104,6 +104,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         # non-retriable failure has the same evidence as a direct invocation.
         $previousErrorActionPreference = $ErrorActionPreference
         $reportOutput = @()
+        $reportExitCode = 1
         try {
             $ErrorActionPreference = 'Continue'
             & cargo '+{{ rust_nightly }}' llvm-cov report --lcov --output-path $OutputPath 2>&1 |
@@ -159,6 +160,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
             )
             Write-Host 'anvil-llvm-cov: retrying Windows error 206 with an LLVM response file'
             $previousErrorActionPreference = $ErrorActionPreference
+            $retryExitCode = 1
             try {
                 $ErrorActionPreference = 'Continue'
                 & $llvmCov export "@$responsePath" > $OutputPath 2> $retryErrorPath
