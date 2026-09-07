@@ -10,7 +10,7 @@
 //! the real rustc with the lint enabled and keeps a copy of the diagnostics
 //! rustdoc would have thrown away.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -29,8 +29,8 @@ pub struct PackageDoctests {
     /// How many doctests rustdoc compiled.
     compiled: usize,
 
-    /// Dependencies at least one doctest did not use.
-    unused: BTreeSet<String>,
+    /// How many doctests reported each dependency unused.
+    reports: BTreeMap<String, usize>,
 }
 
 /// Doctest evidence for a whole run, keyed by package name.
@@ -48,14 +48,17 @@ impl DoctestEvidence {
 
     /// Whether a doctest of `package` used `name`.
     ///
-    /// Doctests all compile under the crate name `rust_out`, so the diagnostics
-    /// carry no per-doctest identity. None is needed: the question is whether
-    /// *any* doctest used the dependency, so a package that compiled at least
-    /// one doctest without reporting the dependency is evidence of use.
+    /// Every doctest is a separate compilation with the dependency in scope, so
+    /// the counting is the same as for targets: fewer reports than doctests
+    /// means some doctest used it. Treating a single report as proof of disuse
+    /// would convict a dependency that one example needs and the other 174 do
+    /// not mention.
     pub fn used(&self, package: &str, name: &str) -> bool {
-        self.packages
-            .get(package)
-            .is_some_and(|doctests| doctests.compiled > 0 && !doctests.unused.contains(name))
+        self.packages.get(package).is_some_and(|doctests| {
+            let reports = doctests.reports.get(name).copied().unwrap_or_default();
+
+            reports < doctests.compiled
+        })
     }
 }
 
@@ -192,7 +195,7 @@ fn read_captures(capture: &Path) -> Result<PackageDoctests> {
     for line in text.lines() {
         match line.strip_prefix('\t') {
             Some(name) => {
-                doctests.unused.insert(name.to_owned());
+                *doctests.reports.entry(name.to_owned()).or_default() += 1;
             }
             None => doctests.compiled += 1,
         }

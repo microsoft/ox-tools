@@ -310,6 +310,35 @@ fn an_unused_build_dependency_is_reported() {
 }
 
 #[test]
+fn one_doctest_among_many_is_enough_to_spare_a_dependency() {
+    if !nightly() {
+        return;
+    }
+
+    // Every doctest is its own compilation with the dev-dependency in scope, so
+    // the ones that do not mention it each report it unused. Treating any report
+    // as proof of disuse would convict a dependency a single example needs --
+    // which is what a real 175-doctest crate looked like.
+    let fixture = Fixture::new(
+        &["usedonce"],
+        &format!("[dev-dependencies]\n{}", dep("usedonce")),
+        concat!(
+            "//! Lib.\n\n",
+            "/// One.\n///\n/// ```\n/// assert_eq!(1 + 1, 2);\n/// ```\npub fn a() {}\n\n",
+            "/// Two.\n///\n/// ```\n/// assert_eq!(2 + 2, 4);\n/// ```\npub fn b() {}\n\n",
+            "/// Three, the only one that needs it.\n///\n/// ```\n/// usedonce::f();\n/// ```\npub fn c() {}\n",
+        ),
+    );
+
+    let report = fixture.report();
+
+    assert!(
+        !report.contains("usedonce"),
+        "one doctest out of three uses it, which is enough: {report}"
+    );
+}
+
+#[test]
 fn a_dev_dependency_only_a_doctest_uses_is_not_reported() {
     if !nightly() {
         return;

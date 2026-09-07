@@ -324,7 +324,13 @@ fn source_checks(manifest_path: &Path, selection: &[OsString], checks: &[Check])
     // of only those packages that produced a finding, and judge again. On a
     // large workspace that is the difference between a handful of doctest
     // builds and one per package.
-    let candidates = verdict::judge(&workspace.packages, &plain, &all, &doctests::DoctestEvidence::default(), &workspace.allowed);
+    let candidates = verdict::judge(
+        &workspace.packages,
+        &plain,
+        &all,
+        &doctests::DoctestEvidence::default(),
+        &workspace.allowed,
+    );
     let doctests = doctest_evidence(manifest_path, &workspace, &candidates)?;
 
     let findings = verdict::judge(&workspace.packages, &plain, &all, &doctests, &workspace.allowed);
