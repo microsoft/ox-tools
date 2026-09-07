@@ -236,6 +236,8 @@ mod tests {
         assert!(!SETUP_STEP.contains("Cargo.toml | Cargo.lock"));
         assert!(SETUP_STEP.contains("'rust-toolchain.toml'"));
         assert!(!SETUP_STEP.contains("restoreKeys:"));
+        assert!(SETUP_STEP.contains("$minimum = [version]'1.46.0'"));
+        assert!(SETUP_STEP.contains("cargo-anvil requires just >= $minimum"));
         let fingerprint = SETUP_STEP
             .find("anvil setup (fingerprint repository toolchain)")
             .expect("setup must fingerprint optional repository toolchain files");
@@ -255,13 +257,13 @@ mod tests {
 
     #[test]
     fn setup_step_quotes_inline_command_values_containing_colons() {
-        // An inline `- bash: echo "x: y"` is a YAML *plain scalar*; the inner
+        // An inline `- pwsh: Write-Host "x: y"` is a YAML *plain scalar*; the inner
         // `: ` is parsed as a mapping separator ("Mapping values are not
         // allowed in this context"), which ADO rejects at compile time. Such
         // values must be wrapped in quotes. Guard every inline command scalar
         // in the setup step (and catch the specific group=none echo).
         assert!(
-            SETUP_STEP.contains(r#"- bash: 'echo "anvil-setup: group=none, skipping tool install"'"#),
+            SETUP_STEP.contains(r#"- pwsh: 'Write-Host "anvil-setup: group=none, skipping tool install"'"#),
             "the group=none echo must be single-quoted so its colon stays literal",
         );
         for line in SETUP_STEP.lines() {
@@ -288,6 +290,17 @@ mod tests {
     }
 
     #[test]
+    fn ado_artifacts_do_not_require_bash() {
+        for artifact in all() {
+            let has_bash_step = artifact.body().lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("- bash:") || line.starts_with("- task: Bash@")
+            });
+            assert!(!has_bash_step, "ADO artifact contains a Bash step:\n{}", artifact.body());
+        }
+    }
+
+    #[test]
     fn group_step_passes_group_to_setup() {
         let body = render_group_step("pr-fast");
         assert!(body.contains("template: setup.yml"));
@@ -305,6 +318,7 @@ mod tests {
     fn job_wrapper_declares_expected_contract() {
         for needle in [
             "name: name",
+            "name: stage",
             "name: pool",
             "name: steps",
             "type: stepList",
@@ -314,6 +328,58 @@ mod tests {
             "PublishPipelineArtifact@1",
         ] {
             assert!(JOB_WRAPPER.contains(needle), "wrapper missing '{needle}'");
+        }
+    }
+
+    /// Every `steps/job.yml` invocation identifies the ADO stage it renders.
+    ///
+    /// The expected stages are DERIVED from [`GROUPS`] rather than restated as
+    /// a third hardcoded list: a group added to `GROUPS` but never threaded
+    /// into a stages template has to fail here, which a literal list copied
+    /// alongside it cannot do. `impact` is the one stage with no check group
+    /// of its own, so it is the only literal.
+    #[test]
+    fn stages_identify_the_stage_for_every_job() {
+        let mut pr_stages = vec!["impact".to_owned()];
+        let mut scheduled_stages = Vec::new();
+        for group in GROUPS {
+            // The identifier is the ADO stage name, i.e. the group with `-`
+            // swapped for `_` -- what the template writes after `stage:` and
+            // what `System.StageName` reports at runtime.
+            let stage = group.replace('-', "_");
+            if group.starts_with("pr-") {
+                pr_stages.push(stage);
+            } else {
+                assert!(group.starts_with("scheduled-"), "group '{group}' has no known tier prefix");
+                scheduled_stages.push(stage);
+            }
+        }
+
+        for (template, label, expected) in [
+            (PR_STAGES, "pr-stages.yml", &pr_stages),
+            (SCHEDULED_STAGES, "scheduled-stages.yml", &scheduled_stages),
+        ] {
+            for stage in expected {
+                // The 10-space indent is the `parameters:` form; it does not
+                // match the `  - stage:` declaration that opens the stage.
+                assert_eq!(
+                    template.matches(&format!("\n          stage: {stage}\n")).count(),
+                    2,
+                    "{label} must pass `stage: {stage}` on both per-OS jobs"
+                );
+            }
+            let jobs = template.matches("- template: steps/job.yml").count();
+            assert_eq!(
+                jobs,
+                expected.len() * 2,
+                "{label} renders {jobs} jobs but {} stages are expected",
+                expected.len()
+            );
+            assert_eq!(
+                template.matches("\n          stage: ").count(),
+                jobs,
+                "{label} leaves a steps/job.yml invocation without a stage"
+            );
         }
     }
 
@@ -330,9 +396,9 @@ mod tests {
         );
         // A PR group always downloads the artifact, so it consumes it. The mode
         // is fixed by tier -- not probed at runtime from a marker file.
-        assert!(body.contains("export ANVIL_IMPACT=consume"));
+        assert!(body.contains(r#"ANVIL_IMPACT: "consume""#));
         assert!(
-            !body.contains("ANVIL_IMPACT=off"),
+            !body.contains(r#"ANVIL_IMPACT: "off""#),
             "a PR group must not fall back to off (it always has the artifact)"
         );
         assert!(
@@ -362,9 +428,9 @@ mod tests {
         // target/anvil/impact/impact.state, so no leftover state on the agent
         // can wrongly enable scoping and skip the full-workspace backstop.
         let body = render_group_step("scheduled-test");
-        assert!(body.contains("export ANVIL_IMPACT=off"));
+        assert!(body.contains(r#"ANVIL_IMPACT: "off""#));
         assert!(
-            !body.contains("ANVIL_IMPACT=consume"),
+            !body.contains(r#"ANVIL_IMPACT: "consume""#),
             "scheduled group must never consume the impact cache"
         );
         assert!(

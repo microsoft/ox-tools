@@ -57,11 +57,12 @@
 //!
 //! # Why this crate has no dependencies
 //!
-//! It has zero dependencies, no features, no build script and no `std`, by design. Anything else
-//! would perturb feature unification in *the user's* tree, which could change what their code
-//! compiles to and therefore what their tests prove, or stop a `no_std` tree from building once
-//! the shim is injected into it. Zero dependencies is a correctness requirement, not a
-//! preference.
+//! It has zero dependencies, no build script and no `std`, by design. Its empty features expose
+//! only coordinator or repository test plumbing; the vendored crate enables none of them.
+//! Anything else would perturb feature unification in *the user's* tree, which could change what
+//! their code compiles to and therefore what their tests prove, or stop a `no_std` tree from
+//! building once the shim is injected into it. Zero dependencies is a correctness requirement,
+//! not a preference.
 //!
 //! For the same reason [`a`] must stay trivial. It is called at every mutation site of every
 //! execution of the suite, so its cost is multiplied by the whole population: a cached atomic load
@@ -217,6 +218,26 @@
 
 mod either;
 mod runtime;
+
+#[cfg(feature = "embedding")]
+#[doc(hidden)]
+pub mod embedded {
+    /// Runtime source files embedded by the coordinator into each scratch workspace.
+    pub const SOURCES: [(&str, &str); 3] = [
+        ("lib.rs", include_str!("lib.rs")),
+        ("either.rs", include_str!("either.rs")),
+        ("runtime.rs", include_str!("runtime.rs")),
+    ];
+
+    /// Edition used by the standalone vendored runtime.
+    ///
+    /// Cargo exposes no `CARGO_PKG_EDITION` variable. This stays explicit so a workspace edition
+    /// bump cannot silently reinterpret source injected into another repository.
+    pub const EDITION: &str = "2024";
+
+    /// Minimum compiler version used by the standalone vendored runtime.
+    pub const RUST_VERSION: &str = env!("CARGO_PKG_RUST_VERSION");
+}
 
 #[doc(inline)]
 pub use either::Either;

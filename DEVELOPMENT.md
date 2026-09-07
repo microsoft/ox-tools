@@ -41,13 +41,13 @@ After installing the Rust toolchain, we setup repository-specific tooling:
 2. Switch to the `ox-tools` directory: `cd ox-tools`.
 2. Execute `git config --local include.path ./.gitconfig` to attach the repo-specific Git configuration.
 2. Execute `git lfs install --local` to enable Git LFS for this clone. Binary assets (logos, icons, and compressed test fixtures) are stored in LFS; without this step they are checked out as pointer files and tests that read them will fail.
-2. Execute `just install-tools` to install all necessary Rust toolchain versions and development tooling.
+2. Execute `just anvil-setup` to install all catalog Rust toolchains and development tooling.
 2. Open `.vscode/settings.template.jsonc` and save a copy as `.vscode/settings.json` to apply repo-specific settings for Visual Studio Code. Part of this file should be the same for everyone but the rest you can customize - refer to inline comments.
 
 ## Validate Windows environment
 
-1. Execute `just build` to build the workspace. Verify that the build is successful.
-1. Execute `just test` to execute all tests in the workspace. Verify that all tests pass.
+1. Execute `just anvil-build` to build all workspace targets and features.
+1. Execute `just anvil-pr-test` to run tests, coverage, documentation tests, and example compilation.
 1. Validate that debugging works by opening `crates/tick/examples/basic.rs` and pressing the `Debug` link that appears above `main()`. This should successfully launch the example app under the debugger.
 
 # Linux (WSL) environment setup
@@ -74,7 +74,7 @@ Next, we upgrade, install and configure development prerequisites:
 Next, we setup repository-specific tooling on Linux:
 
 1. Switch to the `ox-tools` directory you previously cloned on Windows, using a `/mnt/c` style path to access the Windows filesystem: `cd /mnt/c/Users/username/Desktop/ox-tools` (adjusting the path to match your chosen location).
-1. Execute `just install-tools` to install all necessary Rust toolchain versions and development tooling.
+1. Execute `just anvil-setup` to install all catalog Rust toolchains and development tooling.
 
 ## Optimize Linux build performance
 
@@ -90,8 +90,8 @@ After installing the Rust toolchains, we setup the build target directory for fa
 
 ## Validate Linux (WSL) environment
 
-1. Execute `just build` to build the workspace. Verify that the build is successful.
-1. Execute `just test` to execute all tests in the workspace. Verify that all tests pass.
+1. Execute `just anvil-build` to build all workspace targets and features.
+1. Execute `just anvil-pr-test` to run tests, coverage, documentation tests, and example compilation.
 
 ## Setup Visual Studio Code integration
 
@@ -115,12 +115,15 @@ Validate that debugging works by opening `crates/tick/examples/basic.rs` and pre
 
 # Before submitting a pull request
 
-Run all essential CI checks locally with a single command:
+Run the complete local pull-request tier for source, build, configuration, or
+CI changes:
 
 ```sh
-just check-changes
+just anvil-pr
 ```
 
-This runs build, tests, clippy, formatting, and other validations in sequence—inspect the `justfile` for the full list of checks. Some checks (e.g., mutation testing) take too long to run locally; review the GitHub pipeline results to address those.
+For documentation-only changes that cannot affect executable behavior, use
+`just anvil-pr-fast`. The fast tier omits tests and coverage, runtime analysis,
+and mutation testing.
 
 PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/) format (e.g., `feat: add validation method`, `fix: resolve memory leak`).

@@ -11,24 +11,22 @@
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
 # a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the bash step).
+# (see the group step).
 steps:
   - template: setup.yml
     parameters:
       group: __GROUP__
 __PR_TITLE_STEP__
-  - bash: |
-      set -euo pipefail
+  - pwsh: just anvil-__GROUP__
+    displayName: anvil-__GROUP__
+    env:
+__PR_TITLE_ENV__
       # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every
       # tier runs full-workspace.
-      export ANVIL_IMPACT=__IMPACT_MODE__
-      just anvil-__GROUP__
-    displayName: anvil-__GROUP__
-    env:
-__PR_TITLE_ENV__
+      ANVIL_IMPACT: "__IMPACT_MODE__"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
       # pure cost with no cross-run benefit. Mirrors the GitHub impl workflows'

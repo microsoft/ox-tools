@@ -1,11 +1,11 @@
 version = 1
 tool = "anvil"
-tool_version = "0.7.0"
-catalog_checksum = "sha256:843393cfb526946ea40a73b8c807794ff9895cfd41dda382ab8956458caa9669"
+tool_version = "0.8.0"
+catalog_checksum = "sha256:629ce0e590e38c259fb3d910e702b5cca278b59c6779eef3a70671bb159426cf"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
-checksum = "sha256:9c7906c20415ca3b832afb075c21e79f191ef14ee2fb4b6a5a95394e8b2153c1"
+checksum = "sha256:3907b9d8d15211ef5adff9ac2bcd23023797ed7b9961a59e28324bb7666ec340"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -21,11 +21,19 @@ checksum = "sha256:d564a0ce424cda58c8f5b2476cf0c8b36e759afbdf8227608bd1f3fc74913
 
 [[file]]
 path = ".github/actions/anvil-setup/action.yml"
-checksum = "sha256:a8e3cb37301ef39783721603b5145ab73dc79b7b4897c06b43b03db1f224a8a8"
+checksum = "sha256:08bdc66a6ee94447aa1a60ece93c73fcbc930b7e331de85b2e9b78b5bc3d2e01"
 
 [[file]]
 path = ".github/actions/anvil-setup/just-problem-matcher.json"
 checksum = "sha256:ea44d5e1a2cb1471cf2cef05eceab846d8afa45cf691be800f21fec1218da120"
+
+[[file]]
+path = ".github/instructions/cargo-anvil.instructions.md"
+checksum = "sha256:cf59c434d6486248f6ebc16a450b88f64651969b7de6e904f14d383db1decfa5"
+
+[[file]]
+path = ".github/skills/cargo-anvil-adoption/SKILL.md"
+checksum = "sha256:544f8753a539c1ca4172af6a7d68d49ab9350708f794384a189266500cee06d6"
 
 [[file]]
 path = ".github/skills/code-review/SKILL.md"
@@ -33,7 +41,7 @@ checksum = "sha256:7c43a36153ec346427892dca414fe971da616f99827fb5241167b1cf58a97
 
 [[file]]
 path = ".github/workflows/anvil-pr-impl.yml"
-checksum = "sha256:6368d048bf4921279b4f67306b22125cd48778e9d299508af1cb34f67f1de1a5"
+checksum = "sha256:e4b87dea56bfa1ce12c2dc28eecf955f31c3be657f356552d6cf8d600d3ab783"
 
 [[file]]
 path = ".github/workflows/anvil-pr.yml"
@@ -85,7 +93,7 @@ checksum = "sha256:c5604e8cb0eaa2baf4e2e2c70032d037d21873090375ffcf1ee99983965f6
 
 [[file]]
 path = "justfiles/anvil/checks/doc-build.just"
-checksum = "sha256:d2f6a9536d62030db5505c88d510c4114cb0aab81a7af0e995ba8da5ce3a16a6"
+checksum = "sha256:77b2677bfe2c1f223b9302757165cff88066f7bbc866f338ddc4f2b24d144712"
 
 [[file]]
 path = "justfiles/anvil/checks/doc-test.just"
@@ -101,7 +109,7 @@ checksum = "sha256:df001306d8091f13eda00d2f9525c4594774e45f33ff71c39e2e62b15040f
 
 [[file]]
 path = "justfiles/anvil/checks/examples.just"
-checksum = "sha256:8b2118916ea76448382864177baa6a8e418817c9aba0a9d7fe52218cd89a135e"
+checksum = "sha256:c71e14c9131ad1d5ff1b6c40a74c86ebd2f2ea596101299c0bb2e2f2b475d021"
 
 [[file]]
 path = "justfiles/anvil/checks/external-types.just"
@@ -109,7 +117,7 @@ checksum = "sha256:13dcd1467250020d152e10a5b6c6766ffce971271042db175ea98a05b567b
 
 [[file]]
 path = "justfiles/anvil/checks/fmt.just"
-checksum = "sha256:ed3d5b3bbd9035285d29892bd1f1b3d429d1c7e150abf12496bca205a3c4f32e"
+checksum = "sha256:693dc1dec0c0fad16a64d2014be8b7cee0dad1eb3b5bd6caffb485e94f261c1f"
 
 [[file]]
 path = "justfiles/anvil/checks/license-headers.just"
@@ -117,7 +125,7 @@ checksum = "sha256:7069b83328f81b280187e45df5f8240152e6bf9245035b7683673e22e2b94
 
 [[file]]
 path = "justfiles/anvil/checks/llvm-cov.just"
-checksum = "sha256:90d3da053e40b41cb399f02f2f19274e1b5b8b6da5aaa2d8fcad448883aad847"
+checksum = "sha256:aa85a58ecfea4dabc1e691b75f55d2dca720955cc4bf1bc22d3b91dce1cf6ed0"
 
 [[file]]
 path = "justfiles/anvil/checks/loom.just"
@@ -137,7 +145,7 @@ checksum = "sha256:02bd9e2d3663d79d1debe009f3c58378d0c4a1c31d46e96cf61631c515097
 
 [[file]]
 path = "justfiles/anvil/checks/miri.just"
-checksum = "sha256:2c437d33706f5de8ffca43ca39ae92e59fb5e071101fda6d524b6eeab6872898"
+checksum = "sha256:426643b1c2da2aa58a7104a41dc02665cfc89052ad7e67a1d9547b1544244e8d"
 
 [[file]]
 path = "justfiles/anvil/checks/msrv-test.just"
@@ -157,7 +165,7 @@ checksum = "sha256:28734aa77526ca5c53d89a32c3e20ae6b42d2032c73ab6a1dbc9831f25cb0
 
 [[file]]
 path = "justfiles/anvil/checks/readme-check.just"
-checksum = "sha256:4993e662875561ddf976ec94c69ec0d647a5c957bfb8f5174f79162a640ed892"
+checksum = "sha256:750354ba4528621f8fcf545fb6f5702a7cfe64526a83b5b98243ecb4d935f79e"
 
 [[file]]
 path = "justfiles/anvil/checks/semver-check.just"
@@ -173,7 +181,11 @@ checksum = "sha256:7d267ab829af37e0b76eb4bffaf73fee78219fc0cd158ef1bb129003e6cee
 
 [[file]]
 path = "justfiles/anvil/container.just"
-checksum = "sha256:3363992c6c006c649eae3732b2a7b04c2a4925eff369179b128d43380e2800d4"
+checksum = "sha256:68a83a014c29bb32db24d8be8140a8a86b829a96f30e5ca72d9b43e06764a5b1"
+
+[[file]]
+path = "justfiles/anvil/dev/build.just"
+checksum = "sha256:0bb312ad114d180657faf4bff47e8ef874c59703acce10170a65d6deffc6c117"
 
 [[file]]
 path = "justfiles/anvil/groups/pr-fast.just"
@@ -225,7 +237,7 @@ checksum = "sha256:5e8b96d77ccc17c7184a4be0f3c1a1fbf2a525b43d2dd49cf48a011a4a867
 
 [[file]]
 path = "justfiles/anvil/mod.just"
-checksum = "sha256:4892e7a17d5f576241834041c89916708b23e88503156721af3048b2a358538f"
+checksum = "sha256:43d04edd4067ab7c76472d020e46caa5a406d25a11e45007ed865626f6a049eb"
 
 [[file]]
 path = "justfiles/anvil/tiers.just"
@@ -233,7 +245,7 @@ checksum = "sha256:00453a12cbb34811ee6a2c083dade5f6198575e3b0610f49e4743366326cd
 
 [[file]]
 path = "justfiles/anvil/tools.just"
-checksum = "sha256:48b887481a7eb8dc7615367347c93b8a02dd7baafb0ef80ece883f03600285dd"
+checksum = "sha256:a4dcb0de11f57187f88cc1c27e0263391a74b53b09ccd27428f0d07c022bd524"
 
 [[file]]
 path = "justfiles/anvil/versions.just"
@@ -257,7 +269,7 @@ checksum = "sha256:7b409a9b560c214e10b50f74330fb6f8c0c12c3d83494e0dcf016f2411b50
 [[region]]
 host = ".anvil/container/Dockerfile"
 id = "anvil-container-setup"
-checksum = "sha256:3788845ea3d4c483917954ddf9bccf918bf69ab7c64bbf559baf59d5781c444f"
+checksum = "sha256:6a516c50a5a717a2b7635e043f2cc33fd872bdf5950a456718518b1af0bf75f9"
 
 [[region]]
 host = ".anvil/container/Dockerfile"
@@ -267,7 +279,7 @@ checksum = "sha256:ba7456ca88da39f72024dd0616e56d49d1aef7a5d26b81a8b33efccb13321
 [[region]]
 host = ".delta.toml"
 id = "anvil-delta"
-checksum = "sha256:198e5de2539f0c70a5fbb56077b280c6adc6c427dc4899580c050d7d898560d0"
+checksum = "sha256:b66778758af55d0f76edfd9e92e65426d203e1c248bca7668716b63161b79320"
 
 [[region]]
 host = ".gitattributes"

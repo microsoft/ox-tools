@@ -25,12 +25,13 @@
 
 #[cfg(test)]
 use core::cell::RefCell;
-use std::fs;
+use std::fs::{self, File};
 use std::io::ErrorKind;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
+use super::input;
 use super::record::{ContextDigest, Killer, RunRecord, Tier};
 use crate::elements::Publication;
 use crate::error::error;
@@ -159,7 +160,7 @@ impl Hints {
 
     /// Reads and validates the artifact at `path`, or nothing when it cannot be trusted.
     fn read(path: &Utf8Path) -> Option<Self> {
-        let text = fs::read_to_string(path.as_std_path()).ok()?;
+        let text = input::text(File::open(path.as_std_path()).ok()?).ok()??;
         let hints = serde_json::from_str::<Self>(&text).ok()?;
 
         (hints.version == VERSION).then_some(hints)
@@ -267,12 +268,30 @@ impl Hints {
         let text = self.rendered()?;
         let workspace = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
+        if u64::try_from(text.len()).unwrap_or(u64::MAX) > input::MAX_BYTES {
+            return Err(error!(
+                "the promoted hints are larger than the {} bytes cargo-gamma will retain",
+                input::MAX_BYTES
+            ));
+        }
+
         // Absent and unreadable are different answers, and collapsing them into one `None` is what
         // turns the rollback below into a delete: undoing a creation means removing the file, and
         // a file that was there all along is not a creation. A file this cannot restore is a file
         // it must not replace, so an existing artifact it cannot read stops the promotion outright.
-        let before = match fs::read_to_string(path.as_std_path()) {
-            Ok(text) => Some(text),
+        let before = match File::open(path.as_std_path()) {
+            Ok(file) => match input::text(file) {
+                Ok(Some(text)) => Some(text),
+                Ok(None) => {
+                    return Err(error!(
+                        "`{path}` is larger than the {} bytes cargo-gamma will retain, so it cannot be safely replaced",
+                        input::MAX_BYTES
+                    ));
+                }
+                Err(cause) => {
+                    return Err(error!("`{path}` is already there and could not be read, so it must not be replaced").caused_by(cause));
+                }
+            },
             Err(cause) if cause.kind() == ErrorKind::NotFound => None,
             Err(cause) => {
                 return Err(error!("`{path}` is already there and could not be read, so it must not be replaced").caused_by(cause));

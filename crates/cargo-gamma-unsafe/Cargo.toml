@@ -4,7 +4,7 @@
 [package]
 name = "cargo-gamma-unsafe"
 description = "The platform calls cargo-gamma cannot make safely, behind a safe interface"
-version = "0.1.0"
+version = "0.2.0"
 readme = "README.md"
 keywords = ["cargo", "mutation-testing", "testing"]
 categories = ["development-tools::testing"]
