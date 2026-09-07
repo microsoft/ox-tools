@@ -1573,7 +1573,7 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
     assert_failed(&failed, "plain nextest failure for an opted-out package");
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(target_arch = "aarch64")))]
 #[test]
 fn windows_coverage_report_retries_error_206_with_response_file() {
     if !tools_available() {
