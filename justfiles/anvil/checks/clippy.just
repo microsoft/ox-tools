@@ -17,9 +17,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} clippy '{packages}' --all-targets --all-features --locked '--' '-D' 'warnings'
+    & cargo {{_anvil_stable_toolchain_args}} each $(& "{{ just_executable() }}" _anvil-impact-include affected; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }) --once '--' cargo {{_anvil_stable_toolchain_args}} clippy '{packages}' --all-targets --all-features --locked '--' '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-clippy` recipe.

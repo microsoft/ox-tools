@@ -12,9 +12,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} ensure-no-cyclic-deps
+    & cargo {{_anvil_stable_toolchain_args}} each $(& "{{ just_executable() }}" _anvil-impact-include modified; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }) --once '--' cargo {{_anvil_stable_toolchain_args}} ensure-no-cyclic-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-ensure-no-cyclic-deps` recipe.

@@ -166,8 +166,9 @@ cargo-delta reports library/target identifiers that do not uniquely name a Cargo
 Ordinal (case-sensitive) lookups (package name, lib/proc-macro target, manifest-dir leaf). When
 a reported identifier resolves to **zero** packages (an unmapped gap) or **more than one** (an
 ambiguity), the recipe fails hard rather than guessing — under-scoping would silently skip
-affected work. cargo-each resolves those names and version-qualifies package arguments
-before invoking child Cargo commands. The impact state key includes a projection-format
+affected work. The cache keeps bare workspace names: cargo-each resolves and
+version-qualifies them where it materially simplifies a recipe, while native Cargo
+commands consume the same unambiguous workspace selectors directly. The impact state key includes a projection-format
 version, so the first run after an include-format change regenerates cached selectors
 instead of accepting incompatible files from an older catalog. Complementarily, a dirty working tree (any uncommitted change outside `target/`,
 detected via a git `:(exclude)` pathspec) widens *every* tier to `--workspace` locally, because

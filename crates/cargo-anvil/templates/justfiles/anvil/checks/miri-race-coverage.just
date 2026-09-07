@@ -17,15 +17,13 @@
 [script("pwsh", "-NoProfile")]
 anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $day = (Get-Date).Day
     $low = (2 * $day) - 1
     $high = (2 * $day) + 1
     $env:MIRIFLAGS = "-Zmiri-many-seeds=$low..$high $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_race_coverage $($env:RUSTFLAGS)".Trim()
     Write-Host "anvil-miri-race-coverage: seed window $low..$high (day $day)"
-    & cargo '+{{ rust_nightly }}' each @selection --once '--' cargo '+{{ rust_nightly }}' miri test --all-features --tests '{packages}'
+    & cargo '+{{ rust_nightly }}' each $(& "{{ just_executable() }}" _anvil-impact-include affected; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }) --once '--' cargo '+{{ rust_nightly }}' miri test --all-features --tests '{packages}'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-miri-race-coverage` recipe.

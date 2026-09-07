@@ -32,16 +32,17 @@ anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Pass 1: default targets (lib + bins) -- surfaces [dependencies] that
     # are only used by tests/benches/examples (should be dev-deps).
-    & cargo '+{{ rust_nightly }}' each @selection --once '--' cargo '+{{ rust_nightly }}' udeps '{packages}' --all-features
+    if ($selection -contains '--none') { Write-Host 'anvil-udeps: no affected packages; skipping'; exit 0 }
+    & cargo '+{{ rust_nightly }}' udeps @selection --all-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Pass 2: --all-targets -- surfaces unused [dev-dependencies].
-    & cargo '+{{ rust_nightly }}' each @selection --once '--' cargo '+{{ rust_nightly }}' udeps '{packages}' --all-features --all-targets
+    & cargo '+{{ rust_nightly }}' udeps @selection --all-features --all-targets
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-udeps` recipe.
 [group("anvil-setup")]
-anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-udeps-install installer) (anvil-tool-cargo-each-install installer)
+anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-udeps-install installer)
 
 # Validate prerequisites for the `anvil-udeps` recipe.
 [group("anvil-setup")]
-anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs

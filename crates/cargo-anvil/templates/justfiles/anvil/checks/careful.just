@@ -66,13 +66,13 @@ anvil-careful: anvil-careful-validate-prereqs anvil-impact
     # there is nothing to clean). Written after the clean so it survives it.
     New-Item -ItemType Directory -Force -Path (Split-Path $marker) | Out-Null
     Set-Content -LiteralPath $marker -Value $idHash
-    & cargo '+{{ rust_nightly }}' each @selection --once '--' cargo '+{{ rust_nightly }}' careful test '{packages}' --all-features --locked
+    & cargo '+{{ rust_nightly }}' careful test @selection --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-careful` recipe.
 [group("anvil-setup")]
-anvil-careful-setup installer="install": anvil-component-nightly-rust-src-install (anvil-tool-cargo-careful-install installer) (anvil-tool-cargo-each-install installer)
+anvil-careful-setup installer="install": anvil-component-nightly-rust-src-install (anvil-tool-cargo-careful-install installer)
 
 # Validate prerequisites for the `anvil-careful` recipe.
 [group("anvil-setup")]
-anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-careful-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-careful-validate-prereqs

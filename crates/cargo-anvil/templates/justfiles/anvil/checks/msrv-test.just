@@ -27,28 +27,28 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     # `harness = false` bench needs a driver binary this group never installs.
     # Benches/examples stay compile-only (`anvil-bench`, `anvil-examples`).
     # `--tests` over `--lib --bins --tests`: `--lib` fails on bin-only packages.
-    & cargo "+$toolchain" each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --all-features --locked
+    & cargo "+$toolchain" test @selection --tests --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo "+$toolchain" each @selection --once '--' cargo "+$toolchain" test '{packages}' --tests --locked
+    & cargo "+$toolchain" test @selection --tests --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Preserve MSRV compile coverage for benches and examples without using
     # `cargo test --all-targets`, which would execute harness-free benches.
-    & cargo "+$toolchain" each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --all-features --locked
+    & cargo "+$toolchain" check @selection --benches --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo "+$toolchain" each @selection --once '--' cargo "+$toolchain" check '{packages}' --benches --examples --locked
+    & cargo "+$toolchain" check @selection --benches --examples --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install the declared MSRV toolchain only when this check is required.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
-anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
+anvil-msrv-test-setup installer="install":
     & "{{ just_executable() }}" _anvil-resolve-stable install-msrv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Validate the MSRV prerequisite.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
-anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
+anvil-msrv-test-validate-prereqs:
     $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
     $resolverExit = $LASTEXITCODE
     if ($resolverExit -ne 0) { exit $resolverExit }

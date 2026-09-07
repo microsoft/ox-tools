@@ -964,14 +964,14 @@ fn path_with_prefix(dir: &Path) -> OsString {
 
 #[test]
 #[serial]
-fn scoped_check_delegates_cached_selection_and_empty_set_to_cargo_each() {
+fn scoped_check_inlines_cached_selection_and_empty_set_into_cargo_each() {
     if !tools_available() {
         return;
     }
     // End-to-end proof of the shared check contract: a scoped check resolves
-    // one selector token per line from the downloaded cache and splats those
-    // tokens into cargo-each. cargo-each owns package resolution, child
-    // expansion, and empty-set success.
+    // one selector token per line from the downloaded cache directly in the
+    // cargo-each invocation. cargo-each owns package resolution, child
+    // expansion, and empty-set success without a local PowerShell array.
     let tmp = workspace();
     let root = tmp.path();
     let impact_dir = root.join("target/anvil/impact");
@@ -992,25 +992,24 @@ fn scoped_check_delegates_cached_selection_and_empty_set_to_cargo_each() {
 
     // consume mode: anvil-impact no-ops, so the check's cargo-each invocation
     // is captured by the shim.
-    let out = just_cmd(root, &["anvil-examples"])
+    let out = just_cmd(root, &["anvil-bench"])
         .env("ANVIL_IMPACT", "consume")
         .env("PATH", &path)
         .output()
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "scoped anvil-examples run failed:\n{combined}");
+    assert!(out.status.success(), "scoped anvil-bench run failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv.contains("each --package alpha --once -- cargo") && argv.contains("build {packages} --examples"),
+        argv.contains("each --package alpha --once -- cargo") && argv.contains("bench {packages} --all-features --no-run"),
         "the cached selector tokens must reach cargo-each; captured argv:\n{argv}"
     );
 
-    // The empty tier is represented in cargo-each's native selector language.
-    // The interactive examples recipe inspects it before cargo-each because it
-    // has additional build/run orchestration after the scoped build.
+    // The empty tier is represented in cargo-each's native selector language
+    // and reaches the same one-line invocation.
     fs::write(impact_dir.join("include_affected.txt"), "--none").unwrap();
     fs::write(&log, "").unwrap();
-    let skipped = just_cmd(root, &["anvil-examples"])
+    let skipped = just_cmd(root, &["anvil-bench"])
         .env("ANVIL_IMPACT", "consume")
         .env("PATH", &path)
         .output()
@@ -1020,11 +1019,11 @@ fn scoped_check_delegates_cached_selection_and_empty_set_to_cargo_each() {
         String::from_utf8_lossy(&skipped.stdout),
         String::from_utf8_lossy(&skipped.stderr)
     );
-    assert!(skipped.status.success(), "skipped anvil-examples run failed:\n{skip_combined}");
+    assert!(skipped.status.success(), "skipped anvil-bench run failed:\n{skip_combined}");
     let argv_skip = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv_skip.is_empty() && skip_combined.contains("no affected packages; skipping"),
-        "the --none selector must skip examples before cargo-each; captured argv:\n{argv_skip}\noutput:\n{skip_combined}"
+        argv_skip.contains("each --none --once -- cargo"),
+        "the --none selector must reach cargo-each; captured argv:\n{argv_skip}\noutput:\n{skip_combined}"
     );
 }
 
@@ -1061,10 +1060,10 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     assert!(output.status.success(), "anvil-msrv-test failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap();
     for expected in [
-        format!("each {affected} --once -- cargo +1.97 test {{packages}} --tests --all-features --locked"),
-        format!("each {affected} --once -- cargo +1.97 test {{packages}} --tests --locked"),
-        format!("each {affected} --once -- cargo +1.97 check {{packages}} --benches --examples --all-features --locked"),
-        format!("each {affected} --once -- cargo +1.97 check {{packages}} --benches --examples --locked"),
+        format!("+1.97 test {affected} --tests --all-features --locked"),
+        format!("+1.97 test {affected} --tests --locked"),
+        format!("+1.97 check {affected} --benches --examples --all-features --locked"),
+        format!("+1.97 check {affected} --benches --examples --locked"),
     ] {
         assert!(argv.contains(&expected), "missing MSRV invocation '{expected}' in:\n{argv}");
     }
@@ -1091,8 +1090,11 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     );
     assert!(skipped.status.success(), "no-MSRV invocation failed:\n{skip_combined}");
     assert!(
-        !fs::read_to_string(&log).unwrap().contains(" each "),
-        "no-MSRV invocation must skip before cargo-each"
+        fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .all(|line| !line.contains(" test ") && !line.contains(" check ")),
+        "no-MSRV invocation must skip before cargo test/check"
     );
 }
 
@@ -1363,6 +1365,20 @@ fn consume_without_downloaded_cache_fails_loudly() {
         "malformed selector cache must fail:\n{malformed_combined}"
     );
     assert!(malformed_combined.contains("empty or malformed") && malformed_combined.contains("affected"));
+
+    write(&cache.join("include_affected.txt"), "--package\nalpha@0.1.0");
+    let qualified = consume(&["anvil-impact"]);
+    let qualified_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&qualified.stdout),
+        String::from_utf8_lossy(&qualified.stderr)
+    );
+    assert_ne!(
+        qualified.status.code(),
+        Some(0),
+        "version-qualified cached selectors must fail:\n{qualified_combined}"
+    );
+    assert!(qualified_combined.contains("empty or malformed") && qualified_combined.contains("affected"));
 
     // A partially downloaded cache -- one tier's include file missing -- must
     // also fail loudly and name the missing tier. This guards the

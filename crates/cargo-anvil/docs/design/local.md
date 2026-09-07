@@ -536,15 +536,14 @@ same way a PR does — not un-committed working-tree edits.
 ### 4.1 How checks consume it
 
 Every **impact-scoped** check depends on `anvil-impact`. Ordinary checks pass their
-category's selector tokens directly to `cargo-each`:
+category's selector tokens directly to `cargo-each`. The helper call stays inline so
+cargo-each replaces, rather than accompanies, recipe-specific selection handling:
 
 ```just
 [script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo each @selection --once '--' cargo clippy '{packages}' --all-targets --all-features --locked '--' '-D' 'warnings'
+    & cargo each $(& "{{ just_executable() }}" _anvil-impact-include affected; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }) --once '--' cargo clippy '{packages}' --all-targets --all-features --locked '--' '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
@@ -563,15 +562,16 @@ Each check requests one cargo-delta **category** — the selector it passes to
 
 | Category   | What recipes do with it                                                                       |
 |------------|------------------------------------------------------------------------------------------------|
-| `modified` | `--none` makes `cargo-each` a successful no-op. Otherwise `--workspace` admits the recipe's command against its normal full input domain. |
-| `affected` | `cargo-each` resolves the selected members and `{packages}` forwards them to the child command. |
-| `required` | Same semantics as affected, but consumed by recipes that need the transitive dependency graph in scope (doc-build, cargo-hack, udeps). |
+| `modified` | `--none` makes an inline `cargo-each` gate a successful no-op. Otherwise `--workspace` admits the recipe's command against its normal full input domain. Recipes that need the selection before their final command handle the gate directly. |
+| `affected` | Inline `cargo-each` recipes resolve the selected members and forward them through `{packages}`. Multi-stage recipes retain the token array and pass it directly to Cargo. |
+| `required` | Same selection as affected plus transitive workspace dependencies; each recipe uses cargo-each only when it removes local orchestration. |
 
 The helper emits one token per line: `--none`, `--workspace`, or repeated
-`--package` / bare-name pairs. PowerShell captures that output as an array ready to splat
-without string parsing. `cargo-each` resolves the names against live workspace metadata;
-when `{packages}` is used, it forwards version-qualified specs so child Cargo commands
-remain unambiguous.
+`--package` / bare-name pairs. PowerShell expands that output into separate arguments
+without string parsing. The inline exit check preserves the helper's failure status
+instead of accidentally invoking cargo-each with its default-member selection.
+`cargo-each` resolves names against live workspace metadata and forwards
+version-qualified specs through `{packages}`.
 
 The helper validates this grammar before returning any cached selector. Empty files,
 mixed single-value and package forms, incomplete pairs, whitespace-bearing names, and
@@ -613,8 +613,9 @@ resolve scope themselves; each underlying check reads what it needs.
 (typically a docs-only PR, or a PR touching only files cargo-delta's
 `file_exclude_patterns` ignore). Ordinary recipes pass it directly to cargo-each, which
 exits successfully without spawning the child command. Orchestration-heavy recipes
-detect it before performing setup that would otherwise have side effects or, for `fmt`,
-before starting its separate full-workspace per-manifest cargo-each fan-out.
+detect it before performing setup that would otherwise have side effects, before issuing
+multiple native Cargo commands, or, for `fmt`, before starting its separate
+full-workspace per-manifest cargo-each fan-out.
 
 ### 4.3 Disabling scoping and the escape hatch
 

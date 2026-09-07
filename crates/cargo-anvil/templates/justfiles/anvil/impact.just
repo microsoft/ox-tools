@@ -641,6 +641,7 @@ _anvil-impact-include tier:
                     [string]::IsNullOrWhiteSpace($name) -or
                     $name -ne $name.Trim() -or
                     $name -match '\s' -or
+                    $name.Contains('@') -or
                     $name.StartsWith('--')) {
                     $valid = $false
                     break
