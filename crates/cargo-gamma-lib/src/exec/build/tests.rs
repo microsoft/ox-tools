@@ -177,6 +177,32 @@ fn a_build_past_its_output_limit_fails_without_retaining_the_excess() {
     );
 }
 
+/// The public defaults, rather than test-only reduced limits, exceed the historical stream and line
+/// caps.
+#[test]
+fn default_output_limits_accept_large_streams_and_lines() {
+    const OLD_STREAM_LIMIT: usize = 4 * 1024 * 1024;
+    const LINE_LENGTH: usize = 128 * 1024;
+
+    let mut output = Vec::with_capacity(OLD_STREAM_LIMIT + LINE_LENGTH);
+    while output.len() <= OLD_STREAM_LIMIT {
+        output.extend(std::iter::repeat_n(b'x', LINE_LENGTH - 1));
+        output.push(b'\n');
+    }
+
+    let (sender, lines) = mpsc::sync_channel(64);
+    let pipe = read_pipe(io::Cursor::new(output.clone()), Stream::Prose, &sender)
+        .expect("spawn reader")
+        .join()
+        .expect("reader");
+    drop(sender);
+    drop(lines);
+
+    assert_eq!(pipe.text, output);
+    assert!(pipe.complete);
+    assert!(pipe.within_limits, "the production defaults regressed to their old bounds");
+}
+
 /// A small retained cap records truncation while continuing to drain the pipe.
 #[test]
 fn an_over_limit_pipe_keeps_only_its_configured_prefix() {
@@ -367,10 +393,10 @@ fn a_narrowed_build_that_fails_is_retried_across_the_whole_workspace() {
     assert!(build.widened, "the build should have reported that it widened");
 }
 
-/// Examples remain part of the compilation oracle even though they are never test binaries.
+/// Targets that cargo-gamma will not run do not belong to its compilation oracle.
 #[test]
-fn the_final_build_still_compiles_examples() {
-    let (_dir, work) = trivial_workspace("build-example-");
+fn the_final_build_does_not_compile_examples_or_benches() {
+    let (_dir, work) = trivial_workspace("build-non-test-targets-");
 
     fs::create_dir_all(work.root.join("examples").as_std_path()).expect("examples");
     fs::write(
@@ -378,6 +404,12 @@ fn the_final_build_still_compiles_examples() {
         "fn main() { let _: i32 = \"not an integer\"; }\n",
     )
     .expect("example");
+    fs::create_dir_all(work.root.join("benches").as_std_path()).expect("benches");
+    fs::write(
+        work.root.join("benches/broken.rs").as_std_path(),
+        "fn main() { let _: i32 = \"not an integer\"; }\n",
+    )
+    .expect("bench");
 
     let mut plan = empty_plan(&work);
     let build = Converger::default()
@@ -388,13 +420,13 @@ fn the_final_build_still_compiles_examples() {
             BuildLimits::default(),
             &mut crate::testing::Recorder::default(),
         )
-        .expect("the build reports the example failure");
+        .expect("non-test targets are not part of the build");
 
+    assert!(build.stuck.is_none(), "examples and benches must not affect the test oracle");
     assert!(
-        build.stuck.is_some(),
-        "a broken example must not disappear from the compilation oracle"
+        !build.binaries.is_empty(),
+        "the test oracle still contains its runnable test binary"
     );
-    assert!(build.binaries.is_empty(), "a failed compilation produces no runnable oracle");
 }
 
 /// A workspace of two members, one of which does not compile and is not being mutated.
@@ -1032,6 +1064,23 @@ fn each_build_gets_the_whole_round_budget_rather_than_what_earlier_builds_left()
     // The withdrawal set is the one thing that is deliberately shared: a mutant already known
     // not to compile stays withdrawn for the rest of the run.
     assert_eq!(converger.withdrawn(), 2, "withdrawals carry across builds");
+}
+
+/// A check-stage duration cannot budget a later code-generating test-target build.
+#[test]
+fn each_build_calibrates_its_own_timeout_reference() {
+    let mut converger = Converger {
+        rounds: 7,
+        per_round: vec![3, 1],
+        first_round: Some(Duration::from_millis(1)),
+        ..Converger::default()
+    };
+
+    converger.begin_convergence();
+
+    assert_eq!(converger.rounds, 0);
+    assert!(converger.per_round.is_empty());
+    assert_eq!(converger.first_round, None);
 }
 
 /// The limit error reads a series of withdrawal counts and gives falling-or-flat advice from
@@ -2991,12 +3040,12 @@ fn the_probe_set_is_ordered_by_the_plan_rather_than_by_the_hint_set() {
     assert_eq!(held, vec![6, 7], "only the unhinted mutants are held back from the probe round");
 }
 
-/// A probe round only defers mutants in the packages the build actually compiles.
+/// A probe round defers every mutant outside its attribution scope.
 ///
-/// Deferring a mutant outside the selection buys nothing — it contributes no diagnostic to this
-/// build — and costs a rewrite of a file a later stage is about to want instrumented again.
+/// A workspace-scoped stage compiles packages outside that scope, so leaving their mutants spliced
+/// would mean the hinted candidates were not actually offered alone.
 #[test]
-fn a_probe_leaves_mutants_outside_the_selection_where_they_are() {
+fn a_probe_defers_mutants_outside_the_attribution_scope() {
     let (_dir, work) = guarded_workspace("build-probe-selection-");
     let mut plan = probe_plan(&work, 5, 2);
 
@@ -3009,5 +3058,37 @@ fn a_probe_leaves_mutants_outside_the_selection_where_they_are() {
     let (candidates, deferred) = converger.probe_sets(&plan, Some(&select));
 
     assert_eq!(candidates, vec![1, 2, 3, 4, 5]);
-    assert!(deferred.is_empty(), "another package's mutants stay spliced: {deferred:?}");
+    assert_eq!(deferred, HashSet::from_iter([6, 7]));
+}
+
+#[test]
+fn diagnostic_blame_is_limited_to_the_stage_being_judged() {
+    let (_dir, work) = guarded_workspace("build-blame-scope-");
+    let mut plan = probe_plan(&work, 1, 1);
+    plan.mutants[1].package = "elsewhere".to_owned().into();
+    let mut blamed = HashMap::from_iter([(1, "E0308".to_owned()), (2, "E0277".to_owned())]);
+    let packages = vec![plan.mutants[0].package.to_string()];
+
+    retain_blamed(&mut blamed, &plan, Some(&packages));
+
+    assert_eq!(blamed, HashMap::from_iter([(1, "E0308".to_owned())]));
+}
+
+/// Widening Cargo's roots must not widen the mutant population physically present in the tree.
+///
+/// Filtering diagnostics alone cannot provide this isolation: a deferred mutant can prevent the
+/// compiler from reaching the current stage or mask its diagnostics. The instrumentation exclusion
+/// set therefore includes both previously withdrawn mutants and every mutant outside the stage.
+#[test]
+fn workspace_stage_withdraws_mutants_outside_the_attribution_scope() {
+    let (_dir, work) = guarded_workspace("build-stage-selection-");
+    let mut plan = probe_plan(&work, 0, 3);
+    plan.mutants[1].package = "elsewhere".to_owned().into();
+    let packages = vec![plan.mutants[0].package.to_string()];
+    let mut converger = Converger::default();
+    let _ = converger.withdrawn.insert(plan.mutants[2].ordinal);
+
+    let withdrawn = converger.scoped_withdrawn(&plan, Some(&packages));
+
+    assert_eq!(withdrawn, HashSet::from_iter([plan.mutants[1].ordinal, plan.mutants[2].ordinal]));
 }
