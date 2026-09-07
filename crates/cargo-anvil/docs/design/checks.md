@@ -510,8 +510,9 @@ Backend wiring:
   is invoked twice: with `path:` to upsert when the file exists, and with `delete: true`
   to clear when it does not. The workflow's reusable job declares
   `permissions: pull-requests: write`. Fork PRs are skipped via a
-  `github.event.pull_request.head.repo.full_name == github.repository` guard because
-  forks can't be granted write tokens.
+  `github.event.pull_request.head.repo.full_name == github.repository` guard,
+  regardless of whether administrators keep GitHub's default read-only fork
+  token policy or enable write tokens for fork workflows.
 - **Azure DevOps Pipelines** — a pwsh step uses the Azure DevOps REST API
   (`$(System.AccessToken)` + the project-collection build identity's "Contribute to
   pull requests" permission) to scan PR threads for the HTML marker, then `PATCH`s the
