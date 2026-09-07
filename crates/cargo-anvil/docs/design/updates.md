@@ -274,9 +274,10 @@ Whatever adoption concludes, the spliced result is parsed before it is planned, 
 *other* managed region masked out. Two managed regions may legitimately declare the same
 key while a migration is in flight — the old combined region is removed in the same pass
 that writes the sections replacing it — so only collisions with text nothing is going to
-remove count. If the result would not parse, the region is **refused**: the host is left
-alone, a diagnostic naming the host and the reason is recorded, and every other artifact is
-still planned. Refusing is scoped to the region, not the run.
+remove count. If the result would not parse, the region is **refused**: that region is left
+unchanged, and a diagnostic names the host and the reason. The diagnostic also explains
+that other regions in the same file and other artifacts may still be updated. Refusing
+is scoped to the region, not the host or the run.
 
 ### User-extension limits for TOML regions
 

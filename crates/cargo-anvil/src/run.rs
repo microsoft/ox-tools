@@ -499,8 +499,8 @@ fn push_region_at(
 /// a wall in front of onboarding.
 fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str) {
     plan.refusal(format!(
-        "Refused to manage {host} [{id}]: {reason}. Nothing was written to it, and other \
-         artifacts were still planned. Reconcile the hand-written table with the managed \
+        "Refused to manage {host} [{id}]: {reason}. This region was left unchanged; other regions in the same file \
+         and other artifacts may still be updated. Reconcile the hand-written table with the managed \
          one -- or empty the region to opt out of it."
     ));
     plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));

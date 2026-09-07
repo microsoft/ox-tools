@@ -192,8 +192,9 @@ fn user_edit_inside_region_is_left_alone() {
 
 /// `deny-conflict`: a `deny.toml` whose hand-written `[advisories]` sets
 /// `yanked` to something other than the managed body's value. No output keeps
-/// both — TOML forbids the repeated key — so the region is refused, the host is
-/// left byte-for-byte alone, and the rest of the onboarding still happens.
+/// both — TOML forbids the repeated key — so the region is refused, the
+/// hand-written value is preserved, and other regions in the same host can
+/// still be written.
 #[test]
 fn a_conflicting_toml_host_is_refused_not_corrupted() {
     let tmp = stage_fixture("deny-conflict");
@@ -222,6 +223,15 @@ fn a_conflicting_toml_host_is_refused_not_corrupted() {
     assert!(
         outcome.plan.refusals().iter().any(|reason| reason.contains("yanked")),
         "the refusal names the key that disagrees; got: {:#?}",
+        outcome.plan.refusals()
+    );
+    assert!(
+        outcome.plan.refusals().iter().any(|reason| {
+            reason.contains("deny.toml [anvil-deny-advisories]")
+                && reason.contains("This region was left unchanged; other regions in the same file")
+                && reason.contains("and other artifacts may still be updated.")
+        }),
+        "the refusal must not claim that the whole host was left unchanged; got: {:#?}",
         outcome.plan.refusals()
     );
 
