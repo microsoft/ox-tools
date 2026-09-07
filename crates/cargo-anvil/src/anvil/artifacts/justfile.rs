@@ -74,6 +74,9 @@ macro_rules! split_recipe_files {
     };
 }
 
+/// Generic local-development recipes that are not cloud check-group members.
+const DEV_FILES: &[(&str, &str)] = split_recipe_files!("dev", ["build"]);
+
 #[test]
 fn aprz_forwards_a_github_token_into_the_container() {
     let aprz = CHECK_FILES
@@ -192,6 +195,12 @@ pub fn helpers() -> Artifact {
 #[must_use]
 pub fn impact() -> Artifact {
     Artifact::owned_file(IMPACT_JUST_PATH, IMPACT_JUST)
+}
+
+/// Generic local-development recipe files.
+#[must_use]
+pub fn dev_files() -> Vec<Artifact> {
+    DEV_FILES.iter().map(|&(path, body)| Artifact::owned_file(path, body)).collect()
 }
 
 /// The `justfiles/anvil/checks/<check>.just` files — one owned artifact

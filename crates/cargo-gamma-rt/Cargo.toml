@@ -4,7 +4,7 @@
 [package]
 name = "cargo-gamma-rt"
 description = "Runtime support library injected into crates under mutation test by cargo-gamma"
-version = "0.1.0"
+version = "0.2.0"
 readme = "README.md"
 keywords = ["cargo", "mutation-testing", "testing"]
 categories = ["development-tools::testing"]
@@ -29,11 +29,14 @@ min-lines-percent = 89.0
 
 # HARD CONSTRAINT: zero production dependencies and no build.rs. This crate is injected into the
 # dependency graph of the crate under test; anything else perturbs feature unification and breaks
-# --offline. The empty `loom` feature selects only the repository's dedicated model target.
+# --offline. Its empty features expose only coordinator or repository test plumbing.
 [lib]
 name = "gamma_rt"
 
 [features]
+# Exposes the package-local runtime sources to cargo-gamma-lib. The vendored runtime never enables
+# this feature, so it does not alter the crate injected into a user's dependency graph.
+embedding = []
 # The vendored runtime never enables this feature, so an ambient `--cfg loom` still keeps the
 # injected copy on its dependency-free atomic path.
 loom = []

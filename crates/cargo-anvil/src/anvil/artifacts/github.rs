@@ -137,6 +137,7 @@ pub(crate) fn all() -> Vec<Artifact> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::collections::BTreeSet;
     #[cfg(windows)]
     use std::env::var_os;
     use std::fs;
@@ -204,12 +205,43 @@ mod tests {
             "Cargo home must be restored before Just is bootstrapped"
         );
         assert!(just_bootstrap < catalog_setup, "Just must be bootstrapped before catalog setup");
+        assert!(SETUP_ACTION.contains("$minimum = [version]'1.46.0'"));
+        assert!(SETUP_ACTION.contains("cargo-anvil requires just >= $minimum"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
         assert!(SETUP_ACTION.contains("::error::Invalid Anvil group;"));
         assert!(!SETUP_ACTION.contains("::error::Invalid Anvil group '$ANVIL_GROUP'"));
         assert!(SETUP_ACTION.contains("none)"));
+    }
+
+    #[test]
+    fn aggregate_gate_depends_on_every_validation_job() {
+        let jobs = PR_IMPL_WORKFLOW.split_once("\njobs:\n").expect("PR workflow defines jobs").1;
+        let all_jobs = jobs
+            .lines()
+            .filter_map(|line| {
+                let name = line.strip_prefix("  ")?.strip_suffix(':')?;
+                (!name.is_empty() && !name.starts_with(' ') && !name.starts_with('#')).then_some(name)
+            })
+            .filter(|name| *name != "required-checks")
+            .collect::<BTreeSet<_>>();
+        let required = jobs
+            .split_once("\n  required-checks:\n")
+            .expect("PR workflow defines the aggregate gate")
+            .1;
+        let needs = required
+            .split_once("\n    needs:\n")
+            .expect("aggregate gate defines dependencies")
+            .1
+            .split_once("\n    runs-on:")
+            .expect("aggregate dependency list ends before runs-on")
+            .0
+            .lines()
+            .filter_map(|line| line.strip_prefix("      - "))
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(needs, all_jobs, "required-checks must depend on every validation job");
     }
 
     #[test]
