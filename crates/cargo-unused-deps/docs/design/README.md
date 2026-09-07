@@ -423,7 +423,9 @@ member's declared dependencies by section; the root manifest for the catalog and
 allow-lists. This phase alone answers questions 1 and 5, and it always reads *every*
 member regardless of package selection — see below.
 
-**2. Gather compile evidence.**
+**2. Gather compile evidence.** Twice — once over default targets, once over
+`--all-targets`, into the same directory so the second pass reuses the first's
+artifacts. The two runs answer different questions; see phase 4.
 
 ```bash
 RUSTFLAGS="-W unused_crate_dependencies" \
@@ -468,11 +470,49 @@ dependency the target's own `cfg(test)` code uses. The one distinction that does
 is scope: a dev-dependency is in scope only for the `cfg(test)` unit of a library or
 binary, so there a lone report is that unit's and means unused.
 
-Per target matters too. A package with a library and two binaries has three counters,
-not one: a dependency used in production by a single binary is reported unused by the
-library and by the other binary, and pooling those reports would convict it. The same
-holds across several tests, benches and examples. The verdicts take the **union** across
-targets — used anywhere is used.
+A third number comes from the manifest rather than the build: `scope(T, D)`, the units
+of `T` that had `D` in scope at all. It equals `units(T)` everywhere except one case —
+a dev-dependency is in scope only for the `cfg(test)` unit of a library or binary, so
+there it is 1.
+
+Two questions follow, and they are not the same question — nor answerable from the same
+run.
+
+**Did any unit use `D`?** — `reports(T, D) < scope(T, D)`. This needs no assumption: a
+unit reports exactly when `D` was in scope and went unused, so fewer reports than
+in-scope units means some in-scope unit used it. It restates the lint's own semantics.
+
+**Did the *plain* unit use `D`?** — `reports(T, D) == 0`, read from a **second run that
+builds default targets only**. There each code target has exactly one unit, so a report
+can only be that unit's.
+
+That second run is not a convenience. In an `--all-targets` run the plain and
+`cfg(test)` units are indistinguishable, and the tempting inference — one report out of
+two units must be the plain one, because `cfg(test)` compiles a superset — is **false**.
+`#[cfg(not(test))]` code is excluded from the test unit, so a dependency used only there
+is used by the library and reported by the `cfg(test)` unit. Inferring would move a
+production dependency into `[dev-dependencies]`. The tool runs the extra pass instead,
+and a regression test pins the case.
+
+Library use is the second question, asked of every code target. Development use is the
+first, asked of code targets and of test, bench and example targets alike — those are
+compiled twice as well when declared `test = true`, so the shape of the rule cannot
+depend on the kind of target. A dependency is used if any target says so: the union,
+never a pool.
+
+Measured on a package with a library, one binary and one integration test:
+
+| target | units | `liponly` | `binonly` | `devdep` |
+|--------|-------|-----------|-----------|----------|
+| `lib/main` | 2 | 0 | 2 | 1 |
+| `bin/one` | 2 | 2 | 0 | 1 |
+| `test/it` | 1 | 1 | 1 | 0 |
+
+`liponly` is used by the library — zero reports there — though the binary reports it
+twice. `binonly` is the mirror image. `devdep` reports once against each code target:
+that is the `cfg(test)` unit, the only one it was ever in scope for, so those count as
+unused. Zero reports against the test target is what spares it. Pooling any row or any
+column would convict something.
 
 Doctest evidence joins here, gathered per package because rustdoc feeds each snippet to
 the test builder on stdin and the shim cannot tell which crate it came from. Cargo can,

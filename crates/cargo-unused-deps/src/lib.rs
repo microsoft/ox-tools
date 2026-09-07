@@ -314,20 +314,23 @@ fn selection_flags(packages: &[String], workspace: bool, exclude: &[String]) -> 
 /// Returns whether anything was found.
 fn source_checks(manifest_path: &Path, selection: &[OsString], checks: &[Check]) -> Result<bool> {
     let workspace = workspace_of(manifest_path)?;
-    let evidence = evidence::gather(manifest_path, selection, &workspace.evidence_target_dir)?;
+    // Two passes: default targets first, where a report can only have come from
+    // a target's single plain unit, then everything.
+    let plain = evidence::gather(manifest_path, selection, &workspace.evidence_target_dir, false)?;
+    let all = evidence::gather(manifest_path, selection, &workspace.evidence_target_dir, true)?;
 
     let shim = std::env::current_exe().context("failed to locate this executable to use as the doctest shim")?;
     let mut doctests = doctests::DoctestEvidence::default();
     for package in &workspace.packages {
         // Only a library target can have doctests; asking cargo for the
         // doctests of a bin-only package is an error, not an empty answer.
-        if package.has_library && evidence.saw_package(&package.manifest_path) {
+        if package.has_library && all.saw_package(&package.manifest_path) {
             let found = doctests::gather_package(manifest_path, &package.name, &workspace.evidence_target_dir, &shim)?;
             doctests.insert(package.name.clone(), found);
         }
     }
 
-    let findings = verdict::judge(&workspace.packages, &evidence, &doctests, &workspace.allowed);
+    let findings = verdict::judge(&workspace.packages, &plain, &all, &doctests, &workspace.allowed);
 
     let wanted: Vec<&verdict::Finding> = findings
         .iter()

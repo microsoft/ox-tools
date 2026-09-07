@@ -56,15 +56,26 @@ pub struct Package {
 
 /// Judge every declaration of every package against the evidence.
 ///
+/// Two runs are needed, and they answer different questions. `plain` built
+/// default targets only, so a report there can only have come from a target's
+/// single, non-`cfg(test)` unit -- which is what "the library itself uses it"
+/// means. `all` built everything, and answers "did anything use it".
+///
 /// `allowed` names are dropped before judging, so an allow-listed dependency
 /// produces no finding of any kind.
-pub fn judge(packages: &[Package], evidence: &Evidence, doctests: &DoctestEvidence, allowed: &BTreeSet<String>) -> Vec<Finding> {
+pub fn judge(
+    packages: &[Package],
+    plain: &Evidence,
+    all: &Evidence,
+    doctests: &DoctestEvidence,
+    allowed: &BTreeSet<String>,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
 
     for package in packages {
         // A package nothing was compiled for was not part of this selection;
         // silence about it is absence of evidence, not evidence of absence.
-        if !evidence.saw_package(&package.manifest_path) {
+        if !all.saw_package(&package.manifest_path) {
             continue;
         }
 
@@ -73,7 +84,7 @@ pub fn judge(packages: &[Package], evidence: &Evidence, doctests: &DoctestEviden
                 continue;
             }
 
-            if let Some(verdict) = judge_one(package, declared, evidence, doctests) {
+            if let Some(verdict) = judge_one(package, declared, plain, all, doctests) {
                 findings.push(Finding {
                     package: package.name.clone(),
                     manifest_path: package.manifest_path.clone(),
@@ -89,27 +100,27 @@ pub fn judge(packages: &[Package], evidence: &Evidence, doctests: &DoctestEviden
 }
 
 /// Judge one declaration.
-fn judge_one(package: &Package, declared: &Declared, evidence: &Evidence, doctests: &DoctestEvidence) -> Option<Verdict> {
+fn judge_one(package: &Package, declared: &Declared, plain: &Evidence, all: &Evidence, doctests: &DoctestEvidence) -> Option<Verdict> {
     let name = declared.extern_name();
     let manifest = package.manifest_path.as_path();
     let used_by_doctest = doctests.used(&package.name, &name);
 
     match declared.section {
         Section::Normal => {
-            if evidence.used_by_library(manifest, &name) {
+            if plain.used_by_plain_unit(manifest, &name) {
                 None
-            } else if used_by_doctest || evidence.used_by_development(manifest, &name, Scope::Always) {
+            } else if used_by_doctest || all.used_by_any_unit(manifest, &name, Scope::Always) {
                 Some(Verdict::Misplaced)
             } else {
                 Some(Verdict::Unused)
             }
         }
 
-        Section::Development => (used_by_doctest || evidence.used_by_development(manifest, &name, Scope::DevelopmentOnly))
+        Section::Development => (used_by_doctest || all.used_by_any_unit(manifest, &name, Scope::DevelopmentOnly))
             .then_some(())
             .map_or(Some(Verdict::Unused), |()| None),
 
-        Section::Build => evidence
+        Section::Build => all
             .used_by_build_script(manifest, &name)
             .then_some(())
             .map_or(Some(Verdict::Unused), |()| None),

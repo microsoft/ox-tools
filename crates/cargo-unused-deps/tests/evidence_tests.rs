@@ -250,6 +250,30 @@ fn a_development_target_compiled_twice_is_counted_like_a_library() {
 }
 
 #[test]
+fn a_dependency_used_only_outside_cfg_test_is_not_misplaced() {
+    if !nightly() {
+        return;
+    }
+
+    // The `cfg(test)` unit is *not* a superset of the plain one: this
+    // dependency is used from `#[cfg(not(test))]` code, so the plain unit uses
+    // it and the `cfg(test)` unit reports it. Inferring "one report must be the
+    // plain unit's" would move a production dependency to dev-dependencies.
+    let fixture = Fixture::new(
+        &["prodonly"],
+        &format!("[dependencies]\n{}", dep("prodonly")),
+        "#[cfg(not(test))]\npub fn go() { prodonly::f(); }\n\n#[cfg(test)]\npub fn go() {}\n",
+    );
+
+    let report = fixture.report();
+
+    assert!(
+        !report.contains("prodonly"),
+        "the library itself uses it, outside cfg(test): {report}"
+    );
+}
+
+#[test]
 fn a_dependency_the_library_uses_is_not_reported() {
     if !nightly() {
         return;

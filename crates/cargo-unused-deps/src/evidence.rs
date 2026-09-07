@@ -80,45 +80,47 @@ pub struct Evidence {
 }
 
 impl Evidence {
-    /// Whether any *plain* library or binary unit loaded `name`.
+    /// Whether the *plain* library or binary unit of any code target loaded
+    /// `name`.
     ///
-    /// This is the question that decides whether a normal dependency earned its
-    /// section, so it deliberately ignores `cfg(test)` code.
-    pub fn used_by_library(&self, manifest_path: &Path, name: &str) -> bool {
+    /// This must be read from a run that built default targets only, where each
+    /// code target has exactly one unit and a report can only have come from it.
+    /// Reading it from an `--all-targets` run would be guesswork: the plain and
+    /// `cfg(test)` units of a target produce indistinguishable diagnostics, and
+    /// `#[cfg(not(test))]` code means the `cfg(test)` unit is not a superset of
+    /// the plain one, so "exactly one report must be the plain unit's" does not
+    /// hold.
+    pub fn used_by_plain_unit(&self, manifest_path: &Path, name: &str) -> bool {
         self.targets_of(manifest_path, TargetKind::Code)
             .any(|target| self.reports_for(target, name) == 0)
     }
 
-    /// Whether any development unit loaded `name` — a test, bench or example
-    /// target, or the `cfg(test)` unit of a library or binary.
-    pub fn used_by_development(&self, manifest_path: &Path, name: &str, scope: Scope) -> bool {
+    /// Whether any unit that had `name` in scope loaded it.
+    ///
+    /// This one needs no assumption about which unit spoke: a unit reports
+    /// exactly when it had the dependency in scope and did not use it, so fewer
+    /// reports than in-scope units means some in-scope unit used it.
+    pub fn used_by_any_unit(&self, manifest_path: &Path, name: &str, scope: Scope) -> bool {
         let in_code_target = self.targets_of(manifest_path, TargetKind::Code).any(|target| {
             let units = self.units.get(target).copied().unwrap_or_default();
             let reports = self.reports_for(target, name);
 
-            // A target compiled once has no `cfg(test)` unit to testify.
-            units >= 2
-                && match scope {
-                    // The test-profile unit compiles a superset of the plain
-                    // unit's code, so when only one of them reports it can only
-                    // be the plain one. Fewer reports than units therefore means
-                    // the test-profile unit loaded the dependency.
-                    Scope::Always => reports < units,
+            match scope {
+                // A normal dependency is in scope for every unit of the target.
+                Scope::Always => reports < units,
 
-                    // A dev-dependency is in scope for that unit alone, so any
-                    // report at all is its report.
-                    Scope::DevelopmentOnly => reports == 0,
-                }
+                // A dev-dependency is in scope only for the `cfg(test)` unit, so
+                // that unit is the only one that can report, and any report is
+                // its report. It exists only when the target was compiled twice.
+                Scope::DevelopmentOnly => units >= 2 && reports == 0,
+            }
         });
 
         in_code_target
             || self.targets_of(manifest_path, TargetKind::Development).any(|target| {
-                // Development targets are usually compiled once, but a test,
-                // bench or example declared `test = true` is compiled twice like
-                // a library. The same monotonicity argument applies: fewer
-                // reports than units means one of them loaded the dependency.
-                // Both units have dev-dependencies in scope, so no distinction
-                // by scope is needed here.
+                // Test, bench and example targets have both kinds of dependency
+                // in scope for every unit, and are themselves compiled twice
+                // when declared `test = true`.
                 let units = self.units.get(target).copied().unwrap_or_default();
 
                 self.reports_for(target, name) < units
@@ -159,13 +161,15 @@ impl Evidence {
 ///
 /// Returns an error when cargo cannot be launched, exits unsuccessfully, or
 /// emits a line that is not the JSON it was asked for.
-pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path) -> Result<Evidence> {
-    let output = Command::new(cargo())
-        .arg("check")
-        .arg("--manifest-path")
-        .arg(manifest_path)
-        .args(selection)
-        .arg("--all-targets")
+pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, all_targets: bool) -> Result<Evidence> {
+    let mut command = Command::new(cargo());
+    command.arg("check").arg("--manifest-path").arg(manifest_path).args(selection);
+
+    if all_targets {
+        command.arg("--all-targets");
+    }
+
+    let output = command
         .arg("--all-features")
         .arg("--target-dir")
         .arg(target_dir)
