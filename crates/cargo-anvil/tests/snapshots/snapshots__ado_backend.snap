@@ -2832,6 +2832,9 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
             if (Test-Path -LiteralPath $retryErrorPath) {
                 Get-Content -LiteralPath $retryErrorPath | ForEach-Object { Write-Host $_ }
             }
+            if ($retryExitCode -ne 0) {
+                Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
+            }
             return $retryExitCode
         } finally {
             Remove-Item -LiteralPath $responsePath -Force -ErrorAction SilentlyContinue

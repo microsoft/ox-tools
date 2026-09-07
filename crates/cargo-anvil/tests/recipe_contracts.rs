@@ -1601,6 +1601,7 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
          if (-not $response) { exit 2 }\n\
          Add-Content -LiteralPath $env:FAKE_LLVM_COV_RESPONSE_LOG -Value (Get-Content -LiteralPath $response.Substring(1) -Raw)\n\
          Write-Output 'TN:'\n\
+         if ($env:FAKE_LLVM_COV_EXIT) { exit [int]$env:FAKE_LLVM_COV_EXIT }\n\
          exit 0\n",
     );
     seed_include(tmp.path(), "affected", "--package measured@0.1.0");
@@ -1622,10 +1623,10 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let invocations = fs::read_to_string(llvm_cov_log).unwrap();
+    let invocations = fs::read_to_string(&llvm_cov_log).unwrap();
     assert_eq!(invocations.lines().count(), 2, "invocations:\n{invocations}");
     assert_eq!(invocations.matches("export @").count(), 2, "invocations:\n{invocations}");
-    let responses = fs::read_to_string(response_log).unwrap();
+    let responses = fs::read_to_string(&response_log).unwrap();
     assert_eq!(responses.matches("-object fake-object.exe").count(), 2, "responses:\n{responses}");
     for config in ["all-features", "no-default"] {
         let report = tmp.path().join(format!("target/coverage/lcov-{config}.info"));
@@ -1638,6 +1639,30 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
             .to_string_lossy()
             .contains("llvm-cov.rsp")),
         "response-file fallback must remove temporary files"
+    );
+
+    let failed = run_just(
+        tmp.path(),
+        &["anvil-llvm-cov"],
+        &[
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")),
+            ("FAKE_LLVM_COV_REPORT_206", OsStr::new("1")),
+            ("FAKE_LLVM_COV_PATH", llvm_cov.as_os_str()),
+            ("FAKE_LLVM_COV_LOG", llvm_cov_log.as_os_str()),
+            ("FAKE_LLVM_COV_RESPONSE_LOG", response_log.as_os_str()),
+            ("FAKE_LLVM_COV_EXIT", OsStr::new("7")),
+        ],
+    );
+    assert_failed(&failed, "failed response-file fallback");
+    let failed_report = tmp.path().join("target/coverage/lcov-all-features.info");
+    assert!(!failed_report.exists(), "failed response-file fallback must remove partial report");
+    assert!(
+        fs::read_dir(tmp.path().join("target/coverage")).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("llvm-cov.rsp")),
+        "failed response-file fallback must remove temporary files"
     );
 }
 
