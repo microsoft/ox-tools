@@ -1130,16 +1130,11 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
     }
 }
 
-/// `cargo fmt` only dispatches: cargo-fmt runs `rustfmt` as a child process through
-/// the rustup shim, which reads `RUSTUP_TOOLCHAIN` and inherits it from any outer
-/// `+`-selected cargo. So the recipe pins that variable rather than writing
-/// `+toolchain`, and has to hold against a hostile ambient selection.
 #[test]
 fn fmt_runs_the_pinned_nightly_over_workspace_members() {
     assert!(
         !FMT.contains("_anvil_stable_toolchain_args"),
-        "a stable-pinned outer cargo exports its selection into cargo-each's children, \
-         which is exactly what reaches rustfmt"
+        "formatting must pin both Cargo invocations to nightly"
     );
     if !tools_available() {
         return;
@@ -1155,13 +1150,11 @@ fn fmt_runs_the_pinned_nightly_over_workspace_members() {
         ],
     );
     let args_log = tmp.path().join("cargo-args.log");
-    let toolchain_log = tmp.path().join("cargo-toolchain.log");
     let output = run_just(
         tmp.path(),
         &["anvil-fmt"],
         &[
             ("FAKE_CARGO_LOG", args_log.as_os_str()),
-            ("FAKE_CARGO_TOOLCHAIN_LOG", toolchain_log.as_os_str()),
             ("RUSTUP_TOOLCHAIN", OsStr::new("test-stable")),
         ],
     );
@@ -1173,32 +1166,10 @@ fn fmt_runs_the_pinned_nightly_over_workspace_members() {
     );
     let invocations = fs::read_to_string(&args_log).unwrap();
     assert!(
-        invocations.contains("each --workspace --keep-going -- cargo fmt --manifest-path {manifest} --check"),
+        invocations.contains("+nightly-test each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest} --check"),
         "unexpected cargo invocation: {invocations}"
     );
     assert!(!invocations.contains("fmt --all"));
-    // The fake cargo appends one line to each log per invocation, so the logs
-    // are positionally aligned and the formatting command can be identified by
-    // its arguments.
-    let selections = fs::read_to_string(&toolchain_log).unwrap();
-    let formatting: Vec<_> = invocations
-        .lines()
-        .zip(selections.lines())
-        .filter(|(arguments, _)| arguments.contains("fmt"))
-        .collect();
-    assert!(
-        !formatting.is_empty(),
-        "the fmt recipe must reach cargo so its toolchain selection is observable:\n{invocations}"
-    );
-    for (arguments, selection) in formatting {
-        assert_eq!(
-            selection.trim(),
-            "nightly-test",
-            "`cargo {arguments}` inherited '{selection}' instead of the pinned nightly, so stable \
-             rustfmt would downgrade every unstable rustfmt.toml option to a warning and the check \
-             would pass without enforcing any of them"
-        );
-    }
 }
 
 #[test]
@@ -1220,7 +1191,7 @@ fn fmt_fix_removes_the_check_flag() {
     let output = run_just(tmp.path(), &["anvil-fmt", "--fix"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
     assert!(output.status.success());
     let commands = fs::read_to_string(log).unwrap();
-    assert!(commands.contains("each --workspace --keep-going -- cargo fmt --manifest-path {manifest}"));
+    assert!(commands.contains("+nightly-test each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest}"));
     assert!(!commands.contains("--check"));
 }
 

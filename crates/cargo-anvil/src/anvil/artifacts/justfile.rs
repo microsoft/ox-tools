@@ -796,21 +796,7 @@ mod tests {
     fn checks_do_not_invoke_an_implicit_default_cargo() {
         for (path, body) in CHECK_FILES {
             let caches_stable_args = body.contains("$stableArgs = {{_anvil_stable_toolchain_args}}");
-            // A recipe may pin RUSTUP_TOOLCHAIN for its own process instead of
-            // writing `+toolchain` at each site. That is the stronger selection:
-            // the rustup shim consults it for every descendant, which is what a
-            // dispatcher like `cargo fmt` needs.
-            let mut pins_toolchain_environment = false;
-            for raw in body.lines() {
-                let line = raw.trim();
-                // An unindented line starts a new recipe, so one recipe's pin
-                // cannot license an unpinned cargo in the next.
-                if !raw.starts_with([' ', '\t']) && !line.is_empty() {
-                    pins_toolchain_environment = false;
-                }
-                if line.starts_with("$env:RUSTUP_TOOLCHAIN = '{{") {
-                    pins_toolchain_environment = true;
-                }
+            for line in body.lines().map(str::trim) {
                 let invokes_cargo = line.starts_with("cargo ")
                     || line.starts_with("& cargo ")
                     || line.contains("= cargo ")
@@ -822,8 +808,7 @@ mod tests {
                         .map(|(_, arguments)| arguments.trim_start())
                         .expect("invokes_cargo patterns always include 'cargo '");
                     assert!(
-                        pins_toolchain_environment
-                            || toolchain.starts_with("'+")
+                        toolchain.starts_with("'+")
                             || toolchain.starts_with("\"+")
                             || toolchain.starts_with("{{_anvil_stable_toolchain_args}}")
                             || (caches_stable_args && toolchain.starts_with("@stableArgs")),
