@@ -2915,12 +2915,12 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         # non-retriable failure has the same evidence as a direct invocation.
         $previousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $reportOutput = @(
-            & cargo '+{{ rust_nightly }}' llvm-cov report --lcov --output-path $OutputPath 2>&1
-        )
+        $reportOutput = @()
+        & cargo '+{{ rust_nightly }}' llvm-cov report --lcov --output-path $OutputPath 2>&1 |
+            Tee-Object -Variable reportOutput |
+            ForEach-Object { Write-Host $_.ToString() }
         $reportExitCode = $LASTEXITCODE
         $ErrorActionPreference = $previousErrorActionPreference
-        foreach ($line in $reportOutput) { Write-Host $line.ToString() }
         if ($reportExitCode -eq 0) { return 0 }
 
         $reportText = ($reportOutput | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
