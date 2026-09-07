@@ -12,9 +12,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} ensure-no-default-features
+    & cargo {{_anvil_stable_toolchain_args}} each $(& "{{ just_executable() }}" _anvil-impact-include modified; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }) --once '--' cargo {{_anvil_stable_toolchain_args}} ensure-no-default-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-ensure-no-default-features` recipe.

@@ -31,7 +31,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
     $pkgArgs = @(if ($package) { '--package'; $package } else { $selection })
     $exampleArgs = @(if ($example) { '--example'; $example } else { '--examples' })
     $stableArgs = {{_anvil_stable_toolchain_args}}
-    & cargo @stableArgs each @pkgArgs --once '--' cargo @stableArgs build '{packages}' @exampleArgs --all-features --locked
+    & cargo @stableArgs build @pkgArgs @exampleArgs --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (-not $run) { exit 0 }
 
@@ -126,8 +126,8 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
 
 # Install prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]
-anvil-examples-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
+anvil-examples-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]
-anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs

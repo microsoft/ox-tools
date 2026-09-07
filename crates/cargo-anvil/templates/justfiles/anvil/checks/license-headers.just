@@ -12,9 +12,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} each @selection --once '--' cargo {{_anvil_stable_toolchain_args}} heather
+    & cargo {{_anvil_stable_toolchain_args}} each $(& "{{ just_executable() }}" _anvil-impact-include modified; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }) --once '--' cargo {{_anvil_stable_toolchain_args}} heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-license-headers` recipe.

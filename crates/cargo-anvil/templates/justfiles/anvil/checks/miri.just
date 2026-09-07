@@ -29,7 +29,6 @@ anvil-miri package="" test="" example="": anvil-miri-validate-prereqs anvil-impa
     }
     $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    if (-not $package -and $selection -contains '--none') { Write-Host 'anvil-miri: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($package) { '--package'; $package } else { $selection })
     if ($example) {
         & cargo '+{{ rust_nightly }}' miri run --all-features --locked @pkg --example $example

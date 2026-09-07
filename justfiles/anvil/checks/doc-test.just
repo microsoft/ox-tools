@@ -15,7 +15,7 @@
 #
 # Cargo errors when `cargo test --doc` selects only bin-only packages. Build
 # the subset with at least one Cargo target marked `doctest = true` before
-# delegating the two invocations to cargo-each. This includes explicit library
+# running the two Cargo invocations. This includes explicit library
 # crate types such as rlib/cdylib as well as plain libraries and proc macros.
 
 # Run documentation tests for affected workspace packages.
@@ -60,15 +60,15 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
         $docSelection.Add('--package')
         $docSelection.Add($name)
     }
-    & cargo {{_anvil_stable_toolchain_args}} each @docSelection --once '--' cargo {{_anvil_stable_toolchain_args}} test --doc '{packages}' --all-features --locked
+    & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} each @docSelection --once '--' cargo {{_anvil_stable_toolchain_args}} test --doc '{packages}' --locked
+    & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
-anvil-doc-test-setup installer="install": anvil-toolchain-stable-install (anvil-tool-cargo-each-install installer)
+anvil-doc-test-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
-anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs

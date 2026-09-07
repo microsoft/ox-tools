@@ -1253,7 +1253,7 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
             "anvil-impact",
         ],
     );
-    seed_include(tmp.path(), "affected", "--package\nfixture@0.1.0");
+    seed_include(tmp.path(), "affected", "--package\nfixture");
     let log = tmp.path().join("cargo.log");
     let default_output = run_just(tmp.path(), &["anvil-miri"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
     assert!(
@@ -1270,9 +1270,7 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
     assert!(example_output.status.success());
     let commands = fs::read_to_string(log).unwrap();
     assert!(
-        commands.contains(
-            "+nightly-test each --package fixture@0.1.0 --once -- cargo +nightly-test miri test --all-features --tests {packages}"
-        ),
+        commands.contains("+nightly-test each --package fixture --once -- cargo +nightly-test miri test --all-features --tests {packages}"),
         "unexpected cargo invocation: {commands}"
     );
     assert!(commands.contains("+nightly-test miri run --all-features --locked --package fixture --example basic"));
@@ -1425,7 +1423,7 @@ fn doc_test_selects_doctest_capable_targets_but_not_bin_only_packages() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = fs::read_to_string(&log).unwrap();
-    assert_eq!(commands.matches(" test --doc ").count(), 2, "commands:\n{commands}");
+    assert_eq!(commands.matches("test --doc ").count(), 2, "commands:\n{commands}");
     assert!(commands.contains("--package fixture"), "commands:\n{commands}");
     assert!(commands.contains("--package macro-package"), "commands:\n{commands}");
     assert!(
@@ -1449,7 +1447,7 @@ fn doc_test_selects_doctest_capable_targets_but_not_bin_only_packages() {
     );
     assert!(scoped.status.success(), "scoped doc-test selection failed");
     let scoped_commands = fs::read_to_string(&log).unwrap();
-    assert_eq!(scoped_commands.matches(" test --doc ").count(), 2);
+    assert_eq!(scoped_commands.matches("test --doc ").count(), 2);
     assert!(scoped_commands.contains("--package fixture"));
     assert!(!scoped_commands.contains("--package bin-only"));
     assert!(!scoped_commands.contains("--package unselected-doc"));
@@ -1471,8 +1469,8 @@ fn doc_test_selects_doctest_capable_targets_but_not_bin_only_packages() {
         "bin-only skip must explain why no doctests ran"
     );
     assert!(
-        !fs::read_to_string(&log).unwrap().lines().any(|line| line.contains("each ")),
-        "bin-only selection must not invoke cargo-each"
+        !fs::read_to_string(&log).unwrap().lines().any(|line| line.contains("test --doc ")),
+        "bin-only selection must not invoke a doctest command"
     );
 }
 

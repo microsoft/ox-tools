@@ -396,12 +396,13 @@ metadata and emits version-qualified specs to child Cargo commands, so the impac
 does not duplicate package versions.
 
 Every **impact-scoped** check depends on `anvil-impact` and resolves its category by
-calling `_anvil-impact-include <category>`. Ordinary checks splat those tokens directly
-into `cargo each`; its empty-set success behavior replaces recipe-specific skip guards,
-and `{packages}` injects the resolved package set into a single child Cargo invocation.
-Checks that must perform work before or around cargo-each capture the same token array
-and handle `--none` first; this includes `fmt`, whose modified selector admits a separate
-full-workspace per-manifest fan-out. The **same** cache is read in cloud workflows — the impact job
+calling `_anvil-impact-include <category>`. Ordinary checks expand those tokens inline
+inside `cargo each`; its empty-set success behavior replaces recipe-specific selection
+variables and skip guards, and `{packages}` injects the resolved package set into a
+single child Cargo invocation. Checks that need the selection before a final command or
+reuse it across commands keep a local token array and invoke Cargo directly. This
+includes `fmt`, whose modified selector admits a separate full-workspace per-manifest
+cargo-each fan-out. The **same** cache is read in cloud workflows — the impact job
 uploads `target/anvil/impact/` as an artifact and each group job downloads it — so the
 identical code path runs locally and in CI, with no scoping threaded through environment
 variables. Scoping is on by default both locally and in CI; it is disabled only by
@@ -412,9 +413,9 @@ Each catalog check is tagged with one of four buckets:
 
 | Bucket    | Selector source                     | Behavior when scoped                                                        | Behavior when unscoped (`ANVIL_IMPACT=off` / no cache) |
 |-----------|-------------------------------------|-----------------------------------------------------------------------------|--------------------------------------|
-| modified  | `_anvil-impact-include modified`    | `--none` skips through `cargo-each`; otherwise the admitted command uses its normal full input domain. | `--workspace` admits the command. |
-| affected  | `_anvil-impact-include affected`    | `cargo-each` resolves and forwards the selected packages.                    | `--workspace`.                       |
-| required  | `_anvil-impact-include required`    | `cargo-each` resolves and forwards the selected packages.                    | `--workspace`.                       |
+| modified  | `_anvil-impact-include modified`    | `--none` skips the command; otherwise the admitted command uses its normal full input domain. | `--workspace` admits the command. |
+| affected  | `_anvil-impact-include affected`    | The recipe forwards the selected packages, using cargo-each only when it removes local orchestration. | `--workspace`. |
+| required  | `_anvil-impact-include required`    | As affected, with transitive workspace dependencies included.                | `--workspace`.                       |
 | unscoped  | *(none)*                            | Always run.                                                                  | Always run.                          |
 
 Bucket assignments per check:
@@ -446,9 +447,10 @@ template (`crates/README.j2` / `README.j2`) and the root `.spelling` dictionary 
 change to one of those would be silently scoped out. These ignore impact scoping and
 always run.
 
-An empty tier is represented by cargo-each's native `--none` selector. Ordinary recipes
-delegate the successful no-op directly to cargo-each; orchestration-heavy recipes detect
-`--none` before doing domain-specific setup.
+An empty tier is represented by cargo-each's native `--none` selector. Concise one-shot
+recipes delegate the successful no-op directly to cargo-each. Recipes that already need
+the selection for branching, repeated commands, or domain-specific setup detect
+`--none` themselves and avoid adding cargo-each solely as an extra wrapper.
 
 Impact and target discovery use three outcomes: work found, proven no work, and
 failure. Only the first two may continue successfully. Malformed impact tiers,
