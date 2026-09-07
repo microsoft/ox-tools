@@ -31,7 +31,7 @@ stages:
               condition: succeededOrFailed()
               displayName: Publish coverage (linux)
               inputs:
-                summaryFileLocation: target/coverage/cobertura-*.xml
+                summaryFileLocation: target/coverage/lcov-*.info
                 failIfCoverageEmpty: false
       - template: steps/job.yml
         parameters:
@@ -44,7 +44,7 @@ stages:
               condition: succeededOrFailed()
               displayName: Publish coverage (windows)
               inputs:
-                summaryFileLocation: target/coverage/cobertura-*.xml
+                summaryFileLocation: target/coverage/lcov-*.info
                 failIfCoverageEmpty: false
 
   - stage: scheduled_advisories

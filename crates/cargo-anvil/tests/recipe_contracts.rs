@@ -202,6 +202,14 @@ if ($args -contains 'semver-checks') {
 if ($args -contains 'bolero' -and $args -contains 'list') {
     exit [int]$env:FAKE_BOLERO_LIST_EXIT
 }
+if ($args -contains 'llvm-cov' -and $args -contains 'report' -and $env:FAKE_LLVM_COV_REPORT_206) {
+    $command = "$($env:FAKE_LLVM_COV_PATH) export -format=lcov -instr-profile=fake.profdata -object fake-object.exe"
+    Write-Error (
+        "error: failed to generate report: could not execute process $([char]96)$command$([char]96) " +
+        "(never executed): The filename or extension is too long. (os error 206)"
+    ) -ErrorAction Continue
+    exit 1
+}
 if ($args -contains 'nextest') {
     if ($env:FAKE_NEXTEST_EXIT -eq '4' -and $args -contains '--no-tests=pass') {
         exit 0
@@ -1444,6 +1452,77 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
         &[("FAKE_NEXTEST_EXIT", OsStr::new("7")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
     assert_failed(&failed, "plain nextest failure for an opted-out package");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_coverage_report_retries_error_206_with_response_file() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-llvm-tools-validate-prereqs",
+            "anvil-tool-cargo-llvm-cov-validate-prereqs",
+            "anvil-tool-cargo-nextest-validate-prereqs",
+            "anvil-tool-cargo-coverage-gate-validate-prereqs",
+            "anvil-component-nightly-llvm-tools-install",
+            "anvil-tool-cargo-llvm-cov-install installer",
+            "anvil-tool-cargo-nextest-install installer",
+            "anvil-tool-cargo-coverage-gate-install installer",
+            "anvil-impact",
+        ],
+    );
+    let llvm_cov = tmp.path().join("fake-bin/llvm-cov.ps1");
+    let llvm_cov_log = tmp.path().join("llvm-cov.log");
+    let response_log = tmp.path().join("response.log");
+    write(
+        &llvm_cov,
+        "param([Parameter(ValueFromRemainingArguments = $true)][string[]] $Remaining)\n\
+         Add-Content -LiteralPath $env:FAKE_LLVM_COV_LOG -Value ($Remaining -join ' ')\n\
+         $response = $Remaining | Where-Object { $_.StartsWith('@') } | Select-Object -First 1\n\
+         if (-not $response) { exit 2 }\n\
+         Add-Content -LiteralPath $env:FAKE_LLVM_COV_RESPONSE_LOG -Value (Get-Content -LiteralPath $response.Substring(1) -Raw)\n\
+         Write-Output 'TN:'\n\
+         exit 0\n",
+    );
+    seed_include(tmp.path(), "affected", "--package measured@0.1.0");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-llvm-cov"],
+        &[
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")),
+            ("FAKE_LLVM_COV_REPORT_206", OsStr::new("1")),
+            ("FAKE_LLVM_COV_PATH", llvm_cov.as_os_str()),
+            ("FAKE_LLVM_COV_LOG", llvm_cov_log.as_os_str()),
+            ("FAKE_LLVM_COV_RESPONSE_LOG", response_log.as_os_str()),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "response-file fallback failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let invocations = fs::read_to_string(llvm_cov_log).unwrap();
+    assert_eq!(invocations.lines().count(), 2, "invocations:\n{invocations}");
+    assert_eq!(invocations.matches("export @").count(), 2, "invocations:\n{invocations}");
+    let responses = fs::read_to_string(response_log).unwrap();
+    assert_eq!(responses.matches("-object fake-object.exe").count(), 2, "responses:\n{responses}");
+    for config in ["all-features", "no-default"] {
+        let report = tmp.path().join(format!("target/coverage/lcov-{config}.info"));
+        assert_eq!(fs::read_to_string(report).unwrap().trim(), "TN:");
+    }
+    assert!(
+        fs::read_dir(tmp.path().join("target/coverage")).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("llvm-cov.rsp")),
+        "response-file fallback must remove temporary files"
+    );
 }
 
 #[cfg(windows)]

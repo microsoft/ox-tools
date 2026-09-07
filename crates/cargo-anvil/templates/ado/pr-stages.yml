@@ -128,7 +128,7 @@ stages:
       # stays as a sibling task on each OS job -- it's a results
       # publish (not a pipeline artifact), so 1ESPT permits it at step
       # level and we don't need to route it through `artifacts:`.
-      # cobertura-*.xml are produced by the anvil-llvm-cov recipe (one per
+      # lcov-*.info files are produced by the anvil-llvm-cov recipe (one per
       # feature config). Publishing from every OS leg matters because
       # OS-gated code is only exercised on its native target; a single-leg
       # upload would systematically under-report coverage of
@@ -151,7 +151,7 @@ stages:
               condition: succeededOrFailed()
               displayName: Publish coverage (linux)
               inputs:
-                summaryFileLocation: target/coverage/cobertura-*.xml
+                summaryFileLocation: target/coverage/lcov-*.info
                 failIfCoverageEmpty: false
       - template: steps/job.yml
         parameters:
@@ -167,7 +167,7 @@ stages:
               condition: succeededOrFailed()
               displayName: Publish coverage (windows)
               inputs:
-                summaryFileLocation: target/coverage/cobertura-*.xml
+                summaryFileLocation: target/coverage/lcov-*.info
                 failIfCoverageEmpty: false
 
   - stage: pr_msrv
