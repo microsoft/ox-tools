@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 
 use ohno::{AppError, app_err, bail};
-use toml_edit::{Item, RawString, Table};
+use toml_edit::{Item, Key, RawString, Table};
 
 /// Comment syntax used by the host file.
 ///
@@ -413,10 +413,14 @@ pub fn insert_after_region(text: &str, id: &str, extra: &str, syntax: CommentSyn
 ///   the region re-emits it verbatim.
 /// * declared only by hand — **residue**, which is kept: it is returned
 ///   separately so the caller can re-emit it after the region's closing
-///   sentinel, where it continues the very table the region opens. That is
-///   what lets a `deny.toml` whose `[advisories]` carries the repository's own
-///   `ignore` list be adopted at all, rather than declining and leaving a
-///   duplicate header behind.
+///   sentinel, where it continues the **last** table the region body opens.
+///   That is what lets a `deny.toml` whose `[advisories]` carries the
+///   repository's own `ignore` list be adopted at all, rather than declining and
+///   leaving a duplicate header behind.
+/// * declared only by hand, in a table the body opens but does not open **last**
+///   — a [`TomlAdoption::Unrelocatable`]. There is nowhere after the region that
+///   TOML still reads as that table, so relocating the entry would silently make
+///   it a setting of another table; this reports instead.
 /// * declared by both with **different** values — a [`TomlAdoption::Conflict`].
 ///   Keeping both would repeat one key inside one table, and dropping either
 ///   would lose configuration somebody chose, so this reports rather than
@@ -459,6 +463,11 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
     };
 
     let protected = managed_region_ranges(text, syntax);
+    // Residue is re-emitted directly after the region's closing sentinel, so
+    // TOML attributes it to the LAST table the body opens. Only that table's
+    // hand-written extras can be relocated without changing what they
+    // configure.
+    let tail = managed.last().map(|table| table.path.clone()).unwrap_or_default();
     // Every header in the document, in order, bounds the table above it: a
     // table's content runs until the next one starts. A managed region's
     // opening sentinel bounds it too, so an adopted table can never swallow the
@@ -503,6 +512,12 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
             start: candidate.header.start,
             end,
         });
+        if !kept.trim().is_empty() && candidate.path != tail {
+            return TomlAdoption::Unrelocatable {
+                table: candidate.path.join("."),
+                tail_table: tail.join("."),
+            };
+        }
         residue.push_str(&kept);
     }
 
@@ -557,7 +572,7 @@ pub enum TomlAdoption {
     /// `text` is the host with the adopted tables removed. `residue` is the
     /// hand-written configuration the managed body does not declare, to be
     /// re-emitted directly after the region's closing sentinel so that it stays
-    /// inside the table the region opens.
+    /// inside the last table the region opens.
     Adopted { text: String, residue: String },
     /// A hand-written entry and a managed entry declare the same key with
     /// different values. There is no output that keeps both — TOML forbids the
@@ -572,6 +587,19 @@ pub enum TomlAdoption {
         managed: String,
         /// The value the host declares by hand.
         hand_written: String,
+    },
+    /// A hand-written table carries configuration the managed body does not
+    /// declare, but it is not the last table the body opens — and residue is
+    /// re-emitted after the closing sentinel, where TOML would attribute it to
+    /// that last table instead. Relocating it would silently move the setting
+    /// into a different table, so the caller must refuse rather than write.
+    Unrelocatable {
+        /// Dotted path of the hand-written table whose extra entries have
+        /// nowhere to go.
+        table: String,
+        /// Dotted path of the last table the managed body opens, which is where
+        /// re-emitted residue lands.
+        tail_table: String,
     },
 }
 
@@ -696,30 +724,7 @@ fn collect_values(table: &Table, path: &mut Vec<String>, values: &mut TableValue
 /// the caller clamps to the next header.
 fn table_entries(table: &Table, text: &str) -> Vec<TableEntry> {
     let mut starts: Vec<(Vec<String>, String, usize)> = Vec::new();
-    for (key, item) in table {
-        // Iteration hands back the key as a `&str`, dropping the `Key` that
-        // carries the decor and span this needs. Looking it straight back up is
-        // infallible — the key came from this very table — and skipping an
-        // entry that failed the lookup would silently drop the user's
-        // configuration, which is the whole failure this module exists to stop.
-        let (key, _) = table.get_key_value(key).expect("a key yielded by a table is present in it");
-        let start = key
-            .leaf_decor()
-            .prefix()
-            .and_then(RawString::span)
-            .map_or_else(|| key.span().map_or(0, |span| span.start), |span| span.start);
-        match item {
-            Item::Value(value) => starts.push((vec![key.get().to_owned()], value.to_string().trim().to_owned(), start)),
-            Item::Table(child) if child.is_dotted() => {
-                let mut nested = TableValues::new();
-                collect_values(child, &mut vec![key.get().to_owned()], &mut nested);
-                for (path, value) in nested {
-                    starts.push((path, value, start));
-                }
-            }
-            _ => {}
-        }
-    }
+    collect_entry_starts(table, text, &mut Vec::new(), &mut starts);
     starts.sort_by_key(|(_, _, start)| *start);
 
     let mut entries = Vec::with_capacity(starts.len());
@@ -733,6 +738,48 @@ fn table_entries(table: &Table, text: &str) -> Vec<TableEntry> {
         });
     }
     entries
+}
+
+/// Record every assignment the table declares with the position of the
+/// assignment that carries it.
+///
+/// Dotted assignments sharing a prefix are one dotted sub-table to the parser,
+/// so descending into it is what gives each leaf its own position. Reading the
+/// prefix key's position instead made every leaf beneath it start at the same
+/// byte, which left all but the last of them with an empty slice — and an entry
+/// whose slice is empty is deleted with its table and re-emitted as nothing.
+fn collect_entry_starts(table: &Table, text: &str, path: &mut Vec<String>, out: &mut Vec<(Vec<String>, String, usize)>) {
+    for (key, item) in table {
+        // Iteration hands back the key as a `&str`, dropping the `Key` that
+        // carries the decor and span this needs. Looking it straight back up is
+        // infallible — the key came from this very table — and skipping an
+        // entry that failed the lookup would silently drop the user's
+        // configuration, which is the whole failure this module exists to stop.
+        let (key, _) = table.get_key_value(key).expect("a key yielded by a table is present in it");
+        path.push(key.get().to_owned());
+        match item {
+            Item::Value(value) => out.push((path.clone(), value.to_string().trim().to_owned(), entry_start(key, text))),
+            Item::Table(child) if child.is_dotted() => collect_entry_starts(child, text, path, out),
+            _ => {}
+        }
+        path.pop();
+    }
+}
+
+/// Where the assignment that carries `key` begins in `text`.
+///
+/// The parser attaches an entry's leading trivia — its blank lines and comments
+/// — to the key it precedes, so that prefix is the start whenever there is one.
+/// Without one the entry starts at the beginning of its own line, which for a
+/// dotted assignment is several segments left of the leaf: `rust.a = 1` hands
+/// back only `a`, and a slice starting there would relocate the setting without
+/// the `rust.` prefix that decides which table it lands in.
+fn entry_start(key: &Key, text: &str) -> usize {
+    if let Some(prefix) = key.leaf_decor().prefix().and_then(RawString::span) {
+        return prefix.start;
+    }
+    let at = key.span().map_or(0, |span| span.start);
+    text[..at].rfind('\n').map_or(0, |newline| newline + 1)
 }
 
 /// The first boundary strictly after `start`, or `fallback` when none follows.
@@ -897,6 +944,9 @@ mod tests {
                 text
             }
             TomlAdoption::Conflict { table, key, .. } => panic!("unexpected conflict on `{key}` in `[{table}]`"),
+            TomlAdoption::Unrelocatable { table, tail_table } => {
+                panic!("unexpected refusal to relocate `[{table}]` past `[{tail_table}]`")
+            }
         }
     }
 
@@ -1187,6 +1237,93 @@ mod tests {
         assert!(
             adopted.contains("# >>> anvil-managed: existing"),
             "the existing region survives:\n{adopted}"
+        );
+    }
+
+    /// Two dotted assignments sharing a prefix are one dotted sub-table to the
+    /// parser, which hands the whole sub-table back under a single key. Reading
+    /// that key's position as the position of every leaf beneath it gave the
+    /// first leaf an empty source slice, so a hand-written setting was deleted
+    /// with the table it sat in and no residue was kept for it.
+    #[test]
+    fn each_dotted_assignment_keeps_its_own_source_slice() {
+        let text = "[lints]\nrust.a_custom = \"warn\"\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
+        let (adopted, residue) = adopted_with_residue(text, "[lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n");
+
+        assert_eq!(adopted, "", "the hand-written header is adopted:\n{adopted}");
+        assert_eq!(
+            residue, "rust.a_custom = \"warn\"\n",
+            "the unmanaged dotted assignment survives with its own prefix"
+        );
+    }
+
+    /// The managed leaf may be written first, so the survivor is the *last* of
+    /// the group. Its slice must still stop at the end of its own line rather
+    /// than running to the next header, or the residue would swallow whatever
+    /// the user wrote after it.
+    #[test]
+    fn a_dotted_assignment_after_a_managed_one_keeps_its_own_slice() {
+        let text = "[lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\nrust.a_custom = \"warn\"\n\n[bans]\nx = 1\n";
+        let (adopted, residue) = adopted_with_residue(text, "[lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n");
+
+        assert_eq!(residue, "rust.a_custom = \"warn\"\n", "only the unmanaged assignment is kept");
+        assert_eq!(adopted, "[bans]\nx = 1\n", "the following table is left alone:\n{adopted}");
+    }
+
+    /// Residue is re-emitted after the region's closing sentinel, so TOML reads
+    /// it as part of the LAST table the body opens. A body that opens more than
+    /// one table therefore cannot relocate an earlier table's extras — doing so
+    /// silently turns a `[Hunspell]` setting into a `[Hunspell.quirks]` one,
+    /// which still parses and is never read. Refusing is the only answer that
+    /// keeps the setting meaning what it says.
+    #[test]
+    fn residue_that_would_land_in_another_table_is_refused() {
+        let text = "[Hunspell]\nlang = \"en_US\"\ntransform_regex = [\"^'\"]\n";
+        let adoption = adopt_unmanaged_toml_tables(
+            text,
+            "[Hunspell]\nlang = \"en_US\"\n\n[Hunspell.quirks]\nallow_concatenation = true\n",
+            SYN,
+        );
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Unrelocatable {
+                table: "Hunspell".to_owned(),
+                tail_table: "Hunspell.quirks".to_owned(),
+            },
+            "the setting is not quietly moved into the trailing table"
+        );
+    }
+
+    /// The refusal is about where residue *lands*, not about how many tables the
+    /// body opens: extras belonging to the last table are still relocatable, and
+    /// a multi-table body that produces no residue at all still adopts.
+    #[test]
+    fn residue_from_the_body_s_last_table_is_still_relocated() {
+        let body = "[Hunspell]\nlang = \"en_US\"\n\n[Hunspell.quirks]\nallow_concatenation = true\n";
+        let text = "[Hunspell]\nlang = \"en_US\"\n\n[Hunspell.quirks]\nallow_concatenation = true\ntransform_regex = [\"^'\"]\n";
+        let (adopted, residue) = adopted_with_residue(text, body);
+
+        assert_eq!(adopted, "", "both hand-written headers are adopted:\n{adopted}");
+        assert_eq!(
+            residue, "transform_regex = [\"^'\"]\n",
+            "the extra setting of the trailing table travels with it"
+        );
+    }
+
+    /// A dotted assignment with no comment above it is located by the start of
+    /// its own line, which is one byte past the newline that ends the line
+    /// before. Starting *at* that newline instead drags a blank line into the
+    /// residue — invisible at the edges, where the residue is trimmed, but not
+    /// between two kept entries.
+    #[test]
+    fn a_relocated_assignment_starts_after_the_preceding_newline() {
+        let text = "[lints]\nrust.a = 1\n# managed below\nrust.b = 2\nrust.c = 3\n";
+        let (_, residue) = adopted_with_residue(text, "[lints]\nrust.b = 2\n");
+
+        assert_eq!(
+            residue, "rust.a = 1\nrust.c = 3\n",
+            "no blank line is introduced between the kept assignments"
         );
     }
 
@@ -1650,14 +1787,24 @@ mod tests {
     /// `[workspace]`. Folding its values into the parent's would make the
     /// managed table look as though it already declared `package.edition`, and
     /// the hand-written copy of that key would be deleted instead of kept.
+    ///
+    /// Kept, here, means refused: the key belongs to `[workspace]`, and the
+    /// body's last header is `[workspace.package]`, so there is nowhere after
+    /// the region that still reads it as a `[workspace]` setting.
     #[test]
     fn a_nested_headed_table_is_not_part_of_the_table_that_declares_it() {
         let text = "[workspace]\nmembers = []\npackage.edition = \"2024\"\n";
         let body = "[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\n";
-        let (adopted, residue) = adopted_with_residue(text, body);
+        let adoption = adopt_unmanaged_toml_tables(text, body, SYN);
 
-        assert_eq!(residue, "package.edition = \"2024\"\n", "the hand-written dotted key is kept");
-        assert_eq!(adopted, "", "the hand-written table is adopted:\n{adopted}");
+        assert_eq!(
+            adoption,
+            TomlAdoption::Unrelocatable {
+                table: "workspace".to_owned(),
+                tail_table: "workspace.package".to_owned(),
+            },
+            "the hand-written dotted key is neither folded into the managed table nor relocated"
+        );
     }
 
     /// The same distinction seen from the host: a nested headed table is not an

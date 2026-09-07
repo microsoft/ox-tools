@@ -260,8 +260,19 @@ Each hand-written entry is then classified against the rendered region body:
 - **declared by both with the same value** — covered, and dropped, since the region
   re-emits it;
 - **declared only by hand** — kept as *residue*, and re-emitted directly after the
-  region's closing sentinel, where it continues the table the region opens. The entry's
-  original source slice is moved, so its comments and spacing survive byte-for-byte;
+  region's closing sentinel, where it continues the **last** table the region body opens.
+  The entry's original source slice is moved, so its comments and spacing survive
+  byte-for-byte. A dotted assignment carries its own prefix with it, because
+  `rust.a = 1` and `rust.b = 2` are one dotted sub-table to the parser and each leaf must
+  be located by its own source position rather than the prefix key's — reading them all as
+  starting where the prefix does gives every leaf but the last an empty slice, which
+  deletes the setting instead of relocating it;
+- **declared only by hand, in a table that is not the body's last** — not relocatable.
+  Residue lands after the closing sentinel, so TOML would read it as a setting of the last
+  table the body opens: a hand-written `[Hunspell]` key would come back as
+  `Hunspell.quirks.<key>`, which still parses and is never read. The region is refused
+  rather than written, and the diagnostic asks the user to remove the settings the region
+  does not declare;
 - **declared by both with different values** — a conflict. There is no output that keeps
   both, because TOML forbids repeating the key inside one table, and no basis for choosing
   between them, so the region is refused rather than written (see below).

@@ -241,7 +241,7 @@ pub fn gitattributes() -> Artifact {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::region::upsert_region;
+    use crate::region::{TomlAdoption, adopt_unmanaged_toml_tables, upsert_region};
 
     #[test]
     fn embedded_catalog_uses_dotted_keys() {
@@ -394,6 +394,43 @@ mod tests {
         assert!(SPELLCHECK_BODY.contains("use_builtin = true"));
         assert!(SPELLCHECK_BODY.contains("[Hunspell.quirks]"));
         assert!(SPELLCHECK_BODY.contains("allow_concatenation = true"));
+    }
+
+    /// The shipped spellcheck body opens two tables, so residue re-emitted
+    /// after its closing sentinel is read as a `[Hunspell.quirks]` setting. A
+    /// hand-written `[Hunspell]` key that the body does not declare therefore
+    /// cannot be relocated, and adoption must refuse rather than quietly move
+    /// it into a table cargo-spellcheck never reads it from.
+    #[test]
+    fn a_hand_written_hunspell_setting_is_never_moved_into_quirks() {
+        let host = "[Hunspell]\nlang = \"en_US\"\ntransform_regex = [\"^'\"]\n";
+        let adoption = adopt_unmanaged_toml_tables(host, SPELLCHECK_BODY, CommentSyntax::Hash);
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Unrelocatable {
+                table: "Hunspell".to_owned(),
+                tail_table: "Hunspell.quirks".to_owned(),
+            },
+            "the real spellcheck body refuses rather than re-attributing the setting"
+        );
+    }
+
+    /// The refusal tells the user to remove the settings the region does not
+    /// declare, so doing exactly that must let the same host onboard.
+    #[test]
+    fn removing_the_unrelocatable_setting_lets_the_spellcheck_region_onboard() {
+        let host = "[Hunspell]\nlang = \"en_US\"\n";
+        let adoption = adopt_unmanaged_toml_tables(host, SPELLCHECK_BODY, CommentSyntax::Hash);
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Adopted {
+                text: String::new(),
+                residue: String::new(),
+            },
+            "the remedy the diagnostic names is the one that works"
+        );
     }
 
     #[test]

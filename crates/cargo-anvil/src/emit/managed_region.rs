@@ -215,6 +215,17 @@ fn splice(
                      one of them and keeping both would repeat the key, which TOML rejects."
                 ));
             }
+            // Also unreachable in the normal path, and refused for the same
+            // reason: the only place the entries could go is where TOML reads
+            // them as another table's.
+            TomlAdoption::Unrelocatable { table, tail_table } => {
+                return Err(app_err!(
+                    "{host_relpath} declares settings in `[{table}]` that the managed region \
+                     '{region_id}' does not, and the region's body ends in `[{tail_table}]`, so \
+                     re-emitting them after the region would make them settings of `[{tail_table}]` \
+                     instead. Remove them from `[{table}]` and re-run."
+                ));
+            }
         }
     } else {
         base
@@ -287,6 +298,25 @@ mod tests {
             .expect("a disagreement over `yanked` must be refused");
 
         assert!(reason.contains("yanked"), "the refusal names the key: {reason}");
+    }
+
+    /// A hand-written setting the body does not declare, in a table the body
+    /// does not open last, has nowhere to go: re-emitted after the region it
+    /// becomes a setting of the body's trailing table. The run refuses the
+    /// region and names both tables, so the user can see what would have moved
+    /// where.
+    #[test]
+    fn a_setting_that_would_change_table_is_refused_rather_than_written() {
+        let host = "[Hunspell]\nlang = \"en_US\"\ntransform_regex = [\"^'\"]\n";
+        let body = "[Hunspell]\nlang = \"en_US\"\n\n[Hunspell.quirks]\nallow_concatenation = true\n";
+
+        let reason = toml_introduction_refusal(Some(host), request("spellcheck.toml", "anvil-spellcheck", body))
+            .expect("a setting that cannot keep its table must be refused");
+
+        assert!(
+            reason.contains("[Hunspell]") && reason.contains("[Hunspell.quirks]"),
+            "the refusal names the table and where residue would land: {reason}"
+        );
     }
 
     /// The refusal is a backstop, not a gate. An ordinary introduction — and an
