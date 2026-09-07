@@ -207,6 +207,9 @@ if ($args -contains 'bolero' -and $args -contains 'list') {
 }
 if ($args -contains 'llvm-cov' -and $args -contains 'report' -and $env:FAKE_LLVM_COV_REPORT_206) {
     $command = "$($env:FAKE_LLVM_COV_PATH) export -format=lcov -instr-profile=fake.profdata -object fake-object.exe"
+    if ($env:FAKE_LLVM_COV_MULTILINE) {
+        $command = $command.Replace(' -object', "`n-object")
+    }
     Write-Error (
         "error: failed to generate report: could not execute process $([char]96)$command$([char]96) " +
         "(never executed): The filename or extension is too long. (os error 206)"
@@ -1611,6 +1614,7 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
         &[
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")),
             ("FAKE_LLVM_COV_REPORT_206", OsStr::new("1")),
+            ("FAKE_LLVM_COV_MULTILINE", OsStr::new("1")),
             ("FAKE_LLVM_COV_PATH", llvm_cov.as_os_str()),
             ("FAKE_LLVM_COV_LOG", llvm_cov_log.as_os_str()),
             ("FAKE_LLVM_COV_RESPONSE_LOG", response_log.as_os_str()),
