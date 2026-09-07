@@ -142,7 +142,7 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
     }
     $packageDirectories = @{}
     $packageLabels = @{}
-    $excludedPackages = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $excludedPackages = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
     $excludedPackageIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($package in $metadata.packages) {
         $packageId = [string]$package.id
@@ -192,8 +192,7 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
     try {
         $artifactManifest = Join-Path $logRoot 'artifacts.jsonl'
         $toolchain = '+{{ rust_nightly }}'
-        $filter = @(if ($testFilter) { '--'; $testFilter })
-        & cargo '+{{ rust_nightly }}' miri test --all-features --tests --no-run --message-format=json-render-diagnostics @packageArgs @filter 1> $artifactManifest
+        & cargo '+{{ rust_nightly }}' miri test --all-features --tests --no-run --message-format=json-render-diagnostics @packageArgs 1> $artifactManifest
         $buildExitCode = $LASTEXITCODE
 
         $artifacts = [System.Collections.Generic.List[object]]::new()
@@ -321,7 +320,9 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
                 Write-Host "anvil miri: starting $($item.Label)"
                 Push-Location -LiteralPath $item.WorkingDirectory
                 try {
-                    & $using:runner runner $item.Artifact *> $log
+                    $runnerArgs = @('runner', $item.Artifact)
+                    if ($using:testFilter) { $runnerArgs += $using:testFilter }
+                    & $using:runner @runnerArgs *> $log
                     $exitCode = $LASTEXITCODE
                 } catch {
                     $_ | Out-String | Set-Content -LiteralPath $log

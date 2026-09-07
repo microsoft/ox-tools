@@ -401,8 +401,15 @@ exit 1
     write(
         &fake_toolchain_bin.join("cargo-miri.ps1"),
         r#"
-$artifact = [System.IO.Path]::GetFileName([string]$args[-1])
+$runnerArgs = @($args)
+if ($runnerArgs.Count -lt 2 -or $runnerArgs[0] -ne 'runner') {
+    Write-Error "unexpected cargo-miri invocation: $($runnerArgs -join ' ')"
+    exit 97
+}
+$artifact = [System.IO.Path]::GetFileName([string]$runnerArgs[1])
+$binaryArgs = @($runnerArgs | Select-Object -Skip 2)
 $prefix = "$($env:FAKE_MIRI_RUN_LOG).$artifact"
+($binaryArgs -join "`n") | Set-Content -LiteralPath "$prefix.args"
 (Get-Location).Path | Set-Content -LiteralPath "$prefix.cwd"
 $env:MIRI_SYSROOT | Set-Content -LiteralPath "$prefix.sysroot"
 $env:MIRI_BE_RUSTC | Set-Content -LiteralPath "$prefix.miri-be-rustc"
@@ -595,6 +602,13 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     let recorded_cwd = fs::read_to_string(run_log.with_extension("alpha-test.cwd")).unwrap();
     let expected_cwd = fs::canonicalize(tmp.path()).unwrap();
     assert_eq!(fs::canonicalize(recorded_cwd.trim()).unwrap(), expected_cwd);
+    assert!(
+        fs::read_to_string(run_log.with_extension("alpha-test.args"))
+            .unwrap()
+            .trim()
+            .is_empty(),
+        "an unfiltered Miri run must not receive binary arguments"
+    );
     assert_eq!(
         fs::read_to_string(run_log.with_extension("alpha-test.sysroot")).unwrap().trim(),
         tmp.path().join("fake-miri-sysroot").to_str().unwrap()
@@ -1786,6 +1800,8 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
         ],
     );
     let log = tmp.path().join("cargo.log");
+    let run_log = tmp.path().join("miri-run");
+    let artifacts = r#"[{"name":"fixture-test","package_id":"fixture 0.1.0","test":true}]"#;
     let default_output = run_just(
         tmp.path(),
         &["anvil-miri"],
@@ -1803,7 +1819,11 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
     let filtered_output = run_just(
         tmp.path(),
         &["anvil-miri", "--package", "fixture", "--test", "module::test_name"],
-        &[("FAKE_CARGO_LOG", log.as_os_str())],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
+            ("FAKE_MIRI_RUN_LOG", run_log.as_os_str()),
+        ],
     );
     assert!(
         filtered_output.status.success(),
@@ -1825,10 +1845,15 @@ fn miri_target_options_preserve_the_default_and_select_examples_explicitly() {
         "default Miri target selection was not preserved:\n{commands}"
     );
     assert!(
-        commands.contains(
-            "+nightly-test miri test --all-features --tests --no-run --message-format=json-render-diagnostics --package fixture -- module::test_name"
-        ),
-        "explicit package and test selection was not forwarded:\n{commands}"
+        commands
+            .contains("+nightly-test miri test --all-features --tests --no-run --message-format=json-render-diagnostics --package fixture"),
+        "explicit package selection was not forwarded:\n{commands}"
+    );
+    let runner_args = fs::read_to_string(run_log.with_extension("fixture-test.args")).unwrap();
+    assert_eq!(
+        runner_args.trim(),
+        "module::test_name",
+        "the libtest filter must be forwarded to the executed Miri artifact"
     );
     assert!(
         commands.contains("+nightly-test miri run --all-features --locked --package fixture --example basic"),

@@ -164,7 +164,10 @@ hidden runner phase. Before dispatching an artifact, the recipe prepares the
 Miri sysroot, resolves the pinned toolchain sysroot, locates cargo-miri under
 that toolchain, and establishes the ambient rustc-mode sentinel expected by
 the serialized run information. The runner then restores the recorded state
-and starts Miri interpretation from the artifact's package directory.
+and starts Miri interpretation from the artifact's package directory. Runtime
+arguments are not part of that serialized state when `--no-run` suppresses
+Cargo's runner invocation, so a requested libtest filter is passed explicitly
+to every hidden runner invocation.
 
 These steps are not a public cargo-anvil API and may change when the pinned
 nightly changes. A nightly update must therefore revalidate sysroot discovery,
