@@ -15,6 +15,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use cargo_anvil::test_support::{Cli, run_update};
 use tempfile::TempDir;
 
 const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
@@ -595,6 +596,73 @@ fn the_container_build_does_not_require_a_root_toolchain_file() {
     assert!(
         !CONTAINER.contains("$inputs = @('rust-toolchain.toml'"),
         "the tag must not fail on a repository that owns no root toolchain file"
+    );
+}
+
+/// The image builds against a context that carries the root manifest and none
+/// of the members it names, and it runs `just anvil-setup binstall` there.
+/// Workspace MSRV validation resolves every member through `cargo metadata`, so
+/// it has to stay outside that graph: it hangs off
+/// `anvil-tool-rustc-validate-prereqs`, and no `-setup` recipe depends on a
+/// `-validate-prereqs` recipe.
+///
+/// Nothing declares that, so this pins it. A dependency edge added later, or a
+/// recipe body that shells out to one, would surface as a cargo path error
+/// inside an image build, naming a manifest instead of the edge that reached
+/// it. The whole emitted tree is planned rather than a fixture subset, because
+/// the edge could be added in any tier, group or check file.
+#[test]
+fn setup_never_reaches_workspace_msrv_validation() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    write(
+        &root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nrust-version = \"1.90\"\n",
+    );
+    write(
+        &root.join("crates/alpha/Cargo.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.join("crates/alpha/src/lib.rs"), "");
+    run_update(
+        &cargo_anvil::Catalog::anvil(),
+        &Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        },
+        root,
+    )
+    .unwrap();
+    write(&root.join("Justfile"), "import 'justfiles/anvil/mod.just'\n");
+
+    let output = run_just(root, &["--dry-run", "anvil-setup", "binstall"], &[]);
+    assert!(
+        output.status.success(),
+        "planning the image's setup failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // `just` writes the plan to stderr; the resolver's own body reaches stdout
+    // under other actions and names the action in a list, so the invocation
+    // spelling is matched rather than the bare word.
+    let plan = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        plan.contains("_anvil-resolve-stable install-msrv"),
+        "the plan must reach the resolver at all, or this test proves nothing\nplan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("_anvil-resolve-stable validate-workspace-msrv"),
+        "`anvil-setup` reached workspace MSRV validation, which the image's context cannot answer: \
+         it carries the root manifest and none of its members"
     );
 }
 
