@@ -438,6 +438,13 @@ Cargo-installed tools and stable analyzers use this same repository-selected
 compiler. Anvil does not provision a separate tooling compiler; checks that
 require nightly continue to use their catalog-pinned nightly.
 
+When `cargo-each` dispatches another Cargo command, both invocations use the
+same selector: the selected stable toolchain for stable checks, the same pinned
+nightly for nightly checks, or the same dynamically resolved MSRV for MSRV
+checks. A dispatcher must not select stable and then launch a differently
+selected Cargo child, because a later rustup-managed component can resolve back
+to the outer selection in a nested proxy chain.
+
 When the root manifest declares an MSRV, `anvil-msrv-test` runs affected-package
 `cargo test --tests` in all-features and default-features configurations
 under that compiler. This covers library and binary unit tests and integration
@@ -473,7 +480,9 @@ rust_nightly_external_types := "nightly-YYYY-MM-DD"
 ```
 
 **One source of truth, two consumers.** Recipes read the pins by `{{ }}` interpolation
-(`cargo +{{ rust_nightly }} udeps ...`). The `anvil-toolchain-<name>-install`
+(`cargo +{{ rust_nightly }} udeps ...`). A recipe that delegates through
+`cargo-each` applies the same pin to both the dispatcher and child. The
+`anvil-toolchain-<name>-install`
 recipes read the same variables and pass them to `rustup toolchain install`. The
 setup composites/templates call those install recipes (directly or transitively via
 a group's `*-setup` recipe). There is no env-file duplicate.

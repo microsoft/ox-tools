@@ -811,6 +811,34 @@ mod tests {
     }
 
     #[test]
+    fn cargo_each_dispatchers_match_their_child_toolchain() {
+        for (path, body) in CHECK_FILES {
+            for line in body.lines().map(str::trim) {
+                let invokes_cargo_each =
+                    (line.starts_with("cargo ") || line.starts_with("& cargo ")) && line.contains(" each ") && line.contains("'--' cargo ");
+                if !invokes_cargo_each {
+                    continue;
+                }
+                let (_, after_outer_cargo) = line
+                    .split_once("cargo ")
+                    .expect("invokes_cargo_each requires an outer cargo invocation");
+                let (outer_toolchain, after_each) = after_outer_cargo
+                    .split_once(" each ")
+                    .expect("invokes_cargo_each requires an each subcommand");
+                let (_, after_child_cargo) = after_each
+                    .split_once("'--' cargo ")
+                    .expect("invokes_cargo_each requires a child cargo command");
+                assert!(
+                    after_child_cargo
+                        .strip_prefix(outer_toolchain)
+                        .is_some_and(|child_command| child_command.starts_with(' ')),
+                    "{path} selects different toolchains for cargo-each and its child Cargo: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn mod_just_imports_siblings_and_defines_alias() {
         for needle in [
             "import 'helpers.just'",

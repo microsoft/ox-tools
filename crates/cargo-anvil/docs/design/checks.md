@@ -172,11 +172,16 @@ fallback produces an explicit `+toolchain`; with no source, the command fails.
 Setup makes the selected compiler available before stable Cargo or Rust runs,
 while paired prerequisite validation remains read-only.
 
+When a check delegates through `cargo-each`, the dispatcher and its child Cargo
+command use the same toolchain selector. This avoids a nested rustup selection
+where a child Cargo selects a different toolchain but a later rustup-managed
+component resolves back to the dispatcher's toolchain.
+
 ### `pr-fast`
 
 | Check                          | Invocation                                                | Source |
 |--------------------------------|-----------------------------------------------------------|--------|
-| `fmt`                          | `cargo each --workspace --keep-going -- cargo +<pinned-nightly> fmt --manifest-path {manifest} --check`. `cargo-each` resolves workspace membership and invokes rustfmt once per manifest, keeping child commands bounded on every platform while reporting every failing member. Unlike `cargo fmt --all`, local path dependencies outside the workspace are not included. | all |
+| `fmt`                          | `cargo +<pinned-nightly> each --workspace --keep-going -- cargo +<pinned-nightly> fmt --manifest-path {manifest} --check`. `cargo-each` resolves workspace membership and invokes rustfmt once per manifest, keeping child commands bounded on every platform while reporting every failing member. Matching the dispatcher and child pins keeps rustfmt on the selected nightly through the nested Cargo dispatch. Unlike `cargo fmt --all`, local path dependencies outside the workspace are not included. | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
 | `cargo-sort`                   | `cargo sort --workspace --grouped --check --check-format`. Since cargo-sort 2.1.2, formatting-only differences are warnings unless `--check-format` is set; Anvil keeps it load-bearing so dependency ordering and Cargo manifest formatting are both enforced. `--grouped` preserves intentional blank-line-separated dependency groups. | oxidizer-github |
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |
