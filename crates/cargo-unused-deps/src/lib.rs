@@ -319,16 +319,13 @@ fn source_checks(manifest_path: &Path, selection: &[OsString], checks: &[Check])
     let plain = evidence::gather(manifest_path, selection, &workspace.evidence_target_dir, false)?;
     let all = evidence::gather(manifest_path, selection, &workspace.evidence_target_dir, true)?;
 
-    let shim = std::env::current_exe().context("failed to locate this executable to use as the doctest shim")?;
-    let mut doctests = doctests::DoctestEvidence::default();
-    for package in &workspace.packages {
-        // Only a library target can have doctests; asking cargo for the
-        // doctests of a bin-only package is an error, not an empty answer.
-        if package.has_library && all.saw_package(&package.manifest_path) {
-            let found = doctests::gather_package(manifest_path, &package.name, &workspace.evidence_target_dir, &shim)?;
-            doctests.insert(package.name.clone(), found);
-        }
-    }
+    // Doctest evidence can only ever spare a dependency, never accuse one, so
+    // it is gathered lazily: judge first without it, then compile the doctests
+    // of only those packages that produced a finding, and judge again. On a
+    // large workspace that is the difference between a handful of doctest
+    // builds and one per package.
+    let candidates = verdict::judge(&workspace.packages, &plain, &all, &doctests::DoctestEvidence::default(), &workspace.allowed);
+    let doctests = doctest_evidence(manifest_path, &workspace, &candidates)?;
 
     let findings = verdict::judge(&workspace.packages, &plain, &all, &doctests, &workspace.allowed);
 
@@ -351,6 +348,31 @@ fn source_checks(manifest_path: &Path, selection: &[OsString], checks: &[Check])
     report_findings(&wanted);
 
     Ok(true)
+}
+
+/// Compile the doctests of the packages a finding was raised against.
+///
+/// Nothing else needs them: a doctest can only reveal that a dependency *is*
+/// used, so a package with no findings has nothing a doctest could change.
+fn doctest_evidence(manifest_path: &Path, workspace: &Workspace, candidates: &[verdict::Finding]) -> Result<doctests::DoctestEvidence> {
+    let mut evidence = doctests::DoctestEvidence::default();
+    if candidates.is_empty() {
+        return Ok(evidence);
+    }
+
+    let shim = std::env::current_exe().context("failed to locate this executable to use as the doctest shim")?;
+    let accused: BTreeSet<&str> = candidates.iter().map(|finding| finding.package.as_str()).collect();
+
+    for package in &workspace.packages {
+        // Only a library target can have doctests; asking cargo for the
+        // doctests of a bin-only package is an error, not an empty answer.
+        if package.has_library && accused.contains(package.name.as_str()) {
+            let found = doctests::gather_package(manifest_path, &package.name, &workspace.evidence_target_dir, &shim)?;
+            evidence.insert(package.name.clone(), found);
+        }
+    }
+
+    Ok(evidence)
 }
 
 /// Report every source-level finding, grouped the way a reader fixes them.
