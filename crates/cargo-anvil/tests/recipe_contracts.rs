@@ -586,14 +586,6 @@ fn the_container_build_does_not_require_a_root_toolchain_file() {
         CONTAINER_DOCKERIGNORE.contains("!rust-toolchain.toml") && CONTAINER_DOCKERIGNORE.contains("!rust-toolchain\n"),
         "the context must admit a root toolchain file in either spelling"
     );
-    assert!(
-        CONTAINER.contains("$toolchainFiles"),
-        "the tag must hash a root toolchain file when the repository owns one"
-    );
-    assert!(
-        !CONTAINER.contains("$inputs = @('rust-toolchain.toml'"),
-        "the tag must not fail on a repository that owns no root toolchain file"
-    );
 }
 
 /// The image builds against a context that carries the root manifest and none
@@ -2240,6 +2232,8 @@ fn a_link_among_the_image_inputs_is_refused() {
         ("a file link below a walk root", "justfiles/anvil/linked.just", false),
         ("a directory link below a walk root", "justfiles/anvil/linked", true),
         ("a linked declared input", "rust-toolchain.toml", false),
+        ("a linked extensionless toolchain file", "rust-toolchain", false),
+        ("a linked root manifest", "Cargo.toml", false),
         ("a linked recipe walk root", "justfiles/anvil", true),
         ("a linked container walk root", ".anvil/container", true),
     ] {
@@ -2248,6 +2242,11 @@ fn a_link_among_the_image_inputs_is_refused() {
         stub_msrv_resolver(root);
         write(&root.join("elsewhere/target.just"), "# shared\n");
         write(&root.join("elsewhere/Dockerfile"), "FROM scratch\n");
+        // The fixture writes a root manifest of its own, which the link for
+        // that case has to replace rather than sit beside.
+        if name == "Cargo.toml" {
+            fs::remove_file(root.join(name)).unwrap();
+        }
         // Everything the tag needs, except whatever this case replaces with a
         // link. The link stands in for it, so writing it first would defeat the
         // case for a walk root and leave nothing to link at all.

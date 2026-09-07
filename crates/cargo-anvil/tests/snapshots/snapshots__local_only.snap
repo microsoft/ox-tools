@@ -2950,7 +2950,11 @@ anvil-container-tag:
     # link at `justfiles` is copied as a link while everything here reads
     # through it -- the same divergence this guard exists to refuse, reached one
     # level up.
-    foreach ($declared in @('rust-toolchain.toml', 'rust-toolchain', '.anvil', '.anvil/container', 'justfiles', 'justfiles/anvil')) {
+    #
+    # The root manifest is checked too, though the digest reads a value out of
+    # it rather than hashing it: the context copies the link, so the resolver
+    # inside the image would meet a target the ignore file never admitted.
+    foreach ($declared in @('rust-toolchain.toml', 'rust-toolchain', 'Cargo.toml', '.anvil', '.anvil/container', 'justfiles', 'justfiles/anvil')) {
         $item = Get-Item -LiteralPath (Join-Path $repoRoot $declared) -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
             $links += $item.FullName
