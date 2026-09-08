@@ -25,7 +25,7 @@ pub(crate) enum CargoCli {
     version,
     about = "Run a command over a cargo-style selection of workspace members",
     long_about = "Resolve a cargo-style package selection (-p/--package, --workspace, --exclude), \
-                  optionally filter it by a metadata predicate, and run a command over the result \
+                  optionally filter it with Boolean expressions over Cargo metadata, and run a command over the result \
                   — once per member, once per matching Cargo target, or once for the whole set."
 )]
 #[expect(clippy::struct_excessive_bools, reason = "each bool is an independent clap CLI flag")]
