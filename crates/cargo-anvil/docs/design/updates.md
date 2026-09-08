@@ -202,8 +202,7 @@ The sentinel pair serves two purposes:
    surrounding content.
 2. **Body delimitation.** Everything between the sentinels (exclusive) is "the region's
    body." Lines outside the sentinels are user-owned and preserved verbatim, with the
-   single exception described in *Adopting a hand-written table on first introduction*
-   below.
+   single exception described in *Adopting a hand-written table* below.
 
 For TOML hosts the sentinels are TOML line comments around the affected content. To
 work with TOML's no-duplicate-table rule, anvil writes a single parent-table header
@@ -241,13 +240,13 @@ while still failing cloud workflows on anything the catalog covers. Users who wa
 behavior set per-lint `"deny"` values inside the region — the dirty-file flow then
 preserves their edit.
 
-### Adopting a hand-written table on first introduction
+### Adopting a hand-written table
 
 TOML rejects a duplicate table header, so appending a region that declares `[lints]` to a
 host that already declares `[lints]` by hand does not merely duplicate text — it produces
-a manifest that will not parse. On **first introduction only** (once the region exists,
-in-place replacement applies and there is nothing to adopt), the tool therefore takes over
-the hand-written table instead of duplicating it.
+a manifest that will not parse. The tool therefore takes over the hand-written table
+instead of duplicating it, both when the region is first introduced and when an existing
+region's body gains a table (see below).
 
 The host is read with the TOML parser, with any existing managed regions blanked out, so
 table headers are located by parsing rather than by scanning for a bracketed line. A
