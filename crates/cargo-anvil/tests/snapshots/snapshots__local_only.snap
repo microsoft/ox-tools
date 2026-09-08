@@ -1641,9 +1641,8 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
             Write-Warning 'anvil-llvm-cov: the failed export executable was not named llvm-cov'
             return $reportExitCode
         }
-
         $responsePath = [System.IO.Path]::GetFullPath("$OutputPath.llvm-cov.rsp")
-        $retryErrorPath = "$responsePath.stderr"
+        $responsePath = [System.IO.Path]::GetFullPath("$OutputPath.llvm-cov.rsp")
         try {
             [System.IO.File]::WriteAllText(
                 $responsePath,
@@ -1651,18 +1650,14 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
                 [System.Text.UTF8Encoding]::new($false)
             )
             Write-Host 'anvil-llvm-cov: retrying Windows error 206 with an LLVM response file'
-            & $llvmCov export "@$responsePath" > $OutputPath 2> $retryErrorPath
+            & $llvmCov export "@$responsePath" > $OutputPath
             $retryExitCode = $LASTEXITCODE
-            if (Test-Path -LiteralPath $retryErrorPath) {
-                Get-Content -LiteralPath $retryErrorPath | ForEach-Object { Write-Host $_ }
-            }
             if ($retryExitCode -ne 0) {
                 Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
             }
             return $retryExitCode
         } finally {
             Remove-Item -LiteralPath $responsePath -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $retryErrorPath -Force -ErrorAction SilentlyContinue
         }
     }
     # Instrument and run tests once per feature configuration, each as a
