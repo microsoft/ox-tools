@@ -1,0 +1,59 @@
+---
+source: crates/cargo-anvil/tests/toml_adoption.rs
+expression: show_line_endings(&rendered)
+---
+--- deny.toml, as the user wrote it ---<LF>
+# We accept this one until upstream ships a fix.<CRLF>
+[advisories]<CRLF>
+ignore = ["RUSTSEC-9999-0001"]<CRLF>
+<LF>
+--- decisions ---<LF>
+anvil-deny-advisories: Write<LF>
+anvil-deny-bans: Write<LF>
+anvil-deny-licenses: Write<LF>
+anvil-deny-sources: Write<LF>
+<LF>
+--- refusals ---<LF>
+(none)<LF>
+<LF>
+--- deny.toml, as anvil left it ---<LF>
+# We accept this one until upstream ships a fix.<CRLF>
+<LF>
+# >>> anvil-managed: anvil-deny-advisories<LF>
+[advisories]<LF>
+yanked = "deny"<LF>
+# Scope of unmaintained-crate checks: "all" surfaces transitive<LF>
+# dependencies too; tighten to "workspace" if the noise is high.<LF>
+unmaintained = "all"<LF>
+# <<< anvil-managed: anvil-deny-advisories<LF>
+ignore = ["RUSTSEC-9999-0001"]<CRLF>
+<LF>
+# >>> anvil-managed: anvil-deny-licenses<LF>
+[licenses]<LF>
+allow = [<LF>
+    "MIT",<LF>
+    "Apache-2.0",<LF>
+    "Apache-2.0 WITH LLVM-exception",<LF>
+    "BSD-2-Clause",<LF>
+    "BSD-3-Clause",<LF>
+    "ISC",<LF>
+    "MPL-2.0",<LF>
+    "Unicode-DFS-2016",<LF>
+    "Unicode-3.0",<LF>
+    "Zlib",<LF>
+]<LF>
+confidence-threshold = 0.93<LF>
+# <<< anvil-managed: anvil-deny-licenses<LF>
+<LF>
+# >>> anvil-managed: anvil-deny-bans<LF>
+[bans]<LF>
+multiple-versions = "warn"<LF>
+wildcards = "deny"<LF>
+allow-wildcard-paths = true<LF>
+# <<< anvil-managed: anvil-deny-bans<LF>
+<LF>
+# >>> anvil-managed: anvil-deny-sources<LF>
+[sources]<LF>
+unknown-registry = "deny"<LF>
+unknown-git = "deny"<LF>
+# <<< anvil-managed: anvil-deny-sources<LF>

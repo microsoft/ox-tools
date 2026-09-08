@@ -297,6 +297,11 @@ LF or CRLF blank-line gap before the content that followed the region, and the r
 residue keeps the line ending it was written with rather than being terminated with a
 lone LF.
 
+`tests/toml_adoption.rs` snapshots each of these outcomes end to end — the host as the
+user wrote it, the decision per region, the refusal if any, and the host anvil left
+behind. The unit tests pin the rules; those snapshots are what makes the resulting file
+reviewable, which is what the substring assertions this behaviour replaced could not do.
+
 ### User-extension limits for TOML regions
 
 Three constraints follow from TOML's no-duplicate-tables rule and anvil's chosen

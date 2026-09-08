@@ -498,9 +498,13 @@ fn push_region_at(
 /// still planned, which is what makes refusing an acceptable answer rather than
 /// a wall in front of onboarding.
 fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str) {
+    // Some reasons are whole sentences and some are a parser's error text, so
+    // the sentence break is supplied only when the reason has not already
+    // written one.
+    let stop = if reason.trim_end().ends_with('.') { "" } else { "." };
     plan.refusal(format!(
-        "Refused to manage {host} [{id}]: {reason}. This region was left unchanged; other regions in the same file \
-         and other artifacts may still be updated. Reconcile the hand-written table with the managed \
+        "Refused to manage {host} [{id}]: {reason}{stop} This region was left unchanged; other regions in the same \
+         file and other artifacts may still be updated. Reconcile the hand-written table with the managed \
          one before retrying."
     ));
     plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
@@ -915,6 +919,75 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, contents).unwrap();
+    }
+
+    /// The refusal diagnostic joins a reason to a fixed remedy, and the two
+    /// classes of reason punctuate themselves differently: adoption writes
+    /// whole sentences, while the parser backstop appends `toml_edit`'s error
+    /// text, which does not end in a full stop. Supplying the break
+    /// unconditionally produced `TOML rejects.. This region`, and omitting it
+    /// unconditionally would run the parser's message straight into the remedy.
+    mod refuse_region {
+        use super::*;
+
+        fn refusal_for(reason: &str) -> String {
+            let mut plan = Plan::default();
+            super::super::refuse_region(&mut plan, "deny.toml".to_owned(), "anvil-deny-advisories", reason);
+            plan.refusals().first().expect("a refusal is recorded").clone()
+        }
+
+        #[test]
+        fn a_reason_that_ends_a_sentence_is_not_given_a_second_full_stop() {
+            let refusal = refusal_for("keeping both would repeat the key, which TOML rejects.");
+
+            assert!(
+                refusal.contains("which TOML rejects. This region was left unchanged"),
+                "one full stop, one space: {refusal}"
+            );
+            assert!(!refusal.contains(".."), "no doubled full stop: {refusal}");
+        }
+
+        #[test]
+        fn a_reason_without_a_full_stop_is_given_one() {
+            let refusal = refusal_for("splicing the region would leave deny.toml unparsable as TOML: expected `]`");
+
+            assert!(
+                refusal.contains("expected `]`. This region was left unchanged"),
+                "the reason is closed before the remedy begins: {refusal}"
+            );
+        }
+
+        /// Trailing whitespace on the reason must not defeat the check: the
+        /// break is decided by the last non-space character, and the reason is
+        /// still emitted exactly as it arrived.
+        #[test]
+        fn a_trailing_space_does_not_hide_the_full_stop() {
+            let refusal = refusal_for("which TOML rejects. ");
+
+            assert!(!refusal.contains(".."), "no doubled full stop: {refusal}");
+            assert!(
+                refusal.contains("which TOML rejects.  This region was left unchanged"),
+                "the reason's own trailing space is preserved: {refusal}"
+            );
+        }
+
+        /// The plan still accounts for the region it refused, as a no-op —
+        /// otherwise the summary would simply not mention it.
+        #[test]
+        fn the_refused_region_is_still_planned_as_a_no_op() {
+            let mut plan = Plan::default();
+            super::super::refuse_region(&mut plan, "deny.toml".to_owned(), "anvil-deny-advisories", "because.");
+
+            let item = plan.items().first().expect("the region is planned");
+            assert_eq!(item.decision, Decision::LeaveAlone);
+            assert_eq!(
+                item.target,
+                Target::Region {
+                    host: "deny.toml".to_owned(),
+                    id: "anvil-deny-advisories".to_owned(),
+                }
+            );
+        }
     }
 
     /// `composed_placement` decides where an *absent* region lands in a host
