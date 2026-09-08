@@ -210,7 +210,7 @@ matrix overhead.
 
 | Check        | Invocation                                                                  | Source |
 |--------------|-----------------------------------------------------------------------------|--------|
-| `llvm-cov`   | Runs tests for every affected package under both feature configurations. Packages with a positive coverage threshold run through self-contained `cargo +<catalog-nightly> llvm-cov nextest --no-report` invocations and produce per-config lcov/cobertura reports. Packages declaring `min-lines-percent = 0` still run through plain `cargo nextest`; the opt-out disables measurement and gating, never tests. Per-config reports avoid Windows command-line overflow and are reconciled downstream by cargo-coverage-gate, Codecov, and ADO. Codecov is display-only; the local coverage gate is authoritative. | oxidizer, oxidizer-github; gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
+| `llvm-cov`   | Runs tests for every affected package under both feature configurations. Packages with a positive coverage threshold run through self-contained `cargo +<catalog-nightly> llvm-cov nextest --no-report` invocations and produce per-config LCOV reports. Packages declaring `min-lines-percent = 0` still run through plain `cargo nextest`; the opt-out disables measurement and gating, never tests. On Windows, an `llvm-cov export` that exceeds the process command-line limit (OS error 206) is retried from cargo-llvm-cov's diagnostic through an LLVM response file. Other report failures remain failures. Per-config reports are reconciled downstream by cargo-coverage-gate, Codecov, and ADO. Codecov is display-only; the local coverage gate is authoritative. | oxidizer, oxidizer-github; gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
 | `doc-test`   | Two cargo-test runs over affected packages with at least one Cargo target marked `doctest = true`: `cargo test --doc --all-features --locked` and `cargo test --doc --locked` (default features). This metadata capability includes explicit library crate types such as `rlib` and proc macros while excluding bin-only packages, which make Cargo error when they are the only selection. Running both feature modes catches doctests that only compile under one configuration. nextest does not run doctests, so this stays separate. | oxidizer, oxidizer-github |
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Local `--run` executes selected examples after compilation with a bounded timeout; cloud workflows never pass it. Packages exclude interactive, credentialed, or otherwise unsuitable examples from an unfiltered run with `[package.metadata.anvil.examples] no-run = ["name"]`. An explicit `--example <name>` overrides the default exclusion. | oxidizer, oxidizer-github |
 
@@ -276,9 +276,9 @@ The mutants check requires a base ref: locally the recipe resolves `BASE_REF` (i
 
 Same three checks as `pr-test` -- `llvm-cov`, `doc-test`, `examples` -- and the same
 recipe invocations, with the same per-config output paths
-(`target/coverage/lcov-<config>.info` and `target/coverage/cobertura-<config>.xml`).
+(`target/coverage/lcov-<config>.info`).
 The recipe is shared between tiers; only the cloud workflow
-wiring around it changes (PR uploads lcov to Codecov / cobertura to ADO from each
+wiring around it changes (PR uploads LCOV to Codecov / ADO from each
 PR run; scheduled does the same against `main` plus flags the upload as `scheduled` in
 Codecov so the two streams stay distinguishable in the UI). Two purposes for re-running
 on scheduled: catch flakes/environmental sensitivities that didn't trip in PR, and

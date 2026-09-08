@@ -488,8 +488,10 @@ mod tests {
         assert_eq!(
             PR_STAGES.matches("- task: PublishCodeCoverageResults@2").count(),
             2,
-            "cobertura publish should appear once per pr_test job (linux + windows)"
+            "LCOV publish should appear once per pr_test job (linux + windows)"
         );
+        assert_eq!(PR_STAGES.matches("summaryFileLocation: target/coverage/lcov-*.info").count(), 2);
+        assert!(!PR_STAGES.contains("cobertura"));
         // Every pr-* stage depends on the single impact stage.
         assert_eq!(
             PR_STAGES.matches("dependsOn: [impact]").count(),
@@ -509,6 +511,11 @@ mod tests {
             assert!(SCHEDULED_STAGES.contains(needle), "scheduled stages missing '{needle}'");
         }
         assert!(SCHEDULED_STAGES.contains("PublishCodeCoverageResults@2"));
+        assert_eq!(
+            SCHEDULED_STAGES.matches("summaryFileLocation: target/coverage/lcov-*.info").count(),
+            2
+        );
+        assert!(!SCHEDULED_STAGES.contains("cobertura"));
         assert!(SCHEDULED_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !SCHEDULED_STAGES.contains("\n      - job: "),
