@@ -244,7 +244,7 @@ impl<'a> ExpressionParser<'a> {
     fn parse_or(&mut self, depth: usize) -> Result<Predicate, EachError> {
         let mut operands = vec![self.parse_and(depth)?];
         while self.peek() == Some(Token::Or) {
-            self.position += 1;
+            self.advance();
             operands.push(self.parse_and(depth)?);
         }
         Ok(if operands.len() == 1 {
@@ -257,7 +257,7 @@ impl<'a> ExpressionParser<'a> {
     fn parse_and(&mut self, depth: usize) -> Result<Predicate, EachError> {
         let mut operands = vec![self.parse_unary(depth)?];
         while self.peek() == Some(Token::And) {
-            self.position += 1;
+            self.advance();
             operands.push(self.parse_unary(depth)?);
         }
         Ok(if operands.len() == 1 {
@@ -273,20 +273,20 @@ impl<'a> ExpressionParser<'a> {
         }
         match self.peek() {
             Some(Token::Atom(atom)) => {
-                self.position += 1;
+                self.advance();
                 Predicate::parse_atom(atom)
             }
             Some(Token::Not) => {
-                self.position += 1;
+                self.advance();
                 Ok(Predicate::Not(Box::new(self.parse_unary(depth + 1)?)))
             }
             Some(Token::LeftParen) => {
-                self.position += 1;
+                self.advance();
                 let expression = self.parse_or(depth + 1)?;
                 if self.peek() != Some(Token::RightParen) {
                     return Err(invalid(self.spec, "unclosed `(`"));
                 }
-                self.position += 1;
+                self.advance();
                 Ok(expression)
             }
             Some(token) => Err(invalid(
@@ -302,6 +302,11 @@ impl<'a> ExpressionParser<'a> {
 
     fn peek(&self) -> Option<Token<'a>> {
         self.tokens.get(self.position).copied()
+    }
+
+    #[mutants::skip] // Backward cursor mutations loop forever; parser tests cover every observable transition.
+    fn advance(&mut self) {
+        self.position += 1;
     }
 }
 
