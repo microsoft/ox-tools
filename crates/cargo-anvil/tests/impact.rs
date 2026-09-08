@@ -241,6 +241,7 @@ fn workspace() -> TempDir {
 /// - `ANVIL_IMPACT`: a cloud group job runs its checks under `consume`/`off`,
 ///   and one of those checks (the coverage/mutants suite) is what drives these
 ///   tests; inherited, the temp-repo recipe would no-op instead of computing.
+/// - `ANVIL_IMPACT_INPUT_DIR`: a caller's cache must not replace the test input.
 /// - `BASE_REF` / `GITHUB_BASE_REF` / `SYSTEM_PULLREQUEST_TARGETBRANCH`: on a
 ///   PR build these point at the *outer* repo's base (e.g.
 ///   `GITHUB_BASE_REF=main`); inherited, `_anvil-base-ref` would resolve
@@ -254,6 +255,7 @@ fn just_cmd(root: &Path, args: &[&str]) -> Command {
     cmd.args(["--justfile", "Justfile"])
         .args(args)
         .env_remove("ANVIL_IMPACT")
+        .env_remove("ANVIL_IMPACT_INPUT_DIR")
         .env_remove("BASE_REF")
         .env_remove("GITHUB_BASE_REF")
         .env_remove("SYSTEM_PULLREQUEST_TARGETBRANCH")
@@ -1016,15 +1018,8 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     }
     let tmp = workspace_at_base();
     let root = tmp.path();
-    // Stage a checked-in downloaded-cache fixture; this tests the consumer,
-    // not cargo-delta's impact production.
+    // Inject the checked-in cache directly; neither copy it nor compute impact.
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/msrv-impact-cache");
-    let impact_dir = root.join("target/anvil/impact");
-    fs::create_dir_all(&impact_dir).unwrap();
-    for tier in ["modified", "affected", "required"] {
-        let file = format!("include_{tier}.txt");
-        fs::copy(fixture.join(&file), impact_dir.join(&file)).unwrap();
-    }
     let affected = "--package alpha@0.1.0";
 
     let bin = root.join(".fakebin");
@@ -1034,6 +1029,7 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     let run_msrv = || {
         just_cmd(root, &["anvil-msrv-test"])
             .env("ANVIL_IMPACT", "consume")
+            .env("ANVIL_IMPACT_INPUT_DIR", &fixture)
             .env("RUSTUP_TOOLCHAIN", "test-stable")
             .env("PATH", &path)
             .output()
@@ -1080,6 +1076,10 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     assert!(
         fs::read_to_string(&log).unwrap().is_empty(),
         "no-MSRV invocation must skip before calling cargo"
+    );
+    assert!(
+        !root.join("target/anvil/impact").exists(),
+        "consuming the fixture must not create a local impact cache"
     );
 }
 
@@ -1324,6 +1324,24 @@ fn consume_without_downloaded_cache_fails_loudly() {
         ok.status.success(),
         "consume with a present cache must succeed as a no-op:\n{ok_combined}"
     );
+
+    // An explicit input must never fall back to the complete default cache.
+    let missing_input = root.join("missing input [cache]");
+    for args in [&["anvil-impact"][..], &["_anvil-impact-include", "affected"][..]] {
+        let out = just_cmd(root, args)
+            .env("ANVIL_IMPACT", "consume")
+            .env("ANVIL_IMPACT_INPUT_DIR", &missing_input)
+            .env("PATH", &shim.path)
+            .env("ANVIL_TEST_LOG", &shim.log)
+            .output()
+            .unwrap();
+        let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(!out.status.success(), "a missing explicit input must fail:\n{combined}");
+        assert!(
+            combined.contains("missing input [cache]"),
+            "the diagnostic must identify the selected input:\n{combined}"
+        );
+    }
 
     // A partially downloaded cache -- one tier's include file missing -- must
     // also fail loudly and name the missing tier. This guards the

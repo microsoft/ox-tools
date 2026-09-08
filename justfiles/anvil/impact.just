@@ -32,6 +32,9 @@
 # cargo-delta nor a fetched base ref, which group jobs lack); it asserts the
 # downloaded include_<tier>.txt files are present -- failing loudly if any are
 # missing -- and the checks read them directly.
+# ANVIL_IMPACT_INPUT_DIR optionally selects a different read-only cache in
+# consume mode, for example a checked-in fixture. Unset/empty uses the default
+# target/anvil/impact directory. Computing impact never writes to this override.
 
 # Private. Produces the two cargo-delta snapshots under
 # target/anvil/impact/snapshots/ with two independent cache keys:
@@ -343,6 +346,7 @@ anvil-impact: _anvil-impact-snapshot
     }
     if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
     if ($env:ANVIL_IMPACT -eq 'consume') {
+        $inputDir = if ($env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
         # consume = trust an already-downloaded cache verbatim, so assert the
         # cache is actually present. If the CI download ever stops landing at
         # target/anvil/impact/ (renamed artifact, a missing download step, or
@@ -351,9 +355,9 @@ anvil-impact: _anvil-impact-snapshot
         # stay green. Fail loudly instead. (Presence only -- freshness stays a
         # deliberate non-goal in consume mode.)
         $missing = @('modified', 'affected', 'required') |
-            Where-Object { -not (Test-Path "target/anvil/impact/include_$_.txt") }
+            Where-Object { -not (Test-Path -LiteralPath (Join-Path $inputDir "include_$_.txt") -PathType Leaf) }
         if ($missing.Count -gt 0) {
-            Write-Error "anvil-impact: ANVIL_IMPACT=consume but the downloaded impact cache is missing ($($missing -join ', ') include file(s) absent under target/anvil/impact/). The impact artifact must be downloaded there before scoped checks run."
+            Write-Error "anvil-impact: ANVIL_IMPACT=consume but the input impact cache is missing ($($missing -join ', ') include file(s) absent under $inputDir). Supply a complete impact cache before scoped checks run."
             exit 1
         }
         exit 0
@@ -621,9 +625,13 @@ _anvil-impact-include tier:
         exit 2
     }
     if ($env:ANVIL_IMPACT -eq 'off') { Write-Output $default; exit 0 }
-    $file = "target/anvil/impact/include_$tier.txt"
-    if (Test-Path $file) {
-        Write-Output ("$(Get-Content -Raw $file)".Trim())
+    $inputDir = if ($env:ANVIL_IMPACT -eq 'consume' -and $env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
+    $file = Join-Path $inputDir "include_$tier.txt"
+    if (Test-Path -LiteralPath $file -PathType Leaf) {
+        Write-Output ("$(Get-Content -Raw -LiteralPath $file)".Trim())
+    } elseif ($env:ANVIL_IMPACT -eq 'consume') {
+        Write-Error "anvil-impact: ANVIL_IMPACT=consume but the input impact cache is missing ($file). Supply a complete impact cache before scoped checks run."
+        exit 1
     } else {
         Write-Output $default
     }
