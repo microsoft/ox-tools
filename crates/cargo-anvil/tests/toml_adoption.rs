@@ -33,6 +33,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use cargo_anvil::test_support::{Cli, RunOutcome, Target, run_update};
+use cargo_anvil::{Artifact, Catalog, CliMeta, CommentSyntax, HostSelector, RegionId, RegionSpec};
 use tempfile::TempDir;
 
 /// A workspace with nothing in it but the manifest anvil needs to find, plus
@@ -230,6 +231,54 @@ rust.unsafe_op_in_unsafe_fn = \"warn\"
     let outcome = run(&tmp);
 
     insta::assert_snapshot!("keeps_an_unmanaged_dotted_lint", report(before, &tmp, "Cargo.toml", &outcome));
+}
+
+/// Two regions *of the catalog* on one host that declare the same table. Each
+/// is invisible to the other's parser check — the backstop masks every other
+/// managed region before it parses — so both used to plan a write and compose a
+/// `deny.toml` with two `[licenses]` headers.
+///
+/// This refusal reads differently from the others on purpose. Both regions are
+/// anvil's own, so there is no edit to the host that resolves it; telling the
+/// user to reconcile a table they never wrote would send them chasing nothing.
+/// It asks for a bug report instead, and the first region still onboards.
+#[test]
+fn refuses_two_regions_claiming_one_table() {
+    let tmp = workspace_with("deny.toml", "");
+    std::fs::remove_file(tmp.path().join("deny.toml")).unwrap();
+
+    let catalog = Catalog::builder(CliMeta::new("anvil"))
+        .with_artifact(Artifact::region(RegionSpec {
+            host: HostSelector::Path("deny.toml".to_owned()),
+            id: RegionId::new("anvil-licenses-basics"),
+            body: "[licenses]\nallow = [\"MIT\"]\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        }))
+        .with_artifact(Artifact::region(RegionSpec {
+            host: HostSelector::Path("deny.toml".to_owned()),
+            id: RegionId::new("anvil-licenses-threshold"),
+            body: "[licenses]\nconfidence-threshold = 0.93\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        }))
+        .build()
+        .unwrap();
+
+    let outcome = run_update(
+        &catalog,
+        &Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        },
+        tmp.path(),
+    )
+    .unwrap();
+
+    insta::assert_snapshot!(
+        "refuses_two_regions_claiming_one_table",
+        report("(anvil creates this file)\n", &tmp, "deny.toml", &outcome)
+    );
 }
 
 /// A CRLF host keeps the bytes the user wrote. Two separate places used to

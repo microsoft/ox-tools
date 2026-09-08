@@ -24,7 +24,7 @@
 //! Empty body (just the sentinels with no content between them) is the
 //! opt-out signal — see [`updates.md`](../../docs/design/updates.md).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ohno::{AppError, app_err, bail};
 use toml_edit::{Item, Key, RawString, Table};
@@ -638,6 +638,28 @@ struct TableEntry {
 
 /// The configuration a TOML table declares, as canonical path/value pairs.
 type TableValues = BTreeMap<Vec<String>, String>;
+
+/// The tables a rendered region body declares with an explicit header, as
+/// dotted paths.
+///
+/// Two managed regions on one host that declare the same table produce a
+/// duplicate header no matter what either does about hand-written text, so the
+/// planner uses this to catch the collision before it writes either of them.
+/// Arrays of tables are excluded: TOML permits `[[bin]]` to repeat, so a second
+/// one is not a duplicate.
+///
+/// Returns an empty set for a body that is not valid TOML on its own — a
+/// non-TOML host's body is not this check's business, and a body that cannot be
+/// parsed is a separate diagnosis.
+#[must_use]
+pub fn declared_tables(body: &str) -> BTreeSet<String> {
+    headed_tables(body)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|table| !table.array_of_tables)
+        .map(|table| table.path.join("."))
+        .collect()
+}
 
 /// Every explicitly headed table in `text`, in document order.
 ///

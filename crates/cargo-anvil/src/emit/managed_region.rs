@@ -123,7 +123,7 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
     Ok(item)
 }
 
-/// Why introducing `request`'s region into its TOML host would produce a file
+/// Why writing `request`'s region into its TOML host would produce a file
 /// TOML cannot read, if it would.
 ///
 /// This is the backstop for the whole class of failure behind issue #148:
@@ -134,13 +134,14 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
 /// catches whatever is left by asking the parser, rather than by enumerating
 /// shapes.
 ///
-/// Only an **introduction** is checked. Once the region exists,
-/// `upsert_region_with_placement` replaces it where it stands and cannot
-/// introduce a duplicate header — and a host the repository has since broken by
-/// hand is not anvil's to refuse.
+/// Both introducing a region and updating one are checked. An update used to
+/// be assumed safe, on the grounds that replacing a region where it stands
+/// cannot add a header — but the *body* can: a template that gains a table the
+/// host already declares by hand collides on the next run, from a host that
+/// was perfectly valid before it.
 ///
-/// Returns `None` for a host that is not TOML, for a region that is already
-/// present, and for a splice whose result parses.
+/// Returns `None` for a host that is not TOML and for a splice whose result
+/// parses.
 #[must_use]
 pub fn toml_introduction_refusal(host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Option<String> {
     let ManagedRegionRequest {
@@ -155,7 +156,7 @@ pub fn toml_introduction_refusal(host_text: Option<&str>, request: ManagedRegion
     }
     let base = host_text.unwrap_or("");
     // A malformed region is a separate diagnosis, raised by the planner.
-    if !matches!(find_region(base, region_id, syntax), Ok(None)) {
+    if matches!(find_region(base, region_id, syntax), Err(_)) {
         return None;
     }
 
@@ -184,14 +185,23 @@ fn splice(
 ) -> Result<String, AppError> {
     let base = host_text.unwrap_or("");
 
-    // Introducing a region into a TOML host: adopt any hand-written copy of the
+    // Writing a region into a TOML host: adopt any hand-written copy of the
     // tables the body declares, rather than appending a duplicate that TOML
-    // will refuse to parse. Only on introduction — once the region exists,
-    // `upsert_region_with_placement` replaces it in place and there is nothing
-    // to adopt.
+    // will refuse to parse.
+    //
+    // This runs on updates as well as introductions. It was once scoped to
+    // introductions, on the reasoning that replacing an existing region in
+    // place cannot add a header — true of the splice, but not of the body: a
+    // template that gains a table the host declares by hand collides on the
+    // next run. Reconciling it here is what spares the user an edit they would
+    // have to reverse-engineer, since the correct one (drop the header, move
+    // the extras below the closing sentinel) is not something a diagnostic can
+    // usefully describe. On an ordinary update there is nothing to adopt:
+    // adoption masks every managed region before parsing, so tables the region
+    // already owns are invisible and it returns `Unchanged`.
     let adopted;
     let mut residue = String::new();
-    let base = if is_toml_host(host_relpath) && find_region(base, region_id, syntax)?.is_none() {
+    let base = if is_toml_host(host_relpath) {
         match adopt_unmanaged_toml_tables(base, rendered_body, syntax) {
             TomlAdoption::Unchanged => base,
             TomlAdoption::Adopted { text, residue: kept } => {
@@ -341,18 +351,116 @@ mod tests {
         );
     }
 
-    /// Once the region exists it is replaced where it stands, so it cannot
-    /// introduce a duplicate header — and a host the repository has since
-    /// broken by hand is not anvil's to refuse. Checking an update too would
-    /// turn every such file into a refusal of a region that is already there.
+    /// A region already on disk beside a hand-written copy of its own table is
+    /// the duplicate-header file adoption exists to repair — so an update
+    /// repairs it rather than walking past it. The host below does not parse as
+    /// written: two `[advisories]` headers. Adoption masks the region, sees the
+    /// hand-written copy, and takes it over.
     #[test]
-    fn an_existing_region_is_not_re_checked() {
-        let host = "# >>> anvil-managed: r\n[advisories]\nyanked = \"deny\"\n# <<< anvil-managed: r\n\n[advisories]\nignore = []\n";
+    fn an_existing_region_beside_a_hand_written_copy_is_repaired() {
+        let host = "# >>> anvil-managed: r\n[advisories]\nyanked = \"warn\"\n# <<< anvil-managed: r\n\n[advisories]\nignore = []\n";
+        assert!(host.parse::<DocumentMut>().is_err(), "the host starts out broken");
 
-        assert_eq!(
-            toml_introduction_refusal(Some(host), request("deny.toml", "r", "[advisories]\nyanked = \"deny\"\n")),
-            None
+        let request = request("deny.toml", "r", "[advisories]\nyanked = \"deny\"\n");
+        assert_eq!(toml_introduction_refusal(Some(host), request), None, "repairable, not refused");
+
+        let mut manifest = Manifest::default();
+        manifest.set_region("deny.toml", "r", checksum_str("[advisories]\nyanked = \"warn\"\n"));
+        let item = plan_managed_region(&manifest, Some(host), request).unwrap();
+        let spliced = item.spliced_host.as_deref().expect("the region is written");
+
+        let document = spliced
+            .parse::<DocumentMut>()
+            .unwrap_or_else(|error| panic!("the repaired host must parse: {error}\n---\n{spliced}\n---"));
+        assert_eq!(spliced.matches("[advisories]").count(), 1, "one header survives:\n{spliced}");
+        assert!(
+            document["advisories"]["ignore"].as_array().is_some(),
+            "and the hand-written entry is kept:\n{spliced}"
         );
+    }
+
+    /// The update path used to be assumed safe: replacing a region where it
+    /// stands cannot add a header. The *body* can. A template that gains a
+    /// table the host already declares by hand collided on the next run, from a
+    /// host that was valid before it — `decision=Write`, no refusal, two
+    /// `[licenses]` headers on disk.
+    ///
+    /// Reconciling it here rather than refusing is deliberate. The edit that
+    /// clears it by hand — drop the header, move the extras below the closing
+    /// sentinel so TOML still reads them as that table's — is not something a
+    /// diagnostic can usefully describe, and the likeliest reading of one
+    /// ("remove the table") costs the user the setting they wrote.
+    #[test]
+    fn an_update_whose_body_gains_a_table_adopts_the_hand_written_copy() {
+        let host = "\
+[licenses]
+unused-allowed-license = \"allow\"
+
+# >>> anvil-managed: r
+[advisories]
+yanked = \"deny\"
+# <<< anvil-managed: r
+";
+        assert!(host.parse::<DocumentMut>().is_ok(), "the host is valid before the bump");
+
+        let old_body = "[advisories]\nyanked = \"deny\"\n";
+        let new_body = "[advisories]\nyanked = \"deny\"\n\n[licenses]\nallow = [\"MIT\"]\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("deny.toml", "r", checksum_str(old_body));
+
+        let request = request("deny.toml", "r", new_body);
+        assert_eq!(toml_introduction_refusal(Some(host), request), None, "adoption resolves it");
+
+        let item = plan_managed_region(&manifest, Some(host), request).unwrap();
+        assert_eq!(item.decision, Decision::Write, "the template moved, so the region is rewritten");
+        let spliced = item.spliced_host.as_deref().expect("the region is written");
+
+        let document = spliced
+            .parse::<DocumentMut>()
+            .unwrap_or_else(|error| panic!("the updated host must parse: {error}\n---\n{spliced}\n---"));
+        assert_eq!(spliced.matches("[licenses]").count(), 1, "no duplicate header:\n{spliced}");
+        assert_eq!(
+            document["licenses"]["unused-allowed-license"].as_str(),
+            Some("allow"),
+            "the user's own setting is never dropped, and still configures `[licenses]`:\n{spliced}"
+        );
+        assert!(document["licenses"]["allow"].as_array().is_some(), "alongside the managed keys");
+    }
+
+    /// Adoption on the update path does not reach for anything it did not
+    /// reach for before: with nothing hand-written outside a region, every
+    /// table the body declares is already the region's own and invisible behind
+    /// the mask, so an ordinary template bump is byte-identical to what it was.
+    #[test]
+    fn an_ordinary_update_is_untouched_by_adoption() {
+        let host = "# >>> anvil-managed: r\n[advisories]\nyanked = \"warn\"\n# <<< anvil-managed: r\n";
+        let new_body = "[advisories]\nyanked = \"deny\"\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("deny.toml", "r", checksum_str("[advisories]\nyanked = \"warn\"\n"));
+
+        let item = plan_managed_region(&manifest, Some(host), request("deny.toml", "r", new_body)).unwrap();
+
+        assert_eq!(item.decision, Decision::Write);
+        assert_eq!(
+            item.spliced_host.as_deref(),
+            Some("# >>> anvil-managed: r\n[advisories]\nyanked = \"deny\"\n# <<< anvil-managed: r\n"),
+            "the region is replaced in place, with nothing relocated"
+        );
+    }
+
+    /// An update whose body disagrees with a hand-written value still has no
+    /// safe output, so it refuses exactly as an introduction does — and the
+    /// remedy the diagnostic names is one the user can actually carry out.
+    #[test]
+    fn an_update_that_conflicts_with_a_hand_written_value_is_refused() {
+        let host =
+            "[licenses]\nconfidence-threshold = 0.8\n\n# >>> anvil-managed: r\n[advisories]\nyanked = \"deny\"\n# <<< anvil-managed: r\n";
+        let new_body = "[advisories]\nyanked = \"deny\"\n\n[licenses]\nconfidence-threshold = 0.93\n";
+
+        let reason = toml_introduction_refusal(Some(host), request("deny.toml", "r", new_body))
+            .expect("a disagreement over `confidence-threshold` must be refused");
+
+        assert!(reason.contains("confidence-threshold"), "the refusal names the key: {reason}");
     }
 
     #[test]
@@ -570,12 +678,15 @@ mod tests {
         assert_eq!(item.decision, Decision::Propose);
     }
 
-    /// Adoption applies only when the region is first introduced. Once the
-    /// region exists, the host outside the sentinels is untouched and the
-    /// body is replaced in place, so a hand-written table stays exactly where
-    /// it is whatever its relationship to the rendered body.
+    /// The counterpart to the introduction case, and once the reverse of it:
+    /// this asserted that an existing region left a hand-written `[lints]`
+    /// exactly where it was, which — with the body declaring `[lints]` too —
+    /// is a `Cargo.toml` carrying two `[lints]` headers, i.e. one TOML rejects
+    /// and cargo cannot read. Adoption now runs here too, so the hand-written
+    /// copy is taken over instead. Its lone entry is one the body declares
+    /// identically, so it is covered and simply dropped.
     #[test]
-    fn an_existing_region_does_not_re_run_table_adoption() {
+    fn an_existing_region_adopts_a_hand_written_table_its_body_declares() {
         let host = "[lints]\nworkspace = true\n\n# >>> anvil-managed: r\nold = true\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
         manifest.set_region("Cargo.toml", "r", checksum_str("old = true\n"));
@@ -584,10 +695,11 @@ mod tests {
 
         assert_eq!(item.decision, Decision::Write);
         let spliced = item.spliced_host.as_deref().unwrap();
-        assert!(
-            spliced.starts_with("[lints]\nworkspace = true\n"),
-            "the hand-written table is left alone:\n{spliced}"
-        );
+        spliced
+            .parse::<DocumentMut>()
+            .unwrap_or_else(|error| panic!("the updated manifest must parse: {error}\n---\n{spliced}\n---"));
+        assert_eq!(spliced.matches("[lints]").count(), 1, "no duplicate header:\n{spliced}");
+        assert!(spliced.contains("workspace = true"), "the setting survives:\n{spliced}");
     }
 
     #[test]

@@ -1,0 +1,19 @@
+---
+source: crates/cargo-anvil/tests/toml_adoption.rs
+expression: "report(\"(anvil creates this file)\\n\", &tmp, \"deny.toml\", &outcome)"
+---
+--- deny.toml, as the user wrote it ---
+(anvil creates this file)
+
+--- decisions ---
+anvil-licenses-basics: Write
+anvil-licenses-threshold: LeaveAlone
+
+--- refusals ---
+Refused to manage deny.toml [anvil-licenses-threshold]: this region declares `[licenses]`, which the managed region 'anvil-licenses-basics' already declares in the same file. Both are anvil's own regions, so deny.toml cannot be edited to fix this — please report it. This region was left unchanged; other regions in the same file and other artifacts may still be updated.
+
+--- deny.toml, as anvil left it ---
+# >>> anvil-managed: anvil-licenses-basics
+[licenses]
+allow = ["MIT"]
+# <<< anvil-managed: anvil-licenses-basics

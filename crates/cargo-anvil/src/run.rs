@@ -6,7 +6,7 @@
 //! Orchestrates: workspace discovery, manifest load, backend resolution,
 //! emitter invocation, plan accumulation, and final apply/summarize.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use ohno::{AppError, bail};
@@ -26,7 +26,7 @@ use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
-use crate::region::{CommentSyntax, RegionPlacement, find_region, remove_region, upsert_region_with_placement};
+use crate::region::{CommentSyntax, RegionPlacement, declared_tables, find_region, remove_region, upsert_region_with_placement};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -468,11 +468,36 @@ fn push_region_at(
         syntax: spec.syntax,
         placement,
     };
-    // Introducing a region into a TOML host that already declares the same
-    // table by hand can produce a file TOML cannot read. Refuse the region
-    // rather than write it: `cargo deny` and `cargo` itself fail on the whole
-    // file, so a silent rewrite breaks the repository the generator was
-    // onboarding, and the manifest would record a region nothing can use.
+    // Two catalog regions on one host that declare the same table compose into
+    // a duplicate header, and the parser backstop below cannot see it: it masks
+    // every other managed region before checking, so each sibling is invisible
+    // to the other. Both regions are anvil's own, so unlike every other refusal
+    // there is no edit to the host that resolves it — say so rather than
+    // sending the reader to reconcile a table they did not write.
+    if let Some(collision) = composed.claim_tables(&host, spec.id.as_str(), body) {
+        plan.refusal(format!(
+            "Refused to manage {host} [{id}]: this region declares `[{table}]`, which the managed region \
+             '{owner}' already declares in the same file. Both are anvil's own regions, so {host} cannot be \
+             edited to fix this — please report it. This region was left unchanged; other regions in the same \
+             file and other artifacts may still be updated.",
+            id = spec.id.as_str(),
+            table = collision.table,
+            owner = collision.owner,
+        ));
+        plan.push(PlanItem::noop(
+            Target::Region {
+                host,
+                id: spec.id.as_str().to_owned(),
+            },
+            Decision::LeaveAlone,
+        ));
+        return Ok(());
+    }
+    // Writing a region into a TOML host that already declares the same table by
+    // hand can produce a file TOML cannot read. Refuse the region rather than
+    // write it: `cargo deny` and `cargo` itself fail on the whole file, so a
+    // silent rewrite breaks the repository the generator was onboarding, and
+    // the manifest would record a region nothing can use.
     if let Some(reason) = toml_introduction_refusal(current.as_deref(), request) {
         refuse_region(plan, host, spec.id.as_str(), &reason);
         return Ok(());
@@ -612,6 +637,46 @@ struct ComposedHosts {
     /// Hosts whose refusal has already been reported, so one fault produces one
     /// diagnostic rather than one per region.
     reported: BTreeSet<String>,
+    /// Which region has claimed each TOML table of each host, among the regions
+    /// this pass is writing.
+    ///
+    /// Two catalog regions on one host that both declare `[licenses]` compose
+    /// into a file with two `[licenses]` headers, and neither notices: the
+    /// parser backstop masks every *other* managed region before it checks, so
+    /// each is invisible to the other. That masking is deliberate and cannot
+    /// simply be dropped — during a migration the region being replaced
+    /// legitimately declares the same tables as the regions replacing it — but
+    /// a region being removed is an orphan, absent from the catalog, so it
+    /// never claims anything here and migrations are unaffected.
+    claims: HashMap<String, BTreeMap<String, String>>,
+}
+
+impl ComposedHosts {
+    /// Claim `body`'s tables for `region_id`, or name the sibling that already
+    /// holds one of them.
+    fn claim_tables(&mut self, host_relpath: &str, region_id: &str, body: &str) -> Option<Collision> {
+        let claimed = self.claims.entry(host_relpath.to_owned()).or_default();
+        for table in declared_tables(body) {
+            match claimed.get(&table) {
+                Some(owner) if owner != region_id => {
+                    return Some(Collision {
+                        table,
+                        owner: owner.clone(),
+                    });
+                }
+                _ => {
+                    claimed.insert(table, region_id.to_owned());
+                }
+            }
+        }
+        None
+    }
+}
+
+/// A table two managed regions of one host both declare.
+struct Collision {
+    table: String,
+    owner: String,
 }
 
 /// Classify a composed host before anything is written to it.
@@ -2172,6 +2237,63 @@ mod tests {
         // Steady state: both regions are now tracked, so a re-run is a no-op.
         let second = run_update(&catalog, &local_only(), tmp.path()).unwrap();
         assert!(!second.plan.has_changes(), "second run should be idempotent");
+    }
+
+    /// Two catalog regions on one host that declare the same table compose into
+    /// a file with two `[licenses]` headers, which TOML rejects. Neither region
+    /// can see the problem on its own: the parser backstop masks every *other*
+    /// managed region before it checks, so each sibling is invisible to the
+    /// other, and both used to plan a `Write` that left `shared.toml`
+    /// unreadable.
+    ///
+    /// Both regions are anvil's own, so there is no edit to `shared.toml` that
+    /// resolves it — the diagnostic says so and asks for a report instead of
+    /// sending the reader to reconcile a table they did not write. The first
+    /// region still writes: refusing is per region, and one of the two claims
+    /// is legitimate.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn two_regions_claiming_one_table_refuse_the_second() {
+        let tmp = empty_workspace();
+        let catalog = two_region_catalog(
+            "shared.toml",
+            "anvil-sec-a",
+            "[licenses]\nallow = [\"MIT\"]\n",
+            "anvil-sec-b",
+            "[licenses]\nconfidence-threshold = 0.9\n",
+        );
+
+        let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        shared
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|error| panic!("the host must stay readable: {error}\n---\n{shared}\n---"));
+        assert_eq!(shared.matches("[licenses]").count(), 1, "no duplicate header:\n{shared}");
+        assert!(shared.contains("anvil-sec-a"), "the first claim is honored:\n{shared}");
+        assert!(!shared.contains("anvil-sec-b"), "the colliding sibling is not written:\n{shared}");
+
+        let refusal = outcome
+            .plan
+            .refusals()
+            .iter()
+            .find(|reason| reason.contains("anvil-sec-b"))
+            .unwrap_or_else(|| panic!("the collision is reported; got {:#?}", outcome.plan.refusals()));
+        assert!(refusal.contains("[licenses]"), "it names the table: {refusal}");
+        assert!(refusal.contains("anvil-sec-a"), "and the sibling holding it: {refusal}");
+        assert!(
+            refusal.contains("please report it"),
+            "and asks for a report, since no edit to the host fixes it: {refusal}"
+        );
+        assert!(
+            !refusal.contains("Reconcile the hand-written table"),
+            "it must not send the reader to reconcile a table they did not write: {refusal}"
+        );
+        assert_eq!(
+            outcome.plan.dry_run_exit_code(),
+            1,
+            "and a catalog defect fails the drift gate rather than passing quietly"
+        );
     }
 
     /// Splitting one region into several on the same host (the `deny.toml`

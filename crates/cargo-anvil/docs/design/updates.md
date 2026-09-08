@@ -290,6 +290,25 @@ unchanged, and a diagnostic names the host and the reason. The diagnostic also e
 that other regions in the same file and other artifacts may still be updated. Refusing
 is scoped to the region, not the host or the run.
 
+Adoption runs when a region is **updated**, not only when it is introduced. Replacing a
+region where it stands cannot add a header, but its *body* can: a template that gains a
+table the host already declares by hand collides on the next run, from a host that was
+valid before it. Reconciling it is deliberate rather than refusing, because the edit that
+clears it by hand — drop the header, move the remaining settings below the closing sentinel
+so TOML still reads them as that table's — is not something a diagnostic can usefully
+describe, and its likeliest reading ("remove the table") costs the user the setting they
+wrote. An ordinary update is unaffected: adoption masks every managed region before
+parsing, so tables the region already owns are invisible and it reports no change.
+
+The masking that makes migrations safe leaves one case the parser cannot see: two regions
+*of the catalog* on one host that declare the same table are each hidden from the other's
+check, and compose into a duplicate header. The planner tracks which region has claimed
+each table of each host and refuses the second, before either is written. A region being
+removed is an orphan — absent from the catalog — so it claims nothing and migrations still
+work. This refusal reads differently from the rest on purpose: both regions are anvil's
+own, so no edit to the host resolves it, and the diagnostic asks for a bug report instead
+of sending the reader to reconcile a table they never wrote.
+
 The diagnostic asks the user to reconcile the hand-written table with the managed one
 before retrying. No managed region was introduced on refusal, so there is no region to
 empty at that point. When adoption succeeds, residue insertion preserves any existing
