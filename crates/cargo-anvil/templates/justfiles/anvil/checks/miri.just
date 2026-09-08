@@ -27,9 +27,9 @@ anvil-miri package="" test="" example="": anvil-miri-validate-prereqs anvil-impa
         Write-Error 'anvil-miri: --example requires --package to avoid workspace ambiguity'
         exit 2
     }
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $pkg = @(if ($package) { '--package'; $package } else { $selection })
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-miri: no affected packages; skipping'; exit 0 }
+    $pkg = @(if ($package) { '--package'; $package } elseif ($include) { -split $include } else { '--workspace' })
     if ($example) {
         & cargo '+{{ rust_nightly }}' miri run --all-features --locked @pkg --example $example
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -61,15 +61,15 @@ anvil-miri package="" test="" example="": anvil-miri-validate-prereqs anvil-impa
     # opt-out for build-tooling / CLI crates), so the old nextest
     # `--no-tests=pass` workaround is no longer needed.
     $filter = @(if ($testFilter) { '--'; $testFilter })
-    & cargo '+{{ rust_nightly }}' each @pkg --once '--' cargo '+{{ rust_nightly }}' miri test --all-features --tests '{packages}' @filter
+    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg @filter
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-runtime-analysis members ---
 
 # Install prerequisites for the `anvil-miri` recipe.
 [group("anvil-setup")]
-anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
+anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
 # Validate prerequisites for the `anvil-miri` recipe.
 [group("anvil-setup")]
-anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs

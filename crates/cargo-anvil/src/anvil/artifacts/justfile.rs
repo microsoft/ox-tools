@@ -396,20 +396,15 @@ mod tests {
 
     #[test]
     fn each_check_file_defines_its_own_check_recipe() {
-        // The file `checks/<name>.just` must define `anvil-<name>`, optionally
-        // with public arguments before its colon. This guards against a
-        // mis-split that files a check's recipe under the wrong name.
+        // The file `checks/<name>.just` must define `anvil-<name>:` -- guards
+        // against a mis-split that files a check's recipe under the wrong name.
         for (path, body) in CHECK_FILES {
             let stem = path
                 .strip_prefix("justfiles/anvil/checks/")
                 .and_then(|p| p.strip_suffix(".just"))
                 .expect("check file path has the expected shape");
-            let recipe = format!("anvil-{stem}");
-            let defines_recipe = body.lines().map(str::trim).any(|line| {
-                line.strip_prefix(&recipe)
-                    .is_some_and(|remainder| remainder.starts_with(':') || (remainder.starts_with(' ') && remainder.contains(':')))
-            });
-            assert!(defines_recipe, "{path} must define '{recipe}'");
+            let needle = format!("anvil-{stem}:");
+            assert!(body.contains(&needle), "{path} must define '{needle}'");
         }
     }
 
@@ -488,20 +483,15 @@ mod tests {
                         "{path}: declared {policy:?} but its _anvil-impact-include category is {calls:?}"
                     );
                     // A scoped check must depend on anvil-impact so the cache is
-                    // fresh. Simple cargo-each recipes expand the helper inline;
-                    // multi-stage recipes retain a local token array.
+                    // fresh, and capture the scope into a local $include -- no
+                    // ANVIL_INCLUDE_* env-var indirection.
                     assert!(
                         body.contains("-validate-prereqs anvil-impact"),
                         "{path} reads the impact cache but does not depend on anvil-impact"
                     );
-                    let captures_selection = body.contains("$selection = @(& \"{{ just_executable() }}\" _anvil-impact-include");
-                    let expands_selection_inline = body.lines().any(|line| {
-                        line.contains(" each $(& \"{{ just_executable() }}\" _anvil-impact-include")
-                            && line.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }")
-                    });
                     assert!(
-                        captures_selection || expands_selection_inline,
-                        "{path} must capture impact tokens or expand them inline with fail-closed status propagation"
+                        body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
+                        "{path} must capture _anvil-impact-include into a local $include variable"
                     );
                 }
             }
@@ -826,68 +816,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    #[test]
-    fn cargo_each_dispatchers_match_their_child_toolchain() {
-        for (path, body) in CHECK_FILES {
-            for line in body.lines().map(str::trim) {
-                let invokes_cargo_each =
-                    (line.starts_with("cargo ") || line.starts_with("& cargo ")) && line.contains(" each ") && line.contains("'--' cargo ");
-                if !invokes_cargo_each {
-                    continue;
-                }
-                let (_, after_outer_cargo) = line
-                    .split_once("cargo ")
-                    .expect("invokes_cargo_each requires an outer cargo invocation");
-                let (outer_toolchain, after_each) = after_outer_cargo
-                    .split_once(" each ")
-                    .expect("invokes_cargo_each requires an each subcommand");
-                let (_, after_child_cargo) = after_each
-                    .split_once("'--' cargo ")
-                    .expect("invokes_cargo_each requires a child cargo command");
-                assert!(
-                    after_child_cargo
-                        .strip_prefix(outer_toolchain)
-                        .is_some_and(|child_command| child_command.starts_with(' ')),
-                    "{path} selects different toolchains for cargo-each and its child Cargo: {line}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn simple_cargo_each_recipes_inline_impact_selection() {
-        for path in [
-            "justfiles/anvil/checks/bench.just",
-            "justfiles/anvil/checks/cargo-hack.just",
-            "justfiles/anvil/checks/cargo-sort.just",
-            "justfiles/anvil/checks/clippy.just",
-            "justfiles/anvil/checks/doc-build.just",
-            "justfiles/anvil/checks/ensure-no-cyclic-deps.just",
-            "justfiles/anvil/checks/ensure-no-default-features.just",
-            "justfiles/anvil/checks/license-headers.just",
-            "justfiles/anvil/checks/miri-race-coverage.just",
-            "justfiles/anvil/checks/miri-strict-provenance.just",
-            "justfiles/anvil/checks/miri-tree-borrows.just",
-        ] {
-            let (_, body) = CHECK_FILES
-                .iter()
-                .find(|(candidate, _)| *candidate == path)
-                .expect("the audited cargo-each recipe must remain in CHECK_FILES");
-            assert!(
-                !body.contains("$selection ="),
-                "{path} should not retain a local selection variable when cargo-each can consume it inline"
-            );
-            assert!(
-                body.lines().any(|line| {
-                    line.contains(" each $(& ")
-                        && line.contains("_anvil-impact-include")
-                        && line.contains("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }")
-                }),
-                "{path} must inline its fail-closed impact selection into cargo-each"
-            );
         }
     }
 

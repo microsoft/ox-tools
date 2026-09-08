@@ -10,15 +10,18 @@
 [script("pwsh", "-NoProfile")]
 anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') { Write-Host 'anvil-miri-strict-provenance: no affected packages; skipping'; exit 0 }
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
-    & cargo '+{{ rust_nightly }}' each $(& "{{ just_executable() }}" _anvil-impact-include affected; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }) --once '--' cargo '+{{ rust_nightly }}' miri test --all-features --tests '{packages}'
+    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-miri-strict-provenance` recipe.
 [group("anvil-setup")]
-anvil-miri-strict-provenance-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
+anvil-miri-strict-provenance-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
 # Validate prerequisites for the `anvil-miri-strict-provenance` recipe.
 [group("anvil-setup")]
-anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs

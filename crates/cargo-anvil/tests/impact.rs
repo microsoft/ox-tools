@@ -314,21 +314,7 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
     );
     assert!(noop.contains("cache hit"), "no-op run should report an impact cache hit:\n{noop}");
 
-    // --- 3. An old projection format forces include regeneration. ---
-    let state_file = impact_dir.join("impact.state");
-    let current_state = fs::read_to_string(&state_file).unwrap();
-    fs::write(&state_file, current_state.trim_start_matches("projection-v2 ")).unwrap();
-    let migrated = run_impact(root);
-    assert!(
-        !migrated.contains("impact set up to date (cache hit)"),
-        "an old projection format must not reuse incompatible include files:\n{migrated}"
-    );
-    assert!(
-        fs::read_to_string(&state_file).unwrap().starts_with("projection-v2 "),
-        "regeneration must persist the current projection format"
-    );
-
-    // --- 4. HEAD moves (a new commit): only `current.json` is regenerated. ---
+    // --- 3. HEAD moves (a new commit): only `current.json` is regenerated. ---
     // A committed change advances HEAD without moving the base ref
     // (origin/master), so current.key changes while the baseline key does
     // not. The tree stays clean, so scoping is NOT widened.
@@ -349,7 +335,7 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
         "a new commit moves HEAD, so the current snapshot is regenerated:\n{edited}"
     );
 
-    // --- 5. Base ref moves: only `baseline.json` is regenerated. ---
+    // --- 4. Base ref moves: only `baseline.json` is regenerated. ---
     // Advance origin/master to a NEW commit without moving HEAD (commit on a
     // throwaway branch, repoint the ref, return to main). The tree stays
     // clean, so `current` is untouched and only the baseline regenerates.
@@ -502,8 +488,8 @@ fn impact_empty_output_when_head_equals_base() {
     }
     // A clean checkout whose HEAD is exactly the base ref: cargo-delta sees no
     // committed diff and emits no impact JSON. The recipe must still write a
-    // durable, EMPTY impact set -- `{}` to impact.json and the `--none`
-    // selector for every tier -- and treat an unchanged repeat run as a cache
+    // durable, EMPTY impact set -- `{}` to impact.json and the `--skip`
+    // sentinel for every tier -- and treat an unchanged repeat run as a cache
     // hit. (The shared `workspace()` fixture always advances HEAD past the
     // base, so this empty-output path is otherwise never exercised.)
     let tmp = workspace_at_base();
@@ -521,8 +507,8 @@ fn impact_empty_output_when_head_equals_base() {
     for tier in ["modified", "affected", "required"] {
         assert_eq!(
             fs::read_to_string(impact_dir.join(format!("include_{tier}.txt"))).unwrap().trim(),
-            "--none",
-            "an empty impact set must project tier '{tier}' to the --none selector"
+            "--skip",
+            "an empty impact set must project tier '{tier}' to the --skip sentinel"
         );
     }
 
@@ -610,10 +596,8 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
         fs::read_to_string(impact_dir.join("include_required.txt")).unwrap().trim(),
         "--workspace"
     );
-    assert_eq!(
-        fs::read_to_string(impact_dir.join("include_modified.txt")).unwrap().trim(),
-        "--workspace"
-    );
+    // modified is empty (not --skip), so its workspace-wide tools still run.
+    assert_eq!(fs::read_to_string(impact_dir.join("include_modified.txt")).unwrap().trim(), "");
 
     // The warning must fire on EVERY dirty invocation, not just the first --
     // running again with the same dirty tree still warns (the dirty check runs
@@ -636,40 +620,45 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
     // land in the affected tier (guards against a regression that drops it or
     // widens without printing the warning).
     let affected_after = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
-    let affected_tokens = affected_after.lines().collect::<Vec<_>>();
     assert!(
-        affected_tokens.windows(2).any(|pair| pair == ["--package", "beta"]),
+        affected_after.contains("--package beta@"),
         "committing the uncommitted change must scope beta into the affected tier, got: {affected_after}"
     );
 }
 
 #[test]
 #[serial]
-fn impact_include_reads_workspace_selector_for_modified_widen() {
+fn impact_include_reads_zero_byte_modified_file_without_throwing() {
     if !tools_available() {
         return;
     }
-    // A dirty-tree widen admits modified-tier workspace-wide commands through
-    // cargo-each with the same concrete --workspace selector as every other
-    // tier.
+    // The dirty-tree widen writes include_modified.txt as a 0-byte file
+    // (`-Value '' -NoNewline`). `Get-Content -Raw` returns $null for a 0-byte
+    // file, so `_anvil-impact-include` must read it null-safely rather than
+    // throwing on `$null.Trim()` -- which every modified-tier check hits on any
+    // dirty local run.
     let tmp = workspace();
     let root = tmp.path();
-    // Uncommitted edit -> anvil-impact widens every tier.
+    // Uncommitted edit -> anvil-impact widens and writes the 0-byte include.
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn wip() {}\n");
     run_impact(root);
     let modified_file = root.join("target/anvil/impact/include_modified.txt");
-    assert_eq!(fs::read_to_string(&modified_file).unwrap().trim(), "--workspace");
+    assert_eq!(
+        fs::metadata(&modified_file).unwrap().len(),
+        0,
+        "the dirty widen must write a 0-byte include_modified.txt for this test to be meaningful"
+    );
 
     let out = just_cmd(root, &["_anvil-impact-include", "modified"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(
         out.status.success(),
-        "_anvil-impact-include must resolve the modified selector:\n{combined}"
+        "_anvil-impact-include must not throw on a 0-byte include file:\n{combined}"
     );
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
-        "--workspace",
-        "a widened modified tier must admit its command through cargo-each"
+        "",
+        "an empty modified tier must resolve to '' (run), not crash"
     );
 }
 
@@ -918,7 +907,6 @@ fn fake_cargo(dir: &Path, log: &Path) {
              foreach ($argument in $args) {{\n\
              \x20   if ($argument -is [Array]) {{ $effectiveArgs += @($argument) }} else {{ $effectiveArgs += $argument }}\n\
              }}\n\
-             if (($effectiveArgs -contains 'install') -and ($effectiveArgs -contains '--list')) {{ Write-Output 'cargo-each v0.1.0:'; exit 0 }}\n\
              Add-Content -LiteralPath '{}' -Value ($effectiveArgs -join ' ')\n\
              exit 0\n",
             log.display()
@@ -927,29 +915,11 @@ fn fake_cargo(dir: &Path, log: &Path) {
     }
     #[cfg(unix)]
     {
-        let script = format!(
-            "#!/bin/sh\nall_args=\"$*\"\ncase \"$1\" in +*) shift ;; esac\nif [ \"$1 $2\" = \"install --list\" ]; then printf '%s\\n' 'cargo-each v0.1.0:'; exit 0; fi\nprintf '%s\\n' \"$all_args\" >> '{}'\nexit 0\n",
-            log.display()
-        );
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n", log.display());
         let path = dir.join("cargo");
         fs::write(&path, script).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
-}
-
-#[cfg(unix)]
-#[test]
-fn fake_cargo_recognizes_toolchain_qualified_install_list() {
-    let tmp = TempDir::new().unwrap();
-    let log = tmp.path().join("cargo.log");
-    fake_cargo(tmp.path(), &log);
-    let output = Command::new(tmp.path().join("cargo"))
-        .args(["+1.97", "install", "--list"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("cargo-each v0.1.0:"));
-    assert!(!log.exists(), "tool discovery probes should not be logged as check invocations");
 }
 
 /// The process `PATH` with `dir` prepended, so an executable in `dir` shadows
@@ -964,14 +934,18 @@ fn path_with_prefix(dir: &Path) -> OsString {
 
 #[test]
 #[serial]
-fn scoped_check_inlines_cached_selection_and_empty_set_into_cargo_each() {
+fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     if !tools_available() {
         return;
     }
-    // End-to-end proof of the shared check contract: a scoped check resolves
-    // one selector token per line from the downloaded cache directly in the
-    // cargo-each invocation. cargo-each owns package resolution, child
-    // expansion, and empty-set success without a local PowerShell array.
+    // End-to-end proof of the shared check contract that the 25 rewritten
+    // checks all use: a scoped check resolves its tier from the downloaded
+    // target/anvil/impact cache, splits the `--package name@version` list, and
+    // passes it to its cargo tool -- and short-circuits (never invoking the
+    // tool) on the `--skip` sentinel. `anvil-examples` stands in for the
+    // family; a fake `cargo` on PATH captures the argv the recipe builds. This
+    // guards the PowerShell capture/splitting/short-circuit path that static
+    // text-presence assertions on the emitted recipe cannot.
     let tmp = workspace();
     let root = tmp.path();
     let impact_dir = root.join("target/anvil/impact");
@@ -981,7 +955,7 @@ fn scoped_check_inlines_cached_selection_and_empty_set_into_cargo_each() {
     let affected = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
     let affected = affected.trim().to_owned();
     assert!(
-        affected.lines().eq(["--package", "alpha"]),
+        affected.contains("--package alpha@"),
         "precondition: the affected tier should be a scoped --package list, got: {affected}"
     );
 
@@ -990,26 +964,26 @@ fn scoped_check_inlines_cached_selection_and_empty_set_into_cargo_each() {
     fake_cargo(&bin, &log);
     let path = path_with_prefix(&bin);
 
-    // consume mode: anvil-impact no-ops, so the check's cargo-each invocation
-    // is captured by the shim.
-    let out = just_cmd(root, &["anvil-bench"])
+    // consume mode: anvil-impact no-ops (no snapshot / cargo-delta), so the
+    // ONLY cargo invocation is the recipe's own `cargo build` -- captured by
+    // the shim.
+    let out = just_cmd(root, &["anvil-examples"])
         .env("ANVIL_IMPACT", "consume")
         .env("PATH", &path)
         .output()
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "scoped anvil-bench run failed:\n{combined}");
+    assert!(out.status.success(), "scoped anvil-examples run failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv.contains("each --package alpha --once -- cargo") && argv.contains("bench {packages} --all-features --no-run"),
-        "the cached selector tokens must reach cargo-each; captured argv:\n{argv}"
+        argv.contains("build") && argv.contains(&affected) && argv.contains("--examples"),
+        "the cached --package list must reach the tool; captured argv:\n{argv}\nexpected to contain: build ... {affected} ... --examples"
     );
 
-    // The empty tier is represented in cargo-each's native selector language
-    // and reaches the same one-line invocation.
-    fs::write(impact_dir.join("include_affected.txt"), "--none").unwrap();
+    // The `--skip` sentinel must short-circuit: the tool is never invoked.
+    fs::write(impact_dir.join("include_affected.txt"), "--skip").unwrap();
     fs::write(&log, "").unwrap();
-    let skipped = just_cmd(root, &["anvil-bench"])
+    let skipped = just_cmd(root, &["anvil-examples"])
         .env("ANVIL_IMPACT", "consume")
         .env("PATH", &path)
         .output()
@@ -1019,11 +993,11 @@ fn scoped_check_inlines_cached_selection_and_empty_set_into_cargo_each() {
         String::from_utf8_lossy(&skipped.stdout),
         String::from_utf8_lossy(&skipped.stderr)
     );
-    assert!(skipped.status.success(), "skipped anvil-bench run failed:\n{skip_combined}");
+    assert!(skipped.status.success(), "skipped anvil-examples run failed:\n{skip_combined}");
     let argv_skip = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv_skip.contains("each --none --once -- cargo"),
-        "the --none selector must reach cargo-each; captured argv:\n{argv_skip}\noutput:\n{skip_combined}"
+        !argv_skip.contains("build"),
+        "the --skip sentinel must short-circuit the tool (no cargo build); captured argv:\n{argv_skip}"
     );
 }
 
@@ -1035,8 +1009,10 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     let tmp = workspace();
     let root = tmp.path();
     run_impact(root);
-    let affected = fs::read_to_string(root.join("target/anvil/impact/include_affected.txt")).unwrap();
-    let affected = affected.lines().collect::<Vec<_>>().join(" ");
+    let affected = fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
+        .unwrap()
+        .trim()
+        .to_owned();
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
@@ -1062,16 +1038,15 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     for expected in [
         format!("+1.97 test {affected} --tests --all-features --locked"),
         format!("+1.97 test {affected} --tests --locked"),
-        format!("+1.97 check {affected} --benches --examples --all-features --locked"),
-        format!("+1.97 check {affected} --benches --examples --locked"),
     ] {
         assert!(argv.contains(&expected), "missing MSRV invocation '{expected}' in:\n{argv}");
     }
-    // Tests must not execute bench targets; the separate cargo-check commands
-    // retain compile-only MSRV coverage for benches and examples.
+    // The MSRV check must not build or execute bench targets: `--all-targets`
+    // expands to include `--benches`, and a `harness = false` bench then runs
+    // through a driver binary the msrv setup chain never installs.
     assert!(
-        !argv.lines().any(|line| line.contains(" test ") && line.contains("--benches")),
-        "MSRV test invocations must not select bench targets; captured argv:\n{argv}"
+        !argv.contains("--all-targets") && !argv.contains("--benches"),
+        "MSRV invocations must not select bench targets; captured argv:\n{argv}"
     );
 
     let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
@@ -1090,11 +1065,8 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     );
     assert!(skipped.status.success(), "no-MSRV invocation failed:\n{skip_combined}");
     assert!(
-        fs::read_to_string(&log)
-            .unwrap()
-            .lines()
-            .all(|line| !line.contains(" test ") && !line.contains(" check ")),
-        "no-MSRV invocation must skip before cargo test/check"
+        fs::read_to_string(&log).unwrap().is_empty(),
+        "no-MSRV invocation must skip before calling cargo"
     );
 }
 
@@ -1141,7 +1113,7 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
     // Regression guard for the loom `--workspace` path: `anvil-loom` parses its
     // own package set from `cargo metadata`, and a prior bug turned the
     // unscoped `--workspace` value into an empty affected set that silently
-    // skipped every loom target. The representative anvil-examples/`--none`
+    // skipped every loom target. The representative anvil-examples/`--skip`
     // test can't catch this bespoke parsing. Here a fake `cargo metadata`
     // reports a crate with a `required-features = ["loom"]` test target; run
     // under ANVIL_IMPACT=off (so the tier resolves to --workspace), loom must
@@ -1327,8 +1299,8 @@ fn consume_without_downloaded_cache_fails_loudly() {
     // checks their presence, never recomputes.
     let cache = root.join("target/anvil/impact");
     for (file, spec) in [
-        ("include_modified.txt", "--workspace"),
-        ("include_affected.txt", "--package\nalpha"),
+        ("include_modified.txt", ""),
+        ("include_affected.txt", "--package alpha@0.1.0"),
         ("include_required.txt", "--workspace"),
     ] {
         write(&cache.join(file), spec);
@@ -1339,46 +1311,6 @@ fn consume_without_downloaded_cache_fails_loudly() {
         ok.status.success(),
         "consume with a present cache must succeed as a no-op:\n{ok_combined}"
     );
-
-    // Presence is not enough: an empty or malformed selector would otherwise
-    // become an empty argv and make cargo-each fall back to default-members.
-    write(&cache.join("include_affected.txt"), "");
-    let empty = consume(&["anvil-impact"]);
-    let empty_combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&empty.stdout),
-        String::from_utf8_lossy(&empty.stderr)
-    );
-    assert_ne!(empty.status.code(), Some(0), "empty selector cache must fail:\n{empty_combined}");
-    assert!(empty_combined.contains("empty or malformed") && empty_combined.contains("affected"));
-
-    write(&cache.join("include_affected.txt"), "--package\nalpha\n--workspace");
-    let malformed = consume(&["anvil-impact"]);
-    let malformed_combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&malformed.stdout),
-        String::from_utf8_lossy(&malformed.stderr)
-    );
-    assert_ne!(
-        malformed.status.code(),
-        Some(0),
-        "malformed selector cache must fail:\n{malformed_combined}"
-    );
-    assert!(malformed_combined.contains("empty or malformed") && malformed_combined.contains("affected"));
-
-    write(&cache.join("include_affected.txt"), "--package\nalpha@0.1.0");
-    let qualified = consume(&["anvil-impact"]);
-    let qualified_combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&qualified.stdout),
-        String::from_utf8_lossy(&qualified.stderr)
-    );
-    assert_ne!(
-        qualified.status.code(),
-        Some(0),
-        "version-qualified cached selectors must fail:\n{qualified_combined}"
-    );
-    assert!(qualified_combined.contains("empty or malformed") && qualified_combined.contains("affected"));
 
     // A partially downloaded cache -- one tier's include file missing -- must
     // also fail loudly and name the missing tier. This guards the
@@ -1491,8 +1423,8 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
 
     let (stdout, stderr, ok) = run_format(root, "affected", fixture);
     assert!(ok, "the formatter must exit 0:\nstderr: {stderr}");
-    assert!(
-        stdout.lines().eq(["--package", "my-macro"]),
+    assert_eq!(
+        stdout, "--package my-macro@0.3.0",
         "the proc-macro target `my_macro` must map back to its package `my-macro`:\nstdout: {stdout}\nstderr: {stderr}"
     );
 }

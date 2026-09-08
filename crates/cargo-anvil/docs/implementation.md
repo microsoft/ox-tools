@@ -162,15 +162,11 @@ runs never collide or remove each other's checkout; it is always removed in a `f
 ### Fail-closed mapping and the dirty-tree safety net
 
 cargo-delta reports library/target identifiers that do not uniquely name a Cargo package, so
-`_anvil-impact-format` reverse-maps them to bare workspace package selectors using three
+`_anvil-impact-format` reverse-maps them to version-qualified package selectors using three
 Ordinal (case-sensitive) lookups (package name, lib/proc-macro target, manifest-dir leaf). When
 a reported identifier resolves to **zero** packages (an unmapped gap) or **more than one** (an
 ambiguity), the recipe fails hard rather than guessing — under-scoping would silently skip
-affected work. The cache keeps bare workspace names: cargo-each resolves and
-version-qualifies them where it materially simplifies a recipe, while native Cargo
-commands consume the same unambiguous workspace selectors directly. The impact state key includes a projection-format
-version, so the first run after an include-format change regenerates cached selectors
-instead of accepting incompatible files from an older catalog. Complementarily, a dirty working tree (any uncommitted change outside `target/`,
+affected work. Complementarily, a dirty working tree (any uncommitted change outside `target/`,
 detected via a git `:(exclude)` pathspec) widens *every* tier to `--workspace` locally, because
 cargo-delta scopes on the committed diff and cannot see working-tree edits. Cloud checkouts are clean, so this
 only affects local runs.

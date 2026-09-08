@@ -25,10 +25,9 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         Write-Error 'anvil-examples: --example requires --package to avoid workspace ambiguity'
         exit 2
     }
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    if (-not $package -and $selection -contains '--none') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
-    $pkgArgs = @(if ($package) { '--package'; $package } else { $selection })
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
+    $pkgArgs = @(if ($package) { '--package'; $package } elseif ($include) { -split $include } else { '--workspace' })
     $exampleArgs = @(if ($example) { '--example'; $example } else { '--examples' })
     $stableArgs = {{_anvil_stable_toolchain_args}}
     & cargo @stableArgs build @pkgArgs @exampleArgs --all-features --locked
@@ -45,11 +44,12 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
     }
     $selectedPackages = if ($package) {
         @($package)
-    } elseif ($selection -notcontains '--workspace') {
+    } elseif ($include -and $include -ne '--workspace') {
         $names = [System.Collections.Generic.List[string]]::new()
-        for ($i = 0; $i -lt $selection.Count; $i++) {
-            if ($selection[$i] -eq '--package' -and ++$i -lt $selection.Count) {
-                $names.Add(($selection[$i] -split '@', 2)[0])
+        $parts = @(-split $include)
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            if ($parts[$i] -eq '--package' -and ++$i -lt $parts.Count) {
+                $names.Add(($parts[$i] -split '@', 2)[0])
             }
         }
         @($names)

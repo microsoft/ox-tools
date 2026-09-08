@@ -12,57 +12,17 @@
 # doctests that only compile when those features are off. The
 # duplication is cheap because doctests are already a small fraction
 # of total compile/test time.
-#
-# Cargo errors when `cargo test --doc` selects only bin-only packages. Build
-# the subset with at least one Cargo target marked `doctest = true` before
-# running the two Cargo invocations. This includes explicit library
-# crate types such as rlib/cdylib as well as plain libraries and proc macros.
 
 # Run documentation tests for affected workspace packages.
 [script("pwsh", "-NoProfile")]
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    & cargo {{_anvil_stable_toolchain_args}} test --doc @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    if ($selection -contains '--none') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
-    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
-    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-doc-test: cargo metadata failed'; exit $LASTEXITCODE }
-    try {
-        $meta = $metadataJson | ConvertFrom-Json
-    } catch {
-        Write-Error "anvil-doc-test: could not parse cargo metadata output: $_"
-        exit 1
-    }
-    $docPackages = @{}
-    foreach ($package in $meta.packages) {
-        if ($package.targets | Where-Object { $_.doctest -eq $true }) {
-            $docPackages[$package.name] = $true
-        }
-    }
-    $names = if ($selection -contains '--workspace') {
-        @($docPackages.Keys | Sort-Object)
-    } else {
-        @(
-            for ($i = 0; $i -lt $selection.Count; $i++) {
-                if ($selection[$i] -eq '--package' -and ($i + 1) -lt $selection.Count) {
-                    $name = $selection[++$i]
-                    if ($docPackages.ContainsKey($name)) { $name }
-                }
-            }
-        )
-    }
-    if ($names.Count -eq 0) {
-        Write-Host 'anvil-doc-test: no affected doctest-capable packages; skipping'
-        exit 0
-    }
-    $docSelection = [System.Collections.Generic.List[string]]::new()
-    foreach ($name in $names) {
-        $docSelection.Add('--package')
-        $docSelection.Add($name)
-    }
-    & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --all-features --locked
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --locked
+    & cargo {{_anvil_stable_toolchain_args}} test --doc @pkg --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-doc-test` recipe.

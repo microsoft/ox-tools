@@ -28,15 +28,15 @@
 [script("pwsh", "-NoProfile")]
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include required)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
+    if ($include -eq '--skip') { Write-Host 'anvil-udeps: no affected packages; skipping'; exit 0 }
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Pass 1: default targets (lib + bins) -- surfaces [dependencies] that
     # are only used by tests/benches/examples (should be dev-deps).
-    if ($selection -contains '--none') { Write-Host 'anvil-udeps: no affected packages; skipping'; exit 0 }
-    & cargo '+{{ rust_nightly }}' udeps @selection --all-features
+    & cargo '+{{ rust_nightly }}' udeps @pkg --all-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Pass 2: --all-targets -- surfaces unused [dev-dependencies].
-    & cargo '+{{ rust_nightly }}' udeps @selection --all-features --all-targets
+    & cargo '+{{ rust_nightly }}' udeps @pkg --all-features --all-targets
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-udeps` recipe.

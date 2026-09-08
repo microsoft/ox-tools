@@ -32,25 +32,26 @@
 [script("pwsh", "-NoProfile")]
 anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     if (-not $IsLinux) {
         Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
         exit 0
     }
-    if ($selection -contains '--none') {
+    if ($include -eq '--skip') {
         Write-Host 'anvil-bolero: no affected packages; skipping'
         exit 0
     }
     $packageNames = [System.Collections.Generic.List[string]]::new()
-    if ($selection -notcontains '--workspace') {
-        $pkgArgs = $selection
+    if ($include -and $include -ne '--workspace') {
+        $pkgArgs = @(-split $include)
         for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
             if ($pkgArgs[$i] -ne '--package' -or ($i + 1) -ge $pkgArgs.Count) {
-                Write-Error "anvil-bolero: unsupported affected-package arguments: $($selection -join ' ')"
+                Write-Error "anvil-bolero: unsupported affected-package arguments: $include"
                 exit 1
             }
-            $packageNames.Add($pkgArgs[++$i])
+            # Impact emits version-qualified specs (name@version); cargo-bolero
+            # resolves workspace members by bare package name.
+            $packageNames.Add(($pkgArgs[++$i] -split '@', 2)[0])
         }
     } else {
         $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1

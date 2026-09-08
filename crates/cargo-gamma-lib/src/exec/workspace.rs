@@ -26,7 +26,7 @@ use super::events::Events;
 #[cfg(test)]
 use super::faults::{self, Fault};
 use super::loader::{Launch, toolchain_libraries};
-use super::manifest::{CAP_LINTS, Manifest, RUNTIME_CRATE, RUNTIME_PACKAGE, anchor_cargo_config, cap_lints};
+use super::manifest::{CAP_LINTS, Manifest, RUNTIME_CRATE, RUNTIME_PACKAGE, WorkspaceRuntimeFeatures, anchor_cargo_config, cap_lints};
 use super::nextest::Harness;
 use super::sync::sync_or_copy;
 use super::test_binary::{TEST_THREADS_VAR, TestBinary, harness_threads};
@@ -1497,6 +1497,15 @@ fn try_lock(file: &File) -> core::result::Result<(), TryLockError> {
 /// Every manifest is visited, not just the ones belonging to mutated packages: a package nobody
 /// mutates is still built, and a path dependency it cannot resolve fails the build just as surely.
 fn anchor_manifests(source: &Utf8Path, root: &Utf8Path, runtime: &Utf8Path) -> Result<()> {
+    // Read before any manifest in the tree is edited: `root` is the copy of the whole workspace
+    // `source` names, so its own `Cargo.toml` carries whatever `[workspace.dependencies]`
+    // declares for the runtime crate — settings a member manifest that only says
+    // `workspace = true` cannot see for itself once its own entry is replaced below. A missing,
+    // unreadable, or malformed root manifest here just leaves nothing to inherit; the walk below
+    // still reads and validates that same file in its own right, so a genuine problem with it is
+    // reported from there instead of masked here.
+    let workspace_features = WorkspaceRuntimeFeatures::from_workspace(&root.join("Cargo.toml")).unwrap_or_default();
+
     for entry in WalkDir::new(root.as_std_path()).into_iter().filter_map(core::result::Result::ok) {
         if entry.file_name() != "Cargo.toml" {
             continue;
@@ -1514,7 +1523,7 @@ fn anchor_manifests(source: &Utf8Path, root: &Utf8Path, runtime: &Utf8Path) -> R
         let mut manifest = Manifest::read(path)?;
 
         manifest.anchor_paths(&source.join(original), original);
-        manifest.redirect_runtime(runtime)?;
+        manifest.redirect_runtime(runtime, &workspace_features)?;
         manifest.save()?;
     }
 

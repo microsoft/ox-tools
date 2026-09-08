@@ -10,9 +10,9 @@
 [script("pwsh", "-NoProfile")]
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $selection = @(& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    if ($selection -contains '--none') { Write-Host 'anvil-careful: no affected packages; skipping'; exit 0 }
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') { Write-Host 'anvil-careful: no affected packages; skipping'; exit 0 }
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Guard against cargo-careful's stale-sysroot hazard. cargo-careful
     # builds a custom std ("careful sysroot": debug-assertions + extra UB
     # checks) into a STABLE cache path -- ProjectDirs(de.ralfj.cargo-careful),
@@ -66,7 +66,7 @@ anvil-careful: anvil-careful-validate-prereqs anvil-impact
     # there is nothing to clean). Written after the clean so it survives it.
     New-Item -ItemType Directory -Force -Path (Split-Path $marker) | Out-Null
     Set-Content -LiteralPath $marker -Value $idHash
-    & cargo '+{{ rust_nightly }}' careful test @selection --all-features --locked
+    & cargo '+{{ rust_nightly }}' careful test @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-careful` recipe.

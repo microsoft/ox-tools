@@ -33,8 +33,8 @@ repo/
 │   │                       runs `cargo delta impact`, and writes the
 │   │                       target/anvil/impact/ artifacts that scoped checks read
 │   │                       via _anvil-impact-include. Also owns _anvil-impact-format
-│   │                       (project a cargo-delta report into per-tier
-│   │                       cargo-each selector tokens). Same recipe
+│   │                       (project a cargo-delta report into the per-tier
+│   │                       `--package name@version` include list). Same recipe
 │   │                       locally and in CI.
 │   ├── checks/             one file per check: checks/<check>.just holds the
 │   │                       `anvil-<check>` recipe plus its paired `*-setup` and
@@ -438,13 +438,6 @@ Cargo-installed tools and stable analyzers use this same repository-selected
 compiler. Anvil does not provision a separate tooling compiler; checks that
 require nightly continue to use their catalog-pinned nightly.
 
-When `cargo-each` dispatches another Cargo command, both invocations use the
-same selector: the selected stable toolchain for stable checks, the same pinned
-nightly for nightly checks, or the same dynamically resolved MSRV for MSRV
-checks. A dispatcher must not select stable and then launch a differently
-selected Cargo child, because a later rustup-managed component can resolve back
-to the outer selection in a nested proxy chain.
-
 When the root manifest declares an MSRV, `anvil-msrv-test` runs affected-package
 `cargo test --tests` in all-features and default-features configurations
 under that compiler. This covers library and binary unit tests and integration
@@ -480,9 +473,7 @@ rust_nightly_external_types := "nightly-YYYY-MM-DD"
 ```
 
 **One source of truth, two consumers.** Recipes read the pins by `{{ }}` interpolation
-(`cargo +{{ rust_nightly }} udeps ...`). A recipe that delegates through
-`cargo-each` applies the same pin to both the dispatcher and child. The
-`anvil-toolchain-<name>-install`
+(`cargo +{{ rust_nightly }} udeps ...`). The `anvil-toolchain-<name>-install`
 recipes read the same variables and pass them to `rustup toolchain install`. The
 setup composites/templates call those install recipes (directly or transitively via
 a group's `*-setup` recipe). There is no env-file duplicate.
@@ -527,7 +518,7 @@ a CI shell and threading the result between jobs as environment variables.
 | `snapshots/baseline.json`    | cargo-delta snapshot of the base ref. Cached, keyed on the composite of the base commit sha **and** the effective `.delta.toml` identity (`baseline.key` stores `<base-sha> <config-hash>`) — the expensive throwaway-worktree snapshot is retaken when the base moves *or* the cargo-delta config changes, so the baseline is never diffed against a current snapshot captured under different rules. |
 | `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha (`current.key`); the dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
 | `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth; `{}` when nothing changed). |
-| `include_<tier>.txt`         | the pre-projected per-tier selector tokens (see below), one token per line. |
+| `include_<tier>.txt`         | the pre-projected per-tier scope string (see below), one file per tier. |
 
 Because the modified/current set comes from cargo-delta's **committed** git diff against
 the base, local scoping reflects the commits your branch adds on top of the base ref, the
@@ -535,16 +526,17 @@ same way a PR does — not un-committed working-tree edits.
 
 ### 4.1 How checks consume it
 
-Every **impact-scoped** check depends on `anvil-impact`. Ordinary checks pass their
-category's selector tokens directly to `cargo-each`. The helper call stays inline so
-cargo-each replaces, rather than accompanies, recipe-specific selection handling:
+Every **impact-scoped** per-crate check depends on `anvil-impact` and, at the top of its
+body, resolves its category's scope into a local `$include` variable by calling
+`_anvil-impact-include`:
 
 ```just
 [script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    & cargo each $(& "{{ just_executable() }}" _anvil-impact-include affected; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }) --once '--' cargo clippy '{packages}' --all-targets --all-features --locked '--' '-D' 'warnings'
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo clippy @(if ($include) { -split $include } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
 ```
 
 `_anvil-impact-include` reads `target/anvil/impact/` — the cache produced by the
@@ -558,26 +550,20 @@ both worlds:
   is threaded between jobs via environment variables.
 
 Each check requests one cargo-delta **category** — the selector it passes to
-`_anvil-impact-include`:
+`_anvil-impact-include` — which determines how it uses the returned `$include`:
 
 | Category   | What recipes do with it                                                                       |
 |------------|------------------------------------------------------------------------------------------------|
-| `modified` | `--none` makes an inline `cargo-each` gate a successful no-op. Otherwise `--workspace` admits the recipe's command against its normal full input domain. Recipes that need the selection before their final command handle the gate directly. |
-| `affected` | Inline `cargo-each` recipes resolve the selected members and forward them through `{packages}`. Multi-stage recipes retain the token array and pass it directly to Cargo. |
-| `required` | Same selection as affected plus transitive workspace dependencies; each recipe uses cargo-each only when it removes local orchestration. |
+| `modified` | `--skip` → recipe exits 0. Otherwise the recipe runs against the input domain defined by its own command; impact-selected package arguments are not forwarded. |
+| `affected` | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when empty. |
+| `required` | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
-The helper emits one token per line: `--none`, `--workspace`, or repeated
-`--package` / bare-name pairs. PowerShell expands that output into separate arguments
-without string parsing. The inline exit check preserves the helper's failure status
-instead of accidentally invoking cargo-each with its default-member selection.
-`cargo-each` resolves names against live workspace metadata and forwards
-version-qualified specs through `{packages}`.
-
-The helper validates this grammar before returning any cached selector. Empty files,
-mixed single-value and package forms, incomplete pairs, whitespace-bearing names, and
-unknown flag positions fail closed. `ANVIL_IMPACT=consume` validates all three downloaded
-selector files before accepting the artifact, so a malformed cache cannot fall through
-to cargo-each's default-member selection.
+`$include` is either the literal sentinel `--skip` (the tier is empty), a pre-built
+argument string like `--package alpha@1.0.0 --package beta@0.2.0` (version-qualified cargo
+specs, so `-p` resolves uniquely even against a like-named transitive dependency), or a
+full-workspace default (`--workspace` for affected/required, empty for modified) when the
+tier is unscoped. Every value comes from the shared `_anvil-impact-format` helper via the
+cache.
 
 `_anvil-impact-format` **fails the recipe** (non-zero exit, aborting `anvil-impact`)
 when at least one name cargo-delta reported cannot be resolved to exactly one workspace
@@ -607,21 +593,21 @@ The mapping from check to bucket is fixed in the catalog (see
 `anvil-impact` dependency and never resolve a scope; they always run. Group recipes do not
 resolve scope themselves; each underlying check reads what it needs.
 
-### 4.2 Empty tiers
+### 4.2 The `--skip` sentinel
 
-`_anvil-impact-format` emits cargo-each's native `--none` selector when a tier is empty
-(typically a docs-only PR, or a PR touching only files cargo-delta's
-`file_exclude_patterns` ignore). Ordinary recipes pass it directly to cargo-each, which
-exits successfully without spawning the child command. Orchestration-heavy recipes
-detect it before performing setup that would otherwise have side effects, before issuing
-multiple native Cargo commands, or, for `fmt`, before starting its separate
-full-workspace per-manifest cargo-each fan-out.
+`--skip` is a magic string `_anvil-impact-format` emits when a tier is empty (typically a
+docs-only PR, or a PR touching only files cargo-delta's `file_exclude_patterns` ignore).
+It is not a valid cargo argument, so there is no risk of collision with a real package
+name. Recipes test for it and exit 0 cleanly, keeping the job green while signalling that
+nothing in that tier needed to run. "Which checks can no-op when their tier is empty" is a
+per-check property living in the catalog/recipe, not in the wiring layer.
 
 ### 4.3 Disabling scoping and the escape hatch
 
 Set `ANVIL_IMPACT=off` in the environment to disable scoping entirely: `anvil-impact`
 (and its snapshot dependency) no-op without touching git or cargo-delta, and
-`_anvil-impact-include` returns `--workspace` for every tier. Because `just` runs a recipe's dependencies in the
+`_anvil-impact-include` returns each tier's full-workspace default (`--workspace` for
+affected/required, empty for modified). Because `just` runs a recipe's dependencies in the
 same environment, the guard is honored even when `anvil-impact` fires as a check
 dependency. This is exactly how the **scheduled** and **full** tiers stay full-workspace:
 `anvil-scheduled` / `anvil-full` wrap their private recipe in `_anvil-unscoped`
