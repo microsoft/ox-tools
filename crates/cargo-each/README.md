@@ -110,6 +110,9 @@ no brace-escape, so this passthrough is part of the contract.
 An empty resolved selection (via `--none`, or a filter that removes every
 member) is a **successful no-op**: `cargo-each` prints a one-line note and
 exits 0. This is what lets callers drop bespoke nothing-to-do guards.
+Child commands inherit `PATH` explicitly. On Windows this makes relative
+program lookup honor the inherited `PATH` order instead of preferring an
+unrelated executable beside `cargo-each`.
 Otherwise the exit code is the first failing command code (fail-fast),
 `1` under `--keep-going` if any command failed, or `2` for a `cargo-each`
 usage error (unknown selector, bad filter expression, misused placeholder).

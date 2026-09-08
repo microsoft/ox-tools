@@ -111,6 +111,60 @@ fn each(manifest: &Path) -> Command {
     cmd
 }
 
+#[cfg(windows)]
+fn compile_probe(source: &Path, executable: &Path, marker: &str) {
+    fs::write(source, format!("fn main() {{ println!(\"{marker}\"); }}\n")).expect("write probe source");
+    let output = std::process::Command::new("rustc")
+        .arg(source)
+        .arg("-o")
+        .arg(executable)
+        .output()
+        .expect("rustc must be available to compile the Windows resolution probe");
+    assert!(
+        output.status.success(),
+        "failed to compile Windows resolution probe:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(windows)]
+#[cfg_attr(miri, ignore = "spawns cargo-each and child processes; miri supports neither")]
+#[test]
+fn relative_child_program_uses_path_before_cargo_each_directory() {
+    let (_workspace, manifest) = fixture();
+    let layout = tempfile::tempdir().expect("resolution layout");
+    let executable_dir = layout.path().join("executable");
+    let path_dir = layout.path().join("path");
+    fs::create_dir_all(&executable_dir).expect("create executable directory");
+    fs::create_dir_all(&path_dir).expect("create PATH directory");
+
+    let cargo_each = executable_dir.join("cargo-each.exe");
+    fs::copy(assert_cmd::cargo::cargo_bin!("cargo-each"), &cargo_each).expect("copy cargo-each");
+
+    let probe_name = "cargo-each-path-resolution-probe.exe";
+    compile_probe(
+        &layout.path().join("adjacent.rs"),
+        &executable_dir.join(probe_name),
+        "adjacent executable",
+    );
+    compile_probe(&layout.path().join("path.rs"), &path_dir.join(probe_name), "PATH executable");
+
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(path_dir).chain(std::env::split_paths(&inherited))).expect("fixture PATH must be valid");
+
+    Command::new(cargo_each)
+        .arg("each")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .args(["--package", "alpha", "--once", "--", probe_name])
+        .env("PATH", path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PATH executable"))
+        .stdout(predicate::str::contains("adjacent executable").not());
+}
+
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
 fn once_whole_workspace_expands_to_workspace_flag() {

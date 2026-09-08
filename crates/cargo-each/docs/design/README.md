@@ -277,6 +277,11 @@ no-op.
 - **No shell.** The command is spawned directly (argv, not a shell string), so
   there is no quoting/dialect surface. Placeholder expansion is textual and
   happens before spawn.
+- **Child executable resolution follows `PATH`.** `cargo-each` explicitly
+  copies an inherited `PATH` onto every child command. This is equivalent to
+  ordinary inheritance on other platforms and makes Windows resolve a relative
+  program from `PATH` before considering an unrelated executable beside
+  `cargo-each`. If the parent has no `PATH`, cargo-each leaves it unset.
 
 ## 6. How it simplifies cargo-anvil
 

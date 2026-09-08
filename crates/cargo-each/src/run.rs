@@ -131,6 +131,9 @@ fn execute(plan: &Plan, keep_going: bool) -> Result<ExitCode, AppError> {
         }
         let (program, rest) = inv.argv.split_first().expect("Plan::build never emits an empty argv");
         let mut command = Command::new(program);
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env("PATH", path);
+        }
         command.args(rest);
         if let Some(dir) = &inv.work_dir {
             command.current_dir(dir);
