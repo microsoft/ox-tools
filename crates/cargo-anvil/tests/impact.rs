@@ -266,6 +266,14 @@ fn run_impact(root: &Path) -> String {
     let out = just_cmd(root, &["anvil-impact"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "just anvil-impact failed:\n{combined}");
+    for tier in ["modified", "affected", "required"] {
+        let path = root.join(format!("target/anvil/impact/include_{tier}.txt"));
+        assert!(
+            path.is_file(),
+            "just anvil-impact succeeded without producing {}:\n{combined}",
+            path.display()
+        );
+    }
     combined
 }
 
@@ -1003,16 +1011,17 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
 
 #[test]
 fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msrv() {
-    if !tools_available() {
+    if !core_tools_available() {
         return;
     }
-    let tmp = workspace();
+    let tmp = workspace_at_base();
     let root = tmp.path();
-    run_impact(root);
-    let affected = fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
-        .unwrap()
-        .trim()
-        .to_owned();
+    // This tests a cache consumer, not cargo-delta. Model the downloaded
+    // artifact directly so impact production cannot fail before the MSRV assertions.
+    let affected = "--package alpha@0.1.0";
+    for (tier, include) in [("modified", "--skip"), ("affected", affected), ("required", "--workspace")] {
+        write(&root.join(format!("target/anvil/impact/include_{tier}.txt")), include);
+    }
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
@@ -1035,12 +1044,12 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     );
     assert!(output.status.success(), "anvil-msrv-test failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap();
-    for expected in [
+    let expected = [
         format!("+1.97 test {affected} --tests --all-features --locked"),
         format!("+1.97 test {affected} --tests --locked"),
-    ] {
-        assert!(argv.contains(&expected), "missing MSRV invocation '{expected}' in:\n{argv}");
-    }
+    ];
+    let test_invocations: Vec<_> = argv.lines().filter(|line| line.starts_with("+1.97 test ")).collect();
+    assert_eq!(test_invocations, expected, "unexpected MSRV test invocations:\n{argv}");
     // The MSRV check must not build or execute bench targets: `--all-targets`
     // expands to include `--benches`, and a `harness = false` bench then runs
     // through a driver binary the msrv setup chain never installs.
