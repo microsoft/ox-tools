@@ -203,7 +203,7 @@ result = selection
 Expressions use `not`, `and`, `or`, and parentheses, with conventional
 precedence (`not` before `and` before `or`). Operators must be lowercase and
 separated from predicates by whitespace or parentheses. A metadata value that
-contains Boolean operators or parentheses can be surrounded with double quotes;
+contains whitespace, Boolean operators, or parentheses can be surrounded with double quotes;
 inside it, `\"` escapes a quote and `\\` escapes a backslash. The expression
 atoms are:
 
