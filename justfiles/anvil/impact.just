@@ -642,6 +642,7 @@ _anvil-impact-include tier:
                     $parts.Count -ne 2 -or
                     [string]::IsNullOrWhiteSpace($parts[0]) -or
                     [string]::IsNullOrWhiteSpace($parts[1]) -or
+                    $parts[1].Contains('@') -or
                     $spec -ne $spec.Trim() -or
                     $spec -match '\s' -or
                     $parts[0].StartsWith('--')) {

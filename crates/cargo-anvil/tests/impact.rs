@@ -1372,6 +1372,14 @@ fn consume_without_downloaded_cache_fails_loudly() {
     assert_ne!(bare.status.code(), Some(0), "bare cached selectors must fail:\n{bare_combined}");
     assert!(bare_combined.contains("empty or malformed") && bare_combined.contains("affected"));
 
+    write(&cache.join("include_affected.txt"), "--package\nalpha@0.1.0@junk");
+    let extra_separator = consume(&["anvil-impact"]);
+    assert_ne!(
+        extra_separator.status.code(),
+        Some(0),
+        "selectors with multiple @ separators must fail"
+    );
+
     // A partially downloaded cache -- one tier's include file missing -- must
     // also fail loudly and name the missing tier. This guards the
     // all-three-files contract against regressing to a directory or
