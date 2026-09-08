@@ -774,10 +774,9 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
                 Write-Error "anvil-bolero: unsupported affected-package arguments: $include"
                 exit 1
             }
-            # cargo-bolero resolves workspace members by bare package name.
-            $spec = $pkgArgs[++$i]
-            $packageName = (($spec -split '#', 2)[-1] -split '@', 2)[0]
-            $packageNames.Add($packageName)
+            # Impact emits version-qualified specs (name@version); cargo-bolero
+            # resolves workspace members by bare package name.
+            $packageNames.Add(($pkgArgs[++$i] -split '@', 2)[0])
         }
     } else {
         $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
@@ -1232,7 +1231,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         $parts = @(-split $include)
         for ($i = 0; $i -lt $parts.Count; $i++) {
             if ($parts[$i] -eq '--package' -and ++$i -lt $parts.Count) {
-                $names.Add((($parts[$i] -split '#', 2)[-1] -split '@', 2)[0])
+                $names.Add(($parts[$i] -split '@', 2)[0])
             }
         }
         @($names)
@@ -1372,8 +1371,10 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     } else {
         for ($i = 0; $i -lt $pkg.Count; $i++) {
             if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                # Recover the bare package name from the full package ID.
-                $name = (($pkg[$i + 1] -split '#', 2)[-1] -split '@', 2)[0]
+                # Impact emits version-qualified specs (name@version);
+                # strip the @version to recover the bare package name
+                # this manifest-path map keys on.
+                $name = ($pkg[$i + 1] -split '@', 2)[0]
                 if ($libPkgs.ContainsKey($name)) { $packages += $name }
                 $i++
             }
@@ -1546,10 +1547,11 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         if ($optedOut.Count -gt 0) {
             $filtered = [System.Collections.Generic.List[string]]::new()
             for ($i = 0; $i -lt $pkg.Count; $i++) {
-                # Compare the bare name against the opt-out set, but keep the
-                # full package ID in $pkg so the llvm-cov
+                # Impact emits version-qualified specs (name@version);
+                # compare the bare name against the opt-out set, but keep
+                # the full name@version token in $pkg so the llvm-cov
                 # measurement below resolves unambiguously.
-                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains ((($pkg[$i + 1] -split '#', 2)[-1] -split '@', 2)[0])) {
+                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains (($pkg[$i + 1] -split '@', 2)[0])) {
                     $testOnlyPkg.Add('--package')
                     $testOnlyPkg.Add($pkg[$i + 1])
                     $i++
@@ -1581,7 +1583,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     if ($IsWindows) {
         # llvm-cov passes every instrumented binary as a separate argument.
         # Keep those paths short enough for Windows CreateProcess.
-        $env:CARGO_LLVM_COV_TARGET_DIR = '.c'
+        $env:CARGO_LLVM_COV_TARGET_DIR = 'target/.c'
     }
     if ($testOnlyPkg.Count -gt 0) {
         Write-Host 'anvil-llvm-cov: running tests without coverage for opted-out packages'
@@ -1662,7 +1664,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         if ($pkg[$i] -eq '--workspace') { continue }
         if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
             $gateArgs.Add('--package')
-            $gateArgs.Add((($pkg[$i + 1] -split '#', 2)[-1] -split '@', 2)[0])
+            $gateArgs.Add(($pkg[$i + 1] -split '@', 2)[0])
             $i++
             continue
         }
@@ -1744,8 +1746,8 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $meta = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1 | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    # Optional impact-scoping: recover bare package names from the impact
-    # step's full package IDs.
+    # Optional impact-scoping: recover bare package names from the
+    # impact step's version-qualified `--package name@version` pairs.
     # Full-workspace modes (`--workspace` -- e.g. the scheduled tier,
     # ANVIL_IMPACT=off, or no impact cache) carry no `--package` tokens,
     # so $affected stays $null and the package set is left unfiltered
@@ -1755,7 +1757,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     for ($i = 0; $i -lt $tokens.Count; $i++) {
         if ($tokens[$i] -eq '--package' -and ($i + 1) -lt $tokens.Count) {
             if ($null -eq $affected) { $affected = @() }
-            $affected += (($tokens[$i + 1] -split '#', 2)[-1] -split '@', 2)[0]
+            $affected += ($tokens[$i + 1] -split '@', 2)[0]
             $i++
         }
     }
@@ -2485,8 +2487,9 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         $packages = @()
         for ($i = 0; $i -lt $pkg.Count; $i++) {
             if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                # Recover the bare package name from the full package ID.
-                $name = (($pkg[$i + 1] -split '#', 2)[-1] -split '@', 2)[0]
+                # Impact emits version-qualified specs (name@version);
+                # strip the @version to recover the bare package name.
+                $name = ($pkg[$i + 1] -split '@', 2)[0]
                 if ($libPkgs[$name]) { $packages += $name }
                 $i++
             }

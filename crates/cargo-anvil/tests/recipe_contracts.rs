@@ -72,6 +72,11 @@ fn bolero_uses_its_supported_release_profile_option() {
 }
 
 #[test]
+fn windows_coverage_uses_a_short_ignored_target_directory() {
+    assert!(LLVM_COV.contains("$env:CARGO_LLVM_COV_TARGET_DIR = 'target/.c'"));
+}
+
+#[test]
 fn developer_options_are_explicit_and_cloud_defaults_stay_non_interactive() {
     assert!(BUILD.contains("[arg(\"package\", long"));
     assert!(BUILD.contains("anvil-build package=\"\" profile=\"\""));
@@ -825,11 +830,7 @@ fn bolero_discovery_failure_propagates() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(
-        tmp.path(),
-        "affected",
-        "--package path+file:///workspace/crates/fixture#fixture@0.1.0",
-    );
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
     let output = run_just(
         tmp.path(),
         &["anvil-bolero"],
@@ -920,11 +921,7 @@ fn semver_exit_code_contract_is_executed() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(
-        tmp.path(),
-        "affected",
-        "--package path+file:///workspace/crates/fixture#fixture@0.1.0",
-    );
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
     let common = [("BASE_REF", OsStr::new("base")), ("FAKE_CARGO_LOG", log.as_os_str())];
 
     let findings = run_just(
@@ -1502,11 +1499,7 @@ fn semver_includes_libraries_restricted_to_named_registries() {
             "anvil-impact",
         ],
     );
-    seed_include(
-        tmp.path(),
-        "affected",
-        "--package registry+https://github.com/rust-lang/crates.io-index#named-registry@0.1.0",
-    );
+    seed_include(tmp.path(), "affected", "--package named-registry@0.1.0");
     let log = tmp.path().join("cargo.log");
     let output = run_just(
         tmp.path(),
@@ -1551,11 +1544,7 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(
-        tmp.path(),
-        "affected",
-        "--package path+file:///workspace/crates/fixture#fixture@0.1.0",
-    );
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
     let output = run_just(
         tmp.path(),
         &["anvil-llvm-cov"],

@@ -205,7 +205,7 @@ matrix overhead.
 
 | Check        | Invocation                                                                  | Source |
 |--------------|-----------------------------------------------------------------------------|--------|
-| `llvm-cov`   | Runs tests for every affected package under both feature configurations. Packages with a positive coverage threshold run through self-contained `cargo +<catalog-nightly> llvm-cov nextest --no-report` invocations and produce per-config lcov/cobertura reports. Packages declaring `min-lines-percent = 0` still run through plain `cargo nextest`; the opt-out disables measurement and gating, never tests. Per-config reports avoid Windows command-line overflow and are reconciled downstream by cargo-coverage-gate, Codecov, and ADO. Codecov is display-only; the local coverage gate is authoritative. | oxidizer, oxidizer-github; gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
+| `llvm-cov`   | Runs tests for every affected package under both feature configurations. Packages with a positive coverage threshold run through self-contained `cargo +<catalog-nightly> llvm-cov nextest --no-report` invocations and produce per-config lcov/cobertura reports. Packages declaring `min-lines-percent = 0` still run through plain `cargo nextest`; the opt-out disables measurement and gating, never tests. Per-config reports and a short ignored `target/.c` instrumentation directory avoid Windows command-line overflow; reports are reconciled downstream by cargo-coverage-gate, Codecov, and ADO. Codecov is display-only; the local coverage gate is authoritative. | oxidizer, oxidizer-github; gate via [`cargo-coverage-gate`](../../../cargo-coverage-gate) |
 | `doc-test`   | Two cargo-test runs over the same affected set: `cargo test --doc --workspace --all-features --locked` and `cargo test --doc --workspace --locked` (default features). Running both catches doctests that only compile under one feature configuration (oxidizer-github runs both). nextest does not run doctests, so this stays a separate cargo-test invocation. | oxidizer, oxidizer-github |
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Local `--run` executes selected examples after compilation with a bounded timeout; cloud workflows never pass it. Packages exclude interactive, credentialed, or otherwise unsuitable examples from an unfiltered run with `[package.metadata.anvil.examples] no-run = ["name"]`. An explicit `--example <name>` overrides the default exclusion. | oxidizer, oxidizer-github |
 
@@ -386,9 +386,7 @@ runs cargo-delta once, writes `target/anvil/impact/`, and projects each tier —
 (or the literal sentinel `--skip` when the tier is empty). Each package is a
 version-qualified cargo spec (`name@version`) so `-p` resolves uniquely to the workspace
 member even when a like-named crate is also pulled in as a different-versioned transitive
-dependency. Check recipes that need a bare package name also accept Cargo's full package-ID
-form (`source#name@version`) so cached impact artifacts remain portable across tool versions
-and operating systems.
+dependency.
 
 Every **impact-scoped** per-crate check depends on `anvil-impact` and resolves its
 category's scope by calling `_anvil-impact-include <category>` into a local `$include`

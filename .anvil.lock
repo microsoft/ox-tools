@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.8.0"
-catalog_checksum = "sha256:8dcae76055d0c548f892539abaed392d7bb4ccbc01b3b24fcd57c960c3869c01"
+catalog_checksum = "sha256:9115b58f275db97982563f16309d1fe0bf088f0b1dd1d1c59250f89e3ae9ed01"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -69,7 +69,7 @@ checksum = "sha256:850793443ada2151a895ee2728e81f03da5430facde16522bcc2e0c314a28
 
 [[file]]
 path = "justfiles/anvil/checks/bolero.just"
-checksum = "sha256:9c67570f8a5c9efbf4f75d0bde8d2bea8d8a011719f9fa4d90fa3bef592fc7cf"
+checksum = "sha256:5a1767c4ff911cec3b0870d675cbefb563193146cedd3a1cbfe1667215bdb264"
 
 [[file]]
 path = "justfiles/anvil/checks/careful.just"
@@ -109,11 +109,11 @@ checksum = "sha256:38e089afe176aea92c93ac6758154b206b6fc8940931035c0d059449fa824
 
 [[file]]
 path = "justfiles/anvil/checks/examples.just"
-checksum = "sha256:3aa0ab0be0ee74d9c4547ccd473b7674f54dd8ca0277bdbfecc9bce21b0fe309"
+checksum = "sha256:8f60f5c660ab68d7e559ed2f6234a2094f005df9856cb56f77c79955ff3aeafb"
 
 [[file]]
 path = "justfiles/anvil/checks/external-types.just"
-checksum = "sha256:ec8003814e928758c5e353562cf9483e5e4f2524801c256040ee42f67c2fbdb5"
+checksum = "sha256:7e67d90a9d8bd8cd5c8adb68baf41fdd4625bff4d425b5bf18b75baee62892a8"
 
 [[file]]
 path = "justfiles/anvil/checks/fmt.just"
@@ -125,11 +125,11 @@ checksum = "sha256:7aa0560dc9088b33e80cd55aee0a25090cbd3d3610652afd3734d0ca52ee7
 
 [[file]]
 path = "justfiles/anvil/checks/llvm-cov.just"
-checksum = "sha256:1801ca6d3372b30c1028316f3bd8356127cf6fac431d6dfa97d96037a94e4c6a"
+checksum = "sha256:5784ee2bbbbaa14de23d2cde765c16c55be714453f8c778e5dcab1b3c6c27004"
 
 [[file]]
 path = "justfiles/anvil/checks/loom.just"
-checksum = "sha256:56ba1e68ce636a3880d556fa546d4817ec9ceec1e753b5c2d32cb997348a442a"
+checksum = "sha256:f4822a8f9cb282bc426790355ba83b63e778db9327e986ba3c86ae6205cfdabb"
 
 [[file]]
 path = "justfiles/anvil/checks/miri-race-coverage.just"
@@ -169,7 +169,7 @@ checksum = "sha256:750354ba4528621f8fcf545fb6f5702a7cfe64526a83b5b98243ecb4d935f
 
 [[file]]
 path = "justfiles/anvil/checks/semver-check.just"
-checksum = "sha256:299d749f7739d7e66434cdb7eb6f5279560e202074446cd42eaa3bf7342a2acb"
+checksum = "sha256:be0430a53007301db00602d4bc9296f51ad9b2f011583084d069c51b30939b74"
 
 [[file]]
 path = "justfiles/anvil/checks/spellcheck.just"
