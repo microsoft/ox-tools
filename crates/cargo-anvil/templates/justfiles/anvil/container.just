@@ -988,9 +988,10 @@ anvil-container *command:
 
     # The recipe contract's own inputs. These are read by generated checks --
     # `anvil-pr-title` reads PR_TITLE, `_anvil-base-ref` reads BASE_REF and its
-    # CI equivalents, and `anvil-impact` reads ANVIL_IMPACT to decide whether to
-    # compute scoping, consume a downloaded cache, or skip -- so dropping them at
-    # the boundary makes the same command mean different things inside and out.
+    # CI equivalents, `anvil-impact` reads ANVIL_IMPACT to decide whether to
+    # compute scoping, consume a downloaded cache, or skip, and the Miri runner
+    # reads ANVIL_MIRI_JOBS to cap artifact workers -- so dropping them at the
+    # boundary makes the same command mean different things inside and out.
     # anvil-pr-title is the sharp case: with PR_TITLE unset it exits 0 with a
     # skip notice, so a title a native run rejects passes in a container and the
     # tier still reports green. ANVIL_IMPACT is the other: a CI group job exports
@@ -1003,7 +1004,7 @@ anvil-container *command:
     foreach ($name in @(
         'PR_TITLE',
         'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH',
-        'ANVIL_IMPACT')) {
+        'ANVIL_IMPACT', 'ANVIL_MIRI_JOBS')) {
         if ((Test-Path -LiteralPath "Env:$name") -and -not [string]::IsNullOrEmpty((Get-Item -LiteralPath "Env:$name").Value)) {
             $forwardedEnv += $name
             $runArgs += @('-e', $name)
