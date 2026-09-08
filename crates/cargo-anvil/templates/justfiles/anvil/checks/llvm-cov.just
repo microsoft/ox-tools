@@ -159,15 +159,8 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
                 [System.Text.UTF8Encoding]::new($false)
             )
             Write-Host 'anvil-llvm-cov: retrying Windows error 206 with an LLVM response file'
-            $previousErrorActionPreference = $ErrorActionPreference
-            $retryExitCode = 1
-            try {
-                $ErrorActionPreference = 'Continue'
-                & $llvmCov export "@$responsePath" > $OutputPath 2> $retryErrorPath
-                $retryExitCode = $LASTEXITCODE
-            } finally {
-                $ErrorActionPreference = $previousErrorActionPreference
-            }
+            & $llvmCov export "@$responsePath" > $OutputPath 2> $retryErrorPath
+            $retryExitCode = $LASTEXITCODE
             if (Test-Path -LiteralPath $retryErrorPath) {
                 Get-Content -LiteralPath $retryErrorPath | ForEach-Object { Write-Host $_ }
             }
