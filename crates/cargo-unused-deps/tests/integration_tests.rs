@@ -40,6 +40,10 @@ fn workspace(root: &str, members: &[(&str, &str)]) -> TempDir {
         fs::create_dir_all(member.join("src")).expect("failed to create member dir");
         fs::write(member.join("src").join("lib.rs"), "").expect("failed to write member source");
 
+        // Fixture metadata is an arbitrary valid placeholder: these tests
+        // exercise workspace inheritance, which is independent of a member's
+        // version and edition. The directly written manifests elsewhere in this
+        // file follow the same convention.
         let manifest = format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n{body}");
         fs::write(member.join("Cargo.toml"), manifest).expect("failed to write member manifest");
     }
@@ -50,6 +54,9 @@ fn workspace(root: &str, members: &[(&str, &str)]) -> TempDir {
 /// Run the tool against `manifest_path` with `args`.
 fn run(manifest_path: &Path, args: &[&str]) -> Output {
     Command::new(binary())
+        // Cargo invokes a custom subcommand as `cargo-<name> <name> ...`, and the
+        // parser expects that repeated name. Running the binary directly
+        // bypasses Cargo, so the test has to supply the token itself.
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(manifest_path)
@@ -81,7 +88,10 @@ fn passes_when_every_entry_is_inherited() {
     let (success, stdout, _) = outcome(&run(&manifest, &[]));
 
     assert!(success, "an inherited catalog should pass");
-    assert!(stdout.contains("All 1 workspace dependency"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("every workspace dependency is inherited by a workspace member (declared: 1, members: 1)"),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -137,7 +147,10 @@ fn recognizes_dev_build_and_target_tables() {
     let (success, stdout, stderr) = outcome(&run(&manifest, &[]));
 
     assert!(success, "every table form should count as inheritance: {stderr}");
-    assert!(stdout.contains("All 4 workspace dependencies"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("every workspace dependency is inherited by a workspace member (declared: 4, members: 1)"),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -212,6 +225,21 @@ fn honors_the_allow_list_and_reports_stale_entries() {
         !stderr.contains("'kept' is allowed"),
         "the load-bearing allow entry is not stale: {stderr}"
     );
+}
+
+#[test]
+fn a_non_string_allow_list_entry_is_an_error() {
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.metadata.unused-deps]\nallowed = [123]\n\n",
+        "[workspace.dependencies]\nonce_cell = \"1\"\n",
+    );
+    let dir = workspace(root, &[("member", "")]);
+
+    let (success, _, stderr) = outcome(&run(&dir.path().join("Cargo.toml"), &[]));
+
+    assert!(!success, "a mis-typed allow-list must not pass silently");
+    assert!(stderr.contains("allowed must contain only strings"), "unexpected stderr: {stderr}");
 }
 
 #[test]
@@ -303,8 +331,8 @@ fn fix_keeps_a_trailing_header_behind_the_last_survivor() {
         "the trailing header must not be hoisted above the survivor: {fixed}"
     );
 
-    // The trailing branch reports too: this is the path that used to claim a
-    // carry whether or not the append had actually happened.
+    // A carry is reported only when the comment was actually appended, so the
+    // trailing branch must report one here -- the append above succeeded.
     assert!(
         stderr.contains("Carried 1 comment line from 'once_cell' onto 'serde'"),
         "the trailing carry must be reported: {stderr}"
@@ -452,7 +480,7 @@ fn fix_reports_comments_dropped_with_an_emptied_table() {
 
     assert!(success, "--fix should succeed: {stderr}");
     assert!(
-        stderr.contains("Dropped 1 comment line from 'once_cell': no surviving entry could carry them."),
+        stderr.contains("Dropped 1 comment line from 'once_cell': no surviving entry could carry the comments."),
         "the drop must be reported: {stderr}"
     );
 }

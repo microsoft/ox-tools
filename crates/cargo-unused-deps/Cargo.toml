@@ -3,7 +3,7 @@
 
 [package]
 name = "cargo-unused-deps"
-description = "A cargo subcommand that finds unused dependencies, starting with uninherited [workspace.dependencies] entries"
+description = "A Cargo subcommand that reports [workspace.dependencies] entries no workspace member inherits"
 version = "0.1.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "ci"]

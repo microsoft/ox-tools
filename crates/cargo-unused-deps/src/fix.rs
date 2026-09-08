@@ -3,12 +3,19 @@
 
 //! Removal of unused `[workspace.dependencies]` entries, preserving the
 //! formatting and comments of everything that survives.
+//!
+//! "Comments attached to an entry" means the comment lines that precede it.
+//! A comment written on the same line as an entry annotates that entry alone,
+//! so it is removed together with the entry it describes rather than carried
+//! onto an unrelated survivor.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 
-use toml_edit::{DocumentMut, Item, TableLike};
+use toml_edit::{DocumentMut, Item, RawString, TableLike};
 
-/// What a `--fix` did.
+/// What a `--fix` did, in the form the caller reports to the user: a count for
+/// the summary line and one record per comment block that had to move.
 pub struct Outcome {
     /// How many entries were removed.
     pub removed: usize,
@@ -19,7 +26,8 @@ pub struct Outcome {
 
 /// Comments that belonged to removed entries and had to go somewhere else.
 ///
-/// Only recorded when comments actually moved, so `from` is never empty.
+/// Only recorded when comments actually moved, so `from` is never empty and
+/// `lines` is never zero.
 ///
 /// Reported so the relocation is visible: the carry-forward cannot tell a group
 /// header from a note about one specific dependency, and a note that lands on
@@ -34,13 +42,38 @@ pub struct Carry {
     pub onto: Option<String>,
 
     /// How many comment lines moved.
-    pub lines: usize,
+    pub lines: NonZeroUsize,
+}
+
+/// A non-empty run of comment lines lifted off a removed entry.
+///
+/// Constructing it is the only way to count comment lines, so a block that
+/// exists always has at least one line and a [`Carry`] can never claim a
+/// zero-line move.
+struct CommentBlock {
+    /// The decor text, comments and interleaved blank lines alike.
+    text: String,
+
+    /// How many of those lines are comments.
+    lines: NonZeroUsize,
+}
+
+impl CommentBlock {
+    /// Append `next` after this block.
+    fn extend(&mut self, next: Self) {
+        let Self { text, lines } = next;
+
+        self.text.push_str(&text);
+        self.lines = self.lines.saturating_add(lines.get());
+    }
 }
 
 /// Remove `names` from the catalog.
 ///
-/// Comments attached to a removed entry are carried forward to the next
+/// Leading comments of a removed entry are carried forward to the next
 /// surviving entry, so a group header keeps labeling the group it introduces.
+/// A same-line trailing comment describes only the entry it sits on and leaves
+/// with it.
 pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
     let table = manifest
         .get_mut("workspace")
@@ -56,35 +89,36 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
         removed: 0,
         carries: Vec::new(),
     };
-    let mut carried = String::new();
+    let mut carried: Option<CommentBlock> = None;
     let mut sources: Vec<String> = Vec::new();
 
     for name in &order {
         if doomed.contains(name.as_str()) {
-            let comments = comments_of(&leading_comments(table, name));
-            if !comments.is_empty() {
+            if let Some(block) = comments_of(&leading_comments(table, name)) {
                 sources.push(name.clone());
+                match &mut carried {
+                    Some(earlier) => earlier.extend(block),
+                    None => carried = Some(block),
+                }
             }
-            carried.push_str(&comments);
             table.remove(name);
             outcome.removed += 1;
-        } else if !carried.is_empty() {
+        } else if let Some(block) = carried.take() {
             // `onto` reports where the comments actually landed. Claiming a
             // move that did not happen sends the reviewer of the `--fix` diff
             // hunting for text that is not there, which is the failure this
             // reporting exists to prevent.
-            let onto = prepend_comments(table, name, &carried);
+            let onto = prepend_comments(table, name, &block.text);
 
             outcome.carries.push(Carry {
                 from: std::mem::take(&mut sources),
                 onto,
-                lines: comment_lines(&carried),
+                lines: block.lines,
             });
-            carried.clear();
         }
     }
 
-    if !carried.is_empty() {
+    if let Some(block) = carried {
         // The removed entries were the last in the table, so there is no
         // following entry to carry the comments to. Append them after the final
         // surviving entry's *value* instead: attaching them ahead of that entry
@@ -100,13 +134,8 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
         let last = table.iter().last().map(|(key, _)| key.to_owned());
         let onto = last.and_then(|last| {
             let appended = table.get_mut(&last).and_then(Item::as_value_mut).map(|value| {
-                let suffix = value
-                    .decor()
-                    .suffix()
-                    .and_then(toml_edit::RawString::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                value.decor_mut().set_suffix(format!("{suffix}{carried}"));
+                let suffix = value.decor().suffix().and_then(RawString::as_str).unwrap_or_default().to_owned();
+                value.decor_mut().set_suffix(format!("{suffix}{}", block.text));
             });
 
             appended.map(|()| last)
@@ -115,7 +144,7 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
         outcome.carries.push(Carry {
             from: std::mem::take(&mut sources),
             onto,
-            lines: comment_lines(&carried),
+            lines: block.lines,
         });
     }
 
@@ -145,24 +174,19 @@ fn leading_comments(table: &dyn TableLike, name: &str) -> String {
             .and_then(Item::as_table_like)
             .and_then(|nested| nested.key(&leaf))
             .and_then(|key| key.leaf_decor().prefix())
-            .and_then(toml_edit::RawString::as_str)
+            .and_then(RawString::as_str)
             .unwrap_or_default()
             .to_owned();
     }
 
     if let Some(nested) = table.get(name).and_then(Item::as_table) {
-        return nested
-            .decor()
-            .prefix()
-            .and_then(toml_edit::RawString::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        return nested.decor().prefix().and_then(RawString::as_str).unwrap_or_default().to_owned();
     }
 
     table
         .key(name)
         .and_then(|key| key.leaf_decor().prefix())
-        .and_then(toml_edit::RawString::as_str)
+        .and_then(RawString::as_str)
         .unwrap_or_default()
         .to_owned()
 }
@@ -200,19 +224,16 @@ fn prepend_comments(table: &mut dyn TableLike, name: &str, carried: &str) -> Opt
     })
 }
 
-/// The comment-bearing part of a removed entry's decor.
+/// The comment-bearing part of a removed entry's decor, or `None` when it holds
+/// no comments.
 ///
-/// Blank-line padding is dropped: only comments such as a `# --- group ---`
-/// header are worth carrying to another entry.
-fn comments_of(prefix: &str) -> String {
-    if prefix.lines().any(|line| line.trim_start().starts_with('#')) {
-        prefix.to_owned()
-    } else {
-        String::new()
-    }
-}
+/// Blank-line padding alone is dropped: only comments such as a
+/// `# --- group ---` header are worth carrying to another entry.
+fn comments_of(prefix: &str) -> Option<CommentBlock> {
+    let lines = prefix.lines().filter(|line| line.trim_start().starts_with('#')).count();
 
-/// How many lines of `decor` are comments.
-fn comment_lines(decor: &str) -> usize {
-    decor.lines().filter(|line| line.trim_start().starts_with('#')).count()
+    NonZeroUsize::new(lines).map(|lines| CommentBlock {
+        text: prefix.to_owned(),
+        lines,
+    })
 }

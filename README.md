@@ -33,7 +33,7 @@ These are the crates built out of this repo:
 - [`cargo-ensure-no-default-features`](./crates/cargo-ensure-no-default-features/README.md) - A cargo subcommand that ensures dependencies are declared with default-features = false
 - [`cargo-gamma`](./crates/cargo-gamma/README.md) - Fast mutation testing for Rust
 - [`cargo-heather`](./crates/cargo-heather/README.md) - A cargo subcommand to validate license headers in Rust, TOML, PowerShell, Just, and env source files
-- [`cargo-unused-deps`](./crates/cargo-unused-deps/README.md) - A cargo subcommand that finds unused dependencies, starting with uninherited [workspace.dependencies] entries
+- [`cargo-unused-deps`](./crates/cargo-unused-deps/README.md) - A Cargo subcommand that reports [workspace.dependencies] entries no workspace member inherits
 
 ## About this Repo
 

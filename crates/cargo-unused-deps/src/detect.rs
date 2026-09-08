@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use toml_edit::{DocumentMut, Item, TableLike, Value};
 
 /// Dependency tables a member manifest can inherit workspace dependencies from.
@@ -16,6 +16,10 @@ const DEP_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-depend
 const METADATA_KEY: &str = "unused-deps";
 
 /// What a manifest turned out to be.
+///
+/// Selects the branch the check takes: a non-workspace manifest has no catalog
+/// to be wrong about and passes, while a workspace root carries the entries and
+/// allow-list that detection, reporting, and `--fix` all work from.
 pub enum Catalog {
     /// The manifest has no `[workspace]` table, so it declares no catalog.
     NotAWorkspace,
@@ -52,9 +56,16 @@ pub fn read_manifest(path: &Path) -> Result<DocumentMut> {
 
 /// Classify a parsed manifest and, when it is a workspace root, collect its
 /// catalog and allow-list.
-pub fn catalog(manifest: &DocumentMut) -> Catalog {
+///
+/// # Errors
+///
+/// Returns an error when an `allowed` entry is not a string. Skipping such an
+/// entry would leave a mis-typed configuration behaving as though nothing were
+/// allowed, which is hard to tell from a configuration that simply does not
+/// work.
+pub fn catalog(manifest: &DocumentMut) -> Result<Catalog> {
     let Some(workspace) = manifest.get("workspace").and_then(Item::as_table_like) else {
-        return Catalog::NotAWorkspace;
+        return Ok(Catalog::NotAWorkspace);
     };
 
     let declared = workspace
@@ -63,17 +74,27 @@ pub fn catalog(manifest: &DocumentMut) -> Catalog {
         .map(|table| table.iter().map(|(key, _)| key.to_owned()).collect())
         .unwrap_or_default();
 
-    let allowed = workspace
+    let configured = workspace
         .get("metadata")
         .and_then(Item::as_table_like)
         .and_then(|metadata| metadata.get(METADATA_KEY))
         .and_then(Item::as_table_like)
         .and_then(|config| config.get("allowed"))
-        .and_then(Item::as_array)
-        .map(|names| names.iter().filter_map(Value::as_str).map(ToOwned::to_owned).collect())
-        .unwrap_or_default();
+        .and_then(Item::as_array);
 
-    Catalog::Workspace(WorkspaceCatalog { declared, allowed })
+    let mut allowed = BTreeSet::new();
+    for value in configured.into_iter().flatten() {
+        let name = value.as_str().ok_or_else(|| {
+            anyhow!(
+                "[workspace.metadata.{METADATA_KEY}] allowed must contain only strings, found {}",
+                value.type_name()
+            )
+        })?;
+
+        allowed.insert(name.to_owned());
+    }
+
+    Ok(Catalog::Workspace(WorkspaceCatalog { declared, allowed }))
 }
 
 /// Collect the catalog keys that member manifests inherit.
@@ -82,21 +103,21 @@ pub fn catalog(manifest: &DocumentMut) -> Catalog {
 /// cannot be read or parsed fails the run rather than being silently treated as
 /// inheriting nothing, which would turn a read error into false accusations.
 pub fn inherited(members: &[PathBuf]) -> Result<BTreeSet<String>> {
-    let mut used = BTreeSet::new();
+    let mut keys = BTreeSet::new();
 
     for member in members {
         let doc = read_manifest(member)?;
-        collect_inherited(&doc, &mut used);
+        collect_inherited(&doc, &mut keys);
     }
 
-    Ok(used)
+    Ok(keys)
 }
 
 /// Record every catalog key a single manifest inherits.
-fn collect_inherited(doc: &DocumentMut, used: &mut BTreeSet<String>) {
+fn collect_inherited(doc: &DocumentMut, inherited: &mut BTreeSet<String>) {
     for name in DEP_TABLES {
         if let Some(table) = doc.get(name).and_then(Item::as_table_like) {
-            collect_from_dep_table(table, used);
+            collect_from_dep_table(table, inherited);
         }
     }
 
@@ -108,17 +129,24 @@ fn collect_inherited(doc: &DocumentMut, used: &mut BTreeSet<String>) {
     for target in targets.iter().filter_map(|(_, target)| target.as_table_like()) {
         for name in DEP_TABLES {
             if let Some(table) = target.get(name).and_then(Item::as_table_like) {
-                collect_from_dep_table(table, used);
+                collect_from_dep_table(table, inherited);
             }
         }
     }
 }
 
 /// Record the inheriting declarations of one dependency table.
-fn collect_from_dep_table(table: &dyn TableLike, used: &mut BTreeSet<String>) {
+///
+/// The declaration key is recorded as written, never the package it resolves
+/// to. Cargo matches inheritance by catalog key: a member writing
+/// `rustdoc-types-v57 = { workspace = true }` can only be served by the catalog
+/// key `rustdoc-types-v57`, whatever `package = "..."` rename that entry
+/// carries. Normalizing to the resolved package name here would make every
+/// renamed catalog entry look uninherited.
+fn collect_from_dep_table(table: &dyn TableLike, inherited: &mut BTreeSet<String>) {
     for (name, spec) in table.iter() {
         if inherits_from_workspace(spec) {
-            used.insert(name.to_owned());
+            inherited.insert(name.to_owned());
         }
     }
 }
@@ -137,11 +165,11 @@ fn inherits_from_workspace(spec: &Item) -> bool {
 /// that suppressed nothing.
 ///
 /// Declaration order is preserved so the report reads alongside the manifest.
-pub fn partition(catalog: &WorkspaceCatalog, used: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
+pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
     let uninherited: Vec<String> = catalog
         .declared
         .iter()
-        .filter(|name| !used.contains(name.as_str()))
+        .filter(|name| !inherited.contains(name.as_str()))
         .cloned()
         .collect();
 

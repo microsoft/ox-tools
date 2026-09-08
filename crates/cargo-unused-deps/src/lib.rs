@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! A cargo sub-command that ensures every `[workspace.dependencies]` entry is
-//! inherited by at least one workspace member.
+//! A Cargo subcommand that reports uninherited workspace dependencies.
 #![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-unused-deps/logo.png")]
 #![doc(
     html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-unused-deps/favicon.ico"
@@ -23,7 +22,7 @@
 //!
 //! # Usage
 //!
-//! Run in a cargo workspace:
+//! Run in a Cargo workspace:
 //!
 //! ```bash
 //! cargo unused-deps
@@ -35,10 +34,11 @@
 //! cargo unused-deps --fix
 //! ```
 //!
-//! `--manifest-path` points at an explicit workspace root, defaulting to the
-//! `Cargo.toml` in the current directory. A manifest with no `[workspace]` table
-//! declares no catalog and passes with a note; `--require-workspace` turns that
-//! into an error for callers that know they are pointing at a workspace root.
+//! `--manifest-path` points at an explicit workspace root manifest, defaulting
+//! to the `Cargo.toml` in the current directory. A manifest with no
+//! `[workspace]` table declares no catalog and passes with a note;
+//! `--require-workspace` turns that into an error for callers that know they
+//! are pointing at a root manifest.
 //!
 //! # Configuration
 //!
@@ -49,16 +49,24 @@
 //! allowed = ["kept-on-purpose"]
 //! ```
 //!
-//! An `allowed` name that suppresses nothing is reported as stale, on stderr,
-//! without failing the run.
+//! An `allowed` name that suppresses no unused catalog entry is reported as a
+//! stale allow-list entry, on stderr, without failing the run.
 //!
 //! # Fixing
 //!
-//! `--fix` replaces the manifest atomically -- a temporary file in the same
-//! directory, renamed over the original, carrying the permissions of the
-//! manifest it replaces and following a symlinked manifest to its target -- and
-//! refuses to write at all if the file changed after it was read, so a
-//! concurrent edit is never clobbered.
+//! `--fix` edits only the workspace root manifest, and does so carefully.
+//!
+//! The replacement is written to a temporary file in the manifest's own
+//! directory and renamed over the original, so the manifest is never truncated
+//! in place. The rename carries the permissions of the manifest it replaces.
+//! A symlinked manifest is resolved first, so the rename lands on the file the
+//! link points at rather than replacing the link.
+//!
+//! Before the rename the manifest is re-read and compared against the bytes
+//! that were parsed. An edit that arrives while `cargo metadata` runs is
+//! therefore detected and the fix abandoned. The check narrows that window
+//! rather than closing it: an edit landing between the comparison and the
+//! rename is still overwritten.
 //!
 //! Comments on a removed entry are carried to the next surviving entry, which
 //! keeps a group header attached to the group it introduces. A note about one
@@ -77,20 +85,22 @@
 //! # Example output
 //!
 //! ```text
-//! Found 2 unused workspace dependencies in Cargo.toml:
+//! ❌ Found 2 unused workspace dependencies in Cargo.toml:
 //!
 //!   - once_cell
 //!   - smallvec
 //!
-//! Re-run with --fix to remove them.
+//! Re-run with --fix to remove what is listed above.
 //! ```
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod detect;
 mod fix;
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -105,6 +115,8 @@ use tempfile::NamedTempFile;
 use crate::detect::{Catalog, WorkspaceCatalog};
 use crate::fix::Carry;
 
+// Deliberately identical to the palette of the repository's other styled Cargo
+// subcommands, so help output looks the same whichever one the user reaches for.
 const CLAP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
     .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
@@ -120,6 +132,11 @@ struct Cli {
     command: Commands,
 }
 
+/// The subcommand token Cargo passes through, and the options that follow it.
+///
+/// Cargo invokes a custom subcommand as `cargo-unused-deps unused-deps ...`, so
+/// the tool parses the repeated name as a nested subcommand and takes the check's
+/// options from that level rather than from the top-level parser.
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Ensure every `[workspace.dependencies]` entry is inherited by a member
@@ -170,7 +187,7 @@ fn check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<Exi
     let original = detect::read_manifest_text(manifest_path)?;
     let mut manifest = detect::parse_manifest(&original, manifest_path)?;
 
-    let catalog = match detect::catalog(&manifest) {
+    let catalog = match detect::catalog(&manifest)? {
         Catalog::Workspace(catalog) => catalog,
         Catalog::NotAWorkspace => {
             if require_workspace {
@@ -197,13 +214,13 @@ fn check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<Exi
     }
 
     let members = members_of(manifest_path)?;
-    let used = detect::inherited(&members)?;
-    let (unused, stale) = detect::partition(&catalog, &used);
+    let inherited = detect::inherited(&members)?;
+    let (unused, stale) = detect::partition(&catalog, &inherited);
 
     report_stale(&stale);
 
     if unused.is_empty() {
-        report_clean(manifest_path, &catalog, &used, members.len());
+        report_clean(manifest_path, &catalog, &inherited, members.len());
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -260,16 +277,16 @@ fn write_back(manifest_path: &Path, original: &str, contents: &str) -> Result<()
 
     // Follow a symlinked manifest through to its target, the way an in-place
     // write would have.
-    let target = std::fs::canonicalize(manifest_path).context(resolve_failure)?;
+    let target = fs::canonicalize(manifest_path).context(resolve_failure)?;
 
-    let current = std::fs::read_to_string(&target).context(read_failure)?;
+    let current = fs::read_to_string(&target).context(read_failure)?;
     ensure!(
         current == original,
         "{} changed on disk while the check was running; not writing",
         manifest_path.display()
     );
 
-    let permissions = std::fs::metadata(&target).context(metadata_failure)?.permissions();
+    let permissions = fs::metadata(&target).context(metadata_failure)?.permissions();
     let directory = target
         .parent()
         .expect("a canonicalized file path always names a file, so it always has a parent directory");
@@ -322,35 +339,28 @@ fn report_carries(carries: &[Carry]) {
             Some(onto) => eprintln!(
                 "⚠️ Carried {} comment {} from '{sources}' onto '{onto}'; check that the text still describes '{onto}'.",
                 carry.lines,
-                lines(carry.lines)
+                lines(carry.lines.get())
             ),
             None => eprintln!(
-                "⚠️ Dropped {} comment {} from '{sources}': no surviving entry could carry them.",
+                "⚠️ Dropped {} comment {} from '{sources}': no surviving entry could carry the comments.",
                 carry.lines,
-                lines(carry.lines)
+                lines(carry.lines.get())
             ),
         }
     }
 }
 
 /// Report a catalog in which every entry is inherited or allowed.
-fn report_clean(manifest_path: &Path, catalog: &WorkspaceCatalog, used: &BTreeSet<String>, members: usize) {
+fn report_clean(manifest_path: &Path, catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>, members: usize) {
     let declared = catalog.declared.len();
-    let inherited = catalog.declared.iter().filter(|name| used.contains(name.as_str())).count();
+    let covered = catalog.declared.iter().filter(|name| inherited.contains(name.as_str())).count();
 
-    if declared == inherited {
-        println!(
-            "✅ All {declared} workspace {} in {} are inherited by one of {members} members.",
-            entries(declared),
-            manifest_path.display()
-        );
-    } else {
-        println!(
-            "✅ All {declared} workspace {} in {} are inherited by one of {members} members or explicitly allowed.",
-            entries(declared),
-            manifest_path.display()
-        );
-    }
+    let qualifier = if declared == covered { "" } else { " or explicitly allowed" };
+
+    println!(
+        "✅ {}: every workspace dependency is inherited by a workspace member{qualifier} (declared: {declared}, members: {members}).",
+        manifest_path.display()
+    );
 }
 
 /// Report the entries no member inherits.
@@ -364,7 +374,7 @@ fn report_unused(manifest_path: &Path, unused: &[String]) {
     for name in unused {
         eprintln!("  - {name}");
     }
-    eprintln!("\nRe-run with --fix to remove them.");
+    eprintln!("\nRe-run with --fix to remove what is listed above.");
 }
 
 /// Pluralize `dependency` for `count`.

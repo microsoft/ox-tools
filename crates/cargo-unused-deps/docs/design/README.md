@@ -33,8 +33,8 @@ manifests, decidable by reading them.
    entry that no workspace member inherits.
 2. **No false positives.** The verdict rests only on manifest text. A gate that
    occasionally accuses a load-bearing dependency would be turned off.
-3. **Cheap.** No compilation, no toolchain pin, no network. Fast enough for the
-   text/metadata tier that runs on every pull request.
+3. **Cheap.** No compilation, no toolchain pin, no network. Fast enough to run on
+   every pull request alongside the other manifest-only checks.
 4. **Cargo-native UX.** Ship as `cargo unused-deps`, matching its
    sibling gates `cargo ensure-no-cyclic-deps` and `cargo ensure-no-default-features`.
 5. **Mechanical remediation.** Removing an entry nobody inherits is lossless, so the
@@ -80,7 +80,7 @@ deliberately permissive: it errs toward *used*.
 
 ### Invocation
 
-```bash
+```text
 cargo unused-deps [--manifest-path <PATH>] [--fix] [--require-workspace]
 ```
 
@@ -116,10 +116,10 @@ line, because the generated CI recipe invokes the tool with a fixed argument lis
 allowed = ["kept-on-purpose"]
 ```
 
-An allowed name is neither reported nor removed. An `allowed` entry that matches no
-unused entry produces a warning on stderr without changing the exit code — a stale
-exception is a maintenance smell, and failing the build for one would punish the act
-of fixing the underlying problem.
+An allowed name is neither reported nor removed. An `allowed` entry that suppresses
+no unused catalog entry is a *stale allow-list entry*: it produces a warning on
+stderr without changing the exit code — a stale exception is a maintenance smell, and
+failing the build for one would punish the act of fixing the underlying problem.
 
 ### Reporting
 
@@ -137,8 +137,9 @@ the file. The success line goes to stdout.
 A `[workspace]` table with no `dependencies` catalog is a pass: no entry can be
 uninherited when none is declared. It is not silent, though — that is the boundary
 where *every* configured `allowed` name suppresses nothing, so each one is reported
-as stale on stderr before the run succeeds. A manifest with no `[workspace]` table at
-all is a pass with a note on stderr, or an error under `--require-workspace`.
+as a stale allow-list entry on stderr before the run succeeds. A manifest with no
+`[workspace]` table at all is a pass with a note on stderr, or an error under
+`--require-workspace`.
 
 The exit code is returned from `run` as an `ExitCode` rather than raised with
 `std::process::exit`, so `main` unwinds normally. That matters under coverage
@@ -167,8 +168,8 @@ dropped.
 contributed a node to the dependency graph. The tool never touches the lockfile, and
 a lockfile that changes after a fix indicates unrelated drift.
 
-The workspace root is the one file whose loss breaks every other tool in the
-repository, so it is never truncated in place. The replacement is written to a
+The workspace root manifest is the one file whose loss breaks every other tool in
+the repository, so it is never truncated in place. The replacement is written to a
 temporary file in the manifest's own directory and renamed over the original, which
 is atomic on a single filesystem. Before that rename the file is re-read and compared
 against the bytes that were parsed: `cargo metadata` runs in between as a subprocess,
@@ -219,9 +220,9 @@ did not happen would send the reviewer hunting for text that is not in the diff.
 | Is an inherited dependency actually referenced in code? | `udeps`                      |
 | Is it declared with explicit features?                  | `ensure-no-default-features` |
 
-The first two compose without overlap and without gaps: this tool is manifest-only
-and cannot be fooled by macro-hidden imports; `udeps` is compile-accurate and cannot
-see uninherited entries.
+This tool and `udeps` compose without overlap and without gaps: this tool is
+manifest-only and cannot be fooled by macro-hidden imports; `udeps` is
+compile-accurate and cannot see uninherited entries.
 
 **`cargo-shear` was evaluated and rejected as the vehicle.** It does implement a
 `shear/unused_workspace_dependency` diagnostic, but derives it from static
@@ -234,19 +235,24 @@ since) was likewise rejected as a pinned dependency.
 
 ## 7. CI integration
 
-The check belongs in the `modified` tier, running in the `pr-fast` group as
+**Not wired yet.** Anvil installs pinned tools from crates.io, so the wiring follows
+the crate's first release. Until then the tool is runnable by hand and enforces
+nothing. The intended shape is recorded here so the wiring change has a target.
+
+The check will join the `pr-fast` group of the PR tier, invoked as
 `cargo unused-deps` alongside `ensure-no-cyclic-deps` and
-`ensure-no-default-features`. It is a text/metadata check: one platform is enough and
-no toolchain pin is required.
+`ensure-no-default-features`. Like those two it reads manifests only, so one platform
+is enough and no toolchain pin is required.
 
-**Not yet wired.** Anvil installs pinned tools from crates.io, so the wiring — a
-pinned version in `versions.just`, install and validate recipes in `tools.just`, a
-check recipe in `checks/`, and the `pr-fast` entry — follows the crate's first
-release. Until then the tool is published and runnable but enforces nothing here.
+Its impact-scoping include level will be `modified`: it reads the workspace root
+manifest and every member manifest in one pass, so it runs once from the repository
+root against its own input domain rather than taking impact-selected package
+arguments. Single-crate repositories run the same command and pass without
+configuration.
 
-Because the tool reads the workspace root, it runs once from the repository root
-rather than per affected package. Single-crate repositories run the same command and
-pass without configuration.
+Wiring it means a pinned version in `versions.just`, install and validate recipes in
+`tools.just`, a check recipe under `checks/`, and entries in the `pr-fast` group and
+the `modified` include list.
 
 ## 8. Out of scope
 
