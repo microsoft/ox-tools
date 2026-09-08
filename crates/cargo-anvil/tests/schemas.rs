@@ -134,6 +134,7 @@ fn just_lists_emitted_recipes() {
         ),
         ("anvil-pr", "# Run all pull request checks."),
         ("anvil-pr-fast", "# Run the fast pull request checks."),
+        ("anvil-pr-msrv", "# Run pull request compatibility tests under the declared MSRV."),
         ("anvil-pr-mutants", "# Run the pull request mutation tests."),
         ("anvil-pr-runtime-analysis", "# Run the pull request runtime analysis."),
         ("anvil-pr-slow", "# Run the slow pull request checks."),

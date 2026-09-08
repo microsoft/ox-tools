@@ -109,6 +109,37 @@ pub enum Artifact {
     Region(RegionSpec),
 }
 
+/// A region host whose region order is semantic, and which needs a scaffold
+/// before the first region can be spliced into it.
+///
+/// Registering a host here is a claim, not a default. Most hosts hold regions
+/// that are order-independent (TOML tables in `deny.toml`, line sets in
+/// `.gitattributes`), and appending an absent one at end-of-file is correct for
+/// them. A registered host instead has its on-disk sequence checked against
+/// [`order`](Self::order) and is refused when it deviates, so registering a
+/// host whose regions commute turns a working file into a refusal.
+///
+/// Only [`HostSelector::Path`] hosts can be described. The engine looks a host
+/// up by the relative path it has already resolved, which the selector variants
+/// conditioned on workspace shape never produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComposedHost {
+    /// Repo-root-relative forward-slash path of the host file.
+    pub path: &'static str,
+    /// The content written when the file is absent, as the base the first
+    /// region splices into.
+    ///
+    /// A scaffold is written once and never reconciled: on every later run the
+    /// file already exists, and everything outside the sentinels belongs to the
+    /// repository. It must therefore carry only what cannot live inside a
+    /// region and cannot go stale, such as a parser directive that must precede
+    /// all comments, and never a directive anvil may later need to change.
+    pub scaffold: &'static str,
+    /// The region ids this host carries, in the order a valid file must carry
+    /// them.
+    pub order: &'static [&'static str],
+}
+
 /// The engine-internal identity of an artifact, used for dedup and override.
 ///
 /// Not part of the public surface: a fork never constructs or names a key;

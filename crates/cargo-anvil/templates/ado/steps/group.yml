@@ -11,51 +11,22 @@
 # target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
 # read that cache via their `anvil-impact` dependency -- the same code path as
 # a local run. Scheduled group jobs download nothing and run full-workspace
-# (see the bash step).
+# (see the group step).
 steps:
   - template: setup.yml
     parameters:
       group: __GROUP__
-  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
-  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
-  # literal unexpanded macro text (non-empty) and make anvil-pr-title
-  # validate that string. Resolve the real title from the REST API on PR
-  # builds and publish it as the PR_TITLE pipeline variable. Only
-  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
-  # resolve uniformly to keep group.yml the same across groups. Non-PR builds
-  # skip; a known PR whose metadata cannot be retrieved fails closed.
-  - pwsh: |
-      $ErrorActionPreference = 'Stop'
-      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
-      if (-not $prId) {
-          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
-          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
-          exit 0
-      }
-      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
-      try {
-          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
-          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
-      } catch {
-          Write-Error "anvil: could not resolve PR title for PR $prId ($_). Ensure the job can access the repository OAuth token."
-          exit 1
-      }
-    displayName: anvil-__GROUP__ (resolve PR title)
+__PR_TITLE_STEP__
+  - pwsh: just anvil-__GROUP__
+    displayName: anvil-__GROUP__
     env:
-      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-  - bash: |
-      set -euo pipefail
+__PR_TITLE_ENV__
       # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every
       # tier runs full-workspace.
-      export ANVIL_IMPACT=__IMPACT_MODE__
-      just anvil-__GROUP__
-    displayName: anvil-__GROUP__
-    env:
-      # Resolved by the preceding step; empty only outside PR builds.
-      PR_TITLE: $(PR_TITLE)
+      ANVIL_IMPACT: "__IMPACT_MODE__"
       # Disable cargo incremental compilation in CI: the incremental dir is
       # not part of the anvil-setup cache (see setup.yml), so generating it is
       # pure cost with no cross-run benefit. Mirrors the GitHub impl workflows'

@@ -31,7 +31,7 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Build pkg-name -> manifest-path map, restricted to library crates.
     $libPkgs = @{}
-    $metadataJson = & cargo metadata --no-deps --format-version 1
+    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-external-types: cargo metadata failed'
         exit $LASTEXITCODE

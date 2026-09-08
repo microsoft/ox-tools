@@ -33,7 +33,15 @@ use serde_json::Value;
     ThresholdOutOfRangeError,
     InvalidNoCoverableLinesValueError,
     ConflictingCoverageMetadataError,
+    WorkspaceTargetPolicyError,
+    InvalidTargetTableError,
+    InvalidTargetPolicyShapeError,
+    MissingTargetPolicyBehaviorError,
+    InvalidTargetSelectorError,
+    UnsupportedTargetSelectorError,
+    AmbiguousTargetPolicyError,
     WorkspaceScopedNoCoverableLinesError,
+    ResolveTargetError,
     ParseLcovError,
     ReadLcovError,
     UnknownPackageSelectorError
@@ -102,6 +110,101 @@ pub(crate) struct ConflictingCoverageMetadataError {
 )]
 pub(crate) struct WorkspaceScopedNoCoverableLinesError;
 
+/// Target policies were declared in workspace metadata.
+#[ohno::error]
+#[display("coverage-gate target policies are package-scoped and cannot be set in workspace metadata")]
+pub(crate) struct WorkspaceTargetPolicyError;
+
+/// A target-policy container was not a table.
+#[ohno::error]
+#[display("{source}: coverage-gate `target` must be a table keyed by target triple or cfg expression")]
+pub(crate) struct InvalidTargetTableError {
+    pub(crate) source: String,
+}
+
+/// A selected target policy was not a table.
+#[ohno::error]
+#[display("{source}: coverage-gate target policy must be a table")]
+pub(crate) struct InvalidTargetPolicyShapeError {
+    pub(crate) source: String,
+}
+
+/// A target policy did not select an effective behavior.
+#[ohno::error]
+#[display("{source}: target policy must set `min-lines-percent` or `expect-no-coverable-lines = true`")]
+pub(crate) struct MissingTargetPolicyBehaviorError {
+    pub(crate) source: String,
+}
+
+/// A target-policy selector was syntactically invalid.
+#[ohno::error]
+#[display("{source}: invalid coverage-gate target selector `{selector}`")]
+#[from(cargo_platform::ParseError)]
+pub(crate) struct InvalidTargetSelectorError {
+    pub(crate) source: String,
+    pub(crate) selector: String,
+}
+
+/// A target selector depends on Cargo build-unit context.
+#[ohno::error]
+#[display("{source}: coverage-gate target selector `{selector}` uses unsupported build-context configuration options: {options}")]
+pub(crate) struct UnsupportedTargetSelectorError {
+    pub(crate) source: String,
+    pub(crate) selector: String,
+    pub(crate) options: String,
+}
+
+/// More than one `cfg(...)` target policy matched the selected Rust target.
+#[ohno::error]
+#[display(
+    "{source}: multiple coverage-gate target policies match `{target}`: {selectors}; \
+     use disjoint cfg expressions or an exact Rust target-triple override"
+)]
+pub(crate) struct AmbiguousTargetPolicyError {
+    pub(crate) source: String,
+    pub(crate) target: String,
+    pub(crate) selectors: String,
+}
+
+/// The Rust target or its cfg values could not be obtained.
+#[ohno::error]
+#[display("failed to resolve Rust target")]
+#[from(ExecuteRustcError, RustcCommandFailedError, MissingRustcHostTargetError, InvalidRustcCfgError)]
+pub(crate) struct ResolveTargetError;
+
+/// A rustc target-information command could not be launched.
+#[ohno::error]
+#[display("could not execute `{command}`")]
+#[from(std::io::Error)]
+pub(crate) struct ExecuteRustcError {
+    pub(crate) command: String,
+}
+
+/// A rustc target-information command exited unsuccessfully.
+#[ohno::error]
+#[display("`{command}` exited with {status}: {stderr}")]
+pub(crate) struct RustcCommandFailedError {
+    pub(crate) command: String,
+    pub(crate) status: String,
+    pub(crate) stderr: String,
+}
+
+/// The rustc version output did not identify its host target.
+#[ohno::error]
+#[display("`{command}` did not report a host target")]
+pub(crate) struct MissingRustcHostTargetError {
+    pub(crate) command: String,
+}
+
+/// A cfg value emitted by rustc could not be parsed.
+#[ohno::error]
+#[display("rustc reported invalid cfg `{value}` for Rust target `{target}`")]
+#[from(cargo_platform::ParseError)]
+pub(crate) struct InvalidRustcCfgError {
+    pub(crate) value: String,
+    pub(crate) target: String,
+}
+
 /// An lcov tracefile was syntactically malformed.
 #[ohno::error]
 #[display("lcov tracefile is not well-formed")]
@@ -146,6 +249,13 @@ mod tests {
     }
 
     #[test]
+    fn execute_rustc_error_preserves_io_source() {
+        let error = ExecuteRustcError::caused_by("rustc -vV".to_owned(), std::io::Error::other("launch failed"));
+        let source = std::error::Error::source(&error).expect("execute error must retain its IO source");
+        assert_eq!(source.to_string(), "launch failed");
+    }
+
+    #[test]
     fn unknown_package_selector_carries_pattern() {
         let err = UnknownPackageSelectorError::new("nope-*".to_owned());
         let rendered = err.to_string();
@@ -187,5 +297,18 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("expect-no-coverable-lines"));
         assert!(rendered.contains("workspace.metadata.coverage-gate"));
+    }
+
+    #[test]
+    fn ambiguous_target_policy_names_target_and_selectors() {
+        let err = AmbiguousTargetPolicyError::new(
+            "alpha".to_owned(),
+            "x86_64-pc-windows-msvc".to_owned(),
+            "cfg(windows), cfg(target_os = \"windows\")".to_owned(),
+        );
+        let rendered = err.to_string();
+        assert!(rendered.contains("alpha"));
+        assert!(rendered.contains("x86_64-pc-windows-msvc"));
+        assert!(rendered.contains("cfg(windows)"));
     }
 }

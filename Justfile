@@ -5,28 +5,10 @@
 set unstable
 
 set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]
-set script-interpreter := ["pwsh", "-NoProfile"]
-
-# Constants shared by Just commands and GitHub workflows.
-set dotenv-path := "./constants.env"
-set dotenv-required := true
-
-package := ""
-target_package := if package == "" { "--workspace" } else { "-p " + package }
 
 _default:
     @just --list
 
-import 'justfiles/basic.just'
-import 'justfiles/coverage.just'
-import 'justfiles/format.just'
-import 'justfiles/setup.just'
-import 'justfiles/spelling.just'
-
 # >>> anvil-managed: anvil-imports
 import 'justfiles/anvil/mod.just'
 # <<< anvil-managed: anvil-imports
-
-# >>> anvil-managed: anvil-runner
-anvil_runner := env_var_or_default("ANVIL_RUNNER", "native")
-# <<< anvil-managed: anvil-runner

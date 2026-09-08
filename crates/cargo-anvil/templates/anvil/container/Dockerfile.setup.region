@@ -1,0 +1,39 @@
+# The whole recipe tree is copied because `just` parses it to reach the install
+# recipes.
+#
+# The credential files are removed in the same layer that used them: a build
+# secret never lands in a layer, but anything the install *writes* with it is
+# ordinary content, and the `chmod` below would publish it world-readable. A
+# later `RUN` cannot undo that, because the earlier layer keeps them.
+#
+# `HOME` is not set by this image and `docker build` does not set it either, so
+# `${HOME}/.netrc` would expand to `/.netrc` and leave the file root actually
+# uses. Both spellings are named.
+#
+# `registry` and `git` must exist before the `chmod`. The run mounts a named
+# volume over each, and an engine seeds a new volume from the image path it
+# covers; a path that does not exist seeds as root-owned 0755, which the
+# `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
+# The root manifest is copied for the MSRV, the one version `anvil-setup`
+# installs that is declared in repository source rather than pinned in
+# `versions.just`. `/opt/anvil` is the root the recipes already resolve against,
+# so the resolver reads it there with no container-specific path. The workspace
+# members it names are not copied and are not needed: the toolchain file selects
+# the compiler, which is the branch that skips workspace MSRV validation.
+#
+# It is deleted once the setup has read it, so it does not survive into the
+# finished image. The tag hashes the declared MSRV rather than the file, so an
+# unrelated dependency edit computes the same tag; a manifest left in place
+# would make that tag name two different filesystems, and a reused or published
+# image would carry a manifest that does not match any checkout.
+WORKDIR /opt/anvil
+COPY justfiles ./justfiles
+COPY rust-toolchain.toml ./
+COPY Cargo.toml ./
+RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
+    && just anvil-setup binstall \
+    && rm -f Cargo.toml \
+    && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
+    && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME:-/root}/.netrc" /root/.netrc \
+    && mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+    && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"

@@ -6,7 +6,7 @@
 [![crates.io](https://img.shields.io/crates/v/cargo-anvil.svg)](https://crates.io/crates/cargo-anvil)
 [![docs.rs](https://docs.rs/cargo-anvil/badge.svg)](https://docs.rs/cargo-anvil)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-anvil)](https://crates.io/crates/cargo-anvil)
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml/badge.svg)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 <a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>
@@ -15,429 +15,382 @@
 
 ## cargo-anvil
 
-Opinionated, unified Rust build and cloud-workflow scaffolding for GitHub Actions and
-Azure DevOps Pipelines. One opinionated check catalog, two cloud workflows
-backends, generated from the same source of truth.
+`cargo-anvil` gives a Rust repository a complete, maintained set of build
+checks for local development and continuous integration. It standardizes
+common engineering work, including formatting, linting, tests, coverage, dependency
+policy, minimum-Rust-version testing, undefined-behavior checks, and
+mutation testing, without requiring each repository to design and maintain
+that infrastructure independently.
 
-### What it does
+Run it once to add the build system to a repository. Run it again whenever
+the repository should adopt a newer cargo-anvil release. The generated
+files are committed with the source, so builds do not download or execute
+cargo-anvil itself.
 
-`cargo-anvil` writes files. `just` runs them. The repo composes
-everything. The tool itself is not on the local-build hot path or in
-the cloud-workflow graph at runtime — it is a code generator that you re-run when
-you want to upgrade the opinionated baseline.
+### What you get
 
-Each run of `cargo anvil` writes:
+A generated setup includes:
 
-* The owned `justfiles/anvil/` recipe tree (`tools.just`, `checks/`,
-  `groups/`, `tiers.just`).
-* A managed region in your `Justfile` that imports them.
-* A managed region in your workspace `Cargo.toml` carrying
-  `[workspace.lints]` in dotted-key form, plus a `[lints] workspace = true` region in each workspace member.
-* Managed regions in `deny.toml`, `rustfmt.toml`, and `.delta.toml`.
-* For each selected cloud-workflow backend (`github`, `ado`), the full set of
-  composite actions / step templates, reusable workflows / stages
-  templates, and root workflows / pipelines.
+* commands for individual checks, groups of related checks, and complete
+  pull-request or scheduled validation tiers;
+* pinned Rust nightly and Cargo tool versions;
+* impact analysis that limits pull-request work to affected crates while
+  retaining full-workspace scheduled validation;
+* GitHub Actions workflows, Azure DevOps pipelines, or both;
+* shared formatting, lint, dependency, spelling, and impact-analysis
+  configuration;
+* repository-wide agent instructions for setup, complete PR validation,
+  and efficient iteration on individual failures;
+* a repository skill for completing adoption in an existing Rust codebase,
+  including policy migration and removal of duplicate build infrastructure;
+* safe update metadata that distinguishes generated content from
+  repository-owned customization.
 
-Outside the managed regions, your content is preserved byte-for-byte.
+The default catalog is opinionated. Its purpose is to provide one strong,
+coherent baseline rather than a collection of switches that every
+repository must assemble differently.
 
-### Installation
+### Install and adopt
 
-```bash
+Install the generator:
+
+```console
 cargo install --locked cargo-anvil
 ```
 
-Only the maintainer who runs updates needs the binary. Everyone else
-uses `just` (or plain `cargo`).
+From the root of a Rust repository, generate the local commands and
+autodetect the cloud provider from the `origin` remote:
 
-### Usage
-
-```text
-cargo anvil [--backend <name>]... [--no-backends] [--dry-run] [--force]
+```console
+cargo anvil
 ```
 
-`update` is the only subcommand. There is no separate `init`,
-`migrate`, `check`, `enable`, or `disable`. The algorithm is uniform
-— first runs and subsequent runs go through the same decision table.
+A backend can also be selected explicitly:
 
-Flags:
-
-* `--backend <name>` — repeatable. Valid values: `github`, `ado`. If
-  omitted, the backend is autodetected from the `origin` git remote.
-* `--no-backends` — emit only local files; skip every cloud-workflow backend.
-  Mutually exclusive with `--backend`.
-* `--dry-run` — analyze without writing. Exits 1 if anything would be
-  written or proposed, or if Anvil refuses to manage an artifact it
-  cannot safely inspect.
-* `--force` — override the single-tool guard and switch the repository to
-  this tool, then run a normal update. A repo is managed by exactly one
-  anvil-family tool (recorded as `tool` in `.anvil.lock`); without
-  `--force`, a run refuses when that field names a different tool.
-
-`--version` prints the build version plus, on a second line, the
-`catalog:` checksum — a `sha256` over the whole compiled-in catalog — so
-two builds at the same version but different catalogs are distinguishable.
-
-### Daily driver
-
-After the first run, your daily workflow is plain `just`:
-
-```text
-$ just anvil          # alias for `just anvil-pr`
-$ just anvil-pr       # the PR tier
-$ just anvil-scheduled  # the scheduled tier
-$ just anvil-full     # both, sequentially
+```console
+cargo anvil --backend github
+cargo anvil --backend ado
+cargo anvil --backend github --backend ado
+cargo anvil --no-backends
 ```
 
-cloud workflows invoke the same recipes, so a check behaves identically
-locally and in cloud workflows — they share one implementation in the
-imported `.just` files, including impact scoping: a local `just anvil-pr`
-runs `anvil-impact` (via [`cargo-delta`][__link0])
-and scopes each check to the affected packages, exactly as a cloud-workflow
-PR run does. The scheduled and full tiers deliberately opt out
-(`ANVIL_IMPACT=off`) and run every check over the whole workspace.
+Commit the generated files. Teammates and CI runners need the generated
+files and their declared tools, but they do not need the cargo-anvil binary.
 
-The generated GitHub scheduled workflow publishes failures as GitHub
-issues. On failure, it best-effort reuses an open marker-owned issue and
-comments when later scheduled runs also fail. A maintainer closes the issue
-after resolving the incident; successful runs do not close it automatically.
-Repositories can disable this behavior by setting the
-`ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository variable to `false`.
+`cargo anvil --dry-run` reports drift without writing. It exits unsuccessfully
+when an update is pending, generated state is inconsistent, or content
+cannot be inspected safely. `cargo anvil --force` permits an intentional
+switch from another tool built on the cargo-anvil engine.
 
-### Containerized local checks
+### Running checks
 
-Anvil can run any generated recipe in a content-addressed Linux container.
-The image installs the Rust toolchains and Cargo tools pinned by the
-repository’s generated Anvil configuration, providing a repeatable Linux
-environment without installing those tools directly on the host.
+The generated command interface uses
+[`just`][__link0], a cross-platform command runner.
+A repository’s `Justfile` imports the generated recipes under
+`justfiles/anvil/`; each recipe invokes ordinary Rust and Cargo tools.
 
-#### Prerequisites
+Run the complete pull-request tier locally:
 
-* Docker Engine 23.0 or newer, installed directly in Linux or WSL and
-  usable by the current user.
-* `git` and `just` on the host.
-* Bash on Linux and WSL; `PowerShell` Core (`pwsh`) and WSL 2 on Windows.
-* `[script]` support enabled in the root `Justfile` (`set unstable` when
-  required by the installed `just` version).
-* A repository-owned `rust-toolchain.toml`.
-* On Windows, Docker Engine running in the default WSL distribution:
-
-```powershell
-wsl -e docker version
-```
-
-The Windows driver invokes Docker in the default WSL distribution and does
-not call Windows `docker.exe`. Regardless of the installation, the command
-above must succeed. Docker Desktop is not required.
-
-On ARM64 hosts, Docker emulates the required `linux/amd64` environment, so
-image builds and checks can be substantially slower than on x86-64 hosts.
-
-#### Run a recipe
-
-```text
-just anvil-container anvil-clippy
-just anvil-container anvil-pr
-just anvil-container
-```
-
-The no-argument form opens an interactive shell. Anvil builds an image the
-first time it encounters a content hash and reuses it on later runs. Changes
-to the Rust toolchain, generated Anvil files, Containerfile, or other static
-image inputs select a new tag and build a new image. Images for earlier
-hashes remain available to older branches. Runtime `customize.*` files do not
-affect image identity.
-Every argument is a recipe name; recipe parameters are not supported by
-this command surface.
-
-Cargo registry and Cargo Git caches use repository-scoped named volumes;
-`target/` is additionally scoped by image ID. The
-repository is mounted at `/workspace`; keeping build output in a named
-volume avoids slow host bind-mount I/O, particularly on Windows.
-
-#### Make tiers use the container
-
-Native execution remains the default. Enable container execution for the
-current shell:
-
-```powershell
-$env:ANVIL_RUNNER = "container"
+```console
 just anvil-pr
 ```
 
-On Unix:
+Run only the fast checks when a change cannot affect executable behavior:
 
-```sh
-ANVIL_RUNNER=container just anvil-pr
+```console
+just anvil-pr-fast
 ```
 
-A one-off override is also supported:
+Other useful entry points are:
+
+```console
+just anvil-build
+just anvil-build --package my-crate
+just anvil-doc-build --open
+just anvil-examples --run
+just anvil-fmt --fix
+just anvil-miri --package my-crate --example basic
+just anvil-readme --fix
+just anvil-scheduled
+just anvil-full
+```
+
+Individual checks are also available as `anvil-<check>` recipes. Run
+`just --list` to see the generated interface and `just --usage <recipe>` to
+see a recipe’s options.
+
+### Pull-request and scheduled validation
+
+The pull-request tier is impact-scoped. It computes which workspace
+packages changed and which packages depend on them, then gives each check
+the scope required for correctness. Independent groups run in parallel in
+the generated cloud workflow:
+
+* **fast checks** cover formatting, Clippy, documentation, dependency
+  policy, spelling, README drift, API compatibility, and metadata;
+* **tests and coverage** run tests, documentation tests, coverage gates,
+  and example compilation;
+* **MSRV tests** execute affected tests with the repository’s declared
+  minimum supported Rust version;
+* **runtime analysis** runs Miri, cargo-careful, Loom, and a short Bolero
+  fuzzing pass;
+* **mutation testing** tests mutants in the pull-request diff.
+
+The scheduled tier runs full-workspace backstops and expensive checks that
+do not belong on every pull request, including extended Miri profiles, full
+mutation testing, feature-powerset checks, and benchmark compilation.
+GitHub scheduled failures can be published to a durable issue.
+
+Local and cloud runs call the same generated recipes with the same check
+arguments. Cloud workflows add orchestration for matrices, permissions,
+artifacts, comments, and status reporting, but do not re-implement the
+checks.
+
+### Rust toolchains and tools
+
+Ordinary checks select Rust deterministically, in this order:
+
+1. a caller-provided `RUSTUP_TOOLCHAIN`;
+1. a root `rust-toolchain` or `rust-toolchain.toml`;
+1. the root package or workspace `rust-version`.
+
+Repositories with none of these fail instead of silently using a runner’s
+ambient compiler. Nightly-only checks use catalog pins. The MSRV group
+separately installs and tests the minimum version declared by the
+repository.
+
+Tool installation is explicit:
+
+```console
+just anvil-setup         # install every tool and toolchain in the catalog
+just anvil-pr-fast-setup # install only prerequisites for the fast PR group
+```
+
+Generated checks validate their prerequisites before executing and provide
+an installation hint when something is missing.
+
+### Check catalog
+
+Every check is available independently as `just anvil-<name>`. The tiers
+above compose these recipes into the default policy:
+
+* **Source and package hygiene:** [`rustfmt`][__link1]
+  (`fmt`), [`Clippy`][__link2] (`clippy`),
+  [`cargo-sort`][__link3], license headers with
+  [`cargo-heather`][__link4],
+  [`cargo-ensure-no-cyclic-deps`][__link5],
+  and [`cargo-ensure-no-default-features`][__link6].
+* **Documentation and repository policy:** Cargo documentation
+  (`doc-build`), documentation tests (`doc-test`), generated README checks
+  with [`cargo-doc2readme`][__link7],
+  [`cargo-spellcheck`][__link8], and
+  [Conventional Commits][__link9] pull-request
+  titles.
+* **Dependencies and public API:** [`cargo-deny`][__link10],
+  [`cargo-audit`][__link11],
+  [`cargo-aprz`][__link12],
+  [`cargo-udeps`][__link13],
+  [`cargo-semver-checks`][__link14], and
+  [`cargo-check-external-types`][__link15].
+* **Tests and coverage:** tests under the declared MSRV, coverage with
+  [`cargo-llvm-cov`][__link16] and
+  [`cargo-coverage-gate`][__link17],
+  documentation tests, and example compilation or optional execution.
+* **Runtime analysis:** [`Miri`][__link18],
+  [`cargo-careful`][__link19],
+  [`Loom`][__link20], and
+  [`Bolero`][__link21].
+* **Broader validation:** diff-scoped and full
+  [`cargo-mutants`][__link22] runs,
+  [`cargo-hack`][__link23] feature-powerset
+  checks, and benchmark compilation.
+
+`docs/design/checks.md` records the exact commands, impact scope, feature
+configurations, operating-system matrix, tier placement, and rationale for
+each check.
+
+### Configuring checks
+
+Customize behavior through the configuration understood by each underlying
+tool, package metadata, and source attributes. This keeps policy close to
+the code it governs and lets the same configuration work with Anvil,
+direct Cargo commands, and editor integrations.
+
+cargo-anvil updates owned recipe and workflow files, plus marked regions in
+shared configuration files. Checksums in `.anvil.lock` record the generated
+state. Repository configuration outside `anvil-managed` regions is
+preserved. If generated content is edited directly, cargo-anvil preserves
+the edit and writes changed catalog content to an `.anvil-proposed` sibling
+rather than overwriting it.
+
+For normal repository policy, configure the tool instead of editing the
+generated recipe.
+
+#### Formatting and linting
+
+Rust formatting follows `rustfmt.toml`. Rust and Clippy lint policy lives in
+workspace and package `Cargo.toml` lint tables, with Clippy-specific
+configuration in `clippy.toml`. Add repository rules outside the generated
+regions so catalog updates can continue to maintain the shared baseline.
+
+#### Dependencies and public API
+
+License, source, advisory, and duplicate-dependency policy lives in
+`deny.toml`. Dependency features and version requirements remain ordinary
+`Cargo.toml` declarations. Intentional public exposure of third-party types
+is recorded with `cargo-check-external-types` package metadata, next to the
+API surface that requires the exception.
+
+#### Spelling
+
+Add project names, acronyms, and domain terms to the repository’s
+`.spelling` file, one term per line. `anvil-spellcheck` converts it to the
+dictionary format expected by cargo-spellcheck.
+
+#### Coverage
+
+[`cargo-coverage-gate`][__link24]
+metadata controls workspace and package thresholds, target-specific policy,
+and intentional exclusions. Coverage enforcement is local to the generated
+check; a hosted coverage service is optional reporting rather than the
+source of the verdict.
+
+#### Miri
+
+Anvil compiles the selected scope together once with all features enabled,
+preserving Cargo feature unification, and runs the resulting Miri test
+executables concurrently.
+Each executable is one Cargo test target containing one or more libtest
+tests.
+`ANVIL_MIRI_JOBS` overrides the default worker count. Local callers can use
+`--package` to override impact scope, `--test` to select libtest names, or
+`--example` with `--package` to run one example instead of the test suite.
+
+A package whose own test targets should not run under Miri can opt out while
+remaining available as a dependency:
+
+```toml
+[package.metadata.anvil.miri]
+exclude = true
+```
+
+Reserve this package-wide switch for constraints that apply to every test
+target. Prefer per-test ignores with reasons for narrower or temporary
+suppressions.
+
+Tests that cannot run in the interpreter can carry an ordinary ignore:
 
 ```text
-just anvil_runner=container anvil-pr
+#[cfg_attr(miri, ignore = "spawns a process")]
 ```
 
-To make containers the project default, edit `<repository-root>/Justfile`
-and change the default value in the `anvil-runner` region from `"native"`
-to `"container"`. Commit `<repository-root>/Justfile` with that policy
-change. Set `ANVIL_RUNNER=native` to override it for one shell.
-
-#### Controls
-
-|Variable|Effect|
-|--------|------|
-|`ANVIL_CONTAINER_BASE_IMAGE`|Select a compatible digest-pinned Linux base image; the value is included in the content hash.|
-|`ANVIL_CONTAINER_IMAGE`|Override the local image name. The content hash remains the tag.|
-|`ANVIL_CONTAINER_NO_REBUILD=1`|Fail when the matching image is missing instead of building it.|
-
-The public driver never pulls `ANVIL_CONTAINER_IMAGE` remotely. Repositories
-and derived catalogs can add trusted `customize.sh` and
-`customize.ps1` files for image-build secrets, dependency preparation,
-APRZ classification, runtime arguments, and cleanup through the documented
-customization contract without changing the public command surface.
-
-Customization files execute on the host with the developer’s permissions
-before container isolation. Only run them from a repository or catalog you
-trust.
-
-For GitHub API checks, the driver automatically uses an existing host
-`GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
-mounts the token read-only for the command and removes the temporary file
-afterward. If `gh` is installed but not authenticated, an interactive run
-pauses before building the image, explains the unauthenticated API limit,
-and continues after the user completes `gh auth login` and presses Enter.
-
-#### Troubleshooting
-
-* A first-run image build is expected and may take several minutes.
-* `wsl -e docker images anvil-dev` lists locally cached Anvil images from
-  Windows; use `docker images anvil-dev` inside Linux or WSL.
-* `ANVIL_CONTAINER_NO_REBUILD=1` distinguishes a cache miss from a build
-  failure.
-* Non-interactive runs cannot pause for login. Authenticate `gh` or set host
-  `GITHUB_TOKEN` before starting them.
-* Regenerate managed files with `cargo anvil`; do not hand-edit
-  `.anvil/container/`.
-
-### Checks and tiers
-
-Checks are grouped into **tiers** (`anvil-pr`, `anvil-scheduled`) that
-fan out to **groups** (one cloud-workflow job each), which in turn run
-individual checks sequentially. `anvil-full` runs both tiers.
-
-The catalog and per-check rationale live in `docs/design/checks.md`;
-the tables below map each check to the group that runs it, link each
-check to its tool’s documentation, and note anything anvil-specific.
-
-**PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped
-both locally and in cloud workflows. Two jobs: `pr-fast`, and `pr-slow` (whose three
-sub-groups run sequentially within the one job per OS leg):
-
-<table>
-  <thead><tr><th>Job</th><th>Sub-group</th><th>Check</th><th>Notes</th></tr></thead>
-  <tbody>
-    <tr><td rowspan="15"><code>pr-fast</code></td><td rowspan="15">—</td><td><a href="https://rust-lang.github.io/rustfmt/">fmt</a></td><td>predefined configuration with nightly features</td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td><td>predefined lints</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-sort">cargo-sort</a></td><td>keeps blank-line groups (<code>--grouped</code>)</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-heather">license-headers</a></td><td></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-ensure-no-cyclic-deps">ensure-no-cyclic-deps</a></td><td></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-ensure-no-default-features">ensure-no-default-features</a></td><td></td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-doc.html">doc-build</a></td><td></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-doc2readme">readme-check</a></td><td></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-spellcheck">spellcheck</a></td><td>custom dictionary: <code>.spelling</code></td></tr>
-    <tr><td><a href="https://www.conventionalcommits.org/">pr-title</a></td><td>cloud-only; skipped locally</td></tr>
-    <tr><td><a href="https://embarkstudios.github.io/cargo-deny/">deny</a></td><td></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-audit">audit</a></td><td></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-udeps">udeps</a></td><td>runs twice: with and without <code>--all-targets</code></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-semver-checks">semver-check</a></td><td>findings and inconclusive comparisons are advisory (posts a PR comment); Anvil preflight failures remain enforcing</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-check-external-types">external-types</a></td><td></td></tr>
-    <tr><td rowspan="8"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td>runs both feature configs</td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td>compile-only</td></tr>
-    <tr><td rowspan="4"><code>pr-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td>libtest, not nextest</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-careful">careful</a></td><td>self-cleans on a toolchain bump</td></tr>
-    <tr><td><a href="https://crates.io/crates/loom">loom</a></td><td>opt-in targets only</td></tr>
-    <tr><td><a href="https://crates.io/crates/bolero">bolero</a></td><td>60s smoke only; Linux-only</td></tr>
-    <tr><td><code>pr-mutants</code></td><td><a href="https://mutants.rs/">mutants-diff</a></td><td>diff-scoped (<code>--in-diff</code>)</td></tr>
-  </tbody>
-</table>
-
-**Scheduled tier** (`anvil-scheduled`) — full-workspace, runs on a
-schedule against the default branch, not on PRs:
-
-<table>
-  <thead><tr><th>Group</th><th>Check</th><th>Notes</th></tr></thead>
-  <tbody>
-    <tr><td rowspan="3"><code>scheduled-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td></td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td></td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td></td></tr>
-    <tr><td rowspan="4"><code>scheduled-advisories</code></td><td><a href="https://embarkstudios.github.io/cargo-deny/">deny</a></td><td rowspan="4">re-run to catch newly-published advisories / lints</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-audit">audit</a></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-aprz">aprz</a></td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td></tr>
-    <tr><td rowspan="4"><code>scheduled-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td></td></tr>
-    <tr><td><a href="https://github.com/rust-lang/miri">miri-tree-borrows</a></td><td><code>-Zmiri-tree-borrows</code></td></tr>
-    <tr><td><a href="https://github.com/rust-lang/miri">miri-strict-provenance</a></td><td><code>-Zmiri-strict-provenance</code></td></tr>
-    <tr><td><a href="https://github.com/rust-lang/miri">miri-race-coverage</a></td><td>day-rotated seed window</td></tr>
-    <tr><td rowspan="3"><code>scheduled-exhaustive</code></td><td><a href="https://mutants.rs/">mutants-full</a></td><td></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-hack">cargo-hack</a></td><td>feature powerset</td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-bench.html">bench</a></td><td>compile-only</td></tr>
-  </tbody>
-</table>
-
-### Customization
-
-Four escape valves, in increasing severity:
-
-1. **Compose around the tool**: add your own `.just` files or
-   workflows; the tool never touches anything not prefixed
-   `anvil-`.
-1. **Extend managed regions** outside the sentinels — add lints,
-   deny rules, etc. The tool preserves everything outside.
-1. **Opt out by emptying** a managed region or owned file. The tool
-   will skip the item on every future `update` and only emit a
-   `.anvil-proposed` sibling when the template actually changes.
-1. **Take ownership by editing inside** an owned file or managed
-   region. The next `update` detects the dirt and writes a
-   `.anvil-proposed` sibling instead of overwriting.
-
-#### Scheduled failure issue publication (GitHub)
-
-The generated GitHub scheduled workflow creates or updates
-`[Anvil] Scheduled checks failed` when a scheduled group fails.
-To disable this behavior without editing an Anvil-owned workflow,
-set the Actions repository variable `ANVIL_PUBLISH_FAILURE_ISSUE`
-to `false` under **Settings → Secrets and variables → Actions →
-Variables**. Removing the variable or setting any other value
-restores the default publication behavior.
-
-### In-tree tool customization
-
-anvil follows a few source-level and `Cargo.toml` conventions so you
-can customize how some of the executed tools behave from within your
-own crates — without editing the generated `justfiles/anvil/` tree.
-
-#### Spelling dictionary (`spellcheck`)
-
-The `spellcheck` check ([`cargo-spellcheck`][__link1])
-reads a repo-root `.spelling` file — one word per line — as its custom
-dictionary. Add project-specific terms (crate names, acronyms,
-identifiers) there to silence false positives; the `anvil-spellcheck`
-recipe sorts and filters it into the dictionary cargo-spellcheck
-consumes. Keep the file `LF`-terminated.
-
-#### Coverage (`llvm-cov`)
-
-Coverage is gated by [`cargo-coverage-gate`][__link2];
-per-package and per-workspace thresholds, the coverage-exclusion
-attribute, and opt-out are all configured through its `Cargo.toml`
-metadata conventions — see its documentation.
-
-#### Undefined-behavior checking (`miri`)
-
-The PR-tier `miri` check runs `cargo miri test --all-features --tests`
-(libtest, not nextest — process-per-test is roughly twice as slow under miri).
-Opt a test out of miri when it touches the filesystem, spawns
-subprocesses, or otherwise can’t run under the interpreter:
+The scheduled Tree Borrows, strict-provenance, and race-coverage profiles
+each define their own cfg so a test can opt out of one profile without
+disappearing from the others:
 
 ```text
-#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri_tree_borrows, ignore = "exceeds the runner memory limit")]
+#[cfg_attr(miri_strict_provenance, ignore = "uses an intentional integer-to-pointer cast")]
+#[cfg_attr(miri_race_coverage, ignore = "not deterministic across seeds")]
 ```
 
-The **scheduled** tier adds three stricter miri profiles, each of
-which sets a distinct cfg so you can quarantine a test from one
-profile without affecting the others (e.g. a test that OOMs only
-under tree-borrows):
+#### Loom
 
-```text
-#[cfg_attr(miri_tree_borrows,      ignore = "OOMs under -Zmiri-tree-borrows")]
-#[cfg_attr(miri_strict_provenance, ignore = "int-to-ptr cast by design")]
-#[cfg_attr(miri_race_coverage,     ignore = "nondeterministic across seeds")]
-```
-
-#### Concurrency model checking (`loom`)
-
-The `loom` check runs only the test targets that opt in, detected
-**structurally** (no filename/comment heuristic). A crate opts in by
-declaring a `loom` feature, a dedicated `[[test]]` target that
-requires it, and a `cfg(loom)`-gated `loom` dependency:
+A crate opts into concurrency model checking with a `loom` feature, a
+dedicated test target, and a cfg-gated dependency:
 
 ```toml
 [features]
 loom = []
 
 [[test]]
-name = "loom"               # tests/loom.rs
+name = "loom"
 required-features = ["loom"]
 
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 ```
 
-In source, swap std atomics for loom’s under the cfg
-(`#[cfg(loom)] use loom::sync::atomic::...`). The recipe builds those
-targets with `--cfg loom`, per-package so the cfg never leaks into
-other members’ dependencies. It is **fail-loud**: a crate that
-declares loom support (a `loom` feature or a `cfg(loom)` dependency)
-but ships no such test target errors out rather than silently
-skipping. When no crate ships a loom target the check is a no-op.
+Source can then select Loom synchronization primitives with `#[cfg(loom)]`.
+Anvil detects the target from Cargo metadata and fails loudly when a crate
+declares Loom support but exposes no matching test target.
 
-### Extensibility: shipping your own tool
+#### Examples
 
-Another team can ship its own cargo subcommand with its own catalog while
-reusing this entire engine. The downstream binary’s `main` is one line:
+`anvil-examples` always compiles selected examples. An unfiltered
+`--run` skips interactive, credentialed, or otherwise unsuitable examples
+declared by their package:
+
+```toml
+[package.metadata.anvil.examples]
+no-run = ["interactive-demo", "needs-production-credentials"]
+```
+
+Explicit `--package` and `--example` selection overrides the default
+exclusion because the caller has deliberately chosen that example.
+
+#### Scheduled failure reporting
+
+The generated GitHub scheduled workflow creates or updates an
+`[Anvil] Scheduled checks failed` issue. Set the Actions repository
+variable `ANVIL_PUBLISH_FAILURE_ISSUE` to `false` to disable publication
+without taking ownership of the workflow.
+
+### Containerized local execution
+
+Any generated command can run in an optional content-addressed Linux
+container:
+
+```console
+just anvil-container just anvil-pr
+just anvil-container just anvil-clippy
+just anvil-container cargo build
+```
+
+The image contains the same tool versions used by the generated checks.
+Its tag is derived from the Dockerfile, toolchain, and generated recipe
+tree, so changes to those inputs select a different image. Docker is
+supported; Podman is available on a best-effort basis. Repositories that
+need private feeds can add a host-side credential hook without embedding
+credentials in the image or command line. See
+`docs/design/containers.md` for setup, security boundaries, and advanced
+customization.
+
+### Building another tool on the engine
+
+The crate also exposes the catalog engine used by `cargo-anvil`. A
+downstream tool can start from [`Catalog::anvil`][__link25], add, replace, or remove
+[`Artifact`][__link26] values, select its own CLI identity, and pass the result to
+[`run_app`][__link27]:
 
 ```rust
 use std::process::ExitCode;
 
-fn main() -> ExitCode {
-    cargo_anvil::run_app(myforge::catalog())
-}
-```
-
-…plus a [`Catalog`][__link3] value that starts from [`Catalog::anvil`][__link4] and
-customizes the CLI identity ([`CliMeta`][__link5]) and artifact set:
-
-```rust
 use cargo_anvil::{Artifact, Catalog, artifacts};
 
-pub fn catalog() -> Catalog {
+fn catalog() -> Catalog {
     Catalog::anvil()
         .into_builder()
         .subcommand("myforge")
         .with_artifact(Artifact::owned_file(
             "justfiles/anvil/extra.just",
-            "# ...\n",
+            "# generated by myforge\n",
         ))
-        .replace_artifact(artifacts::region::rustfmt().with_body("max_width = 80\n"))
         .without_artifact(artifacts::region::clippy())
         .build()
-        .expect("valid catalog")
+        .expect("the customized catalog has one artifact per target")
+}
+
+fn main() -> ExitCode {
+    cargo_anvil::run_app(catalog())
 }
 ```
 
-The on-disk vocabulary (`.anvil.lock`, `anvil-managed` sentinels,
-`justfiles/anvil/`, `anvil-` recipes) is the fixed engine format and is
-never rebranded. A fork customizes only its CLI identity and which
-artifacts it emits, via the three uniform builder verbs
-([`CatalogBuilder::with_artifact`][__link6], [`CatalogBuilder::replace_artifact`][__link7],
-[`CatalogBuilder::without_artifact`][__link8]) over the public [`artifacts`][__link9]
-registry. The `tool` field recorded in `.anvil.lock` keeps two
-anvil-family tools from clobbering one another in a shared repo (see `--force`).
-See `docs/design/extensibility.md`.
+The engine format remains `anvil`-named on disk so tools built on it can
+coexist safely and share the same update rules.
 
-### Design docs
-
-See `docs/design/` for the full architecture:
-
-* `README.md` — overall principles and CLI shape.
-* `checks.md` — the opinionated check catalog.
-* `local.md` — the `justfiles/anvil/` tree.
-* `updates.md` — the drift-detection algorithm.
-* `extensibility.md` — how downstream tools ship their own catalog.
-* `github.md` — GitHub Actions emission.
-* `ado.md` — Azure DevOps Pipelines emission.
-
-And `docs/verification.md` for the continuous-validation strategy.
+More detailed design and operational guidance is available in the
+`docs/design/` folder.
 
 
 <hr/>
@@ -445,14 +398,32 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQblcBzF-_WZVYbCN9Rt1pYQLsblkUTM0oENsMbNe4wSAldeq9hZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
- [__link0]: https://crates.io/crates/cargo-delta
- [__link1]: https://crates.io/crates/cargo-spellcheck
- [__link2]: https://crates.io/crates/cargo-coverage-gate
- [__link3]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=Catalog
- [__link4]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=Catalog::anvil
- [__link5]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CliMeta
- [__link6]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::with_artifact
- [__link7]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
- [__link8]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::without_artifact
- [__link9]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb_Wi2RvJKqLgb6U0-tQFqaYMbiv-kD9siQ44bVYhqNqZVUZBhZIGDa2NhcmdvLWFudmlsZTAuOS4wa2NhcmdvX2Fudmls
+ [__link0]: https://github.com/casey/just
+ [__link1]: https://rust-lang.github.io/rustfmt/
+ [__link10]: https://embarkstudios.github.io/cargo-deny/
+ [__link11]: https://crates.io/crates/cargo-audit
+ [__link12]: https://crates.io/crates/cargo-aprz
+ [__link13]: https://crates.io/crates/cargo-udeps
+ [__link14]: https://crates.io/crates/cargo-semver-checks
+ [__link15]: https://crates.io/crates/cargo-check-external-types
+ [__link16]: https://crates.io/crates/cargo-llvm-cov
+ [__link17]: https://crates.io/crates/cargo-coverage-gate
+ [__link18]: https://github.com/rust-lang/miri
+ [__link19]: https://crates.io/crates/cargo-careful
+ [__link2]: https://doc.rust-lang.org/clippy/
+ [__link20]: https://crates.io/crates/loom
+ [__link21]: https://crates.io/crates/bolero
+ [__link22]: https://mutants.rs/
+ [__link23]: https://crates.io/crates/cargo-hack
+ [__link24]: https://crates.io/crates/cargo-coverage-gate
+ [__link25]: https://docs.rs/cargo-anvil/0.9.0/cargo_anvil/?search=Catalog::anvil
+ [__link26]: https://docs.rs/cargo-anvil/0.9.0/cargo_anvil/?search=Artifact
+ [__link27]: https://docs.rs/cargo-anvil/0.9.0/cargo_anvil/fn.run_app.html
+ [__link3]: https://crates.io/crates/cargo-sort
+ [__link4]: https://crates.io/crates/cargo-heather
+ [__link5]: https://crates.io/crates/cargo-ensure-no-cyclic-deps
+ [__link6]: https://crates.io/crates/cargo-ensure-no-default-features
+ [__link7]: https://crates.io/crates/cargo-doc2readme
+ [__link8]: https://crates.io/crates/cargo-spellcheck
+ [__link9]: https://www.conventionalcommits.org/

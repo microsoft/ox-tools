@@ -9,7 +9,7 @@ use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cargo_coverage_gate::EvaluatedReport;
+use cargo_coverage_gate::{EvaluatedReport, evaluate_many_for_target};
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::CoverageGateArgs;
@@ -27,7 +27,8 @@ pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
     }
     let lcov_refs: Vec<&str> = lcov_texts.iter().map(String::as_str).collect();
 
-    let report = cargo_coverage_gate::evaluate_many(&lcov_refs, None, &args.packages).into_app_err("failed to evaluate coverage")?;
+    let report =
+        evaluate_many_for_target(&lcov_refs, None, &args.packages, args.target.as_deref()).into_app_err("failed to evaluate coverage")?;
 
     write_text_output(&report, args.quiet).into_app_err("failed to write verdict to stdout")?;
 

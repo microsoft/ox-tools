@@ -9,7 +9,7 @@
 # Scheduled groups
 
 # Scheduled groups are the full-workspace backstop for PR-tier impact scoping,
-# so route through _anvil-run with impact "off": it exports ANVIL_IMPACT=off
+# so route through _anvil-unscoped: it exports ANVIL_IMPACT=off
 # before the check dependencies run, so the group is full-workspace regardless
 # of how it is invoked (CI, `just anvil-scheduled`, or
 # `just anvil-scheduled-test` directly). Because these groups never recompute
@@ -17,7 +17,7 @@
 
 # Run the scheduled tests.
 [group("anvil")]
-anvil-scheduled-test: (_anvil-run "scheduled-test" anvil_runner "off")
+anvil-scheduled-test: (_anvil-unscoped "scheduled-test")
 
 [private]
 _anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \

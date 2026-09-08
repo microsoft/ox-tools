@@ -10,7 +10,10 @@
 
 use std::io;
 
-use crate::render::{files, format_delta, format_lines, format_source, format_status_markdown, format_threshold, result_summary};
+use crate::render::{
+    MAX_DIAGNOSTIC_LINES, diagnostic_line_count, failure_detail, files, format_delta, format_line_ranges, format_lines, format_source,
+    format_status_markdown, format_threshold, result_summary,
+};
 use crate::verdict::Report;
 
 /// Render `report` as a GFM table to `out`.
@@ -34,6 +37,7 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     writeln!(out)?;
 
     writeln!(out, "**Result:** {}", result_summary(&report.outcomes))?;
+    write_failure_details(out, report)?;
     if report.unattributed > 0 {
         writeln!(
             out,
@@ -44,13 +48,49 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     Ok(())
 }
 
+fn write_failure_details(out: &mut dyn io::Write, report: &Report) -> io::Result<()> {
+    let failures: Vec<_> = report
+        .outcomes
+        .iter()
+        .filter_map(|outcome| failure_detail(outcome).map(|detail| (outcome, detail)))
+        .collect();
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(out)?;
+    writeln!(out, "#### Failure details")?;
+    for (outcome, detail) in failures {
+        writeln!(out, "- **{}:** {}", outcome.name, detail)?;
+        let mut remaining = MAX_DIAGNOSTIC_LINES;
+        for diagnostic in &outcome.diagnostics {
+            if remaining == 0 {
+                break;
+            }
+            let displayed = diagnostic.lines.len().min(remaining);
+            writeln!(
+                out,
+                "  - `{}`: {}",
+                diagnostic.path.display(),
+                format_line_ranges(&diagnostic.lines[..displayed])
+            )?;
+            remaining -= displayed;
+        }
+        let omitted = diagnostic_line_count(outcome).saturating_sub(MAX_DIAGNOSTIC_LINES);
+        if omitted > 0 {
+            writeln!(out, "  - ... {omitted} more line locations omitted")?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::aggregate::LineTotals;
     use crate::threshold::{Threshold, ThresholdSource};
-    use crate::verdict::{PackageOutcome, Status};
+    use crate::verdict::{LineDiagnostic, PackageOutcome, Status};
 
     fn outcome(name: &str, count: u32, covered: u32, threshold: f64, source: ThresholdSource, status: Status) -> PackageOutcome {
         PackageOutcome {
@@ -61,6 +101,7 @@ mod tests {
             },
             totals: LineTotals { count, covered },
             status,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -84,17 +125,65 @@ mod tests {
 
     #[test]
     fn uses_check_emoji_for_pass_and_cross_for_fail() {
+        let mut beta = outcome("beta", 100, 50, 80.0, ThresholdSource::Workspace, Status::Fail);
+        beta.diagnostics.push(LineDiagnostic {
+            path: "src/lib.rs".into(),
+            lines: vec![51, 52, 60],
+        });
         let report = Report {
-            outcomes: vec![
-                outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok),
-                outcome("beta", 100, 50, 80.0, ThresholdSource::Workspace, Status::Fail),
-            ],
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok), beta],
             unattributed: 0,
         };
         let s = render_to_string(&report);
         assert!(s.contains("| ✅ |"));
         assert!(s.contains("| ❌ |"));
         assert!(s.contains("1 package below threshold"));
+        assert!(s.contains("#### Failure details"));
+        assert!(s.contains("**beta:** 50/100 lines covered; 50 uncovered."));
+        assert!(s.contains("`src/lib.rs`: 51-52, 60"));
+    }
+
+    #[test]
+    fn failure_detail_limit_spans_diagnostic_files() {
+        let mut failed = outcome("alpha", 120, 0, 80.0, ThresholdSource::Package, Status::Fail);
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/first.rs".into(),
+            lines: (1..=60).collect(),
+        });
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/second.rs".into(),
+            lines: (101..=160).collect(),
+        });
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/third.rs".into(),
+            lines: vec![200],
+        });
+        let report = Report {
+            outcomes: vec![failed],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("`src/first.rs`: 1-60"), "got:\n{s}");
+        assert!(s.contains("`src/second.rs`: 101-140"), "got:\n{s}");
+        assert!(!s.contains("`src/second.rs`: 101-160"), "got:\n{s}");
+        assert!(!s.contains("src/third.rs"), "got:\n{s}");
+        assert!(s.contains("21 more line locations omitted"), "got:\n{s}");
+    }
+
+    #[test]
+    fn exact_failure_detail_limit_has_no_omission_notice() {
+        let mut failed = outcome("alpha", 100, 0, 80.0, ThresholdSource::Package, Status::Fail);
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/lib.rs".into(),
+            lines: (1..=100).collect(),
+        });
+        let report = Report {
+            outcomes: vec![failed],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("`src/lib.rs`: 1-100"), "got:\n{s}");
+        assert!(!s.contains("more line locations omitted"), "got:\n{s}");
     }
 
     #[test]
@@ -210,6 +299,23 @@ mod tests {
             unattributed: 0,
         };
         let mut w = FailOnNeedle { needle: b"ROWFAIL" };
+        assert!(render(&mut w, &report).is_err());
+    }
+
+    #[test]
+    fn propagates_error_from_failure_diagnostic_write() {
+        let mut failed = outcome("alpha", 1, 0, 80.0, ThresholdSource::Package, Status::Fail);
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/DIAGNOSTIC_WRITE_FAIL.rs".into(),
+            lines: vec![1],
+        });
+        let report = Report {
+            outcomes: vec![failed],
+            unattributed: 0,
+        };
+        let mut w = FailOnNeedle {
+            needle: b"DIAGNOSTIC_WRITE_FAIL",
+        };
         assert!(render(&mut w, &report).is_err());
     }
 

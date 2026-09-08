@@ -8,8 +8,8 @@
 
 use std::sync::{Arc, LazyLock};
 
-use cel_interpreter::objects::Map;
-use cel_interpreter::{Context, Program, Value};
+use cel::objects::Map;
+use cel::{Context, Program, Value};
 use chrono::{DateTime, Local};
 
 use super::{Appraisal, Expression, ExpressionDisposition, ExpressionOutcome, Risk};
@@ -144,7 +144,7 @@ fn evaluate_expression(program: &Program, name: &str, context: &Context) -> Resu
 /// `&'static str`, so they are identical for every crate. Building them once and handing out
 /// `Arc` clones avoids allocating a fresh `String` per metric per crate, which would otherwise
 /// scale with the size of the dependency graph.
-#[expect(clippy::rc_buffer, reason = "cel-interpreter's map keys are Arc<String>")]
+#[expect(clippy::rc_buffer, reason = "cel's map keys are Arc<String>")]
 static METRIC_KEYS: LazyLock<crate::HashMap<&'static str, Arc<String>>> = LazyLock::new(|| {
     let mut keys = crate::hash_map_with_capacity(METRIC_DEFINITIONS.len());
     for def in METRIC_DEFINITIONS {
@@ -157,7 +157,7 @@ static METRIC_KEYS: LazyLock<crate::HashMap<&'static str, Arc<String>>> = LazyLo
 
 /// Returns the interned CEL key for a metric's suffix, falling back to a fresh allocation for
 /// names that are not part of the built-in metric set (as used by some tests).
-#[expect(clippy::rc_buffer, reason = "cel-interpreter's map keys are Arc<String>")]
+#[expect(clippy::rc_buffer, reason = "cel's map keys are Arc<String>")]
 fn metric_key(name: &str, suffix: &str) -> Arc<String> {
     METRIC_KEYS.get(name).map_or_else(|| Arc::new(suffix.to_string()), Arc::clone)
 }

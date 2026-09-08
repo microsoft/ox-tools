@@ -30,7 +30,7 @@ pub fn plan_owned_file(repo_root: &Path, manifest: &Manifest, relpath: &str, ren
     let on_disk = read_file_if_present(&abs)?;
     let disk_checksum = on_disk.as_deref().map(checksum_str);
     let template_checksum = checksum_str(rendered);
-    let last_rendered = manifest.files.get(relpath).map(String::as_str);
+    let last_rendered = manifest.file_checksum(relpath);
 
     let inputs = DecisionInputs {
         last_rendered,

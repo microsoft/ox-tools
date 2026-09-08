@@ -9,19 +9,14 @@ yanked = "deny"
 unmaintained = "all"
 # Advisories we have consciously accepted. Each entry needs a reason and,
 # where the fix is out of our hands, the upstream we are waiting on.
-ignore = [
-    # `paste` is unmaintained but has no safe upgrade. It reaches us only
-    # transitively through `cel-interpreter`, which `cargo-aprz` uses to
-    # evaluate appraisal expressions. Revisit when cel-interpreter moves to
-    # `pastey` (which this workspace already depends on directly).
-    "RUSTSEC-2024-0436",
-]
+ignore = []
 # <<< anvil-managed: anvil-deny-advisories
 
 # >>> anvil-managed: anvil-deny-bans
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+allow-wildcard-paths = true
 # <<< anvil-managed: anvil-deny-bans
 
 # >>> anvil-managed: anvil-deny-sources
@@ -43,6 +38,10 @@ allow = [
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
+    # Public-domain-equivalent license carried by `vu128`, the variable-length
+    # integer codec behind `cargo-aprz`'s binary crates.io tables. It is the
+    # crate's only license, so it cannot resolve to one of the entries above.
+    "0BSD",
     # Data-only license carried by `webpki-root-certs` (the Mozilla root
     # certificate set), pulled in transitively by `reqwest`'s rustls backend.
     "CDLA-Permissive-2.0",

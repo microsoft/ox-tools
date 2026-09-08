@@ -16,11 +16,6 @@ license.workspace = true
 homepage.workspace = true
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-each"
 
-[package.metadata.ox-gen-readme]
-# Binary-only crate: no library rustdoc to generate a README from, so the
-# README is hand-maintained rather than produced by cargo-doc2readme.
-disable = true
-
 [dependencies]
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }

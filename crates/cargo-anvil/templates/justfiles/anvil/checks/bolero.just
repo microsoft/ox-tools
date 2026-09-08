@@ -54,7 +54,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
             $packageNames.Add(($pkgArgs[++$i] -split '@', 2)[0])
         }
     } else {
-        $metadataJson = & cargo metadata --no-deps --format-version 1
+        $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
         if ($LASTEXITCODE -ne 0) {
             Write-Error 'anvil-bolero: cargo metadata failed'
             exit $LASTEXITCODE
@@ -103,7 +103,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
             exit 1
         }
         Write-Host "anvil-bolero: ${packageName}::${testName}"
-        & cargo '+{{ rust_nightly }}' bolero test --release --engine libfuzzer -T 60s --package $packageName $testName
+        & cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package $packageName $testName
         if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }

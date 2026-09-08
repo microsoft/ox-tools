@@ -12,14 +12,22 @@
 # format_code_in_doc_comments). Floating nightly would mean
 # format-drift breaking cloud workflows on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
+#
+# Iterate workspace members rather than every local path dependency that
+# `cargo fmt --all` discovers. `--keep-going` reports formatting failures from
+# every member while retaining a bounded rustfmt command line per invocation.
+#
+# Pin both the cargo-each wrapper and cargo-fmt to the same nightly so the
+# formatting command does not mix stable and nightly toolchains.
 
 # Check Rust source formatting.
+[arg("fix", long, value="true")]
 [script("pwsh", "-NoProfile")]
-anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
+anvil-fmt fix="false": anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     if ($include -eq '--skip') { Write-Host 'anvil-fmt: no modified packages; skipping'; exit 0 }
-    cargo '+{{ rust_nightly }}' fmt --all --check
+    cargo '+{{ rust_nightly }}' each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' {{ if fix == "true" { "" } else { "--check" } }}
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Per-check setup + validate-prereqs
@@ -39,8 +47,8 @@ anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
-anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install
+anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
-anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
+anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anvil-tool-cargo-each-validate-prereqs

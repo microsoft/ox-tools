@@ -27,6 +27,11 @@
     - patch: Increments the patch version (e.g., 1.2.3 -> 1.2.4)
     This parameter is mutually exclusive with --version.
 
+.PARAMETER BackfillVersion
+    [Optional] Reconstructs the changelog section for an existing tagged version without updating
+    crate versions or README files. The commit range is derived from the preceding semantic-version
+    tag and the requested version's tag. This parameter is mutually exclusive with --version and --bump.
+
 .EXAMPLE
     # Increment the minor version for 'my-crate' (default behavior)
     .\release-crate.ps1 "my-crate"
@@ -42,6 +47,10 @@
 .EXAMPLE
     # Bump the patch version for 'my-crate'
     .\release-crate.ps1 my-crate -b patch
+
+.EXAMPLE
+    # Reconstruct the changelog section for an existing tagged release
+    .\release-crate.ps1 my-crate -BackfillVersion "1.2.3"
 #>
 [CmdletBinding()]
 param(
@@ -55,7 +64,10 @@ param(
     [Parameter(Mandatory = $false)]
     [Alias('b')]
     [ValidateSet('major', 'minor', 'patch')]
-    [string]$Bump
+    [string]$Bump,
+
+    [Parameter(Mandatory = $false)]
+    [string]$BackfillVersion
 )
 
 # --- CONFIGURATION ---
@@ -452,9 +464,81 @@ function Update-CrateVersion {
     return $newVersion
 }
 
+function Write-BackfilledChangelogVersion {
+    param(
+        [string]$crateName,
+        [string]$version,
+        [string]$crateFolder,
+        [string]$changelogFile,
+        [string]$prBaseUrl
+    )
+
+    $tags = Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
+    $releaseTags = @(
+        $tags |
+            Where-Object { $_ -match "^${crateName}-v\d+\.\d+\.\d+$" } |
+            Sort-Object { [version]($_ -replace "^${crateName}-v", '') }
+    )
+
+    $targetTag = "$crateName-v$version"
+    $targetIndex = [array]::IndexOf($releaseTags, $targetTag)
+    if ($targetIndex -lt 0) {
+        Write-Error "Cannot backfill version '$version': tag '$targetTag' does not exist." -ErrorAction Stop
+    }
+
+    if ($targetIndex -eq 0) {
+        Write-Error "Cannot backfill version '$version': tag '$targetTag' has no preceding semantic-version tag." -ErrorAction Stop
+    }
+
+    $previousTag = $releaseTags[$targetIndex - 1]
+    $rawCommits = @(
+        Invoke-GitCommand -Command "log $previousTag..$targetTag --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for '$previousTag..$targetTag'"
+    )
+    $formattedCommits = Format-ConventionalCommits -rawCommitMessages $rawCommits -prBaseUrl $prBaseUrl
+    if (-not $formattedCommits) {
+        Write-Error "No relevant commits found for '$previousTag..$targetTag'." -ErrorAction Stop
+    }
+
+    $releaseCommit = Invoke-GitCommand -Command "rev-list -n 1 $targetTag" -ErrorMessage "Failed to resolve release commit for '$targetTag'"
+    $releaseDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $releaseCommit" -ErrorMessage "Failed to retrieve release date for '$targetTag'"
+    $newVersionSection = @("## [$version] - $releaseDate", "")
+    $newVersionSection += $formattedCommits
+    $newVersionSection += ""
+    $sectionText = ($newVersionSection -join "`n") + "`n"
+
+    $existingContent = if (Test-Path $changelogFile) {
+        Get-Content $changelogFile -Raw
+    } else {
+        "# Changelog`n"
+    }
+
+    $escapedVersion = [regex]::Escape($version)
+    $targetSectionPattern = "(?ms)^## \[$escapedVersion\].*?(?=^## \[|\z)"
+    $existingContent = [regex]::Replace($existingContent, $targetSectionPattern, '').TrimEnd() + "`n"
+
+    $insertPosition = $existingContent.Length
+    $versionMatches = [regex]::Matches($existingContent, '(?m)^## \[(\d+\.\d+\.\d+)\]')
+    foreach ($versionMatch in $versionMatches) {
+        if ([version]$versionMatch.Groups[1].Value -lt [version]$version) {
+            $insertPosition = $versionMatch.Index
+            break
+        }
+    }
+
+    $newContent = if ($insertPosition -eq $existingContent.Length) {
+        $existingContent.TrimEnd() + "`n`n" + $sectionText
+    } else {
+        $existingContent.Insert($insertPosition, $sectionText)
+    }
+
+    $newContent | Set-Content $changelogFile -NoNewline
+    Write-Host "✅ Changelog version '$version' reconstructed from '$previousTag..$targetTag'."
+}
+
 function Write-Changelog {
     param(
         [string]$crateName,
+        [string]$oldVersion,
         [string]$newVersion,
         [string]$crateFolder,
         [string]$changelogFile,
@@ -463,22 +547,41 @@ function Write-Changelog {
 
     $tags = Invoke-GitCommand -Command "tag --list `"$crateName-v*`"" -ErrorMessage "Failed to retrieve git tags"
     $latestTag = $null
+    $initialCommit = $null
+    $previousReleaseCommit = $null
     if ($null -eq $tags -or $tags.Count -eq 0) {
-        Write-Warning "No tags found for crate '$crateName'. Generating changelog from all history."
+        Write-Warning "No tags found for crate '$crateName'. Generating changelog from the available repository history."
     } else {
         $filteredTags = @($tags | Where-Object { $_ -match "^${crateName}-v\d+\.\d+\.\d+$" })
         if ($filteredTags.Count -gt 0) {
             $sortedTags = @($filteredTags | Sort-Object { [version]($_ -replace "${crateName}-v", '') })
             $latestTag = $sortedTags[-1]
+            $previousReleaseCommit = Invoke-GitCommand -Command "rev-list -n 1 $latestTag" -ErrorMessage "Failed to resolve latest release tag"
         } else {
-            Write-Warning "No valid semantic version tags found for crate '$crateName'. Generating changelog from all history."
+            Write-Warning "No valid semantic version tags found for crate '$crateName'. Generating changelog from the available repository history."
         }
     }
 
     $currentDate = (Get-Date).ToString('yyyy-MM-dd')
 
     # Get commits since the latest tag (unreleased commits)
-    $range = if ($latestTag) { "$latestTag..HEAD" } else { "HEAD" }
+    if (-not $latestTag) {
+        $crateCommits = @(Invoke-GitCommand -Command "log --reverse --format=`"%H`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve crate history")
+        if ($crateCommits.Count -gt 0) {
+            $initialCommit = $crateCommits[0]
+            $previousReleaseCommit = $initialCommit
+        }
+    }
+
+    # A newly introduced crate may have shipped before its first release tag was created. Its
+    # introduction belongs to that initial version, not to the next release generated from HEAD.
+    $range = if ($latestTag) {
+        "$latestTag..HEAD"
+    } elseif ($initialCommit -and $oldVersion -ne "0.0.0") {
+        "$initialCommit..HEAD"
+    } else {
+        "HEAD"
+    }
     $rawCommits = Invoke-GitCommand -Command "log $range --pretty=format:`"%s`" -- `"$crateFolder`"" -ErrorMessage "Failed to retrieve git log for unreleased commits"
     if ($null -eq $rawCommits -or $rawCommits.Count -eq 0) {
         $rawCommits = @()
@@ -506,12 +609,45 @@ function Write-Changelog {
     if (Test-Path $changelogFile) {
         $existingContent = Get-Content $changelogFile -Raw
         if ($existingContent) {
-            # Find the position after "# Changelog" header and any blank lines
-            # Insert the new version section there
-            $headerPattern = '^# Changelog\s*\r?\n(\r?\n)*'
-            if ($existingContent -match $headerPattern) {
-                $headerMatch = [regex]::Match($existingContent, $headerPattern)
-                $insertPosition = $headerMatch.Index + $headerMatch.Length
+            # Rerunning a release replaces that version's generated section rather than duplicating
+            # it. This also repairs output produced before initial-release history was separated.
+            $escapedNewVersion = [regex]::Escape($newVersion)
+            $targetSectionPattern = "(?ms)^## \[$escapedNewVersion\].*?(?=^## \[|\z)"
+            $existingContent = [regex]::Replace($existingContent, $targetSectionPattern, '').TrimEnd() + "`n"
+            $existingContent = [regex]::Replace($existingContent, '(?m)^# Changelog\s*\r?\n(?=## \[)', "# Changelog`n`n")
+
+            $initialReleasePattern = '(?s)## \[Unreleased\]\s*-\s*Initial release\.\s*\z'
+            $wasInitialRelease = $existingContent -match $initialReleasePattern
+
+            if ($wasInitialRelease -and $previousReleaseCommit) {
+                $initialDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $previousReleaseCommit" -ErrorMessage "Failed to retrieve initial release date"
+                $initialSection = "## [$oldVersion] - $initialDate`n`n- Initial release.`n"
+                $existingContent = [regex]::Replace($existingContent, $initialReleasePattern, $initialSection)
+            }
+
+            $escapedOldVersion = [regex]::Escape($oldVersion)
+            $hasInitialVersion = $existingContent -match "(?m)^## \[$escapedOldVersion\]"
+            $hasReleasedVersion = $existingContent -match '(?m)^## \[\d+\.\d+\.\d+\]'
+            # A gap in an established changelog does not mean the previous version was the initial release.
+            if ($oldVersion -ne "0.0.0" -and -not $hasInitialVersion -and -not $hasReleasedVersion -and $previousReleaseCommit) {
+                $initialDate = Invoke-GitCommand -Command "show -s --format=`"%cs`" $previousReleaseCommit" -ErrorMessage "Failed to retrieve initial release date"
+                $existingContent = $existingContent.TrimEnd() + "`n`n## [$oldVersion] - $initialDate`n`n- Initial release.`n"
+            }
+
+            # Keep the explanatory preamble directly below the title and `Unreleased` first.
+            $unreleasedMatch = [regex]::Match($existingContent, '(?m)^## \[Unreleased\]\s*\r?\n(?:\r?\n)*')
+            $sectionMatch = [regex]::Match($existingContent, '(?m)^## \[')
+            if (-not $unreleasedMatch.Success) {
+                $insertPosition = if ($sectionMatch.Success) { $sectionMatch.Index } else { $existingContent.Length }
+                $separator = if ($insertPosition -eq $existingContent.Length) { "`n" } else { "" }
+                $existingContent = $existingContent.Substring(0, $insertPosition) +
+                                   $separator + "## [Unreleased]`n`n" +
+                                   $existingContent.Substring($insertPosition)
+                $unreleasedMatch = [regex]::Match($existingContent, '(?m)^## \[Unreleased\]\s*\r?\n(?:\r?\n)*')
+            }
+
+            if ($unreleasedMatch.Success) {
+                $insertPosition = $unreleasedMatch.Index + $unreleasedMatch.Length
                 $newContent = $existingContent.Substring(0, $insertPosition) +
                               ($newVersionSection -join "`n") + "`n" +
                               $existingContent.Substring($insertPosition)
@@ -624,8 +760,19 @@ if (-not [string]::IsNullOrEmpty($Version) -and -not [string]::IsNullOrEmpty($Bu
     Exit 1
 }
 
+if (-not [string]::IsNullOrEmpty($BackfillVersion) -and
+    (-not [string]::IsNullOrEmpty($Version) -or -not [string]::IsNullOrEmpty($Bump))) {
+    Write-Error "The -BackfillVersion option is mutually exclusive with --version and --bump."
+    Exit 1
+}
+
 if (-not (Test-ValidVersion -version $Version)) {
     Write-Error "Invalid version format '$Version'. Version must follow semantic versioning format (e.g., '1.2.3')."
+    Exit 1
+}
+
+if (-not (Test-ValidVersion -version $BackfillVersion)) {
+    Write-Error "Invalid backfill version format '$BackfillVersion'. Version must follow semantic versioning format (e.g., '1.2.3')."
     Exit 1
 }
 
@@ -684,25 +831,29 @@ if (-not [string]::IsNullOrEmpty($Version)) {
 
 # 6. EXECUTE WORKFLOW
 try {
-    $oldVersion = Get-CurrentVersion -cargoTomlPath $crateCargoToml
+    if (-not [string]::IsNullOrEmpty($BackfillVersion)) {
+        Write-BackfilledChangelogVersion -crateName $CrateName -version $BackfillVersion -crateFolder $crateFolder -changelogFile $changelogFile -prBaseUrl $prBaseUrl
+    } else {
+        $oldVersion = Get-CurrentVersion -cargoTomlPath $crateCargoToml
 
-    $newVersion = Update-CrateVersion -crateName $CrateName -version $Version -bump $Bump -crateCargoToml $crateCargoToml -rootCargoToml $rootCargoToml
-    if ($null -eq $newVersion) {
-        Write-Error "Failed to update crate version. Aborting."
-        Exit 1
-    }
-
-    Write-Changelog -crateName $CrateName -newVersion $newVersion -crateFolder $crateFolder -changelogFile $changelogFile -prBaseUrl $prBaseUrl
-    Update-Readme -crateName $CrateName -crateFolder $crateFolder
-
-    if (Test-SemverIncompatibleBump -oldVersion $oldVersion -newVersion $newVersion) {
-        $dependentCrates = Get-DirectDependents -crateName $CrateName -repoRoot $repoRoot
-        if ($dependentCrates.Count -gt 0) {
-            Show-DependentCratesWarning -crateName $CrateName -oldVersion $oldVersion -newVersion $newVersion -dependentCrates $dependentCrates
+        $newVersion = Update-CrateVersion -crateName $CrateName -version $Version -bump $Bump -crateCargoToml $crateCargoToml -rootCargoToml $rootCargoToml
+        if ($null -eq $newVersion) {
+            Write-Error "Failed to update crate version. Aborting."
+            Exit 1
         }
-    }
 
-    Show-FinalMessage -crateName $CrateName -newVersion $newVersion
+        Write-Changelog -crateName $CrateName -oldVersion $oldVersion -newVersion $newVersion -crateFolder $crateFolder -changelogFile $changelogFile -prBaseUrl $prBaseUrl
+        Update-Readme -crateName $CrateName -crateFolder $crateFolder
+
+        if (Test-SemverIncompatibleBump -oldVersion $oldVersion -newVersion $newVersion) {
+            $dependentCrates = Get-DirectDependents -crateName $CrateName -repoRoot $repoRoot
+            if ($dependentCrates.Count -gt 0) {
+                Show-DependentCratesWarning -crateName $CrateName -oldVersion $oldVersion -newVersion $newVersion -dependentCrates $dependentCrates
+            }
+        }
+
+        Show-FinalMessage -crateName $CrateName -newVersion $newVersion
+    }
 }
 catch {
     Write-Error "Script failed: $_"

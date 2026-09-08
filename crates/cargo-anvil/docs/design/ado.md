@@ -50,16 +50,19 @@ flowchart LR
     impact_s["stage: impact_linux + stage: impact_windows<br/>(2 stages;<br/>outputs consumed by every group below)"]:::stage
     pr_fast_s["stage: pr_fast<br/>linux + windows jobs"]:::stage
     pr_test_s["stage: pr_test<br/>linux + windows jobs"]:::stage
+    pr_msrv_s["stage: pr_msrv<br/>linux + windows jobs"]:::stage
     pr_runtime_analysis_s["stage: pr_runtime_analysis<br/>linux + windows jobs"]:::stage
     pr_mutants_s["stage: pr_mutants<br/>linux + windows jobs"]:::stage
     impact_step[".pipelines/anvil/<br/>steps/impact.yml"]:::step
     impact_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     fast_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     test_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
+    msrv_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     runtime_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     mutants_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     fast_step[".pipelines/anvil/<br/>steps/pr-fast.yml"]:::step
     test_step[".pipelines/anvil/<br/>steps/pr-test.yml"]:::step
+    msrv_step[".pipelines/anvil/<br/>steps/pr-msrv.yml"]:::step
     runtime_step[".pipelines/anvil/<br/>steps/pr-runtime-analysis.yml"]:::step
     mutants_step[".pipelines/anvil/<br/>steps/pr-mutants.yml"]:::step
     publish_coverage["PublishCodeCoverageResults@2"]:::external
@@ -68,7 +71,9 @@ flowchart LR
     impact_just["just anvil-impact"]:::recipe
     impact_setup_just["just anvil-setup"]:::recipe
     test_just["just anvil-pr-test"]:::recipe
+    msrv_just["just anvil-pr-msrv"]:::recipe
     test_setup_just["just anvil-setup"]:::recipe
+    msrv_setup_just["just anvil-setup"]:::recipe
     runtime_just["just anvil-pr-runtime-analysis"]:::recipe
     runtime_setup_just["just anvil-setup"]:::recipe
     mutants_just["just anvil-pr-mutants"]:::recipe
@@ -79,12 +84,14 @@ flowchart LR
     pr_stages --> impact_s
     pr_stages --> pr_fast_s
     pr_stages --> pr_test_s
+    pr_stages --> pr_msrv_s
     pr_stages --> pr_runtime_analysis_s
     pr_stages --> pr_mutants_s
 
     impact_s ==> impact_step
     pr_fast_s ==> fast_step
     pr_test_s ==> test_step
+    pr_msrv_s ==> msrv_step
     pr_test_s ==> publish_coverage
     pr_runtime_analysis_s ==> runtime_step
     pr_mutants_s ==> mutants_step
@@ -95,6 +102,8 @@ flowchart LR
     fast_step ==> fast_just
     test_step ==> test_setup
     test_step ==> test_just
+    msrv_step ==> msrv_setup
+    msrv_step ==> msrv_just
     runtime_step ==> runtime_setup
     runtime_step ==> runtime_just
     mutants_step ==> mutants_setup
@@ -103,6 +112,7 @@ flowchart LR
     impact_setup ==> impact_setup_just
     fast_setup ==> fast_setup_just
     test_setup ==> test_setup_just
+    msrv_setup ==> msrv_setup_just
     runtime_setup ==> runtime_setup_just
     mutants_setup ==> mutants_setup_just
 
@@ -115,7 +125,10 @@ flowchart LR
     classDef recipe fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px;
 ```
 
-(Every job in `pr_fast`, `pr_test`, `pr_runtime_analysis`, and `pr_mutants` is rendered through the per-job wrapper at `steps/job.yml`; that uniform indirection is elided from the diagram. See §4.1 for the wrapper's role as a 1ESPT extensibility point.)
+(Every job in `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`, and
+`pr_mutants` is rendered through the per-job wrapper at `steps/job.yml`; that
+uniform indirection is elided from the diagram. See §4.1 for the wrapper's role
+as a 1ESPT extensibility point.)
 
 The scheduled pipeline (same colour key):
 
@@ -183,7 +196,7 @@ Every PR-tier group stage declares `dependsOn: [impact_linux, impact_windows]` s
 
 Note the ADO topology differs from GitHub Actions in two places:
 1. **No reusable workflow indirection**: ADO `extends:` is one-shot; the root pipeline extends a single template. We compensate by putting all stages in `pr.yml` / `scheduled.yml` as direct templates.
-2. **Per-job wrapper**: the `steps/job.yml` template is ADO-specific. GitHub composite actions are uniform; ADO 1ESPT requires per-job extensibility hooks that the wrapper exposes through its `name`/`pool`/`steps`/`artifacts` parameter contract (see §4.1).
+2. **Per-job wrapper**: the `steps/job.yml` template is ADO-specific. GitHub composite actions are uniform; ADO 1ESPT requires per-job extensibility hooks that the wrapper exposes through its `name`/`stage`/`pool`/`steps`/`artifacts` parameter contract (see §4.1).
 
 ## 2. Emitted artifacts
 
@@ -205,11 +218,13 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── impact.yml              owned   (runs `just anvil-impact`; omitted if .delta.toml disabled)
         ├── job.yml                 owned-but-user-customizable
         │                                   (per-job wrapper; takes `name`,
-        │                                    `pool`, `steps`, `artifacts`;
+        │                                    `stage`, `pool`, `steps`,
+        │                                    `inputArtifacts`, `artifacts`;
         │                                    users edit to inject 1ESPT
         │                                    `templateContext:` etc.)
         ├── pr-fast.yml             owned   (one step template per group)
         ├── pr-test.yml            owned
+        ├── pr-msrv.yml            owned
         ├── pr-runtime-analysis.yml            owned
         ├── pr-mutants.yml            owned
         ├── scheduled-test.yml        owned
@@ -226,8 +241,15 @@ customized by adopters whose ADO instance requires extension templates
 (1ES PT, SubstratePT, M365PT). Once a user edits it, the standard dirty-file
 flow kicks in — subsequent anvil updates Propose into a `.proposed` sibling
 rather than overwriting. The stages templates address the wrapper only via its
-parameter contract (`name`, `pool`, `steps`, `artifacts`), so the wrapper can
-diverge arbitrarily without blocking stage-shape updates. See §4.1.
+parameter contract (`name`, `stage`, `pool`, `steps`, `inputArtifacts`,
+`artifacts`), so the wrapper *body* can diverge arbitrarily without blocking
+stage-shape updates.
+
+That guarantee covers the body, not a contract that *grows*. ADO rejects a
+parameter the target template does not declare, so a stages update that begins
+passing a new parameter has to be adopted together with the `.proposed` wrapper
+update that declares it — anvil overwrites the owned stages templates but only
+proposes the wrapper. See §4.1.
 
 ## 3. Root pipelines
 
@@ -353,6 +375,16 @@ which tiers a group's checks consume from that cache is the catalog's concern, n
 wiring layer's. This means moving a check between groups (e.g. `clippy` from `pr-fast` to
 `scheduled-advisories`) never changes the stages template.
 
+The PR template also contains a `pr_msrv` stage. It runs in parallel with
+`pr_test`, `pr_runtime_analysis`, and `pr_mutants`, uses the same Linux and Windows
+x86_64 jobs and per-OS affected-package impact sets as `pr_test`, and invokes
+`anvil-pr-msrv`. The stage consumes the per-OS impact artifact like the other PR
+groups; when the root manifest declares no MSRV, the recipe exits successfully
+after reporting that it skipped the test. Otherwise it runs affected-package
+`cargo test --tests` in all-features and default-features configurations.
+Ordinary stable checks honor a caller-provided `RUSTUP_TOOLCHAIN`. The dedicated
+MSRV setup ensures the declared root MSRV is available through rustup.
+
 ### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
 
 Every job in `pr.yml` and `scheduled.yml` is rendered through a wrapper template at
@@ -368,6 +400,7 @@ The contract is intentionally small and stable:
 | Parameter   | Type       | Required | Meaning                                                                                                                                                                                |
 |-------------|------------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `name`      | `string`   | yes      | Job name; ADO derives the display name from it.                                                                                                                                        |
+| `stage`     | `string`   | no       | ADO stage this job belongs to — exactly what the stages template writes after `stage:`, and what `System.StageName` reports at runtime: `impact`, `pr_fast`, `pr_test`, `pr_msrv`, `pr_runtime_analysis`, `pr_mutants`, `scheduled_test`, `scheduled_advisories`, `scheduled_runtime_analysis`, `scheduled_exhaustive`. Per-OS job names repeat across stages, so `name` alone cannot identify one, and `templateContext:` is consumed at template-expansion time so a runtime condition on `System.StageName` is unavailable there. The default wrapper ignores it; it exists so an owned wrapper can apply per-stage settings. Unrelated to `group` in `steps/setup.yml`, which selects a check group's tool catalog. |
 | `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
 | `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
 | `inputArtifacts` | `object` | no  | List of pipeline artifacts to download *before* the steps run. Each item: `{ name: string, path: string }`. Default wrapper prepends one `DownloadPipelineArtifact@2` per entry; 1ESPT wrappers translate the same list into their own download mechanism (e.g. `templateContext.inputs`). This is how the impact set is shared — each PR group job downloads its OS's `anvil-impact-<os>` artifact into `target/anvil/impact` and its checks read the cache exactly as a local run. |
@@ -379,6 +412,7 @@ The default wrapper anvil ships downloads any `inputArtifacts`, splices in the
 ```yaml
 parameters:
   - { name: name, type: string }
+  - { name: stage, type: string, default: '' }
   - { name: pool, type: object }
   - { name: steps, type: stepList }
   - { name: inputArtifacts, type: object, default: [] }
@@ -441,6 +475,12 @@ changes often (new groups, new dependsOn rules, new impact-output wiring). Putti
 the user's customization in a separate file means stages updates flow through
 without merging, and the user's wrapper changes survive every anvil upgrade.
 
+The one exception is a stages update that starts passing a *new* wrapper
+parameter, as the `stage` addition did: ADO rejects a parameter the target
+template does not declare, so that stages update and the `.proposed` wrapper
+have to be taken together. Growing the contract is therefore a breaking change
+for adopters who own the wrapper, and is called out as such in the changelog.
+
 **Why is the wrapper "owned" rather than "proposed-once"?** So that first-time
 adoption needs zero extra steps — a fresh `cargo anvil` writes a
 working wrapper and the pipeline runs. The dirty-file behavior kicks in only
@@ -494,6 +534,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_linux
+          stage: impact
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/impact.yml
@@ -503,6 +544,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_windows
+          stage: impact
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/impact.yml
@@ -523,6 +565,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_fast
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -532,6 +575,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_fast
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -565,13 +609,13 @@ threading pre-formatted strings the local run never produces. The chain:
    by a 1ESPT `job.yml`).
 3. **The group step template** runs `just anvil-<group>` with an impact mode fixed **by
    group class at emit time** (never probed from a file). PR groups — which always download the
-   artifact — export `ANVIL_IMPACT=consume`. In consume mode `anvil-impact` is a pure
+   artifact — set `ANVIL_IMPACT=consume` in the step environment. In consume mode `anvil-impact` is a pure
    no-op — it trusts the downloaded cache verbatim and **neither snapshots nor
    recomputes**, so it needs neither cargo-delta nor a fetched base ref. Each scoped
    check reads its category's scope from the cache file via `_anvil-impact-include` (into a
    local `$include` variable).
 4. **Scheduled stages download nothing** and always validate the full workspace, so the
-   group step exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by group
+   group step sets `ANVIL_IMPACT=off` in the step environment. Like the PR `consume`, this is fixed by group
    class at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
    mode is a property of the group class, not something probed at runtime. (`setup.yml` no
    longer caches `target/` at all, so the durable `impact.state` never travels through the
@@ -603,7 +647,7 @@ elide the Windows job entirely if their root pipeline is shaped to support that.
 The scheduled stages template is simpler — it omits the `impact` stage and runs each
 group full-workspace, with the same `linuxPool` / `windowsPool` parameter shape and
 the same `steps/job.yml` delegation. Scheduled step templates pass no `include*`
-parameters; the scheduled group recipes route through `_anvil-run` with
+parameters; the scheduled group recipes wrap in `_anvil-unscoped`, which exports
 `ANVIL_IMPACT=off`, so `anvil-impact` no-ops and every category resolves to its
 full-workspace default (`--workspace`).
 
@@ -637,24 +681,23 @@ steps:
     catch { Write-Error "Could not resolve PR title for PR $prId"; exit 1 }
   env:
     SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-- script: just anvil-pr-fast
+- pwsh: just anvil-pr-fast
   displayName: anvil pr-fast
   env:
     PR_TITLE: $(PR_TITLE)
     # Scope comes from the downloaded target/anvil/impact cache: a PR group
-    # always downloads the artifact, so it exports ANVIL_IMPACT=consume (trust
+    # always downloads the artifact, so it sets ANVIL_IMPACT to consume (trust
     # the cache; no snapshot/cargo-delta/base ref), whereas a scheduled group
-    # exports ANVIL_IMPACT=off. The mode is fixed by group class at emit time -- never
+    # sets ANVIL_IMPACT to off. The mode is fixed by group class at emit time -- never
     # probed from the cacheable impact.state marker. See §4.3.
+    ANVIL_IMPACT: "consume"
 ```
 
-The only per-group parameters are the PR-context strings a group's checks consume:
-
-| Template                  | Parameters                                                             |
-|---------------------------|-------------------------------------------------------------------------|
-| `pr-fast.yml`             | `prTitle` (resolved from the REST API; ADO has no PR-title variable)     |
-| `pr-mutants.yml`            | `prBaseRef` (default `$(System.PullRequest.TargetBranch)`)              |
-| `pr-test.yml`, `pr-runtime-analysis.yml`, `scheduled-*.yml` | —                                                                       |
+The generated per-group step templates take no parameters. Only `pr-fast.yml`
+performs the PR-title REST lookup and injects `PR_TITLE`; groups that do not run
+`anvil-pr-title`, including `pr-msrv`, have no title API or OAuth-token
+dependency. The mutation recipe reads its base ref from ADO's predefined
+pull-request environment.
 
 `$(System.PullRequest.*)` are auto-populated by ADO on PR build-validation runs. No
 manual web-UI wiring is needed.
@@ -676,13 +719,14 @@ download to get scoping.
 
 ### `setup.yml` and `impact.yml`
 
-`setup.yml` is a step template that installs `just`
-(`cargo install just --locked`) and then invokes the catalog setup recipes. It
+`setup.yml` is a step template that restores Cargo home, bootstraps Just, and
+then invokes the requested catalog setup recipe, whose prerequisites provision
+the selected compiler and tools. It
 takes a single `group` parameter that controls which recipes run:
 
 - empty (default): runs `just anvil-setup` -- the full catalog. Use for "give
   me everything" flows.
-- `none`: skips the catalog setup entirely. Used by `impact.yml`, which only
+- `none`: skips the group/full tool fan-out. Used by `impact.yml`, which only
   needs `cargo-delta` and installs it itself afterwards.
 - any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
   `just anvil-<group>-setup` -- only the tools, components, and toolchains
@@ -690,10 +734,11 @@ takes a single `group` parameter that controls which recipes run:
   (`.pipelines/anvil/steps/<group>.yml`) passes its own group name here, so a
   `pr-fast` matrix leg never installs cargo-mutants.
 
-The template does not install Rust; it expects `cargo` on PATH -- provided by the
-user's msrustup step in 1ESPT pipelines or by a previous step in OSS pipelines
-(see §6). ADO uses the default `install` backend (source builds) because
-`cargo-binstall` has unresolved compliance issues for internal ADO pipelines.
+The template expects the caller to provide the Rust/rustup bootstrap and
+`cargo` on PATH (see §6). Command steps use `pwsh`, which is already required
+by the template's toolchain fingerprinting step, so Windows agents do not need
+Bash. ADO uses the default `install` backend (source builds) so adopters do not
+need to approve a binary-installation service.
 
 `impact.yml` invokes `setup.yml` with `group: none`, then installs `cargo-delta`
 via `anvil-tool-cargo-delta-install` and runs the shared **`just anvil-impact`**
@@ -717,34 +762,38 @@ mechanics are in [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact
 
 ## 6. Rust toolchain
 
-anvil does not install Rust on ADO. The step templates assume `cargo` is on PATH. The
-user's root pipeline (or compliance template) installs Rust before the anvil stages run.
+The user's root pipeline or compliance template installs the Rust/rustup
+bootstrap before the Anvil stages run. Selection follows the shared local
+contract:
 
-Why anvil doesn't ship a Rust install step:
+1. inherit an existing caller-provided `RUSTUP_TOOLCHAIN` unchanged;
+2. when either root `rust-toolchain` spelling exists, pass no explicit selector
+   and let rustup process toolchain files natively;
+3. otherwise pass the root manifest MSRV explicitly as `+<version>`.
 
-- **1ESPT compliance.** Compliance pipelines install Rust via msrustup
-  (Microsoft-internal). The standard `RustInstaller` ADO task is not used. anvil must
-  emit nothing that conflicts with that.
-- **Toolchain choice is a repo decision.** msrustup channels (`ms-prod-1.93`, etc.) are
-  repo-policy questions anvil has no business making.
+There is no agent-default fallback. With no environment override, root
+toolchain file, or root MSRV, setup and checks fail. Anvil does not parse
+repository toolchain files or replay options from a file suppressed by the
+environment override. Native file processing follows rustup's lookup from each
+Cargo or Rust command's working directory.
 
-In the OSS / non-1ESPT case, the user adds a `RustInstaller@1` task (or a rustup
-shell script) to their root pipeline before the anvil stages template runs. A typical
-placement: a setup stage that `dependsOn`s nothing and runs first, followed by the anvil
-stages.
-
-`anvil-tool-rustc-validate-prereqs` (depended on by every check that needs rustc)
-validates the installed `rustc` against the catalog minimum at recipe time; a
-below-minimum `rustc` produces a clean failure message. For nightly-requiring
-checks (miri, careful, udeps), the matching toolchain-validate-prereqs recipe
-fails with a suggestion to ask the team's pipeline owner to add `nightly` to
-msrustup.
+The generated setup step restores Cargo home before bootstrapping Just, then
+invokes the selected catalog setup recipe. Setup ensures the selected compiler
+is available before stable Cargo or Rust use and does not publish a rewritten
+`RUSTUP_TOOLCHAIN` to later steps. Prerequisite validation remains read-only:
+for a root-MSRV fallback, it requires rustup and verifies the exact toolchain is
+already installed before running Cargo metadata. Nightly-requiring checks still
+fail with a provisioning hint when their dated catalog toolchain is absent.
 
 ## 7. Caching
 
-`setup.yml` computes a cache key from agent OS and architecture, the actual
-`rustc --version`, and hashes of `Cargo.lock`, `.cargo/config.toml`,
-`rust-toolchain.toml`, and `versions.just`. It uses the ADO `Cache@2` task.
+`setup.yml` restores Cargo home before bootstrapping Just so a warm job does not
+compile Just before reaching the cache. The ADO `Cache@2` key uses agent OS and
+architecture plus Cargo configuration, the repository toolchain-file
+fingerprint, and `versions.just`. Toolchain-file changes deliberately start a
+fresh cache generation to bound registry growth. Routine `Cargo.toml`,
+`Cargo.lock`, and compiler-version changes do not invalidate standalone cached
+tools. Rustup toolchains themselves are outside Cargo home.
 
 The cache covers:
 
@@ -802,7 +851,7 @@ For repos with an existing 1ESPT-extending pipeline, adopting anvil is increment
 
 anvil's owned templates compose cleanly with the 1ESPT `enableStages` flag system: each
 group is its own job inside the `ANVIL_pr` stage, so 1ESPT can gate or split them as
-needed. The pre-existing repo-specific compliance steps (msrustup, NuGet pushes, signing,
+needed. The pre-existing repo-specific compliance steps (provisioning, signing,
 …) keep running alongside the anvil stage. anvil does not own the pipeline's shape —
 it just contributes a stage.
 
@@ -810,19 +859,18 @@ it just contributes a stage.
 
 After `pr-test` (and `scheduled-test`) runs the `anvil-llvm-cov` recipe, the stages
 template adds a `PublishCodeCoverageResults@2` step on **each** OS job. `anvil-llvm-cov`
-emits one Cobertura report per feature configuration — `cobertura-all-features.xml` and
-`cobertura-no-default.xml` — and never an unsuffixed `cobertura.xml`, so the step's
-`summaryFileLocation` uses the `target/coverage/cobertura-*.xml` wildcard to select both
-and let the task coalesce them. The cobertura format is the modern recommendation for
-the task (lcov is not accepted) and is produced alongside lcov.info by the same
-instrumented test run.
+emits one LCOV report per feature configuration — `lcov-all-features.info` and
+`lcov-no-default.info` — so the step's `summaryFileLocation` uses the
+`target/coverage/lcov-*.info` wildcard to select both and let the task coalesce them.
+`PublishCodeCoverageResults@2` accepts LCOV directly, which lets the same report feed
+the local coverage gate, Codecov, and ADO without a second cargo-llvm-cov export.
 
 ```yaml
 - task: PublishCodeCoverageResults@2
   condition: succeededOrFailed()
   displayName: Publish coverage (linux)
   inputs:
-    summaryFileLocation: target/coverage/cobertura-*.xml
+    summaryFileLocation: target/coverage/lcov-*.info
     failIfCoverageEmpty: false
 ```
 
@@ -830,7 +878,7 @@ Both the Linux and Windows jobs publish so that OS-gated code is fully represent
 the resulting coverage report -- a single-leg publish would systematically under-report
 the coverage of `cfg(target_os = ...)` branches. ADO's `PublishCodeCoverageResults@2`
 coalesces multiple publishes against the same build into one combined report.
-`failIfCoverageEmpty: false` keeps the step from failing the build when no cobertura
+`failIfCoverageEmpty: false` keeps the step from failing the build when no LCOV
 file exists -- which is exactly the "nothing impacted" case (the `anvil-llvm-cov` recipe
 no-ops when its tier is `--skip`, producing no file), as well as a tooling issue. No
 impact value is threaded into the condition; the presence of the file is the signal.
@@ -840,7 +888,7 @@ tree, and a per-file annotation view. ADO does not natively compute diff coverag
 between PR and base; that's a known limitation of the platform (see `coverage.md`
 for the unified-coverage discussion).
 
-anvil does not gate the PR on coverage. The cobertura upload is informational;
+anvil does not gate the PR on coverage. The LCOV upload is informational;
 adopters who want gating add `BuildQualityChecks@9` (Microsoft DevLabs marketplace
 task) downstream of the test step and configure it via their branch policy.
 
@@ -854,7 +902,7 @@ files into upserts/deletions of a sticky PR comment via the Azure DevOps REST AP
 path is the supported way).
 
 The wiring lives in the `pr_fast` stage of `pr-stages.yml`, as a pwsh step that runs
-on the canonical Linux leg after the `pr-fast` group's `bash: just anvil-pr-fast`
+on the canonical Linux leg after the `pr-fast` group's `pwsh: just anvil-pr-fast`
 step:
 
 ```yaml

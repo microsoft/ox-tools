@@ -50,7 +50,8 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 /// Bare CR bytes are left alone — they're vanishingly rare in
 /// modern source trees, and treating them specially would risk
 /// false-equating distinct content.
-fn normalize_line_endings(data: &[u8]) -> Vec<u8> {
+#[must_use]
+pub(crate) fn normalize_line_endings(data: &[u8]) -> Vec<u8> {
     // Pre-allocate optimistically; the output is the same length as
     // the input minus one byte per CRLF.
     let mut out = Vec::with_capacity(data.len());

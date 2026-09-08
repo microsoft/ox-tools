@@ -27,7 +27,10 @@ impl<'a> RowReader<'a> {
     }
 
     pub fn read_u64(&mut self) -> u64 {
-        let (value, bytes) = vlen::decode::<u64>(&self.data[self.position..]).expect("valid vlen u64");
+        let chunk = self.data[self.position..]
+            .first_chunk()
+            .expect("table data is padded for u64 decoding");
+        let (value, bytes) = vu128::decode_u64(chunk);
         self.position += bytes;
         value
     }
@@ -74,7 +77,7 @@ impl<'a> RowReader<'a> {
         }
     }
 
-    /// Advances past a vlen-encoded `u64` without returning the value.
+    /// Advances past a vu128-encoded `u64` without returning the value.
     pub fn skip_u64(&mut self) {
         let _ = self.read_u64();
     }
@@ -86,7 +89,7 @@ impl<'a> RowReader<'a> {
         self.position = self.position.checked_add(len).expect("no overflow in skip_str");
     }
 
-    /// Advances past a serialized `Version` (3 vlen `u64`s + 2 length-prefixed strings).
+    /// Advances past a serialized `Version` (3 vu128 `u64`s + 2 length-prefixed strings).
     pub fn skip_version(&mut self) {
         self.skip_u64(); // major
         self.skip_u64(); // minor
@@ -125,7 +128,7 @@ mod tests {
             writer.row_done().unwrap();
         }
 
-        // Tables pad their data so vlen decoding never reads past the end of the mapping.
+        // Tables pad their data so vu128 decoding never reads past the end of the mapping.
         buffer.extend_from_slice(&[0u8; 10]);
 
         RowReader::new(&buffer).read_version()

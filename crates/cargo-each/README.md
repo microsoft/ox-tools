@@ -4,8 +4,9 @@
 # Cargo-Each
 
 [![crates.io](https://img.shields.io/crates/v/cargo-each.svg)](https://crates.io/crates/cargo-each)
+[![docs.rs](https://docs.rs/cargo-each/badge.svg)](https://docs.rs/cargo-each)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-each)](https://crates.io/crates/cargo-each)
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml/badge.svg)](https://github.com/microsoft/ox-tools/actions/workflows/anvil-scheduled.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 <a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>
@@ -122,6 +123,7 @@ Run one clippy invocation over a computed subset, skipping when it is empty:
 cargo each -p crate-a -p crate-b --once -- \
     cargo clippy {packages} --all-targets -- -D warnings
 ```
+
 
 <hr/>
 <sub>

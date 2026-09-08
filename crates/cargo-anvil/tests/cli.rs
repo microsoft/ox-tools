@@ -132,6 +132,27 @@ fn apply_writes_files_then_dry_run_is_clean() {
 }
 
 #[test]
+fn dry_run_fails_when_only_the_lockfile_is_stale() {
+    let ws = workspace();
+    anvil(ws.path(), &["--no-backends"]).assert().success();
+    let lock_path = ws.path().join(".anvil.lock");
+    let current = std::fs::read_to_string(&lock_path).unwrap();
+    let stale = current.replace(
+        current.lines().find(|line| line.starts_with("catalog_checksum = ")).unwrap(),
+        "catalog_checksum = \"sha256:stale\"",
+    );
+    std::fs::write(&lock_path, &stale).unwrap();
+
+    anvil(ws.path(), &["--no-backends", "--dry-run"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicates::str::contains(".anvil.lock"));
+
+    assert_eq!(std::fs::read_to_string(lock_path).unwrap(), stale);
+}
+
+#[test]
 fn dry_run_refusal_exits_1_without_writing() {
     let ws = workspace();
     anvil(ws.path(), &["--no-backends"]).assert().success();

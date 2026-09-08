@@ -59,7 +59,7 @@ anvil-careful: anvil-careful-validate-prereqs anvil-impact
         Write-Host "  reason : the nightly toolchain and/or resolved cargo-careful executable changed"
         Write-Host "  now    : $idLabel"
         Write-Host "  identity: $($prev.Substring(0, [Math]::Min(12, $prev.Length)))... -> $($idHash.Substring(0, 12))..."
-        cargo clean
+        & cargo '+{{ rust_nightly }}' clean
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     # Persist the current identity (also seeds the marker on first run, when

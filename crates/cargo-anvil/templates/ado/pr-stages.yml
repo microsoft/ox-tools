@@ -42,6 +42,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_linux
+          stage: impact
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/impact.yml
@@ -51,6 +52,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_windows
+          stage: impact
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/impact.yml
@@ -83,6 +85,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_fast
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -102,6 +105,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_fast
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -109,9 +113,10 @@ stages:
           steps:
             - template: steps/pr-fast.yml
 
-  # The PR-tier slow checks are split into three independent stages
-  # (pr_test, pr_runtime_analysis, pr_mutants) so they run in parallel rather
-  # than sequentially in one job. Each stage owns its own dependsOn link to
+  # The PR-tier slow checks are split into four independent stages
+  # (pr_test, pr_msrv, pr_runtime_analysis, pr_mutants) so they run in
+  # parallel rather than sequentially in one job. Each stage owns its own
+  # dependsOn link to
   # the impact stage and downloads the per-OS impact artifact. ADO has no
   # hosted ARM agents, so the matrix stays Linux + Windows x86_64.
 
@@ -123,7 +128,7 @@ stages:
       # stays as a sibling task on each OS job -- it's a results
       # publish (not a pipeline artifact), so 1ESPT permits it at step
       # level and we don't need to route it through `artifacts:`.
-      # cobertura-*.xml are produced by the anvil-llvm-cov recipe (one per
+      # lcov-*.info files are produced by the anvil-llvm-cov recipe (one per
       # feature config). Publishing from every OS leg matters because
       # OS-gated code is only exercised on its native target; a single-leg
       # upload would systematically under-report coverage of
@@ -135,6 +140,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_test
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -145,11 +151,12 @@ stages:
               condition: succeededOrFailed()
               displayName: Publish coverage (linux)
               inputs:
-                summaryFileLocation: target/coverage/cobertura-*.xml
+                summaryFileLocation: target/coverage/lcov-*.info
                 failIfCoverageEmpty: false
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_test
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -160,8 +167,33 @@ stages:
               condition: succeededOrFailed()
               displayName: Publish coverage (windows)
               inputs:
-                summaryFileLocation: target/coverage/cobertura-*.xml
+                summaryFileLocation: target/coverage/lcov-*.info
                 failIfCoverageEmpty: false
+
+  - stage: pr_msrv
+    displayName: anvil pr-msrv (MSRV tests)
+    dependsOn: [impact]
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          stage: pr_msrv
+          pool: ${{ parameters.linuxPool }}
+          inputArtifacts:
+            - name: anvil-impact-linux
+              path: target/anvil/impact
+          steps:
+            - template: steps/pr-msrv.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          stage: pr_msrv
+          pool: ${{ parameters.windowsPool }}
+          inputArtifacts:
+            - name: anvil-impact-windows
+              path: target/anvil/impact
+          steps:
+            - template: steps/pr-msrv.yml
 
   - stage: pr_runtime_analysis
     displayName: anvil pr-runtime-analysis (miri + careful)
@@ -170,6 +202,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_runtime_analysis
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -179,6 +212,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_runtime_analysis
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows
@@ -195,6 +229,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          stage: pr_mutants
           pool: ${{ parameters.linuxPool }}
           inputArtifacts:
             - name: anvil-impact-linux
@@ -204,6 +239,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          stage: pr_mutants
           pool: ${{ parameters.windowsPool }}
           inputArtifacts:
             - name: anvil-impact-windows

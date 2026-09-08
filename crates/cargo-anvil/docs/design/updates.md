@@ -170,9 +170,15 @@ the source of truth and pointing readers at the update workflow:
 This warning is informational only. Ownership remains path-based in `.anvil.lock`.
 If a repository edits an owned file, cargo-anvil preserves the edit and reports a
 proposal instead of overwriting it; `cargo anvil --dry-run` shows that decision.
-The ADO `steps/job.yml` extension wrapper is the deliberate exception to the
-"do not edit" wording: its header says it is emitted by cargo-anvil and explicitly
-invites repository customization because that file is the supported 1ESPT hook.
+Two files are deliberate exceptions to the "do not edit" wording, and both carry
+a weaker provenance marker instead. The ADO `steps/job.yml` extension wrapper
+says it is emitted by cargo-anvil and explicitly invites repository
+customization, because that file is the supported 1ESPT hook. The container
+`Dockerfile` and its ignore file (`.anvil/container/Dockerfile*`) are marked
+"Managed by cargo-anvil." for the same reason: a repository that needs a
+different base or extra packages edits them in place, and drift handling
+preserves the edit (see [containers.md](./containers.md#8-customization)). A
+"DO NOT EDIT" marker would contradict the customization path both are for.
 
 ## 3. Managed regions
 
@@ -195,7 +201,9 @@ The sentinel pair serves two purposes:
    for the opening sentinel — line-number-independent, robust against user edits to
    surrounding content.
 2. **Body delimitation.** Everything between the sentinels (exclusive) is "the region's
-   body." Lines outside the sentinels are user-owned and preserved verbatim.
+   body." Lines outside the sentinels are user-owned and preserved verbatim, with the
+   single exception described in *Adopting a hand-written table on first introduction*
+   below.
 
 For TOML hosts the sentinels are TOML line comments around the affected content. To
 work with TOML's no-duplicate-table rule, anvil writes a single parent-table header
@@ -232,6 +240,33 @@ running anvil for the first time sees warnings rather than a wall of build failu
 while still failing cloud workflows on anything the catalog covers. Users who want stricter local
 behavior set per-lint `"deny"` values inside the region — the dirty-file flow then
 preserves their edit.
+
+### Adopting a hand-written table on first introduction
+
+TOML rejects a duplicate table header, so appending a region that declares `[lints]` to a
+host that already declares `[lints]` by hand does not merely duplicate text — it produces
+a manifest that will not parse. On **first introduction only** (once the region exists,
+in-place replacement applies and there is nothing to adopt), the tool therefore removes
+the hand-written table instead of duplicating it, including any comments and blank lines
+within that table's range.
+
+Adoption is deliberately narrow. A hand-written table is removed only when **every** one
+of its configuration lines already appears in the rendered region body; the body may
+declare further lines of its own. Adoption is declined — the hand-written table stays
+exactly where it is — when any of the following holds:
+
+- the table carries configuration the region body does not (silently discarding a user's
+  settings is a worse outcome than a visible parse failure);
+- either the host or the body contains a multi-line string (`"""` or `'''`), which a
+  line-oriented scanner cannot classify safely;
+- the header is an array of tables (`[[bin]]`), which TOML permits to repeat, so a second
+  one is not a duplicate;
+- the table sits inside an existing managed region, which the tool already owns.
+
+A declined adoption is not a refusal to write: the region is still inserted, so a host
+that declares a conflicting ordinary table still ends up with a duplicate-table parse
+error. `deny.toml` with user-authored `[advisories]` entries is the case that hits this,
+and resolving it is tracked separately.
 
 ### User-extension limits for TOML regions
 
@@ -407,11 +442,11 @@ work — provided they hadn't customized it.
 
 ### Exit codes
 
-- `--dry-run` exit code 0: the run would change nothing on disk and every artifact was
-  safely inspected.
+- `--dry-run` exit code 0: the run would change nothing on disk, including
+  `.anvil.lock`, and every artifact was safely inspected.
 - `--dry-run` exit code 1: the run would change something on disk, including writing a
-  `.anvil-proposed` sibling, or Anvil refused to manage an artifact it could not safely
-  inspect.
+  `.anvil-proposed` sibling or refreshing manifest checksums and inventory, or Anvil
+  refused to manage an artifact it could not safely inspect.
 
 The same partitioning is printed at the end of every non-`--dry-run` `update`.
 

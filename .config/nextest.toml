@@ -1,20 +1,20 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Every case in cargo-anvil's pr_title suite runs the anvil-pr-title recipe,
-# which starts a PowerShell process. PowerShell intermittently aborts while
-# parsing an assembly name during startup (PowerShell/PowerShell#26940), and
-# concurrent interpreter startups on constrained runners hit that abort often
-# enough to fail the suite. The suite carries `#[serial]` for the plain libtest
-# runners (`cargo test`, `cargo careful test`), but nextest runs each case in
-# its own process, where an in-process lock cannot serialize anything. This
-# group is what serializes them under nextest.
+# Every case in cargo-anvil's pr_title and impact suites starts PowerShell.
+# PowerShell intermittently aborts while parsing an assembly name during
+# startup (PowerShell/PowerShell#26940), and concurrent interpreter startups
+# on constrained runners hit that abort often enough to fail the suite. The
+# suites carry `#[serial]` for plain libtest runners (`cargo test`, `cargo
+# careful test`), but nextest runs each case in its own process, where an
+# in-process lock cannot serialize anything. This group serializes them under
+# nextest.
 #
 # `binary(...)` rather than `test(...)`: the latter filters test names, none of
-# which contain `pr_title`.
+# which contain the integration-test binary names.
 [test-groups]
-pr-title = { max-threads = 1 }
+powershell = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(pr_title)'
-test-group = 'pr-title'
+filter = 'binary(pr_title) | binary(impact)'
+test-group = 'powershell'

@@ -15,7 +15,7 @@
 //! exist today).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ohno::{AppError, IntoAppError as _, app_err, bail};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
@@ -59,6 +59,66 @@ pub struct RegionKey {
     pub host: String,
     /// The region's stable `id` from the sentinel comments.
     pub id: String,
+}
+
+/// Reject a manifest path that would resolve outside the repository root, or
+/// to the root itself.
+///
+/// Every path in the manifest is joined to the repository root and then read,
+/// written or deleted. `Path::join` replaces the base entirely when given an
+/// absolute path or a drive-qualified one, and `..` climbs out of it, so a
+/// manifest that has been corrupted or hand-edited could direct those
+/// operations at arbitrary locations. An empty or purely relative path
+/// (`""`, `"."`) resolves to the repository root, so the same operations would
+/// target a directory. Paths are always stored `/`-separated and
+/// repository-relative, so anything else is malformed.
+///
+/// # Errors
+///
+/// Returns an error naming `context` and the offending path when it is
+/// absolute, carries a drive or network-share prefix or a backslash, contains
+/// a `..` component, or names no file at all.
+fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
+    // The format is `/`-separated, and the platforms disagree about `\`:
+    // Windows treats it as a separator, Unix as an ordinary filename character.
+    // A path carrying one therefore denotes different things on different
+    // machines and slips past whichever check is written in terms of the other
+    // -- `a\` counts a component on Windows yet ends no `/` segment, and
+    // `..\x` climbs on Windows while reading as one filename on Unix. Rejected
+    // rather than interpreted.
+    //
+    // A drive qualifier divides the platforms the same way: `Path::components`
+    // reports `C:x.txt` as a `Prefix` on Windows and as one ordinary name on
+    // Unix, so the check below cannot see it there. Matched lexically instead.
+    let drive_qualified = {
+        let mut chars = path.chars();
+        matches!((chars.next(), chars.next()), (Some(letter), Some(':')) if letter.is_ascii_alphabetic())
+    };
+    if path.contains('\\') || drive_qualified {
+        bail!("{context} '{path}' must be a relative path inside the repository");
+    }
+    let mut names = 0_usize;
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(_) => names += 1,
+            // `.` is not a directory entry, so `resolve_existing_case_insensitive`
+            // cannot fold it away: `./Justfile` stays a second spelling of a live
+            // path, and a liveness check that compares resolved strings misses it.
+            // Rejected so one file has one key.
+            Component::CurDir | Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
+                bail!("{context} '{path}' must be a relative path inside the repository");
+            }
+        }
+    }
+    // `Path::components` folds a trailing `.` away, so `a/.` arrives as a lone
+    // `Normal("a")` and satisfies the count above while naming a directory.
+    // Paths are stored `/`-separated, so the raw final segment is what decides
+    // whether a file is named at all.
+    let last = path.rsplit('/').next().unwrap_or_default();
+    if names == 0 || last.is_empty() || last == "." {
+        bail!("{context} '{path}' must name a file inside the repository");
+    }
+    Ok(())
 }
 
 impl Manifest {
@@ -129,6 +189,7 @@ impl Manifest {
                 if files.insert(path.clone(), checksum).is_some() {
                     bail!("duplicate [[file]] entry for '{path}'");
                 }
+                ensure_contained(&path, "[[file]] entry")?;
             }
         }
 
@@ -154,6 +215,7 @@ impl Manifest {
                 if regions.insert(key.clone(), checksum).is_some() {
                     bail!("duplicate [[region]] entry for host '{}' id '{}'", key.host, key.id);
                 }
+                ensure_contained(&key.host, "[[region]] host")?;
             }
         }
 
@@ -230,6 +292,19 @@ impl Manifest {
         let path = Self::path_for(repo_root);
         let text = self.to_toml();
         let tmp = path.with_extension("lock.tmp");
+        // The write lands on this sibling before the rename, and `fs::write`
+        // opens with create+truncate, which follows a symlink. A checkout can
+        // carry `.anvil.lock.tmp` as a link out of the tree just as easily as
+        // any other name. Clearing it first turns a followed link into a
+        // replaced link; the name is anvil's own, so nothing that belongs to
+        // the repository is at stake. Only a missing file is absorbed.
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
+            }
+        }
         std::fs::write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
         std::fs::rename(&tmp, &path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
         Ok(())
@@ -249,6 +324,36 @@ impl Manifest {
             },
             checksum.into(),
         );
+    }
+
+    /// The checksum recorded for an owned file, tolerating a case-only
+    /// difference between the lock and the path the caller resolved from disk.
+    ///
+    /// Plan items carry the host's real on-disk casing; a lock entry carries
+    /// whatever casing it had when it was written. Comparing the two exactly
+    /// makes a case-only rename look like a file anvil has never seen, which
+    /// costs the file its provenance: it is planned as repository-authored and
+    /// earns a spurious proposal, and the removal pass retires the very entry
+    /// that names it.
+    pub fn file_checksum(&self, path: &str) -> Option<&str> {
+        self.files.get(path).map(String::as_str).or_else(|| {
+            self.files
+                .iter()
+                .find(|(key, _)| key.as_str().eq_ignore_ascii_case(path))
+                .map(|(_, checksum)| checksum.as_str())
+        })
+    }
+
+    /// Whether the lock records any managed region hosted by `path`, comparing
+    /// the host without case for the reason [`Self::file_checksum`] gives.
+    ///
+    /// This is the provenance that separates "a file anvil composes, whose
+    /// regions have been removed" from "a file anvil has never owned". The two
+    /// have opposite recoveries, so the distinction decides which one a refusal
+    /// tells the reader to reach for.
+    #[must_use]
+    pub fn has_region_host(&self, path: &str) -> bool {
+        self.regions.keys().any(|key| key.host.as_str().eq_ignore_ascii_case(path))
     }
 }
 
@@ -402,6 +507,32 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
+    fn save_clears_a_stale_temporary_sibling() {
+        // The temporary file is anvil's own name, so an existing one is
+        // replaced rather than written through -- otherwise a symlink left at
+        // that path would redirect the write outside the repository.
+        let tmp = TempDir::new().unwrap();
+        let sibling = Manifest::path_for(tmp.path()).with_extension("lock.tmp");
+        std::fs::write(&sibling, b"stale").unwrap();
+        sample_manifest().save(tmp.path()).unwrap();
+        assert!(!sibling.exists(), "the temporary sibling must not survive the rename");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn save_stops_when_the_temporary_sibling_cannot_be_cleared() {
+        // Only a missing temporary file is absorbed. A directory occupies the
+        // name here because `remove_file` refuses one on every platform,
+        // without needing a permission the test may not have.
+        let tmp = TempDir::new().unwrap();
+        let sibling = Manifest::path_for(tmp.path()).with_extension("lock.tmp");
+        std::fs::create_dir(&sibling).unwrap();
+        let err = sample_manifest().save(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("failed to clear"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
     fn save_then_load_round_trip() {
         let tmp = TempDir::new().unwrap();
         let m1 = sample_manifest();
@@ -433,5 +564,103 @@ mod tests {
     fn toml_ends_with_newline() {
         let text = sample_manifest().to_toml();
         assert!(text.ends_with('\n'));
+    }
+
+    /// The lock keeps whatever casing a path had when it was written, while a
+    /// plan item carries the casing resolved from disk. An exact-only lookup
+    /// loses the provenance of anvil's own file on a case-only rename, which
+    /// is what makes the removal pass delete it.
+    #[test]
+    fn file_checksum_tolerates_a_case_only_difference() {
+        let mut manifest = Manifest::default();
+        manifest.set_file("justfiles/anvil/tools.just", "sha256:body");
+
+        assert_eq!(manifest.file_checksum("justfiles/anvil/tools.just"), Some("sha256:body"));
+        assert_eq!(manifest.file_checksum("justfiles/anvil/Tools.just"), Some("sha256:body"));
+        assert_eq!(manifest.file_checksum("justfiles/anvil/other.just"), None);
+    }
+
+    /// An exact match must win over a case-insensitive one, so a repository
+    /// holding two entries differing only in case still reads its own.
+    #[test]
+    fn file_checksum_prefers_the_exact_entry() {
+        let mut manifest = Manifest::default();
+        manifest.set_file("a/Thing.just", "sha256:upper");
+        manifest.set_file("a/thing.just", "sha256:lower");
+
+        assert_eq!(manifest.file_checksum("a/Thing.just"), Some("sha256:upper"));
+        assert_eq!(manifest.file_checksum("a/thing.just"), Some("sha256:lower"));
+    }
+
+    /// The provenance that separates "a composed file whose regions were
+    /// removed" from "a file anvil has never owned". The two have opposite
+    /// recoveries, so a missed match sends the reader to delete a file anvil
+    /// rendered.
+    #[test]
+    fn has_region_host_matches_without_case() {
+        let mut manifest = Manifest::default();
+        manifest.set_region(".anvil/container/Dockerfile", "anvil-container-base", "sha256:body");
+
+        assert!(manifest.has_region_host(".anvil/container/Dockerfile"));
+        assert!(manifest.has_region_host(".anvil/container/dockerfile"));
+        assert!(!manifest.has_region_host(".anvil/container/Other"));
+        assert!(!Manifest::default().has_region_host(".anvil/container/Dockerfile"));
+    }
+    #[test]
+    fn rejects_a_file_path_that_escapes_the_repository() {
+        for escape in [
+            "../outside.txt",
+            "/etc/passwd",
+            "a/../../b.txt",
+            "a\\",
+            "..\\outside.txt",
+            "C:\\x.txt",
+            "C:x.txt",
+            "z:dir/file.txt",
+            // `.` is a second spelling of a live path that resolution cannot
+            // fold away, so it is rejected rather than accepted as an alias.
+            ".",
+            "./",
+            "./Justfile",
+        ] {
+            // A TOML basic string treats `\` as an escape, so a path carrying
+            // one has to arrive doubled or the document itself is malformed and
+            // the parse fails before the path is ever validated.
+            let literal = escape.replace('\\', "\\\\");
+            let toml = format!("version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"{literal}\"\nchecksum = \"sha256:x\"\n");
+            let err = Manifest::parse(&toml).unwrap_err();
+            assert!(
+                format!("{err}").contains("must be a relative path inside the repository"),
+                "unexpected error for '{escape}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_region_host_that_escapes_the_repository() {
+        let toml = "version = 1\ntool = \"anvil\"\n\n[[region]]\nhost = \"../Justfile\"\nid = \"anvil-imports\"\nchecksum = \"sha256:x\"\n";
+        let err = Manifest::parse(toml).unwrap_err();
+        assert!(format!("{err}").contains("must be a relative path inside the repository"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_path_that_names_no_file() {
+        // `a/.` reaches here rather than the escape test: `Path::components`
+        // folds a trailing `.` away, so the component loop never sees it and the
+        // final-segment check is what catches it.
+        for empty in ["", "a/", "a/."] {
+            let toml = format!("version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"{empty}\"\nchecksum = \"sha256:x\"\n");
+            let err = Manifest::parse(&toml).unwrap_err();
+            assert!(
+                format!("{err}").contains("must name a file inside the repository"),
+                "unexpected error for '{empty}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_an_ordinary_nested_path() {
+        let toml = "version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"justfiles/anvil/tools.just\"\nchecksum = \"sha256:x\"\n";
+        Manifest::parse(toml).expect("an ordinary nested path must be accepted");
     }
 }

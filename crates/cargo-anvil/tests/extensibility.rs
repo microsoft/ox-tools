@@ -26,9 +26,9 @@ use tempfile::TempDir;
 const EXTRA_FILE: &str = "justfiles/anvil/demoforge.just";
 const METADATA_REGION: &str = "demoforge-metadata";
 const CONTAINER_JUST: &str = "justfiles/anvil/container.just";
-const CONTAINERFILE: &str = ".anvil/container/Containerfile";
-const CONTAINER_RUNNER: &str = ".anvil/container/run-in-container.ps1";
-const CONTAINER_CUSTOMIZE: &str = ".anvil/container/customize.ps1";
+const DOCKERFILE: &str = ".anvil/container/Dockerfile";
+const DOCKERIGNORE: &str = ".anvil/container/Dockerfile.dockerignore";
+const CONTAINER_HOOKS: &str = ".anvil/container/hooks.ps1";
 
 /// The example downstream catalog: anvil's, customized four ways.
 fn demoforge() -> Catalog {
@@ -55,8 +55,8 @@ fn containerforge() -> Catalog {
         .subcommand("containerforge")
         .about("ContainerForge: an anvil container catalog for tests")
         .version("9.9.9")
-        .replace_artifact(artifacts::container::containerfile().with_body("FROM example.invalid/base\n"))
-        .with_artifact(artifacts::container::customize_powershell("# test customization\n"))
+        .replace_artifact(artifacts::container::dockerfile_base().with_body("FROM example.invalid/base\n"))
+        .with_artifact(artifacts::container::hooks("# test credential hook\n"))
         .build()
         .unwrap()
 }
@@ -159,14 +159,10 @@ fn public_container_artifacts_can_be_specialized_by_downstream_catalogs() {
         base_container.contains("anvil-container"),
         "base catalog must expose the public container command"
     );
+    let base_ignore = std::fs::read_to_string(base.path().join(DOCKERIGNORE)).unwrap();
     assert!(
-        base.path().join(CONTAINER_RUNNER).is_file(),
-        "base catalog must emit its public runner"
-    );
-    let base_runner = std::fs::read_to_string(base.path().join(CONTAINER_RUNNER)).unwrap();
-    assert!(
-        !base.path().join(CONTAINER_CUSTOMIZE).exists(),
-        "base catalog must not emit a customization file by default"
+        !base.path().join(CONTAINER_HOOKS).exists(),
+        "base catalog must not emit a credential hook by default"
     );
 
     let configured = workspace();
@@ -176,50 +172,48 @@ fn public_container_artifacts_can_be_specialized_by_downstream_catalogs() {
         configured_container, base_container,
         "downstream catalog must inherit the public container command unchanged"
     );
-    let configured_containerfile = std::fs::read_to_string(configured.path().join(CONTAINERFILE)).unwrap();
-    assert_eq!(
-        configured_containerfile, "FROM example.invalid/base\n",
-        "downstream catalog must replace the public Containerfile"
+    let configured_dockerfile = std::fs::read_to_string(configured.path().join(DOCKERFILE)).unwrap();
+    assert!(
+        configured_dockerfile.contains("# >>> anvil-managed: anvil-container-base\nFROM example.invalid/base\n"),
+        "downstream catalog must replace the public Dockerfile base region"
     );
-    let configured_runner = std::fs::read_to_string(configured.path().join(CONTAINER_RUNNER)).unwrap();
-    assert_eq!(
-        configured_runner, base_runner,
-        "downstream catalog must inherit the public runner unchanged"
+    assert!(
+        configured_dockerfile.contains("just anvil-setup binstall"),
+        "downstream catalog must inherit the catalog-install region it did not replace"
     );
-    let configured_customize = std::fs::read_to_string(configured.path().join(CONTAINER_CUSTOMIZE)).unwrap();
+    assert!(
+        configured_dockerfile.starts_with("# syntax=docker/dockerfile:1\n"),
+        "the seeded parser directive must lead the composed Dockerfile"
+    );
+    let configured_ignore = std::fs::read_to_string(configured.path().join(DOCKERIGNORE)).unwrap();
     assert_eq!(
-        configured_customize, "# test customization\n",
-        "downstream catalog must be able to add its own customization file"
+        configured_ignore, base_ignore,
+        "downstream catalog must inherit the public build-context ignore unchanged"
+    );
+    let configured_hooks = std::fs::read_to_string(configured.path().join(CONTAINER_HOOKS)).unwrap();
+    assert_eq!(
+        configured_hooks, "# test credential hook\n",
+        "downstream catalog must be able to add its own credential hook"
     );
 }
 
 #[test]
-fn a_regular_repository_can_add_customization_files_without_a_derived_catalog() {
-    // A repository maintainer can commit customize.sh/customize.ps1 directly
-    // beside the generated files, without forking anvil into a derived
-    // catalog. The public generator neither creates nor manages them, and
-    // must not disturb them on a later re-run.
+fn a_regular_repository_can_add_a_credential_hook_without_a_derived_catalog() {
+    // A repository maintainer can commit hooks.ps1 directly beside the
+    // generated files, without forking anvil into a derived catalog. The
+    // public generator neither creates nor manages it, and must not disturb it
+    // on a later re-run.
     let tmp = workspace();
     run_update(&Catalog::anvil(), &local(false), tmp.path()).unwrap();
-    let shell_customize = tmp.path().join(".anvil/container/customize.sh");
-    let powershell_customize = tmp.path().join(CONTAINER_CUSTOMIZE);
-    assert!(!shell_customize.exists(), "the public catalog must not emit customize.sh");
-    assert!(!powershell_customize.exists(), "the public catalog must not emit customize.ps1");
+    let hooks = tmp.path().join(CONTAINER_HOOKS);
+    assert!(!hooks.exists(), "the public catalog must not emit hooks.ps1");
 
-    write(&shell_customize, "# repository-owned shell customization\n");
-    write(&powershell_customize, "# repository-owned PowerShell customization\n");
+    write(&hooks, "# repository-owned credential hook\n");
 
-    // Re-running the public generator must leave repository-owned
-    // customization files untouched.
+    // Re-running the public generator must leave a repository-owned hook
+    // untouched.
     run_update(&Catalog::anvil(), &local(false), tmp.path()).unwrap();
-    assert_eq!(
-        std::fs::read_to_string(&shell_customize).unwrap(),
-        "# repository-owned shell customization\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&powershell_customize).unwrap(),
-        "# repository-owned PowerShell customization\n"
-    );
+    assert_eq!(std::fs::read_to_string(&hooks).unwrap(), "# repository-owned credential hook\n");
 }
 
 #[test]

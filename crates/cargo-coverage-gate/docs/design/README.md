@@ -47,8 +47,10 @@ lower-coverage code.
 ## 3. Non-Goals
 
 - Running tests or producing coverage data. The tool consumes the lcov
-  tracefile produced by [`cargo-llvm-cov`][cargo-llvm-cov]; it does not
-  invoke the toolchain itself.
+  tracefile produced by [`cargo-llvm-cov`][cargo-llvm-cov] and never invokes
+  test, build, or coverage commands. Workspace discovery and target-policy
+  evaluation may issue the read-only Cargo and rustc queries described in
+  §10.2.
 - Diff coverage (per-line annotation of changed lines). Different concern,
   different consumers (review tooling like Codecov); this tool answers a
   separable question.
@@ -69,8 +71,9 @@ lower-coverage code.
 
 Corollaries:
 
-- Each workspace member gets an effective threshold via the
-  three-layer resolution (per-package → workspace → built-in `100.0`).
+- Each workspace member gets a base policy via the three-layer resolution
+  (per-package → workspace → built-in `100.0`). A matching package-scoped
+  target table replaces that base policy to produce the effective policy.
   Opting a package out of gating is explicit: set `min-lines-percent = 0.0`.
   A package that legitimately has **no coverable lines** instead declares
   `expect-no-coverable-lines = true` — a self-validating assertion that
@@ -97,15 +100,17 @@ want to reproduce the gate locally.
 
 ```text
 cargo coverage-gate  [--lcov <path>]... [-p <spec>]... [--package <spec>]...
+                     [--target <triple>]
                      [--summary-file <path>] [--quiet]
 ```
 
 A single command — no subcommands. The tool reads one or more cargo-llvm-cov
-lcov tracefiles (merging them at the line level), resolves the effective per-package threshold (per-package metadata,
-then workspace default, then the built-in default of `100.0`), computes
-per-package percentages, and emits a verdict table. Exit `0` if every
-in-scope package meets its threshold; exit `1` if any in-scope package
-fails; exit `2` on configuration error.
+lcov tracefiles (merging them at the line level), resolves each package's base
+policy (package metadata, then workspace default, then the built-in default of
+`100.0`), applies a matching package-scoped target replacement, computes
+per-package percentages, and emits a verdict table. Exit `0` if every in-scope
+package meets its effective policy; exit `1` if any in-scope package fails;
+exit `2` on configuration error.
 
 Flags:
 
@@ -126,6 +131,9 @@ Flags:
   test-impact step so that impact-scoped runs only gate the packages
   whose tests actually ran. A selector that matches no member is a
   configuration error (exit 2).
+- `--target <triple>` — evaluate target-specific package policies for the
+  supplied Rust target. Defaults to the rustc host target when target
+  policies exist; workspaces without target policies do not invoke rustc.
 - `--summary-file <path>` — write a Markdown verdict table to this file.
   When unset, the tool honors the environment variables
   `GITHUB_STEP_SUMMARY` (GitHub Actions) and
@@ -137,9 +145,9 @@ Flags:
 The tool never writes to `Cargo.toml`. All threshold values are set by
 hand, so every change appears in a PR diff and is reviewed.
 
-### 5.3 The threshold metadata
+### 5.3 Policy metadata
 
-A package's threshold is resolved in three layers, in priority order:
+A package's base policy is resolved in three layers, in priority order:
 
 1. **per-package**: `[package.metadata.coverage-gate]` in the package's
    `Cargo.toml`.
@@ -161,9 +169,10 @@ min-lines-percent = 75.0
 min-lines-percent = 80.0
 ```
 
-The schema today is one key, `min-lines-percent`, an integer or float percentage
-(`0.0`–`100.0` inclusive). Future extensions can add `min-functions`,
-`min-regions` symmetrically.
+The base schema accepts `min-lines-percent`, an integer or float percentage
+(`0.0`–`100.0` inclusive), or the package-only
+`expect-no-coverable-lines` assertion described below. Future extensions can
+add `min-functions` and `min-regions` symmetrically.
 
 The built-in default of `100.0` means **gating is on by default**: a new
 package with no metadata anywhere will only pass if every measured line is
@@ -223,6 +232,55 @@ Rules:
 - A non-boolean value is a configuration error (exit `2`). An explicit
   `false` is identical to omitting the key.
 
+#### Target-specific policy
+
+Packages whose coverage policy varies by compilation target use Cargo-style
+target selectors nested under package metadata:
+
+```toml
+[package.metadata.coverage-gate]
+min-lines-percent = 100
+
+[package.metadata.coverage-gate.target.'cfg(not(windows))']
+expect-no-coverable-lines = true
+```
+
+Target keys use the target-derived subset of Cargo's target-specific dependency
+selector grammar: an exact target triple (`x86_64-pc-windows-msvc`) or a quoted
+`cfg(...)` expression composed from target configuration options
+(`cfg(windows)`, `cfg(target_os = "linux")`,
+`cfg(all(unix, target_arch = "x86_64"))`). Coverage-gate parses selectors with
+`cargo-platform` and matches cfg expressions against
+`rustc --print cfg --target <triple>`. Build-context configuration
+options such as `feature`, `test`, `debug_assertions`, and `proc_macro` are
+configuration errors because a standalone target query cannot evaluate them.
+
+`min-lines-percent = 0` disables gating for that package on the matching
+target. It does not disable tests or coverage instrumentation. Test binaries
+from zero-threshold packages remain part of the instrumented run because they
+may contribute coverage to other workspace packages. This is distinct from
+`expect-no-coverable-lines = true`, which asserts that the selected package
+itself owns no coverable lines.
+
+Target tables are package-scoped; declaring one in workspace metadata is a
+configuration error. A selected table replaces the base policy with either
+`min-lines-percent` or `expect-no-coverable-lines = true`, producing the final
+effective policy. The two behaviors are mutually exclusive. An exact target
+that overrides a broader cfg policy repeats its desired policy.
+
+Resolution follows Cargo's precedence:
+
+1. An exact target-triple table wins over every matching `cfg(...)` table.
+2. Otherwise one matching `cfg(...)` table supplies the target policy.
+3. Multiple matching `cfg(...)` tables are a configuration error rather than
+   depending on TOML declaration order.
+4. With no matching target table, the base package → workspace → built-in
+   policy remains effective.
+
+The CLI accepts `--target <triple>`. When omitted, it obtains the rustc host
+target from `rustc -vV`. Rust target discovery is lazy: if no package declares
+target policies, evaluation does not invoke rustc.
+
 ### 5.4 The verdict table
 
 The tool prints a table to stdout (and to the summary file when
@@ -254,6 +312,42 @@ columns render `(no lines)` and `—`, since there is no percentage floor.
 
 Markdown variant uses the same columns and a leading `### coverage-gate`
 header so it renders cleanly in GitHub job summaries and ADO build summaries.
+
+When the verdict is not a pass, both renderers append **failure details**.
+A **coverable line** is a distinct LCOV `DA:` record: a source line for which
+LLVM emitted line-coverage instrumentation, whether or not a test executed it.
+For a package below its numeric threshold, the details show exact
+covered/coverable line counts and the uncovered package-relative source
+locations. For a package that unexpectedly contains coverable lines, they
+show those locations instead. A `NO DATA` package gets an explicit statement
+that no coverage records were attributed to it.
+
+Locations are ordered by package, file, and line, and contiguous lines are
+rendered as ranges. To keep CI logs and summaries bounded, at most the first
+100 relevant line locations are shown per package; the renderer reports how
+many additional locations were omitted. The aggregate counts always describe
+the complete input, not the displayed subset. One hundred locations is large
+enough to show several failure clusters while keeping a pathological package
+to a few kilobytes of diagnostic output; it should be reevaluated if typical
+failures routinely omit the first useful cluster or materially inflate CI
+summaries.
+
+The [implementation guide](../implementation.md) records the parser,
+attribution, status-selection, ordering, and rendering pipeline behind this
+contract.
+
+```text
+Failure details:
+  beta: 60/100 lines covered; 40 uncovered.
+    src/lib.rs: 61-100
+  gamma: 91/100 lines covered; 9 uncovered.
+    src/lib.rs: 12, 24-27, 83-86
+```
+
+The details are part of the gate output rather than delegated to an external
+coverage service or a transient CI artifact. A failed local command and a
+failed CI stage therefore retain enough information to identify what must be
+covered even when a later upload step is skipped.
 
 ### 5.5 Local invocation
 
@@ -295,6 +389,8 @@ For each `SF:` section the tool counts:
 - `lines_total` — number of distinct `DA:` records (executable lines
   the instrumentation knows about).
 - `lines_covered` — number of those with a non-zero hit count.
+- The line numbers of all `DA:` records and of the zero-count subset,
+  retained for failure diagnostics.
 
 Records other than `SF:` / `DA:` / `LF:` / `LH:` (function `FN:`,
 branch `BRDA:`, etc.) are accepted by the parser but not used; the
@@ -377,6 +473,19 @@ true` (§5.3): for that package, zero attributed lines is the *expected*
 state and classifies as a pass (`EMPTY` / `➖`), not the no-data
 configuration error. Conversely, if such a package *does* have attributed
 coverable lines, it fails the gate (exit `1`) rather than passing.
+
+A package whose effective target policy sets `min-lines-percent = 0` passes,
+including when it has no attributed data. Its tests remain instrumented so
+they can contribute coverage to other packages.
+
+An empty lcov tracefile is valid input. Each in-scope package is classified
+from its effective policy: zero-threshold and `expect-no-coverable-lines`
+packages pass, while a package with a positive threshold reports `NO DATA`
+and makes the result a configuration error. This lets an orchestrator recover
+from cargo-llvm-cov's "no coverage data found" export outcome by supplying an
+empty tracefile to the gate. It must not remove test binaries from
+instrumentation preemptively; if those tests produce coverage for another
+package, the normal export succeeds and that coverage remains visible.
 
 ### 6.4 Cross-package test attribution
 
@@ -582,12 +691,17 @@ comparison rounds to the same precision before comparing — see
 
 ### 10.2 Security
 
-The tool reads `Cargo.toml` files and a coverage lcov tracefile. It never
-writes; the only output channels are stdout and the optional summary
-file. No network access, no privileged operations. The only subprocess
-invocation is the read-only `cargo metadata` call performed by
-`cargo_metadata::MetadataCommand::exec()` during workspace discovery
-(used to enumerate workspace members and resolve the workspace root).
+The tool reads `Cargo.toml` files and coverage lcov tracefiles. It never writes;
+the only output channels are stdout and the optional summary file. It performs
+no network access or privileged operations.
+
+Workspace discovery invokes the read-only `cargo metadata` command through
+`cargo_metadata::MetadataCommand::exec()` to enumerate workspace members and
+resolve the workspace root. When any package declares target-specific policy,
+the tool also invokes the executable selected by `RUSTC` (or `rustc` when
+unset). It runs `rustc -vV` only when it must discover the host target, then
+runs `rustc --print cfg --target <triple>` for both explicit and discovered
+targets. Workspaces without target-specific policy do not invoke rustc.
 
 ### 10.3 Monorepo / multi-workspace
 
@@ -605,9 +719,9 @@ file) and `DA:` (line count) records; everything else is ignored, so
 new record types added by future cargo-llvm-cov releases will not
 break parsing.
 
-If a tracefile contains no `SF:` sections — empty file, or a corrupted
-upload — the tool exits with a configuration error (no files attributed
-to any package). Structural parse errors (e.g., malformed `DA:`
+If a tracefile contains no `SF:` sections, every in-scope package is evaluated
+as having no attributed data. The effective package policies determine the
+result as described in §6.3. Structural parse errors (e.g., malformed `DA:`
 records) are hard errors with exit code 2.
 
 #### Tooling requirements

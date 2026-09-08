@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.2] - 2026-09-03
+
+- 🐛 Bug Fixes
+
+  - drop directories and humantime-serde dependencies ([#145](https://github.com/microsoft/ox-tools/pull/145))
+
 ## [Unreleased]
 
 ### Fixed

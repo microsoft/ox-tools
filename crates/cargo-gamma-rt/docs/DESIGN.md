@@ -1,0 +1,82 @@
+# cargo-gamma-rt — Design
+
+> Status: **Implemented**.
+> Crate name: `cargo-gamma-rt`.
+
+## Purpose
+
+This crate is the guard runtime injected into crates under mutation test. It
+selects one compiled mutation at process start while keeping the inactive path
+equivalent to the original program.
+
+## Hard constraints
+
+- Zero ordinary dependencies.
+- No build script and no feature that changes injected runtime behavior. The
+  internal `embedding` feature exposes package-local source text only to
+  `cargo-gamma-lib`; the vendored crate never enables it.
+- `no_std` compatibility.
+- The library target remains named `gamma_rt`.
+- Rustdoc is hidden, and the hand-written README warns downstream users not to
+  depend on this implementation crate.
+
+These constraints prevent injection from perturbing dependency resolution,
+feature unification, offline builds, or the target crate's standard-library
+requirements.
+
+## Selection and census protocol
+
+The runtime captures `GAMMA_ACTIVE` and `GAMMA_CENSUS` during process startup,
+then guards use only the captured atomic selection. Linux reads the immutable
+environment image retained by `exec`, avoiding races with later environment
+mutation. `OVERFLOW` and `SEAL` are public wire-format constants shared with
+the census reader so the protocol has one source of truth.
+
+A variable that is absent and one that could not be read are different answers.
+Absence selects the baseline, or — for `GAMMA_CENSUS` — an ordinary run; a
+failure to open or read the environment image terminates startup with the
+runtime's fixed failure marker, so a census the coordinator asked for can never
+be silently downgraded into a run that appears to have reached nothing. Signal
+delivery interrupts a read without failing it, so reads are retried under a
+budget spent across the whole capture rather than per read: an endless stream of
+signals is reported as a failure instead of spun on inside a native constructor,
+a loader or C-runtime startup hook that runs before `main`.
+Windows preserves the same distinction by clearing last error before each
+`GetEnvironmentVariableA` or `GetEnvironmentVariableW` call and classifying a
+zero return with `GetLastError`: only `ERROR_ENVVAR_NOT_FOUND` means absence.
+Every other API failure emits the same fixed marker and immediately exits with
+the same infrastructure-failure status used on Unix.
+
+On hosted Unix and Windows targets, the cached selection starts in a transient
+uninstalled state until this crate's native constructor publishes the captured
+environment. If instrumented code in an earlier native constructor reaches a
+guard during that window, the runtime writes a fixed diagnostic and terminates
+through `_exit` or `ExitProcess` with the infrastructure-failure status.
+Termination does not unwind, so constructor code cannot catch the failure,
+continue startup, and let the runtime overwrite the evidence with an ordinary
+selection. The diagnostic marker is part of the parent/runtime protocol so the
+coordinator excludes this infrastructure failure from mutation scoring.
+Targets without a supported constructor mechanism, and Miri
+executions that cannot run one, use the permanent unmutated fallback instead.
+
+On non-Linux Unix targets, `getenv` is used under POSIX's precondition that no
+native environment mutation occurs concurrently. The capture runs before Rust
+`main`, so safe Rust cannot have started such a mutation; a foreign native
+constructor that violates the precondition is outside the runtime abstraction.
+A second pointer-and-value read detects visibly inconsistent capture results and
+turns them into a startup failure. This is an integrity check, not a memory-
+safety proof and not proof that forbidden foreign mutation never occurred.
+
+The captured census path lives in a fixed-size buffer the runtime terminates
+itself, rather than relying on the environment image to supply a terminator. A
+census path that fills the buffer leaves census mode selected with no path the
+runtime can open, so nothing is written and nothing is sealed and the reader
+discards that binary's census exactly as it discards a truncated one.
+
+The package owns the source bundle, edition, and minimum Rust version used to
+write the vendored standalone crate. This keeps the coordinator's published
+package self-contained while ensuring the copied runtime is the exact source
+compiled as `cargo-gamma-rt`. The edition is deliberately explicit because
+Cargo exposes no `CARGO_PKG_EDITION` compile-time variable, and a workspace
+edition bump must not silently reinterpret source injected into another
+repository.
