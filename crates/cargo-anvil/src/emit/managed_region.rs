@@ -156,7 +156,7 @@ pub fn toml_introduction_refusal(host_text: Option<&str>, request: ManagedRegion
     }
     let base = host_text.unwrap_or("");
     // A malformed region is a separate diagnosis, raised by the planner.
-    if matches!(find_region(base, region_id, syntax), Err(_)) {
+    if find_region(base, region_id, syntax).is_err() {
         return None;
     }
 

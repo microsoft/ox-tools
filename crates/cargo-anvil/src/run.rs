@@ -361,39 +361,7 @@ fn push_region_at(
     if let Some(declared) = composed_host
         && !composed.states.contains_key(&host)
     {
-        let state = match hosts.get_or_read(repo_root, &host)? {
-            Some(text) => composed_host_state(declared.order, &host, &text, manifest),
-            // Nothing on disk. The scaffold becomes the base the first region
-            // splices into, carrying the parts of the file that cannot live
-            // inside a region -- the `# syntax=` parser directive above all. It
-            // is written once and never reconciled; everything outside the
-            // sentinels is the repository's from then on.
-            None => ComposedHostState::SeedFromScaffold,
-        };
-        // Resolved through a case variant. Case-insensitive resolution is right
-        // for an ordinary host, whose consumers open it by whatever name it
-        // has, but a composed host is read by something that requires the
-        // declared spelling: the container driver refuses any other, because
-        // `BuildKit` derives the ignore file's name from the Dockerfile's and
-        // there is no flag to point it elsewhere. Keeping the file up to date
-        // would leave the two halves disagreeing about one on-disk state, with
-        // the generator reporting the tree in sync while every recipe that uses
-        // it exits 1. The generator is the component that just wrote the file,
-        // so it is the one positioned to say so.
-        //
-        // A content state that already refuses keeps its own diagnosis: it
-        // describes the deeper problem, and its recovery -- move the file
-        // aside, restore the regions -- resolves the spelling along the way,
-        // whereas renaming first would only surface the same refusal again.
-        let state = if host == declared.path || matches!(state, ComposedHostState::Unsafe(_)) {
-            state
-        } else {
-            ComposedHostState::Unsafe(format!(
-                "it must be named exactly `{}`, and the recipes that consume it refuse any other \
-                 spelling, so anvil would be maintaining a file nothing can use. Rename it",
-                declared.path
-            ))
-        };
+        let state = classify_composed_host(repo_root, manifest, hosts, declared, &host)?;
         if matches!(state, ComposedHostState::SeedFromScaffold) {
             hosts.set(&host, declared.scaffold.to_owned());
         }
@@ -475,22 +443,7 @@ fn push_region_at(
     // there is no edit to the host that resolves it — say so rather than
     // sending the reader to reconcile a table they did not write.
     if let Some(collision) = composed.claim_tables(&host, spec.id.as_str(), body) {
-        plan.refusal(format!(
-            "Refused to manage {host} [{id}]: this region declares `[{table}]`, which the managed region \
-             '{owner}' already declares in the same file. Both are anvil's own regions, so {host} cannot be \
-             edited to fix this — please report it. This region was left unchanged; other regions in the same \
-             file and other artifacts may still be updated.",
-            id = spec.id.as_str(),
-            table = collision.table,
-            owner = collision.owner,
-        ));
-        plan.push(PlanItem::noop(
-            Target::Region {
-                host,
-                id: spec.id.as_str().to_owned(),
-            },
-            Decision::LeaveAlone,
-        ));
+        refuse_colliding_region(plan, host, spec.id.as_str(), &collision);
         return Ok(());
     }
     // Writing a region into a TOML host that already declares the same table by
@@ -516,6 +469,55 @@ fn push_region_at(
     Ok(())
 }
 
+/// Classify a composed host once per pass, before any region touches it.
+///
+/// Split out of `push_region_at` because it answers a different question:
+/// whether the file on disk is the shape a composed host must be, independent
+/// of which region is being planned. Later regions targeting the same host see
+/// text this pass has already spliced, which is partially composed by
+/// construction, so the answer is computed once and cached.
+fn classify_composed_host(
+    repo_root: &Path,
+    manifest: &Manifest,
+    hosts: &mut HostTextCache,
+    declared: ComposedHost,
+    host: &str,
+) -> Result<ComposedHostState, AppError> {
+    let state = match hosts.get_or_read(repo_root, host)? {
+        Some(text) => composed_host_state(declared.order, host, &text, manifest),
+        // Nothing on disk. The scaffold becomes the base the first region
+        // splices into, carrying the parts of the file that cannot live
+        // inside a region -- the `# syntax=` parser directive above all. It
+        // is written once and never reconciled; everything outside the
+        // sentinels is the repository's from then on.
+        None => ComposedHostState::SeedFromScaffold,
+    };
+    // Resolved through a case variant. Case-insensitive resolution is right
+    // for an ordinary host, whose consumers open it by whatever name it
+    // has, but a composed host is read by something that requires the
+    // declared spelling: the container driver refuses any other, because
+    // `BuildKit` derives the ignore file's name from the Dockerfile's and
+    // there is no flag to point it elsewhere. Keeping the file up to date
+    // would leave the two halves disagreeing about one on-disk state, with
+    // the generator reporting the tree in sync while every recipe that uses
+    // it exits 1. The generator is the component that just wrote the file,
+    // so it is the one positioned to say so.
+    //
+    // A content state that already refuses keeps its own diagnosis: it
+    // describes the deeper problem, and its recovery -- move the file
+    // aside, restore the regions -- resolves the spelling along the way,
+    // whereas renaming first would only surface the same refusal again.
+    if host == declared.path || matches!(state, ComposedHostState::Unsafe(_)) {
+        Ok(state)
+    } else {
+        Ok(ComposedHostState::Unsafe(format!(
+            "it must be named exactly `{}`, and the recipes that consume it refuse any other \
+             spelling, so anvil would be maintaining a file nothing can use. Rename it",
+            declared.path
+        )))
+    }
+}
+
 /// Record that one region was refused: a diagnostic naming the host, and a
 /// no-op so the plan still accounts for it.
 ///
@@ -531,6 +533,25 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str) {
         "Refused to manage {host} [{id}]: {reason}{stop} This region was left unchanged; other regions in the same \
          file and other artifacts may still be updated. Reconcile the hand-written table with the managed \
          one before retrying."
+    ));
+    plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
+}
+
+/// Record that two catalog regions of one host claim the same table.
+///
+/// Deliberately not [`refuse_region`]: every other refusal ends by asking the
+/// user to reconcile a hand-written table, and here there isn't one. Both
+/// regions are anvil's own, so nothing the user can do to the host resolves it
+/// — sending them to reconcile a table they never wrote would be a worse
+/// outcome than saying plainly that this is a defect to report.
+fn refuse_colliding_region(plan: &mut Plan, host: String, id: &str, collision: &Collision) {
+    plan.refusal(format!(
+        "Refused to manage {host} [{id}]: this region declares `[{table}]`, which the managed region '{owner}' \
+         already declares in the same file. Both are anvil's own regions, so {host} cannot be edited to fix \
+         this — please report it. This region was left unchanged; other regions in the same file and other \
+         artifacts may still be updated.",
+        table = collision.table,
+        owner = collision.owner,
     ));
     plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
 }
