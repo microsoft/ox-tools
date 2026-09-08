@@ -502,13 +502,13 @@ never a pool.
 
 Measured on a package with a library, one binary and one integration test:
 
-| target | units | `liponly` | `binonly` | `devdep` |
+| target | units | `libonly` | `binonly` | `devdep` |
 |--------|-------|-----------|-----------|----------|
 | `lib/main` | 2 | 0 | 2 | 1 |
 | `bin/one` | 2 | 2 | 0 | 1 |
 | `test/it` | 1 | 1 | 1 | 0 |
 
-`liponly` is used by the library — zero reports there — though the binary reports it
+`libonly` is used by the library — zero reports there — though the binary reports it
 twice. `binonly` is the mirror image. `devdep` reports once against each code target:
 that is the `cfg(test)` unit, the only one it was ever in scope for, so those count as
 unused. Zero reports against the test target is what spares it. Pooling any row or any

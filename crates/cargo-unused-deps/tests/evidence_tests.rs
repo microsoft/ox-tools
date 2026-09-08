@@ -165,9 +165,9 @@ fn evidence_is_counted_per_target_not_per_package() {
     // unused. Counting per package would convict them; counting per target and
     // taking the union does not.
     let fixture = Fixture::new(
-        &["liponly", "binonly", "bintest"],
-        &format!("[dependencies]\n{}{}{}", dep("liponly"), dep("binonly"), dep("bintest")),
-        "pub fn go() { liponly::f(); }\n",
+        &["libonly", "binonly", "bintest"],
+        &format!("[dependencies]\n{}{}{}", dep("libonly"), dep("binonly"), dep("bintest")),
+        "pub fn go() { libonly::f(); }\n",
     )
     .with_file(
         "src/bin/one.rs",
@@ -178,7 +178,7 @@ fn evidence_is_counted_per_target_not_per_package() {
     let report = fixture.report();
 
     assert!(
-        !report.contains("liponly"),
+        !report.contains("libonly"),
         "used by the library, reported unused by both binaries: {report}"
     );
     assert!(
