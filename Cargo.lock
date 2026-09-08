@@ -702,7 +702,7 @@ dependencies = [
  "cargo_metadata",
  "clap",
  "tempfile",
- "toml_edit",
+ "toml_edit 0.25.13+spec-1.1.0",
 ]
 
 [[package]]
