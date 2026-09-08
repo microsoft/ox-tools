@@ -468,6 +468,10 @@ impl Progress {
             return;
         }
 
+        // Cargo prefixes redraws with erase-to-end-of-line. This display replaces the whole row
+        // itself, so retaining that control would only make the encoder expose it as `\e[K`.
+        let line = line.strip_prefix("\u{1b}[K").unwrap_or(line);
+
         self.draw_borrowed(host, &encode_preserving_color(line));
     }
 
@@ -1207,6 +1211,16 @@ mod tests {
             String::from_utf8_lossy(&host.err.bytes).ends_with("Building [==>  ] 2/9: syn"),
             "the replacement did not carry the build bar"
         );
+    }
+
+    #[test]
+    fn cargos_erase_prefix_is_not_rendered_as_progress_text() {
+        let text = written(|progress, host| {
+            progress.borrowed(host, "\u{1b}[K    Building [==>  ] 2/9: syn");
+        });
+
+        assert_eq!(visible(&text), "    Building [==>  ] 2/9: syn");
+        assert!(!text.contains("\\e[K"), "{text:?}");
     }
 
     /// Releasing Cargo's row restores the active phase instead of leaving a blank line.

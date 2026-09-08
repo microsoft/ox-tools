@@ -69,11 +69,10 @@ therefore covers the complete descendant tree.
   handle through which this process can later terminate the child's descendants.
   Failure to create a job is likewise a refusal rather than a degraded launch.
 - Sealed containment uses a boundary that descendants cannot leave. A host that
-  offers no sealed boundary at all is reported once through `containment`,
-  before any repository-controlled code runs, rather than degrading each launch
-  silently. An unmetered launch may then use best-effort process-group
-  containment and report itself as unsealed. A host that can seal but fails one
-  launch refuses that launch.
+  offers no sealed boundary at all silently uses best-effort process-group
+  containment for an unmetered launch; absence of a warning does not establish
+  that the launch was sealed. A host that can seal but fails one launch refuses
+  that launch.
 - An observation that finds the leader already reaped elsewhere revokes the
   numeric capabilities naming it — the retained child handle and the stored
   process-group id — after sweeping the non-numeric containment capability: the

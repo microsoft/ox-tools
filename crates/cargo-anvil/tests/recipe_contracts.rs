@@ -1199,7 +1199,11 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
 }
 
 #[test]
-fn fmt_delegates_workspace_iteration_to_cargo_each() {
+fn fmt_runs_the_pinned_nightly_over_workspace_members() {
+    assert!(
+        !FMT.contains("_anvil_stable_toolchain_args"),
+        "formatting must pin both Cargo invocations to nightly"
+    );
     if !tools_available() {
         return;
     }
@@ -1213,20 +1217,27 @@ fn fmt_delegates_workspace_iteration_to_cargo_each() {
             "anvil-impact",
         ],
     );
-    let log = tmp.path().join("cargo.log");
-    let output = run_just(tmp.path(), &["anvil-fmt"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
+    let args_log = tmp.path().join("cargo-args.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-fmt"],
+        &[
+            ("FAKE_CARGO_LOG", args_log.as_os_str()),
+            ("RUSTUP_TOOLCHAIN", OsStr::new("test-stable")),
+        ],
+    );
     assert!(
         output.status.success(),
         "per-package formatting failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let commands = fs::read_to_string(&log).unwrap();
+    let invocations = fs::read_to_string(&args_log).unwrap();
     assert!(
-        commands.contains("each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest} --check"),
-        "unexpected cargo invocation: {commands}"
+        invocations.contains("+nightly-test each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest} --check"),
+        "unexpected cargo invocation: {invocations}"
     );
-    assert!(!commands.contains("fmt --all"));
+    assert!(!invocations.contains("fmt --all"));
 }
 
 #[test]
@@ -1248,7 +1259,7 @@ fn fmt_fix_removes_the_check_flag() {
     let output = run_just(tmp.path(), &["anvil-fmt", "--fix"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
     assert!(output.status.success());
     let commands = fs::read_to_string(log).unwrap();
-    assert!(commands.contains("each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest}"));
+    assert!(commands.contains("+nightly-test each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest}"));
     assert!(!commands.contains("--check"));
 }
 
