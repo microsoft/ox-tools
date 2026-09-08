@@ -398,12 +398,13 @@ alone. The driver therefore follows each nested target a plan names, until nothi
 tier reads as needing nothing and `anvil-aprz` runs unauthenticated inside an image that has no `gh` of its own.
 
 It also forwards the recipe contract's own inputs when they are set — `PR_TITLE`, `BASE_REF`, `GITHUB_BASE_REF`,
-`SYSTEM_PULLREQUEST_TARGETBRANCH` and `ANVIL_IMPACT` — because a check that reads one natively must read
-the same value in a container. `anvil-pr-title` is the sharp case: with `PR_TITLE` unset it exits 0 with a skip notice,
-so dropping it at the boundary would let a title a native run rejects pass in a container while the tier still reported
-green. `ANVIL_IMPACT` is the other: a CI group job exports `consume`, and a container that did not inherit it would
-recompute scoping from a diff instead of trusting the artifact the group downloaded. They are forwarded by name and
-only when set, so an unset variable stays unset rather than arriving empty.
+`SYSTEM_PULLREQUEST_TARGETBRANCH`, `ANVIL_IMPACT` and `ANVIL_MIRI_JOBS` — because a check that reads one
+natively must read the same value in a container. `anvil-pr-title` is the sharp case: with `PR_TITLE` unset it exits 0
+with a skip notice, so dropping it at the boundary would let a title a native run rejects pass in a container while the
+tier still reported green. `ANVIL_IMPACT` controls whether a CI group trusts its downloaded impact artifact.
+`ANVIL_MIRI_JOBS` caps the number of memory-heavy artifact workers used by Miri; dropping it could turn a deliberately bounded
+container run into one worker per logical processor. They are forwarded by name and only when set, so an unset variable
+stays unset rather than arriving empty.
 
 A resolved token is set on the driver process, passed by name, and unset after the run, so it never reaches a host
 command line. Inside the container it is readable by everything the run executes, including build scripts and proc
