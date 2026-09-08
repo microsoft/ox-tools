@@ -643,18 +643,13 @@ struct TableEntry {
 /// The configuration a TOML table declares, as canonical path/value pairs.
 type TableValues = BTreeMap<Vec<String>, String>;
 
-/// The tables a rendered region body declares with an explicit header, as
-/// dotted paths.
+/// The tables a TOML body declares with an explicit header, as dotted paths.
 ///
-/// Two managed regions on one host that declare the same table produce a
-/// duplicate header no matter what either does about hand-written text, so the
-/// planner uses this to catch the collision before it writes either of them.
-/// Arrays of tables are excluded: TOML permits `[[bin]]` to repeat, so a second
-/// one is not a duplicate.
-///
-/// Returns an empty set for a body that is not valid TOML on its own — a
-/// non-TOML host's body is not this check's business, and a body that cannot be
-/// parsed is a separate diagnosis.
+/// Diagnostic only: the parser decides whether a splice is valid, and this
+/// names the table two of anvil's own regions both declare so the refusal can
+/// say which one. Arrays of tables are excluded, since TOML permits `[[bin]]`
+/// to repeat. Returns an empty set for a body that is not valid TOML on its
+/// own, in which case the caller falls back to the parser's own words.
 #[must_use]
 pub fn declared_tables(body: &str) -> BTreeSet<String> {
     headed_tables(body)
@@ -841,12 +836,11 @@ fn mask_managed_regions(text: &str, syntax: CommentSyntax) -> String {
 /// Blank every managed region except `keep`, so what remains is the region
 /// under consideration plus the repository's own hand-written content.
 ///
-/// This is the view a TOML validity check has to take. Two managed regions can
-/// legitimately declare the same key while a migration is in flight — the old
-/// combined region is removed in the same pass that writes the sections
-/// replacing it — so judging the intermediate text as a whole would refuse a
-/// migration that is about to become valid. What matters is whether the region
-/// being introduced collides with text nothing is going to remove.
+/// This hides a sibling region that is *staying*, so it answers only "does this
+/// region collide with hand-written text". Use
+/// [`mask_retiring_managed_regions`] for the question a validity check
+/// actually has to ask; this one distinguishes the two faults once one has been
+/// found.
 #[must_use]
 pub fn mask_other_managed_regions(text: &str, syntax: CommentSyntax, keep: &str) -> String {
     let ranges: Vec<ByteRange> = managed_region_ranges_with_ids(text, syntax)
@@ -854,6 +848,34 @@ pub fn mask_other_managed_regions(text: &str, syntax: CommentSyntax, keep: &str)
         .filter_map(|(id, range)| (id != keep).then_some(range))
         .collect();
     mask_regions(text, &ranges)
+}
+
+/// Blank the managed regions named in `retiring`, so what remains is the file
+/// as this pass will leave it.
+///
+/// This is the view a TOML validity check has to take. Two managed regions can
+/// legitimately declare the same key while a migration is in flight — the old
+/// combined region is removed in the same pass that writes the sections
+/// replacing it — so the regions this pass removes are blanked and everything
+/// else is judged as written. Masking *every* other region instead would hide a
+/// sibling that is staying, and two regions of the catalog declaring one table
+/// would compose into a duplicate header that neither could see.
+#[must_use]
+pub fn mask_retiring_managed_regions(text: &str, syntax: CommentSyntax, retiring: &BTreeSet<String>) -> String {
+    if retiring.is_empty() {
+        return text.to_owned();
+    }
+    let ranges: Vec<ByteRange> = managed_region_ranges_with_ids(text, syntax)
+        .into_iter()
+        .filter_map(|(id, range)| retiring.contains(&id).then_some(range))
+        .collect();
+    mask_regions(text, &ranges)
+}
+
+/// The ids of the managed regions in `text`, in document order.
+#[must_use]
+pub fn managed_region_ids(text: &str, syntax: CommentSyntax) -> Vec<String> {
+    managed_region_ranges_with_ids(text, syntax).into_iter().map(|(id, _)| id).collect()
 }
 
 fn mask_regions(text: &str, ranges: &[ByteRange]) -> String {

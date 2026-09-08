@@ -280,14 +280,28 @@ Adoption never touches an array of tables (`[[bin]]`), which TOML permits to rep
 second one is not a duplicate; nor a table inside an existing managed region, which the
 tool already owns; nor anything in a host the parser cannot read at all.
 
-Whatever adoption concludes, the spliced result is parsed before it is planned, with every
-*other* managed region masked out. Two managed regions may legitimately declare the same
-key while a migration is in flight — the old combined region is removed in the same pass
-that writes the sections replacing it — so only collisions with text nothing is going to
-remove count. If the result would not parse, the region is **refused**: that region is left
-unchanged, and a diagnostic names the host and the reason. The diagnostic also explains
-that other regions in the same file and other artifacts may still be updated. Refusing
-is scoped to the region, not the host or the run.
+Whatever adoption concludes, the spliced result is parsed before it is planned, judged as
+the pass will leave the file: only the regions this pass **removes** are masked out.
+Two managed regions may legitimately declare the same key while a migration is in flight —
+the old combined region is removed in the same pass that writes the sections replacing it —
+and blanking exactly those is what keeps the migration valid while still judging every
+region that is staying. A region is masked only if the catalog no longer declares it *and*
+the removal decision is to remove it; a customized orphan is kept, so it stays in the file
+and keeps the tables it declares. If the result would not parse, the region is **refused**:
+that region is left unchanged, and a diagnostic names the host and the reason. The
+diagnostic also explains that other regions in the same file and other artifacts may still
+be updated. Refusing is scoped to the region, not the host or the run.
+
+Masking every *other* region instead — the narrower question "does this region collide with
+hand-written text" — is what let two regions *of the catalog* compose into a duplicate
+header with neither able to see the other. It is still asked, but only after a refusal, to
+tell the two faults apart: if the file parses with every other region blanked, nothing
+hand-written is involved and the collision is between two regions anvil owns. That refusal
+reads differently on purpose — both regions are anvil's own, so no edit to the host resolves
+it, and the diagnostic asks for a bug report instead of sending the reader to reconcile a
+table they never wrote. It names the table and the sibling holding it where both declare it
+with a header, and otherwise quotes the parser, since a table declared by a dotted
+assignment has no header to name.
 
 Adoption runs when a region is **updated**, not only when it is introduced. Replacing a
 region where it stands cannot add a header, but its *body* can: a template that gains a
@@ -298,15 +312,6 @@ so TOML still reads them as that table's — is not something a diagnostic can u
 describe, and its likeliest reading ("remove the table") costs the user the setting they
 wrote. An ordinary update is unaffected: adoption masks every managed region before
 parsing, so tables the region already owns are invisible and it reports no change.
-
-The masking that makes migrations safe leaves one case the parser cannot see: two regions
-*of the catalog* on one host that declare the same table are each hidden from the other's
-check, and compose into a duplicate header. The planner tracks which region has claimed
-each table of each host and refuses the second, before either is written. A region being
-removed is an orphan — absent from the catalog — so it claims nothing and migrations still
-work. This refusal reads differently from the rest on purpose: both regions are anvil's
-own, so no edit to the host resolves it, and the diagnostic asks for a bug report instead
-of sending the reader to reconcile a table they never wrote.
 
 The diagnostic asks the user to reconcile the hand-written table with the managed one
 before retrying. No managed region was introduced on refusal, so there is no region to

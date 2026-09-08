@@ -16,6 +16,8 @@
 //! [`crate::run`]'s `HostTextCache` and
 //! [`updates.md`](../../../docs/design/updates.md).
 
+use std::collections::BTreeSet;
+
 use ohno::{AppError, app_err};
 use toml_edit::DocumentMut;
 
@@ -24,8 +26,8 @@ use crate::decision::{Decision, DecisionInputs, UpdateDecision, decide};
 use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
 use crate::region::{
-    CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_region, insert_after_region,
-    mask_other_managed_regions, upsert_region_with_placement,
+    CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, declared_tables, find_region, insert_after_region,
+    managed_region_ids, mask_other_managed_regions, mask_retiring_managed_regions, upsert_region_with_placement,
 };
 
 /// Inputs that identify and render one managed region.
@@ -140,10 +142,21 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
 /// host already declares by hand collides on the next run, from a host that
 /// was perfectly valid before it.
 ///
+/// `retiring` names the managed regions this pass removes from the host. They
+/// are blanked and everything else is judged as written, so a migration that is
+/// about to become valid is not refused while a sibling that is *staying* is
+/// still seen. The alternative — masking every region but this one — is what
+/// let two regions of the catalog compose into a duplicate header with neither
+/// able to see it.
+///
 /// Returns `None` for a host that is not TOML and for a splice whose result
 /// parses.
 #[must_use]
-pub fn toml_introduction_refusal(host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Option<String> {
+pub fn toml_introduction_refusal(
+    host_text: Option<&str>,
+    request: ManagedRegionRequest<'_>,
+    retiring: &BTreeSet<String>,
+) -> Option<TomlRefusal> {
     let ManagedRegionRequest {
         host_relpath,
         region_id,
@@ -160,12 +173,81 @@ pub fn toml_introduction_refusal(host_text: Option<&str>, request: ManagedRegion
         return None;
     }
 
-    match splice(host_relpath, host_text, region_id, rendered_body, syntax, placement) {
-        Err(error) => Some(error.to_string()),
-        Ok(spliced) => mask_other_managed_regions(&spliced, syntax, region_id)
-            .parse::<DocumentMut>()
-            .err()
-            .map(|error| format!("splicing the region would leave {host_relpath} unparsable as TOML: {error}")),
+    let spliced = match splice(host_relpath, host_text, region_id, rendered_body, syntax, placement) {
+        Err(error) => return Some(TomlRefusal::Host(error.to_string())),
+        Ok(spliced) => spliced,
+    };
+    let error = mask_retiring_managed_regions(&spliced, syntax, retiring)
+        .parse::<DocumentMut>()
+        .err()?;
+    // Which fault is this? Blanking every other managed region leaves this
+    // region beside the repository's own text alone. If *that* parses, nothing
+    // hand-written is involved and the collision is between two regions anvil
+    // owns -- a defect to report rather than a table the reader can reconcile,
+    // since no edit to the host resolves it.
+    if mask_other_managed_regions(&spliced, syntax, region_id)
+        .parse::<DocumentMut>()
+        .is_ok()
+    {
+        return Some(TomlRefusal::Sibling(
+            colliding_sibling(&spliced, rendered_body, syntax, region_id, retiring).map_or_else(
+                || format!("splicing the region would leave {host_relpath} unparsable as TOML: {error}"),
+                |(table, owner)| {
+                    format!("this region declares `[{table}]`, which the managed region '{owner}' already declares in the same file")
+                },
+            ),
+        ));
+    }
+    Some(TomlRefusal::Host(format!(
+        "splicing the region would leave {host_relpath} unparsable as TOML: {error}"
+    )))
+}
+
+/// The table and region id of the sibling this body collides with, when one can
+/// be named.
+///
+/// Purely for the diagnostic: the parser has already decided. A sibling that
+/// declares the table through a dotted assignment rather than a header cannot
+/// be named this way, and the caller falls back to the parser's own message.
+fn colliding_sibling(
+    spliced: &str,
+    rendered_body: &str,
+    syntax: CommentSyntax,
+    region_id: &str,
+    retiring: &BTreeSet<String>,
+) -> Option<(String, String)> {
+    let mine = declared_tables(rendered_body);
+    managed_region_ids(spliced, syntax)
+        .into_iter()
+        .filter(|id| id != region_id && !retiring.contains(id))
+        .find_map(|id| {
+            let body = find_region(spliced, &id, syntax).ok()??;
+            let shared = declared_tables(body.body_str()).intersection(&mine).next()?.clone();
+            Some((shared, id))
+        })
+}
+
+/// Which of the two faults a refused TOML splice is.
+///
+/// They read differently to the user on purpose: one names an edit that
+/// resolves it, and the other cannot, so it asks for a bug report instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TomlRefusal {
+    /// The region collides with the repository's own hand-written text, which
+    /// the user can reconcile.
+    Host(String),
+    /// Two of anvil's own regions compose into a file TOML cannot read. No edit
+    /// to the host fixes it.
+    Sibling(String),
+}
+
+impl TomlRefusal {
+    /// The parser's account of what went wrong, without the verdict.
+    #[cfg(test)]
+    fn reason(&self) -> &str {
+        match self {
+            Self::Host(reason) | Self::Sibling(reason) => reason,
+        }
     }
 }
 
@@ -256,6 +338,55 @@ mod tests {
         ManagedRegionRequest::at_end(host_relpath, region_id, rendered_body, SYN)
     }
 
+    /// The backstop with nothing retiring, which is every case but a migration.
+    fn refusal(host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Option<TomlRefusal> {
+        toml_introduction_refusal(host_text, request, &BTreeSet::new())
+    }
+
+    /// A sibling region that is *staying* is judged as written, so the region
+    /// being spliced sees the table it declares. Both are anvil's own, so the
+    /// verdict is `Sibling` — the wording that asks for a bug report rather
+    /// than sending the reader to reconcile a table nobody hand-wrote.
+    #[test]
+    fn a_sibling_region_declaring_the_same_table_is_anvils_own_fault() {
+        let host = "# >>> anvil-managed: other\n[licenses]\nallow = [\"MIT\"]\n# <<< anvil-managed: other\n";
+        let body = "[licenses]\nconfidence-threshold = 0.9\n";
+
+        let verdict = refusal(Some(host), request("deny.toml", "r", body)).expect("two regions cannot both declare [licenses]");
+
+        assert!(matches!(verdict, TomlRefusal::Sibling(_)), "anvil's own fault: {verdict:?}");
+    }
+
+    /// The same collision against a sibling this pass is *removing* is a
+    /// migration, not a fault: the old region is blanked, so the splice is
+    /// judged against the file as it will be left.
+    #[test]
+    fn a_retiring_sibling_does_not_refuse_the_region_replacing_it() {
+        let host = "# >>> anvil-managed: old\n[licenses]\nallow = [\"MIT\"]\n# <<< anvil-managed: old\n";
+        let body = "[licenses]\nconfidence-threshold = 0.9\n";
+        let retiring = BTreeSet::from(["old".to_owned()]);
+
+        assert_eq!(
+            toml_introduction_refusal(Some(host), request("deny.toml", "r", body), &retiring),
+            None,
+            "the region being removed must not block the one replacing it"
+        );
+    }
+
+    /// A dotted assignment declares its table just as a header does, so a
+    /// sibling writing `[a]` beside a region writing `a.b = 1` is the same
+    /// collision. Nothing enumerates table *headers* any more — the parser is
+    /// asked, and it rejects declaring `a` twice.
+    #[test]
+    fn a_dotted_key_collides_with_a_siblings_header() {
+        let host = "# >>> anvil-managed: other\nlints.rust.unsafe_code = \"deny\"\n# <<< anvil-managed: other\n";
+        let body = "[lints]\nworkspace = true\n";
+
+        let verdict = refusal(Some(host), request("Cargo.toml", "r", body)).expect("a dotted key declares the table too");
+
+        assert!(matches!(verdict, TomlRefusal::Sibling(_)), "anvil's own fault: {verdict:?}");
+    }
+
     /// Issue #148, end to end. A `deny.toml` whose `[advisories]` carries the
     /// repository's own accepted advisory used to receive a second
     /// `[advisories]` header — a file `cargo deny` cannot read, written to disk
@@ -304,8 +435,9 @@ mod tests {
         let host = "[advisories]\nyanked = \"warn\"\n";
         let body = "[advisories]\nyanked = \"deny\"\n";
 
-        let reason = toml_introduction_refusal(Some(host), request("deny.toml", "anvil-deny-advisories", body))
-            .expect("a disagreement over `yanked` must be refused");
+        let reason =
+            refusal(Some(host), request("deny.toml", "anvil-deny-advisories", body)).expect("a disagreement over `yanked` must be refused");
+        let reason = reason.reason();
 
         assert!(reason.contains("yanked"), "the refusal names the key: {reason}");
     }
@@ -320,8 +452,9 @@ mod tests {
         let host = "[Hunspell]\nlang = \"en_US\"\ntransform_regex = [\"^'\"]\n";
         let body = "[Hunspell]\nlang = \"en_US\"\n\n[Hunspell.quirks]\nallow_concatenation = true\n";
 
-        let reason = toml_introduction_refusal(Some(host), request("spellcheck.toml", "anvil-spellcheck", body))
+        let reason = refusal(Some(host), request("spellcheck.toml", "anvil-spellcheck", body))
             .expect("a setting that cannot keep its table must be refused");
+        let reason = reason.reason();
 
         assert!(
             reason.contains("[Hunspell]") && reason.contains("[Hunspell.quirks]"),
@@ -337,18 +470,9 @@ mod tests {
         let host = "[advisories]\nignore = [\"RUSTSEC-9999-0001\"]\n";
         let body = "[advisories]\nyanked = \"deny\"\n";
 
-        assert_eq!(
-            toml_introduction_refusal(Some(host), request("deny.toml", "anvil-deny-advisories", body)),
-            None
-        );
-        assert_eq!(
-            toml_introduction_refusal(None, request("deny.toml", "anvil-deny-advisories", body)),
-            None
-        );
-        assert_eq!(
-            toml_introduction_refusal(Some("recipe:\n"), request("Justfile", "r", "body\n")),
-            None
-        );
+        assert_eq!(refusal(Some(host), request("deny.toml", "anvil-deny-advisories", body)), None);
+        assert_eq!(refusal(None, request("deny.toml", "anvil-deny-advisories", body)), None);
+        assert_eq!(refusal(Some("recipe:\n"), request("Justfile", "r", "body\n")), None);
     }
 
     /// A region already on disk beside a hand-written copy of its own table is
@@ -362,7 +486,7 @@ mod tests {
         assert!(host.parse::<DocumentMut>().is_err(), "the host starts out broken");
 
         let request = request("deny.toml", "r", "[advisories]\nyanked = \"deny\"\n");
-        assert_eq!(toml_introduction_refusal(Some(host), request), None, "repairable, not refused");
+        assert_eq!(refusal(Some(host), request), None, "repairable, not refused");
 
         let mut manifest = Manifest::default();
         manifest.set_region("deny.toml", "r", checksum_str("[advisories]\nyanked = \"warn\"\n"));
@@ -409,7 +533,7 @@ yanked = \"deny\"
         manifest.set_region("deny.toml", "r", checksum_str(old_body));
 
         let request = request("deny.toml", "r", new_body);
-        assert_eq!(toml_introduction_refusal(Some(host), request), None, "adoption resolves it");
+        assert_eq!(refusal(Some(host), request), None, "adoption resolves it");
 
         let item = plan_managed_region(&manifest, Some(host), request).unwrap();
         assert_eq!(item.decision, Decision::Write, "the template moved, so the region is rewritten");
@@ -457,8 +581,9 @@ yanked = \"deny\"
             "[licenses]\nconfidence-threshold = 0.8\n\n# >>> anvil-managed: r\n[advisories]\nyanked = \"deny\"\n# <<< anvil-managed: r\n";
         let new_body = "[advisories]\nyanked = \"deny\"\n\n[licenses]\nconfidence-threshold = 0.93\n";
 
-        let reason = toml_introduction_refusal(Some(host), request("deny.toml", "r", new_body))
-            .expect("a disagreement over `confidence-threshold` must be refused");
+        let reason =
+            refusal(Some(host), request("deny.toml", "r", new_body)).expect("a disagreement over `confidence-threshold` must be refused");
+        let reason = reason.reason();
 
         assert!(reason.contains("confidence-threshold"), "the refusal names the key: {reason}");
     }

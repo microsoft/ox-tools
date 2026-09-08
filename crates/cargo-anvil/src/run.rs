@@ -6,7 +6,7 @@
 //! Orchestrates: workspace discovery, manifest load, backend resolution,
 //! emitter invocation, plan accumulation, and final apply/summarize.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use ohno::{AppError, bail};
@@ -20,13 +20,13 @@ use crate::catalog::artifact::{Artifact, ComposedHost, HostSelector, RegionSpec}
 use crate::checksum::{checksum_str, normalize_line_endings};
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
-use crate::emit::{ManagedRegionRequest, plan_managed_region, plan_owned_file, toml_introduction_refusal};
+use crate::emit::{ManagedRegionRequest, TomlRefusal, plan_managed_region, plan_owned_file, toml_introduction_refusal};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
-use crate::region::{CommentSyntax, RegionPlacement, declared_tables, find_region, remove_region, upsert_region_with_placement};
+use crate::region::{CommentSyntax, RegionPlacement, find_region, managed_region_ids, remove_region, upsert_region_with_placement};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -156,6 +156,28 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
 /// against the discovered workspace (see [`push_region`]). Every path is
 /// resolved to its on-disk casing so anvil follows whatever a repo already
 /// uses (e.g. `justfile` vs `Justfile`).
+/// Every `(host, region id)` this pass declares, resolved to the casing on
+/// disk.
+///
+/// Computed before anything is planned, because the validity check each region
+/// runs has to know which of the regions already in its host are on their way
+/// out — and removals are not planned until every region has been visited.
+fn live_region_keys(repo_root: &Path, workspace: &Workspace, catalog: &Catalog) -> BTreeSet<(String, String)> {
+    catalog
+        .artifacts()
+        .iter()
+        .filter_map(|artifact| match artifact {
+            Artifact::Region(spec) => Some(spec),
+            Artifact::OwnedFile(_) => None,
+        })
+        .flat_map(|spec| {
+            region_host_paths(workspace, spec)
+                .into_iter()
+                .map(|host| (resolve_existing_case_insensitive(repo_root, host), spec.id.as_str().to_owned()))
+        })
+        .collect()
+}
+
 fn build_plan(
     repo_root: &Path,
     workspace: &Workspace,
@@ -167,7 +189,10 @@ fn build_plan(
     let mut hosts = HostTextCache::default();
     // Hosts already reported as unsafe to compose. Every region targeting one
     // hits the same fault, and four copies of one message is noise.
-    let mut composed = ComposedHosts::default();
+    let mut composed = ComposedHosts {
+        live: live_region_keys(repo_root, workspace, catalog),
+        ..ComposedHosts::default()
+    };
 
     for artifact in catalog.artifacts() {
         match artifact {
@@ -297,8 +322,7 @@ impl HostTextCache {
     }
 }
 
-/// Dispatch one managed-region artifact into the plan, expanding its host
-/// selector against the discovered workspace.
+/// The host paths one region spec targets in this workspace.
 ///
 /// - [`HostSelector::Path`] — a single literal host.
 /// - [`HostSelector::EachMemberManifest`] — one host per workspace member (no
@@ -306,6 +330,34 @@ impl HostTextCache {
 /// - [`HostSelector::WorkspaceCargoToml`] / [`HostSelector::SingleCrateCargoToml`]
 ///   — the root `Cargo.toml`, gated on whether it declares a `[workspace]`
 ///   table.
+///
+/// Shared with the live-key set [`build_plan`] computes up front, so the two
+/// cannot drift: a region skipped here because the workspace has the other
+/// shape must not be counted as live, or the pass would treat the region it is
+/// about to retire as one that is staying.
+fn region_host_paths<'a>(workspace: &'a Workspace, spec: &'a RegionSpec) -> Vec<&'a str> {
+    match &spec.host {
+        HostSelector::Path(path) => vec![path.as_str()],
+        HostSelector::WorkspaceCargoToml => {
+            if workspace.has_workspace_table {
+                vec!["Cargo.toml"]
+            } else {
+                Vec::new()
+            }
+        }
+        HostSelector::SingleCrateCargoToml => {
+            if workspace.has_workspace_table {
+                Vec::new()
+            } else {
+                vec!["Cargo.toml"]
+            }
+        }
+        HostSelector::EachMemberManifest => workspace.members.iter().map(|member| member.manifest_relpath.as_str()).collect(),
+    }
+}
+
+/// Dispatch one managed-region artifact into the plan, expanding its host
+/// selector against the discovered workspace.
 fn push_region(
     repo_root: &Path,
     workspace: &Workspace,
@@ -315,25 +367,8 @@ fn push_region(
     composed: &mut ComposedHosts,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
-    match &spec.host {
-        HostSelector::Path(path) => {
-            push_region_at(repo_root, manifest, plan, hosts, composed, path, spec)?;
-        }
-        HostSelector::WorkspaceCargoToml => {
-            if workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, hosts, composed, "Cargo.toml", spec)?;
-            }
-        }
-        HostSelector::SingleCrateCargoToml => {
-            if !workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, hosts, composed, "Cargo.toml", spec)?;
-            }
-        }
-        HostSelector::EachMemberManifest => {
-            for member in &workspace.members {
-                push_region_at(repo_root, manifest, plan, hosts, composed, &member.manifest_relpath, spec)?;
-            }
-        }
+    for host in region_host_paths(workspace, spec) {
+        push_region_at(repo_root, manifest, plan, hosts, composed, host, spec)?;
     }
     Ok(())
 }
@@ -436,24 +471,31 @@ fn push_region_at(
         syntax: spec.syntax,
         placement,
     };
-    // Two catalog regions on one host that declare the same table compose into
-    // a duplicate header, and the parser backstop below cannot see it: it masks
-    // every other managed region before checking, so each sibling is invisible
-    // to the other. Both regions are anvil's own, so unlike every other refusal
-    // there is no edit to the host that resolves it — say so rather than
-    // sending the reader to reconcile a table they did not write.
-    if let Some(collision) = composed.claim_tables(&host, spec.id.as_str(), body) {
-        refuse_colliding_region(plan, host, spec.id.as_str(), &collision);
-        return Ok(());
-    }
     // Writing a region into a TOML host that already declares the same table by
     // hand can produce a file TOML cannot read. Refuse the region rather than
     // write it: `cargo deny` and `cargo` itself fail on the whole file, so a
     // silent rewrite breaks the repository the generator was onboarding, and
     // the manifest would record a region nothing can use.
-    if let Some(reason) = toml_introduction_refusal(current.as_deref(), request) {
-        refuse_region(plan, host, spec.id.as_str(), &reason);
-        return Ok(());
+    //
+    // The check judges the host as this pass will leave it, with only the
+    // regions being removed blanked out. That is what lets it see a sibling
+    // region of the catalog declaring the same table -- masking every other
+    // region instead hid each sibling from the other, and the two composed into
+    // a duplicate header that nothing refused.
+    let retiring = current
+        .as_deref()
+        .map(|text| composed.retiring_regions(manifest, &host, text, spec.syntax))
+        .unwrap_or_default();
+    match toml_introduction_refusal(current.as_deref(), request, &retiring) {
+        Some(TomlRefusal::Host(reason)) => {
+            refuse_region(plan, host, spec.id.as_str(), &reason);
+            return Ok(());
+        }
+        Some(TomlRefusal::Sibling(reason)) => {
+            refuse_sibling_region(plan, host, spec.id.as_str(), &reason);
+            return Ok(());
+        }
+        None => {}
     }
     let item = plan_managed_region(manifest, current.as_deref(), request)?;
     // Only a `Write` mutates the live host on disk; fold its spliced
@@ -537,21 +579,19 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str) {
     plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
 }
 
-/// Record that two catalog regions of one host claim the same table.
+/// Record that two of anvil's own regions compose into a file TOML cannot read.
 ///
 /// Deliberately not [`refuse_region`]: every other refusal ends by asking the
 /// user to reconcile a hand-written table, and here there isn't one. Both
 /// regions are anvil's own, so nothing the user can do to the host resolves it
 /// — sending them to reconcile a table they never wrote would be a worse
 /// outcome than saying plainly that this is a defect to report.
-fn refuse_colliding_region(plan: &mut Plan, host: String, id: &str, collision: &Collision) {
+fn refuse_sibling_region(plan: &mut Plan, host: String, id: &str, reason: &str) {
+    let stop = if reason.trim_end().ends_with('.') { "" } else { "." };
     plan.refusal(format!(
-        "Refused to manage {host} [{id}]: this region declares `[{table}]`, which the managed region '{owner}' \
-         already declares in the same file. Both are anvil's own regions, so {host} cannot be edited to fix \
-         this — please report it. This region was left unchanged; other regions in the same file and other \
-         artifacts may still be updated.",
-        table = collision.table,
-        owner = collision.owner,
+        "Refused to manage {host} [{id}]: {reason}{stop} Both are anvil's own regions, so {host} cannot be edited \
+         to fix this — please report it. This region was left unchanged; other regions in the same file and other \
+         artifacts may still be updated."
     ));
     plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
 }
@@ -658,46 +698,44 @@ struct ComposedHosts {
     /// Hosts whose refusal has already been reported, so one fault produces one
     /// diagnostic rather than one per region.
     reported: BTreeSet<String>,
-    /// Which region has claimed each TOML table of each host, among the regions
-    /// this pass is writing.
-    ///
-    /// Two catalog regions on one host that both declare `[licenses]` compose
-    /// into a file with two `[licenses]` headers, and neither notices: the
-    /// parser backstop masks every *other* managed region before it checks, so
-    /// each is invisible to the other. That masking is deliberate and cannot
-    /// simply be dropped — during a migration the region being replaced
-    /// legitimately declares the same tables as the regions replacing it — but
-    /// a region being removed is an orphan, absent from the catalog, so it
-    /// never claims anything here and migrations are unaffected.
-    claims: HashMap<String, BTreeMap<String, String>>,
+    /// Every `(host, region id)` this pass declares. A managed region found in
+    /// a host that is absent from this set is an orphan: the pass may be about
+    /// to remove it, in which case the tables it declares must not be held
+    /// against the region being written.
+    live: BTreeSet<(String, String)>,
 }
 
 impl ComposedHosts {
-    /// Claim `body`'s tables for `region_id`, or name the sibling that already
-    /// holds one of them.
-    fn claim_tables(&mut self, host_relpath: &str, region_id: &str, body: &str) -> Option<Collision> {
-        let claimed = self.claims.entry(host_relpath.to_owned()).or_default();
-        for table in declared_tables(body) {
-            match claimed.get(&table) {
-                Some(owner) if owner != region_id => {
-                    return Some(Collision {
-                        table,
-                        owner: owner.clone(),
-                    });
-                }
-                _ => {
-                    claimed.insert(table, region_id.to_owned());
-                }
-            }
-        }
-        None
+    /// The managed regions of `host_text` this pass will actually remove.
+    ///
+    /// A region is retiring only if the catalog no longer declares it *and* the
+    /// removal decision is to remove it: a customized orphan is kept, stays in
+    /// the file, and so still owns the tables it declares. Getting that wrong
+    /// in either direction is a real fault — treating a kept orphan as gone
+    /// writes a duplicate header, and treating a removed one as staying refuses
+    /// a migration that is about to become valid.
+    fn retiring_regions(&self, manifest: &Manifest, host_relpath: &str, host_text: &str, syntax: CommentSyntax) -> BTreeSet<String> {
+        managed_region_ids(host_text, syntax)
+            .into_iter()
+            .filter(|id| !self.live.contains(&(host_relpath.to_owned(), id.clone())))
+            .filter(|id| {
+                let key = RegionKey {
+                    host: host_relpath.to_owned(),
+                    id: id.clone(),
+                };
+                let Some(last) = manifest.regions.get(&key) else {
+                    // Never recorded, so anvil does not own it and will not
+                    // remove it, whatever the sentinels say.
+                    return false;
+                };
+                let body = find_region(host_text, id, syntax)
+                    .ok()
+                    .flatten()
+                    .map(|region| checksum_str(region.body_str()));
+                matches!(decide_removal(last, body.as_deref()), RemovalDecision::Remove)
+            })
+            .collect()
     }
-}
-
-/// A table two managed regions of one host both declare.
-struct Collision {
-    table: String,
-    owner: String,
 }
 
 /// Classify a composed host before anything is written to it.
@@ -2207,6 +2245,24 @@ mod tests {
     /// A catalog with two managed regions targeting the same host file —
     /// the shape that `deny.toml`'s per-section split uses. Built on the
     /// `anvil` identity so the single-tool guard stays satisfied.
+    /// One region on one host, for staging the state a later catalog grows out
+    /// of.
+    fn one_region_catalog(host: &str, id: &str, body: &str) -> Catalog {
+        use crate::catalog::CliMeta;
+        use crate::catalog::artifact::RegionId;
+
+        let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+        Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path(host.to_owned()),
+                id: RegionId::new(id),
+                body: body.to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap()
+    }
+
     fn two_region_catalog(host: &str, id_a: &str, body_a: &str, id_b: &str, body_b: &str) -> Catalog {
         use crate::catalog::CliMeta;
         use crate::catalog::artifact::RegionId;
@@ -2260,57 +2316,19 @@ mod tests {
         assert!(!second.plan.has_changes(), "second run should be idempotent");
     }
 
-    /// A region re-claiming its *own* table is not a collision. One region id
-    /// can reach one host twice — a catalog may register it for both the
-    /// workspace manifest and each member, and in a workspace whose root is
-    /// also a member those resolve to the same `Cargo.toml`. Treating the
-    /// second visit as a clash would refuse a region because it collides with
-    /// itself, and print a diagnostic naming the same id on both sides.
-    #[test]
-    fn a_region_reclaiming_its_own_table_is_not_a_collision() {
-        let mut composed = ComposedHosts::default();
-        let body = "[lints]\nworkspace = true\n";
-
-        assert!(composed.claim_tables("Cargo.toml", "anvil-lints", body).is_none());
-        assert!(
-            composed.claim_tables("Cargo.toml", "anvil-lints", body).is_none(),
-            "the same region may claim the same table again"
-        );
-
-        let collision = composed
-            .claim_tables("Cargo.toml", "other-region", body)
-            .expect("a different region claiming it is");
-        assert_eq!(collision.table, "lints");
-        assert_eq!(collision.owner, "anvil-lints");
-    }
-
-    /// Claims are per host: two regions may declare `[lints]` as long as they
-    /// are writing to different files, which is the ordinary case for the
-    /// per-member lint stub.
-    #[test]
-    fn claims_do_not_leak_between_hosts() {
-        let mut composed = ComposedHosts::default();
-        let body = "[lints]\nworkspace = true\n";
-
-        assert!(composed.claim_tables("crates/a/Cargo.toml", "anvil-lints", body).is_none());
-        assert!(
-            composed.claim_tables("crates/b/Cargo.toml", "anvil-lints", body).is_none(),
-            "a different host is a different claim"
-        );
-    }
-
     /// Two catalog regions on one host that declare the same table compose into
     /// a file with two `[licenses]` headers, which TOML rejects. Neither region
-    /// can see the problem on its own: the parser backstop masks every *other*
-    /// managed region before it checks, so each sibling is invisible to the
-    /// other, and both used to plan a `Write` that left `shared.toml`
-    /// unreadable.
+    /// could see the problem while the backstop masked every *other* managed
+    /// region before it checked: each sibling was invisible to the other, and
+    /// both planned a `Write` that left `shared.toml` unreadable. Only the
+    /// regions this pass *removes* are masked now, so the second region sees
+    /// the first.
     ///
     /// Both regions are anvil's own, so there is no edit to `shared.toml` that
     /// resolves it — the diagnostic says so and asks for a report instead of
     /// sending the reader to reconcile a table they did not write. The first
-    /// region still writes: refusing is per region, and one of the two claims
-    /// is legitimate.
+    /// region still writes: refusing is per region, and one of the two is
+    /// legitimate.
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn two_regions_claiming_one_table_refuse_the_second() {
@@ -2353,6 +2371,83 @@ mod tests {
             outcome.plan.dry_run_exit_code(),
             1,
             "and a catalog defect fails the drift gate rather than passing quietly"
+        );
+    }
+
+    /// A sibling that is *already on disk* is the harder half of the same
+    /// fault, and the claim registry got it exactly backwards. `anvil-sec-b`
+    /// exists with `[licenses]`; a later catalog adds `anvil-sec-a` ahead of it
+    /// declaring the same table. Whichever region claimed first won, so A wrote
+    /// and B was refused — but refusing B leaves B's existing region **in the
+    /// file**, and the host ends up carrying two `[licenses]` headers, which is
+    /// the very outcome the backstop exists to prevent.
+    ///
+    /// Judging the host as this pass will leave it inverts that: B is staying,
+    /// so A is the one refused, and the file on disk stays readable.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_region_added_ahead_of_an_existing_sibling_does_not_break_the_host() {
+        let tmp = empty_workspace();
+        let threshold = "[licenses]\nconfidence-threshold = 0.9\n";
+        let existing = one_region_catalog("shared.toml", "anvil-sec-b", threshold);
+        run_update(&existing, &local_only(), tmp.path()).unwrap();
+
+        let grown = two_region_catalog(
+            "shared.toml",
+            "anvil-sec-a",
+            "[licenses]\nallow = [\"MIT\"]\n",
+            "anvil-sec-b",
+            threshold,
+        );
+        let outcome = run_update(&grown, &local_only(), tmp.path()).unwrap();
+
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        shared
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|error| panic!("the host must stay readable: {error}\n---\n{shared}\n---"));
+        assert_eq!(shared.matches("[licenses]").count(), 1, "no duplicate header:\n{shared}");
+        assert!(shared.contains("anvil-sec-b"), "the region already on disk is kept:\n{shared}");
+        assert!(
+            !shared.contains("anvil-sec-a"),
+            "the region that would collide is not written:\n{shared}"
+        );
+
+        let refusal = outcome
+            .plan
+            .refusals()
+            .iter()
+            .find(|reason| reason.contains("anvil-sec-a"))
+            .unwrap_or_else(|| panic!("the collision is reported; got {:#?}", outcome.plan.refusals()));
+        assert!(refusal.contains("please report it"), "it asks for a report: {refusal}");
+    }
+
+    /// A dotted assignment declares its table exactly as a header does, so a
+    /// region writing `lints.rust.* = ...` and a sibling writing `[lints]`
+    /// compose into a file TOML rejects. The claim registry enumerated headers
+    /// only, so the dotted side claimed nothing and both regions passed. The
+    /// parser has no such blind spot.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_dotted_region_and_a_headed_sibling_do_not_compose_into_a_broken_host() {
+        let tmp = empty_workspace();
+        let catalog = two_region_catalog(
+            "shared.toml",
+            "anvil-sec-a",
+            "lints.rust.unsafe_code = \"deny\"\n",
+            "anvil-sec-b",
+            "[lints]\nworkspace = true\n",
+        );
+
+        let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        shared
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|error| panic!("the host must stay readable: {error}\n---\n{shared}\n---"));
+        assert!(
+            outcome.plan.refusals().iter().any(|reason| reason.contains("anvil-sec-b")),
+            "the collision is reported; got {:#?}",
+            outcome.plan.refusals()
         );
     }
 
