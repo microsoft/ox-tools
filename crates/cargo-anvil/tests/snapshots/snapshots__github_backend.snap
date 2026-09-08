@@ -2958,7 +2958,6 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
             return $reportExitCode
         }
         $responsePath = [System.IO.Path]::GetFullPath("$OutputPath.llvm-cov.rsp")
-        $responsePath = [System.IO.Path]::GetFullPath("$OutputPath.llvm-cov.rsp")
         try {
             [System.IO.File]::WriteAllText(
                 $responsePath,
