@@ -104,7 +104,6 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         # non-retriable failure has the same evidence as a direct invocation.
         $reportOutput = @()
         $reportExitCode = 1
-        $PSNativeCommandUseErrorActionPreference = $false
         & cargo '+{{ rust_nightly }}' llvm-cov report --lcov --output-path $OutputPath 2>&1 |
             Tee-Object -Variable reportOutput |
             ForEach-Object { Write-Host $_.ToString() }
