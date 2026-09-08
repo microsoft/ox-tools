@@ -206,14 +206,14 @@ if ($args -contains 'bolero' -and $args -contains 'list') {
     exit [int]$env:FAKE_BOLERO_LIST_EXIT
 }
 if ($args -contains 'llvm-cov' -and $args -contains 'report' -and $env:FAKE_LLVM_COV_REPORT_206) {
-    $command = "$($env:FAKE_LLVM_COV_PATH) export -format=lcov -instr-profile=fake.profdata -object fake-object.exe"
+    $command = "$([char]34)$($env:FAKE_LLVM_COV_PATH)$([char]34) export -format=lcov -instr-profile=fake.profdata -object fake-object.exe"
     if ($env:FAKE_LLVM_COV_MULTILINE) {
         $command = $command.Replace(' -object', "`n-object")
     }
-    Write-Error (
+    Write-Output (
         "error: failed to generate report: could not execute process $([char]96)$command$([char]96) " +
         "(never executed): The filename or extension is too long. (os error 206)"
-    ) -ErrorAction Continue
+    )
     exit 1
 }
 if ($args -contains 'nextest') {

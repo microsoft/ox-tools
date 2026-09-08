@@ -102,18 +102,13 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         # Capture cargo-llvm-cov's diagnostic because it is the only place its
         # private object discovery result is exposed. Keep displaying it so a
         # non-retriable failure has the same evidence as a direct invocation.
-        $previousErrorActionPreference = $ErrorActionPreference
         $reportOutput = @()
         $reportExitCode = 1
-        try {
-            $ErrorActionPreference = 'Continue'
-            & cargo '+{{ rust_nightly }}' llvm-cov report --lcov --output-path $OutputPath 2>&1 |
-                Tee-Object -Variable reportOutput |
-                ForEach-Object { Write-Host $_.ToString() }
-            $reportExitCode = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $previousErrorActionPreference
-        }
+        $PSNativeCommandUseErrorActionPreference = $false
+        & cargo '+{{ rust_nightly }}' llvm-cov report --lcov --output-path $OutputPath 2>&1 |
+            Tee-Object -Variable reportOutput |
+            ForEach-Object { Write-Host $_.ToString() }
+        $reportExitCode = $LASTEXITCODE
         if ($reportExitCode -eq 0) { return 0 }
 
         $reportText = ($reportOutput | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
