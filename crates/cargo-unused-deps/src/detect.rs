@@ -63,10 +63,10 @@ pub fn read_manifest(path: &Path) -> Result<DocumentMut> {
 ///
 /// # Errors
 ///
-/// Returns an error when an `allowed` entry is not a string. Skipping such an
-/// entry would leave a mis-typed configuration behaving as though nothing were
-/// allowed, which is hard to tell from a configuration that simply does not
-/// work.
+/// Returns an error when `allowed` is not an array of strings. Skipping a
+/// mis-typed entry would leave the configuration behaving as though nothing
+/// were allowed, which is hard to tell from a configuration that simply does
+/// not work.
 pub fn catalog(manifest: &DocumentMut) -> Result<Catalog> {
     let Some(workspace) = manifest.get("workspace").and_then(Item::as_table_like) else {
         return Ok(Catalog::NotAWorkspace);
@@ -83,11 +83,10 @@ pub fn catalog(manifest: &DocumentMut) -> Result<Catalog> {
         .and_then(Item::as_table_like)
         .and_then(|metadata| metadata.get(METADATA_KEY))
         .and_then(Item::as_table_like)
-        .and_then(|config| config.get("allowed"))
-        .and_then(Item::as_array);
+        .and_then(|config| config.get("allowed"));
 
     let mut allowed = BTreeSet::new();
-    for value in configured.into_iter().flatten() {
+    for value in array_of(configured, "allowed")? {
         let name = value.as_str().ok_or_else(|| {
             anyhow!(
                 "[workspace.metadata.{METADATA_KEY}] allowed must contain only strings, found {}",
@@ -99,6 +98,25 @@ pub fn catalog(manifest: &DocumentMut) -> Result<Catalog> {
     }
 
     Ok(Catalog::Workspace(WorkspaceCatalog { declared, allowed }))
+}
+
+/// The values of a configured array, or none when the key is absent.
+///
+/// A present value of any other type is an error rather than a silent empty
+/// list: a mis-typed key that behaves like an absent one is indistinguishable
+/// from configuration that does not work.
+fn array_of<'a>(configured: Option<&'a Item>, key: &str) -> Result<impl Iterator<Item = &'a Value>> {
+    let array = match configured {
+        None => None,
+        Some(item) => Some(item.as_array().ok_or_else(|| {
+            anyhow!(
+                "[workspace.metadata.{METADATA_KEY}] {key} must be an array, found {}",
+                item.type_name()
+            )
+        })?),
+    };
+
+    Ok(array.into_iter().flatten())
 }
 
 /// Collect the catalog keys that member manifests inherit.

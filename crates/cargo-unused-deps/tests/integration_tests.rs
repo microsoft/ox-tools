@@ -243,6 +243,21 @@ fn a_non_string_allow_list_entry_is_an_error() {
 }
 
 #[test]
+fn a_non_array_allow_list_is_an_error() {
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.metadata.unused-deps]\nallowed = \"once_cell\"\n\n",
+        "[workspace.dependencies]\nonce_cell = \"1\"\n",
+    );
+    let dir = workspace(root, &[("member", "")]);
+
+    let (success, _, stderr) = outcome(&run(&dir.path().join("Cargo.toml"), &[]));
+
+    assert!(!success, "a mis-typed allow-list must not pass silently");
+    assert!(stderr.contains("allowed must be an array"), "unexpected stderr: {stderr}");
+}
+
+#[test]
 fn fix_removes_the_entries_and_keeps_the_rest_intact() {
     let root = concat!(
         "[workspace]\nmembers = [\"member\"]\n\n",
