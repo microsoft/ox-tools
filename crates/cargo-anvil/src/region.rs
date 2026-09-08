@@ -552,6 +552,10 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 /// own keys is theirs, and survives. The terminator restored is the one the
 /// residue itself was written with, so relocating a block out of a CRLF host
 /// does not leave it ending in a lone `\n`.
+///
+/// The trailing edge is trimmed of all whitespace, not just line breaks, so a
+/// last line that ended in spaces or tabs loses them rather than being
+/// re-emitted with trailing whitespace before the terminator this restores.
 fn tidy_residue(residue: &str) -> String {
     let newline = residue_newline(residue);
     let trimmed = trim_leading_blank_lines(residue).trim_end();

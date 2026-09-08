@@ -27,8 +27,6 @@
 //!
 //! Reviewed with `cargo insta review`; snapshots live under `tests/snapshots/`.
 
-#![expect(clippy::unwrap_used, reason = "integration tests favor concise assertions over Result plumbing")]
-
 use std::fmt::Write as _;
 use std::path::Path;
 
