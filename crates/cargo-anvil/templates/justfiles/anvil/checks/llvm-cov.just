@@ -49,11 +49,10 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         if ($optedOut.Count -gt 0) {
             $filtered = [System.Collections.Generic.List[string]]::new()
             for ($i = 0; $i -lt $pkg.Count; $i++) {
-                # Impact emits version-qualified specs (name@version);
-                # compare the bare name against the opt-out set, but keep
-                # the full name@version token in $pkg so the llvm-cov
+                # Compare the bare name against the opt-out set, but keep the
+                # full package ID in $pkg so the llvm-cov
                 # measurement below resolves unambiguously.
-                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains (($pkg[$i + 1] -split '@', 2)[0])) {
+                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains ((($pkg[$i + 1] -split '#', 2)[-1] -split '@', 2)[0])) {
                     $testOnlyPkg.Add('--package')
                     $testOnlyPkg.Add($pkg[$i + 1])
                     $i++
@@ -81,6 +80,11 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
         exit 0
+    }
+    if ($IsWindows) {
+        # llvm-cov passes every instrumented binary as a separate argument.
+        # Keep those paths short enough for Windows CreateProcess.
+        $env:CARGO_LLVM_COV_TARGET_DIR = '.c'
     }
     if ($testOnlyPkg.Count -gt 0) {
         Write-Host 'anvil-llvm-cov: running tests without coverage for opted-out packages'
@@ -161,7 +165,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         if ($pkg[$i] -eq '--workspace') { continue }
         if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
             $gateArgs.Add('--package')
-            $gateArgs.Add(($pkg[$i + 1] -split '@', 2)[0])
+            $gateArgs.Add((($pkg[$i + 1] -split '#', 2)[-1] -split '@', 2)[0])
             $i++
             continue
         }

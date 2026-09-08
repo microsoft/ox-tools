@@ -49,7 +49,7 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         $parts = @(-split $include)
         for ($i = 0; $i -lt $parts.Count; $i++) {
             if ($parts[$i] -eq '--package' -and ++$i -lt $parts.Count) {
-                $names.Add(($parts[$i] -split '@', 2)[0])
+                $names.Add((($parts[$i] -split '#', 2)[-1] -split '@', 2)[0])
             }
         }
         @($names)

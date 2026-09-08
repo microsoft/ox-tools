@@ -825,7 +825,11 @@ fn bolero_discovery_failure_propagates() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    seed_include(
+        tmp.path(),
+        "affected",
+        "--package path+file:///workspace/crates/fixture#fixture@0.1.0",
+    );
     let output = run_just(
         tmp.path(),
         &["anvil-bolero"],
@@ -916,7 +920,11 @@ fn semver_exit_code_contract_is_executed() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    seed_include(
+        tmp.path(),
+        "affected",
+        "--package path+file:///workspace/crates/fixture#fixture@0.1.0",
+    );
     let common = [("BASE_REF", OsStr::new("base")), ("FAKE_CARGO_LOG", log.as_os_str())];
 
     let findings = run_just(
@@ -1483,7 +1491,11 @@ fn semver_includes_libraries_restricted_to_named_registries() {
             "anvil-impact",
         ],
     );
-    seed_include(tmp.path(), "affected", "--package named-registry@0.1.0");
+    seed_include(
+        tmp.path(),
+        "affected",
+        "--package registry+https://github.com/rust-lang/crates.io-index#named-registry@0.1.0",
+    );
     let log = tmp.path().join("cargo.log");
     let output = run_just(
         tmp.path(),
@@ -1528,7 +1540,11 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
         ],
     );
     let log = tmp.path().join("cargo.log");
-    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    seed_include(
+        tmp.path(),
+        "affected",
+        "--package path+file:///workspace/crates/fixture#fixture@0.1.0",
+    );
     let output = run_just(
         tmp.path(),
         &["anvil-llvm-cov"],

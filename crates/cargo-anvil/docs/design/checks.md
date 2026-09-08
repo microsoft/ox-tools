@@ -386,7 +386,9 @@ runs cargo-delta once, writes `target/anvil/impact/`, and projects each tier —
 (or the literal sentinel `--skip` when the tier is empty). Each package is a
 version-qualified cargo spec (`name@version`) so `-p` resolves uniquely to the workspace
 member even when a like-named crate is also pulled in as a different-versioned transitive
-dependency.
+dependency. Check recipes that need a bare package name also accept Cargo's full package-ID
+form (`source#name@version`) so cached impact artifacts remain portable across tool versions
+and operating systems.
 
 Every **impact-scoped** per-crate check depends on `anvil-impact` and resolves its
 category's scope by calling `_anvil-impact-include <category>` into a local `$include`
