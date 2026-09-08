@@ -18,16 +18,10 @@
 # that tier sets ANVIL_IMPACT=off, so _anvil-impact-include resolves
 # to --workspace. A direct local invocation is impact-scoped like any
 # other affected-tier check -- it reads the anvil-impact cache and
-# honors an empty selection.
+# honors --skip.
 
 # Run Miri tests with the Tree Borrows model.
-[script("pwsh", "-NoProfile")]
-anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
-    $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
-    & cargo '+{{ rust_nightly }}' each $(& "{{ just_executable() }}" _anvil-impact-include affected; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }) --once '--' cargo '+{{ rust_nightly }}' miri test --all-features --tests '{packages}'
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-test "tree-borrows")
 
 # The three nightly-miri profiles share the same toolchain prereqs
 # as anvil-miri; they only differ in the MIRIFLAGS / RUSTFLAGS the
@@ -36,8 +30,8 @@ anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-miri-tree-borrows` recipe.
 [group("anvil-setup")]
-anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
+anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
 # Validate prerequisites for the `anvil-miri-tree-borrows` recipe.
 [group("anvil-setup")]
-anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs

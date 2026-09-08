@@ -50,7 +50,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
                 Write-Error "anvil-bolero: unsupported affected-package arguments: $($selection -join ' ')"
                 exit 1
             }
-            $packageNames.Add($pkgArgs[++$i])
+            $packageNames.Add(($pkgArgs[++$i] -split '@', 2)[0])
         }
     } else {
         $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1

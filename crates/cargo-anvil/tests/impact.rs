@@ -638,7 +638,7 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
     let affected_after = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
     let affected_tokens = affected_after.lines().collect::<Vec<_>>();
     assert!(
-        affected_tokens.windows(2).any(|pair| pair == ["--package", "beta"]),
+        affected_tokens.windows(2).any(|pair| pair == ["--package", "beta@0.1.0"]),
         "committing the uncommitted change must scope beta into the affected tier, got: {affected_after}"
     );
 }
@@ -981,7 +981,7 @@ fn scoped_check_inlines_cached_selection_and_empty_set_into_cargo_each() {
     let affected = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
     let affected = affected.trim().to_owned();
     assert!(
-        affected.lines().eq(["--package", "alpha"]),
+        affected.lines().eq(["--package", "alpha@0.1.0"]),
         "precondition: the affected tier should be a scoped --package list, got: {affected}"
     );
 
@@ -1001,7 +1001,7 @@ fn scoped_check_inlines_cached_selection_and_empty_set_into_cargo_each() {
     assert!(out.status.success(), "scoped anvil-bench run failed:\n{combined}");
     let argv = fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        argv.contains("each --package alpha --once -- cargo") && argv.contains("bench {packages} --all-features --no-run"),
+        argv.contains("each --package alpha@0.1.0 --once -- cargo") && argv.contains("bench {packages} --all-features --no-run"),
         "the cached selector tokens must reach cargo-each; captured argv:\n{argv}"
     );
 
@@ -1328,7 +1328,7 @@ fn consume_without_downloaded_cache_fails_loudly() {
     let cache = root.join("target/anvil/impact");
     for (file, spec) in [
         ("include_modified.txt", "--workspace"),
-        ("include_affected.txt", "--package\nalpha"),
+        ("include_affected.txt", "--package\nalpha@0.1.0"),
         ("include_required.txt", "--workspace"),
     ] {
         write(&cache.join(file), spec);
@@ -1366,19 +1366,11 @@ fn consume_without_downloaded_cache_fails_loudly() {
     );
     assert!(malformed_combined.contains("empty or malformed") && malformed_combined.contains("affected"));
 
-    write(&cache.join("include_affected.txt"), "--package\nalpha@0.1.0");
-    let qualified = consume(&["anvil-impact"]);
-    let qualified_combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&qualified.stdout),
-        String::from_utf8_lossy(&qualified.stderr)
-    );
-    assert_ne!(
-        qualified.status.code(),
-        Some(0),
-        "version-qualified cached selectors must fail:\n{qualified_combined}"
-    );
-    assert!(qualified_combined.contains("empty or malformed") && qualified_combined.contains("affected"));
+    write(&cache.join("include_affected.txt"), "--package\nalpha");
+    let bare = consume(&["anvil-impact"]);
+    let bare_combined = format!("{}{}", String::from_utf8_lossy(&bare.stdout), String::from_utf8_lossy(&bare.stderr));
+    assert_ne!(bare.status.code(), Some(0), "bare cached selectors must fail:\n{bare_combined}");
+    assert!(bare_combined.contains("empty or malformed") && bare_combined.contains("affected"));
 
     // A partially downloaded cache -- one tier's include file missing -- must
     // also fail loudly and name the missing tier. This guards the
@@ -1492,7 +1484,7 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
     let (stdout, stderr, ok) = run_format(root, "affected", fixture);
     assert!(ok, "the formatter must exit 0:\nstderr: {stderr}");
     assert!(
-        stdout.lines().eq(["--package", "my-macro"]),
+        stdout.lines().eq(["--package", "my-macro@0.3.0"]),
         "the proc-macro target `my_macro` must map back to its package `my-macro`:\nstdout: {stdout}\nstderr: {stderr}"
     );
 }

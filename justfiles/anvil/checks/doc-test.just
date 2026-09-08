@@ -45,7 +45,7 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
         @(
             for ($i = 0; $i -lt $selection.Count; $i++) {
                 if ($selection[$i] -eq '--package' -and ($i + 1) -lt $selection.Count) {
-                    $name = $selection[++$i]
+                    $name = ($selection[++$i] -split '@', 2)[0]
                     if ($docPackages.ContainsKey($name)) { $name }
                 }
             }

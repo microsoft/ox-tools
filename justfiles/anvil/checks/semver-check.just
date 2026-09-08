@@ -93,7 +93,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         $packages = @()
         for ($i = 0; $i -lt $pkg.Count; $i++) {
             if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                $name = $pkg[$i + 1]
+                $name = ($pkg[$i + 1] -split '@', 2)[0]
                 if ($libPkgs[$name]) { $packages += $name }
                 $i++
             }

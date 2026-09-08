@@ -64,12 +64,12 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
                 Write-Error "anvil-llvm-cov: unsupported affected-package arguments: $($pkg -join ' ')"
                 exit 1
             }
-            $name = $pkg[++$i]
-            if (-not $specsByName.ContainsKey($name)) {
-                Write-Error "anvil-llvm-cov: affected package '$name' is absent from workspace metadata"
+            $spec = $pkg[++$i]
+            $name = ($spec -split '@', 2)[0]
+            if (-not $specsByName.ContainsKey($name) -or $specsByName[$name] -ne $spec) {
+                Write-Error "anvil-llvm-cov: affected package '$spec' is absent from workspace metadata"
                 exit 1
             }
-            $spec = $specsByName[$name]
             $qualifiedAll.Add('--package')
             $qualifiedAll.Add($spec)
             if ($optedOut -contains $name) {

@@ -324,7 +324,7 @@ _anvil-impact-snapshot:
     }
 
 # Public. Computes the impact set from the two snapshots and projects each
-# tier into tokenized `--package name` selectors (or `--none` when the tier is
+# tier into tokenized `--package name@version` selectors (or `--none` when the tier is
 # empty) via the shared _anvil-impact-format helper, written to
 # include_<tier>.txt. Per-crate checks depend on this recipe and read those
 # files via _anvil-impact-include. Cache-aware: no-ops when the snapshots
@@ -470,9 +470,9 @@ anvil-impact: _anvil-impact-snapshot
 #                `cargo delta impact --format json`.
 #
 # Output (stdout, one token per line so PowerShell captures a ready-to-splat array):
-#   * repeated "--package" / bare workspace package-name pairs when the
-#     tier has members. cargo-each resolves those names from live metadata
-#     and emits version-qualified specs to child Cargo commands.
+#   * repeated "--package" / version-qualified workspace package specs when
+#     the tier has members. Both Cargo and cargo-each consume this portable,
+#     unambiguous form directly.
 #   * "--none" when the tier is empty (cargo-each treats this as a no-op).
 # Metadata failures and unknown/ambiguous package names are written to
 # STDERR and fail the recipe, so callers never continue with an incomplete
@@ -595,7 +595,7 @@ _anvil-impact-format tier impactJson:
         }
         $p = $candidates[0]
         $selectors.Add('--package')
-        $selectors.Add($p.name)
+        $selectors.Add("$($p.name)@$($p.version)")
     }
     if ($selectors.Count -eq 0) {
         Write-Output '--none'
@@ -636,20 +636,22 @@ _anvil-impact-include tier:
         } elseif ($tokens.Count -gt 0 -and ($tokens.Count % 2) -eq 0) {
             $valid = $true
             for ($i = 0; $i -lt $tokens.Count; $i += 2) {
-                $name = $tokens[$i + 1]
+                $spec = $tokens[$i + 1]
+                $parts = $spec -split '@', 2
                 if ($tokens[$i] -ne '--package' -or
-                    [string]::IsNullOrWhiteSpace($name) -or
-                    $name -ne $name.Trim() -or
-                    $name -match '\s' -or
-                    $name.Contains('@') -or
-                    $name.StartsWith('--')) {
+                    $parts.Count -ne 2 -or
+                    [string]::IsNullOrWhiteSpace($parts[0]) -or
+                    [string]::IsNullOrWhiteSpace($parts[1]) -or
+                    $spec -ne $spec.Trim() -or
+                    $spec -match '\s' -or
+                    $parts[0].StartsWith('--')) {
                     $valid = $false
                     break
                 }
             }
         }
         if (-not $valid) {
-            Write-Error "anvil-impact: selector file '$file' is empty or malformed. Expected exactly --workspace, exactly --none, or one token per line as repeated --package/name pairs. Recompute or re-download the impact cache."
+            Write-Error "anvil-impact: selector file '$file' is empty or malformed. Expected exactly --workspace, exactly --none, or one token per line as repeated --package/name@version pairs. Recompute or re-download the impact cache."
             exit 1
         }
         Write-Output $tokens

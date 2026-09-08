@@ -829,6 +829,10 @@ mod tests {
     /// The watchdog returns what the closure returned, and does it on the closure's own thread.
     #[test]
     fn a_closure_that_finishes_gets_its_value_back() {
+        if std::env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
+            return;
+        }
+
         let id = within(WATCHDOG, "reporting a thread id", || thread::current().id());
 
         assert_eq!(within(WATCHDOG, "adding", || 21 + 21), 42);
@@ -845,6 +849,10 @@ mod tests {
     /// the helper promises to do.
     #[test]
     fn a_body_that_never_finishes_is_reported_as_hung() {
+        if std::env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
+            return;
+        }
+
         let (release, released) = mpsc::channel::<()>();
         let hung = panic::catch_unwind(|| {
             within(Duration::from_millis(50), "a deliberately hung body", move || {

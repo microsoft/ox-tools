@@ -16,6 +16,9 @@
 # Iterate workspace members rather than every local path dependency that
 # `cargo fmt --all` discovers. `--keep-going` reports formatting failures from
 # every member while retaining a bounded rustfmt command line per invocation.
+#
+# Pin both the cargo-each wrapper and cargo-fmt to the same nightly so the
+# formatting command does not mix stable and nightly toolchains.
 
 # Check Rust source formatting.
 [arg("fix", long, value="true")]

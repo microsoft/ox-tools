@@ -62,7 +62,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # Optional impact-scoping: recover bare package names from the
-    # impact step's `--package name` pairs.
+    # impact step's `--package name@version` pairs.
     # Full-workspace modes (`--workspace` -- e.g. the scheduled tier,
     # ANVIL_IMPACT=off, or no impact cache) carry no `--package` tokens,
     # so $affected stays $null and the package set is left unfiltered
@@ -72,7 +72,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     for ($i = 0; $i -lt $tokens.Count; $i++) {
         if ($tokens[$i] -eq '--package' -and ($i + 1) -lt $tokens.Count) {
             if ($null -eq $affected) { $affected = @() }
-            $affected += $tokens[$i + 1]
+            $affected += ($tokens[$i + 1] -split '@', 2)[0]
             $i++
         }
     }

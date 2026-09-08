@@ -7,18 +7,12 @@
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run Miri tests with strict provenance checks.
-[script("pwsh", "-NoProfile")]
-anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
-    $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
-    & cargo '+{{ rust_nightly }}' each $(& "{{ just_executable() }}" _anvil-impact-include affected; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }) --once '--' cargo '+{{ rust_nightly }}' miri test --all-features --tests '{packages}'
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_anvil-miri-test "strict-provenance")
 
 # Install prerequisites for the `anvil-miri-strict-provenance` recipe.
 [group("anvil-setup")]
-anvil-miri-strict-provenance-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
+anvil-miri-strict-provenance-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
 # Validate prerequisites for the `anvil-miri-strict-provenance` recipe.
 [group("anvil-setup")]
-anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs
+anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs

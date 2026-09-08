@@ -567,11 +567,10 @@ Each check requests one cargo-delta **category** — the selector it passes to
 | `required` | Same selection as affected plus transitive workspace dependencies; each recipe uses cargo-each only when it removes local orchestration. |
 
 The helper emits one token per line: `--none`, `--workspace`, or repeated
-`--package` / bare-name pairs. PowerShell expands that output into separate arguments
+`--package` / `name@version` pairs. PowerShell expands that output into separate arguments
 without string parsing. The inline exit check preserves the helper's failure status
 instead of accidentally invoking cargo-each with its default-member selection.
-`cargo-each` resolves names against live workspace metadata and forwards
-version-qualified specs through `{packages}`.
+Both Cargo and cargo-each consume the version-qualified specs directly.
 
 The helper validates this grammar before returning any cached selector. Empty files,
 mixed single-value and package forms, incomplete pairs, whitespace-bearing names, and
@@ -686,7 +685,35 @@ baseline — so an environment without the base ref must either provide it, run 
 `ANVIL_IMPACT=off`, or (in CI) download the cache and set `ANVIL_IMPACT=consume`.
 
 
-## 5. Daily driver
+## 5. Miri execution customization
+
+Miri compiles the selected package scope once, then executes each compiled Miri
+test executable concurrently. `ANVIL_MIRI_JOBS` overrides the default of one
+artifact worker per logical processor and must be a positive integer. The worker
+count is always clamped to the number of discovered executables. Use the override
+when a runner needs a lower memory footprint; containerized runs forward the
+setting unchanged.
+
+The standard, Tree Borrows, strict-provenance, and race-coverage recipes share
+this compile-once execution behavior. Each stricter profile applies its
+documented Miri flags and matching `miri_<profile>` cfg before compilation.
+
+Packages whose own test targets are inherently unsuitable or unproductive under
+Miri can declare:
+
+```toml
+[package.metadata.anvil.miri]
+exclude = true
+```
+
+This Boolean disables every Miri test target owned by the package, in both
+impact-scoped and full-workspace runs, although the package can still compile as
+a dependency of another selected package. Because the metadata has no place to
+record a reason, reserve it for package-wide constraints. Prefer per-test
+`cfg_attr(miri, ignore = "<reason>")` or the profile-specific cfgs when a narrower
+or temporary suppression can keep its rationale beside the affected test.
+
+## 6. Daily driver
 
 ```text
 $ just anvil
@@ -744,7 +771,7 @@ local targeted iteration.
 `anvil-readme` checks by default and regenerates with `--fix`;
 `anvil-readme-check` remains the stable check-group member.
 
-## 6. No-tooling fallback
+## 7. No-tooling fallback
 
 A user with only `cargo` (no `just`, no `cargo-anvil`) can still run the basics:
 
@@ -759,7 +786,7 @@ The same commands appear as the body of the corresponding `just` recipes under
 covers core hygiene only — coverage, miri, mutants, etc. still require their respective
 tools.
 
-## 7. Customization at the recipe level
+## 8. Customization at the recipe level
 
 Per the four customization tiers in [README.md §7](./README.md#7-customization):
 

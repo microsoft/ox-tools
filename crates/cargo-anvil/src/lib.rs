@@ -257,6 +257,27 @@
 //!
 //! ### Miri
 //!
+//! Anvil compiles the selected scope together once with all features enabled,
+//! preserving Cargo feature unification, and runs the resulting Miri test
+//! executables concurrently.
+//! Each executable is one Cargo test target containing one or more libtest
+//! tests.
+//! `ANVIL_MIRI_JOBS` overrides the default worker count. Local callers can use
+//! `--package` to override impact scope, `--test` to select libtest names, or
+//! `--example` with `--package` to run one example instead of the test suite.
+//!
+//! A package whose own test targets should not run under Miri can opt out while
+//! remaining available as a dependency:
+//!
+//! ```toml
+//! [package.metadata.anvil.miri]
+//! exclude = true
+//! ```
+//!
+//! Reserve this package-wide switch for constraints that apply to every test
+//! target. Prefer per-test ignores with reasons for narrower or temporary
+//! suppressions.
+//!
 //! Tests that cannot run in the interpreter can carry an ordinary ignore:
 //!
 //! ```text
