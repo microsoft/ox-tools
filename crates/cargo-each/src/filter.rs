@@ -515,15 +515,67 @@ mod tests {
             "lib bin",
             "(lib or bin",
             "lib or )",
+            "lib not bin",
             "()",
             "lib AND bin",
+            r#""lib""#,
+            r#"metadata:role=value"quoted""#,
+            r#"metadata:role=""suffix"#,
             r#"metadata:role="unclosed"#,
             r#"metadata:role="unsupported\q""#,
         ] {
             Predicate::parse(expression).expect_err(expression);
         }
-        let too_deep = format!("{}lib{}", "(".repeat(66), ")".repeat(66));
-        Predicate::parse(&too_deep).expect_err("excessive nesting");
+
+        let unexpected = Predicate::parse("lib or )").expect_err("unexpected closing parenthesis");
+        assert!(
+            unexpected
+                .to_string()
+                .contains("unexpected `)`; expected a predicate, `not`, or `(`"),
+            "diagnostic must identify the unexpected token: {unexpected}"
+        );
+
+        let trailing = Predicate::parse("lib not bin").expect_err("unexpected trailing operator");
+        assert!(
+            trailing
+                .to_string()
+                .contains("unexpected `not`; expected `and`, `or`, or end of expression"),
+            "diagnostic must identify the trailing token: {trailing}"
+        );
+    }
+
+    #[test]
+    fn expression_nesting_accepts_64_levels_but_rejects_65() {
+        let maximum = format!("{}lib{}", "(".repeat(64), ")".repeat(64));
+        assert_eq!(Predicate::parse(&maximum).expect("64 levels are supported"), Predicate::HasLib);
+
+        let too_deep = format!("{}lib{}", "(".repeat(65), ")".repeat(65));
+        let error = Predicate::parse(&too_deep).expect_err("65 levels exceed the limit");
+        assert!(
+            error.to_string().contains("expression nesting exceeds 64 levels"),
+            "diagnostic must identify the nesting limit: {error}"
+        );
+
+        let maximum_negation = format!("{}lib", "not ".repeat(64));
+        Predicate::parse(&maximum_negation).expect("64 negations are supported");
+
+        let too_many_negations = format!("{}lib", "not ".repeat(65));
+        Predicate::parse(&too_many_negations).expect_err("65 negations exceed the limit");
+    }
+
+    #[test]
+    fn token_diagnostics_name_every_token_kind() {
+        assert_eq!(Token::Atom("lib").display(), "predicate");
+        assert_eq!(Token::And.display(), "`and`");
+        assert_eq!(Token::Or.display(), "`or`");
+        assert_eq!(Token::Not.display(), "`not`");
+        assert_eq!(Token::LeftParen.display(), "`(`");
+        assert_eq!(Token::RightParen.display(), "`)`");
+    }
+
+    #[test]
+    fn rejects_trailing_escape_in_quoted_metadata_value() {
+        parse_metadata_value("metadata:role", r#""trailing\""#).expect_err("trailing escape must error");
     }
 
     #[test]
