@@ -319,22 +319,29 @@ mod tests {
         GROUP_FILES.iter().map(|(_, b)| *b).collect::<Vec<_>>().join("\n")
     }
 
+    fn defines_recipe(body: &str, recipe: &str) -> bool {
+        body.lines().any(|line| {
+            line.strip_prefix(recipe)
+                .is_some_and(|suffix| suffix.starts_with(':') || suffix.starts_with(' '))
+        })
+    }
+
     #[test]
     fn checks_just_template_includes_all_catalog_checks() {
         let checks = all_check_bodies();
         for needle in [
-            "anvil-fmt:",
-            "anvil-clippy:",
-            "anvil-license-headers:",
-            "anvil-pr-title:",
-            "anvil-llvm-cov:",
-            "anvil-doc-test:",
-            "anvil-mutants-diff:",
-            "anvil-miri:",
-            "anvil-mutants-full:",
-            "anvil-bench:",
+            "anvil-fmt",
+            "anvil-clippy",
+            "anvil-license-headers",
+            "anvil-pr-title",
+            "anvil-llvm-cov",
+            "anvil-doc-test",
+            "anvil-mutants-diff",
+            "anvil-miri",
+            "anvil-mutants-full",
+            "anvil-bench",
         ] {
-            assert!(checks.contains(needle), "checks tree missing recipe '{needle}'");
+            assert!(defines_recipe(&checks, needle), "checks tree missing recipe '{needle}'");
         }
     }
 
@@ -396,15 +403,59 @@ mod tests {
 
     #[test]
     fn each_check_file_defines_its_own_check_recipe() {
-        // The file `checks/<name>.just` must define `anvil-<name>:` -- guards
+        // The file `checks/<name>.just` must define `anvil-<name>` -- guards
         // against a mis-split that files a check's recipe under the wrong name.
         for (path, body) in CHECK_FILES {
             let stem = path
                 .strip_prefix("justfiles/anvil/checks/")
                 .and_then(|p| p.strip_suffix(".just"))
                 .expect("check file path has the expected shape");
-            let needle = format!("anvil-{stem}:");
-            assert!(body.contains(&needle), "{path} must define '{needle}'");
+            let recipe = format!("anvil-{stem}");
+            assert!(defines_recipe(body, &recipe), "{path} must define '{recipe}'");
+        }
+    }
+
+    #[test]
+    fn miri_profiles_inherit_the_parallel_artifact_runner() {
+        let miri = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
+            .expect("miri.just is registered in CHECK_FILES");
+        for needle in [
+            "_anvil-miri-test profile package=\"\" test_filter=\"\" example=\"\": anvil-impact",
+            "ForEach-Object -Parallel",
+            "-ThrottleLimit $jobs",
+            "anvil miri: ANVIL_MIRI_JOBS must be a positive integer",
+            "Sort-Object PackageLabel, TargetKind, TargetName, Path",
+            "##[group]Miri executable",
+            "::group::Miri executable",
+        ] {
+            assert!(miri.contains(needle), "miri runner is missing '{needle}'");
+        }
+
+        for (check, profile) in [
+            ("miri", "standard"),
+            ("miri-tree-borrows", "tree-borrows"),
+            ("miri-strict-provenance", "strict-provenance"),
+            ("miri-race-coverage", "race-coverage"),
+        ] {
+            let body = CHECK_FILES
+                .iter()
+                .find_map(|(path, body)| path.ends_with(&format!("/{check}.just")).then_some(*body))
+                .unwrap_or_else(|| panic!("{check}.just is registered in CHECK_FILES"));
+            let dependency = if check == "miri" {
+                format!("(_anvil-miri-test \"{profile}\" package test example)")
+            } else {
+                format!("(_anvil-miri-test \"{profile}\")")
+            };
+            assert!(
+                body.contains(&dependency),
+                "{check}.just must inherit the shared Miri executable runner with its profile"
+            );
+            assert!(
+                !body.contains("& \"{{ just_executable() }}\" _anvil-miri-test"),
+                "{check}.just must not launch the main Miri runner through a nested just process"
+            );
         }
     }
 
@@ -440,6 +491,10 @@ mod tests {
             EXPECTED_CHECK_POLICY.len(),
             "EXPECTED_CHECK_POLICY contains a duplicate check entry"
         );
+        let miri_runner = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
+            .expect("miri.just is registered in CHECK_FILES");
 
         let mut seen = BTreeSet::new();
         for (path, body) in CHECK_FILES {
@@ -451,30 +506,33 @@ mod tests {
             let policy = *expected
                 .get(stem)
                 .unwrap_or_else(|| panic!("check '{stem}' is missing from EXPECTED_CHECK_POLICY; classify it explicitly"));
+            let execution_body = if body.contains("(_anvil-miri-test \"") { miri_runner } else { body };
 
             // Parse the actual category calls, matched as whole tokens so
             // `_anvil-impact-include affected` cannot collide with a longer
             // word. A recipe must resolve exactly one category, never two.
             let calls: Vec<&str> = ["modified", "affected", "required"]
                 .into_iter()
-                .filter(|cat| body.contains(&format!("_anvil-impact-include {cat}")))
+                .filter(|cat| execution_body.contains(&format!("_anvil-impact-include {cat}")))
                 .collect();
             assert!(
                 calls.len() <= 1,
                 "{path} makes contradictory impact-include calls {calls:?}; a check resolves exactly one category"
             );
+            let depends_on_impact = execution_body
+                .lines()
+                .filter(|line| !line.starts_with('#') && !line.chars().next().is_some_and(char::is_whitespace))
+                .filter_map(|line| line.split_once(':'))
+                .any(|(_, dependencies)| dependencies.split_whitespace().any(|dependency| dependency == "anvil-impact"));
 
             match policy.category() {
                 None => {
                     // Unscoped: no cache dependency, no include call.
                     assert!(
-                        !body.contains("_anvil-impact-include"),
+                        !execution_body.contains("_anvil-impact-include"),
                         "{path} is declared Unscoped but calls _anvil-impact-include"
                     );
-                    assert!(
-                        !body.contains("-validate-prereqs anvil-impact"),
-                        "{path} is declared Unscoped but depends on anvil-impact"
-                    );
+                    assert!(!depends_on_impact, "{path} is declared Unscoped but depends on anvil-impact");
                 }
                 Some(category) => {
                     assert_eq!(
@@ -486,11 +544,11 @@ mod tests {
                     // fresh, and capture the scope into a local $include -- no
                     // ANVIL_INCLUDE_* env-var indirection.
                     assert!(
-                        body.contains("-validate-prereqs anvil-impact"),
+                        depends_on_impact,
                         "{path} reads the impact cache but does not depend on anvil-impact"
                     );
                     assert!(
-                        body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
+                        execution_body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
                         "{path} must capture _anvil-impact-include into a local $include variable"
                     );
                 }

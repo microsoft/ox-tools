@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.8.0"
-catalog_checksum = "sha256:25beddc77b7a0f7c6d7569bd7d252f63770603600e5f3a2701eb0c5adf8ca44f"
+catalog_checksum = "sha256:baa2a5e479fe8f466e8f54e71ef0c498e07ac225b59a61a76ee99d46d5498650"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -117,7 +117,7 @@ checksum = "sha256:7e67d90a9d8bd8cd5c8adb68baf41fdd4625bff4d425b5bf18b75baee6289
 
 [[file]]
 path = "justfiles/anvil/checks/fmt.just"
-checksum = "sha256:692e388c44f3c0de2c6bff873ea3440ee25cd6e56b48e0424ebf9c9b1bda4e66"
+checksum = "sha256:01bb1913af9d8096290a09e51cb1c06726988484a2d72f54709bc26c8712dd3e"
 
 [[file]]
 path = "justfiles/anvil/checks/license-headers.just"
@@ -125,7 +125,7 @@ checksum = "sha256:7aa0560dc9088b33e80cd55aee0a25090cbd3d3610652afd3734d0ca52ee7
 
 [[file]]
 path = "justfiles/anvil/checks/llvm-cov.just"
-checksum = "sha256:a6c45a290030fc56ab39ce92d7f89b7169485edc58d931381bf7957eec1622bd"
+checksum = "sha256:eb2ade5b0499110f5754f6e3121d8b4853951b78f5e1c5d6052981ff740240e0"
 
 [[file]]
 path = "justfiles/anvil/checks/loom.just"
@@ -133,19 +133,19 @@ checksum = "sha256:f4822a8f9cb282bc426790355ba83b63e778db9327e986ba3c86ae6205cfd
 
 [[file]]
 path = "justfiles/anvil/checks/miri-race-coverage.just"
-checksum = "sha256:f8435d359f4495a3a1b3693069b0bab371bf94c3698389d9749acf95704a3c45"
+checksum = "sha256:56693b4851dea7dc4e707076d48d8cb369055d5352f5703375a3033af1950abb"
 
 [[file]]
 path = "justfiles/anvil/checks/miri-strict-provenance.just"
-checksum = "sha256:2e3fafdb060f10635a0dc34b447db4f06d7dd1549e585440611a5018a1e4ef5c"
+checksum = "sha256:bab029c5ca3be78fcea2d6af02763a0e0640722dfe1431a0eaa541801a9811df"
 
 [[file]]
 path = "justfiles/anvil/checks/miri-tree-borrows.just"
-checksum = "sha256:c82f586402f2cb05397a40eec6fe95c7590df2cc52f0dd9da6879de08517561c"
+checksum = "sha256:ea3349941fd3cf3811bce48a679490fe466dddafdb6d0955c1f5471155669f79"
 
 [[file]]
 path = "justfiles/anvil/checks/miri.just"
-checksum = "sha256:e3f363260e6f306248b86281fc3aad70b9e0be52a3e0bfb2658c4230b4c7a368"
+checksum = "sha256:8866d9ec87c13e30ecbefbda507315c7ed80cf7f114f32d242b4b6cb16a15ff3"
 
 [[file]]
 path = "justfiles/anvil/checks/msrv-test.just"
@@ -181,7 +181,7 @@ checksum = "sha256:6efd7378a2cd0f5d86519bd32fd86f2055a60191187dd77a8842b374b8eb7
 
 [[file]]
 path = "justfiles/anvil/container.just"
-checksum = "sha256:68a83a014c29bb32db24d8be8140a8a86b829a96f30e5ca72d9b43e06764a5b1"
+checksum = "sha256:6e2a24a20fb7c0a7a0bffa35f98b8b9e66f96bb6ec9cce8154199930546b375c"
 
 [[file]]
 path = "justfiles/anvil/dev/build.just"
@@ -249,7 +249,7 @@ checksum = "sha256:77329a0cb72de82742e7f48b6c8c06874e13b5c1622dc8080ce003e0c5ece
 
 [[file]]
 path = "justfiles/anvil/versions.just"
-checksum = "sha256:ae6676fb883aa58adb0995384adef477957ad7df10fc43439517cfb617fd92d1"
+checksum = "sha256:321c52416fe0024450d9293396144b0171d0818a013cda5fb026599a06a5f90d"
 
 [[region]]
 host = ".anvil/container/Dockerfile"
