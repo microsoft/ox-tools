@@ -28,8 +28,10 @@ pub enum Catalog {
     Workspace(WorkspaceCatalog),
 }
 
-/// The `[workspace.dependencies]` catalog of a workspace root, with the
-/// allow-list that accompanies it.
+/// A workspace root's dependency catalog.
+///
+/// Carries the `[workspace.dependencies]` entry names together with the
+/// allow-list configured beside them.
 pub struct WorkspaceCatalog {
     /// Catalog entry names, in the order the manifest declares them.
     pub declared: Vec<String>,
@@ -54,8 +56,10 @@ pub fn read_manifest(path: &Path) -> Result<DocumentMut> {
     parse_manifest(&read_manifest_text(path)?, path)
 }
 
-/// Classify a parsed manifest and, when it is a workspace root, collect its
-/// catalog and allow-list.
+/// Classify a parsed manifest.
+///
+/// When the manifest is a workspace root, its catalog and allow-list are
+/// collected as part of the classification.
 ///
 /// # Errors
 ///
@@ -151,8 +155,11 @@ fn collect_from_dep_table(table: &dyn TableLike, inherited: &mut BTreeSet<String
     }
 }
 
-/// True for `dep = { workspace = true, .. }` and the dotted `dep.workspace = true`
-/// form. Both are table-like to `toml_edit`, so one lookup covers each.
+/// Whether a dependency declaration inherits from the workspace.
+///
+/// True for `dep = { workspace = true, .. }` and for the dotted
+/// `dep.workspace = true` form. Both are table-like to `toml_edit`, so one
+/// lookup covers each.
 fn inherits_from_workspace(spec: &Item) -> bool {
     spec.as_table_like()
         .and_then(|table| table.get("workspace"))
@@ -161,8 +168,10 @@ fn inherits_from_workspace(spec: &Item) -> bool {
         .unwrap_or(false)
 }
 
-/// Split the catalog into the entries nobody inherits and the allow-list entries
-/// that suppressed nothing.
+/// Split the catalog into unused entries and stale allow-list entries.
+///
+/// An entry is unused when no member inherits it and the allow-list does not
+/// exempt it; an allow-list entry is stale when it suppresses nothing.
 ///
 /// Declaration order is preserved so the report reads alongside the manifest.
 pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {

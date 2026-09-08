@@ -471,6 +471,36 @@ fn fix_reports_which_comments_moved_and_where() {
 }
 
 #[test]
+fn fix_accumulates_comments_from_consecutive_removed_entries() {
+    // Two removed entries in a row each carry a comment; both blocks reach the
+    // same survivor as one carry, so the report names both sources and counts
+    // every line.
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.dependencies]\n",
+        "# --- unstable pins ---\n",
+        "once_cell = \"1\"\n",
+        "# kept for the aarch64 workaround\n",
+        "smallvec = \"1\"\n",
+        "serde = \"1\"\n",
+    );
+    let dir = workspace(root, &[("member", "[dependencies]\nserde = { workspace = true }\n")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&manifest, &["--fix"]));
+
+    assert!(success, "--fix should succeed: {stderr}");
+    assert!(
+        stderr.contains("Carried 2 comment lines from 'once_cell', 'smallvec' onto 'serde'"),
+        "both sources and the combined line count must be reported: {stderr}"
+    );
+
+    let fixed = fs::read_to_string(&manifest).expect("failed to read the fixed manifest");
+    assert!(fixed.contains("--- unstable pins ---"), "the first block survives: {fixed}");
+    assert!(fixed.contains("aarch64 workaround"), "the second block survives: {fixed}");
+}
+
+#[test]
 fn fix_reports_comments_dropped_with_an_emptied_table() {
     let root = "[workspace]\nmembers = [\"member\"]\n\n[workspace.dependencies]\n# --- all of it ---\nonce_cell = \"1\"\n";
     let dir = workspace(root, &[("member", "")]);

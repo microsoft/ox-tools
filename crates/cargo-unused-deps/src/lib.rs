@@ -181,8 +181,10 @@ pub fn run() -> Result<ExitCode> {
     check(&manifest_path, fix, require_workspace)
 }
 
-/// The check itself, split from [`run`] so tests can drive it without a process
-/// boundary or a parsed command line.
+/// The check itself.
+///
+/// Split from [`run`] so tests can drive it without a process boundary or a
+/// parsed command line.
 fn check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<ExitCode> {
     let original = detect::read_manifest_text(manifest_path)?;
     let mut manifest = detect::parse_manifest(&original, manifest_path)?;
@@ -243,8 +245,10 @@ fn check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<Exi
     Ok(ExitCode::SUCCESS)
 }
 
-/// Replace `manifest_path` with `contents`, atomically and only if the file
-/// still holds what was read.
+/// Replace `manifest_path` with `contents`.
+///
+/// The replacement is atomic, and happens only if the file still holds what was
+/// read.
 ///
 /// The workspace root manifest is the one file whose loss breaks every other
 /// tool in the repository, so it is never truncated in place: the replacement

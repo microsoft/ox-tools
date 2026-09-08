@@ -20,8 +20,8 @@ list of things this repository depends on.
 The existing unused-dependency gate cannot see them. `cargo udeps` resolves the crate
 graph and asks which *declared* dependencies go unreferenced; an entry that no member
 declares is absent from that graph entirely. The same blind spot applies to
-`cargo machete`. In this repository the gap accumulated 48 stale entries before a
-manual sweep removed them — with `udeps` green throughout.
+`cargo machete`. In this repository the gap accumulated 48 unused catalog entries before
+a manual sweep removed them — with `udeps` green throughout.
 
 The missing check is a different question from the one `udeps` answers, and a much
 cheaper one: *is this catalog entry inherited by anybody?* That is a fact about the
@@ -44,7 +44,7 @@ manifests, decidable by reading them.
 
 - **Judging whether an inherited dependency is used in code.** That is the
   compile-accurate question `udeps` already answers. This tool stops at inheritance.
-- **Editing member manifests.** Only the workspace root is ever written.
+- **Editing member manifests.** Only the workspace root manifest is ever written.
 - **Feature or version opinions.** `ensure-no-default-features` covers the catalog's
   feature hygiene; version policy belongs to `cargo-aprz` and `deny`.
 
@@ -90,7 +90,7 @@ cargo unused-deps [--manifest-path <PATH>] [--fix] [--require-workspace]
 | `--fix`               | *(off)*      | Remove the unused entries instead of only reporting them.            |
 | `--require-workspace` | *(off)*      | Treat a manifest with no `[workspace]` table as an error.            |
 
-### Manifests that are not workspace roots
+### Manifests without a `[workspace]` table
 
 A manifest with no `[workspace]` table has no catalog, so there is nothing this
 check can be wrong about. It reports that on stderr and succeeds.
@@ -103,7 +103,7 @@ opt-out. Succeeding is also the honest answer: the property "no catalog entry go
 uninherited" holds vacuously.
 
 `--require-workspace` restores the strict reading for callers that know they are
-pointing at a workspace root and want a misdirected `--manifest-path` to fail rather
+pointing at a root manifest and want a misdirected `--manifest-path` to fail rather
 than pass quietly.
 
 ### Allowed entries
@@ -239,13 +239,14 @@ since) was likewise rejected as a pinned dependency.
 the crate's first release. Until then the tool is runnable by hand and enforces
 nothing. The intended shape is recorded here so the wiring change has a target.
 
-The check will join the `pr-fast` group of the PR tier, invoked as
+The check will join the `pr-fast` group of anvil's PR tier (see
+[cargo-anvil's check catalog](../../../cargo-anvil/docs/design/checks.md)), invoked as
 `cargo unused-deps` alongside `ensure-no-cyclic-deps` and
-`ensure-no-default-features`. Like those two it reads manifests only, so one platform
+`ensure-no-default-features`. Like those two it is a text/metadata check: one platform
 is enough and no toolchain pin is required.
 
-Its impact-scoping include level will be `modified`: it reads the workspace root
-manifest and every member manifest in one pass, so it runs once from the repository
+Its impact-scoping include level will be `modified`: it reads the root manifest
+and every member manifest in one pass, so it runs once from the repository
 root against its own input domain rather than taking impact-selected package
 arguments. Single-crate repositories run the same command and pass without
 configuration.

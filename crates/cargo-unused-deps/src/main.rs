@@ -1,18 +1,20 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! A cargo sub-command that ensures every `[workspace.dependencies]` entry is
-//! inherited by at least one workspace member.
+//! A Cargo subcommand that reports uninherited workspace dependencies.
+//!
+//! Every `[workspace.dependencies]` entry is expected to be inherited by at least
+//! one workspace member.
 //!
 //! # Usage
 //!
-//! After installation, run in any cargo workspace:
+//! After installation, run in any Cargo workspace:
 //!
 //! ```bash
 //! cargo unused-deps
 //! ```
 //!
-//! Or point at an explicit workspace root:
+//! Or point at an explicit workspace root manifest:
 //!
 //! ```bash
 //! cargo unused-deps --manifest-path path/to/Cargo.toml

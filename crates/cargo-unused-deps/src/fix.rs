@@ -14,8 +14,10 @@ use std::num::NonZeroUsize;
 
 use toml_edit::{DocumentMut, Item, RawString, TableLike};
 
-/// What a `--fix` did, in the form the caller reports to the user: a count for
-/// the summary line and one record per comment block that had to move.
+/// What a `--fix` did.
+///
+/// Shaped for reporting: a count for the summary line, and one record per
+/// comment block that had to move.
 pub struct Outcome {
     /// How many entries were removed.
     pub removed: usize,
@@ -191,8 +193,9 @@ fn leading_comments(table: &dyn TableLike, name: &str) -> String {
         .to_owned()
 }
 
-/// Prepend `carried` to an entry's leading comments, in the same slot
-/// [`leading_comments`] reads from.
+/// Prepend `carried` to an entry's leading comments.
+///
+/// Written to the same slot [`leading_comments`] reads from.
 ///
 /// Writing to a different slot than the one that holds the entry's own decor
 /// would render both, duplicating text the user never wrote. Returns the entry
@@ -224,8 +227,9 @@ fn prepend_comments(table: &mut dyn TableLike, name: &str, carried: &str) -> Opt
     })
 }
 
-/// The comment-bearing part of a removed entry's decor, or `None` when it holds
-/// no comments.
+/// The comment-bearing part of a removed entry's decor.
+///
+/// `None` when the decor holds no comments at all.
 ///
 /// Blank-line padding alone is dropped: only comments such as a
 /// `# --- group ---` header are worth carrying to another entry.
