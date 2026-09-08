@@ -477,6 +477,7 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
     // or output-backend markers from the process running the test suite. Tests
     // that exercise those contracts pass the relevant values explicitly.
     command.env_remove("ANVIL_IMPACT");
+    command.env_remove("ANVIL_MIRI_JOBS");
     command.env_remove("GITHUB_ACTIONS");
     command.env_remove("TF_BUILD");
     for key in std::env::vars_os().map(|(key, _)| key) {
