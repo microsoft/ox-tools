@@ -2260,6 +2260,45 @@ mod tests {
         assert!(!second.plan.has_changes(), "second run should be idempotent");
     }
 
+    /// A region re-claiming its *own* table is not a collision. One region id
+    /// can reach one host twice — a catalog may register it for both the
+    /// workspace manifest and each member, and in a workspace whose root is
+    /// also a member those resolve to the same `Cargo.toml`. Treating the
+    /// second visit as a clash would refuse a region because it collides with
+    /// itself, and print a diagnostic naming the same id on both sides.
+    #[test]
+    fn a_region_reclaiming_its_own_table_is_not_a_collision() {
+        let mut composed = ComposedHosts::default();
+        let body = "[lints]\nworkspace = true\n";
+
+        assert!(composed.claim_tables("Cargo.toml", "anvil-lints", body).is_none());
+        assert!(
+            composed.claim_tables("Cargo.toml", "anvil-lints", body).is_none(),
+            "the same region may claim the same table again"
+        );
+
+        let collision = composed
+            .claim_tables("Cargo.toml", "other-region", body)
+            .expect("a different region claiming it is");
+        assert_eq!(collision.table, "lints");
+        assert_eq!(collision.owner, "anvil-lints");
+    }
+
+    /// Claims are per host: two regions may declare `[lints]` as long as they
+    /// are writing to different files, which is the ordinary case for the
+    /// per-member lint stub.
+    #[test]
+    fn claims_do_not_leak_between_hosts() {
+        let mut composed = ComposedHosts::default();
+        let body = "[lints]\nworkspace = true\n";
+
+        assert!(composed.claim_tables("crates/a/Cargo.toml", "anvil-lints", body).is_none());
+        assert!(
+            composed.claim_tables("crates/b/Cargo.toml", "anvil-lints", body).is_none(),
+            "a different host is a different claim"
+        );
+    }
+
     /// Two catalog regions on one host that declare the same table compose into
     /// a file with two `[licenses]` headers, which TOML rejects. Neither region
     /// can see the problem on its own: the parser backstop masks every *other*
