@@ -36,29 +36,29 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $docPackages = @{}
     foreach ($package in $meta.packages) {
         if ($package.targets | Where-Object { $_.doctest -eq $true }) {
-            $docPackages[$package.name] = $true
+            $docPackages[$package.name] = "$($package.name)@$($package.version)"
         }
     }
-    $names = if ($selection -contains '--workspace') {
-        @($docPackages.Keys | Sort-Object)
+    $specs = if ($selection -contains '--workspace') {
+        @($docPackages.Keys | Sort-Object | ForEach-Object { $docPackages[$_] })
     } else {
         @(
             for ($i = 0; $i -lt $selection.Count; $i++) {
                 if ($selection[$i] -eq '--package' -and ($i + 1) -lt $selection.Count) {
                     $name = ($selection[++$i] -split '@', 2)[0]
-                    if ($docPackages.ContainsKey($name)) { $name }
+                    if ($docPackages.ContainsKey($name)) { $docPackages[$name] }
                 }
             }
         )
     }
-    if ($names.Count -eq 0) {
+    if ($specs.Count -eq 0) {
         Write-Host 'anvil-doc-test: no affected doctest-capable packages; skipping'
         exit 0
     }
     $docSelection = [System.Collections.Generic.List[string]]::new()
-    foreach ($name in $names) {
+    foreach ($spec in $specs) {
         $docSelection.Add('--package')
-        $docSelection.Add($name)
+        $docSelection.Add($spec)
     }
     & cargo {{_anvil_stable_toolchain_args}} test --doc @docSelection --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

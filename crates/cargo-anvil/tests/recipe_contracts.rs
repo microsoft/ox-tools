@@ -2028,10 +2028,10 @@ fn doc_test_selects_doctest_capable_targets_but_not_bin_only_packages() {
     );
     let commands = fs::read_to_string(&log).unwrap();
     assert_eq!(commands.matches("test --doc ").count(), 2, "commands:\n{commands}");
-    assert!(commands.contains("--package fixture"), "commands:\n{commands}");
-    assert!(commands.contains("--package macro-package"), "commands:\n{commands}");
+    assert!(commands.contains("--package fixture@0.1.0"), "commands:\n{commands}");
+    assert!(commands.contains("--package macro-package@0.1.0"), "commands:\n{commands}");
     assert!(
-        commands.contains("--package fixture --package macro-package"),
+        commands.contains("--package fixture@0.1.0 --package macro-package@0.1.0"),
         "workspace doctest packages must be sorted by name:\n{commands}"
     );
     assert!(!commands.contains("--package bin-only"), "commands:\n{commands}");
@@ -2052,7 +2052,7 @@ fn doc_test_selects_doctest_capable_targets_but_not_bin_only_packages() {
     assert!(scoped.status.success(), "scoped doc-test selection failed");
     let scoped_commands = fs::read_to_string(&log).unwrap();
     assert_eq!(scoped_commands.matches("test --doc ").count(), 2);
-    assert!(scoped_commands.contains("--package fixture"));
+    assert!(scoped_commands.contains("--package fixture@0.1.0"));
     assert!(!scoped_commands.contains("--package bin-only"));
     assert!(!scoped_commands.contains("--package unselected-doc"));
 
