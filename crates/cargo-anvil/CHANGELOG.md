@@ -1,5 +1,38 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.9.0] - 2026-09-08
+
+- 🐛 Bug Fixes
+
+  - retry oversized Windows coverage exports ([#166](https://github.com/microsoft/ox-tools/pull/166))
+  - make anvil-fmt actually run the pinned nightly rustfmt ([#159](https://github.com/microsoft/ox-tools/pull/159))
+  - address validation follow-ups ([#131](https://github.com/microsoft/ox-tools/pull/131))
+  - remove Bash from ADO steps ([#160](https://github.com/microsoft/ox-tools/pull/160))
+
+- ⚡ Performance
+
+  - parallelize Miri test artifacts ([#123](https://github.com/microsoft/ox-tools/pull/123))
+
+- 🏗️ Build System
+
+  - bump cargo-coverage-gate and cargo-heather catalog pins ([#167](https://github.com/microsoft/ox-tools/pull/167))
+
+## [0.8.0] - 2026-09-04
+
+- ⚠️ Breaking
+
+  - identify the ADO stage on every job wrapper invocation ([#154](https://github.com/microsoft/ox-tools/pull/154))
+
+- ✨ Features
+
+  - replace legacy CI with aggregate gate ([#158](https://github.com/microsoft/ox-tools/pull/158))
+
+- 🐛 Bug Fixes
+
+  - let the container image resolve the declared MSRV ([#155](https://github.com/microsoft/ox-tools/pull/155))
+
 ## [0.7.0] - 2026-09-03
 
 - ✨ Features
