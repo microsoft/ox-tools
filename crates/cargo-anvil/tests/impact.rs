@@ -1016,12 +1016,16 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     }
     let tmp = workspace_at_base();
     let root = tmp.path();
-    // This tests a cache consumer, not cargo-delta. Model the downloaded
-    // artifact directly so impact production cannot fail before the MSRV assertions.
-    let affected = "--package alpha@0.1.0";
-    for (tier, include) in [("modified", "--skip"), ("affected", affected), ("required", "--workspace")] {
-        write(&root.join(format!("target/anvil/impact/include_{tier}.txt")), include);
+    // Stage a checked-in downloaded-cache fixture; this tests the consumer,
+    // not cargo-delta's impact production.
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/msrv-impact-cache");
+    let impact_dir = root.join("target/anvil/impact");
+    fs::create_dir_all(&impact_dir).unwrap();
+    for tier in ["modified", "affected", "required"] {
+        let file = format!("include_{tier}.txt");
+        fs::copy(fixture.join(&file), impact_dir.join(&file)).unwrap();
     }
+    let affected = "--package alpha@0.1.0";
 
     let bin = root.join(".fakebin");
     let log = root.join("cargo-argv.log");
