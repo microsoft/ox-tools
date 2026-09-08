@@ -279,18 +279,9 @@ fn refuses_two_regions_claiming_one_table() {
     );
 }
 
-/// A CRLF host keeps the bytes the user wrote. Two separate places used to
-/// break that: the gap check after the region recognised only `\n`, so a CRLF
-/// file gained a stray `\n`; and the residue's own terminator was trimmed and
-/// replaced with a literal `\n`, ending the relocated block in LF.
-///
-/// What this pins is that **the user's** line endings are not rewritten — the
-/// carried-over comment and the relocated `ignore` line are still CRLF in the
-/// output. The managed body between the sentinels is LF, and deliberately so:
-/// it is the template's own bytes, and `.anvil.lock` checksums normalize line
-/// endings precisely so a `core.autocrlf=true` checkout does not read as a user
-/// edit. Rendering the body per host would make the same region hash
-/// differently on different machines.
+/// A CRLF host stays CRLF throughout: carried-over user content, generated
+/// bodies, sentinels, and separator lines. The lock's normalized checksums
+/// still recognize the generated regions as in sync on the next run.
 ///
 /// Line endings are shown as markers because that is the whole subject here —
 /// a snapshot of the raw bytes would show two files that look identical.
@@ -302,6 +293,17 @@ fn preserves_a_crlf_host() {
 
     let rendered = report(before, &tmp, "deny.toml", &outcome);
     insta::assert_snapshot!("preserves_a_crlf_host", show_line_endings(&rendered));
+    let after = std::fs::read_to_string(tmp.path().join("deny.toml")).unwrap();
+    assert!(!after.replace("\r\n", "").contains('\n'), "the whole host must stay CRLF");
+
+    let repeated = run(&tmp);
+    assert!(repeated.plan.refusals().is_empty());
+    for item in repeated.plan.items() {
+        if matches!(&item.target, Target::Region { host, .. } if host == "deny.toml") {
+            assert_eq!(item.decision, cargo_anvil::test_support::Decision::InSync);
+        }
+    }
+    assert_eq!(std::fs::read_to_string(tmp.path().join("deny.toml")).unwrap(), after);
 }
 
 /// Make line endings visible so a CRLF/LF difference is reviewable rather than

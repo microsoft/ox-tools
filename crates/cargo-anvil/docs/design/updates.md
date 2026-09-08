@@ -224,7 +224,13 @@ clippy.pedantic = "warn"
 rust.missing_docs = "warn"
 ```
 
-Whitespace and comments inside the region are preserved verbatim by the rewrite.
+Inserted or rewritten regions use the host's first line ending (CRLF or LF) for
+their body, sentinels, and new separator lines. A host without any line breaks,
+including a new or empty file, defaults to LF. For mixed-ending hosts, the first
+line ending decides the generated style; existing user content is not normalized.
+The style is captured before TOML adoption, even if adoption removes the whole host.
+Other template whitespace and comments are preserved. Already-in-sync regions are
+not rewritten solely to change their line endings.
 Checksums (in `.anvil.lock`) are computed over the body bytes with line endings
 normalized to LF so a Git checkout setting `core.autocrlf=true` doesn't trigger
 spurious "user edited" detection. Trailing whitespace on individual lines and a

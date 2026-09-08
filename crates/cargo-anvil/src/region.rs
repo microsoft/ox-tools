@@ -178,9 +178,9 @@ pub fn find_region<'a>(text: &'a str, id: &str, syntax: CommentSyntax) -> Result
 /// Replace the body of region `id` in `text`, or append a new region if
 /// none exists.
 ///
-/// `new_body` is inserted between the sentinel lines verbatim, with a
-/// single newline between each sentinel and the body. If `new_body` does
-/// not end with `\n`, one is added before the closing sentinel.
+/// Generated content and separators use the host's first line ending, or LF
+/// when it has none. Other body bytes are preserved. An unterminated body
+/// receives a newline before the closing sentinel.
 ///
 /// # Errors
 ///
@@ -205,12 +205,24 @@ pub fn upsert_region_with_placement(
     syntax: CommentSyntax,
     placement: RegionPlacement,
 ) -> Result<String, AppError> {
-    let rendered = render_region(id, new_body, syntax);
+    upsert_region_with_newline(text, id, new_body, syntax, placement, text_newline(text))
+}
+
+/// Use the original host's line ending even when adoption removed all its text.
+pub(crate) fn upsert_region_with_newline(
+    text: &str,
+    id: &str,
+    new_body: &str,
+    syntax: CommentSyntax,
+    placement: RegionPlacement,
+    newline: &str,
+) -> Result<String, AppError> {
+    let rendered = render_region(id, new_body, syntax, newline);
 
     if let Some(region) = find_region(text, id, syntax)? {
         if placement == RegionPlacement::Start {
             let without_region = remove_region(text, id, syntax)?;
-            return Ok(prepend_region(&without_region, &rendered));
+            return Ok(prepend_region(&without_region, &rendered, newline));
         }
         let mut out = String::with_capacity(text.len() + rendered.len());
         out.push_str(&text[..region.start_line.start]);
@@ -220,7 +232,7 @@ pub fn upsert_region_with_placement(
     }
 
     if placement == RegionPlacement::Start {
-        return Ok(prepend_region(text, &rendered));
+        return Ok(prepend_region(text, &rendered, newline));
     }
 
     if let RegionPlacement::At(offset) = placement {
@@ -253,12 +265,10 @@ pub fn upsert_region_with_placement(
         let (before, after) = text.split_at(offset);
         let mut out = String::with_capacity(text.len() + rendered.len() + 2);
         out.push_str(before);
-        if !before.is_empty() && !before.ends_with("\n\n") {
-            out.push('\n');
-        }
+        separate_region(&mut out, newline);
         out.push_str(&rendered);
-        if !after.is_empty() && !after.starts_with('\n') {
-            out.push('\n');
+        if !after.is_empty() && leading_newline_len(after) == 0 {
+            out.push_str(newline);
         }
         out.push_str(after);
         return Ok(out);
@@ -268,46 +278,66 @@ pub fn upsert_region_with_placement(
     // if the file is non-empty and doesn't end in two newlines.
     let mut out = String::with_capacity(text.len() + rendered.len() + 1);
     out.push_str(text);
-    if !text.is_empty() {
-        if !text.ends_with('\n') {
-            out.push('\n');
-        }
-        if !text.ends_with("\n\n") && !text.is_empty() {
-            out.push('\n');
-        }
-    }
+    separate_region(&mut out, newline);
     out.push_str(&rendered);
     Ok(out)
 }
 
-fn prepend_region(text: &str, rendered: &str) -> String {
+fn prepend_region(text: &str, rendered: &str, newline: &str) -> String {
     let mut out = String::with_capacity(text.len() + rendered.len() + 1);
     out.push_str(rendered);
-    if !text.is_empty() && !text.starts_with('\n') {
-        out.push('\n');
+    if !text.is_empty() && leading_newline_len(text) == 0 {
+        out.push_str(newline);
     }
     out.push_str(text);
     out
 }
 
-/// Render an isolated region — sentinels plus body — without splicing it
-/// into a host.
-#[must_use]
-pub fn render_region(id: &str, body: &str, syntax: CommentSyntax) -> String {
+fn separate_region(out: &mut String, newline: &str) {
+    if !out.is_empty() {
+        if !out.ends_with('\n') {
+            out.push_str(newline);
+        }
+        if trailing_blank_line_len(out) == 0 {
+            out.push_str(newline);
+        }
+    }
+}
+
+fn leading_newline_len(text: &str) -> usize {
+    if text.starts_with("\r\n") {
+        2
+    } else {
+        usize::from(text.starts_with('\n'))
+    }
+}
+
+fn trailing_blank_line_len(text: &str) -> usize {
+    if text.ends_with("\n\r\n") {
+        2
+    } else {
+        usize::from(text.ends_with("\n\n"))
+    }
+}
+
+fn render_region(id: &str, body: &str, syntax: CommentSyntax, newline: &str) -> String {
     let prefix = syntax.prefix();
     let mut out = String::with_capacity(body.len() + 80);
     out.push_str(prefix);
     out.push_str(" >>> anvil-managed: ");
     out.push_str(id);
-    out.push('\n');
-    out.push_str(body);
-    if !body.is_empty() && !body.ends_with('\n') {
-        out.push('\n');
+    out.push_str(newline);
+    for line in body.split_inclusive('\n') {
+        let content = line
+            .strip_suffix('\n')
+            .map_or(line, |content| content.strip_suffix('\r').unwrap_or(content));
+        out.push_str(content);
+        out.push_str(newline);
     }
     out.push_str(prefix);
     out.push_str(" <<< anvil-managed: ");
     out.push_str(id);
-    out.push('\n');
+    out.push_str(newline);
     out
 }
 
@@ -336,17 +366,15 @@ pub fn remove_region(text: &str, id: &str, syntax: CommentSyntax) -> Result<Stri
     // "add one blank line of separation" when the region was first
     // inserted, and it preserves a single blank between user content
     // when the region sits in the middle of the file.
-    let trailing_blank = text[cut_end..].starts_with('\n');
-    if trailing_blank {
-        cut_end += 1;
+    let trailing_blank = leading_newline_len(&text[cut_end..]);
+    if trailing_blank > 0 {
+        cut_end += trailing_blank;
     } else {
         // Region sits at end-of-file: there's no trailing blank to
         // eat. Pull back the leading blank instead so the file doesn't
         // end with an orphan blank line where the region used to be.
         let prefix = &text[..cut_start];
-        if prefix.ends_with("\n\n") {
-            cut_start -= 1;
-        }
+        cut_start -= trailing_blank_line_len(prefix);
     }
 
     let mut out = String::with_capacity(text.len() - (cut_end - cut_start));
@@ -377,22 +405,23 @@ pub fn insert_after_region(text: &str, id: &str, extra: &str, syntax: CommentSyn
         return Err(app_err!("region '{id}' is missing from the host it was just spliced into"));
     };
     let at = region.end_line.end;
+    let newline = text_newline(text);
 
     let mut out = String::with_capacity(text.len() + extra.len() + 1);
     out.push_str(&text[..at]);
     if !text[..at].ends_with('\n') {
-        out.push('\n');
+        out.push_str(newline);
     }
     out.push_str(extra);
     if !extra.ends_with('\n') {
-        out.push('\n');
+        out.push_str(newline);
     }
     let rest = &text[at..];
     // The gap that followed the region is preserved, but a residue block that
     // already ends in a newline must not be run straight into the next line of
     // the file: that would attach the following header's comment to it.
-    if !rest.is_empty() && !rest.starts_with('\n') && !rest.starts_with("\r\n") {
-        out.push('\n');
+    if !rest.is_empty() && leading_newline_len(rest) == 0 {
+        out.push_str(newline);
     }
     out.push_str(rest);
     Ok(out)
@@ -541,7 +570,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 
     TomlAdoption::Adopted {
         text: out,
-        residue: tidy_residue(&residue),
+        residue: tidy_residue(&residue, text_newline(text)),
     }
 }
 
@@ -551,13 +580,18 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 /// Only the edges are touched: a blank line the user put *between* two of their
 /// own keys is theirs, and survives. The terminator restored is the one the
 /// residue itself was written with, so relocating a block out of a CRLF host
-/// does not leave it ending in a lone `\n`.
+/// does not leave it ending in a lone `\n`. A residue with no line break uses
+/// the original host's line ending.
 ///
 /// The trailing edge is trimmed of all whitespace, not just line breaks, so a
 /// last line that ended in spaces or tabs loses them rather than being
 /// re-emitted with trailing whitespace before the terminator this restores.
-fn tidy_residue(residue: &str) -> String {
-    let newline = residue_newline(residue);
+fn tidy_residue(residue: &str, host_newline: &str) -> String {
+    let newline = if residue.contains('\n') {
+        text_newline(residue)
+    } else {
+        host_newline
+    };
     let trimmed = trim_leading_blank_lines(residue).trim_end();
     if trimmed.is_empty() {
         String::new()
@@ -569,12 +603,8 @@ fn tidy_residue(residue: &str) -> String {
     }
 }
 
-/// The line ending `text` uses, read from its first line break.
-///
-/// The residue's own terminator is trimmed before the block is re-emitted, and
-/// a single-line residue keeps no other line break to copy — so the style has
-/// to be taken from the text as it arrived.
-fn residue_newline(text: &str) -> &'static str {
+/// The first line ending in `text`, or LF when there is no line break.
+pub(crate) fn text_newline(text: &str) -> &'static str {
     match text.find('\n') {
         Some(at) if text[..at].ends_with('\r') => "\r\n",
         _ => "\n",
@@ -1507,6 +1537,111 @@ mod tests {
         assert_eq!(new, "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
     }
 
+    #[test]
+    fn generated_regions_and_separators_match_host_line_endings() {
+        for newline in ["\n", "\r\n"] {
+            let region = format!("# >>> anvil-managed: x{newline}body{newline}next{newline}# <<< anvil-managed: x{newline}");
+            for body in ["body\nnext\n", "body\r\nnext\r\n", "body\r\nnext\n", "body\nnext"] {
+                for gap in ["", newline] {
+                    let before = format!("before{newline}{gap}");
+                    let after = format!("{gap}after{newline}");
+                    let appended = upsert_region(&before, "x", body, SYN).unwrap();
+                    assert_eq!(appended, format!("before{newline}{newline}{region}"));
+                    let prepended = upsert_region_with_placement(&after, "x", body, SYN, RegionPlacement::Start).unwrap();
+                    assert_eq!(prepended, format!("{region}{newline}after{newline}"));
+                    let host = format!("{before}{after}");
+                    let inserted = upsert_region_with_placement(&host, "x", body, SYN, RegionPlacement::At(before.len())).unwrap();
+                    assert_eq!(inserted, format!("before{newline}{newline}{region}{newline}after{newline}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_regions_default_to_lf_without_a_host_line_ending() {
+        for host in ["", "unterminated"] {
+            for placement in [RegionPlacement::Start, RegionPlacement::End, RegionPlacement::At(host.len())] {
+                let out = upsert_region_with_placement(host, "x", "body\r\n", SYN, placement).unwrap();
+                assert!(!out.contains('\r'));
+                assert!(out.contains("# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n"));
+                if !host.is_empty() {
+                    assert!(out.contains("unterminated\n\n") || out.ends_with("\n\nunterminated"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_host_uses_first_line_ending_without_normalizing_user_content() {
+        for (host, newline) in [("first\r\nsecond\n", "\r\n"), ("first\nsecond\r\n", "\n")] {
+            let out = upsert_region(host, "x", "body\n", SYN).unwrap();
+            assert_eq!(
+                out,
+                format!("{host}{newline}# >>> anvil-managed: x{newline}body{newline}# <<< anvil-managed: x{newline}")
+            );
+        }
+    }
+
+    #[test]
+    fn crlf_updates_and_start_repositioning_preserve_line_endings() {
+        let before = "before\r\n\r\n";
+        let old = "# >>> anvil-managed: x\r\nold\r\n# <<< anvil-managed: x\r\n";
+        let host = format!("{before}{old}");
+        for body in ["new\n", ""] {
+            let rendered = if body.is_empty() {
+                "# >>> anvil-managed: x\r\n# <<< anvil-managed: x\r\n"
+            } else {
+                "# >>> anvil-managed: x\r\nnew\r\n# <<< anvil-managed: x\r\n"
+            };
+            let updated = upsert_region(&host, "x", body, SYN).unwrap();
+            assert_eq!(updated, format!("{before}{rendered}"));
+            assert_eq!(upsert_region(&updated, "x", body, SYN).unwrap(), updated);
+            let moved = upsert_region_with_placement(&host, "x", body, SYN, RegionPlacement::Start).unwrap();
+            assert_eq!(moved, format!("{rendered}\r\nbefore\r\n"));
+            assert_eq!(
+                upsert_region_with_placement(&moved, "x", body, SYN, RegionPlacement::Start).unwrap(),
+                moved
+            );
+        }
+    }
+
+    #[test]
+    fn crlf_insertion_after_an_unterminated_line_adds_a_complete_separator() {
+        let host = "first\r\nlast";
+        for placement in [RegionPlacement::End, RegionPlacement::At(host.len())] {
+            let out = upsert_region_with_placement(host, "x", "body\n", SYN, placement).unwrap();
+            assert_eq!(
+                out,
+                "first\r\nlast\r\n\r\n# >>> anvil-managed: x\r\nbody\r\n# <<< anvil-managed: x\r\n"
+            );
+        }
+    }
+
+    #[test]
+    fn crlf_region_removal_consumes_a_complete_adjacent_blank_line() {
+        let region = "# >>> anvil-managed: x\r\nbody\r\n# <<< anvil-managed: x\r\n";
+        for (host, expected) in [
+            (format!("before\r\n\r\n{region}"), "before\r\n"),
+            (format!("before\r\n\r\n{region}\r\nafter\r\n"), "before\r\n\r\nafter\r\n"),
+        ] {
+            assert_eq!(remove_region(&host, "x", SYN).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn crlf_residue_insertion_supplies_matching_terminators_and_separator() {
+        let region = "# >>> anvil-managed: x\r\n[advisories]\r\n# <<< anvil-managed: x";
+        assert_eq!(
+            insert_after_region(region, "x", "ignore = []", SYN).unwrap(),
+            format!("{region}\r\nignore = []\r\n")
+        );
+        let host = format!("{region}\r\n[licenses]\r\n");
+        assert_eq!(
+            insert_after_region(&host, "x", "ignore = []", SYN).unwrap(),
+            format!("{region}\r\nignore = []\r\n\r\n[licenses]\r\n")
+        );
+    }
+
     /// `At` exists for hosts whose region order is semantic: a region added in a
     /// later release has to land at its declared position, not at end-of-file.
     /// The offset the caller computes points at the end of the preceding
@@ -1628,13 +1763,13 @@ mod tests {
 
     #[test]
     fn render_region_with_empty_body() {
-        let s = render_region("x", "", SYN);
+        let s = render_region("x", "", SYN, "\n");
         assert_eq!(s, "# >>> anvil-managed: x\n# <<< anvil-managed: x\n");
     }
 
     #[test]
     fn render_region_adds_trailing_newline() {
-        let s = render_region("x", "body", SYN);
+        let s = render_region("x", "body", SYN, "\n");
         assert_eq!(s, "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
     }
 
@@ -1831,12 +1966,12 @@ mod tests {
     #[test]
     fn relocated_residue_keeps_the_line_ending_it_was_written_with() {
         assert_eq!(
-            tidy_residue("\r\n\r\nignore = []\r\nyanked = \"warn\"\r\n"),
+            tidy_residue("\r\n\r\nignore = []\r\nyanked = \"warn\"\r\n", "\n"),
             "ignore = []\r\nyanked = \"warn\"\r\n",
             "a CRLF residue stays CRLF to its last line"
         );
         assert_eq!(
-            tidy_residue("\n\nignore = []\nyanked = \"warn\"\n"),
+            tidy_residue("\n\nignore = []\nyanked = \"warn\"\n", "\r\n"),
             "ignore = []\nyanked = \"warn\"\n",
             "an LF residue is unaffected"
         );
@@ -1847,14 +1982,15 @@ mod tests {
     /// residue as it arrived rather than from what survives trimming.
     #[test]
     fn a_single_line_crlf_residue_keeps_its_terminator() {
-        assert_eq!(tidy_residue("\r\nignore = []\r\n"), "ignore = []\r\n");
+        assert_eq!(tidy_residue("\r\nignore = []\r\n", "\n"), "ignore = []\r\n");
     }
 
-    /// A residue with no line ending at all — the host's last line, unterminated
-    /// — gets the plain `\n` the file would have used.
+    /// A residue with no line ending needs a terminator matching the host.
     #[test]
-    fn an_unterminated_residue_is_given_a_plain_newline() {
-        assert_eq!(tidy_residue("ignore = []"), "ignore = []\n");
+    fn an_unterminated_residue_uses_the_host_line_ending() {
+        for newline in ["\n", "\r\n"] {
+            assert_eq!(tidy_residue("ignore = []", newline), format!("ignore = []{newline}"));
+        }
     }
 
     /// A dotted key is configuration like any other. Not descending into it

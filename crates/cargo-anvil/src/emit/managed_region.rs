@@ -27,7 +27,7 @@ use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
 use crate::region::{
     CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, declared_tables, find_region, insert_after_region,
-    managed_region_ids, mask_other_managed_regions, mask_retiring_managed_regions, upsert_region_with_placement,
+    managed_region_ids, mask_other_managed_regions, mask_retiring_managed_regions, text_newline, upsert_region_with_newline,
 };
 
 /// Inputs that identify and render one managed region.
@@ -37,7 +37,7 @@ pub struct ManagedRegionRequest<'a> {
     pub host_relpath: &'a str,
     /// Stable identifier written into the region sentinels.
     pub region_id: &'a str,
-    /// Byte-exact content rendered between the sentinels.
+    /// Template content rendered between the sentinels using the host's line endings.
     pub rendered_body: &'a str,
     /// Comment flavor used by the host file.
     pub syntax: CommentSyntax,
@@ -266,6 +266,7 @@ fn splice(
     placement: RegionPlacement,
 ) -> Result<String, AppError> {
     let base = host_text.unwrap_or("");
+    let newline = text_newline(base);
 
     // Writing a region into a TOML host: adopt any hand-written copy of the
     // tables the body declares, rather than appending a duplicate that TOML
@@ -323,7 +324,7 @@ fn splice(
         base
     };
 
-    let spliced = upsert_region_with_placement(base, region_id, rendered_body, syntax, placement)?;
+    let spliced = upsert_region_with_newline(base, region_id, rendered_body, syntax, placement, newline)?;
     insert_after_region(&spliced, region_id, &residue, syntax)
 }
 
@@ -604,6 +605,68 @@ yanked = \"deny\"
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.starts_with("user content\n"));
         assert!(spliced.contains("# >>> anvil-managed: r"));
+    }
+
+    #[test]
+    fn adoption_keeps_the_original_line_ending_when_it_removes_the_whole_host() {
+        for newline in ["\n", "\r\n"] {
+            for residue in ["", "ignore = []"] {
+                let host = format!("[advisories]{newline}yanked = \"deny\"{newline}{residue}{newline}");
+                let body = "[advisories]\nyanked = \"deny\"\n";
+                let item = plan_managed_region(&Manifest::default(), Some(&host), request("deny.toml", "r", body)).unwrap();
+                let spliced = item.spliced_host.as_deref().unwrap();
+                let expected = format!(
+                    "# >>> anvil-managed: r{newline}[advisories]{newline}yanked = \"deny\"{newline}# <<< anvil-managed: r{newline}"
+                );
+                let expected = if residue.is_empty() {
+                    expected
+                } else {
+                    format!("{expected}{residue}{newline}")
+                };
+                assert_eq!(spliced, expected);
+                let document = spliced.parse::<DocumentMut>().unwrap();
+                assert_eq!(document["advisories"]["yanked"].as_str(), Some("deny"));
+                if !residue.is_empty() {
+                    assert!(document["advisories"]["ignore"].is_array());
+                }
+
+                let mut manifest = Manifest::default();
+                manifest.set_region("deny.toml", "r", checksum_str(body));
+                let repeated = plan_managed_region(&manifest, Some(spliced), request("deny.toml", "r", body)).unwrap();
+                assert_eq!(repeated.decision, Decision::InSync);
+            }
+        }
+    }
+
+    #[test]
+    fn crlf_region_updates_and_proposals_keep_normalized_checksum_decisions() {
+        let old_body = "old\n";
+        let host = "# user\r\n\r\n# >>> anvil-managed: r\r\nold\r\n# <<< anvil-managed: r\r\n";
+        for (last_body, decision) in [(old_body, Decision::Write), ("original\n", Decision::Propose)] {
+            let mut manifest = Manifest::default();
+            manifest.set_region("Justfile", "r", checksum_str(last_body));
+            let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new\n")).unwrap();
+            assert_eq!(item.decision, decision);
+            assert_eq!(
+                item.spliced_host.as_deref().unwrap(),
+                "# user\r\n\r\n# >>> anvil-managed: r\r\nnew\r\n# <<< anvil-managed: r\r\n"
+            );
+        }
+    }
+
+    #[test]
+    fn adopting_an_unterminated_crlf_host_keeps_the_relocated_entry_crlf() {
+        let host = "[advisories]\r\nignore = []";
+        let item = plan_managed_region(
+            &Manifest::default(),
+            Some(host),
+            request("deny.toml", "r", "[advisories]\nyanked = \"deny\"\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            item.spliced_host.as_deref().unwrap(),
+            "# >>> anvil-managed: r\r\n[advisories]\r\nyanked = \"deny\"\r\n# <<< anvil-managed: r\r\nignore = []\r\n"
+        );
     }
 
     /// A member manifest that already declares `[lints] workspace = true` by
