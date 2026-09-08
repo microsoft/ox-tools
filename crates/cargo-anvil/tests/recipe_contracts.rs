@@ -595,18 +595,17 @@ fn the_container_build_does_not_require_a_root_toolchain_file() {
     );
 }
 
-/// The image builds against a context that carries the root manifest and none
-/// of the members it names, and it runs `just anvil-setup binstall` there.
-/// Workspace MSRV validation resolves every member through `cargo metadata`, so
-/// it has to stay outside that graph: it hangs off
-/// `anvil-tool-rustc-validate-prereqs`, and no `-setup` recipe depends on a
-/// `-validate-prereqs` recipe.
+/// `anvil-setup` must not reach workspace MSRV validation: the image runs it
+/// against a context carrying the root manifest and none of the members that
+/// validation resolves through `cargo metadata`. The fixture here is an
+/// ordinary workspace, because what is under test is the recipe graph rather
+/// than the container's filesystem.
 ///
-/// Nothing else declares this. A dependency edge added later, or a recipe body
-/// that shells out to one, would surface as a cargo path error inside an image
+/// Nothing else declares this. An edge added later, or a recipe body that
+/// shells out to one, would surface as a cargo path error inside an image
 /// build, naming a manifest instead of the edge that reached it. The whole
-/// emitted tree is planned rather than a fixture subset, because the edge could
-/// be added in any tier, group or check file.
+/// emitted tree is planned, because the edge could be added in any tier, group
+/// or check file.
 #[test]
 fn setup_never_reaches_workspace_msrv_validation() {
     if !tools_available() {
