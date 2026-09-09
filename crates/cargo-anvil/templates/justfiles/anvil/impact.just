@@ -357,7 +357,7 @@ anvil-impact: _anvil-impact-snapshot
         $missing = @('modified', 'affected', 'required') |
             Where-Object { -not (Test-Path -LiteralPath (Join-Path $inputDir "include_$_.txt") -PathType Leaf) }
         if ($missing.Count -gt 0) {
-            Write-Error "anvil-impact: ANVIL_IMPACT=consume but the input impact cache is missing ($($missing -join ', ') include file(s) absent under $inputDir). Supply a complete impact cache before scoped checks run."
+            Write-Error "anvil-impact: ANVIL_IMPACT=consume but the input impact cache is missing ($($missing -join ', ') include file(s) absent under $inputDir). A complete cache holds include_modified.txt, include_affected.txt and include_required.txt. The read directory is ANVIL_IMPACT_INPUT_DIR when set, otherwise target/anvil/impact -- check that variable if the path above is not where you expected. Supply a complete impact cache before scoped checks run."
             exit 1
         }
         exit 0
@@ -630,7 +630,7 @@ _anvil-impact-include tier:
     if (Test-Path -LiteralPath $file -PathType Leaf) {
         Write-Output ("$(Get-Content -Raw -LiteralPath $file)".Trim())
     } elseif ($env:ANVIL_IMPACT -eq 'consume') {
-        Write-Error "anvil-impact: ANVIL_IMPACT=consume but the input impact cache is missing ($file). Supply a complete impact cache before scoped checks run."
+        Write-Error "anvil-impact: ANVIL_IMPACT=consume but the input impact cache is missing ($file). A complete cache holds include_modified.txt, include_affected.txt and include_required.txt. The read directory is ANVIL_IMPACT_INPUT_DIR when set, otherwise target/anvil/impact -- check that variable if the path above is not where you expected. Supply a complete impact cache before scoped checks run."
         exit 1
     } else {
         Write-Output $default

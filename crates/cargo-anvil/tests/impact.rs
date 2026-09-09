@@ -1341,6 +1341,16 @@ fn consume_without_downloaded_cache_fails_loudly() {
             combined.contains("missing input [cache]"),
             "the diagnostic must identify the selected input:\n{combined}"
         );
+        // The remediation must name the variable that redirected the read and
+        // the files a complete cache holds -- an operator who set the override
+        // by accident cannot otherwise tell why the path is unexpected.
+        assert!(
+            combined.contains("ANVIL_IMPACT_INPUT_DIR")
+                && combined.contains("include_modified.txt")
+                && combined.contains("include_affected.txt")
+                && combined.contains("include_required.txt"),
+            "the diagnostic must name the override variable and the required include files:\n{combined}"
+        );
     }
 
     // A partially downloaded cache -- one tier's include file missing -- must
