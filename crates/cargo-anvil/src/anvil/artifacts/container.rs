@@ -859,8 +859,15 @@ mod tests {
             "ANVIL_IMPACT_INPUT_DIR must not be forwarded: it is a host path"
         );
         assert!(
-            RECIPE.contains("Env:ANVIL_IMPACT_INPUT_DIR") && RECIPE.contains("containerized checks cannot honor it"),
+            RECIPE.contains("Env:ANVIL_IMPACT_INPUT_DIR") && RECIPE.contains("containerized checks cannot honor the override"),
             "a containerized run with ANVIL_IMPACT_INPUT_DIR set must be rejected, not silently fall back"
+        );
+        // ...but only under consume, the one mode that reads it. With impact off
+        // or unset the override is ignored, so a container cannot diverge and
+        // rejecting would block a run that is perfectly well defined.
+        assert!(
+            RECIPE.contains("$env:ANVIL_IMPACT -eq 'consume' -and (Test-Path -LiteralPath 'Env:ANVIL_IMPACT_INPUT_DIR')"),
+            "the rejection must be gated on consume mode"
         );
         // Nothing reads these; forwarding them only implied a contract that
         // does not exist. See justfile.rs, which asserts they stay removed.

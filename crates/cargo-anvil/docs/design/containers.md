@@ -428,9 +428,11 @@ stays unset rather than arriving empty.
 directory, and `-e NAME` passes the host value unchanged, so a path outside the bind mount would not resolve inside the
 container. Dropping it silently would be worse than useless: the containerized check would fall back to
 `target/anvil/impact` and could scope off a different package list than the native run while still reporting green.
-The boundary therefore rejects the combination — a containerized run with `ANVIL_IMPACT_INPUT_DIR` set fails with an
-explicit error telling the operator to unset it or run the check natively. An explicit input that cannot be honored
-fails; it never falls back.
+The boundary therefore rejects the combination — a containerized run with `ANVIL_IMPACT=consume` **and**
+`ANVIL_IMPACT_INPUT_DIR` set fails with an explicit error telling the operator to unset it or run the check natively.
+The rejection is gated on consume because that is the only mode that reads the override; with impact off or unset the
+variable is ignored, so a container cannot diverge and there is nothing to reject. An explicit input that cannot be
+honored fails; it never falls back.
 
 A resolved token is set on the driver process, passed by name, and unset after the run, so it never reaches a host
 command line. Inside the container it is readable by everything the run executes, including build scripts and proc
