@@ -2099,6 +2099,38 @@ mod tests {
         );
     }
 
+    /// A root-scope body has no header to compare, so its adoption reads the
+    /// whole host as one table. A host that does not parse cannot be read that
+    /// way, and rewriting it from a partial understanding would delete
+    /// assignments this never saw. The headed path already refuses such a host;
+    /// the root path has to refuse it for the same reason.
+    #[test]
+    fn an_unparsable_host_is_left_alone_by_root_adoption() {
+        let adoption = adopt_unmanaged_toml_tables("edition = = \"2024\"\n", "edition = \"2024\"\n", SYN);
+
+        assert_eq!(adoption, TomlAdoption::Unchanged, "an unreadable host must not be rewritten");
+    }
+
+    /// Datetimes are ordinary TOML values and have to compare like the rest. A
+    /// canonical form that did not cover them would make two different
+    /// timestamps look equal, and the hand-written one would be deleted in
+    /// favour of the managed one instead of being reported.
+    #[test]
+    fn a_differing_root_datetime_is_reported_as_a_conflict() {
+        let adoption = adopt_unmanaged_toml_tables("stamp = 1979-05-27T07:32:00Z\n", "stamp = 2001-01-01T00:00:00Z\n", SYN);
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Conflict {
+                table: "<root>".to_owned(),
+                key: "stamp".to_owned(),
+                managed: "2001-01-01T00:00:00Z".to_owned(),
+                hand_written: "1979-05-27T07:32:00Z".to_owned(),
+            },
+            "the datetimes are compared by value rather than collapsing to one form"
+        );
+    }
+
     /// `[workspace.package]` declares table `package`, not a key of
     /// `[workspace]`. Folding its values into the parent's would make the
     /// managed table look as though it already declared `package.edition`, and

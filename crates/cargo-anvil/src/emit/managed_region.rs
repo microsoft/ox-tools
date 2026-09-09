@@ -304,6 +304,22 @@ mod tests {
         );
     }
 
+    /// A region whose own markers cannot be read is diagnosed by the planner,
+    /// which names the malformed marker. Answering here as well would report
+    /// the same file twice, and the second report would blame TOML for what is
+    /// really a broken sentinel.
+    #[test]
+    fn a_malformed_marker_is_left_to_the_planner() {
+        let host = "# >>> anvil-managed: r\n[licenses]\nallow = [\"MIT\"]\n";
+        let body = "[licenses]\nconfidence-threshold = 0.9\n";
+
+        assert_eq!(
+            refusal(Some(host), request("deny.toml", "r", body)),
+            None,
+            "an unreadable region is the planner's diagnosis, not this one's"
+        );
+    }
+
     /// A dotted assignment declares its table just as a header does, so a
     /// sibling writing `[a]` beside a region writing `a.b = 1` is the same
     /// collision. Nothing enumerates table *headers* any more — the parser is

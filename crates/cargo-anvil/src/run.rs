@@ -1004,6 +1004,49 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    /// A composed host is only valid in one arrangement, so anvil classifies it
+    /// before writing. A region whose markers cannot be read is its own
+    /// diagnosis: folding it in with "absent" would report a broken region as a
+    /// missing one and send the reader looking for content that is in fact
+    /// right there, under a mismatched marker.
+    #[test]
+    fn a_malformed_sentinel_makes_a_composed_host_unsafe() {
+        let text = "# syntax=docker/dockerfile:1\n# >>> anvil-managed: base\nFROM scratch\n";
+
+        let state = composed_host_state(&["base", "layers"], "Dockerfile", text, &Manifest::default());
+
+        let ComposedHostState::Unsafe(reason) = state else {
+            panic!("a region that cannot be read must not be treated as absent");
+        };
+        assert!(
+            reason.contains("its 'base' region cannot be read"),
+            "the diagnosis must name the region carrying the broken marker: {reason}"
+        );
+    }
+
+    /// The delta config's body depends on what the host already declares, which
+    /// means reading the host with its region removed. Markers that cannot be
+    /// read make that impossible, and guessing "no repository key" from a file
+    /// this could not parse would overwrite the repository's own settings.
+    #[test]
+    fn malformed_delta_markers_are_reported_rather_than_guessed() {
+        let spec = RegionSpec {
+            host: HostSelector::Path(".delta.toml".to_owned()),
+            id: crate::catalog::artifact::RegionId::new(DELTA_REGION_ID),
+            body: String::new(),
+            syntax: CommentSyntax::Hash,
+        };
+        let host = format!("# >>> anvil-managed: {DELTA_REGION_ID}\n[delta]\nroot-files = []\n");
+
+        let DeltaRegionBody::Malformed(reason) = delta_region_body(Some(&host), &spec) else {
+            panic!("an unreadable host must not be silently treated as managed");
+        };
+        assert!(
+            reason.contains("managed-region markers are malformed"),
+            "the reason must say the markers are at fault, not the TOML: {reason}"
+        );
+    }
+
     /// The refusal diagnostic joins a reason to a fixed remedy, and the two
     /// classes of reason punctuate themselves differently: adoption writes
     /// whole sentences, while the parser backstop appends `toml_edit`'s error

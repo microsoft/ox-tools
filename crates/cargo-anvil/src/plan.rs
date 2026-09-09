@@ -583,6 +583,31 @@ mod tests {
 
     use super::*;
 
+    /// Only owned files propose: a managed region's proposal would be a sidecar
+    /// nobody can apply, because moving it over the host would replace the
+    /// repository's own content around the region as well. The arm that says so
+    /// is a real invariant, and a test that fires it is what keeps it from
+    /// being quietly relaxed into a silent no-op.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    #[should_panic(expected = "only owned files can propose")]
+    fn a_region_that_proposes_is_refused_rather_than_written() {
+        let tmp = TempDir::new().unwrap();
+        let mut plan = Plan::default();
+        plan.push(PlanItem {
+            target: Target::Region {
+                host: "deny.toml".to_owned(),
+                id: "anvil-deny-advisories".to_owned(),
+            },
+            decision: Decision::Propose,
+            rendered: Some("[advisories]\n".to_owned()),
+            spliced_host: None,
+            rendered_checksum: None,
+        });
+
+        drop(plan.apply_files(tmp.path()));
+    }
+
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn an_existing_temporary_sibling_is_cleared_and_the_write_proceeds() {
