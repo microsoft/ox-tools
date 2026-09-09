@@ -200,6 +200,15 @@ The manifest is deleted once the setup has read it, so it is in the build contex
 keeps the tag honest: it hashes the declared MSRV rather than the file, so a dependency edit computes the same tag,
 and nothing is left behind for that tag to misdescribe.
 
+**The image names its default toolchain.** `rustup` is initialized with `--default-toolchain none`, and rustup then
+sets the default as a side effect of the first `rustup toolchain install` that finds none set. That is the MSRV today,
+but only because of the order `anvil-setup` reaches the install recipes in. A checkout with a root toolchain file never
+notices, because the file overrides the default; a checkout without one has nothing else to select a compiler, so plain
+`cargo` inside the container would follow whichever toolchain the setup graph installed first. The setup region
+therefore runs `rustup default` on the declared MSRV, read from the manifest before it is deleted, so an arbitrary
+Rust command in the container uses the compiler the repository declared. A repository declaring no MSRV is left alone;
+the setup installs no stable toolchain for it either.
+
 The setup region copies the context whole rather than naming each input, because one input is optional. A repository
 that pins its compiler by other means owns no root toolchain file, and a `COPY` of a path that may not exist is not
 portable across the engines anvil supports, so naming the file would leave exactly those repositories unable to build

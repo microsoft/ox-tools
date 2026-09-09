@@ -1149,6 +1149,34 @@ fn the_container_build_does_not_require_a_root_toolchain_file() {
     );
 }
 
+/// A repository with no root toolchain file has nothing but the image's own
+/// default to select a compiler, and `rustup-init` ran with
+/// `--default-toolchain none`. Rustup does set the default from the first
+/// install that finds none set, so this holds today by accident of the order
+/// `anvil-setup` reaches the install recipes in; a reordering that installed a
+/// nightly first would silently make it the compiler `cargo` runs in the
+/// container.
+#[test]
+fn the_image_names_its_default_toolchain() {
+    assert!(
+        CONTAINER_SETUP_REGION.contains("rustup default"),
+        "the setup region must name the image's default toolchain rather than inherit whichever \
+         one the setup graph installed first"
+    );
+    assert!(
+        CONTAINER_SETUP_REGION.contains("_anvil-resolve-stable root-msrv"),
+        "the default must be the declared MSRV, the version the setup installs for a repository \
+         that pins nothing"
+    );
+    let default_at = CONTAINER_SETUP_REGION.find("rustup default").unwrap();
+    let removal_at = CONTAINER_SETUP_REGION.find("rm -f Cargo.toml").unwrap();
+    assert!(
+        default_at < removal_at,
+        "the MSRV is read from the root manifest, so the default must be set before the setup \
+         deletes it"
+    );
+}
+
 /// `anvil-setup` must not reach workspace MSRV validation: the image runs it
 /// against a context carrying the root manifest and none of the members that
 /// validation resolves through `cargo metadata`. The fixture here is an
