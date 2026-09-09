@@ -348,8 +348,10 @@ just anvil-container cargo build
 ```
 
 The image contains the same tool versions used by the generated checks.
-Its tag is derived from the Dockerfile, toolchain, and generated recipe
-tree, so changes to those inputs select a different image. Docker is
+Its tag is derived from the Dockerfile and its ignore file, the generated
+recipe tree, the declared root MSRV, and a root `rust-toolchain` file where
+the repository owns one, so changes to those inputs select a different
+image. Docker is
 supported; Podman is available on a best-effort basis. Repositories that
 need private feeds can add a host-side credential hook without embedding
 credentials in the image or command line. See
@@ -398,7 +400,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb_Wi2RvJKqLgb6U0-tQFqaYMbiv-kD9siQ44bVYhqNqZVUZBhZIGDa2NhcmdvLWFudmlsZTAuOS4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbBALu36V1VAYbFUDdfp-8dCobobFjKbRep8AbYNMPgi_aMhFhZIGDa2NhcmdvLWFudmlsZTAuOS4wa2NhcmdvX2Fudmls
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://embarkstudios.github.io/cargo-deny/
