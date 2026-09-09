@@ -187,10 +187,22 @@ anvil-container-tag:
     # A repository may pin its compiler by other means and own neither
     # spelling, so absence is legal here. Both are checked because the context
     # admits both.
-    $toolchainFiles = @(
-        @('rust-toolchain.toml', 'rust-toolchain') |
-            Where-Object { Test-Path -LiteralPath (Join-Path $repoRoot $_) -PathType Leaf }
-    )
+    #
+    # A directory at either path is refused rather than skipped. The ignore
+    # file re-includes it, so `COPY . ./` copies its whole subtree into the
+    # image, while the digest walks only `.anvil/container/` and
+    # `justfiles/anvil/` -- two images differing anywhere under it would share
+    # a tag.
+    $toolchainFiles = @()
+    foreach ($spelling in @('rust-toolchain.toml', 'rust-toolchain')) {
+        $candidate = Join-Path $repoRoot $spelling
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            Write-Error "anvil: '$spelling' must be a regular file, but this repository has a directory there. The build context admits it and the image copies it whole, while the tag hashes nothing inside it, so the image would not match its own reference."
+            exit 1
+        }
+        $toolchainFiles += $spelling
+    }
     $inputs += $toolchainFiles
 
     $links = @()

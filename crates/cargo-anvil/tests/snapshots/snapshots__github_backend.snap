@@ -107,8 +107,9 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # `versions.just`. `/opt/anvil` is the root the recipes already resolve against,
 # so the resolver reads it there with no container-specific path. The workspace
 # members it names are not admitted and are not needed: the one path that reads
-# them is workspace MSRV validation, which hangs off the `-validate-prereqs`
-# recipes, and `anvil-setup` depends on none of them.
+# them is workspace MSRV validation, which only
+# `anvil-tool-rustc-validate-prereqs` invokes, and nothing `anvil-setup`
+# reaches depends on it.
 #
 # It is deleted once the setup has read it, so it does not survive into the
 # finished image. The tag hashes the declared MSRV rather than the file, so an
@@ -4601,10 +4602,22 @@ anvil-container-tag:
     # A repository may pin its compiler by other means and own neither
     # spelling, so absence is legal here. Both are checked because the context
     # admits both.
-    $toolchainFiles = @(
-        @('rust-toolchain.toml', 'rust-toolchain') |
-            Where-Object { Test-Path -LiteralPath (Join-Path $repoRoot $_) -PathType Leaf }
-    )
+    #
+    # A directory at either path is refused rather than skipped. The ignore
+    # file re-includes it, so `COPY . ./` copies its whole subtree into the
+    # image, while the digest walks only `.anvil/container/` and
+    # `justfiles/anvil/` -- two images differing anywhere under it would share
+    # a tag.
+    $toolchainFiles = @()
+    foreach ($spelling in @('rust-toolchain.toml', 'rust-toolchain')) {
+        $candidate = Join-Path $repoRoot $spelling
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            Write-Error "anvil: '$spelling' must be a regular file, but this repository has a directory there. The build context admits it and the image copies it whole, while the tag hashes nothing inside it, so the image would not match its own reference."
+            exit 1
+        }
+        $toolchainFiles += $spelling
+    }
     $inputs += $toolchainFiles
 
     $links = @()

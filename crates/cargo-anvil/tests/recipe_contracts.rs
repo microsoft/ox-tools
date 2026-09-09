@@ -1159,7 +1159,9 @@ fn the_container_build_does_not_require_a_root_toolchain_file() {
 /// shells out to one, would surface as a cargo path error inside an image
 /// build, naming a manifest instead of the edge that reached it. The whole
 /// emitted tree is planned, because the edge could be added in any tier, group
-/// or check file.
+/// or check file. `anvil-setup` does reach `anvil-tool-pwsh-validate-prereqs`,
+/// so the assertion is about the one validator that resolves members, not about
+/// the family.
 #[test]
 fn setup_never_reaches_workspace_msrv_validation() {
     if !tools_available() {
@@ -2949,6 +2951,36 @@ fn the_image_tag_treats_a_root_toolchain_file_as_optional() {
     let extensionless = tag();
     assert_ne!(none, extensionless, "the extensionless spelling is an image input too");
     assert_ne!(toml, extensionless, "the same bytes under the other spelling are a different input");
+}
+
+/// The ignore file re-includes either toolchain path, so a directory at one is
+/// copied into the image whole, while the digest walks only `.anvil/container/`
+/// and `justfiles/anvil/` and hashes nothing inside it. Discovery skips a
+/// non-leaf, which would leave two images differing anywhere under that
+/// directory sharing one tag, and the link guard does not fire because a plain
+/// directory is not a reparse point.
+#[test]
+fn a_directory_at_a_toolchain_path_is_refused() {
+    if !tools_available() {
+        return;
+    }
+    for spelling in ["rust-toolchain", "rust-toolchain.toml"] {
+        let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+        let root = tmp.path();
+        write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+        write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
+        write(&root.join("justfiles/anvil/mod.just"), "# recipes\n");
+        stub_msrv_resolver(root);
+        write(&root.join(spelling).join("payload.txt"), "A\n");
+
+        let output = run_just(root, &["anvil-container-tag"], &[]);
+        assert_failed(&output, &format!("computing a tag with a directory at {spelling}"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(spelling) && stderr.contains("regular file"),
+            "the refusal must name the path and what it must be\nstderr:\n{stderr}"
+        );
+    }
 }
 
 /// The tag is computed from the index while the build copies the working tree,

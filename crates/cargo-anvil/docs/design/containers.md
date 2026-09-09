@@ -134,7 +134,7 @@ never read, rewritten or reordered.
 | `anvil-container-base-image` | `ARG BASE_IMAGE`, pinned to a digest. | A second `ARG BASE_IMAGE=…` to build on a different base. |
 | `anvil-container-base` | `FROM`, the version pins for `pwsh`, `just`, `rustup` and `cargo-binstall`, and the `ENV` block. | Anything the first network access needs: a root CA, `http_proxy`, an internal package mirror. |
 | `anvil-container-tools` | System packages and those four tools. | Libraries a catalog tool needs to compile, for tools `binstall` has no prebuilt binary for. |
-| `anvil-container-setup` | `COPY` of the recipe tree and the root manifest, then `just anvil-setup`. | Anything the repository's own checks need at run time. |
+| `anvil-container-setup` | `COPY` of the scoped build context, then `just anvil-setup`. | Anything the repository's own checks need at run time. |
 | `anvil-container-entry` | `ANVIL_IN_CONTAINER`, `WORKDIR`, `CMD`. | — |
 
 Each gap sits at the only point in the build where its kind of addition works: a certificate has to land before the
@@ -192,8 +192,8 @@ and copied to `/opt/anvil`, the root the recipes already resolve against, so the
 container-specific path in it.
 
 The workspace members it names are not admitted: they are a checkout, and the image is not one. The one path that
-would need them is workspace MSRV validation, which the image never reaches: it hangs off
-`anvil-tool-rustc-validate-prereqs`, and no `-setup` recipe depends on a `-validate-prereqs` recipe. Inside a running
+would need them is workspace MSRV validation, which the image never reaches: `anvil-tool-rustc-validate-prereqs` is its
+only caller, and nothing `anvil-setup` reaches depends on that recipe. Inside a running
 container that validation does execute, against `/workspace` — a real checkout, with its members.
 
 The manifest is deleted once the setup has read it, so it is in the build context but not in the finished image. That
@@ -650,7 +650,9 @@ second tool list the design exists to avoid, and is almost never right.
 **A replacement must keep the ignore file in step.** The setup region `COPY`s the context whole, so the ignore file is
 what decides the image's contents. A region that needs anything outside `justfiles/anvil/`, `.anvil/container/`, a root
 toolchain file and the root `Cargo.toml` must also replace `artifacts::container::dockerignore()` (§3), or the added
-paths never reach the build context.
+paths never reach the build context. Widening it also moves content into the image that the digest does not hash: the
+walk covers `.anvil/container/` and `justfiles/anvil/` and nothing else, so a newly admitted tree has to be brought
+under one of them, or the tag stops covering what the image contains.
 
 **Anything extra it copies is digested, provided it lives under `.anvil/container/`.** The hashed set is that whole
 directory (§4.1), so an installer script, a config file or a certificate placed beside the Dockerfile is an input:
@@ -661,10 +663,11 @@ manual `ANVIL_CONTAINER_NO_CACHE=1`.
 `justfiles/anvil/` must contain `.just` recipes and nothing else, which `CatalogBuilder::build` enforces for
 catalog-owned files. The reason is legibility rather than identity: the directory is the recipe tree, `just` parses
 every file the image copies, and a catalog that hides an installer script there makes the tool set harder to reason
-about than one that keeps it in `.anvil/`. Identity is safe either way, because the digest covers every file the build
-context admits and the image keeps (§4.1), not only the recipes — a repository that adds a non-recipe file by hand
+about than one that keeps it in `.anvil/`. Identity is safe either way, because the digest walks that whole directory
+rather than only its recipes (§4.1) — a repository that adds a non-recipe file by hand
 still renames the tag when it edits it. The root `Cargo.toml` is the one admitted file the digest does not cover as
-bytes, and it is also the one the setup deletes once read, so it is in no image for the tag to misdescribe.
+bytes, and it is also the one the setup deletes once read, so it is in no image for the tag to misdescribe. Both
+statements describe the ignore file anvil ships; a replacement that admits another tree carries the obligation above.
 
 A fork inherits everything else: the recipes, the identity scheme, the cache volumes, the mounts, and the re-entry
 guard. A different base OS with a different toolchain source is two region replacements plus one hook.

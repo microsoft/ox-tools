@@ -105,8 +105,9 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # `versions.just`. `/opt/anvil` is the root the recipes already resolve against,
 # so the resolver reads it there with no container-specific path. The workspace
 # members it names are not admitted and are not needed: the one path that reads
-# them is workspace MSRV validation, which hangs off the `-validate-prereqs`
-# recipes, and `anvil-setup` depends on none of them.
+# them is workspace MSRV validation, which only
+# `anvil-tool-rustc-validate-prereqs` invokes, and nothing `anvil-setup`
+# reaches depends on it.
 #
 # It is deleted once the setup has read it, so it does not survive into the
 # finished image. The tag hashes the declared MSRV rather than the file, so an
