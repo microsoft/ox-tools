@@ -43,7 +43,7 @@ pub enum CommentSyntax {
 /// Where a newly rendered managed region is placed in its host file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionPlacement {
-    /// Place the region before user content.
+    /// Place the region after leading header comments, before user settings.
     Start,
     /// Place the region after user content.
     End,
@@ -260,7 +260,7 @@ pub(crate) fn upsert_region_with_newline(
     if let Some(region) = find_region(text, id, syntax)? {
         if placement == RegionPlacement::Start {
             let without_region = remove_region(text, id, syntax)?;
-            return Ok(prepend_region(&without_region, &rendered, newline));
+            return Ok(prepend_region(&without_region, &rendered, syntax, newline));
         }
         let mut out = String::with_capacity(text.len() + rendered.len());
         out.push_str(&text[..region.start_line.start]);
@@ -270,7 +270,7 @@ pub(crate) fn upsert_region_with_newline(
     }
 
     if placement == RegionPlacement::Start {
-        return Ok(prepend_region(text, &rendered, newline));
+        return Ok(prepend_region(text, &rendered, syntax, newline));
     }
 
     if let RegionPlacement::At(offset) = placement {
@@ -321,8 +321,28 @@ pub(crate) fn upsert_region_with_newline(
     Ok(out)
 }
 
-fn prepend_region(text: &str, rendered: &str, newline: &str) -> String {
-    let mut out = String::with_capacity(text.len() + rendered.len() + 1);
+/// The first non-header line, stopping before any managed sentinel or setting.
+pub(crate) fn start_region_offset(text: &str, syntax: CommentSyntax) -> usize {
+    let offset = text
+        .split_inclusive('\n')
+        .take_while(|line| {
+            let line = line.trim();
+            line.is_empty()
+                || line
+                    .strip_prefix(syntax.prefix())
+                    .map(str::trim_start)
+                    .is_some_and(|comment| !comment.starts_with(">>> anvil-managed:") && !comment.starts_with("<<< anvil-managed:"))
+        })
+        .map(str::len)
+        .sum();
+    if text[..offset].trim().is_empty() { 0 } else { offset }
+}
+
+fn prepend_region(text: &str, rendered: &str, syntax: CommentSyntax, newline: &str) -> String {
+    let (header, text) = text.split_at(start_region_offset(text, syntax));
+    let mut out = String::with_capacity(header.len() + text.len() + rendered.len() + 1);
+    out.push_str(header);
+    separate_region(&mut out, newline);
     out.push_str(rendered);
     if !text.is_empty() && leading_newline_len(text) == 0 {
         out.push_str(newline);
@@ -811,6 +831,7 @@ fn canonical_value(value: &toml_edit::Value) -> String {
 }
 
 fn adopt_unmanaged_root_settings(text: &str, body: &str, syntax: CommentSyntax) -> TomlAdoption {
+    let header_end = start_region_offset(text, syntax);
     let masked = mask_managed_regions(text, syntax);
     let (Ok(managed), Ok(document), Some(tables)) = (
         toml_edit::Document::parse(body),
@@ -835,7 +856,9 @@ fn adopt_unmanaged_root_settings(text: &str, body: &str, syntax: CommentSyntax) 
                 hand_written: entry.value,
             };
         }
-        out.push_str(&text[cursor..entry.span.start]);
+        // The parser attaches the file header to the first assignment, but
+        // adopting that assignment must not discard the header.
+        out.push_str(&text[cursor..entry.span.start.max(header_end)]);
         cursor = entry.span.end.min(boundary_after(&boundaries, entry.span.start, text.len()));
     }
     if cursor == 0 {

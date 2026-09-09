@@ -225,7 +225,12 @@ host style. In-sync content is not rewritten solely for line-ending differences.
 ## 4. Per-host insertion anchors
 
 Regions normally append in catalog order; existing regions update in place.
-`Start` places root keys before every TOML table. `.delta.toml`'s
+`Start` retains leading header comments and their whitespace, then places root
+keys before user settings and every TOML table. Managed sentinels end the header;
+the insertion must not enter an existing block. Root-setting adoption also
+preserves these leading comments instead of dropping a copyright header attached
+to a matching assignment. The same insertion anchor is used to recognize an
+already correctly placed region, making the next run a no-op. `.delta.toml`'s
 `anvil-delta` and `spellcheck.toml`'s `anvil-spellcheck-root` use this placement.
 A clean legacy delta block below `[git]` moves to the beginning even when its
 template is unchanged, so `trip_wire_patterns` is a root key rather than a

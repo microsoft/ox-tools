@@ -28,7 +28,7 @@ use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
 use crate::region::{
     CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_region, insert_after_region,
-    mask_retiring_managed_regions, text_newline, upsert_region_with_newline,
+    mask_retiring_managed_regions, start_region_offset, text_newline, upsert_region_with_newline,
 };
 
 /// Inputs that identify and render one managed region.
@@ -98,7 +98,10 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
         Some(text) => find_region(text, region_id, syntax)?,
     };
     let disk_checksum = disk_region.as_ref().map(|region| checksum_str(region.body_str()));
-    let needs_reposition = placement == RegionPlacement::Start && disk_region.as_ref().is_some_and(|region| region.start_line.start != 0);
+    let needs_reposition = placement == RegionPlacement::Start
+        && disk_region
+            .as_ref()
+            .is_some_and(|region| region.start_line.start != start_region_offset(host_text.unwrap_or(""), syntax));
 
     let target = Target::Region {
         host: host_relpath.to_owned(),

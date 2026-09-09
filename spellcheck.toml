@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # >>> anvil-managed: anvil-spellcheck-root
 # Check spelling in code comments marked as dev/developer comments
 # (e.g., `// TODO:`, `// FIXME:`). Set to false to skip them.
@@ -7,9 +10,6 @@ dev_comments = false
 # README files in spell checking.
 skip_readme = false
 # <<< anvil-managed: anvil-spellcheck-root
-
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 
 # >>> anvil-managed: anvil-spellcheck-hunspell
 [Hunspell]

@@ -1585,6 +1585,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses filesystem")]
     #[test]
     fn shipped_spellcheck_split_migrates_and_adopts_matching_root_settings() {
+        let header = "# Copyright (c) Microsoft Corporation.\n# Licensed under the MIT License.\n";
         let body = [
             include_str!("../templates/regions/spellcheck.toml"),
             include_str!("../templates/regions/spellcheck-hunspell.toml"),
@@ -1600,9 +1601,12 @@ mod tests {
                 write(&tmp.path().join("spellcheck.toml"), &body);
             }
             let path = tmp.path().join("spellcheck.toml");
-            let input = format!("{}\n# repository quirks\nallow_dashes = true\n", fs::read_to_string(&path).unwrap())
-                .replace("\r\n", "\n")
-                .replace('\n', newline);
+            let input = format!(
+                "{header}{}\n# repository quirks\nallow_dashes = true\n",
+                fs::read_to_string(&path).unwrap()
+            )
+            .replace("\r\n", "\n")
+            .replace('\n', newline);
             write(&path, &input);
             let before = input.parse::<toml_edit::DocumentMut>().unwrap();
             assert_eq!(before["Hunspell"]["quirks"]["allow_dashes"].as_bool(), Some(true));
@@ -1610,6 +1614,8 @@ mod tests {
             let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
             assert!(outcome.plan.refusals().is_empty(), "{:?}", outcome.plan.refusals());
             let output = fs::read_to_string(tmp.path().join("spellcheck.toml")).unwrap();
+            assert!(output.starts_with(&header.replace('\n', newline)), "{output}");
+            assert_eq!(output.matches("Copyright (c) Microsoft Corporation.").count(), 1);
             assert!(find_region(&output, "anvil-spellcheck", CommentSyntax::Hash).unwrap().is_none());
             let parsed = output.parse::<toml_edit::DocumentMut>().unwrap();
             assert_eq!(parsed["dev_comments"].as_bool(), Some(false));
@@ -2100,9 +2106,10 @@ mod tests {
     #[test]
     fn legacy_delta_region_moves_to_start_and_settles() {
         let tmp = empty_workspace();
+        let header = "# Copyright (c) Microsoft Corporation.\n# Licensed under the MIT License.\n";
         let old_body = "[delta]\nroot-files = [\"Cargo.lock\", \"Cargo.toml\", \"rust-toolchain.toml\"]\n";
         let old_host = format!(
-            "[git]\nremote_branch = \"origin/main\"\n\n# >>> anvil-managed: {DELTA_REGION_ID}\n\
+            "{header}\n[git]\nremote_branch = \"origin/main\"\n\n# >>> anvil-managed: {DELTA_REGION_ID}\n\
              {old_body}# <<< anvil-managed: {DELTA_REGION_ID}\n"
         );
         fs::write(tmp.path().join(".delta.toml"), old_host).unwrap();
@@ -2114,7 +2121,7 @@ mod tests {
 
         let content = fs::read_to_string(tmp.path().join(".delta.toml")).unwrap();
         assert!(
-            content.starts_with(&format!("# >>> anvil-managed: {DELTA_REGION_ID}\n")),
+            content.starts_with(&format!("{header}\n# >>> anvil-managed: {DELTA_REGION_ID}\n")),
             "the upgraded root-level key must precede every TOML table:\n{content}"
         );
         let document: toml_edit::DocumentMut = content.parse().expect("upgraded delta config must be valid TOML");
