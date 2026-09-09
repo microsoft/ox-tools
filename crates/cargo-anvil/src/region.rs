@@ -2003,6 +2003,28 @@ mod tests {
         );
     }
 
+    /// The same host with no gap at all after the region. The separator the
+    /// insertion has to supply is the one case where nothing in the file can be
+    /// copied, so a hard-coded `\n` would go unnoticed on LF hosts and split a
+    /// CRLF host's line endings.
+    #[test]
+    fn residue_insertion_separates_with_the_hosts_newline_when_there_is_no_gap() {
+        for newline in ["\n", "\r\n"] {
+            let prefix = format!("# >>> anvil-managed: x{newline}[advisories]{newline}# <<< anvil-managed: x{newline}");
+            let residue = format!("ignore = []{newline}");
+            let rest = format!("[bans]{newline}");
+            let text = format!("{prefix}{rest}");
+
+            let out = insert_after_region(&text, "x", &residue, SYN).unwrap();
+
+            assert_eq!(out, format!("{prefix}{residue}{newline}{rest}"));
+            assert!(
+                newline == "\n" || !out.replace("\r\n", "").contains('\n'),
+                "a CRLF host must not gain a lone LF: {out:?}"
+            );
+        }
+    }
+
     #[test]
     fn residue_insertion_preserves_existing_lf_and_crlf_gaps() {
         for newline in ["\n", "\r\n"] {
@@ -2111,8 +2133,8 @@ mod tests {
         assert_eq!(adoption, TomlAdoption::Unchanged, "an unreadable host must not be rewritten");
     }
 
-    /// Datetimes are ordinary TOML values and have to compare like the rest. A
-    /// canonical form that did not cover them would make two different
+    /// Datetime values are ordinary TOML values and have to compare like the
+    /// rest. A canonical form that did not cover them would make two different
     /// timestamps look equal, and the hand-written one would be deleted in
     /// favour of the managed one instead of being reported.
     #[test]

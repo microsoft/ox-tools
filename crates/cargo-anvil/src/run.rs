@@ -22,7 +22,7 @@ use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
 use crate::emit::{ManagedRegionRequest, plan_managed_region, plan_owned_file, toml_introduction_refusal};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
-use crate::manifest::{Manifest, RegionKey};
+use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
@@ -665,13 +665,19 @@ impl ComposedHosts {
             .into_iter()
             .filter(|id| !self.live.contains(&(host_relpath.to_owned(), id.clone())))
             .filter(|id| {
-                let key = RegionKey {
-                    host: host_relpath.to_owned(),
-                    id: id.clone(),
-                };
-                let Some(last) = manifest.regions.get(&key) else {
+                let Some(last) = manifest.region_checksum(host_relpath, id) else {
                     // Never recorded, so anvil does not own it and will not
                     // remove it, whatever the sentinels say.
+                    //
+                    // The lookup tolerates a case-only difference in the host:
+                    // `host_relpath` is the file's real on-disk name and the
+                    // lock carries whatever casing it was written under, so an
+                    // exact comparison would call a recorded region unowned
+                    // after a case-only rename. It would then stay visible to
+                    // the parser while `plan_removals` — which does resolve the
+                    // casing — removes it in this same plan, and the
+                    // replacement declaring the same table would be refused as
+                    // a duplicate of a region that is on its way out.
                     return false;
                 };
                 let region = find_region(host_text, id, syntax).ok().flatten();
@@ -1004,6 +1010,41 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    /// `plan_removals` resolves the host's casing before deciding what to
+    /// remove, so this must too. A lock that records `Deny.toml` for a file now
+    /// spelled `deny.toml` still owns that region, and the same pass is about
+    /// to remove it — treating it as unowned leaves it visible to the parser
+    /// and refuses the replacement declaring the same table as a duplicate of
+    /// something that is on its way out.
+    #[test]
+    fn a_case_only_host_rename_still_retires_a_clean_region() {
+        let body = "[licenses]\nallow = [\"MIT\"]\n";
+        let host_text = format!("# >>> anvil-managed: old\n{body}# <<< anvil-managed: old\n");
+        let mut manifest = Manifest::default();
+        manifest.set_region("Deny.toml", "old", checksum_str(body));
+
+        let composed = ComposedHosts::default();
+        let retiring = composed.retiring_regions(&manifest, "deny.toml", &host_text, CommentSyntax::Hash);
+
+        assert_eq!(
+            retiring,
+            BTreeSet::from(["old".to_owned()]),
+            "the recorded region is anvil's own however the host is spelled"
+        );
+    }
+
+    /// The counterpart: a region the lock does not record under any spelling of
+    /// the host is not anvil's to remove, so it stays and keeps the tables it
+    /// declares.
+    #[test]
+    fn an_unrecorded_region_is_not_treated_as_retiring() {
+        let host_text = "# >>> anvil-managed: old\n[licenses]\n# <<< anvil-managed: old\n";
+
+        let retiring = ComposedHosts::default().retiring_regions(&Manifest::default(), "deny.toml", host_text, CommentSyntax::Hash);
+
+        assert!(retiring.is_empty(), "a region anvil never wrote must not be masked away");
+    }
+
     /// A composed host is only valid in one arrangement, so anvil classifies it
     /// before writing. A region whose markers cannot be read is its own
     /// diagnosis: folding it in with "absent" would report a broken region as a
@@ -1024,10 +1065,11 @@ mod tests {
         );
     }
 
-    /// The delta config's body depends on what the host already declares, which
-    /// means reading the host with its region removed. Markers that cannot be
-    /// read make that impossible, and guessing "no repository key" from a file
-    /// this could not parse would overwrite the repository's own settings.
+    /// The body of the delta config depends on what the host already declares,
+    /// which means reading the host with its region removed. Markers that
+    /// cannot be read make that impossible, and guessing "no repository key"
+    /// from a file this could not parse would overwrite the repository's own
+    /// settings.
     #[test]
     fn malformed_delta_markers_are_reported_rather_than_guessed() {
         let spec = RegionSpec {
@@ -2747,7 +2789,7 @@ mod tests {
 
         live.parse::<toml_edit::DocumentMut>().unwrap();
         assert!(!tmp.path().join("shared.toml.anvil-proposed").exists());
-        let key = RegionKey {
+        let key = crate::manifest::RegionKey {
             host: "shared.toml".into(),
             id: "anvil-sec-a".into(),
         };
