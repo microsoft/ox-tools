@@ -606,11 +606,15 @@ _anvil-impact-format tier impactJson:
 # Private. Resolves an impact category's scope for a check recipe and echoes it on stdout.
 #   1. ANVIL_IMPACT=off            -> tier default (full-workspace / run).
 #   2. include_<tier>.txt present  -> its contents (a --package list or --skip).
-#   3. otherwise                   -> tier default.
+#   3. absent under ANVIL_IMPACT=consume -> hard failure (exit 1). consume trusts
+#      an already-supplied cache, so a missing include file is a defect, not a
+#      reason to widen scope.
+#   4. otherwise                   -> tier default.
 # Tier default: --workspace for affected/required; empty (run) for modified.
 # Each scoped check calls this directly (into a local $include variable) to
-# read its category's scope from the target/anvil/impact cache -- the same cache
-# both locally and in cloud workflows (where the group job downloaded it).
+# read its category's scope from the impact cache -- target/anvil/impact by
+# default, or ANVIL_IMPACT_INPUT_DIR when that is set under consume -- the same
+# cache both locally and in cloud workflows (where the group job downloaded it).
 
 # Resolve a tier's package scope from the impact cache.
 [script("pwsh", "-NoProfile")]

@@ -424,6 +424,14 @@ tier still reported green. `ANVIL_IMPACT` controls whether a CI group trusts its
 container run into one worker per logical processor. They are forwarded by name and only when set, so an unset variable
 stays unset rather than arriving empty.
 
+`ANVIL_IMPACT_INPUT_DIR` is the one recipe-contract input that is deliberately **not** forwarded. It names a host
+directory, and `-e NAME` passes the host value unchanged, so a path outside the bind mount would not resolve inside the
+container. Dropping it silently would be worse than useless: the containerized check would fall back to
+`target/anvil/impact` and could scope off a different package list than the native run while still reporting green.
+The boundary therefore rejects the combination — a containerized run with `ANVIL_IMPACT_INPUT_DIR` set fails with an
+explicit error telling the operator to unset it or run the check natively. An explicit input that cannot be honored
+fails; it never falls back.
+
 A resolved token is set on the driver process, passed by name, and unset after the run, so it never reaches a host
 command line. Inside the container it is readable by everything the run executes, including build scripts and proc
 macros.

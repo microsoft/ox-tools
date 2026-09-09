@@ -46,7 +46,9 @@
 # environment variables. `$include` is one of:
 #
 #   * "--workspace" (affected/required) or "" (modified) - the tier is
-#     unscoped: ANVIL_IMPACT=off, or no impact cache is present. Recipes splat
+#     unscoped: ANVIL_IMPACT=off, or no impact cache is present outside consume
+#     mode (under consume a missing cache is a hard failure, not an unscoped
+#     run). Recipes splat
 #     "--workspace" (an empty string is NOT $null, so recipes test truthiness
 #     rather than `?? "--workspace"`, which would splat an empty arg cargo
 #     rejects).

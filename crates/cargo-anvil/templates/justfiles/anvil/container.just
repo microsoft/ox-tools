@@ -1028,6 +1028,18 @@ anvil-container *command:
     # Forwarded by name and only when set, so an unset variable stays unset
     # rather than arriving as an empty string, which several of these treat as
     # a value.
+    # ANVIL_IMPACT_INPUT_DIR is deliberately NOT forwarded. `-e NAME` passes the
+    # host value unchanged, and the override is a host path that need not exist
+    # inside the container, so forwarding it cannot be made correct in general.
+    # Dropping it silently is worse: the container would fall back to
+    # target/anvil/impact and could scope off a different package list than the
+    # native run while still reporting green. Reject the combination instead --
+    # an explicit input that cannot be honored must fail, never fall back.
+    if ((Test-Path -LiteralPath 'Env:ANVIL_IMPACT_INPUT_DIR') -and -not [string]::IsNullOrEmpty($env:ANVIL_IMPACT_INPUT_DIR)) {
+        Write-Error "anvil-container: ANVIL_IMPACT_INPUT_DIR is set ($env:ANVIL_IMPACT_INPUT_DIR) but containerized checks cannot honor it -- it names a host directory that need not exist inside the container, and forwarding it would let the run scope off a different cache than the native run. Unset it to run this check in a container, or run the check natively to use the injected cache."
+        exit 1
+    }
+
     foreach ($name in @(
         'PR_TITLE',
         'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH',

@@ -5456,6 +5456,18 @@ anvil-container *command:
     # Forwarded by name and only when set, so an unset variable stays unset
     # rather than arriving as an empty string, which several of these treat as
     # a value.
+    # ANVIL_IMPACT_INPUT_DIR is deliberately NOT forwarded. `-e NAME` passes the
+    # host value unchanged, and the override is a host path that need not exist
+    # inside the container, so forwarding it cannot be made correct in general.
+    # Dropping it silently is worse: the container would fall back to
+    # target/anvil/impact and could scope off a different package list than the
+    # native run while still reporting green. Reject the combination instead --
+    # an explicit input that cannot be honored must fail, never fall back.
+    if ((Test-Path -LiteralPath 'Env:ANVIL_IMPACT_INPUT_DIR') -and -not [string]::IsNullOrEmpty($env:ANVIL_IMPACT_INPUT_DIR)) {
+        Write-Error "anvil-container: ANVIL_IMPACT_INPUT_DIR is set ($env:ANVIL_IMPACT_INPUT_DIR) but containerized checks cannot honor it -- it names a host directory that need not exist inside the container, and forwarding it would let the run scope off a different cache than the native run. Unset it to run this check in a container, or run the check natively to use the injected cache."
+        exit 1
+    }
+
     foreach ($name in @(
         'PR_TITLE',
         'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH',
@@ -6099,7 +6111,9 @@ anvil-scheduled-test-validate-prereqs: \
 # environment variables. `$include` is one of:
 #
 #   * "--workspace" (affected/required) or "" (modified) - the tier is
-#     unscoped: ANVIL_IMPACT=off, or no impact cache is present. Recipes splat
+#     unscoped: ANVIL_IMPACT=off, or no impact cache is present outside consume
+#     mode (under consume a missing cache is a hard failure, not an unscoped
+#     run). Recipes splat
 #     "--workspace" (an empty string is NOT $null, so recipes test truthiness
 #     rather than `?? "--workspace"`, which would splat an empty arg cargo
 #     rejects).
@@ -6804,11 +6818,15 @@ _anvil-impact-format tier impactJson:
 # Private. Resolves an impact category's scope for a check recipe and echoes it on stdout.
 #   1. ANVIL_IMPACT=off            -> tier default (full-workspace / run).
 #   2. include_<tier>.txt present  -> its contents (a --package list or --skip).
-#   3. otherwise                   -> tier default.
+#   3. absent under ANVIL_IMPACT=consume -> hard failure (exit 1). consume trusts
+#      an already-supplied cache, so a missing include file is a defect, not a
+#      reason to widen scope.
+#   4. otherwise                   -> tier default.
 # Tier default: --workspace for affected/required; empty (run) for modified.
 # Each scoped check calls this directly (into a local $include variable) to
-# read its category's scope from the target/anvil/impact cache -- the same cache
-# both locally and in cloud workflows (where the group job downloaded it).
+# read its category's scope from the impact cache -- target/anvil/impact by
+# default, or ANVIL_IMPACT_INPUT_DIR when that is set under consume -- the same
+# cache both locally and in cloud workflows (where the group job downloaded it).
 
 # Resolve a tier's package scope from the impact cache.
 [script("pwsh", "-NoProfile")]

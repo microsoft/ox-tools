@@ -634,6 +634,9 @@ Unset or empty uses `target/anvil/impact/`, preserving existing CI behavior.
 The override is ignored outside consume mode: computing impact still writes only to
 the default cache, and `off` still disables scoping. Tests can inject the fixture
 without copying it into a temporary repository or running impact analysis.
+Containerized checks reject the override rather than inherit it: it names a host path
+that need not exist inside the container, so `anvil-container` fails fast when it is
+set instead of silently falling back to the default cache (see `containers.md`).
 
 The two-key cache means the expensive baseline snapshot is only retaken when the base ref
 moves, and the working-tree snapshot only when the tree changes; an unchanged repo yields
