@@ -167,6 +167,10 @@ stays under `[Hunspell]` below `anvil-spellcheck-hunspell`, not under quirks.
 The old combined `anvil-spellcheck` block retires in the same run that introduces
 the three replacement regions. An untouched old block is removed; the next run
 is a no-op. An edited old block is preserved and remains tracked, with a refusal.
+The headed replacements are inserted before the old block using the shared
+`At` splice placement. Removing that block then leaves user settings after its
+closing sentinel immediately below the new quirks region: for example,
+`allow_dashes = true` remains `Hunspell.quirks.allow_dashes`, never a root key.
 
 Catalog composition tests parse the actual per-host bodies for every workspace
 shape. They catch duplicate table claims and dotted-key/header collisions.
@@ -200,6 +204,11 @@ participate in body checksums. Cleanup is persisted even for otherwise in-sync
 regions and even if remaining content conflicts. Cleanup never blesses a changed
 non-marker body. Nested cross-id recovery and general broken-input repair are
 outside this contract.
+Retired markers in hosts receiving new regions are repaired before adoption
+and validation, using the same accumulated text through retirement. If two
+complete pairs share a retired id, only the first body is owned; the second
+body becomes unmanaged text and must participate in conflict checks. Marker
+cleanup alone does not make the retired catalog entry live again.
 
 ### Line endings
 

@@ -193,6 +193,14 @@ fn build_plan(
         live: live_region_keys(repo_root, workspace, catalog),
         ..ComposedHosts::default()
     };
+    // Adoption, validation, and retirement must see the same repaired text.
+    // Extra complete pairs retain their bodies as unmanaged settings.
+    for key in manifest.regions.keys() {
+        let host = resolve_existing_case_insensitive(repo_root, &key.host);
+        if composed.live.iter().any(|(live_host, _)| live_host == &host) && !composed.live.contains(&(host.clone(), key.id.clone())) {
+            repair_host_markers(repo_root, &mut plan, &mut hosts, &host, &key.id, CommentSyntax::Hash)?;
+        }
+    }
 
     for artifact in catalog.artifacts() {
         match artifact {
@@ -372,7 +380,7 @@ fn push_region_at(
         );
     }
     let placement = composed_host.map_or_else(
-        || region_placement(spec.id.as_str()),
+        || region_placement(spec.id.as_str(), current.as_deref()),
         |declared| composed_placement(declared.order, declared.scaffold, spec.id.as_str(), current.as_deref()),
     );
     let body = match delta_region_body(current.as_deref(), spec) {
@@ -578,12 +586,18 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
     RegionPlacement::At(if carries_directive { first_line.len() } else { 0 })
 }
 
-fn region_placement(region_id: &str) -> RegionPlacement {
+fn region_placement(region_id: &str, current: Option<&str>) -> RegionPlacement {
     if matches!(region_id, DELTA_REGION_ID | "anvil-spellcheck-root") {
-        RegionPlacement::Start
-    } else {
-        RegionPlacement::End
+        return RegionPlacement::Start;
     }
+    if matches!(region_id, "anvil-spellcheck-hunspell" | "anvil-spellcheck-quirks")
+        && let Some(old) = current.and_then(|text| find_region(text, "anvil-spellcheck", CommentSyntax::Hash).ok().flatten())
+    {
+        // Install the replacement tables before retiring the combined block:
+        // its trailing user settings must still follow Hunspell.quirks.
+        return RegionPlacement::At(old.start_line.start);
+    }
+    RegionPlacement::End
 }
 
 /// The composed-host declaration for a host, when it has one.
@@ -658,8 +672,7 @@ impl ComposedHosts {
                     // remove it, whatever the sentinels say.
                     return false;
                 };
-                let repaired = repair_markers(host_text, id, syntax);
-                let region = find_region(&repaired, id, syntax).ok().flatten();
+                let region = find_region(host_text, id, syntax).ok().flatten();
                 region.is_some_and(|region| region.is_empty() || checksum_str(region.body_str()) == *last)
             })
             .collect()
@@ -820,6 +833,8 @@ fn plan_removals(
     let live_regions: BTreeSet<(String, String)> = plan
         .items()
         .iter()
+        // Marker-only writes do not make a retired catalog entry live again.
+        .filter(|item| item.decision != Decision::Write || item.rendered_checksum.is_some())
         .filter_map(|i| match &i.target {
             Target::Region { host, id } => Some((host.clone(), id.clone())),
             Target::File { .. } => None,
@@ -1574,7 +1589,7 @@ mod tests {
             include_str!("../templates/regions/spellcheck-quirks.toml"),
         ]
         .join("\n");
-        for managed in [true, false] {
+        for (managed, newline) in [(true, "\n"), (true, "\r\n"), (false, "\n")] {
             let tmp = empty_workspace();
             if managed {
                 let old = one_region_catalog("spellcheck.toml", "anvil-spellcheck", &body);
@@ -1582,6 +1597,13 @@ mod tests {
             } else {
                 write(&tmp.path().join("spellcheck.toml"), &body);
             }
+            let path = tmp.path().join("spellcheck.toml");
+            let input = format!("{}\n# repository quirks\nallow_dashes = true\n", fs::read_to_string(&path).unwrap())
+                .replace("\r\n", "\n")
+                .replace('\n', newline);
+            write(&path, &input);
+            let before = input.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(before["Hunspell"]["quirks"]["allow_dashes"].as_bool(), Some(true));
             let catalog = Catalog::anvil();
             let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
             assert!(outcome.plan.refusals().is_empty(), "{:?}", outcome.plan.refusals());
@@ -1591,7 +1613,47 @@ mod tests {
             assert_eq!(parsed["dev_comments"].as_bool(), Some(false));
             assert_eq!(parsed["skip_readme"].as_bool(), Some(false));
             assert!(parsed["Hunspell"]["quirks"].is_table());
+            assert_eq!(
+                parsed["Hunspell"]["quirks"].get("allow_dashes").and_then(toml_edit::Item::as_bool),
+                before["Hunspell"]["quirks"]["allow_dashes"].as_bool()
+            );
+            assert!(!parsed.contains_key("allow_dashes"));
+            assert!(output.contains("# repository quirks"));
+            if newline == "\r\n" {
+                assert!(!output.replace("\r\n", "").contains('\n'));
+            }
             assert!(!run_update(&catalog, &local_only(), tmp.path()).unwrap().plan.has_changes());
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn retired_duplicate_pairs_expose_user_settings_before_adoption() {
+        for value in [2, 9] {
+            let tmp = empty_workspace();
+            let path = tmp.path().join("shared.toml");
+            let old = one_region_catalog("shared.toml", "old", "[old]\na = 1\n");
+            run_update(&old, &local_only(), tmp.path()).unwrap();
+            let input = format!(
+                "{}\n{}",
+                fs::read_to_string(&path).unwrap(),
+                upsert_region("", "old", &format!("[new]\nb = {value}\n"), CommentSyntax::Hash).unwrap()
+            );
+            write(&path, &input);
+            let before = input.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(before["new"]["b"].as_integer(), Some(value));
+            let next = one_region_catalog("shared.toml", "new", "[new]\nb = 2\n");
+            for _ in 0..2 {
+                let outcome = run_update(&next, &local_only(), tmp.path()).unwrap();
+                assert_eq!(outcome.plan.refusals().len(), usize::from(value != 2));
+                let output = fs::read_to_string(&path).unwrap();
+                let after = output.parse::<toml_edit::DocumentMut>().unwrap();
+                assert_eq!(after["new"]["b"].as_integer(), before["new"]["b"].as_integer());
+                assert!(!after.contains_key("old"));
+                let tracked = Manifest::load(tmp.path()).unwrap().regions;
+                assert!(!tracked.keys().any(|key| key.id == "old"));
+                assert_eq!(tracked.len(), usize::from(value == 2));
+            }
         }
     }
 
