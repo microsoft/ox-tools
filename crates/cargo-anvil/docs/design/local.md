@@ -620,10 +620,25 @@ scheduled group invoked directly is full-workspace too.
 
 `ANVIL_IMPACT` is a strict tri-state — `off`, `consume`, or unset. Any other value makes
 all three read sites exit 2 with an actionable error, so a typo like `ANVIL_IMPACT=on`
-fails loudly rather than silently leaving scoping on. `consume` is CI-only: a group job
+fails loudly rather than silently leaving scoping on. In CI, a group job
 that already downloaded the `target/anvil/impact` artifact sets it to trust that cache
-verbatim — `anvil-impact` no-ops after asserting the cache is present — and it is never set
-locally.
+verbatim using `consume` — `anvil-impact` no-ops after asserting the cache is present.
+
+In consume mode, `ANVIL_IMPACT_INPUT_DIR` can select an alternate read-only cache
+directory, such as a checked-in test fixture. Both the presence check and
+`_anvil-impact-include` use this directory; a missing input fails rather than falling
+back to another cache or full-workspace scope. The directory must contain all three
+`include_<tier>.txt` files. Absolute paths and paths relative to the recipe's working
+directory are supported, and paths are interpreted literally rather than as wildcards.
+Unset or empty uses `target/anvil/impact/`, preserving existing CI behavior.
+The override is ignored outside consume mode: computing impact still writes only to
+the default cache, and `off` still disables scoping. Tests can inject the fixture
+without copying it into a temporary repository or running impact analysis.
+Containerized checks reject the override rather than inherit it: it names a host path
+that need not exist inside the container, so `anvil-container` fails fast when it is
+set under consume instead of silently falling back to the default cache (see
+`containers.md`). Outside consume the override is ignored there too, so containerized
+runs with impact off or unset are unaffected.
 
 The two-key cache means the expensive baseline snapshot is only retaken when the base ref
 moves, and the working-tree snapshot only when the tree changes; an unchanged repo yields

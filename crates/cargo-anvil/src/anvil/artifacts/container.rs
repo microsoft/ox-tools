@@ -848,6 +848,27 @@ mod tests {
             RECIPE.contains("'ANVIL_IMPACT', 'ANVIL_MIRI_JOBS')) {"),
             "ANVIL_IMPACT and ANVIL_MIRI_JOBS must be in the forwarded set, not merely mentioned"
         );
+        // ANVIL_IMPACT_INPUT_DIR is the deliberate exception: it names a HOST
+        // directory that need not exist inside the container, so `-e` cannot
+        // carry it correctly. Forwarding it would be wrong and dropping it
+        // silently would let the container fall back to target/anvil/impact and
+        // scope off a different package list while still reporting green, so
+        // the boundary rejects the combination instead.
+        assert!(
+            !RECIPE.contains("'ANVIL_IMPACT_INPUT_DIR')") && !RECIPE.contains("'ANVIL_IMPACT_INPUT_DIR',"),
+            "ANVIL_IMPACT_INPUT_DIR must not be forwarded: it is a host path"
+        );
+        assert!(
+            RECIPE.contains("Env:ANVIL_IMPACT_INPUT_DIR") && RECIPE.contains("containerized checks cannot honor the override"),
+            "a containerized run with ANVIL_IMPACT_INPUT_DIR set must be rejected, not silently fall back"
+        );
+        // ...but only under consume, the one mode that reads it. With impact off
+        // or unset the override is ignored, so a container cannot diverge and
+        // rejecting would block a run that is perfectly well defined.
+        assert!(
+            RECIPE.contains("$env:ANVIL_IMPACT -eq 'consume' -and (Test-Path -LiteralPath 'Env:ANVIL_IMPACT_INPUT_DIR')"),
+            "the rejection must be gated on consume mode"
+        );
         // Nothing reads these; forwarding them only implied a contract that
         // does not exist. See justfile.rs, which asserts they stay removed.
         assert!(
