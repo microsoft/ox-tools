@@ -62,14 +62,19 @@ pub struct PlanItem {
     /// The driver's decision.
     pub decision: Decision,
     /// What the driver wants to write — either to disk (for `Write`) or
-    /// to a `.anvil-proposed` sibling (for `Propose`). `None` for
-    /// decisions that don't write.
+    /// to a `.anvil-proposed` sibling (for `Propose`). Always `None` for
+    /// decisions that do not write, and also `None` for the one write that
+    /// carries no body of its own: [`Self::repair_region`], which rewrites
+    /// the host to drop redundant marker lines and deliberately leaves the
+    /// recorded body checksum alone.
     pub rendered: Option<String>,
     /// The full host-file body after a region write or removal.
     /// `None` for owned files; only owned files can produce proposals.
     pub spliced_host: Option<String>,
     /// Checksum of [`Self::rendered`], populated when `rendered` is
-    /// `Some`. The manifest stores this for `Write` decisions.
+    /// `Some`. The manifest records it for `Write`, `Propose` and `InSync`
+    /// whenever it is present, so a decision that leaves it `None` leaves
+    /// the previously recorded checksum untouched.
     pub rendered_checksum: Option<String>,
 }
 

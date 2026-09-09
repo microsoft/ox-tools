@@ -1062,6 +1062,70 @@ fn an_edited_retirement_is_refused_under_the_on_disk_casing_and_says_why() {
     );
 }
 
+/// The retirement path refuses an unpaired region too, rather than splicing
+/// out a span it cannot delimit. Removing a region whose boundary is unknown
+/// would cut the wrong text out of the file, so the region and its lock entry
+/// both stay: the next run still knows it is anvil's to retire once a human
+/// restores the missing sentinel.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_retirement_with_unpaired_markers_is_refused_and_removes_nothing() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let justfile = root.join("Justfile");
+
+    // A region the catalog no longer declares, whose closing sentinel is gone.
+    let text = std::fs::read_to_string(&justfile).unwrap();
+    let widowed = format!("{text}\n# >>> anvil-managed: {RETIRED_REGION_ID}\n{RETIRED_REGION_BODY}");
+    write(&justfile, &widowed);
+
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest.set_region("Justfile", RETIRED_REGION_ID, checksum_str(RETIRED_REGION_BODY));
+    manifest.save(root).unwrap();
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let refusal = outcome
+        .plan
+        .refusals()
+        .iter()
+        .find(|reason| reason.contains(RETIRED_REGION_ID))
+        .unwrap_or_else(|| panic!("the retirement must be refused; got {:?}", outcome.plan.refusals()))
+        .clone();
+    assert!(
+        refusal.contains("span to remove cannot be established"),
+        "the refusal must say why the removal was declined: {refusal}"
+    );
+    assert!(
+        !refusal.contains("Reconcile the hand-written table"),
+        "a marker fault is not a table collision: {refusal}"
+    );
+
+    let after = std::fs::read_to_string(&justfile).unwrap();
+    assert!(
+        after.contains(&format!("# >>> anvil-managed: {RETIRED_REGION_ID}")),
+        "the surviving sentinel must not be stripped:\n{after}"
+    );
+    assert!(
+        after.contains(RETIRED_REGION_BODY.trim()),
+        "the body must still be there, once:\n{after}"
+    );
+    assert_eq!(
+        after.matches(RETIRED_REGION_BODY.trim()).count(),
+        1,
+        "and must not have been duplicated:\n{after}"
+    );
+
+    let key = RegionKey {
+        host: "Justfile".to_owned(),
+        id: RETIRED_REGION_ID.to_owned(),
+    };
+    assert!(
+        Manifest::load(root).unwrap().regions.contains_key(&key),
+        "the lock entry must survive so the retirement can finish once the boundary is restored"
+    );
+}
+
 /// Strip a whole managed region, sentinels included, from `text`.
 fn remove_region_block(text: &str, id: &str) -> String {
     let open = format!("# >>> anvil-managed: {id}");
