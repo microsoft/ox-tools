@@ -802,10 +802,10 @@ Per the four customization tiers in [README.md §7](./README.md#7-customization)
   copy the recipe you want to change into your top-level Justfile with a different name
   (e.g. `my-clippy`) and reference *that* from your own group/tier recipes. Don't fight the
   anvil-* names; just compose around them.
-- **Disable a recipe wholesale**: opt out of the managed `Justfile` region per
-  [updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs). This stops the imports from
-  happening at all, so all `anvil-*` recipes vanish. Use this only when anvil is no longer
-  the right tool for your repo.
+- **Disable an owned recipe file**: its empty-file behavior is described in
+  [updates.md](./updates.md#2-owned-files). The managed `Justfile` imports are
+  not an opt-out mechanism: an empty imports region regenerates, and nonempty
+  edits require reconciliation.
 
 Customizing the *contents* of `justfiles/anvil/*.just` is supported — they're owned files,
 so editing them flips them to "dirty" and the next `update` writes a `.anvil-proposed`

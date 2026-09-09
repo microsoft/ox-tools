@@ -24,10 +24,6 @@
     clippy::panic,
     reason = "integration tests panic on unmet preconditions for readable failure output"
 )]
-#![expect(
-    clippy::doc_markdown,
-    reason = "fixture names like `opt-outs` look like code but are directory names"
-)]
 
 use std::path::{Path, PathBuf};
 
@@ -143,10 +139,9 @@ fn single_crate_emits_crate_lints_and_justfiles() {
     );
 }
 
-/// `opt-outs`: a user who emptied the rustfmt managed region after a
-/// first run keeps that opt-out across re-runs (LeaveAlone decision).
+/// Emptying a managed block requests regeneration, not an opt-out.
 #[test]
-fn empty_region_is_treated_as_opt_out() {
+fn empty_region_is_repopulated() {
     use cargo_anvil::CommentSyntax;
     use cargo_anvil::test_support::{rustfmt_region_id, upsert_region};
 
@@ -159,11 +154,12 @@ fn empty_region_is_treated_as_opt_out() {
     let emptied = upsert_region(&body, rustfmt_region_id(), "", CommentSyntax::Hash).unwrap();
     std::fs::write(&rustfmt_path, &emptied).unwrap();
 
-    // Re-run and check the rustfmt region is LeaveAlone.
+    // Re-run with the unchanged template.
     let outcome = run(&tmp);
-    assert_eq!(region_decision(&outcome, "rustfmt.toml", rustfmt_region_id()), Decision::LeaveAlone);
+    assert_eq!(region_decision(&outcome, "rustfmt.toml", rustfmt_region_id()), Decision::Write);
     let after = std::fs::read_to_string(&rustfmt_path).unwrap();
-    assert_eq!(after, emptied, "opt-out region must not be re-populated");
+    assert_eq!(after, body);
+    assert!(!run(&tmp).plan.has_changes());
 }
 
 /// `customized`: a user edit inside a managed region with an unchanged
@@ -183,6 +179,7 @@ fn user_edit_inside_region_is_left_alone() {
 
     let outcome = run(&tmp);
     assert_eq!(region_decision(&outcome, "rustfmt.toml", rustfmt_region_id()), Decision::LeaveAlone);
+    assert!(outcome.plan.refusals().iter().any(|reason| reason.contains("rustfmt.toml")));
     let after = std::fs::read_to_string(&rustfmt_path).unwrap();
     assert!(
         after.contains("edition = \"2021\""),

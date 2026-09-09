@@ -9,7 +9,7 @@ user-visible shape of the tool. Detail lives in companion documents:
 
 - [checks.md](./checks.md) — the opinionated check catalog, the group/tier structure
 - [local.md](./local.md) — the `justfiles/anvil/` layout, recipe surface, and customization.
-- [updates.md](./updates.md) — the drift-detection and update algorithm; opt-out semantics.
+- [updates.md](./updates.md) — ownership, TOML adoption, marker recovery, and retirement.
 - [extensibility.md](./extensibility.md) — how downstream tools ship their own brand + catalog.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
 - [ado.md](./ado.md) — Azure DevOps Pipelines emission and compliance-template composition.
@@ -240,14 +240,14 @@ The tool produces a small set of files. They fall into three categories:
   `# <<< anvil-managed: <id>`) delimits the region body and identifies it by stable ID;
   the manifest tracks the last-rendered checksum per `(host, id)`. Outside the
   sentinels, the user's content is preserved byte-for-byte — except that first
-  introduction into a TOML host may adopt a hand-written table, see
-  [updates.md](./updates.md#adopting-a-hand-written-table-on-first-introduction).
+  adoption into a TOML host may relocate compatible hand-written settings, see
+  [updates.md](./updates.md#adopting-a-hand-written-table).
 - **user-authored** — files the user owns; the tool only reads them.
   `rust-toolchain.toml` and `.cargo/config.toml` fall in this category.
 
-Opt-out is expressed inline by **emptiness**: an empty managed-region body (just the
-sentinels, no content between them) disables a region; an empty owned file disables
-that owned item. See [updates.md §6](./updates.md#6-opting-out-in-file-stubs).
+Managed-region edits are refused and stay tracked until reconciled; empty or
+whitespace-only bodies regenerate. Only owned files retain empty-file opt-out
+semantics and proposals. See [updates.md](./updates.md#strict-ownership).
 
 ```text
 repo/
@@ -258,7 +258,8 @@ repo/
 ├── Cargo.toml                                     managed-region: anvil-workspace-lints (or anvil-lints in single-crate)
 ├── crates/<member>/Cargo.toml                     managed-region: anvil-lints (one per workspace member)
 ├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
-├── rustfmt.toml                                   managed-region: anvil-rustfmt (opt out with empty stub)
+├── rustfmt.toml                                   managed-region: anvil-rustfmt
+├── spellcheck.toml                                managed-regions: anvil-spellcheck-{root,hunspell,quirks}
 ├── .delta.toml                                    managed-region: anvil-delta (points to owned cloud config)
 ├── .gitattributes                                 managed-region: anvil-gitattributes (pins *.rs to LF)
 ├── rust-toolchain[.toml]                          optional, user-authored (read only)
@@ -315,15 +316,18 @@ Detail on each host:
   separate regions lets users add their own keys in the gaps between them (the engine composes
   the co-hosted regions into one file). Users may also add keys
   outside the regions. Created if absent. Content detailed in [checks.md](./checks.md).
-- **`rustfmt.toml`** — created with the opinionated baseline if absent; managed region at the
-  end of the file. The most contested opinion in the catalog; users who want to keep their own
-  formatting opt the file out via the empty-stub mechanism in [updates.md](./updates.md).
+- **`rustfmt.toml`** — created with the opinionated baseline if absent. User-only
+  root settings can remain outside the block; conflicting managed values require
+  reconciliation, not an empty-stub override.
+- **`spellcheck.toml`** — separate root, Hunspell, and quirks regions preserve
+  user-only Hunspell settings in their own table. The untouched old combined
+  spellcheck region retires automatically during migration.
 - **`.delta.toml`** — managed trip-wire patterns for conservative impact analysis.
   Repository-specific parser, exclusion, and fixed comparison-branch policy remains
   user-owned outside the region. Cloud workflows explicitly load this same file, so
   local and cloud impact analysis share one configuration. When adopting an existing
   valid top-level `trip_wire_patterns` key, cargo-anvil preserves it and emits an empty
-  managed-region opt-out rather than creating a duplicate TOML key. See
+  managed body with a preservation note rather than creating a duplicate TOML key. See
   [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
   [github.md](./github.md) / [ado.md](./ado.md).
 - **`.gitattributes`** — managed region pinning `*.rs text eol=lf` so Rust sources keep LF
@@ -339,7 +343,7 @@ Detail on each host:
 
 The tool's persistent state lives in `.anvil.lock` at the repo root — the sidecar
 manifest tracking last-rendered checksums per owned file and per managed region. See
-[updates.md §1](./updates.md#1-the-manifest). All other state — including opt-outs —
+[updates.md §1](./updates.md#1-the-manifest). All other state — including owned-file stubs —
 lives in the affected file itself; see [updates.md](./updates.md).
 
 ## 7. Customization
@@ -357,27 +361,25 @@ Four escape valves, in increasing severity:
    in the `[workspace.lints]` scope). The tool preserves everything outside the
    sentinels verbatim. Note that TOML forbids redeclaring a table header (`[workspace.lints.clippy]`
    etc.), so user extensions must use dotted-key form or sit in a different parent
-   table; overriding an individual key already set inside the region requires editing
-   inside it, which triggers the dirty-file flow (see [updates.md §5](./updates.md#5-the-decision-algorithm)).
-3. **Opt out by emptying.** Empty a managed region (leave only the sentinels) or empty
-   an owned file. The tool will skip the item on every future `update` and only emit a
-   `.anvil-proposed` sibling when the template actually changes. See
-   [updates.md §6](./updates.md#6-opting-out-in-file-stubs).
-4. **Take ownership of an owned file or managed region by editing it.** The next
-   `update` detects the dirt (via checksum comparison against the manifest), leaves your
-   file alone, and writes a `.anvil-proposed` sibling only if the template changed since
-   the last render. Re-bless by deleting your file (or region) and rerunning `update`.
-   Suitable for one-off divergence; for permanent divergence prefer the opt-out stub.
+   table. Repeating a managed key is invalid TOML; editing it inside the block
+   causes a refusal, even if the template has not changed.
+3. **Disable an owned file by emptying it.** An unchanged template leaves it alone;
+   a changed template can produce a `.anvil-proposed` sibling. Emptying a managed
+   region instead requests regeneration.
+4. **Customize an owned file by editing it.** Updates preserve it and propose
+   changed templates. This does not transfer ownership of a managed block:
+   nonempty region edits, including retired blocks, remain tracked and refused.
+   Restore generated content or empty the block to reconcile.
 
 What the tool deliberately does **not** do:
 
-- Modify `Cargo.toml` outside the `anvil-workspace-lints` / `anvil-lints` managed regions.
+- Modify unrelated `Cargo.toml` settings; compatible lint assignments may be adopted.
 - Modify `.cargo/config.toml` or `rust-toolchain.toml`.
 - Replace existing workflows, root pipelines, or any file it didn't create.
 
 The intentional consequence: there is exactly one place to look for "what does this repo do
 differently from the default?" — the working tree itself, plus the `--dry-run` summary listing
-outstanding proposed updates.
+outstanding owned-file proposals and managed-region refusals.
 
 ## 8. Cross-Cutting Concerns
 

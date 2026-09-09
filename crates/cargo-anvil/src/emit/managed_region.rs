@@ -22,12 +22,13 @@ use ohno::{AppError, app_err};
 use toml_edit::DocumentMut;
 
 use crate::checksum::checksum_str;
-use crate::decision::{Decision, DecisionInputs, UpdateDecision, decide};
+#[cfg(test)]
+use crate::decision::Decision;
 use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
 use crate::region::{
-    CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, declared_tables, find_region, insert_after_region,
-    managed_region_ids, mask_other_managed_regions, mask_retiring_managed_regions, text_newline, upsert_region_with_newline,
+    CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_region, insert_after_region,
+    mask_retiring_managed_regions, text_newline, upsert_region_with_newline,
 };
 
 /// Inputs that identify and render one managed region.
@@ -43,6 +44,8 @@ pub struct ManagedRegionRequest<'a> {
     pub syntax: CommentSyntax,
     /// Required position of the region within the host file.
     pub placement: RegionPlacement,
+    /// Original host style, captured before marker cleanup or adoption.
+    pub newline: Option<&'a str>,
 }
 
 impl ManagedRegionRequest<'_> {
@@ -54,6 +57,7 @@ impl ManagedRegionRequest<'_> {
             rendered_body,
             syntax,
             placement: RegionPlacement::End,
+            newline: None,
         }
     }
 }
@@ -80,6 +84,7 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
         rendered_body,
         syntax,
         placement,
+        newline,
     } = request;
     let template_checksum = checksum_str(rendered_body);
     let key = RegionKey {
@@ -95,34 +100,30 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
     let disk_checksum = disk_region.as_ref().map(|region| checksum_str(region.body_str()));
     let needs_reposition = placement == RegionPlacement::Start && disk_region.as_ref().is_some_and(|region| region.start_line.start != 0);
 
-    let inputs = DecisionInputs {
-        last_rendered,
-        disk: disk_checksum.as_deref(),
-        template: &template_checksum,
-    };
-
     let target = Target::Region {
         host: host_relpath.to_owned(),
         id: region_id.to_owned(),
     };
-    let decision = match decide(&inputs) {
-        UpdateDecision::InSync if needs_reposition => UpdateDecision::Write,
-        decision => decision,
-    };
-    let item = match decision {
-        UpdateDecision::InSync => PlanItem::insync(target, template_checksum),
-        UpdateDecision::LeaveAlone => PlanItem::noop(target, Decision::LeaveAlone),
-        UpdateDecision::Write => {
-            let spliced = splice(host_relpath, host_text, region_id, rendered_body, syntax, placement)?;
-            PlanItem::write_region(host_relpath, region_id, rendered_body.to_owned(), spliced, template_checksum)
-        }
-        UpdateDecision::Propose => {
-            let spliced = splice(host_relpath, host_text, region_id, rendered_body, syntax, placement)?;
-            PlanItem::propose_region(host_relpath, region_id, rendered_body.to_owned(), spliced, template_checksum)
-        }
-    };
-
-    Ok(item)
+    if disk_checksum.as_deref() == Some(&template_checksum) && !needs_reposition {
+        return Ok(PlanItem::insync(target, template_checksum));
+    }
+    if disk_region.as_ref().is_some_and(|region| !region.is_empty())
+        && disk_checksum.as_deref() != last_rendered
+        && disk_checksum.as_deref() != Some(&template_checksum)
+    {
+        return Err(app_err!(
+            "the managed region contains edits that do not match its last render or the current template. \
+             Restore its generated content, or empty its body to regenerate it; keep user settings outside the sentinels"
+        ));
+    }
+    let spliced = splice(host_relpath, host_text, region_id, rendered_body, syntax, placement, newline)?;
+    Ok(PlanItem::write_region(
+        host_relpath,
+        region_id,
+        rendered_body.to_owned(),
+        spliced,
+        template_checksum,
+    ))
 }
 
 /// Why writing `request`'s region into its TOML host would produce a file
@@ -156,13 +157,14 @@ pub fn toml_introduction_refusal(
     host_text: Option<&str>,
     request: ManagedRegionRequest<'_>,
     retiring: &BTreeSet<String>,
-) -> Option<TomlRefusal> {
+) -> Option<String> {
     let ManagedRegionRequest {
         host_relpath,
         region_id,
         rendered_body,
         syntax,
         placement,
+        newline,
     } = request;
     if !is_toml_host(host_relpath) {
         return None;
@@ -173,82 +175,16 @@ pub fn toml_introduction_refusal(
         return None;
     }
 
-    let spliced = match splice(host_relpath, host_text, region_id, rendered_body, syntax, placement) {
-        Err(error) => return Some(TomlRefusal::Host(error.to_string())),
+    let spliced = match splice(host_relpath, host_text, region_id, rendered_body, syntax, placement, newline) {
+        Err(error) => return Some(error.to_string()),
         Ok(spliced) => spliced,
     };
     let error = mask_retiring_managed_regions(&spliced, syntax, retiring)
         .parse::<DocumentMut>()
         .err()?;
-    // Which fault is this? Blanking every other managed region leaves this
-    // region beside the repository's own text alone. If *that* parses, nothing
-    // hand-written is involved and the collision is between two regions anvil
-    // owns -- a defect to report rather than a table the reader can reconcile,
-    // since no edit to the host resolves it.
-    if mask_other_managed_regions(&spliced, syntax, region_id)
-        .parse::<DocumentMut>()
-        .is_ok()
-    {
-        return Some(TomlRefusal::Sibling(
-            colliding_sibling(&spliced, rendered_body, syntax, region_id, retiring).map_or_else(
-                || format!("splicing the region would leave {host_relpath} unparsable as TOML: {error}"),
-                |(table, owner)| {
-                    format!("this region declares `[{table}]`, which the managed region '{owner}' already declares in the same file")
-                },
-            ),
-        ));
-    }
-    Some(TomlRefusal::Host(format!(
+    Some(format!(
         "splicing the region would leave {host_relpath} unparsable as TOML: {error}"
-    )))
-}
-
-/// The table and region id of the sibling this body collides with, when one can
-/// be named.
-///
-/// Purely for the diagnostic: the parser has already decided. A sibling that
-/// declares the table through a dotted assignment rather than a header cannot
-/// be named this way, and the caller falls back to the parser's own message.
-fn colliding_sibling(
-    spliced: &str,
-    rendered_body: &str,
-    syntax: CommentSyntax,
-    region_id: &str,
-    retiring: &BTreeSet<String>,
-) -> Option<(String, String)> {
-    let mine = declared_tables(rendered_body);
-    managed_region_ids(spliced, syntax)
-        .into_iter()
-        .filter(|id| id != region_id && !retiring.contains(id))
-        .find_map(|id| {
-            let body = find_region(spliced, &id, syntax).ok()??;
-            let shared = declared_tables(body.body_str()).intersection(&mine).next()?.clone();
-            Some((shared, id))
-        })
-}
-
-/// Which of the two faults a refused TOML splice is.
-///
-/// They read differently to the user on purpose: one names an edit that
-/// resolves it, and the other cannot, so it asks for a bug report instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TomlRefusal {
-    /// The region collides with the repository's own hand-written text, which
-    /// the user can reconcile.
-    Host(String),
-    /// Two of anvil's own regions compose into a file TOML cannot read. No edit
-    /// to the host fixes it.
-    Sibling(String),
-}
-
-impl TomlRefusal {
-    /// The parser's account of what went wrong, without the verdict.
-    #[cfg(test)]
-    fn reason(&self) -> &str {
-        match self {
-            Self::Host(reason) | Self::Sibling(reason) => reason,
-        }
-    }
+    ))
 }
 
 fn is_toml_host(host_relpath: &str) -> bool {
@@ -264,9 +200,10 @@ fn splice(
     rendered_body: &str,
     syntax: CommentSyntax,
     placement: RegionPlacement,
+    newline: Option<&str>,
 ) -> Result<String, AppError> {
     let base = host_text.unwrap_or("");
-    let newline = text_newline(base);
+    let newline = newline.unwrap_or_else(|| text_newline(base));
 
     // Writing a region into a TOML host: adopt any hand-written copy of the
     // tables the body declares, rather than appending a duplicate that TOML
@@ -292,10 +229,6 @@ fn splice(
                 adopted = text;
                 adopted.as_str()
             }
-            // Unreachable in the normal path: `run` refuses the host before it
-            // ever plans a conflicting region (see `toml_introduction_refusal`).
-            // Reported rather than written, because every output available here
-            // either repeats a key TOML forbids or discards configuration.
             TomlAdoption::Conflict {
                 table,
                 key,
@@ -308,9 +241,6 @@ fn splice(
                      one of them and keeping both would repeat the key, which TOML rejects."
                 ));
             }
-            // Also unreachable in the normal path, and refused for the same
-            // reason: the only place the entries could go is where TOML reads
-            // them as another table's.
             TomlAdoption::Unrelocatable { table, tail_table } => {
                 return Err(app_err!(
                     "{host_relpath} declares settings in `[{table}]` that the managed region \
@@ -340,22 +270,19 @@ mod tests {
     }
 
     /// The backstop with nothing retiring, which is every case but a migration.
-    fn refusal(host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Option<TomlRefusal> {
+    fn refusal(host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Option<String> {
         toml_introduction_refusal(host_text, request, &BTreeSet::new())
     }
 
-    /// A sibling region that is *staying* is judged as written, so the region
-    /// being spliced sees the table it declares. Both are anvil's own, so the
-    /// verdict is `Sibling` — the wording that asks for a bug report rather
-    /// than sending the reader to reconcile a table nobody hand-wrote.
+    /// The generic parse backstop sees every region that is staying.
     #[test]
-    fn a_sibling_region_declaring_the_same_table_is_anvils_own_fault() {
+    fn a_duplicate_table_fails_the_parse_backstop() {
         let host = "# >>> anvil-managed: other\n[licenses]\nallow = [\"MIT\"]\n# <<< anvil-managed: other\n";
         let body = "[licenses]\nconfidence-threshold = 0.9\n";
 
         let verdict = refusal(Some(host), request("deny.toml", "r", body)).expect("two regions cannot both declare [licenses]");
 
-        assert!(matches!(verdict, TomlRefusal::Sibling(_)), "anvil's own fault: {verdict:?}");
+        assert!(verdict.contains("unparsable as TOML"));
     }
 
     /// The same collision against a sibling this pass is *removing* is a
@@ -385,7 +312,7 @@ mod tests {
 
         let verdict = refusal(Some(host), request("Cargo.toml", "r", body)).expect("a dotted key declares the table too");
 
-        assert!(matches!(verdict, TomlRefusal::Sibling(_)), "anvil's own fault: {verdict:?}");
+        assert!(verdict.contains("unparsable as TOML"));
     }
 
     /// Issue #148, end to end. A `deny.toml` whose `[advisories]` carries the
@@ -438,7 +365,6 @@ mod tests {
 
         let reason =
             refusal(Some(host), request("deny.toml", "anvil-deny-advisories", body)).expect("a disagreement over `yanked` must be refused");
-        let reason = reason.reason();
 
         assert!(reason.contains("yanked"), "the refusal names the key: {reason}");
     }
@@ -455,7 +381,6 @@ mod tests {
 
         let reason = refusal(Some(host), request("spellcheck.toml", "anvil-spellcheck", body))
             .expect("a setting that cannot keep its table must be refused");
-        let reason = reason.reason();
 
         assert!(
             reason.contains("[Hunspell]") && reason.contains("[Hunspell.quirks]"),
@@ -504,19 +429,9 @@ mod tests {
         );
     }
 
-    /// The update path used to be assumed safe: replacing a region where it
-    /// stands cannot add a header. The *body* can. A template that gains a
-    /// table the host already declares by hand collided on the next run, from a
-    /// host that was valid before it — `decision=Write`, no refusal, two
-    /// `[licenses]` headers on disk.
-    ///
-    /// Reconciling it here rather than refusing is deliberate. The edit that
-    /// clears it by hand — drop the header, move the extras below the closing
-    /// sentinel so TOML still reads them as that table's — is not something a
-    /// diagnostic can usefully describe, and the likeliest reading of one
-    /// ("remove the table") costs the user the setting they wrote.
+    /// A new independent table gets its own region, preserving the older one.
     #[test]
-    fn an_update_whose_body_gains_a_table_adopts_the_hand_written_copy() {
+    fn a_new_table_region_adopts_the_hand_written_copy() {
         let host = "\
 [licenses]
 unused-allowed-license = \"allow\"
@@ -529,15 +444,15 @@ yanked = \"deny\"
         assert!(host.parse::<DocumentMut>().is_ok(), "the host is valid before the bump");
 
         let old_body = "[advisories]\nyanked = \"deny\"\n";
-        let new_body = "[advisories]\nyanked = \"deny\"\n\n[licenses]\nallow = [\"MIT\"]\n";
+        let new_body = "[licenses]\nallow = [\"MIT\"]\n";
         let mut manifest = Manifest::default();
         manifest.set_region("deny.toml", "r", checksum_str(old_body));
 
-        let request = request("deny.toml", "r", new_body);
+        let request = request("deny.toml", "licenses", new_body);
         assert_eq!(refusal(Some(host), request), None, "adoption resolves it");
 
         let item = plan_managed_region(&manifest, Some(host), request).unwrap();
-        assert_eq!(item.decision, Decision::Write, "the template moved, so the region is rewritten");
+        assert_eq!(item.decision, Decision::Write);
         let spliced = item.spliced_host.as_deref().expect("the region is written");
 
         let document = spliced
@@ -550,6 +465,10 @@ yanked = \"deny\"
             "the user's own setting is never dropped, and still configures `[licenses]`:\n{spliced}"
         );
         assert!(document["licenses"]["allow"].as_array().is_some(), "alongside the managed keys");
+        assert_eq!(
+            find_region(spliced, "r", CommentSyntax::Hash).unwrap().unwrap().body_str(),
+            old_body
+        );
     }
 
     /// Adoption on the update path does not reach for anything it did not
@@ -580,11 +499,10 @@ yanked = \"deny\"
     fn an_update_that_conflicts_with_a_hand_written_value_is_refused() {
         let host =
             "[licenses]\nconfidence-threshold = 0.8\n\n# >>> anvil-managed: r\n[advisories]\nyanked = \"deny\"\n# <<< anvil-managed: r\n";
-        let new_body = "[advisories]\nyanked = \"deny\"\n\n[licenses]\nconfidence-threshold = 0.93\n";
+        let new_body = "[licenses]\nconfidence-threshold = 0.93\n";
 
-        let reason =
-            refusal(Some(host), request("deny.toml", "r", new_body)).expect("a disagreement over `confidence-threshold` must be refused");
-        let reason = reason.reason();
+        let reason = refusal(Some(host), request("deny.toml", "licenses", new_body))
+            .expect("a disagreement over `confidence-threshold` must be refused");
 
         assert!(reason.contains("confidence-threshold"), "the refusal names the key: {reason}");
     }
@@ -639,14 +557,14 @@ yanked = \"deny\"
     }
 
     #[test]
-    fn crlf_region_updates_and_proposals_keep_normalized_checksum_decisions() {
+    fn crlf_region_updates_keep_normalized_checksum_decisions() {
         let old_body = "old\n";
         let host = "# user\r\n\r\n# >>> anvil-managed: r\r\nold\r\n# <<< anvil-managed: r\r\n";
-        for (last_body, decision) in [(old_body, Decision::Write), ("original\n", Decision::Propose)] {
+        for last_body in [old_body, "old\r\n"] {
             let mut manifest = Manifest::default();
             manifest.set_region("Justfile", "r", checksum_str(last_body));
             let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new\n")).unwrap();
-            assert_eq!(item.decision, decision);
+            assert_eq!(item.decision, Decision::Write);
             assert_eq!(
                 item.spliced_host.as_deref().unwrap(),
                 "# user\r\n\r\n# >>> anvil-managed: r\r\nnew\r\n# <<< anvil-managed: r\r\n"
@@ -828,42 +746,37 @@ yanked = \"deny\"
     }
 
     #[test]
-    fn user_modified_proposes_when_template_changed() {
+    fn user_modified_is_refused_when_template_changed() {
         let host = "# >>> anvil-managed: r\nuser body\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("old body\n"));
-        let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new body\n")).unwrap();
-        assert_eq!(item.decision, Decision::Propose);
-        assert!(item.spliced_host.is_some());
+        plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new body\n")).unwrap_err();
     }
 
     #[test]
-    fn user_modified_template_unchanged_leaves_alone() {
+    fn user_modified_is_refused_when_template_unchanged() {
         let host = "# >>> anvil-managed: r\nuser body\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("body\n"));
-        let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "body\n")).unwrap();
-        assert_eq!(item.decision, Decision::LeaveAlone);
+        plan_managed_region(&manifest, Some(host), request("Justfile", "r", "body\n")).unwrap_err();
     }
 
     #[test]
-    fn empty_region_opts_out_when_template_unchanged() {
-        // Steady-state opt-out: user emptied the region, template hasn't moved.
+    fn empty_region_is_regenerated_when_template_unchanged() {
         let host = "# >>> anvil-managed: r\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("body\n"));
         let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "body\n")).unwrap();
-        assert_eq!(item.decision, Decision::LeaveAlone);
+        assert_eq!(item.decision, Decision::Write);
     }
 
     #[test]
-    fn empty_region_with_new_template_proposes() {
+    fn empty_region_is_regenerated_with_new_template() {
         let host = "# >>> anvil-managed: r\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("old\n"));
         let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new\n")).unwrap();
-        // Opt-out remains in place but the user gets a proposed host file.
-        assert_eq!(item.decision, Decision::Propose);
+        assert_eq!(item.decision, Decision::Write);
     }
 
     /// The counterpart to the introduction case, and once the reverse of it:

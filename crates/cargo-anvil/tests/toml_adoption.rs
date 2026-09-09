@@ -31,7 +31,6 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use cargo_anvil::test_support::{Cli, RunOutcome, Target, run_update};
-use cargo_anvil::{Artifact, Catalog, CliMeta, CommentSyntax, HostSelector, RegionId, RegionSpec};
 use tempfile::TempDir;
 
 /// A workspace with nothing in it but the manifest anvil needs to find, plus
@@ -179,18 +178,9 @@ yanked = \"warn\"
     insta::assert_snapshot!("refuses_a_key_both_sides_declare", report(before, &tmp, "deny.toml", &outcome));
 }
 
-/// Residue is re-emitted after the region's closing sentinel, so TOML reads it
-/// as a setting of whichever table the body opens **last**. The shipped
-/// spellcheck body opens `[Hunspell]` and then `[Hunspell.quirks]`, so a
-/// hand-written `[Hunspell]` key that the body does not declare would come back
-/// as `Hunspell.quirks.<key>` — valid TOML that parses cleanly and that
-/// cargo-spellcheck never reads.
-///
-/// Anvil refuses instead, naming both tables and the edit that clears it. A
-/// file that quietly means something else is exactly the failure mode this PR
-/// rejects elsewhere, when it disproves issue #148's dotted-key option.
+/// Separate shipped regions keep Hunspell extras outside the quirks table.
 #[test]
-fn refuses_residue_that_cannot_stay_in_its_table() {
+fn preserves_hunspell_extras_in_their_table() {
     let before = "\
 [Hunspell]
 transform_regex = [\"^[0-9]+$\"]
@@ -199,7 +189,7 @@ transform_regex = [\"^[0-9]+$\"]
     let outcome = run(&tmp);
 
     insta::assert_snapshot!(
-        "refuses_residue_that_cannot_stay_in_its_table",
+        "preserves_hunspell_extras_in_their_table",
         report(before, &tmp, "spellcheck.toml", &outcome)
     );
 }
@@ -231,52 +221,17 @@ rust.unsafe_op_in_unsafe_fn = \"warn\"
     insta::assert_snapshot!("keeps_an_unmanaged_dotted_lint", report(before, &tmp, "Cargo.toml", &outcome));
 }
 
-/// Two regions *of the catalog* on one host that declare the same table. Each
-/// is invisible to the other's parser check — the backstop masks every other
-/// managed region before it parses — so both used to plan a write and compose a
-/// `deny.toml` with two `[licenses]` headers.
-///
-/// This refusal reads differently from the others on purpose. Both regions are
-/// anvil's own, so there is no edit to the host that resolves it; telling the
-/// user to reconcile a table they never wrote would send them chasing nothing.
-/// It asks for a bug report instead, and the first region still onboards.
+/// Catalog arrays-of-tables are unsupported, but user bin targets survive.
 #[test]
-fn refuses_two_regions_claiming_one_table() {
-    let tmp = workspace_with("deny.toml", "");
-    std::fs::remove_file(tmp.path().join("deny.toml")).unwrap();
-
-    let catalog = Catalog::builder(CliMeta::new("anvil"))
-        .with_artifact(Artifact::region(RegionSpec {
-            host: HostSelector::Path("deny.toml".to_owned()),
-            id: RegionId::new("anvil-licenses-basics"),
-            body: "[licenses]\nallow = [\"MIT\"]\n".to_owned(),
-            syntax: CommentSyntax::Hash,
-        }))
-        .with_artifact(Artifact::region(RegionSpec {
-            host: HostSelector::Path("deny.toml".to_owned()),
-            id: RegionId::new("anvil-licenses-threshold"),
-            body: "[licenses]\nconfidence-threshold = 0.93\n".to_owned(),
-            syntax: CommentSyntax::Hash,
-        }))
-        .build()
-        .unwrap();
-
-    let outcome = run_update(
-        &catalog,
-        &Cli {
-            backends: vec![],
-            no_backends: true,
-            dry_run: false,
-            force: false,
-        },
-        tmp.path(),
-    )
-    .unwrap();
-
-    insta::assert_snapshot!(
-        "refuses_two_regions_claiming_one_table",
-        report("(anvil creates this file)\n", &tmp, "deny.toml", &outcome)
-    );
+fn preserves_user_binary_targets() {
+    let before = "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+                  [lints]\nworkspace=true # our policy\n\
+                  [[bin]]\nname = \"extra\"\npath = \"src/main.rs\"\n";
+    let host = "crates/alpha/Cargo.toml";
+    let tmp = workspace_with(host, before);
+    write(&tmp.path().join("crates/alpha/src/main.rs"), "fn main() {}\n");
+    let outcome = run(&tmp);
+    insta::assert_snapshot!("preserves_user_binary_targets", report(before, &tmp, host, &outcome));
 }
 
 /// A CRLF host stays CRLF throughout: carried-over user content, generated

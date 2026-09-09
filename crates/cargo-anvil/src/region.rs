@@ -21,8 +21,7 @@
 //! The `id` is globally unique within the catalog (e.g. `anvil-imports`,
 //! `anvil-workspace-lints`).
 //!
-//! Empty body (just the sentinels with no content between them) is the
-//! opt-out signal — see [`updates.md`](../../docs/design/updates.md).
+//! Empty bodies are regenerated; nonempty edits require reconciliation.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -102,17 +101,56 @@ impl<'a> Region<'a> {
         &self.text[self.body.start..self.body.end]
     }
 
-    /// Whether this region is empty (opted out). An empty region is one
+    /// Whether this region is empty. An empty region is one
     /// whose body, after trimming line terminators and whitespace,
     /// contains no non-whitespace characters.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "region opt-out predicate, currently exercised only by unit tests")
-    )]
     pub fn is_empty(&self) -> bool {
         self.body_str().trim().is_empty()
     }
+}
+
+/// Remove only unmatched or redundant marker lines for one id.
+///
+/// The first opener and first subsequent closer define ownership. Extra
+/// openers inside that pair and closers outside it are discarded. With no
+/// complete pair, every marker is discarded and all content stays unmanaged.
+#[must_use]
+pub fn repair_markers(text: &str, id: &str, syntax: CommentSyntax) -> String {
+    let opener = format!("{} >>> anvil-managed: {id}", syntax.prefix());
+    let closer = format!("{} <<< anvil-managed: {id}", syntax.prefix());
+    let markers: Vec<(ByteRange, bool)> = iterate_lines(text)
+        .filter_map(|line| {
+            let value = text[line.start..line.end].trim();
+            if value == opener {
+                Some((line, true))
+            } else if value == closer {
+                Some((line, false))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let start = markers.iter().position(|(_, opens)| *opens);
+    let end = start.and_then(|start| {
+        markers
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, (_, opens))| !opens)
+            .map(|(index, _)| index)
+    });
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (index, (line, _)) in markers.iter().enumerate() {
+        if end.is_some() && (Some(index) == start || Some(index) == end) {
+            continue;
+        }
+        out.push_str(&text[cursor..line.start]);
+        cursor = line.end;
+    }
+    out.push_str(&text[cursor..]);
+    out
 }
 
 /// Locate the named region in `text`. Returns `Ok(None)` if absent.
@@ -475,7 +513,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         return TomlAdoption::Unchanged;
     };
     if managed.is_empty() {
-        return TomlAdoption::Unchanged;
+        return adopt_unmanaged_root_settings(text, body, syntax);
     }
 
     // Parse the host with its managed regions blanked out. Two things fall out
@@ -673,23 +711,6 @@ struct TableEntry {
 /// The configuration a TOML table declares, as canonical path/value pairs.
 type TableValues = BTreeMap<Vec<String>, String>;
 
-/// The tables a TOML body declares with an explicit header, as dotted paths.
-///
-/// Diagnostic only: the parser decides whether a splice is valid, and this
-/// names the table two of anvil's own regions both declare so the refusal can
-/// say which one. Arrays of tables are excluded, since TOML permits `[[bin]]`
-/// to repeat. Returns an empty set for a body that is not valid TOML on its
-/// own, in which case the caller falls back to the parser's own words.
-#[must_use]
-pub fn declared_tables(body: &str) -> BTreeSet<String> {
-    headed_tables(body)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|table| !table.array_of_tables)
-        .map(|table| table.path.join("."))
-        .collect()
-}
-
 /// Every explicitly headed table in `text`, in document order.
 ///
 /// Returns `None` when `text` is not valid TOML. Parsing the document rather
@@ -766,12 +787,66 @@ fn table_values(table: &Table) -> TableValues {
     values
 }
 
+fn canonical_value(value: &toml_edit::Value) -> String {
+    use toml_edit::Value;
+    match value {
+        Value::String(value) => format!("{:?}", value.value()),
+        Value::Integer(value) => value.value().to_string(),
+        Value::Float(value) => format!("{:?}", value.value()),
+        Value::Boolean(value) => value.value().to_string(),
+        Value::Datetime(value) => value.value().to_string(),
+        Value::Array(values) => format!("[{}]", values.iter().map(canonical_value).collect::<Vec<_>>().join(", ")),
+        Value::InlineTable(table) => {
+            let sorted: BTreeMap<_, _> = table.iter().map(|(key, value)| (key, canonical_value(value))).collect();
+            format!("{sorted:?}")
+        }
+    }
+}
+
+fn adopt_unmanaged_root_settings(text: &str, body: &str, syntax: CommentSyntax) -> TomlAdoption {
+    let masked = mask_managed_regions(text, syntax);
+    let (Ok(managed), Ok(document), Some(tables)) = (
+        toml_edit::Document::parse(body),
+        toml_edit::Document::parse(&masked),
+        headed_tables(&masked),
+    ) else {
+        return TomlAdoption::Unchanged;
+    };
+    let values = table_values(managed.as_table());
+    let mut boundaries: Vec<_> = tables.iter().map(|table| table.header.start).collect();
+    boundaries.extend(managed_region_ranges(text, syntax).iter().map(|range| range.start));
+    boundaries.sort_unstable();
+    let mut out = String::new();
+    let mut cursor = 0;
+    for entry in table_entries(document.as_table(), &masked) {
+        let Some(value) = values.get(&entry.path) else { continue };
+        if *value != entry.value {
+            return TomlAdoption::Conflict {
+                table: "<root>".to_owned(),
+                key: entry.path.join("."),
+                managed: value.clone(),
+                hand_written: entry.value,
+            };
+        }
+        out.push_str(&text[cursor..entry.span.start]);
+        cursor = entry.span.end.min(boundary_after(&boundaries, entry.span.start, text.len()));
+    }
+    if cursor == 0 {
+        return TomlAdoption::Unchanged;
+    }
+    out.push_str(&text[cursor..]);
+    TomlAdoption::Adopted {
+        text: out,
+        residue: String::new(),
+    }
+}
+
 fn collect_values(table: &Table, path: &mut Vec<String>, values: &mut TableValues) {
     for (key, item) in table {
         path.push(key.to_owned());
         match item {
             Item::Value(value) => {
-                values.insert(path.clone(), value.to_string().trim().to_owned());
+                values.insert(path.clone(), canonical_value(value));
             }
             Item::Table(child) if child.is_dotted() => collect_values(child, path, values),
             _ => {}
@@ -824,7 +899,7 @@ fn collect_entry_starts(table: &Table, text: &str, path: &mut Vec<String>, out: 
         let (key, _) = table.get_key_value(key).expect("a key yielded by a table is present in it");
         path.push(key.get().to_owned());
         match item {
-            Item::Value(value) => out.push((path.clone(), value.to_string().trim().to_owned(), entry_start(key, text))),
+            Item::Value(value) => out.push((path.clone(), canonical_value(value), entry_start(key, text))),
             Item::Table(child) if child.is_dotted() => collect_entry_starts(child, text, path, out),
             _ => {}
         }
@@ -861,23 +936,6 @@ fn boundary_after(boundaries: &[usize], start: usize, fallback: usize) -> usize 
 /// text.
 fn mask_managed_regions(text: &str, syntax: CommentSyntax) -> String {
     mask_regions(text, &managed_region_ranges(text, syntax))
-}
-
-/// Blank every managed region except `keep`, so what remains is the region
-/// under consideration plus the repository's own hand-written content.
-///
-/// This hides a sibling region that is *staying*, so it answers only "does this
-/// region collide with hand-written text". Use
-/// [`mask_retiring_managed_regions`] for the question a validity check
-/// actually has to ask; this one distinguishes the two faults once one has been
-/// found.
-#[must_use]
-pub fn mask_other_managed_regions(text: &str, syntax: CommentSyntax, keep: &str) -> String {
-    let ranges: Vec<ByteRange> = managed_region_ranges_with_ids(text, syntax)
-        .into_iter()
-        .filter_map(|(id, range)| (id != keep).then_some(range))
-        .collect();
-    mask_regions(text, &ranges)
 }
 
 /// Blank the managed regions named in `retiring`, so what remains is the file
@@ -949,8 +1007,9 @@ fn managed_region_ranges_with_ids(text: &str, syntax: CommentSyntax) -> Vec<(Str
     for line in iterate_lines(text) {
         let trimmed = text[line.start..line.end].trim();
         if let Some(id) = trimmed.strip_prefix(&open) {
-            start = Some((id.trim().to_owned(), line.start));
-        } else if trimmed.starts_with(&close)
+            start.get_or_insert_with(|| (id.trim().to_owned(), line.start));
+        } else if let Some(closing_id) = trimmed.strip_prefix(&close)
+            && start.as_ref().is_some_and(|(id, _)| id == closing_id.trim())
             && let Some((id, open_at)) = start.take()
         {
             ranges.push((
@@ -961,17 +1020,6 @@ fn managed_region_ranges_with_ids(text: &str, syntax: CommentSyntax) -> Vec<(Str
                 },
             ));
         }
-    }
-    // An unterminated region still shields everything below it: its body is the
-    // region's, not the user's, and `find_region` rejects the file separately.
-    if let Some((id, open_at)) = start {
-        ranges.push((
-            id,
-            ByteRange {
-                start: open_at,
-                end: text.len(),
-            },
-        ));
     }
     ranges
 }
@@ -1112,6 +1160,19 @@ mod tests {
             },
             "the disagreement is reported rather than resolved"
         );
+    }
+
+    #[test]
+    fn adoption_compares_parsed_values_not_their_source_notation() {
+        let body = "[settings]\nvalues = [1, 2]\npolicy = { a = true, b = \"a#b\" }\ncount = 1000\n";
+        let text = "[settings]\ncount=1_000 # our policy\npolicy={b='a#b',a=true}\nvalues=[ 1,\n 2, ]\nkeep = 'ours'\n";
+        let TomlAdoption::Adopted { text, residue } = adopt_unmanaged_toml_tables(text, body, CommentSyntax::Hash) else {
+            panic!("equivalent parsed values should be emitted once");
+        };
+        assert!(text.trim().is_empty());
+        assert_eq!(residue, "keep = 'ours'\n");
+        let parsed = format!("{body}{residue}").parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(parsed["settings"]["keep"].as_str(), Some("ours"));
     }
 
     /// The defect behind issue #148: a hand-written table carrying
@@ -1928,24 +1989,16 @@ mod tests {
         }
     }
 
-    /// A region left unterminated still owns everything below it — that text is
-    /// the region's, not the user's. Masking only as far as a closing sentinel
-    /// that never arrives would expose the region's own tables to adoption as
-    /// though a human had written them.
+    /// Without a complete pair, every non-marker byte remains unmanaged.
     #[test]
-    fn an_unterminated_region_is_masked_to_the_end_of_the_file() {
+    fn an_unterminated_region_does_not_hide_unmanaged_values() {
         let text = "[advisories]\n# >>> anvil-managed: x\nyanked = \"deny\"\n";
         let masked = mask_managed_regions(text, SYN);
 
-        assert_eq!(masked.len(), text.len(), "masking leaves every byte offset where it was");
-        assert!(
-            masked.starts_with("[advisories]\n"),
-            "text above the region is untouched:\n{masked}"
-        );
+        assert_eq!(masked, text);
         assert_eq!(
-            masked["[advisories]\n".len()..].trim(),
-            "",
-            "everything from the opening sentinel down is blanked:\n{masked}"
+            masked.parse::<toml_edit::DocumentMut>().unwrap()["advisories"]["yanked"].as_str(),
+            Some("deny")
         );
     }
 
@@ -2054,10 +2107,7 @@ mod tests {
         );
     }
 
-    /// The refusal check masks every managed region except the one being
-    /// introduced, which has to stay readable for the check to judge it. The
-    /// blanking keeps every line break, so the parser reports the same spans
-    /// against the copy as against the original.
+    /// Only retiring regions are masked; spans and line endings stay stable.
     #[test]
     fn masking_keeps_the_named_region_and_every_line_break() {
         let text = "[advisories]\n\
@@ -2067,7 +2117,7 @@ mod tests {
                     # >>> anvil-managed: b\n\
                     unmaintained = \"warn\"\n\
                     # <<< anvil-managed: b\n";
-        let masked = mask_other_managed_regions(text, SYN, "b");
+        let masked = mask_retiring_managed_regions(text, SYN, &BTreeSet::from(["a".to_owned()]));
 
         assert_eq!(masked.len(), text.len(), "every byte offset is where it was");
         assert_eq!(

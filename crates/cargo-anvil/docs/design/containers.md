@@ -154,8 +154,8 @@ reconcile by hand. For this file the consequence is silent: it carries the base 
 repository that edits it once builds on a frozen base and frozen versions indefinitely, while `anvil-container-tag`
 still resolves, because the tag hashes the file as it stands. Identity stays correct and the image stays stale.
 
-**Regions are not write protection.** The ownership rules in `updates.md` §2 apply to a region body exactly as they do
-to a file: an edit inside a region is preserved and produces a proposal rather than being overwritten. The gaps exist
+**Regions have strict ownership.** Unlike owned files, nonempty edits inside a region
+are preserved and refused until reconciled, without proposals (`updates.md` §3). The gaps exist
 so that editing a region is never the right way to add something.
 
 **Overriding the base image.** `ARG BASE_IMAGE` and the `FROM` that consumes it are separate regions, so the override

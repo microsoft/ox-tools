@@ -593,27 +593,25 @@ fn refusing_a_composed_host_leaves_its_lock_entry_intact() {
     }
 }
 
-/// A malformed sentinel must be reported as such, not folded in with "this
-/// region is missing" -- the content is right there, with a broken marker.
+/// Duplicate markers are repaired before the entire composed host is classified.
 #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
 #[test]
-fn a_malformed_sentinel_is_named_in_the_refusal() {
+fn duplicate_sentinels_are_repaired_without_changing_composed_content() {
     let tmp = generated_tree();
     let root = tmp.path();
     let dockerfile = root.join(".anvil/container/Dockerfile");
 
-    // Duplicate the opening sentinel, leaving the close unmatched.
     let text = std::fs::read_to_string(&dockerfile).unwrap();
-    let opener = "# >>> anvil-managed: anvil-container-base";
-    let broken = text.replacen(opener, &format!("{opener}\n{opener}"), 1);
+    let opener = "# >>> anvil-managed: anvil-container-base\n";
+    let broken = text.replacen(opener, &format!("{opener}{opener}"), 1);
     write(&dockerfile, &broken);
 
     let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&dockerfile).unwrap(),
-        broken,
-        "a refused host must not be modified"
+        text,
+        "only duplicate marker noise should be removed"
     );
     let refusals: Vec<&String> = outcome
         .plan
@@ -621,12 +619,8 @@ fn a_malformed_sentinel_is_named_in_the_refusal() {
         .iter()
         .filter(|r| r.contains(".anvil/container/Dockerfile"))
         .collect();
-    assert_eq!(refusals.len(), 1, "one diagnostic per host: {refusals:?}");
-    assert!(
-        refusals[0].contains("cannot be read"),
-        "a broken sentinel must not be reported as a missing region: {}",
-        refusals[0]
-    );
+    assert!(refusals.is_empty(), "{refusals:?}");
+    assert!(!run_update(&Catalog::anvil(), &local(), root).unwrap().plan.has_changes());
 }
 
 /// The guard that refuses a repository-authored Dockerfile is reached through
@@ -869,11 +863,12 @@ fn refusing_a_composed_host_spares_a_retired_region_entry_too() {
     let legacy_body = "RUN echo legacy\n";
     let text = std::fs::read_to_string(&dockerfile).unwrap();
     let with_legacy = format!("{text}\n# >>> anvil-managed: {legacy_id}\n{legacy_body}# <<< anvil-managed: {legacy_id}\n");
-    // Duplicate an opening sentinel so the host classifies `Unsafe` and the run
-    // refuses it. The legacy region itself stays well formed, so the removal
-    // path can still reach it.
-    let opener = "# >>> anvil-managed: anvil-container-base\n";
-    let broken = with_legacy.replacen(opener, &format!("{opener}{opener}"), 1);
+    // Out-of-order complete regions remain unsafe; marker-only cleanup cannot
+    // repair ordering. The retired region itself is still well formed.
+    let broken = with_legacy
+        .replace("anvil-container-base-image", "anvil-container-swapped")
+        .replace("anvil-container-base\n", "anvil-container-base-image\n")
+        .replace("anvil-container-swapped", "anvil-container-base");
     write(&dockerfile, &broken);
 
     let mut manifest = Manifest::load(root).unwrap();
