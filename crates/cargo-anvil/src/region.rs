@@ -110,13 +110,33 @@ impl<'a> Region<'a> {
     }
 }
 
-/// Remove only unmatched or redundant marker lines for one id.
+/// What repairing one id's marker lines produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkerRepair {
+    /// The markers are usable: absent, or a complete pair. Any redundant
+    /// markers around that pair have been removed from the returned text,
+    /// which is otherwise the input.
+    Repaired(String),
+    /// Markers for this id exist but none of them form a pair, so the
+    /// boundary of whatever anvil last generated cannot be proven.
+    Unpaired,
+}
+
+/// Remove only redundant marker lines for one id, around a complete pair.
 ///
 /// The first opener and first subsequent closer define ownership. Extra
-/// openers inside that pair and closers outside it are discarded. With no
-/// complete pair, every marker is discarded and all content stays unmanaged.
+/// openers inside that pair and closers outside it are discarded.
+///
+/// With markers but no complete pair, nothing is touched and
+/// [`MarkerRepair::Unpaired`] is returned. Discarding them instead would be
+/// the corrupting answer: a generated region that has lost its closing marker
+/// still holds a generated body, and dropping the surviving opener turns that
+/// body into ordinary text no one owns. `find_region` then reports no region,
+/// the writer appends the template afresh, and the file ends up with two
+/// copies of the same recipes or imports — the older of which nothing tracks.
+/// The host is left exactly as found and the caller refuses the region.
 #[must_use]
-pub fn repair_markers(text: &str, id: &str, syntax: CommentSyntax) -> String {
+pub fn repair_markers(text: &str, id: &str, syntax: CommentSyntax) -> MarkerRepair {
     let opener = format!("{} >>> anvil-managed: {id}", syntax.prefix());
     let closer = format!("{} <<< anvil-managed: {id}", syntax.prefix());
     let markers: Vec<(ByteRange, bool)> = iterate_lines(text)
@@ -131,6 +151,9 @@ pub fn repair_markers(text: &str, id: &str, syntax: CommentSyntax) -> String {
             }
         })
         .collect();
+    if markers.is_empty() {
+        return MarkerRepair::Repaired(text.to_owned());
+    }
     let start = markers.iter().position(|(_, opens)| *opens);
     let end = start.and_then(|start| {
         markers
@@ -143,17 +166,20 @@ pub fn repair_markers(text: &str, id: &str, syntax: CommentSyntax) -> String {
             .find(|(_, (_, opens))| !opens)
             .map(|(index, _)| index)
     });
+    let (Some(start), Some(end)) = (start, end) else {
+        return MarkerRepair::Unpaired;
+    };
     let mut out = String::with_capacity(text.len());
     let mut cursor = 0;
     for (index, (line, _)) in markers.iter().enumerate() {
-        if end.is_some() && (Some(index) == start || Some(index) == end) {
+        if index == start || index == end {
             continue;
         }
         out.push_str(&text[cursor..line.start]);
         cursor = line.end;
     }
     out.push_str(&text[cursor..]);
-    out
+    MarkerRepair::Repaired(out)
 }
 
 /// Locate the named region in `text`. Returns `Ok(None)` if absent.

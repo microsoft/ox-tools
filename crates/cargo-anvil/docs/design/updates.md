@@ -203,15 +203,25 @@ and the refusal names which one, because they have different answers:
 | Two managed regions declare one table | Nothing hand-written is involved; re-run to finish a move, and if the refusal repeats the catalog is exchanging tables, which is unsupported |
 | A managed region and hand-written text declare one table | Reconcile the hand-written table with the managed one |
 
-A fourth refusal shares the wording but not the cause, and is not a parse fault
-at all: a region the catalog no longer declares, whose body has been edited
-since anvil rendered it. Anvil will not discard changes it did not write, so
-the region stays and retirement stays incomplete until its body matches the
-last generated one, or it is emptied, or it is deleted. That refusal says so
-rather than sending the reader to reconcile a table, and it names the host by
-the spelling on disk, which a case-only rename makes differ from the one the
-lock recorded. It reaches non-TOML hosts too, because nothing about it depends
-on the format.
+A fourth and a fifth refusal share the wording but not the cause, and neither
+is a parse fault. One is a region the catalog no longer declares whose body has
+been edited since anvil rendered it; anvil will not discard changes it did not
+write, so the region stays and retirement stays incomplete until its body
+matches the last generated one, or it is emptied, or it is deleted. The other
+is a *live* region whose body no longer matches either its last render or the
+current template. Both say so rather than sending the reader to reconcile a
+table, and the retirement one names the host by the spelling on disk, which a
+case-only rename makes differ from the one the lock recorded. Both reach
+non-TOML hosts, because nothing about them depends on the format.
+
+A sixth refusal covers marker lines that do not form a matching pair. Anvil
+does not repair that shape and does not remove the surviving marker: a region
+that has lost a sentinel still holds a generated body whose end nothing can
+prove, and unmanaging it makes the writer append the template beside it,
+leaving two copies of the same content with only the newer one tracked. The
+host is left exactly as found until a human restores the boundary. Redundant
+markers *around* a complete pair are still cleaned up automatically, because
+there the boundary is known.
 
 **Moving a table between two live regions takes two runs, in one ordering.** When
 the region gaining the table is planned before the region giving it up, the first

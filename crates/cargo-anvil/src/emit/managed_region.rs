@@ -24,7 +24,7 @@ use toml_edit::DocumentMut;
 use crate::checksum::checksum_str;
 #[cfg(test)]
 use crate::decision::Decision;
-use crate::manifest::{Manifest, RegionKey};
+use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
 use crate::region::{
     CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_region, insert_after_region, managed_region_ids,
@@ -50,11 +50,33 @@ pub enum RefusalRemedy {
     BetweenManagedRegions,
     /// The region collides with a table the repository wrote.
     HandWrittenTable,
+    /// The region is live, but its body on disk matches neither the body anvil
+    /// last generated nor the current template. Nothing was parsed and no
+    /// table collided; the host's format is irrelevant.
+    EditedRegion,
+    /// The region's marker lines do not form a usable pair, so no boundary can
+    /// be proven for whatever sits between them.
+    MalformedMarkers,
     /// The catalog no longer declares the region, so it was due for removal,
     /// but its body carries edits anvil did not write. Nothing was parsed and
     /// no table collided; the host's format is irrelevant, so this reaches
     /// non-TOML hosts too.
     EditedRetirement,
+}
+
+/// A managed region that could not be planned: why, and what to do about it.
+#[derive(Debug)]
+pub struct ManagedRegionRefusal {
+    /// The account of what went wrong, quoted into the refusal.
+    pub reason: AppError,
+    /// Which fault produced it.
+    pub remedy: RefusalRemedy,
+}
+
+impl ManagedRegionRefusal {
+    fn new(reason: AppError, remedy: RefusalRemedy) -> Self {
+        Self { reason, remedy }
+    }
 }
 
 /// A refused TOML splice: what the parser said, and what to do about it.
@@ -111,8 +133,13 @@ impl ManagedRegionRequest<'_> {
 ///
 /// # Errors
 ///
-/// Returns an error if the region in the host is malformed.
-pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Result<PlanItem, AppError> {
+/// Returns the fault that stopped the region being planned, classified so the
+/// caller can offer the remedy that actually applies.
+pub fn plan_managed_region(
+    manifest: &Manifest,
+    host_text: Option<&str>,
+    request: ManagedRegionRequest<'_>,
+) -> Result<PlanItem, ManagedRegionRefusal> {
     let ManagedRegionRequest {
         host_relpath,
         region_id,
@@ -122,15 +149,18 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
         newline,
     } = request;
     let template_checksum = checksum_str(rendered_body);
-    let key = RegionKey {
-        host: host_relpath.to_owned(),
-        id: region_id.to_owned(),
-    };
-    let last_rendered = manifest.regions.get(&key).map(String::as_str);
+    // Case-insensitively, as the retirement path does. `push_region_at`
+    // resolves the host to its on-disk spelling, so after a rename such as
+    // `Deny.toml` to `deny.toml` an exact lookup misses the lock entry, and a
+    // clean generated body then reads as an edit -- refused every run until
+    // someone empties it by hand.
+    let last_rendered = manifest.region_checksum(host_relpath, region_id);
 
     let disk_region = match host_text {
         None => None,
-        Some(text) => find_region(text, region_id, syntax)?,
+        Some(text) => {
+            find_region(text, region_id, syntax).map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?
+        }
     };
     let disk_checksum = disk_region.as_ref().map(|region| checksum_str(region.body_str()));
     let needs_reposition = placement == RegionPlacement::Start
@@ -149,9 +179,12 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
         && disk_checksum.as_deref() != last_rendered
         && disk_checksum.as_deref() != Some(&template_checksum)
     {
-        return Err(app_err!(
-            "the managed region contains edits that do not match its last render or the current template. \
-             Restore its generated content, or empty its body to regenerate it; keep user settings outside the sentinels"
+        return Err(ManagedRegionRefusal::new(
+            app_err!(
+                "the managed region contains edits that do not match its last render or the current template. \
+                 Restore its generated content, or empty its body to regenerate it; keep user settings outside the sentinels"
+            ),
+            RefusalRemedy::EditedRegion,
         ));
     }
     let spliced = splice(host_relpath, host_text, region_id, rendered_body, syntax, placement, newline)?;
@@ -214,10 +247,10 @@ pub fn toml_introduction_refusal(
     }
 
     let spliced = match splice(host_relpath, host_text, region_id, rendered_body, syntax, placement, newline) {
-        Err(error) => {
+        Err(refusal) => {
             return Some(TomlHostRefusal {
-                reason: error.to_string(),
-                remedy: RefusalRemedy::HandWrittenTable,
+                reason: refusal.reason.to_string(),
+                remedy: refusal.remedy,
             });
         }
         Ok(spliced) => spliced,
@@ -277,7 +310,7 @@ fn splice(
     syntax: CommentSyntax,
     placement: RegionPlacement,
     newline: Option<&str>,
-) -> Result<String, AppError> {
+) -> Result<String, ManagedRegionRefusal> {
     let base = host_text.unwrap_or("");
     let newline = newline.unwrap_or_else(|| text_newline(base));
 
@@ -311,18 +344,24 @@ fn splice(
                 managed,
                 hand_written,
             } => {
-                return Err(app_err!(
-                    "{host_relpath} declares `{key}` in `[{table}]` as {hand_written}, but the managed \
-                     region '{region_id}' declares it as {managed}. Adopting the table would discard \
-                     one of them and keeping both would repeat the key, which TOML rejects."
+                return Err(ManagedRegionRefusal::new(
+                    app_err!(
+                        "{host_relpath} declares `{key}` in `[{table}]` as {hand_written}, but the managed \
+                         region '{region_id}' declares it as {managed}. Adopting the table would discard \
+                         one of them and keeping both would repeat the key, which TOML rejects."
+                    ),
+                    RefusalRemedy::HandWrittenTable,
                 ));
             }
             TomlAdoption::Unrelocatable { table, tail_table } => {
-                return Err(app_err!(
-                    "{host_relpath} declares settings in `[{table}]` that the managed region \
-                     '{region_id}' does not, and the region's body ends in `[{tail_table}]`, so \
-                     re-emitting them after the region would make them settings of `[{tail_table}]` \
-                     instead. Remove them from `[{table}]` and re-run."
+                return Err(ManagedRegionRefusal::new(
+                    app_err!(
+                        "{host_relpath} declares settings in `[{table}]` that the managed region \
+                         '{region_id}' does not, and the region's body ends in `[{tail_table}]`, so \
+                         re-emitting them after the region would make them settings of `[{tail_table}]` \
+                         instead. Remove them from `[{table}]` and re-run."
+                    ),
+                    RefusalRemedy::HandWrittenTable,
                 ));
             }
         }
@@ -330,8 +369,10 @@ fn splice(
         base
     };
 
-    let spliced = upsert_region_with_newline(base, region_id, rendered_body, syntax, placement, newline)?;
+    let spliced = upsert_region_with_newline(base, region_id, rendered_body, syntax, placement, newline)
+        .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?;
     insert_after_region(&spliced, region_id, &residue, syntax)
+        .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))
 }
 
 #[cfg(test)]
@@ -888,7 +929,54 @@ yanked = \"deny\"
         let host = "# >>> anvil-managed: r\nuser body\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("old body\n"));
-        plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new body\n")).unwrap_err();
+        let refusal = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new body\n")).unwrap_err();
+        assert_eq!(refusal.remedy, RefusalRemedy::EditedRegion);
+    }
+
+    /// A case-only rename of the host must not make a clean generated body
+    /// look edited. `push_region_at` resolves the host to its on-disk
+    /// spelling, so an exact lock lookup misses the entry a rename left behind
+    /// under the old casing; `last_rendered` then reads as `None` and the
+    /// strict check refuses an untouched region, every run, until someone
+    /// empties it by hand. The retirement path already looks it up
+    /// case-insensitively -- this is its live-region counterpart.
+    #[test]
+    fn a_case_only_host_rename_does_not_make_a_clean_region_look_edited() {
+        let generated = "old body\n";
+        let host = format!("# >>> anvil-managed: r\n{generated}# <<< anvil-managed: r\n");
+        let mut manifest = Manifest::default();
+        // The lock recorded the pre-rename spelling; disk now says `deny.toml`.
+        manifest.set_region("Deny.toml", "r", checksum_str(generated));
+
+        let item = plan_managed_region(&manifest, Some(&host), request("deny.toml", "r", "new body\n"))
+            .unwrap_or_else(|refusal| panic!("an untouched generated body is not an edit: {}", refusal.reason));
+
+        assert_eq!(item.decision, Decision::Write, "the template change is simply applied");
+    }
+
+    /// The id, unlike the host, never travels through the filesystem, so two
+    /// ids differing only in case are two different regions and must not be
+    /// conflated by the lookup above.
+    #[test]
+    fn a_case_only_id_difference_is_still_a_different_region() {
+        let host = "# >>> anvil-managed: r\nuser body\n# <<< anvil-managed: r\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("Justfile", "R", checksum_str("user body\n"));
+
+        let refusal = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new body\n")).unwrap_err();
+
+        assert_eq!(refusal.remedy, RefusalRemedy::EditedRegion);
+    }
+
+    /// Markers that cannot be paired are their own fault with their own
+    /// remedy: the reader must not be sent looking for a table collision.
+    #[test]
+    fn an_unpaired_marker_is_classified_as_a_marker_fault() {
+        let host = "# >>> anvil-managed: r\nbody\n";
+
+        let refusal = plan_managed_region(&Manifest::default(), Some(host), request("Justfile", "r", "body\n")).unwrap_err();
+
+        assert_eq!(refusal.remedy, RefusalRemedy::MalformedMarkers);
     }
 
     #[test]

@@ -26,7 +26,7 @@ use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
-use crate::region::{CommentSyntax, RegionPlacement, find_region, managed_region_ids, remove_region, repair_markers};
+use crate::region::{CommentSyntax, MarkerRepair, RegionPlacement, find_region, managed_region_ids, remove_region, repair_markers};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -202,7 +202,9 @@ fn build_plan(
     for key in manifest.regions.keys() {
         let host = resolve_existing_case_insensitive(repo_root, &key.host);
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
-            repair_host_markers(repo_root, &mut plan, &mut hosts, &host, &key.id, CommentSyntax::Hash)?;
+            // An unpaired result is left for the path that plans the region:
+            // it refuses there, where the region's own id is being handled.
+            let _ = repair_host_markers(repo_root, &mut plan, &mut hosts, &host, &key.id, CommentSyntax::Hash)?;
         }
     }
 
@@ -339,31 +341,11 @@ fn push_region_at(
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     let host = resolve_existing_case_insensitive(repo_root, host);
-    repair_host_markers(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax)?;
-    let composed_host = composed_host_spec(&host);
-    if let Some(declared) = composed_host
-        && !composed.states.contains_key(&host)
-    {
-        let state = prepare_composed_host(repo_root, manifest, plan, hosts, declared, &host)?;
-        if matches!(state, ComposedHostState::SeedFromScaffold) {
-            hosts.set(&host, declared.scaffold.to_owned());
-        }
-        composed.states.insert(host.clone(), state);
+    if !repair_or_refuse(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false)? {
+        return Ok(());
     }
-    if let Some(ComposedHostState::Unsafe(reason)) = composed.states.get(&host) {
-        if composed.reported.insert(host.clone()) {
-            plan.refusal(format!(
-                "Refused to manage {host}: {reason}. Only marker cleanup, if needed, was written to it, and other \
-                 artifacts were still planned."
-            ));
-        }
-        plan.push(PlanItem::noop(
-            Target::Region {
-                host,
-                id: spec.id.as_str().to_owned(),
-            },
-            Decision::LeaveAlone,
-        ));
+    let composed_host = composed_host_spec(&host);
+    if !settle_composed_host(repo_root, manifest, plan, hosts, composed, &host, spec)? {
         return Ok(());
     }
     let current = hosts.get_or_read(repo_root, &host)?;
@@ -422,8 +404,8 @@ fn push_region_at(
     };
     let item = match plan_managed_region(manifest, current.as_deref(), request) {
         Ok(item) => item,
-        Err(error) => {
-            refuse_region(plan, host, spec.id.as_str(), &error.to_string(), RefusalRemedy::HandWrittenTable);
+        Err(refusal) => {
+            refuse_region(plan, host, spec.id.as_str(), &refusal.reason.to_string(), refusal.remedy);
             return Ok(());
         }
     };
@@ -463,7 +445,9 @@ fn prepare_composed_host(
     host: &str,
 ) -> Result<ComposedHostState, AppError> {
     for id in declared.order {
-        repair_host_markers(repo_root, plan, hosts, host, id, CommentSyntax::Hash)?;
+        // Each region of a composed host refuses for itself when it is planned;
+        // this pre-pass only performs the repairs that are safe.
+        let _ = repair_host_markers(repo_root, plan, hosts, host, id, CommentSyntax::Hash)?;
     }
     let state = match hosts.get_or_read(repo_root, host)? {
         Some(text) => composed_host_state(declared.order, host, &text, manifest),
@@ -537,6 +521,23 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
              changes anvil did not write and discarding those is not its call. Retirement stays \
              incomplete, and this refusal repeats every run, until one of those is done."
         }
+        // A live region whose body was edited. Nothing was parsed here either,
+        // so the hand-written-table advice would send the reader looking for a
+        // collision that does not exist.
+        RefusalRemedy::EditedRegion => {
+            "The body between the sentinels is anvil's to write, and it will not overwrite changes it did \
+             not make. Settings that must survive belong outside the sentinels, where anvil never touches \
+             them."
+        }
+        // The markers do not pair up, so nothing can be said about what lies
+        // between them -- and anvil must not guess, because guessing wrong
+        // duplicates a generated body and orphans the older copy.
+        RefusalRemedy::MalformedMarkers => {
+            "Without a matching pair of sentinels the boundary of the generated body cannot be established, \
+             so anvil will not write this region rather than risk appending a second copy of it. Restore the \
+             missing sentinel around the body anvil generated, or delete the stray one together with the \
+             body it was meant to enclose."
+        }
     };
     plan.refusal(format!(
         "Refused to manage {host} [{id}]: {reason}{stop} This region was left unchanged; other regions in the same \
@@ -545,7 +546,81 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
     plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
 }
 
+/// Bring a composed host's state up to date and report whether the region may
+/// still be planned into it.
+///
+/// A host judged unsafe to compose is refused once, not once per region, and
+/// every region targeting it becomes a no-op.
+fn settle_composed_host(
+    repo_root: &Path,
+    manifest: &Manifest,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    composed: &mut ComposedHosts,
+    host: &str,
+    spec: &RegionSpec,
+) -> Result<bool, AppError> {
+    if let Some(declared) = composed_host_spec(host)
+        && !composed.states.contains_key(host)
+    {
+        let state = prepare_composed_host(repo_root, manifest, plan, hosts, declared, host)?;
+        if matches!(state, ComposedHostState::SeedFromScaffold) {
+            hosts.set(host, declared.scaffold.to_owned());
+        }
+        composed.states.insert(host.to_owned(), state);
+    }
+    let Some(ComposedHostState::Unsafe(reason)) = composed.states.get(host) else {
+        return Ok(true);
+    };
+    if composed.reported.insert(host.to_owned()) {
+        plan.refusal(format!(
+            "Refused to manage {host}: {reason}. Only marker cleanup, if needed, was written to it, and other \
+             artifacts were still planned."
+        ));
+    }
+    plan.push(PlanItem::noop(
+        Target::Region {
+            host: host.to_owned(),
+            id: spec.id.as_str().to_owned(),
+        },
+        Decision::LeaveAlone,
+    ));
+    Ok(false)
+}
+
+/// Repair a region's markers and, when they cannot be paired, refuse it.
+///
+/// Returns whether planning may continue. Refusing is the whole point: with
+/// one sentinel missing, a body anvil generated is still sitting in the file
+/// with no provable end, and treating it as absent makes the writer append the
+/// template beside it — two copies of the same content, only one of them
+/// tracked.
+fn repair_or_refuse(
+    repo_root: &Path,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    host: &str,
+    id: &str,
+    syntax: CommentSyntax,
+    retiring: bool,
+) -> Result<bool, AppError> {
+    if repair_host_markers(repo_root, plan, hosts, host, id, syntax)? != MarkerRepair::Unpaired {
+        return Ok(true);
+    }
+    let reason = if retiring {
+        "this retired managed region has marker lines that do not form a matching pair, so the span to remove cannot be established"
+    } else {
+        "this region's marker lines do not form a matching pair, so the boundary of any body anvil already generated cannot be established"
+    };
+    refuse_region(plan, host.to_owned(), id, reason, RefusalRemedy::MalformedMarkers);
+    Ok(false)
+}
+
 /// Persist cheap marker repairs independently of adopting or updating the body.
+///
+/// Reports whether the region's markers can be worked with at all. Unpaired
+/// markers are left exactly as found: see [`repair_markers`] for why removing
+/// them is the corrupting answer.
 fn repair_host_markers(
     repo_root: &Path,
     plan: &mut Plan,
@@ -553,15 +628,18 @@ fn repair_host_markers(
     host: &str,
     id: &str,
     syntax: CommentSyntax,
-) -> Result<(), AppError> {
-    if let Some(text) = hosts.get_or_read(repo_root, host)? {
-        let repaired = repair_markers(&text, id, syntax);
-        if repaired != text {
-            hosts.set(host, repaired.clone());
-            plan.push(PlanItem::repair_region(host, id, repaired));
-        }
+) -> Result<MarkerRepair, AppError> {
+    let Some(text) = hosts.get_or_read(repo_root, host)? else {
+        return Ok(MarkerRepair::Repaired(String::new()));
+    };
+    let outcome = repair_markers(&text, id, syntax);
+    if let MarkerRepair::Repaired(repaired) = &outcome
+        && repaired != &text
+    {
+        hosts.set(host, repaired.clone());
+        plan.push(PlanItem::repair_region(host, id, repaired.clone()));
     }
-    Ok(())
+    Ok(outcome)
 }
 
 /// Where a region belongs inside a composed host whose order is semantic.
@@ -967,7 +1045,11 @@ fn plan_removals(
             }));
             continue;
         }
-        repair_host_markers(repo_root, plan, hosts, &resolved_host, &key.id, CommentSyntax::Hash)?;
+        if !repair_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, CommentSyntax::Hash, true)? {
+            // The lock entry survives with the region, so the next run still
+            // knows it is anvil's to retire once the boundary is repaired.
+            continue;
+        }
         let Some(host_text) = hosts.get_or_read(repo_root, &resolved_host)? else {
             // Host file is gone entirely; just drop the manifest
             // entry. Emit OrphanedKept (no-op apply) so the plan
@@ -1186,6 +1268,26 @@ mod tests {
             assert!(
                 !retirement.contains("Reconcile the hand-written table"),
                 "nothing was parsed and no table collided: {retirement}"
+            );
+
+            let edited = remedy_for(RefusalRemedy::EditedRegion);
+            assert!(
+                edited.contains("outside the sentinels"),
+                "an edited live region is told where its settings belong: {edited}"
+            );
+            assert!(
+                !edited.contains("Reconcile the hand-written table"),
+                "an edited body is not a table collision: {edited}"
+            );
+
+            let markers = remedy_for(RefusalRemedy::MalformedMarkers);
+            assert!(
+                markers.contains("second copy"),
+                "the reader is told what anvil refused to risk: {markers}"
+            );
+            assert!(
+                !markers.contains("Reconcile the hand-written table"),
+                "a marker fault has nothing to do with a table: {markers}"
             );
         }
 
@@ -1653,6 +1755,9 @@ mod tests {
         assert_eq!(saved.catalog_checksum, Some(catalog.checksum()));
     }
 
+    /// Redundant markers around a complete pair are still cleaned up, and the
+    /// result settles. Markers that do NOT pair up are a different case
+    /// entirely -- see `unpaired_markers_are_refused_rather_than_unmanaged`.
     #[cfg_attr(miri, ignore = "uses filesystem")]
     #[test]
     fn marker_recovery_preserves_content_and_settles_for_both_syntaxes() {
@@ -1671,8 +1776,6 @@ mod tests {
                 .build()
                 .unwrap();
             for input in [
-                format!("{open}user"),
-                format!("{close}user\r\n{open}"),
                 format!("{open}{open}generated\r\n{close}user\r\n"),
                 format!("{open}generated\r\n{close}user\r\n{close}"),
             ] {
@@ -1690,6 +1793,77 @@ mod tests {
                 assert!(!output.replace("\r\n", "").contains('\n'));
                 assert!(!run_update(&catalog, &local_only(), tmp.path()).unwrap().plan.has_changes());
                 assert_eq!(fs::read_to_string(&path).unwrap(), output);
+            }
+        }
+    }
+
+    /// A region that has lost one of its sentinels still holds a body anvil
+    /// generated, and nothing can prove where that body ends. Discarding the
+    /// surviving marker -- which this used to do -- hands the body back to the
+    /// repository, and
+    /// the writer then appends the template beside it, leaving two copies of
+    /// the same content with only the newer one tracked. The file is left
+    /// exactly as found instead, and the region is refused until a human
+    /// restores the boundary.
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn unpaired_markers_are_refused_rather_than_unmanaged() {
+        use crate::catalog::{CliMeta, RegionId};
+        for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash] {
+            let prefix = if syntax == CommentSyntax::Hash { "#" } else { "//" };
+            let open = format!("{prefix} >>> anvil-managed: repair\r\n");
+            let close = format!("{prefix} <<< anvil-managed: repair\r\n");
+            let catalog = Catalog::builder(CliMeta::new("anvil"))
+                .with_artifact(Artifact::region(RegionSpec {
+                    host: HostSelector::Path("host.txt".to_owned()),
+                    id: RegionId::new("repair"),
+                    body: "generated\n".to_owned(),
+                    syntax,
+                }))
+                .build()
+                .unwrap();
+            // An opener whose closer is gone, and a closer that precedes the
+            // only opener -- neither yields a pair.
+            for input in [format!("{open}generated\r\nuser\r\n"), format!("{close}user\r\n{open}")] {
+                let tmp = empty_workspace();
+                let path = tmp.path().join("host.txt");
+                write(&path, &input);
+
+                let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+
+                let refusal = outcome
+                    .plan
+                    .refusals()
+                    .first()
+                    .unwrap_or_else(|| panic!("an unprovable boundary must be refused; got {:#?}", outcome.plan.refusals()))
+                    .clone();
+                assert!(
+                    refusal.contains("do not form a matching pair") || refusal.contains("sentinel"),
+                    "the refusal must name the marker fault: {refusal}"
+                );
+                assert!(
+                    !refusal.contains("Reconcile the hand-written table"),
+                    "no table is involved in a marker fault: {refusal}"
+                );
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap(),
+                    input,
+                    "the host must be left exactly as found, markers included"
+                );
+                // The generated body must not have been duplicated beside itself.
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap().matches("generated").count(),
+                    input.matches("generated").count()
+                );
+
+                // And a re-run must not quietly do it either.
+                let repeated = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+                assert_eq!(
+                    repeated.plan.refusals().len(),
+                    1,
+                    "the refusal repeats rather than resolving itself"
+                );
+                assert_eq!(fs::read_to_string(&path).unwrap(), input);
             }
         }
     }
@@ -2954,18 +3128,18 @@ mod tests {
         assert_eq!(repeated.plan.dry_run_exit_code(), 1);
     }
 
+    /// The generated body under a widowed opener stays inside its marker and
+    /// stays anvil's, rather than being handed to the repository as ordinary
+    /// text that the next write would duplicate.
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn unmatched_opener_is_removed_without_claiming_its_content() {
+    fn unmatched_opener_is_refused_without_unmanaging_its_content() {
         let tmp = empty_workspace();
-        fs::write(
-            tmp.path().join("rustfmt.toml"),
-            format!("# >>> anvil-managed: {}\nmax_width = 120\n", region::RUSTFMT_REGION_ID),
-        )
-        .unwrap();
+        let host = format!("# >>> anvil-managed: {}\nmax_width = 120\n", region::RUSTFMT_REGION_ID);
+        fs::write(tmp.path().join("rustfmt.toml"), &host).unwrap();
 
         let outcome = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap();
         assert!(outcome.plan.refusals().iter().any(|reason| reason.contains("rustfmt.toml")));
-        assert_eq!(fs::read_to_string(tmp.path().join("rustfmt.toml")).unwrap(), "max_width = 120\n");
+        assert_eq!(fs::read_to_string(tmp.path().join("rustfmt.toml")).unwrap(), host);
     }
 }
