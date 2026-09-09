@@ -546,7 +546,6 @@ clippy.should_panic_without_expect = "allow"
 clippy.significant_drop_tightening = "allow"
 # Blocked by Clippy bug: https://github.com/rust-lang/rust-clippy/issues/15036
 clippy.wildcard_imports = "allow"
-
 # <<< anvil-managed: anvil-workspace-lints
 
 === Justfile ===
