@@ -1013,9 +1013,9 @@ mod tests {
     /// `plan_removals` resolves the host's casing before deciding what to
     /// remove, so this must too. A lock that records `Deny.toml` for a file now
     /// spelled `deny.toml` still owns that region, and the same pass is about
-    /// to remove it — treating it as unowned leaves it visible to the parser
-    /// and refuses the replacement declaring the same table as a duplicate of
-    /// something that is on its way out.
+    /// to remove it — reading it as a region anvil does not own leaves it
+    /// visible to the parser and refuses the replacement declaring the same
+    /// table as a duplicate of something that is on its way out.
     #[test]
     fn a_case_only_host_rename_still_retires_a_clean_region() {
         let body = "[licenses]\nallow = [\"MIT\"]\n";
