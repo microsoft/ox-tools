@@ -203,6 +203,16 @@ and the refusal names which one, because they have different answers:
 | Two managed regions declare one table | Nothing hand-written is involved; re-run to finish a move, and if the refusal repeats the catalog is exchanging tables, which is unsupported |
 | A managed region and hand-written text declare one table | Reconcile the hand-written table with the managed one |
 
+A fourth refusal shares the wording but not the cause, and is not a parse fault
+at all: a region the catalog no longer declares, whose body has been edited
+since anvil rendered it. Anvil will not discard changes it did not write, so
+the region stays and retirement stays incomplete until its body matches the
+last generated one, or it is emptied, or it is deleted. That refusal says so
+rather than sending the reader to reconcile a table, and it names the host by
+the spelling on disk, which a case-only rename makes differ from the one the
+lock recorded. It reaches non-TOML hosts too, because nothing about it depends
+on the format.
+
 **Moving a table between two live regions takes two runs, in one ordering.** When
 the region gaining the table is planned before the region giving it up, the first
 run refuses the gaining side — the giving side still declares the table on disk —

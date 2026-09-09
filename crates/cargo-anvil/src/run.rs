@@ -20,7 +20,7 @@ use crate::catalog::artifact::{Artifact, ComposedHost, HostSelector, RegionSpec}
 use crate::checksum::{checksum_str, normalize_line_endings};
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
-use crate::emit::{ManagedRegionRequest, TomlRemedy, plan_managed_region, plan_owned_file, toml_introduction_refusal};
+use crate::emit::{ManagedRegionRequest, RefusalRemedy, plan_managed_region, plan_owned_file, toml_introduction_refusal};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
@@ -423,7 +423,7 @@ fn push_region_at(
     let item = match plan_managed_region(manifest, current.as_deref(), request) {
         Ok(item) => item,
         Err(error) => {
-            refuse_region(plan, host, spec.id.as_str(), &error.to_string(), TomlRemedy::HandWrittenTable);
+            refuse_region(plan, host, spec.id.as_str(), &error.to_string(), RefusalRemedy::HandWrittenTable);
             return Ok(());
         }
     };
@@ -506,14 +506,14 @@ fn prepare_composed_host(
 /// The refusal is scoped to the region, not the run — every other artifact is
 /// still planned, which is what makes refusing an acceptable answer rather than
 /// a wall in front of onboarding.
-fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: TomlRemedy) {
+fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: RefusalRemedy) {
     // Some reasons are whole sentences and some are a parser's error text, so
     // the sentence break is supplied only when the reason has not already
     // written one.
     let stop = if reason.trim_end().ends_with('.') { "" } else { "." };
     let remedy = match remedy {
-        TomlRemedy::HandWrittenTable => "Reconcile the hand-written table with the managed one before retrying.",
-        TomlRemedy::HostAlreadyUnparsable => {
+        RefusalRemedy::HandWrittenTable => "Reconcile the hand-written table with the managed one before retrying.",
+        RefusalRemedy::HostAlreadyUnparsable => {
             "This file does not parse as it stands, before this region is written, so no run can write it \
              until the existing TOML is repaired."
         }
@@ -522,11 +522,20 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
         // collision, and the next run writes the other. A catalog that
         // *exchanges* tables never settles, so the reader is told what a
         // repeat means rather than being left to re-run indefinitely.
-        TomlRemedy::BetweenManagedRegions => {
+        RefusalRemedy::BetweenManagedRegions => {
             "Both tables are declared by regions anvil manages, so nothing hand-written is involved. A table \
              moving between managed regions is applied over two runs; re-run to complete it. If the same \
              refusal repeats, the catalog is exchanging tables between two regions, which is not supported: \
              retire the region giving the table up first, then add the one taking it."
+        }
+        // Retirement is the one refusal that is not about a parse at all, so
+        // the reason already carries the whole instruction. What it cannot say
+        // is why anvil stopped rather than removing the region, or that
+        // re-running changes nothing until someone acts.
+        RefusalRemedy::EditedRetirement => {
+            "The catalog no longer declares this region, so anvil would have removed it, but it carries \
+             changes anvil did not write and discarding those is not its call. Retirement stays \
+             incomplete, and this refusal repeats every run, until one of those is done."
         }
     };
     plan.refusal(format!(
@@ -995,12 +1004,16 @@ fn plan_removals(
                 plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
             }
             RemovalDecision::OrphanedKept => {
+                // Named by the spelling on disk, not the one the lock
+                // recorded: this refusal says a file was left alone, so it has
+                // to name the file that is actually there. A case-only rename
+                // is exactly where the two diverge.
                 refuse_region(
                     plan,
-                    key.host.clone(),
+                    resolved_host.clone(),
                     &key.id,
                     "this retired managed region contains edits. Restore its last generated body, empty it, or remove it to complete retirement",
-                    TomlRemedy::HandWrittenTable,
+                    RefusalRemedy::EditedRetirement,
                 );
             }
             RemovalDecision::AlreadyGone => {
@@ -1127,7 +1140,7 @@ mod tests {
                 "deny.toml".to_owned(),
                 "anvil-deny-advisories",
                 reason,
-                TomlRemedy::HandWrittenTable,
+                RefusalRemedy::HandWrittenTable,
             );
             plan.refusals().first().expect("a refusal is recorded").clone()
         }
@@ -1144,17 +1157,17 @@ mod tests {
                 plan.refusals().first().expect("a refusal is recorded").clone()
             };
 
-            let hand_written = remedy_for(TomlRemedy::HandWrittenTable);
+            let hand_written = remedy_for(RefusalRemedy::HandWrittenTable);
             assert!(hand_written.contains("Reconcile the hand-written table"), "{hand_written}");
 
-            let already = remedy_for(TomlRemedy::HostAlreadyUnparsable);
+            let already = remedy_for(RefusalRemedy::HostAlreadyUnparsable);
             assert!(already.contains("does not parse as it stands"), "{already}");
             assert!(
                 !already.contains("Reconcile the hand-written table"),
                 "a pre-existing fault is not the reader's hand-written table: {already}"
             );
 
-            let managed = remedy_for(TomlRemedy::BetweenManagedRegions);
+            let managed = remedy_for(RefusalRemedy::BetweenManagedRegions);
             assert!(managed.contains("re-run to complete it"), "{managed}");
             assert!(
                 managed.contains("exchanging tables between two regions, which is not supported"),
@@ -1163,6 +1176,16 @@ mod tests {
             assert!(
                 !managed.contains("Reconcile the hand-written table"),
                 "nothing hand-written is involved: {managed}"
+            );
+
+            let retirement = remedy_for(RefusalRemedy::EditedRetirement);
+            assert!(
+                retirement.contains("no longer declares this region"),
+                "the reader is told why anvil stopped instead of removing it: {retirement}"
+            );
+            assert!(
+                !retirement.contains("Reconcile the hand-written table"),
+                "nothing was parsed and no table collided: {retirement}"
             );
         }
 
@@ -1211,7 +1234,7 @@ mod tests {
                 "deny.toml".to_owned(),
                 "anvil-deny-advisories",
                 "because.",
-                TomlRemedy::HandWrittenTable,
+                RefusalRemedy::HandWrittenTable,
             );
 
             let item = plan.items().first().expect("the region is planned");

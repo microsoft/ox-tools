@@ -1001,6 +1001,67 @@ fn a_region_removal_composes_with_the_writes_of_the_same_pass() {
     );
 }
 
+/// The refusal names the file it actually left alone. Everything else on the
+/// retirement path — the marker repair, the read, the region lookup — works
+/// from the spelling resolved on disk, so a message built from the lock's
+/// spelling sends the reader to a name that is not there. A case-only rename
+/// of the host is precisely where the two diverge, and it is reachable
+/// whatever the filesystem's case sensitivity, because the directory entry
+/// carries one spelling and the lock the other.
+///
+/// It also checks the remedy: nothing was parsed and no table collided, so
+/// telling the reader to reconcile a hand-written table is advice about a
+/// fault that did not happen.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn an_edited_retirement_is_refused_under_the_on_disk_casing_and_says_why() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let recorded = root.join("Justfile");
+    let renamed = root.join("justfile");
+
+    // A region the catalog no longer declares, holding a body anvil did not
+    // write -- the edits are what turn removal into a refusal.
+    let edited_body = "anvil_runner := \"hand-edited\"\n";
+    let text = std::fs::read_to_string(&recorded).unwrap();
+    let with_retired = format!("{text}\n# >>> anvil-managed: {RETIRED_REGION_ID}\n{edited_body}# <<< anvil-managed: {RETIRED_REGION_ID}\n");
+    std::fs::remove_file(&recorded).unwrap();
+    write(&renamed, &with_retired);
+
+    // The lock records the pre-rename casing and the body anvil last rendered,
+    // which the file no longer holds.
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest.set_region("Justfile", RETIRED_REGION_ID, checksum_str(RETIRED_REGION_BODY));
+    manifest.save(root).unwrap();
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let refusal = outcome
+        .plan
+        .refusals()
+        .iter()
+        .find(|r| r.contains(RETIRED_REGION_ID))
+        .unwrap_or_else(|| panic!("the edited retirement must be refused: {:?}", outcome.plan.refusals()))
+        .clone();
+
+    assert!(
+        refusal.contains("justfile") && !refusal.contains("Justfile"),
+        "the refusal must name the file on disk, not the casing the lock recorded: {refusal}"
+    );
+    assert!(
+        !refusal.contains("Reconcile the hand-written table"),
+        "no table was parsed and none collided, so hand-written-table advice is about a different fault: {refusal}"
+    );
+    assert!(
+        refusal.contains("no longer declares this region"),
+        "the remedy must say why anvil stopped instead of removing it: {refusal}"
+    );
+    assert!(
+        std::fs::read_to_string(&renamed).unwrap().contains(edited_body),
+        "a refused retirement leaves the edits in place"
+    );
+}
+
 /// Strip a whole managed region, sentinels included, from `text`.
 fn remove_region_block(text: &str, id: &str) -> String {
     let open = format!("# >>> anvil-managed: {id}");

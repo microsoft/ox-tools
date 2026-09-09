@@ -31,15 +31,17 @@ use crate::region::{
     mask_retiring_managed_regions, start_region_offset, text_newline, upsert_region_with_newline,
 };
 
-/// What the reader should do about a refused TOML splice.
+/// What the reader should do about a refused region.
 ///
-/// The refusal message quotes the parser either way; this decides which
-/// remedy follows it, and the three are not interchangeable. Sending a reader
-/// to reconcile a hand-written table when both sides are anvil's own wastes
+/// Three of these classify a failed TOML splice, where the refusal message
+/// quotes the parser either way and only the remedy distinguishes the faults;
+/// the fourth is not about TOML at all. They are not interchangeable. Sending
+/// a reader to reconcile a hand-written table when both sides are anvil's own
+/// — or when no table was ever parsed, as in an edited retirement — wastes
 /// their time on a file they did not write, and it is the failure mode a
-/// generic remedy produces every run, for as long as the collision lasts.
+/// generic remedy produces every run, for as long as the fault lasts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TomlRemedy {
+pub enum RefusalRemedy {
     /// The host does not parse as it already stands. Nothing this pass writes
     /// caused it and nothing this pass omits will fix it.
     HostAlreadyUnparsable,
@@ -48,6 +50,11 @@ pub enum TomlRemedy {
     BetweenManagedRegions,
     /// The region collides with a table the repository wrote.
     HandWrittenTable,
+    /// The catalog no longer declares the region, so it was due for removal,
+    /// but its body carries edits anvil did not write. Nothing was parsed and
+    /// no table collided; the host's format is irrelevant, so this reaches
+    /// non-TOML hosts too.
+    EditedRetirement,
 }
 
 /// A refused TOML splice: what the parser said, and what to do about it.
@@ -56,7 +63,7 @@ pub struct TomlHostRefusal {
     /// The parser's own account of why the composed host does not read.
     pub reason: String,
     /// Which fault produced it.
-    pub remedy: TomlRemedy,
+    pub remedy: RefusalRemedy,
 }
 
 /// Inputs that identify and render one managed region.
@@ -210,7 +217,7 @@ pub fn toml_introduction_refusal(
         Err(error) => {
             return Some(TomlHostRefusal {
                 reason: error.to_string(),
-                remedy: TomlRemedy::HandWrittenTable,
+                remedy: RefusalRemedy::HandWrittenTable,
             });
         }
         Ok(spliced) => spliced,
@@ -235,12 +242,12 @@ pub fn toml_introduction_refusal(
 /// Once the base is known good, masking every *other* managed region answers
 /// the remaining question: if the splice parses without them, the collision
 /// needs one of them and nothing hand-written is involved.
-fn classify_refusal(base: &str, spliced: &str, region_id: &str, syntax: CommentSyntax, retiring: &BTreeSet<String>) -> TomlRemedy {
+fn classify_refusal(base: &str, spliced: &str, region_id: &str, syntax: CommentSyntax, retiring: &BTreeSet<String>) -> RefusalRemedy {
     if mask_retiring_managed_regions(base, syntax, retiring)
         .parse::<DocumentMut>()
         .is_err()
     {
-        return TomlRemedy::HostAlreadyUnparsable;
+        return RefusalRemedy::HostAlreadyUnparsable;
     }
     let others: BTreeSet<String> = managed_region_ids(spliced, syntax)
         .into_iter()
@@ -250,9 +257,9 @@ fn classify_refusal(base: &str, spliced: &str, region_id: &str, syntax: CommentS
         .parse::<DocumentMut>()
         .is_ok()
     {
-        TomlRemedy::BetweenManagedRegions
+        RefusalRemedy::BetweenManagedRegions
     } else {
-        TomlRemedy::HandWrittenTable
+        RefusalRemedy::HandWrittenTable
     }
 }
 
@@ -344,7 +351,7 @@ mod tests {
     }
 
     /// The remedy the backstop chose, with nothing retiring.
-    fn remedy(host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Option<TomlRemedy> {
+    fn remedy(host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Option<RefusalRemedy> {
         toml_introduction_refusal(host_text, request, &BTreeSet::new()).map(|refusal| refusal.remedy)
     }
 
@@ -390,14 +397,14 @@ mod tests {
         let hand_written = "[[licenses]]\nallow = [\"MIT\"]\n";
         assert_eq!(
             remedy(Some(hand_written), request("deny.toml", "r", body)),
-            Some(TomlRemedy::HandWrittenTable),
+            Some(RefusalRemedy::HandWrittenTable),
             "the only other declaration is the repository's own"
         );
 
         let sibling = "# >>> anvil-managed: other\n[licenses]\nallow = [\"MIT\"]\n# <<< anvil-managed: other\n";
         assert_eq!(
             remedy(Some(sibling), request("deny.toml", "r", body)),
-            Some(TomlRemedy::BetweenManagedRegions),
+            Some(RefusalRemedy::BetweenManagedRegions),
             "masking the sibling leaves a file that parses, so nothing hand-written is involved"
         );
 
@@ -411,7 +418,7 @@ mod tests {
                 Some(&already_broken),
                 request("deny.toml", "r", "[advisories]\nyanked = \"deny\"\n")
             ),
-            Some(TomlRemedy::HostAlreadyUnparsable),
+            Some(RefusalRemedy::HostAlreadyUnparsable),
             "a pre-existing fault is not the incoming region's doing"
         );
     }
