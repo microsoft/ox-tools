@@ -859,19 +859,18 @@ it just contributes a stage.
 
 After `pr-test` (and `scheduled-test`) runs the `anvil-llvm-cov` recipe, the stages
 template adds a `PublishCodeCoverageResults@2` step on **each** OS job. `anvil-llvm-cov`
-emits one Cobertura report per feature configuration — `cobertura-all-features.xml` and
-`cobertura-no-default.xml` — and never an unsuffixed `cobertura.xml`, so the step's
-`summaryFileLocation` uses the `target/coverage/cobertura-*.xml` wildcard to select both
-and let the task coalesce them. The cobertura format is the modern recommendation for
-the task (lcov is not accepted) and is produced alongside lcov.info by the same
-instrumented test run.
+emits one LCOV report per feature configuration — `lcov-all-features.info` and
+`lcov-no-default.info` — so the step's `summaryFileLocation` uses the
+`target/coverage/lcov-*.info` wildcard to select both and let the task coalesce them.
+`PublishCodeCoverageResults@2` accepts LCOV directly, which lets the same report feed
+the local coverage gate, Codecov, and ADO without a second cargo-llvm-cov export.
 
 ```yaml
 - task: PublishCodeCoverageResults@2
   condition: succeededOrFailed()
   displayName: Publish coverage (linux)
   inputs:
-    summaryFileLocation: target/coverage/cobertura-*.xml
+    summaryFileLocation: target/coverage/lcov-*.info
     failIfCoverageEmpty: false
 ```
 
@@ -879,7 +878,7 @@ Both the Linux and Windows jobs publish so that OS-gated code is fully represent
 the resulting coverage report -- a single-leg publish would systematically under-report
 the coverage of `cfg(target_os = ...)` branches. ADO's `PublishCodeCoverageResults@2`
 coalesces multiple publishes against the same build into one combined report.
-`failIfCoverageEmpty: false` keeps the step from failing the build when no cobertura
+`failIfCoverageEmpty: false` keeps the step from failing the build when no LCOV
 file exists -- which is exactly the "nothing impacted" case (the `anvil-llvm-cov` recipe
 no-ops when its tier is `--skip`, producing no file), as well as a tooling issue. No
 impact value is threaded into the condition; the presence of the file is the signal.
@@ -889,7 +888,7 @@ tree, and a per-file annotation view. ADO does not natively compute diff coverag
 between PR and base; that's a known limitation of the platform (see `coverage.md`
 for the unified-coverage discussion).
 
-anvil does not gate the PR on coverage. The cobertura upload is informational;
+anvil does not gate the PR on coverage. The LCOV upload is informational;
 adopters who want gating add `BuildQualityChecks@9` (Microsoft DevLabs marketplace
 task) downstream of the test step and configure it via their branch policy.
 

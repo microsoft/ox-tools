@@ -79,6 +79,10 @@ this simple process:
    `CHANGELOG.md` file.
    Run the script many times if you want to release several crates in the same PR.
 
+   To reconstruct a missing changelog section for an existing tagged release without changing
+   the crate version, run `./scripts/release-crate.ps1 <crate_name> -BackfillVersion <version>`.
+   The script derives the commit range from that release tag and its preceding version tag.
+
 4. Create a PR like normal to push changes out.
 
 Once your PR is merged, automation will kick in. It will tag the
