@@ -136,7 +136,10 @@ pub fn repair_markers(text: &str, id: &str, syntax: CommentSyntax) -> String {
         markers
             .iter()
             .enumerate()
-            .skip(start + 1)
+            // `markers[start]` is an opener and this looks for one that
+            // closes, so starting the scan at `start` skips it just as
+            // `start + 1` would.
+            .skip(start)
             .find(|(_, (_, opens))| !opens)
             .map(|(index, _)| index)
     });
@@ -1894,6 +1897,30 @@ mod tests {
         let text = "before\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n";
         let out = remove_region(text, "x", SYN).unwrap();
         assert_eq!(out, "before\n");
+    }
+
+    #[test]
+    fn remove_region_mid_file_eats_the_blank_below_not_the_one_above() {
+        // Blank line below the region, none above. Eating the one below is
+        // what closes the gap; pulling back a leading blank that is not there
+        // leaves it open, so the two branches are not interchangeable.
+        let text = "before\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nafter\n";
+        let out = remove_region(text, "x", SYN).unwrap();
+        assert_eq!(out, "before\nafter\n");
+    }
+
+    #[test]
+    fn ends_in_toml_table_wants_the_last_table_and_an_ordinary_one() {
+        let path = ["Hunspell", "quirks"];
+        assert!(ends_in_toml_table("[Hunspell]\nk = 1\n[Hunspell.quirks]\nj = 2\n", &path));
+        // A later header takes the trailing assignments, so they no longer
+        // belong to the table asked about.
+        assert!(!ends_in_toml_table("[Hunspell.quirks]\nj = 2\n[Hunspell]\nk = 1\n", &path));
+        // Same path, but an array-of-tables entry rather than the ordinary
+        // table this reports on.
+        assert!(!ends_in_toml_table("[[Hunspell.quirks]]\nj = 2\n", &path));
+        // Not TOML at all: nothing can be concluded about what trails.
+        assert!(!ends_in_toml_table("[unclosed\n", &path));
     }
 
     #[test]

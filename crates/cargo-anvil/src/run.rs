@@ -195,9 +195,13 @@ fn build_plan(
     };
     // Adoption, validation, and retirement must see the same repaired text.
     // Extra complete pairs retain their bodies as unmanaged settings.
+    //
+    // Only regions on their way out are repaired here. A live one is repaired
+    // by `push_region_at` when it plans the region, with that region's own
+    // comment syntax rather than the `Hash` assumed below.
     for key in manifest.regions.keys() {
         let host = resolve_existing_case_insensitive(repo_root, &key.host);
-        if composed.live.iter().any(|(live_host, _)| live_host == &host) && !composed.live.contains(&(host.clone(), key.id.clone())) {
+        if !composed.live.contains(&(host.clone(), key.id.clone())) {
             repair_host_markers(repo_root, &mut plan, &mut hosts, &host, &key.id, CommentSyntax::Hash)?;
         }
     }
