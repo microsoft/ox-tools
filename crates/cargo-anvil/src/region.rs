@@ -711,6 +711,13 @@ struct TableEntry {
 /// The configuration a TOML table declares, as canonical path/value pairs.
 type TableValues = BTreeMap<Vec<String>, String>;
 
+/// Whether trailing assignments in `text` belong to this ordinary TOML table.
+pub(crate) fn ends_in_toml_table(text: &str, path: &[&str]) -> bool {
+    headed_tables(text)
+        .and_then(|mut tables| tables.pop())
+        .is_some_and(|table| !table.array_of_tables && table.path == path)
+}
+
 /// Every explicitly headed table in `text`, in document order.
 ///
 /// Returns `None` when `text` is not valid TOML. Parsing the document rather

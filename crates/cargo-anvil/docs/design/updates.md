@@ -167,10 +167,14 @@ stays under `[Hunspell]` below `anvil-spellcheck-hunspell`, not under quirks.
 The old combined `anvil-spellcheck` block retires in the same run that introduces
 the three replacement regions. An untouched old block is removed; the next run
 is a no-op. An edited old block is preserved and remains tracked, with a refusal.
-The headed replacements are inserted before the old block using the shared
-`At` splice placement. Removing that block then leaves user settings after its
+When the old body ends in `[Hunspell.quirks]`, the headed replacements are
+inserted before it using the shared `At` splice placement, based on the parsed
+table context rather than the region id. Removing that block leaves user settings after its
 closing sentinel immediately below the new quirks region: for example,
 `allow_dashes = true` remains `Hunspell.quirks.allow_dashes`, never a root key.
+Empty or whitespace-only old bodies establish no table context: the replacements
+append instead. A conflicting user root `dev_comments = true` stays at root
+while adoption of the generated root defaults refuses, including on repeat runs.
 
 Catalog composition tests parse the actual per-host bodies for every workspace
 shape. They catch duplicate table claims and dotted-key/header collisions.

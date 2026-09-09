@@ -592,9 +592,11 @@ fn region_placement(region_id: &str, current: Option<&str>) -> RegionPlacement {
     }
     if matches!(region_id, "anvil-spellcheck-hunspell" | "anvil-spellcheck-quirks")
         && let Some(old) = current.and_then(|text| find_region(text, "anvil-spellcheck", CommentSyntax::Hash).ok().flatten())
+        && crate::region::ends_in_toml_table(old.body_str(), &["Hunspell", "quirks"])
     {
         // Install the replacement tables before retiring the combined block:
-        // its trailing user settings must still follow Hunspell.quirks.
+        // its trailing user settings must still follow Hunspell.quirks. An
+        // empty block establishes no table context; append replacements instead.
         return RegionPlacement::At(old.start_line.start);
     }
     RegionPlacement::End
@@ -1623,6 +1625,48 @@ mod tests {
                 assert!(!output.replace("\r\n", "").contains('\n'));
             }
             assert!(!run_update(&catalog, &local_only(), tmp.path()).unwrap().plan.has_changes());
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn empty_spellcheck_retirement_preserves_conflicting_user_root_settings() {
+        for body in ["", " \t\n"] {
+            let tmp = empty_workspace();
+            let path = tmp.path().join("spellcheck.toml");
+            let old = one_region_catalog("spellcheck.toml", "anvil-spellcheck", "[Hunspell.quirks]\n");
+            run_update(&old, &local_only(), tmp.path()).unwrap();
+            let input = format!(
+                "{}dev_comments = true\n",
+                upsert_region("", "anvil-spellcheck", body, CommentSyntax::Hash).unwrap()
+            );
+            write(&path, &input);
+            let before = input.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(before["dev_comments"].as_bool(), Some(true));
+            let catalog = Catalog::anvil();
+            for pass in 0..2 {
+                let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+                assert_eq!(outcome.plan.refusals().len(), 1);
+                assert!(outcome.plan.refusals()[0].contains("anvil-spellcheck-root"));
+                if pass == 1 {
+                    assert!(!outcome.plan.has_changes());
+                }
+                let output = fs::read_to_string(&path).unwrap();
+                let parsed = output.parse::<toml_edit::DocumentMut>().unwrap();
+                assert_eq!(
+                    parsed.get("dev_comments").and_then(toml_edit::Item::as_bool),
+                    before["dev_comments"].as_bool()
+                );
+                assert!(parsed["Hunspell"].get("dev_comments").is_none());
+                assert!(parsed["Hunspell"]["quirks"].get("dev_comments").is_none());
+                assert!(
+                    !Manifest::load(tmp.path())
+                        .unwrap()
+                        .regions
+                        .keys()
+                        .any(|key| key.id == "anvil-spellcheck")
+                );
+            }
         }
     }
 
