@@ -192,6 +192,31 @@ remains visible. Existing managed content is masked when locating unmanaged
 adoption candidates. This may incidentally repair duplicate headers, but is not
 a general invalid-input repair contract.
 
+The backstop judges each write against the host's accumulated text: regions this
+pass has already written are seen with their new bodies, and regions it has not
+reached yet with the bodies still on disk. Three faults can make that parse fail,
+and the refusal names which one, because they have different answers:
+
+| Fault | What the refusal says |
+| --- | --- |
+| The host already fails to parse before this region is spliced | The existing TOML has to be repaired; no run can write the region until it is |
+| Two managed regions declare one table | Nothing hand-written is involved; re-run to finish a move, and if the refusal repeats the catalog is exchanging tables, which is unsupported |
+| A managed region and hand-written text declare one table | Reconcile the hand-written table with the managed one |
+
+**Moving a table between two live regions takes two runs, in one ordering.** When
+the region gaining the table is planned before the region giving it up, the first
+run refuses the gaining side — the giving side still declares the table on disk —
+writes the giving side, and the second run completes the move. Planned the other
+way round, one run does it. Either way it settles, and the state on disk stays
+readable throughout.
+
+**A catalog that exchanges tables between two live regions is not supported.**
+If region A takes B's table while B takes A's, neither can be written first and
+re-running repeats both refusals forever. Retire the region giving a table up,
+ship that, then add the region taking it: a retiring region is masked for the
+backstop, so the migration composes in a single run. This is the same two-step
+shape the combined `anvil-spellcheck` block used to split into three regions.
+
 ### Marker recovery
 
 Before ownership checks, remove redundant or unmatched marker **lines only**:

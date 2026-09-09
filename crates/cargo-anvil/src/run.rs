@@ -20,7 +20,7 @@ use crate::catalog::artifact::{Artifact, ComposedHost, HostSelector, RegionSpec}
 use crate::checksum::{checksum_str, normalize_line_endings};
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
-use crate::emit::{ManagedRegionRequest, plan_managed_region, plan_owned_file, toml_introduction_refusal};
+use crate::emit::{ManagedRegionRequest, TomlRemedy, plan_managed_region, plan_owned_file, toml_introduction_refusal};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
@@ -419,7 +419,7 @@ fn push_region_at(
     let item = match plan_managed_region(manifest, current.as_deref(), request) {
         Ok(item) => item,
         Err(error) => {
-            refuse_region(plan, host, spec.id.as_str(), &error.to_string());
+            refuse_region(plan, host, spec.id.as_str(), &error.to_string(), TomlRemedy::HandWrittenTable);
             return Ok(());
         }
     };
@@ -428,9 +428,9 @@ fn push_region_at(
         .map(|text| composed.retiring_regions(manifest, &host, text, spec.syntax))
         .unwrap_or_default();
     if item.decision == Decision::Write
-        && let Some(reason) = toml_introduction_refusal(current.as_deref(), request, &retiring)
+        && let Some(refusal) = toml_introduction_refusal(current.as_deref(), request, &retiring)
     {
-        refuse_region(plan, host, spec.id.as_str(), &reason);
+        refuse_region(plan, host, spec.id.as_str(), &refusal.reason, refusal.remedy);
         return Ok(());
     }
     // Fold actual writes into the accumulator so later regions compose.
@@ -502,15 +502,32 @@ fn prepare_composed_host(
 /// The refusal is scoped to the region, not the run — every other artifact is
 /// still planned, which is what makes refusing an acceptable answer rather than
 /// a wall in front of onboarding.
-fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str) {
+fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: TomlRemedy) {
     // Some reasons are whole sentences and some are a parser's error text, so
     // the sentence break is supplied only when the reason has not already
     // written one.
     let stop = if reason.trim_end().ends_with('.') { "" } else { "." };
+    let remedy = match remedy {
+        TomlRemedy::HandWrittenTable => "Reconcile the hand-written table with the managed one before retrying.",
+        TomlRemedy::HostAlreadyUnparsable => {
+            "This file does not parse as it stands, before this region is written, so no run can write it \
+             until the existing TOML is repaired."
+        }
+        // Ordinary catalog growth reaches this while a table is moving between
+        // two managed regions: the pass that writes one of them settles the
+        // collision, and the next run writes the other. A catalog that
+        // *exchanges* tables never settles, so the reader is told what a
+        // repeat means rather than being left to re-run indefinitely.
+        TomlRemedy::BetweenManagedRegions => {
+            "Both tables are declared by regions anvil manages, so nothing hand-written is involved. A table \
+             moving between managed regions is applied over two runs; re-run to complete it. If the same \
+             refusal repeats, the catalog is exchanging tables between two regions, which is not supported: \
+             retire the region giving the table up first, then add the one taking it."
+        }
+    };
     plan.refusal(format!(
         "Refused to manage {host} [{id}]: {reason}{stop} This region was left unchanged; other regions in the same \
-         file and other artifacts may still be updated. Reconcile the hand-written table with the managed \
-         one before retrying."
+         file and other artifacts may still be updated. {remedy}"
     ));
     plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
 }
@@ -979,6 +996,7 @@ fn plan_removals(
                     key.host.clone(),
                     &key.id,
                     "this retired managed region contains edits. Restore its last generated body, empty it, or remove it to complete retirement",
+                    TomlRemedy::HandWrittenTable,
                 );
             }
             RemovalDecision::AlreadyGone => {
@@ -1100,8 +1118,48 @@ mod tests {
 
         fn refusal_for(reason: &str) -> String {
             let mut plan = Plan::default();
-            super::super::refuse_region(&mut plan, "deny.toml".to_owned(), "anvil-deny-advisories", reason);
+            super::super::refuse_region(
+                &mut plan,
+                "deny.toml".to_owned(),
+                "anvil-deny-advisories",
+                reason,
+                TomlRemedy::HandWrittenTable,
+            );
             plan.refusals().first().expect("a refusal is recorded").clone()
+        }
+
+        /// Each remedy answers a different question, and only one of the three
+        /// mentions a hand-written table. A reader sent to reconcile a file
+        /// they did not write has been told to look in the wrong place.
+        #[test]
+        fn each_fault_gets_its_own_remedy() {
+            let reason = "splicing the region would leave deny.toml unparsable as TOML: duplicate key";
+            let remedy_for = |remedy| {
+                let mut plan = Plan::default();
+                super::super::refuse_region(&mut plan, "deny.toml".to_owned(), "anvil-deny-advisories", reason, remedy);
+                plan.refusals().first().expect("a refusal is recorded").clone()
+            };
+
+            let hand_written = remedy_for(TomlRemedy::HandWrittenTable);
+            assert!(hand_written.contains("Reconcile the hand-written table"), "{hand_written}");
+
+            let already = remedy_for(TomlRemedy::HostAlreadyUnparsable);
+            assert!(already.contains("does not parse as it stands"), "{already}");
+            assert!(
+                !already.contains("Reconcile the hand-written table"),
+                "a pre-existing fault is not the reader's hand-written table: {already}"
+            );
+
+            let managed = remedy_for(TomlRemedy::BetweenManagedRegions);
+            assert!(managed.contains("re-run to complete it"), "{managed}");
+            assert!(
+                managed.contains("exchanging tables between two regions, which is not supported"),
+                "a repeat has to be distinguishable from a move in progress: {managed}"
+            );
+            assert!(
+                !managed.contains("Reconcile the hand-written table"),
+                "nothing hand-written is involved: {managed}"
+            );
         }
 
         #[test]
@@ -1144,7 +1202,13 @@ mod tests {
         #[test]
         fn the_refused_region_is_still_planned_as_a_no_op() {
             let mut plan = Plan::default();
-            super::super::refuse_region(&mut plan, "deny.toml".to_owned(), "anvil-deny-advisories", "because.");
+            super::super::refuse_region(
+                &mut plan,
+                "deny.toml".to_owned(),
+                "anvil-deny-advisories",
+                "because.",
+                TomlRemedy::HandWrittenTable,
+            );
 
             let item = plan.items().first().expect("the region is planned");
             assert_eq!(item.decision, Decision::LeaveAlone);
@@ -2713,6 +2777,70 @@ mod tests {
             "the collision is reported; got {:#?}",
             outcome.plan.refusals()
         );
+    }
+
+    /// A table moving from one live region to another, in the ordering that
+    /// costs a run: the region *gaining* the table is planned first, while the
+    /// one giving it up still declares it on disk.
+    ///
+    /// This is the shape behind the review's swap example, minus the swap. It
+    /// is not a deadlock — the giving side writes in the same pass, so the
+    /// second run completes the move — and pinning that here is what stops a
+    /// later change from turning one wasted run into a permanent refusal. A
+    /// catalog that *exchanges* tables never reaches this state and is not
+    /// supported; the refusal says so.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_table_moving_between_live_regions_settles_on_the_second_run() {
+        let tmp = empty_workspace();
+
+        let v1 = two_region_catalog("shared.toml", "anvil-sec-a", "a = 1\n", "anvil-sec-b", "[shared]\nk = 1\n");
+        assert!(run_update(&v1, &local_only(), tmp.path()).unwrap().applied);
+
+        // `[shared]` moves to the region planned FIRST, so it is spliced while
+        // the region giving it up has not been reached yet.
+        let v2 = two_region_catalog("shared.toml", "anvil-sec-a", "[shared]\nk = 1\n", "anvil-sec-b", "b = 2\n");
+
+        let second = run_update(&v2, &local_only(), tmp.path()).unwrap();
+        let refusal = second
+            .plan
+            .refusals()
+            .iter()
+            .find(|reason| reason.contains("anvil-sec-a"))
+            .unwrap_or_else(|| panic!("the move is reported; got {:#?}", second.plan.refusals()));
+        assert!(
+            refusal.contains("re-run to complete it"),
+            "the remedy must say a second run finishes the move: {refusal}"
+        );
+        assert!(
+            !refusal.contains("Reconcile the hand-written table"),
+            "nothing hand-written is involved: {refusal}"
+        );
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        shared
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|error| panic!("the host must stay readable: {error}\n---\n{shared}\n---"));
+
+        // The giving side wrote in that same pass, so the move now completes.
+        let third = run_update(&v2, &local_only(), tmp.path()).unwrap();
+        assert!(
+            third.plan.refusals().is_empty(),
+            "the second run must not repeat the refusal; got {:#?}",
+            third.plan.refusals()
+        );
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        shared
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|error| panic!("the host must stay readable: {error}\n---\n{shared}\n---"));
+        assert_eq!(
+            shared.matches("[shared]").count(),
+            1,
+            "the table moved rather than doubling:\n{shared}"
+        );
+        assert!(shared.contains("b = 2"), "the giving region kept its remaining body:\n{shared}");
+
+        let fourth = run_update(&v2, &local_only(), tmp.path()).unwrap();
+        assert!(!fourth.plan.has_changes(), "the move settles rather than oscillating");
     }
 
     /// Splitting one region into several on the same host (the `deny.toml`
