@@ -1,6 +1,21 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
+---
+source: crates/cargo-anvil/tests/toml_adoption.rs
+assertion_line: 191
+expression: "report(before, &tmp, \"spellcheck.toml\", &outcome)"
+---
+--- spellcheck.toml, as the user wrote it ---
+[Hunspell]
+transform_regex = ["^[0-9]+$"]
 
+--- decisions ---
+anvil-spellcheck-hunspell: Write
+anvil-spellcheck-quirks: Write
+anvil-spellcheck-root: Write
+
+--- refusals ---
+(none)
+
+--- spellcheck.toml, as anvil left it ---
 # >>> anvil-managed: anvil-spellcheck-root
 # Check spelling in code comments marked as dev/developer comments
 # (e.g., `// TODO:`, `// FIXME:`). Set to false to skip them.
@@ -60,6 +75,7 @@ use_builtin = true
 #   Misc (default)              : \u00A7 section, \u00B6 pilcrow, \u2026 ellipsis
 tokenization_splitchars = "\",;:.!?#(){}[]|/_-\u2012\u2013\u2014\u2015\u2190\u2192\u2212'`&@\u00A7\u00B6\u2026"
 # <<< anvil-managed: anvil-spellcheck-hunspell
+transform_regex = ["^[0-9]+$"]
 
 # >>> anvil-managed: anvil-spellcheck-quirks
 [Hunspell.quirks]

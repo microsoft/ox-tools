@@ -35,26 +35,32 @@
 #     unscoped by design.
 #
 # Each scoped check depends on `anvil-impact` (which produces the
-# target/anvil/impact cache) and captures its category's selector tokens by
-# calling the shared resolver:
+# target/anvil/impact cache) and captures its category's scope into a local
+# variable by calling the shared resolver:
 #
-#   $selection = @(& "{{ just_executable() }}" _anvil-impact-include <tier>)
+#   $include = (& "{{ just_executable() }}" _anvil-impact-include <tier>)
 #
 # _anvil-impact-include reads that cache both locally and in cloud workflows
 # (where the group job downloaded the target/anvil/impact artifact), so the
 # same code path runs everywhere -- no scoping is threaded between jobs via
-# environment variables. `$selection` is one of:
+# environment variables. `$include` is one of:
 #
-#   * "--workspace" - the tier is unscoped: ANVIL_IMPACT=off, or no impact
-#     cache is present.
-#   * "--package", "A", "--package", "B" - the tier has members. One token is
-#     emitted per line so PowerShell captures a ready-to-splat array.
-#   * "--none" - the tier is empty; cargo-each exits successfully without
-#     invoking the child command.
+#   * "--workspace" (affected/required) or "" (modified) - the tier is
+#     unscoped: ANVIL_IMPACT=off, or no impact cache is present outside consume
+#     mode (under consume a missing cache is a hard failure, not an unscoped
+#     run). Recipes splat
+#     "--workspace" (an empty string is NOT $null, so recipes test truthiness
+#     rather than `?? "--workspace"`, which would splat an empty arg cargo
+#     rejects).
+#   * "--package A@v --package B@v" - the tier has members. Packages are
+#     version-qualified cargo specs so they resolve uniquely even when a
+#     like-named crate is also a transitive dependency.
+#   * "--skip" - the tier is empty for this change (recipe exits 0).
 #
-# Ordinary recipes pass the array to cargo-each. Modified-tier recipes use
-# --once without {packages}, so the selector admits or skips the command while
-# the command retains its normal input domain.
+# This keeps the per-recipe boilerplate to a single capture, a one-line skip
+# guard, and the cargo invocation. Modified-tier recipes never forward
+# `$include`; they only check the skip sentinel and then let their command
+# determine its normal input domain.
 #
 # Every recipe whose body uses multi-line conditionals or array-splat
 # splicing is annotated with [script("pwsh", "-NoProfile")]. pwsh is preinstalled on

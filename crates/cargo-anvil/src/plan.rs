@@ -62,21 +62,37 @@ pub struct PlanItem {
     /// The driver's decision.
     pub decision: Decision,
     /// What the driver wants to write — either to disk (for `Write`) or
-    /// to a `.anvil-proposed` sibling (for `Propose`). `None` for
-    /// decisions that don't write.
+    /// to a `.anvil-proposed` sibling (for `Propose`). Always `None` for
+    /// decisions that do not write, and also `None` for the one write that
+    /// carries no body of its own: [`Self::repair_region`], which rewrites
+    /// the host to drop redundant marker lines and deliberately leaves the
+    /// recorded body checksum alone.
     pub rendered: Option<String>,
-    /// The full host-file body that contains the rendered region after
-    /// splice — used for `Region` targets in either `Write` or `Propose`
-    /// modes. Per [`updates.md §7`](../../docs/design/updates.md), proposed
-    /// outputs show the *full file* even for regions, not just the
-    /// region body. `None` for `File` targets.
+    /// The full host-file body after a region write or removal.
+    /// `None` for owned files; only owned files can produce proposals.
     pub spliced_host: Option<String>,
     /// Checksum of [`Self::rendered`], populated when `rendered` is
-    /// `Some`. The manifest stores this for `Write` decisions.
+    /// `Some`. The manifest records it for `Write`, `Propose` and `InSync`
+    /// whenever it is present, so a decision that leaves it `None` leaves
+    /// the previously recorded checksum untouched.
     pub rendered_checksum: Option<String>,
 }
 
 impl PlanItem {
+    /// Write marker-only cleanup without changing the recorded body checksum.
+    #[must_use]
+    pub fn repair_region(host: impl Into<String>, id: impl Into<String>, spliced_host: String) -> Self {
+        Self {
+            target: Target::Region {
+                host: host.into(),
+                id: id.into(),
+            },
+            decision: Decision::Write,
+            rendered: None,
+            spliced_host: Some(spliced_host),
+            rendered_checksum: None,
+        }
+    }
     /// Construct a plan item for an in-sync, skipped, or leave-alone
     /// decision (no payload).
     #[must_use]
@@ -151,35 +167,6 @@ impl PlanItem {
                 id: id.into(),
             },
             decision: Decision::Write,
-            rendered: Some(body),
-            spliced_host: Some(spliced_host),
-            rendered_checksum: Some(body_checksum),
-        }
-    }
-
-    /// Construct a plan item for a `Propose` decision on a region. The
-    /// proposed payload is the *full host file* that would result from
-    /// the splice (so the user can review by diffing the proposed file
-    /// against the live host). `body` is the rendered region body, carried
-    /// so a post-planning pass can re-splice the proposal against the
-    /// *final* composed host (see `run::recompose_region_proposals`).
-    /// `body_checksum` is the checksum of the rendered region body — the
-    /// apply step records it in the manifest so subsequent runs see the
-    /// proposal as resolved (see [`propose_file`](Self::propose_file)).
-    #[must_use]
-    pub fn propose_region(
-        host: impl Into<String>,
-        id: impl Into<String>,
-        body: String,
-        spliced_host: String,
-        body_checksum: String,
-    ) -> Self {
-        Self {
-            target: Target::Region {
-                host: host.into(),
-                id: id.into(),
-            },
-            decision: Decision::Propose,
             rendered: Some(body),
             spliced_host: Some(spliced_host),
             rendered_checksum: Some(body_checksum),
@@ -277,13 +264,6 @@ impl Plan {
     #[must_use]
     pub fn items(&self) -> &[PlanItem] {
         &self.items
-    }
-
-    /// Mutable access to all plan items in insertion order. Used by the
-    /// post-planning pass that recomposes region proposals against the
-    /// final host text (see `run::recompose_region_proposals`).
-    pub fn items_mut(&mut self) -> &mut [PlanItem] {
-        &mut self.items
     }
 
     /// Record whether applying this plan would change `.anvil.lock`.
@@ -435,10 +415,7 @@ impl Plan {
                     let spliced = item.spliced_host.as_ref().expect("region Write must carry spliced host");
                     write_file(&contained_path(repo_root, host)?, spliced)?;
                 }
-                (Target::Region { host, .. }, Decision::Propose) => {
-                    let spliced = item.spliced_host.as_ref().expect("region Propose must carry spliced host");
-                    write_file(&contained_path(repo_root, &format!("{host}.anvil-proposed"))?, spliced)?;
-                }
+                (Target::Region { .. }, Decision::Propose) => unreachable!("only owned files can propose"),
                 (Target::File { path }, Decision::Remove) => {
                     let actual_path = resolve_existing_case_insensitive(repo_root, path);
                     let abs = contained_path(repo_root, &actual_path)?;
@@ -610,6 +587,31 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// Only owned files propose: a managed region's proposal would be a sidecar
+    /// nobody can apply, because moving it over the host would replace the
+    /// repository's own content around the region as well. The arm that says so
+    /// is a real invariant, and a test that fires it is what keeps it from
+    /// being quietly relaxed into a silent no-op.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    #[should_panic(expected = "only owned files can propose")]
+    fn a_region_that_proposes_is_refused_rather_than_written() {
+        let tmp = TempDir::new().unwrap();
+        let mut plan = Plan::default();
+        plan.push(PlanItem {
+            target: Target::Region {
+                host: "deny.toml".to_owned(),
+                id: "anvil-deny-advisories".to_owned(),
+            },
+            decision: Decision::Propose,
+            rendered: Some("[advisories]\n".to_owned()),
+            spliced_host: None,
+            rendered_checksum: None,
+        });
+
+        drop(plan.apply_files(tmp.path()));
+    }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
@@ -948,25 +950,27 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn apply_region_propose_writes_sibling_and_bumps_manifest() {
+    fn marker_repair_preserves_the_recorded_checksum() {
         let tmp = TempDir::new().unwrap();
         let mut plan = Plan::default();
-        plan.push(PlanItem::propose_region(
+        plan.push(PlanItem::repair_region(
             "Justfile",
             "anvil-imports",
-            "body\n".into(),
             "spliced host content\n".into(),
-            "sha256:newt".into(),
         ));
-        let m = plan.apply(tmp.path(), &Manifest::default()).unwrap();
-        assert!(tmp.path().join("Justfile.anvil-proposed").is_file());
-        // Region L is bumped to the new template checksum on propose;
-        // subsequent runs see LeaveAlone until the template changes.
+        let mut previous = Manifest::default();
+        previous.set_region("Justfile", "anvil-imports", "sha256:original");
+        let m = plan.apply(tmp.path(), &previous).unwrap();
+        assert!(!tmp.path().join("Justfile.anvil-proposed").exists());
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("Justfile")).unwrap(),
+            "spliced host content\n"
+        );
         let key = RegionKey {
             host: "Justfile".into(),
             id: "anvil-imports".into(),
         };
-        assert_eq!(m.regions.get(&key).map(String::as_str), Some("sha256:newt"));
+        assert_eq!(m.regions.get(&key).map(String::as_str), Some("sha256:original"));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

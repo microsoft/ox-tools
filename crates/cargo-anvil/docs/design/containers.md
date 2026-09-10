@@ -53,9 +53,10 @@ Both are addressed by executing the recipe unchanged inside an image built from 
 bodies are identical in either mode, and cloud workflows are unaffected: they run the same recipes natively on their
 own agents. The image is pinned to resemble that environment, not to reproduce it.
 
-Image construction has a deliberately stricter compiler contract than native execution: the repository must own
-`rust-toolchain.toml`. The build context admits that file but not `rust-toolchain`, and the build does not inherit the
-host's `RUSTUP_TOOLCHAIN`; rustup therefore selects the image compiler from the repository-owned TOML file.
+Image construction does not require the repository to own a `rust-toolchain.toml`. Where one exists — either
+spelling — the context admits it and rustup selects the image compiler from it, exactly as it would on a host. Where a
+repository pins its compiler by other means and owns neither, the image compiler is the declared root MSRV, which is
+again what a host resolves there. The build does not inherit the host's `RUSTUP_TOOLCHAIN` in either case.
 
 ## 2. Command surface
 
@@ -133,7 +134,7 @@ never read, rewritten or reordered.
 | `anvil-container-base-image` | `ARG BASE_IMAGE`, pinned to a digest. | A second `ARG BASE_IMAGE=…` to build on a different base. |
 | `anvil-container-base` | `FROM`, the version pins for `pwsh`, `just`, `rustup` and `cargo-binstall`, and the `ENV` block. | Anything the first network access needs: a root CA, `http_proxy`, an internal package mirror. |
 | `anvil-container-tools` | System packages and those four tools. | Libraries a catalog tool needs to compile, for tools `binstall` has no prebuilt binary for. |
-| `anvil-container-setup` | `COPY` of the recipe tree and the root manifest, then `just anvil-setup`. | Anything the repository's own checks need at run time. |
+| `anvil-container-setup` | `COPY` of the scoped build context, then `just anvil-setup`. | Anything the repository's own checks need at run time. |
 | `anvil-container-entry` | `ANVIL_IN_CONTAINER`, `WORKDIR`, `CMD`. | — |
 
 Each gap sits at the only point in the build where its kind of addition works: a certificate has to land before the
@@ -153,8 +154,8 @@ reconcile by hand. For this file the consequence is silent: it carries the base 
 repository that edits it once builds on a frozen base and frozen versions indefinitely, while `anvil-container-tag`
 still resolves, because the tag hashes the file as it stands. Identity stays correct and the image stays stale.
 
-**Regions are not write protection.** The ownership rules in `updates.md` §2 apply to a region body exactly as they do
-to a file: an edit inside a region is preserved and produces a proposal rather than being overwritten. The gaps exist
+**Regions have strict ownership.** Unlike owned files, nonempty edits inside a region
+are preserved and refused until reconciled, without proposals (`updates.md` §3). The gaps exist
 so that editing a region is never the right way to add something.
 
 **Overriding the base image.** `ARG BASE_IMAGE` and the `FROM` that consumes it are separate regions, so the override
@@ -191,23 +192,36 @@ and copied to `/opt/anvil`, the root the recipes already resolve against, so the
 container-specific path in it.
 
 The workspace members it names are not admitted: they are a checkout, and the image is not one. The one path that
-would need them, workspace MSRV validation, returns early whenever a root toolchain file selects the compiler.
+would need them is workspace MSRV validation, which the image never reaches: `anvil-tool-rustc-validate-prereqs` is its
+only caller, and nothing `anvil-setup` reaches depends on that recipe. Inside a running
+container that validation does execute, against `/workspace` — a real checkout, with its members.
 
 The manifest is deleted once the setup has read it, so it is in the build context but not in the finished image. That
 keeps the tag honest: it hashes the declared MSRV rather than the file, so a dependency edit computes the same tag,
 and nothing is left behind for that tag to misdescribe.
 
-That makes the toolchain file a precondition of this design rather than a convenience: the image requires one, copies
-it, and relies on it to keep workspace validation out of reach of a context that has no members. A repository without
-one cannot build the image today, because the `COPY` above is unconditional. Should that become conditional, this
-design needs revisiting alongside it.
+**The image names its default toolchain.** `rustup` is initialized with `--default-toolchain none`, and rustup then
+sets the default as a side effect of the first `rustup toolchain install` that finds none set. That is the MSRV today,
+but only because of the order `anvil-setup` reaches the install recipes in. A checkout with a root toolchain file never
+notices, because the file overrides the default; a checkout without one has nothing else to select a compiler, so plain
+`cargo` inside the container would follow whichever toolchain the setup graph installed first. The setup region
+therefore runs `rustup default` on the declared MSRV, read from the manifest before it is deleted, so an arbitrary
+Rust command in the container uses the compiler the repository declared. A repository declaring no MSRV is left alone;
+the setup installs no stable toolchain for it either.
 
-`Dockerfile.dockerignore` scopes the build context to `justfiles/anvil/`, `.anvil/container/`, `rust-toolchain.toml`
-and the root `Cargo.toml`, denying everything else. The recipe tree is copied whole because `just` has to parse it to run
-`anvil-setup`, and it is hashed whole (§4). `.anvil/container/` is admitted so a gap can `COPY` a file placed beside
-the Dockerfile; anvil's own `.anvil-proposed` review artifacts are excluded from both the context and the digest.
-BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`, so the repository neither needs to
-own a root ignore file nor can have one silently override this.
+The setup region copies the context whole rather than naming each input, because one input is optional. A repository
+that pins its compiler by other means owns no root toolchain file, and a `COPY` of a path that may not exist is not
+portable across the engines anvil supports, so naming the file would leave exactly those repositories unable to build
+an image at all. The ignore file already scopes the context to precisely the image's inputs, so deferring to it makes
+what the context admits and what the image contains the same set. `.anvil/container/` rides along with it; that is the
+committed input a gap `COPY`s from, and the image never runs it.
+
+`Dockerfile.dockerignore` scopes the build context to `justfiles/anvil/`, `.anvil/container/`, a root toolchain file in
+either spelling, and the root `Cargo.toml`, denying everything else. The recipe tree is copied whole because `just` has
+to parse it to run `anvil-setup`, and it is hashed whole (§4). `.anvil/container/` is admitted so a gap can `COPY` a
+file placed beside the Dockerfile; anvil's own `.anvil-proposed` review artifacts are excluded from both the context
+and the digest. BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`, so the repository
+neither needs to own a root ignore file nor can have one silently override this.
 
 ## 4. Image identity
 
@@ -219,7 +233,7 @@ define the image. The name derives from the repository directory (§5.1).
 | Input | Hashed |
 | --- | --- |
 | every file under `.anvil/container/` | always |
-| `rust-toolchain.toml` | always |
+| `rust-toolchain.toml` or `rust-toolchain` | when the repository owns one |
 | every file under `justfiles/anvil/` | always |
 | the declared root MSRV | always |
 
@@ -229,6 +243,10 @@ catalog's replacement region can do the same. Naming only the files anvil happen
 change the image under a reference that already resolves, which is the hole the digest exists to close. A missing
 Dockerfile is still a hard error, checked by name: the walk alone would let it contribute nothing and yield a confident
 tag for an image that cannot be built.
+
+The root toolchain file is the one input whose absence is not an error. It is discovered rather than required, in both
+spellings, and a repository that owns none contributes one fewer record to the digest — a state distinct from owning
+one, so the two cannot share a tag.
 
 The recipe tree is hashed in full. `just anvil-setup` reaches the install recipes through the tier, group and check
 recipes, so the routing decides *whether* a tool is installed just as surely as `tools.just` decides *how*: dropping an
@@ -406,6 +424,16 @@ tier still reported green. `ANVIL_IMPACT` controls whether a CI group trusts its
 container run into one worker per logical processor. They are forwarded by name and only when set, so an unset variable
 stays unset rather than arriving empty.
 
+`ANVIL_IMPACT_INPUT_DIR` is the one recipe-contract input that is deliberately **not** forwarded. It names a host
+directory, and `-e NAME` passes the host value unchanged, so a path outside the bind mount would not resolve inside the
+container. Dropping it silently would be worse than useless: the containerized check would fall back to
+`target/anvil/impact` and could scope off a different package list than the native run while still reporting green.
+The boundary therefore rejects the combination — a containerized run with `ANVIL_IMPACT=consume` **and**
+`ANVIL_IMPACT_INPUT_DIR` set fails with an explicit error telling the operator to unset it or run the check natively.
+The rejection is gated on consume because that is the only mode that reads the override; with impact off or unset the
+variable is ignored, so a container cannot diverge and there is nothing to reject. An explicit input that cannot be
+honored fails; it never falls back.
+
 A resolved token is set on the driver process, passed by name, and unset after the run, so it never reaches a host
 command line. Inside the container it is readable by everything the run executes, including build scripts and proc
 macros.
@@ -421,7 +449,8 @@ image, executes the requested command directly instead of launching another cont
 ## 6. Engines and host setup
 
 anvil installs nothing and manages no virtual machine. Beyond the engine, the host needs `just` and PowerShell Core
-(`pwsh`), which every generated recipe requires, and the repository must own a `rust-toolchain.toml`.
+(`pwsh`), which every generated recipe requires. The repository needs a declared root MSRV; a `rust-toolchain.toml` is
+honoured where it exists but is not required (§1).
 
 | | Docker | Podman |
 | --- | --- | --- |
@@ -637,10 +666,12 @@ Replacing a *region* rather than the whole file is what makes a downstream catal
 private-environment catalog rewrites the base and tool layers and nothing else. Replacing `dockerfile_setup()` reintroduces the
 second tool list the design exists to avoid, and is almost never right.
 
-**A replacement must keep the ignore file in step.** A region that `COPY`s anything outside `justfiles/anvil/`,
-`.anvil/container/`, `rust-toolchain.toml` and the root `Cargo.toml` must also replace
-`artifacts::container::dockerignore()` (§3), or the added paths never reach the build context and the build fails on a
-missing file.
+**A replacement must keep the ignore file in step.** The setup region `COPY`s the context whole, so the ignore file is
+what decides the image's contents. A region that needs anything outside `justfiles/anvil/`, `.anvil/container/`, a root
+toolchain file and the root `Cargo.toml` must also replace `artifacts::container::dockerignore()` (§3), or the added
+paths never reach the build context. Widening it also moves content into the image that the digest does not hash: the
+walk covers `.anvil/container/` and `justfiles/anvil/` and nothing else, so a newly admitted tree has to be brought
+under one of them, or the tag stops covering what the image contains.
 
 **Anything extra it copies is digested, provided it lives under `.anvil/container/`.** The hashed set is that whole
 directory (§4.1), so an installer script, a config file or a certificate placed beside the Dockerfile is an input:
@@ -651,10 +682,11 @@ manual `ANVIL_CONTAINER_NO_CACHE=1`.
 `justfiles/anvil/` must contain `.just` recipes and nothing else, which `CatalogBuilder::build` enforces for
 catalog-owned files. The reason is legibility rather than identity: the directory is the recipe tree, `just` parses
 every file the image copies, and a catalog that hides an installer script there makes the tool set harder to reason
-about than one that keeps it in `.anvil/`. Identity is safe either way, because the digest covers every file the build
-context admits and the image keeps (§4.1), not only the recipes — a repository that adds a non-recipe file by hand
+about than one that keeps it in `.anvil/`. Identity is safe either way, because the digest walks that whole directory
+rather than only its recipes (§4.1) — a repository that adds a non-recipe file by hand
 still renames the tag when it edits it. The root `Cargo.toml` is the one admitted file the digest does not cover as
-bytes, and it is also the one the setup deletes once read, so it is in no image for the tag to misdescribe.
+bytes, and it is also the one the setup deletes once read, so it is in no image for the tag to misdescribe. Both
+statements describe the ignore file anvil ships; a replacement that admits another tree carries the obligation above.
 
 A fork inherits everything else: the recipes, the identity scheme, the cache volumes, the mounts, and the re-entry
 guard. A different base OS with a different toolchain source is two region replacements plus one hook.

@@ -1,0 +1,50 @@
+---
+source: crates/cargo-anvil/tests/toml_adoption.rs
+expression: "report(before, &tmp, \"deny.toml\", &outcome)"
+---
+--- deny.toml, as the user wrote it ---
+[advisories]
+yanked = "warn"
+
+--- decisions ---
+anvil-deny-advisories: LeaveAlone
+anvil-deny-bans: Write
+anvil-deny-licenses: Write
+anvil-deny-sources: Write
+
+--- refusals ---
+Refused to manage deny.toml [anvil-deny-advisories]: deny.toml declares `yanked` in `[advisories]` as "warn", but the managed region 'anvil-deny-advisories' declares it as "deny". Adopting the table would discard one of them and keeping both would repeat the key, which TOML rejects. This region was left unchanged; other regions in the same file and other artifacts may still be updated. Reconcile the hand-written table with the managed one before retrying.
+
+--- deny.toml, as anvil left it ---
+[advisories]
+yanked = "warn"
+
+# >>> anvil-managed: anvil-deny-licenses
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+# <<< anvil-managed: anvil-deny-licenses
+
+# >>> anvil-managed: anvil-deny-bans
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# <<< anvil-managed: anvil-deny-bans
+
+# >>> anvil-managed: anvil-deny-sources
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# <<< anvil-managed: anvil-deny-sources

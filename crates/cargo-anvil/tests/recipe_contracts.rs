@@ -15,6 +15,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use cargo_anvil::test_support::{Cli, run_update};
 use tempfile::TempDir;
 
 const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
@@ -1122,8 +1123,8 @@ fn container_build_carries_the_manifest_that_declares_the_msrv() {
         "the build context must admit the root manifest, or the setup cannot resolve the MSRV"
     );
     assert!(
-        CONTAINER_SETUP_REGION.contains("COPY Cargo.toml ./"),
-        "the setup region must copy the manifest to the root the recipes resolve against"
+        CONTAINER_SETUP_REGION.contains("COPY . ./"),
+        "the setup region must copy the scoped context to the root the recipes resolve against"
     );
     // The tag hashes the declared MSRV, not the file, so an unrelated dependency
     // edit computes the same tag. A manifest left in the image would make that
@@ -1153,16 +1154,113 @@ fn container_build_carries_the_manifest_that_declares_the_msrv() {
         !CONTAINER_SETUP_REGION.contains("ANVIL_ROOT_MSRV"),
         "the setup region must not reintroduce the build argument"
     );
-    // Load-bearing for the two assertions above rather than incidental. The
-    // resolver's workspace MSRV validation reads every member manifest, which
-    // this context does not carry -- and it is unreachable only because a root
-    // toolchain file selects the compiler, which makes it return early. Making
-    // this COPY conditional, so a repository without one can build, would put
-    // that branch back in reach of a partial workspace.
+}
+
+#[test]
+fn the_container_build_does_not_require_a_root_toolchain_file() {
     assert!(
-        CONTAINER_SETUP_REGION.contains("COPY rust-toolchain.toml ./"),
-        "the setup region must copy a root toolchain file: the MSRV design depends on one being \
-         present to keep workspace validation out of reach of a context with no members"
+        !CONTAINER_SETUP_REGION.contains("COPY rust-toolchain"),
+        "naming the toolchain file makes the image unbuildable in exactly the repositories that \
+         have nothing to pin"
+    );
+    assert!(
+        CONTAINER_DOCKERIGNORE.contains("!rust-toolchain.toml") && CONTAINER_DOCKERIGNORE.contains("!rust-toolchain\n"),
+        "the context must admit a root toolchain file in either spelling"
+    );
+}
+
+/// A repository with no root toolchain file has nothing but the image's own
+/// default to select a compiler, and `rustup-init` ran with
+/// `--default-toolchain none`. Rustup does set the default from the first
+/// install that finds none set, so this holds today by accident of the order
+/// `anvil-setup` reaches the install recipes in; a reordering that installed a
+/// nightly first would silently make it the compiler `cargo` runs in the
+/// container.
+#[test]
+fn the_image_names_its_default_toolchain() {
+    assert!(
+        CONTAINER_SETUP_REGION.contains("rustup default"),
+        "the setup region must name the image's default toolchain rather than inherit whichever \
+         one the setup graph installed first"
+    );
+    assert!(
+        CONTAINER_SETUP_REGION.contains("_anvil-resolve-stable root-msrv"),
+        "the default must be the declared MSRV, the version the setup installs for a repository \
+         that pins nothing"
+    );
+    let default_at = CONTAINER_SETUP_REGION.find("rustup default").unwrap();
+    let removal_at = CONTAINER_SETUP_REGION.find("rm -f Cargo.toml").unwrap();
+    assert!(
+        default_at < removal_at,
+        "the MSRV is read from the root manifest, so the default must be set before the setup \
+         deletes it"
+    );
+}
+
+/// `anvil-setup` must not reach workspace MSRV validation: the image runs it
+/// against a context carrying the root manifest and none of the members that
+/// validation resolves through `cargo metadata`. The fixture here is an
+/// ordinary workspace, because what is under test is the recipe graph rather
+/// than the container's filesystem.
+///
+/// Nothing else declares this. An edge added later, or a recipe body that
+/// shells out to one, would surface as a cargo path error inside an image
+/// build, naming a manifest instead of the edge that reached it. The whole
+/// emitted tree is planned, because the edge could be added in any tier, group
+/// or check file. `anvil-setup` does reach `anvil-tool-pwsh-validate-prereqs`,
+/// so the assertion is about the one validator that resolves members, not about
+/// the family.
+#[test]
+fn setup_never_reaches_workspace_msrv_validation() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    write(
+        &root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nrust-version = \"1.90\"\n",
+    );
+    write(
+        &root.join("crates/alpha/Cargo.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.join("crates/alpha/src/lib.rs"), "");
+    run_update(
+        &cargo_anvil::Catalog::anvil(),
+        &Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        },
+        root,
+    )
+    .unwrap();
+    write(&root.join("Justfile"), "import 'justfiles/anvil/mod.just'\n");
+
+    let output = run_just(root, &["--dry-run", "anvil-setup", "binstall"], &[]);
+    assert!(
+        output.status.success(),
+        "planning the image's setup failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The needle is the invocation, not the bare action name, which the
+    // resolver's own body lists among the actions it accepts.
+    let plan = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        plan.contains("_anvil-resolve-stable install-msrv"),
+        "the plan must reach the resolver at all, or this test proves nothing\nplan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("_anvil-resolve-stable validate-workspace-msrv"),
+        "`anvil-setup` reached workspace MSRV validation, which the image's context cannot answer: \
+         it carries the root manifest and none of its members"
     );
 }
 
@@ -2944,6 +3042,85 @@ fn the_image_tag_follows_the_declared_msrv() {
     assert_eq!(declared, tag("1.93.1"), "the tag must depend on the inputs alone");
 }
 
+/// The tag must answer for a repository that owns no toolchain file rather than
+/// refusing it, and must not hand it the same reference as one that owns one.
+#[test]
+fn the_image_tag_treats_a_root_toolchain_file_as_optional() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+    write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
+    write(&root.join("justfiles/anvil/mod.just"), "# recipes\n");
+    stub_msrv_resolver(root);
+    write(&root.join("fake-bin/git.ps1"), "exit 0\n");
+
+    let tag = || {
+        let output = run_just(root, &["anvil-container-tag"], &[]);
+        assert!(
+            output.status.success(),
+            "computing the tag failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+
+    let none = tag();
+
+    write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.90\"\n");
+    let toml = tag();
+    assert_ne!(
+        none, toml,
+        "owning a toolchain file changes the image's compiler, so it must rename it"
+    );
+
+    write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.91\"\n");
+    assert_ne!(
+        toml,
+        tag(),
+        "the image installs the toolchain the file selects, so an edit must rename it"
+    );
+
+    fs::remove_file(root.join("rust-toolchain.toml")).unwrap();
+    write(&root.join("rust-toolchain"), "[toolchain]\nchannel = \"1.90\"\n");
+    let extensionless = tag();
+    assert_ne!(none, extensionless, "the extensionless spelling is an image input too");
+    assert_ne!(toml, extensionless, "the same bytes under the other spelling are a different input");
+}
+
+/// The ignore file re-includes either toolchain path, so a directory at one is
+/// copied into the image whole, while the digest walks only `.anvil/container/`
+/// and `justfiles/anvil/` and hashes nothing inside it. Discovery skips a
+/// non-leaf, which would leave two images differing anywhere under that
+/// directory sharing one tag, and the link guard does not fire because a plain
+/// directory is not a reparse point.
+#[test]
+fn a_directory_at_a_toolchain_path_is_refused() {
+    if !tools_available() {
+        return;
+    }
+    for spelling in ["rust-toolchain", "rust-toolchain.toml"] {
+        let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+        let root = tmp.path();
+        write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+        write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
+        write(&root.join("justfiles/anvil/mod.just"), "# recipes\n");
+        stub_msrv_resolver(root);
+        write(&root.join(spelling).join("payload.txt"), "A\n");
+
+        let output = run_just(root, &["anvil-container-tag"], &[]);
+        assert_failed(&output, &format!("computing a tag with a directory at {spelling}"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(spelling) && stderr.contains("regular file"),
+            "the refusal must name the path and what it must be\nstderr:\n{stderr}"
+        );
+    }
+}
+
 /// The tag is computed from the index while the build copies the working tree,
 /// so the two have to agree about the executable bit. Where they do not, the
 /// reference names an image the build does not produce, and the run stops
@@ -3044,6 +3221,8 @@ fn a_link_among_the_image_inputs_is_refused() {
         ("a file link below a walk root", "justfiles/anvil/linked.just", false),
         ("a directory link below a walk root", "justfiles/anvil/linked", true),
         ("a linked declared input", "rust-toolchain.toml", false),
+        ("a linked extensionless toolchain file", "rust-toolchain", false),
+        ("a linked root manifest", "Cargo.toml", false),
         ("a linked recipe walk root", "justfiles/anvil", true),
         ("a linked container walk root", ".anvil/container", true),
     ] {
@@ -3052,6 +3231,11 @@ fn a_link_among_the_image_inputs_is_refused() {
         stub_msrv_resolver(root);
         write(&root.join("elsewhere/target.just"), "# shared\n");
         write(&root.join("elsewhere/Dockerfile"), "FROM scratch\n");
+        // The fixture writes a root manifest of its own, which the link for
+        // that case has to replace rather than sit beside.
+        if name == "Cargo.toml" {
+            fs::remove_file(root.join(name)).unwrap();
+        }
         // Everything the tag needs, except whatever this case replaces with a
         // link. The link stands in for it, so writing it first would defeat the
         // case for a walk root and leave nothing to link at all.

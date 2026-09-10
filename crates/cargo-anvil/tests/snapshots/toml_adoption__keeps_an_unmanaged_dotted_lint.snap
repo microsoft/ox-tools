@@ -1,3 +1,30 @@
+---
+source: crates/cargo-anvil/tests/toml_adoption.rs
+expression: "report(before, &tmp, \"Cargo.toml\", &outcome)"
+---
+--- Cargo.toml, as the user wrote it ---
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.lints]
+# House rule, not in anvil's catalog.
+rust.a_custom_lint = "warn"
+rust.unsafe_op_in_unsafe_fn = "warn"
+
+--- decisions ---
+anvil-workspace-lints: Write
+
+--- refusals ---
+(none)
+
+--- Cargo.toml, as anvil left it ---
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# >>> anvil-managed: anvil-workspace-lints
+[workspace.lints]
 # Catalog of opinionated lints, in dotted-key form so users can extend the
 # same scope (`[workspace.lints]` or `[lints]`) outside the sentinels.
 # The host-specific table header (`[workspace.lints]` or `[lints]`) is
@@ -82,3 +109,6 @@ clippy.should_panic_without_expect = "allow"
 clippy.significant_drop_tightening = "allow"
 # Blocked by Clippy bug: https://github.com/rust-lang/rust-clippy/issues/15036
 clippy.wildcard_imports = "allow"
+# <<< anvil-managed: anvil-workspace-lints
+# House rule, not in anvil's catalog.
+rust.a_custom_lint = "warn"
