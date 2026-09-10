@@ -38,8 +38,8 @@ The same four chores, re-spelled per recipe, are the bulk of the PowerShell in
 
 `cargo-each` is that helper: one cargo-native tool that resolves a
 cargo-style package selection, optionally filters it by a metadata predicate,
-and runs a command over the result — either once per package (with placeholder
-substitution) or exactly once for the whole set.
+and runs a command over the result — once per package, once per matching Cargo
+target (with placeholder substitution), or exactly once for the whole set.
 
 ## 2. Goals
 

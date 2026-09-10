@@ -42,10 +42,6 @@ pub(crate) struct Member {
     pub(crate) features: BTreeSet<String>,
     /// Cargo targets declared by this package.
     pub(crate) targets: Vec<MemberTarget>,
-    /// Whether the member has a `lib` target.
-    pub(crate) has_lib: bool,
-    /// Whether the member has a `bin` target.
-    pub(crate) has_bin: bool,
     /// Names of this member's declared dependencies (any kind).
     pub(crate) dependencies: BTreeSet<String>,
     /// The member's `package.metadata` block, as freeform JSON.
@@ -113,8 +109,6 @@ impl Workspace {
             .workspace_packages()
             .iter()
             .map(|pkg| {
-                let has_lib = pkg.targets.iter().any(is_lib_target);
-                let has_bin = pkg.targets.iter().any(is_bin_target);
                 let dependencies = pkg.dependencies.iter().map(|d| d.name.clone()).collect();
                 let mut targets: Vec<MemberTarget> = pkg
                     .targets
@@ -133,8 +127,6 @@ impl Workspace {
                     publishable: pkg.publish.as_ref().is_none_or(|registries| !registries.is_empty()),
                     features: pkg.features.keys().cloned().collect(),
                     targets,
-                    has_lib,
-                    has_bin,
                     dependencies,
                     metadata: pkg.metadata.clone(),
                 }
@@ -153,21 +145,6 @@ impl Workspace {
             default_member_names,
         })
     }
-}
-
-/// Whether a target is a plain Rust library (`lib`).
-///
-/// Matches the typed target-kind enum directly rather than its `Display`
-/// string — no per-target allocation and no spelling-drift risk. Proc-macro,
-/// `cdylib`, and `staticlib` library kinds are deliberately *not* counted:
-/// the `lib` filter means the plain `lib` kind only (see the design doc).
-fn is_lib_target(target: &cargo_metadata::Target) -> bool {
-    target.kind.iter().any(|k| matches!(k, TargetKind::Lib))
-}
-
-/// Whether a target is a binary (`bin`).
-fn is_bin_target(target: &cargo_metadata::Target) -> bool {
-    target.kind.iter().any(|k| matches!(k, TargetKind::Bin))
 }
 
 /// Parse a supported Cargo target-kind spelling.

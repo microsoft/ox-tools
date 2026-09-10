@@ -31,10 +31,6 @@ pub(crate) enum Predicate {
     Or(Vec<Self>),
     /// `not operand`: the operand does not match.
     Not(Box<Self>),
-    /// `lib`: member has a `lib` target.
-    HasLib,
-    /// `bin`: member has a `bin` target.
-    HasBin,
     /// `target-kind:<kind>`: member has a target of that Cargo kind.
     HasTargetKind(TargetKind),
     /// `publishable`: Cargo permits publishing the package.
@@ -68,8 +64,8 @@ impl Predicate {
     /// Parse one atomic predicate from its command-line spelling.
     fn parse_atom(spec: &str) -> Result<Self, EachError> {
         match spec {
-            "lib" => Ok(Self::HasLib),
-            "bin" => Ok(Self::HasBin),
+            "lib" => Ok(Self::HasTargetKind(TargetKind::Lib)),
+            "bin" => Ok(Self::HasTargetKind(TargetKind::Bin)),
             "publishable" => Ok(Self::Publishable),
             _ => {
                 if let Some(kind) = spec.strip_prefix("target-kind:") {
@@ -109,8 +105,6 @@ impl Predicate {
             Self::And(predicates) => predicates.iter().all(|predicate| predicate.matches(member)),
             Self::Or(predicates) => predicates.iter().any(|predicate| predicate.matches(member)),
             Self::Not(predicate) => !predicate.matches(member),
-            Self::HasLib => member.has_lib,
-            Self::HasBin => member.has_bin,
             Self::HasTargetKind(kind) => member.targets.iter().any(|target| target.kinds.contains(kind)),
             Self::Publishable => member.publishable,
             Self::HasFeature(name) => member.features.contains(name),
@@ -408,15 +402,28 @@ mod tests {
     use crate::workspace::MemberTarget;
 
     fn member_with(deps: &[&str], metadata: Value, has_lib: bool, has_bin: bool) -> Member {
+        let mut targets = Vec::new();
+        if has_lib {
+            targets.push(MemberTarget {
+                name: "m".to_owned(),
+                kinds: std::iter::once(TargetKind::Lib).collect(),
+                required_features: BTreeSet::new(),
+            });
+        }
+        if has_bin {
+            targets.push(MemberTarget {
+                name: "m".to_owned(),
+                kinds: std::iter::once(TargetKind::Bin).collect(),
+                required_features: BTreeSet::new(),
+            });
+        }
         Member {
             name: "m".to_owned(),
             version: "0.1.0".to_owned(),
             manifest_path: PathBuf::from("/ws/m/Cargo.toml"),
             publishable: true,
             features: BTreeSet::new(),
-            targets: Vec::new(),
-            has_lib,
-            has_bin,
+            targets,
             dependencies: deps.iter().map(|s| (*s).to_owned()).collect::<BTreeSet<_>>(),
             metadata,
         }
@@ -424,8 +431,8 @@ mod tests {
 
     #[test]
     fn parses_kind_predicates() {
-        assert_eq!(Predicate::parse("lib").expect("lib"), Predicate::HasLib);
-        assert_eq!(Predicate::parse("bin").expect("bin"), Predicate::HasBin);
+        assert_eq!(Predicate::parse("lib").expect("lib"), Predicate::HasTargetKind(TargetKind::Lib));
+        assert_eq!(Predicate::parse("bin").expect("bin"), Predicate::HasTargetKind(TargetKind::Bin));
         assert_eq!(
             Predicate::parse("target-kind:proc-macro").expect("target kind"),
             Predicate::HasTargetKind(TargetKind::ProcMacro)
@@ -462,8 +469,11 @@ mod tests {
         assert_eq!(
             Predicate::parse("lib or bin and not publishable").expect("expression"),
             Predicate::Or(vec![
-                Predicate::HasLib,
-                Predicate::And(vec![Predicate::HasBin, Predicate::Not(Box::new(Predicate::Publishable)),]),
+                Predicate::HasTargetKind(TargetKind::Lib),
+                Predicate::And(vec![
+                    Predicate::HasTargetKind(TargetKind::Bin),
+                    Predicate::Not(Box::new(Predicate::Publishable)),
+                ]),
             ])
         );
     }
@@ -473,7 +483,10 @@ mod tests {
         assert_eq!(
             Predicate::parse("(lib or bin) and publishable").expect("expression"),
             Predicate::And(vec![
-                Predicate::Or(vec![Predicate::HasLib, Predicate::HasBin]),
+                Predicate::Or(vec![
+                    Predicate::HasTargetKind(TargetKind::Lib),
+                    Predicate::HasTargetKind(TargetKind::Bin),
+                ]),
                 Predicate::Publishable,
             ])
         );
@@ -499,7 +512,7 @@ mod tests {
                     key: "role".to_owned(),
                     value: "research and (development)".to_owned(),
                 },
-                Predicate::HasLib,
+                Predicate::HasTargetKind(TargetKind::Lib),
             ])
         );
         assert_eq!(
@@ -552,7 +565,10 @@ mod tests {
     #[test]
     fn expression_nesting_accepts_64_levels_but_rejects_65() {
         let maximum = format!("{}lib{}", "(".repeat(64), ")".repeat(64));
-        assert_eq!(Predicate::parse(&maximum).expect("64 levels are supported"), Predicate::HasLib);
+        assert_eq!(
+            Predicate::parse(&maximum).expect("64 levels are supported"),
+            Predicate::HasTargetKind(TargetKind::Lib)
+        );
 
         let too_deep = format!("{}lib{}", "(".repeat(65), ")".repeat(65));
         let error = Predicate::parse(&too_deep).expect_err("65 levels exceed the limit");
@@ -611,8 +627,8 @@ mod tests {
             kinds: std::iter::once(TargetKind::ProcMacro).collect(),
             required_features: BTreeSet::new(),
         });
-        assert!(Predicate::HasLib.matches(&m));
-        assert!(!Predicate::HasBin.matches(&m));
+        assert!(Predicate::HasTargetKind(TargetKind::Lib).matches(&m));
+        assert!(!Predicate::HasTargetKind(TargetKind::Bin).matches(&m));
         assert!(Predicate::HasTargetKind(TargetKind::ProcMacro).matches(&m));
         assert!(!Predicate::HasTargetKind(TargetKind::Test).matches(&m));
     }

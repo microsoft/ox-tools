@@ -264,8 +264,6 @@ mod tests {
             publishable: true,
             features: BTreeSet::new(),
             targets: Vec::new(),
-            has_lib: true,
-            has_bin: false,
             dependencies: BTreeSet::new(),
             metadata: Value::Null,
         }
