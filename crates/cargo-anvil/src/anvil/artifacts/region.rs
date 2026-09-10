@@ -43,7 +43,7 @@ const DENY_SOURCES_REGION_ID: &str = "anvil-deny-sources";
 const RUSTFMT_PATH: &str = "rustfmt.toml";
 /// Region id for the managed section of `rustfmt.toml`.
 ///
-/// `pub(crate)` because the rustfmt region's opt-out (empty body) behavior is
+/// `pub(crate)` because the rustfmt region's empty-body regeneration behavior is
 /// exercised by tests; everything else here is a private implementation
 /// detail of the registry functions below.
 pub(crate) const RUSTFMT_REGION_ID: &str = "anvil-rustfmt";
@@ -56,7 +56,7 @@ pub(crate) const DELTA_REGION_ID: &str = "anvil-delta";
 /// Repo-root-relative path of the `cargo-spellcheck` config.
 const SPELLCHECK_PATH: &str = "spellcheck.toml";
 /// Region id for the managed section of `spellcheck.toml`.
-const SPELLCHECK_REGION_ID: &str = "anvil-spellcheck";
+const SPELLCHECK_REGION_ID: &str = "anvil-spellcheck-root";
 
 /// Repo-root-relative path of the `clippy` lint-tuning config.
 const CLIPPY_PATH: &str = "clippy.toml";
@@ -88,6 +88,8 @@ const DELTA_BODY: &str = include_str!("../../../templates/regions/delta.toml");
 
 /// Embedded body of the spellcheck.toml managed region.
 const SPELLCHECK_BODY: &str = include_str!("../../../templates/regions/spellcheck.toml");
+const SPELLCHECK_HUNSPELL_BODY: &str = include_str!("../../../templates/regions/spellcheck-hunspell.toml");
+const SPELLCHECK_QUIRKS_BODY: &str = include_str!("../../../templates/regions/spellcheck-quirks.toml");
 
 /// Embedded body of the clippy.toml managed region.
 const CLIPPY_BODY: &str = include_str!("../../../templates/regions/clippy.toml");
@@ -215,10 +217,22 @@ pub fn delta() -> Artifact {
     path_region(DELTA_PATH, DELTA_REGION_ID, DELTA_BODY)
 }
 
-/// `spellcheck.toml` / `anvil-spellcheck`.
+/// Root settings of `spellcheck.toml`, before its tables.
 #[must_use]
 pub fn spellcheck() -> Artifact {
     path_region(SPELLCHECK_PATH, SPELLCHECK_REGION_ID, SPELLCHECK_BODY)
+}
+
+/// Independently extensible `[Hunspell]` settings.
+#[must_use]
+pub fn spellcheck_hunspell() -> Artifact {
+    path_region(SPELLCHECK_PATH, "anvil-spellcheck-hunspell", SPELLCHECK_HUNSPELL_BODY)
+}
+
+/// Independently extensible `[Hunspell.quirks]` settings.
+#[must_use]
+pub fn spellcheck_quirks() -> Artifact {
+    path_region(SPELLCHECK_PATH, "anvil-spellcheck-quirks", SPELLCHECK_QUIRKS_BODY)
 }
 
 /// `clippy.toml` / `anvil-clippy`.
@@ -241,7 +255,7 @@ pub fn gitattributes() -> Artifact {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::region::upsert_region;
+    use crate::region::{TomlAdoption, adopt_unmanaged_toml_tables, upsert_region};
 
     #[test]
     fn embedded_catalog_uses_dotted_keys() {
@@ -387,13 +401,45 @@ mod tests {
 
     #[test]
     fn spellcheck_body_configures_hunspell_with_extra_dictionary() {
-        assert!(SPELLCHECK_BODY.contains("[Hunspell]"));
-        assert!(SPELLCHECK_BODY.contains("lang = \"en_US\""));
-        assert!(SPELLCHECK_BODY.contains("\"target/spelling.dic\""));
-        assert!(SPELLCHECK_BODY.contains("skip_os_lookups = true"));
-        assert!(SPELLCHECK_BODY.contains("use_builtin = true"));
-        assert!(SPELLCHECK_BODY.contains("[Hunspell.quirks]"));
-        assert!(SPELLCHECK_BODY.contains("allow_concatenation = true"));
+        let doc = format!("{SPELLCHECK_BODY}\n{SPELLCHECK_HUNSPELL_BODY}\n{SPELLCHECK_QUIRKS_BODY}")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(doc["Hunspell"]["lang"].as_str(), Some("en_US"));
+        assert_eq!(doc["Hunspell"]["extra_dictionaries"][0].as_str(), Some("target/spelling.dic"));
+        assert_eq!(doc["Hunspell"]["skip_os_lookups"].as_bool(), Some(true));
+        assert_eq!(doc["Hunspell"]["use_builtin"].as_bool(), Some(true));
+        assert_eq!(doc["Hunspell"]["quirks"]["allow_concatenation"].as_bool(), Some(true));
+    }
+
+    /// Separate regions leave extension space in the correct table.
+    #[test]
+    fn a_hand_written_hunspell_setting_is_never_moved_into_quirks() {
+        let host = "[Hunspell]\nlang = \"en_US\"\ntransform_regex = [\"^'\"]\n";
+        let adoption = adopt_unmanaged_toml_tables(host, SPELLCHECK_HUNSPELL_BODY, CommentSyntax::Hash);
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Adopted {
+                text: String::new(),
+                residue: "transform_regex = [\"^'\"]\n".into(),
+            },
+            "the setting stays below the Hunspell region, not the quirks region"
+        );
+    }
+
+    #[test]
+    fn matching_hunspell_settings_are_emitted_once() {
+        let host = "[Hunspell]\nlang = \"en_US\"\n";
+        let adoption = adopt_unmanaged_toml_tables(host, SPELLCHECK_HUNSPELL_BODY, CommentSyntax::Hash);
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Adopted {
+                text: String::new(),
+                residue: String::new(),
+            },
+            "the remedy the diagnostic names is the one that works"
+        );
     }
 
     #[test]

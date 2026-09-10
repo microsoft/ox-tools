@@ -24,10 +24,6 @@
     clippy::panic,
     reason = "integration tests panic on unmet preconditions for readable failure output"
 )]
-#![expect(
-    clippy::doc_markdown,
-    reason = "fixture names like `opt-outs` look like code but are directory names"
-)]
 
 use std::path::{Path, PathBuf};
 
@@ -85,6 +81,21 @@ fn region_decision(outcome: &RunOutcome, host: &str, id: &str) -> Decision {
         .decision
 }
 
+/// Read a TOML host anvil wrote and assert it **parses**.
+///
+/// Substring assertions are what let a broken host survive: a `deny.toml`
+/// carrying two `[advisories]` headers contains every string these fixtures
+/// look for and still fails the first `cargo deny` that reads it. Anything
+/// anvil writes to a `.toml` host has to be a file TOML accepts.
+fn read_parsing_toml(tmp: &TempDir, relpath: &str) -> String {
+    let path = tmp.path().join(relpath);
+    let text = std::fs::read_to_string(&path).unwrap();
+    if let Err(error) = text.parse::<toml_edit::DocumentMut>() {
+        panic!("{relpath} is not valid TOML: {error}\n---\n{text}\n---");
+    }
+    text
+}
+
 /// `single-crate`: a manifest with a bare `[package]` and no
 /// `[workspace]` should still get the per-crate lints region (not the
 /// workspace one), the Justfile imports region, and the full
@@ -128,10 +139,9 @@ fn single_crate_emits_crate_lints_and_justfiles() {
     );
 }
 
-/// `opt-outs`: a user who emptied the rustfmt managed region after a
-/// first run keeps that opt-out across re-runs (LeaveAlone decision).
+/// Emptying a managed block requests regeneration, not an opt-out.
 #[test]
-fn empty_region_is_treated_as_opt_out() {
+fn empty_region_is_repopulated() {
     use cargo_anvil::CommentSyntax;
     use cargo_anvil::test_support::{rustfmt_region_id, upsert_region};
 
@@ -144,11 +154,12 @@ fn empty_region_is_treated_as_opt_out() {
     let emptied = upsert_region(&body, rustfmt_region_id(), "", CommentSyntax::Hash).unwrap();
     std::fs::write(&rustfmt_path, &emptied).unwrap();
 
-    // Re-run and check the rustfmt region is LeaveAlone.
+    // Re-run with the unchanged template.
     let outcome = run(&tmp);
-    assert_eq!(region_decision(&outcome, "rustfmt.toml", rustfmt_region_id()), Decision::LeaveAlone);
+    assert_eq!(region_decision(&outcome, "rustfmt.toml", rustfmt_region_id()), Decision::Write);
     let after = std::fs::read_to_string(&rustfmt_path).unwrap();
-    assert_eq!(after, emptied, "opt-out region must not be re-populated");
+    assert_eq!(after, body);
+    assert!(!run(&tmp).plan.has_changes());
 }
 
 /// `customized`: a user edit inside a managed region with an unchanged
@@ -168,11 +179,82 @@ fn user_edit_inside_region_is_left_alone() {
 
     let outcome = run(&tmp);
     assert_eq!(region_decision(&outcome, "rustfmt.toml", rustfmt_region_id()), Decision::LeaveAlone);
+    assert!(outcome.plan.refusals().iter().any(|reason| reason.contains("rustfmt.toml")));
     let after = std::fs::read_to_string(&rustfmt_path).unwrap();
     assert!(
         after.contains("edition = \"2021\""),
         "user customization must be preserved; got:\n{after}"
     );
+}
+
+/// `deny-conflict`: a `deny.toml` whose hand-written `[advisories]` sets
+/// `yanked` to something other than the managed body's value. No output keeps
+/// both — TOML forbids the repeated key — so the region is refused, the
+/// hand-written value is preserved, and other regions in the same host can
+/// still be written.
+#[test]
+fn a_conflicting_toml_host_is_refused_not_corrupted() {
+    let tmp = stage_fixture("deny-conflict");
+
+    let outcome = run(&tmp);
+
+    let after = read_parsing_toml(&tmp, "deny.toml");
+    assert!(
+        after.contains("yanked = \"warn\""),
+        "the repository's own value is never overwritten;\ngot:\n{after}"
+    );
+    assert!(
+        !after.contains("anvil-deny-advisories"),
+        "the conflicting region is not spliced in;\ngot:\n{after}"
+    );
+    assert_eq!(
+        after.matches("[advisories]").count(),
+        1,
+        "and no duplicate header is produced;\ngot:\n{after}"
+    );
+    assert_eq!(
+        region_decision(&outcome, "deny.toml", "anvil-deny-advisories"),
+        Decision::LeaveAlone,
+        "the conflicting region is planned as a no-op"
+    );
+    assert!(
+        outcome.plan.refusals().iter().any(|reason| reason.contains("yanked")),
+        "the refusal names the key that disagrees; got: {:#?}",
+        outcome.plan.refusals()
+    );
+    assert!(
+        outcome.plan.refusals().iter().any(|reason| {
+            reason.contains("deny.toml [anvil-deny-advisories]")
+                && reason.contains("This region was left unchanged; other regions in the same file")
+                && reason.contains("and other artifacts may still be updated.")
+                && reason.contains("Reconcile the hand-written table with the managed one before retrying.")
+                && !reason.contains("empty the region")
+        }),
+        "the refusal must not claim that the whole host was left unchanged; got: {:#?}",
+        outcome.plan.refusals()
+    );
+
+    // The refusal is scoped to the region it applies to. The rest of the host,
+    // and the rest of the onboarding, still happens -- which is what makes
+    // refusing tolerable rather than a wall.
+    assert!(
+        after.contains("anvil-deny-licenses"),
+        "the non-conflicting sections are still written;\ngot:\n{after}"
+    );
+    assert!(
+        tmp.path().join("justfiles/anvil/mod.just").is_file(),
+        "other artifacts are still written"
+    );
+
+    let reconciled = after.replace("yanked = \"warn\"", "yanked = \"deny\"");
+    std::fs::write(tmp.path().join("deny.toml"), reconciled).unwrap();
+    let retried = run(&tmp);
+    assert!(retried.plan.refusals().is_empty(), "reconciling the conflict clears the refusal");
+    assert_eq!(region_decision(&retried, "deny.toml", "anvil-deny-advisories"), Decision::Write);
+    let adopted = read_parsing_toml(&tmp, "deny.toml");
+    assert!(adopted.contains("# >>> anvil-managed: anvil-deny-advisories"));
+    assert_eq!(adopted.matches("[advisories]").count(), 1);
+    assert!(adopted.contains("yanked = \"deny\""));
 }
 
 /// `migration`: a workspace that already has a hand-written
@@ -193,7 +275,7 @@ fn migration_preserves_user_content() {
         "anvil imports region must be spliced into the existing Justfile"
     );
 
-    let cargo = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    let cargo = read_parsing_toml(&tmp, "Cargo.toml");
     assert!(
         cargo.contains("lto = \"thin\""),
         "user-authored [profile.release] must survive migration; got:\n{cargo}"
@@ -203,12 +285,32 @@ fn migration_preserves_user_content() {
         "anvil workspace lints region must be spliced into Cargo.toml"
     );
 
-    let deny = std::fs::read_to_string(tmp.path().join("deny.toml")).unwrap();
+    // The defect this fixture used to hide: the hand-written `[advisories]`
+    // declares an `ignore` list the managed body does not, so adoption cannot
+    // simply delete the table. Appending the region regardless produced a
+    // second `[advisories]` header, which TOML rejects outright -- and every
+    // assertion below still passed, because they only ever looked for a
+    // substring of its text.
+    let deny = read_parsing_toml(&tmp, "deny.toml");
     assert!(
         deny.contains("RUSTSEC-9999-0001"),
         "user-authored deny.toml content must survive migration; got:\n{deny}"
     );
     assert!(deny.contains("anvil-deny"), "anvil deny region must be spliced into deny.toml");
+    assert_eq!(
+        deny.matches("[advisories]").count(),
+        1,
+        "the hand-written table must be adopted, not duplicated; got:\n{deny}"
+    );
+    // Kept configuration has to land *inside* the table the region opens, or
+    // it silently changes meaning -- a relocated `ignore` that ends up under
+    // `[bans]` is a different setting that cargo-deny will not honor.
+    let advisories = deny.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(
+        advisories["advisories"]["ignore"].as_array().unwrap().len(),
+        1,
+        "the user's accepted advisory must still be an [advisories] entry; got:\n{deny}"
+    );
 
     // Idempotence: re-run leaves everything alone.
     let outcome2 = run(&tmp);

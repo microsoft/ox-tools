@@ -593,27 +593,25 @@ fn refusing_a_composed_host_leaves_its_lock_entry_intact() {
     }
 }
 
-/// A malformed sentinel must be reported as such, not folded in with "this
-/// region is missing" -- the content is right there, with a broken marker.
+/// Duplicate markers are repaired before the entire composed host is classified.
 #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
 #[test]
-fn a_malformed_sentinel_is_named_in_the_refusal() {
+fn duplicate_sentinels_are_repaired_without_changing_composed_content() {
     let tmp = generated_tree();
     let root = tmp.path();
     let dockerfile = root.join(".anvil/container/Dockerfile");
 
-    // Duplicate the opening sentinel, leaving the close unmatched.
     let text = std::fs::read_to_string(&dockerfile).unwrap();
-    let opener = "# >>> anvil-managed: anvil-container-base";
-    let broken = text.replacen(opener, &format!("{opener}\n{opener}"), 1);
+    let opener = "# >>> anvil-managed: anvil-container-base\n";
+    let broken = text.replacen(opener, &format!("{opener}{opener}"), 1);
     write(&dockerfile, &broken);
 
     let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&dockerfile).unwrap(),
-        broken,
-        "a refused host must not be modified"
+        text,
+        "only duplicate marker noise should be removed"
     );
     let refusals: Vec<&String> = outcome
         .plan
@@ -621,12 +619,8 @@ fn a_malformed_sentinel_is_named_in_the_refusal() {
         .iter()
         .filter(|r| r.contains(".anvil/container/Dockerfile"))
         .collect();
-    assert_eq!(refusals.len(), 1, "one diagnostic per host: {refusals:?}");
-    assert!(
-        refusals[0].contains("cannot be read"),
-        "a broken sentinel must not be reported as a missing region: {}",
-        refusals[0]
-    );
+    assert!(refusals.is_empty(), "{refusals:?}");
+    assert!(!run_update(&Catalog::anvil(), &local(), root).unwrap().plan.has_changes());
 }
 
 /// The guard that refuses a repository-authored Dockerfile is reached through
@@ -869,11 +863,12 @@ fn refusing_a_composed_host_spares_a_retired_region_entry_too() {
     let legacy_body = "RUN echo legacy\n";
     let text = std::fs::read_to_string(&dockerfile).unwrap();
     let with_legacy = format!("{text}\n# >>> anvil-managed: {legacy_id}\n{legacy_body}# <<< anvil-managed: {legacy_id}\n");
-    // Duplicate an opening sentinel so the host classifies `Unsafe` and the run
-    // refuses it. The legacy region itself stays well formed, so the removal
-    // path can still reach it.
-    let opener = "# >>> anvil-managed: anvil-container-base\n";
-    let broken = with_legacy.replacen(opener, &format!("{opener}{opener}"), 1);
+    // Out-of-order complete regions remain unsafe; marker-only cleanup cannot
+    // repair ordering. The retired region itself is still well formed.
+    let broken = with_legacy
+        .replace("anvil-container-base-image", "anvil-container-swapped")
+        .replace("anvil-container-base\n", "anvil-container-base-image\n")
+        .replace("anvil-container-swapped", "anvil-container-base");
     write(&dockerfile, &broken);
 
     let mut manifest = Manifest::load(root).unwrap();
@@ -1003,6 +998,131 @@ fn a_region_removal_composes_with_the_writes_of_the_same_pass() {
     assert!(
         !after.contains(RETIRED_REGION_ID),
         "the retired region must still be removed:\n{after}"
+    );
+}
+
+/// The refusal names the file it actually left alone. Everything else on the
+/// retirement path — the marker repair, the read, the region lookup — works
+/// from the spelling resolved on disk, so a message built from the lock's
+/// spelling sends the reader to a name that is not there. A case-only rename
+/// of the host is precisely where the two diverge, and it is reachable
+/// whatever the filesystem's case sensitivity, because the directory entry
+/// carries one spelling and the lock the other.
+///
+/// It also checks the remedy: nothing was parsed and no table collided, so
+/// telling the reader to reconcile a hand-written table is advice about a
+/// fault that did not happen.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn an_edited_retirement_is_refused_under_the_on_disk_casing_and_says_why() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let recorded = root.join("Justfile");
+    let renamed = root.join("justfile");
+
+    // A region the catalog no longer declares, holding a body anvil did not
+    // write -- the edits are what turn removal into a refusal.
+    let edited_body = "anvil_runner := \"hand-edited\"\n";
+    let text = std::fs::read_to_string(&recorded).unwrap();
+    let with_retired = format!("{text}\n# >>> anvil-managed: {RETIRED_REGION_ID}\n{edited_body}# <<< anvil-managed: {RETIRED_REGION_ID}\n");
+    std::fs::remove_file(&recorded).unwrap();
+    write(&renamed, &with_retired);
+
+    // The lock records the pre-rename casing and the body anvil last rendered,
+    // which the file no longer holds.
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest.set_region("Justfile", RETIRED_REGION_ID, checksum_str(RETIRED_REGION_BODY));
+    manifest.save(root).unwrap();
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let refusal = outcome
+        .plan
+        .refusals()
+        .iter()
+        .find(|r| r.contains(RETIRED_REGION_ID))
+        .unwrap_or_else(|| panic!("the edited retirement must be refused: {:?}", outcome.plan.refusals()))
+        .clone();
+
+    assert!(
+        refusal.contains("justfile") && !refusal.contains("Justfile"),
+        "the refusal must name the file on disk, not the casing the lock recorded: {refusal}"
+    );
+    assert!(
+        !refusal.contains("Reconcile the hand-written table"),
+        "no table was parsed and none collided, so hand-written-table advice is about a different fault: {refusal}"
+    );
+    assert!(
+        refusal.contains("no longer declares this region"),
+        "the remedy must say why anvil stopped instead of removing it: {refusal}"
+    );
+    assert!(
+        std::fs::read_to_string(&renamed).unwrap().contains(edited_body),
+        "a refused retirement leaves the edits in place"
+    );
+}
+
+/// The retirement path refuses an unpaired region too, rather than splicing
+/// out a span it cannot delimit. Removing a region whose boundary is unknown
+/// would cut the wrong text out of the file, so the region and its lock entry
+/// both stay: the next run still knows it is anvil's to retire once a human
+/// restores the missing sentinel.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_retirement_with_unpaired_markers_is_refused_and_removes_nothing() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let justfile = root.join("Justfile");
+
+    // A region the catalog no longer declares, whose closing sentinel is gone.
+    let text = std::fs::read_to_string(&justfile).unwrap();
+    let widowed = format!("{text}\n# >>> anvil-managed: {RETIRED_REGION_ID}\n{RETIRED_REGION_BODY}");
+    write(&justfile, &widowed);
+
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest.set_region("Justfile", RETIRED_REGION_ID, checksum_str(RETIRED_REGION_BODY));
+    manifest.save(root).unwrap();
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let refusal = outcome
+        .plan
+        .refusals()
+        .iter()
+        .find(|reason| reason.contains(RETIRED_REGION_ID))
+        .unwrap_or_else(|| panic!("the retirement must be refused; got {:?}", outcome.plan.refusals()))
+        .clone();
+    assert!(
+        refusal.contains("span to remove cannot be established"),
+        "the refusal must say why the removal was declined: {refusal}"
+    );
+    assert!(
+        !refusal.contains("Reconcile the hand-written table"),
+        "a marker fault is not a table collision: {refusal}"
+    );
+
+    let after = std::fs::read_to_string(&justfile).unwrap();
+    assert!(
+        after.contains(&format!("# >>> anvil-managed: {RETIRED_REGION_ID}")),
+        "the surviving sentinel must not be stripped:\n{after}"
+    );
+    assert!(
+        after.contains(RETIRED_REGION_BODY.trim()),
+        "the body must still be there, once:\n{after}"
+    );
+    assert_eq!(
+        after.matches(RETIRED_REGION_BODY.trim()).count(),
+        1,
+        "and must not have been duplicated:\n{after}"
+    );
+
+    let key = RegionKey {
+        host: "Justfile".to_owned(),
+        id: RETIRED_REGION_ID.to_owned(),
+    };
+    assert!(
+        Manifest::load(root).unwrap().regions.contains_key(&key),
+        "the lock entry must survive so the retirement can finish once the boundary is restored"
     );
 }
 

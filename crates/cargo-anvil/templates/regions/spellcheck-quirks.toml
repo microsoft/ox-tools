@@ -1,0 +1,5 @@
+[Hunspell.quirks]
+# Treat CamelCase identifiers as concatenations of dictionary words
+# (e.g., `TcpStream` = `Tcp` + `Stream`). Lowers false-positive rate
+# substantially on Rust codebases.
+allow_concatenation = true

@@ -283,7 +283,7 @@ jobs:
 
 Common edits users make to the root workflow (these flip the file to "dirty" and produce
 a `.anvil-proposed` sibling on the next `update` — see
-[updates.md §5](./updates.md#5-the-decision-algorithm)):
+[updates.md §2](./updates.md#2-owned-files)):
 
 - **Self-hosted runners**: pass `with: { linux_runner: 'self-hosted-rust', windows_runner: 'self-hosted-rust-win', linux_arm_runner: 'self-hosted-rust-arm', windows_arm_runner: 'self-hosted-rust-win-arm' }`
 - **Different OS matrix scope**: not a workflow input. The matrices are part of the
@@ -500,7 +500,7 @@ Impact scoping is purely a PR-tier optimization; the scheduled tier never benefi
 Cloud impact explicitly loads the repository's `.delta.toml`, including the managed
 trip-wire patterns and any repository-owned parser, exclusion, or fixed comparison-
 branch settings. Existing repositories that already define top-level
-`trip_wire_patterns` retain that policy and receive an empty managed-region opt-out.
+`trip_wire_patterns` retain that policy and receive an empty managed body with a preservation note.
 
 The reusable workflow declares a small input set so the root workflow can pass overrides:
 
