@@ -44,16 +44,18 @@ directly (argv, not a shell string) after substituting placeholders.
 
 * `-p` / `--package <SPEC>` — select a member. Repeatable. `SPEC` is a
   package name, a `name@version` spec, or a Unix glob (`tokio-*`).
+* `--package-file <PATH>` — read package specs from a UTF-8 file, one per
+  nonempty line. Repeatable; specs are unioned with `--package`. An empty
+  file explicitly selects no members.
 * `--workspace` / `--all` — select every workspace member.
 * `--exclude <SPEC>` — drop a member (with `--workspace`). Repeatable.
 * `--none` — explicitly select zero members (a no-op that exits 0).
 
 When nothing is named the default is cargo `default-members`, exactly
 like `cargo build`; pass `--workspace` for every member. A selector that
-matches no member is an error, so typos fail loudly. A computed selection
-(for example a CI affected-packages set) is fed in as ordinary flags via
-shell expansion — `cargo-each` has no file or environment-variable source
-of its own.
+matches no member is an error, so typos fail loudly. Package files contain
+package specs only: comments, command-line tokens, malformed input, and
+missing, unreadable, or non-UTF-8 files are errors.
 
 ### Filters
 
@@ -82,9 +84,11 @@ can be double-quoted. Expression atoms:
   `--target-required-feature` further narrows targets.
 
 `--keep-going` runs every invocation and exits non-zero if any failed
-(default is fail-fast); `--chdir` runs each per-package or per-target
-command from that member crate root; `--dry-run` prints commands without
-running them.
+(default is fail-fast). `--jobs <N>` bounds concurrent per-package or
+per-target work (default `1`), while `--timeout <DURATION>` terminates each
+invocation and its process tree independently (`250ms`, `30s`, or `2m`).
+`--chdir` runs each per-package or per-target command from that member crate
+root; `--dry-run` prints commands without running them.
 
 ### Placeholders
 
@@ -99,6 +103,9 @@ Substituted inside each command argument:
 * `{packages}` — the cargo selection flags for the resolved set
   (`--workspace` for the whole workspace, else `--package name@version …`);
   valid only in `--once` mode and only as a standalone argument.
+* `{workspace-rust-version}` — the root `[workspace.package].rust-version`,
+  or root `[package].rust-version` in a single-package repository; valid in
+  every mode.
 
 Using a placeholder in the wrong mode is a usage error. Only the tokens
 above are interpreted; any other `{…}` sequence (a typo, or a literal brace
@@ -110,6 +117,19 @@ no brace-escape, so this passthrough is part of the contract.
 An empty resolved selection (via `--none`, or a filter that removes every
 member) is a **successful no-op**: `cargo-each` prints a one-line note and
 exits 0. This is what lets callers drop bespoke nothing-to-do guards.
+Workspace Rust-version validation is lazy: it runs only when the command
+uses `{workspace-rust-version}`, then requires every member’s resolved
+minimum to be present and no newer than the root floor.
+
+With `--jobs > 1`, each invocation’s output is buffered and complete blocks
+are emitted in deterministic plan order. Fail-fast stops launching after
+the first observed failure, waits for running work, and chooses the final
+failure by plan order. `--keep-going` runs the complete plan. Worker panics
+and unexpected worker-channel disconnections become infrastructure-failure
+outcomes instead of blocking the scheduler.
+If timed-out tree cleanup fails, cargo-each reports the infrastructure
+failure and emits already-buffered output without waiting indefinitely for
+surviving descendants to close inherited pipes.
 Child commands inherit `PATH` explicitly. On Windows this makes relative
 program lookup honor the inherited `PATH` order instead of preferring an
 unrelated executable beside `cargo-each`.

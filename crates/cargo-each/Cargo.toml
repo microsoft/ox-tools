@@ -17,11 +17,13 @@ homepage.workspace = true
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-each"
 
 [dependencies]
+cargo-gamma-process = { workspace = true }
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 serde_json = { workspace = true, features = ["std"] }
+toml = { workspace = true, features = ["parse", "serde"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

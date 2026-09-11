@@ -11,10 +11,11 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+use cargo_metadata::semver::Version;
 use cargo_metadata::{MetadataCommand, TargetKind};
 use serde_json::Value;
 
-use crate::error::{EachError, LoadMetadataError};
+use crate::error::{EachError, LoadMetadataError, WorkspaceManifestParseError, WorkspaceManifestReadError, WorkspaceRustVersionError};
 
 /// A resolved view of the cargo workspace `cargo-each` is operating on.
 #[derive(Debug, Clone)]
@@ -25,6 +26,8 @@ pub(crate) struct Workspace {
     /// or every member when unset). Used to resolve a selection that names
     /// no packages.
     pub(crate) default_member_names: HashSet<String>,
+    /// Absolute path to the workspace root manifest.
+    pub(crate) root_manifest_path: PathBuf,
 }
 
 /// A single workspace member and the facts selection/filtering key on.
@@ -34,6 +37,8 @@ pub(crate) struct Member {
     pub(crate) name: String,
     /// Package version, rendered (e.g. `0.3.0`).
     pub(crate) version: String,
+    /// The member's resolved minimum supported Rust version.
+    pub(crate) rust_version: Option<Version>,
     /// Absolute path to this member's `Cargo.toml`.
     pub(crate) manifest_path: PathBuf,
     /// Whether Cargo permits publishing this package.
@@ -123,6 +128,7 @@ impl Workspace {
                 Member {
                     name: pkg.name.to_string(),
                     version: pkg.version.to_string(),
+                    rust_version: pkg.rust_version.clone(),
                     manifest_path: pkg.manifest_path.clone().into_std_path_buf(),
                     publishable: pkg.publish.as_ref().is_none_or(|registries| !registries.is_empty()),
                     features: pkg.features.keys().cloned().collect(),
@@ -139,12 +145,107 @@ impl Workspace {
             .iter()
             .map(|pkg| pkg.name.to_string())
             .collect();
+        let root_manifest_path = metadata.workspace_root.join("Cargo.toml").into_std_path_buf();
 
         Ok(Self {
             members,
             default_member_names,
+            root_manifest_path,
         })
     }
+
+    /// Resolve and validate the workspace-wide Rust compatibility floor.
+    ///
+    /// This deliberately reads the root manifest only when the corresponding
+    /// placeholder is used. Ordinary selection and execution therefore do not
+    /// require a workspace Rust-version declaration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EachError`] if the root declaration is absent or invalid, or
+    /// if any workspace member omits `rust-version` or requires a newer
+    /// compiler than the root floor.
+    pub(crate) fn workspace_rust_version(&self) -> Result<String, EachError> {
+        let path = self.root_manifest_path.display().to_string();
+        let text = std::fs::read_to_string(&self.root_manifest_path)
+            .map_err(|error| WorkspaceManifestReadError::caused_by(path.clone(), error))?;
+        let manifest: toml::Value = toml::from_str(&text).map_err(|error| WorkspaceManifestParseError::caused_by(path, error))?;
+
+        let workspace_floor = manifest
+            .get("workspace")
+            .and_then(|workspace| workspace.get("package"))
+            .and_then(|package| package.get("rust-version"));
+        let root_is_only_member = self.members.len() == 1 && self.members[0].manifest_path == self.root_manifest_path;
+        let package_floor = root_is_only_member
+            .then(|| manifest.get("package").and_then(|package| package.get("rust-version")))
+            .flatten();
+        let floor = workspace_floor.or(package_floor).ok_or_else(|| {
+            WorkspaceRustVersionError::new(
+                "the root manifest must declare `[workspace.package].rust-version`, or `[package].rust-version` for a single-package repository"
+                    .to_owned(),
+            )
+        })?;
+        let Some(floor) = floor.as_str() else {
+            return Err(WorkspaceRustVersionError::new("the root Rust version must be a string".to_owned()).into());
+        };
+        let parsed_floor = parse_rust_version(floor)
+            .map_err(|reason| WorkspaceRustVersionError::new(format!("root Rust version `{floor}` is invalid: {reason}")))?;
+
+        for member in &self.members {
+            let Some(member_floor) = member.rust_version.as_ref() else {
+                return Err(WorkspaceRustVersionError::new(format!(
+                    "workspace member `{}` does not expose a resolved `rust-version`",
+                    member.name
+                ))
+                .into());
+            };
+            if member_floor.major != 1 || !member_floor.pre.is_empty() || !member_floor.build.is_empty() {
+                return Err(WorkspaceRustVersionError::new(format!(
+                    "workspace member `{}` exposes invalid Rust version `{member_floor}`; expected a Rust 1.x toolchain version",
+                    member.name
+                ))
+                .into());
+            }
+            if member_floor > &parsed_floor {
+                return Err(WorkspaceRustVersionError::new(format!(
+                    "workspace member `{}` requires Rust {}, newer than the root floor {floor}",
+                    member.name, member_floor
+                ))
+                .into());
+            }
+        }
+
+        Ok(floor.to_owned())
+    }
+}
+
+fn parse_rust_version(value: &str) -> Result<Version, String> {
+    if value.contains('-') || value.contains('+') {
+        return Err("pre-release and build metadata are not valid Rust toolchain versions".to_owned());
+    }
+    let components: Vec<&str> = value.split('.').collect();
+    if !(2..=3).contains(&components.len())
+        || components
+            .iter()
+            .any(|component| component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err("expected `major.minor` or `major.minor.patch`".to_owned());
+    }
+    if components.iter().any(|component| component.len() > 1 && component.starts_with('0')) {
+        return Err("numeric components must not contain leading zeroes".to_owned());
+    }
+    let normalized = if components.len() == 2 {
+        format!("{value}.0")
+    } else {
+        value.to_owned()
+    };
+    let parsed: Version = normalized
+        .parse()
+        .map_err(|error| format!("expected `major.minor` or `major.minor.patch`: {error}"))?;
+    if parsed.major != 1 {
+        return Err("expected a Rust 1.x toolchain version".to_owned());
+    }
+    Ok(parsed)
 }
 
 /// Parse a supported Cargo target-kind spelling.
@@ -183,5 +284,14 @@ mod tests {
     #[test]
     fn rejects_unknown_target_kind() {
         assert_eq!(parse_target_kind("future-kind"), None);
+    }
+
+    #[test]
+    fn parses_cargo_rust_version_forms() {
+        assert_eq!(parse_rust_version("1.80").expect("minor form"), Version::new(1, 80, 0));
+        assert_eq!(parse_rust_version("1.80.1").expect("patch form"), Version::new(1, 80, 1));
+        for value in ["1", "1.80.0-beta", "1.80+build", "1.080", "2.0", "one.80"] {
+            assert!(parse_rust_version(value).is_err(), "{value}");
+        }
     }
 }
