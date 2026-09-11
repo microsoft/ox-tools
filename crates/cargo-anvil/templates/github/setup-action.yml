@@ -124,7 +124,9 @@ runs:
         }
         if ($null -eq $installed -or $installed -lt $minimum) {
           Write-Host "Installing just >= $minimum (installed: $(if ($installed) { $installed } else { 'not found' }))"
-          & cargo binstall --no-confirm --locked --version ">=$minimum" just
+          # --disable-strategies compile keeps the token out of a third-party
+          # build: a release miss falls through to the tokenless install below.
+          & cargo binstall --no-confirm --locked --disable-strategies compile --version ">=$minimum" just
           if ($LASTEXITCODE -ne 0) {
             # Drop the release-discovery token before compiling third-party code.
             Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue

@@ -41,6 +41,8 @@ use crate::{HashMap, HashSet};
 /// interest, and guessing at them would cost a full resolve.
 ///
 /// ```rust,no_run
+/// # #[cfg(feature = "internals")]
+/// # mod gated {
 /// # use cargo_gamma_lib::internals::cfg::features::enabled;
 /// # use cargo_gamma_lib::internals::commands::FeatureArgs;
 /// # fn example(metadata: &cargo_metadata::Metadata) {
@@ -48,6 +50,7 @@ use crate::{HashMap, HashSet};
 ///
 /// // Every member is present, even one with no features at all.
 /// assert!(features.contains_key("my-crate"));
+/// # }
 /// # }
 /// ```
 #[must_use]

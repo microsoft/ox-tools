@@ -797,9 +797,14 @@ in the action.
 The Just bootstrap and catalog tool installation steps receive the built-in
 `GITHUB_TOKEN`. Cargo-binstall uses it for authenticated release discovery,
 avoiding anonymous API rate limits that can trigger unnecessary source builds.
-The tool installer removes it from the environment before any source install, so
-it is not visible to compiled crates or their build scripts. This adds no token
-permissions and does not install system dependencies.
+Two things keep that credential away from third-party code. The tool installer
+removes it from the environment before any source install and disables
+binstall's own compile strategy while it is set, so a release miss falls
+through to a tokenless `cargo install`. And each generated PR job declares the
+narrowest permissions it needs, so the token those installers see is read-only
+everywhere except `pr-fast`, which alone needs `pull-requests: write` for the
+sticky advisory comment. This adds no token permissions and does not install
+system dependencies.
 
 The action expects the rustup proxies on `PATH` and installs a missing selected public
 toolchain (see §7).

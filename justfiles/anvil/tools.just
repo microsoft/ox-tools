@@ -469,10 +469,13 @@ _install-tool-core name version installer source_prereq="":
             }
         }
         # Keep source builds behind Anvil's prerequisite check instead of
-        # allowing binstall to compile before that check can run. Tools with
-        # no source prerequisite may still use binstall's compile strategy.
+        # allowing binstall to compile before that check can run. Also disable
+        # the compile strategy whenever the release token is set: compiling
+        # under binstall would hand the workflow credential to third-party build
+        # scripts. Either way the tokenless `cargo install` below still covers a
+        # release miss.
         $binstallArgs = @('binstall', '--no-confirm', '--locked')
-        if ($sourcePrereq) {
+        if ($sourcePrereq -or $releaseToken) {
             $binstallArgs += @('--disable-strategies', 'compile')
         }
         $binstallArgs += @($name, '--version', "=$version")
