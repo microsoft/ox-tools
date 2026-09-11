@@ -379,11 +379,9 @@ mod tests {
     #[test]
     fn spellcheck_checks_source_prerequisites_before_source_builds() {
         assert!(
-            TOOLS_JUST.contains("if ($sourcePrereq)"),
-            "binstall compile strategy must only be disabled for tools with source prerequisites"
-        );
-        assert!(
-            TOOLS_JUST.contains("$binstallArgs += @('--disable-strategies', 'compile')"),
+            TOOLS_JUST.contains(
+                "$binstallArgs = @('binstall', '--no-confirm', '--locked', '--disable-strategies', 'compile', '--no-discover-github-token')"
+            ),
             "binstall must not compile before Anvil checks source prerequisites"
         );
         assert!(

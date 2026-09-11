@@ -229,11 +229,10 @@ catalog edit (changing a variable in `versions.just`), not an upstream-release-t
 surprise.
 
 `cargo-binstall` and `just` are bootstrap utilities rather than catalog checks.
-When absent, setup installs the latest compatible release available at that time;
-when present, setup accepts it. They are intentionally outside the catalog's exact
-installation guarantee so the bootstrap does not recursively require a versioned
-installer. Their versions can therefore vary across cold environments, while every
-tool that determines a catalog check's verdict remains catalog-controlled.
+GitHub setup source-installs Just 1.46.0 when the installed version is too old or
+absent. It accepts newer installed versions. The binary-installer bootstrap
+source-installs exactly 1.21.0 when a binary path needs it and it is absent;
+it accepts an existing binary installer.
 
 ### 3.2 Detecting installed versions
 
@@ -287,7 +286,7 @@ Mirror `*-validate-prereqs` recipes exist at every composition layer
 (`anvil-<x>-validate-prereqs`), so it's possible to verify a group's
 prerequisites without installing them.
 
-The atomic installs are fully idempotent (early-skip on installed >= pin), so calling
+The atomic installs are idempotent (early-skip on installed >= pin with an executable on PATH), so calling
 any composition layer on every cloud-workflow run is cheap on a cache hit. There is intentionally
 no separate "install-missing" variant: every install recipe IS the install-missing
 recipe.
@@ -299,17 +298,29 @@ The `installer` argument:
   Slow on a cold runner (~30 min for the full catalog) because every tool
   re-compiles common deps (`clap`, `syn`, `quote`, ...) from scratch independently.
 - `binstall` -- `cargo binstall --no-confirm --locked <tool> --version '=<pin>'`.
-  This selects an ordered strategy, not a binary-only backend. Anvil first asks
-  cargo-binstall to install the exact pin. Tools without a source prerequisite retain
-  cargo-binstall's compile strategy. For tools that declare a source prerequisite,
-  Anvil disables that compile strategy so compilation cannot bypass the check. Any
+  Anvil disables credential discovery and compilation in cargo-binstall. Any
   nonzero binstall result then falls back to Anvil's exact-pin `cargo install`; the
   declared prerequisite, when present, runs immediately before that fallback.
-  A successful binary path cuts the cold-runner install phase from ~30 min to ~1 min.
-  `cargo-binstall` itself needs to be on PATH; the GH setup composite arranges this.
+  Successful downloads avoid source compilation.
+- `ci` -- source-first installation for ordinary Rust tools, including cargo-delta.
+  Only tools with a native source prerequisite (currently cargo-spellcheck) try
+  anonymous binary installation first. This avoids release discovery for ordinary
+  tools without forcing native dependency installation on binary cache hits.
 
-The GitHub composite setup action calls `just anvil-<group>-setup binstall`
-(or just `anvil-setup binstall` when no group is scoped). The ADO setup step
+All three modes remove GitHub and Cargo registry token environment variables in
+the installer process, before probing or installing. Binary installation also
+uses `--no-discover-github-token` to prevent reading GitHub CLI or Git credentials.
+Parent processes retain their environment for later API checks. Private authenticated
+installation is intentionally not supported through these helpers. This reduces
+ambient credential exposure; it does not sandbox build scripts or remove credentials
+from files on the runner.
+
+An install metadata query failure stops setup. Missing executable files, old
+versions, and unparseable versions trigger installation rather than a false cache hit.
+When a ledger entry exists, either installer uses `--force` to repair stale metadata.
+
+The GitHub composite setup action calls `just anvil-<group>-setup ci`
+(or just `anvil-setup ci` when no group is scoped). The ADO setup step
 template uses the default `install` backend because cargo-binstall has unresolved
 compliance issues for internal ADO pipelines (the binary registry it pulls from
 isn't on the standard allow-list), so the slower pure-cargo path is the

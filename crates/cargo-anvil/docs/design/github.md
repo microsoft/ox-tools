@@ -772,16 +772,17 @@ result, and log link without check-suite attribution.
 ### `anvil-setup`
 
 `anvil-setup` is a composite action that restores Cargo home, bootstraps
-cargo-binstall and Just, then invokes the requested catalog setup recipe, whose
+Just, then invokes the requested catalog setup recipe, whose
 prerequisites provision the selected compiler and tools. Its
 `group` input controls which recipes run:
 
-- empty (default): runs `just anvil-setup binstall` -- the full catalog. Use
+- empty (default): runs `just anvil-setup ci` -- the full catalog. Use
   for local "give me everything" flows.
-- `none`: skips the group/full tool fan-out. Used by `anvil-impact`, which only
-  needs `cargo-delta` and installs it itself afterwards.
+- `none`: restores the cache and bootstraps Just without installing catalog tools.
+- `impact`: source-installs only cargo-delta, inside setup before the cache save.
+  Neither `none` nor `impact` needs cargo-binstall.
 - any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
-  `just anvil-<group>-setup binstall` -- only the tools, components, and
+  `just anvil-<group>-setup ci` -- only the tools, components, and
   toolchains that group actually needs. Ordinary group names contain only
   lowercase letters, digits, and hyphens. `anvil-run-group` passes its group
   input here, so a `pr-fast` matrix leg never installs cargo-mutants.
@@ -798,6 +799,21 @@ The action expects the rustup proxies on `PATH` and installs a missing selected 
 toolchain (see §7).
 `anvil-impact` is described in §6 below.
 
+Setup does not forward `github.token` to installers. Just installs from source at
+exactly 1.46.0 on a cold runner. Catalog tools use exact-pin, locked source installs,
+except cargo-spellcheck, whose native prerequisites justify trying anonymous binaries
+first. A binary miss runs the existing libclang prerequisite check before compilation;
+missing prerequisites remain a visible failure with platform-specific install hints.
+Setup does not eagerly install system packages.
+The installer source-builds pinned cargo-binstall 1.21.0 only if a binary path
+needs it and it is absent. Warm tool hits do not bootstrap or invoke cargo-binstall.
+
+Install recipes strip inherited GitHub and Cargo registry token environment variables.
+Binary installation disables credential discovery from GitHub CLI and Git configuration.
+The separate run-group step still supplies `GITHUB_TOKEN` for API checks. Permissions
+remain caller-owned. This is reduced installer exposure, not a token-free workflow or
+a build-script sandbox.
+
 Its optional `free-disk-space` input defaults to `false`. When enabled on a
 GitHub-hosted runner, it removes pre-installed toolchains that anvil's Rust checks do
 not use: Android, Haskell/GHC, Swift and browser drivers on Linux; Android and
@@ -813,13 +829,12 @@ Other groups retain the action's disabled default.
 `anvil-impact` recipe — the same impact building block adopters run locally (see
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe)). It:
 
-1. `./.github/actions/anvil-setup` with `group: none` (bootstrap rust + just +
-   cache; no catalog tools).
-2. `just anvil-tool-cargo-delta-install binstall` -- the only tool this composite
-   needs. **This is the only job that runs cargo-delta to compute the impact
+1. `./.github/actions/anvil-setup` with `group: impact` restores Cargo home,
+   bootstraps Just, and runs `just anvil-tool-cargo-delta-install ci` before saving.
+   **This is the only job that runs cargo-delta to compute the impact
    set.** (Group setup jobs also install cargo-delta as a prerequisite, but in
    `consume` mode they never run it -- they read the downloaded impact cache.)
-3. `just anvil-impact`, which resolves the base ref (`_anvil-base-ref`), snapshots the
+2. `just anvil-impact`, which resolves the base ref (`_anvil-base-ref`), snapshots the
    base ref (in a throwaway worktree) and the working tree, runs
    `cargo delta impact`, and writes the durable cache under `target/anvil/impact/`:
    the per-tier `include_<tier>.txt` lists (via `_anvil-impact-format`), `impact.json`,
@@ -891,7 +906,7 @@ toolchain file or replays options from a file suppressed by
 `RUSTUP_TOOLCHAIN`. Because file selection remains native, rustup applies its
 normal lookup from each Cargo or Rust command's working directory.
 
-The setup action restores Cargo home, bootstraps cargo-binstall and Just, and
+The setup action restores Cargo home, bootstraps Just, and
 then invokes the selected catalog setup recipe. Setup ensures the selected
 compiler is available before stable Cargo or Rust runs. GH-hosted runners
 provide the rustup proxy used to install a missing public MSRV or process a
@@ -924,7 +939,10 @@ compiler.
 
 The `anvil-setup` composite action computes a cache key from runner OS and
 architecture plus hashes of `.cargo/config.toml`, either supported repository
-toolchain file, and `versions.just`, followed by the workflow job ID.
+toolchain file, `versions.just`, `tools.just`, and the setup action itself, followed
+by the workflow job ID. The `anvil-v3` namespace separates source-first installations
+from previous generations. Installer policy, bootstrap versions, catalog versions,
+and source-install options (including any feature arguments) participate in the hash.
 Toolchain-file or catalog changes deliberately start a fresh cache generation
 to bound registry growth; there is no restore fallback across those boundaries.
 Routine `Cargo.toml`, `Cargo.lock`, and compiler-version changes do not
@@ -932,12 +950,33 @@ invalidate standalone cached tools. Job discrimination prevents concurrent
 jobs from racing to save one key, while the fingerprint prefix shares prior
 installs across jobs within the same cache generation.
 
+This is an installed-binary cache, not an exact compiler-artifact cache. An unchanged
+toolchain channel resolving to a new patch release does not invalidate compatible
+binaries. Environment-only compiler, target, or build-flag overrides do not enter the
+key; runners that require distinct binaries must declare those inputs in the hashed
+configuration, or customize the cache key. Default-feature source installs do not
+share compilation artifacts between tools.
+
+Cache restore precedes Just and cargo-delta installation. Impact's delta installation
+now precedes save, so a successful cache producer can retain that binary too.
+Only successful setup saves executable caches. GitHub's existing cache ref scope
+remains the trust boundary: PR caches belong to their merge ref, and cannot overwrite
+or populate default-branch caches. PR reruns can reuse their own caches; sibling PRs
+can restore default-branch caches, not each other's merge-ref caches. No
+`pull_request_target` execution or permission increase is introduced. Failed setup
+cannot seal a partial immutable key. New generations compile ordinary tools on
+cold misses. Full-cache hits
+query install metadata and executable presence without reinstalling tools.
+
 The cache covers:
 
 - The `cargo install`-ed tools installed by the catalog setup recipes (`~/.cargo/bin/`
   plus the `.crates.toml` / `.crates2.json` install ledgers) and the downloaded crate
   registry (`~/.cargo/registry/`). The key includes `${{ github.job }}`, so a `pr-test`
   cache hit doesn't have to wait on a `pr-fast` cache miss.
+
+Only registry archives/indexes, executables, and install ledgers are cached. Cargo
+credential files, Git credential files, and GitHub CLI configuration are excluded.
 
 The `target/` build directory is deliberately **not** cached. A per-job, per-OS, per-arch
 `target/` is large, and the many multi-GB entries would evict the high-value tool caches
@@ -990,8 +1029,8 @@ than inconsistent.
 
 Actions whose publisher has enabled GitHub [immutable releases][immutable] are pinned
 by tag. In the generated workflows that is, at the time of writing,
-`codecov/codecov-action@v7.0.0`, `marocchino/sticky-pull-request-comment@v3.0.5` and
-`cargo-bins/cargo-binstall@v1.21.0`; a repository's own hand-maintained workflows apply
+`codecov/codecov-action@v7.0.0` and `marocchino/sticky-pull-request-comment@v3.0.5`;
+a repository's own hand-maintained workflows apply
 the same rule to the actions they use, so the list a reader sees there may be longer.
 An immutable release locks its Git tag to one commit: the tag cannot be moved, and
 cannot be deleted while the release exists. The tag name cannot be reused even after

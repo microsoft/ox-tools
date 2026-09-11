@@ -262,17 +262,12 @@ description: |
 runs:
   using: composite
   steps:
-    # anvil-setup with group=none bootstraps the rust toolchain +
-    # just + binstall + cache, but skips the full catalog install.
-    # We follow it with just the cargo-delta install (the only tool
-    # this composite needs). This keeps the impact stage lean -- it's
+    # Install only cargo-delta inside setup, after restore and before save.
+    # This keeps the impact stage lean -- it's
     # the critical-path gating dep for every PR-tier group job.
     - uses: ./.github/actions/anvil-setup
       with:
-        group: none
-    - name: Install cargo-delta
-      shell: bash
-      run: just anvil-tool-cargo-delta-install binstall
+        group: impact
     - name: Compute impact
       shell: bash
       # Run the shared anvil-impact recipe -- the same impact building block
@@ -547,8 +542,8 @@ inputs:
           `just anvil-setup` -- use for local "give me everything"
           flows.
         - "none": skip tool installation entirely; just restore the
-          Cargo cache and bootstrap just + binstall. Used by
-          anvil-impact, which installs only cargo-delta afterwards.
+          Cargo cache and bootstrap just.
+        - "impact": install only cargo-delta, before saving the cache.
         - a name containing only lowercase letters, digits, and hyphens:
           install only that group's prerequisites via
           `just anvil-<group>-setup`.
@@ -622,9 +617,9 @@ runs:
         # one key. The prefix shares a completed cache across sibling jobs.
         # There is deliberately no fallback across toolchain/catalog changes:
         # those inputs are the cache-pruning boundary.
-        key: anvil-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-${{ github.job }}
+        key: anvil-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', 'justfiles/anvil/versions.just', 'justfiles/anvil/tools.just', '.github/actions/anvil-setup/action.yml') }}-${{ github.job }}
         restore-keys: |
-          anvil-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-
+          anvil-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', 'justfiles/anvil/versions.just', 'justfiles/anvil/tools.just', '.github/actions/anvil-setup/action.yml') }}-
         # `.crates.toml` and `.crates2.json` track which cargo-installed
         # tools and versions live in ~/.cargo/bin/. Without them in the
         # cache, `cargo install --list` and (downstream) the
@@ -640,13 +635,15 @@ runs:
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
 
-    # cargo-binstall keeps the cold bootstrap path fast.
-    - name: Install cargo-binstall
-      uses: cargo-bins/cargo-binstall@v1.21.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
-
     - name: Install just
       shell: pwsh -NoProfile -Command ". '{0}'"
       run: |
+        foreach ($key in @('GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_ENTERPRISE_TOKEN', 'CARGO_REGISTRY_TOKEN')) {
+          Remove-Item "Env:$key" -ErrorAction SilentlyContinue
+        }
+        foreach ($entry in @(Get-ChildItem Env: | Where-Object Name -Match '^CARGO_REGISTRIES_.*_TOKEN$')) {
+          Remove-Item "Env:$($entry.Name)"
+        }
         $minimum = [version]'1.46.0'
         $installed = if (Get-Command just -ErrorAction SilentlyContinue) {
           [version]((& just --version) -replace '^just\s+', '')
@@ -655,11 +652,8 @@ runs:
         }
         if ($null -eq $installed -or $installed -lt $minimum) {
           Write-Host "Installing just >= $minimum (installed: $(if ($installed) { $installed } else { 'not found' }))"
-          & cargo binstall --no-confirm --locked --version ">=$minimum" just
-          if ($LASTEXITCODE -ne 0) {
-            & cargo install --locked --version ">=$minimum" just
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          & cargo install --locked --version "=$minimum" just
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
         $installed = [version]((& just --version) -replace '^just\s+', '')
         if ($installed -lt $minimum) {
@@ -680,17 +674,12 @@ runs:
       env:
         ANVIL_GROUP: ${{ inputs.group }}
       # When `group` is empty (the default), installs the full catalog
-      # via `just anvil-setup binstall`. When `group` is "none",
-      # skips tool installation entirely (used by anvil-impact, which
-      # only needs cargo-delta and installs it itself afterwards). When
+      # via `just anvil-setup ci`. When `group` is "none",
+      # skips tool installation entirely. When it is "impact", installs
+      # cargo-delta here so the cache save includes it. When
       # `group` is anything else, installs only what that group needs
-      # via `just anvil-<group>-setup binstall`.
-      #
-      # binstall path downloads prebuilt tool binaries from each tool's
-      # GitHub Releases when available (~1 min cold, vs ~30 min for
-      # source builds). cargo-binstall has unresolved compliance issues
-      # for ADO pipelines, so the ADO backend uses the default `install`
-      # path; GH uses `binstall`.
+      # via `just anvil-<group>-setup ci`. Ordinary Rust tools compile
+      # without release discovery; native tools prefer anonymous binaries.
       run: |
         if [[ -n "$ANVIL_GROUP" && "$ANVIL_GROUP" != "none" && ! "$ANVIL_GROUP" =~ ^[a-z0-9-]+$ ]]; then
           echo "::error::Invalid Anvil group; expected lowercase letters, digits, and hyphens."
@@ -700,27 +689,16 @@ runs:
 
         case "$ANVIL_GROUP" in
           none) echo "anvil-setup: group=none, skipping tool install" ;;
-          "")   just anvil-setup binstall ;;
-          *)    just "anvil-$ANVIL_GROUP-setup" binstall ;;
+          impact) just anvil-tool-cargo-delta-install ci ;;
+          "")   just anvil-setup ci ;;
+          *)    just "anvil-$ANVIL_GROUP-setup" ci ;;
         esac
 
-    # Save the cache as the LAST step of setup, regardless of whether
-    # any earlier install step partially failed. `actions/cache`
-    # used to support this via `save-always: true`, but that knob is
-    # deprecated as of 2025 with the explicit message "does not work
-    # as intended" — failing runs simply don't save. The supported
-    # replacement is to call `actions/cache/save` directly as its
-    # own step with `if: always()`.
-    #
-    # Without this, a single catalog issue that fails the install
-    # step locks the cache empty forever (chicken-and-egg: failed
-    # run -> no save -> next run cold-starts -> still fails -> still
-    # no save). Tool binaries installed by anvil-tools-install are
-    # immutable once on disk, so partial state is strictly better
-    # than nothing — and subsequent runs accumulate into the cache
-    # until the catalog is complete.
+    # Preserve GitHub's ref-scoped cache trust boundary: PR writes are confined
+    # to their merge ref, never the default branch. Save only complete setup;
+    # failures must not seal an incomplete immutable key.
     - name: Save cargo cache
-      if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
+      if: success() && steps.cargo-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
@@ -7491,9 +7469,10 @@ anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
 # or no-op if it is already installed at or above that version. The
 # `installer` parameter selects between:
 #   - "install"  (cargo install --locked, pure-source). Default.
-#   - "binstall" (cargo binstall --no-confirm --locked, with a controlled
-#                 cargo install fallback for tools that declare source
-#                 prerequisites). Bootstraps cargo-binstall itself if not on PATH.
+#   - "binstall" (anonymous binary download, with a checked source fallback).
+#   - "ci" (source install, except tools with native source prerequisites,
+#           which try anonymous binaries first). Avoids release discovery for
+#           ordinary Rust tools even when prebuilt binaries exist.
 # `source_prereq`, when set, runs immediately before a source installation,
 # including a binstall fallback.
 [script("pwsh", "-NoProfile")]
@@ -7504,9 +7483,21 @@ _install-tool-core name version installer source_prereq="":
     $installer = '{{installer}}'
     $sourcePrereq = '{{source_prereq}}'
 
-    if ($installer -ne 'install' -and $installer -ne 'binstall') {
-        Write-Error "_install-tool-core: unknown installer '$installer' (expected 'install' or 'binstall')"
+    if ($installer -notin @('install', 'binstall', 'ci')) {
+        Write-Error "_install-tool-core: unknown installer '$installer' (expected 'install', 'binstall', or 'ci')"
         exit 2
+    }
+
+    # This recipe runs in its own process: API checks in the parent retain
+    # their credentials, but installers and third-party build scripts do not.
+    foreach ($key in @('GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_ENTERPRISE_TOKEN', 'CARGO_REGISTRY_TOKEN')) {
+        Remove-Item "Env:$key" -ErrorAction SilentlyContinue
+    }
+    foreach ($entry in @(Get-ChildItem Env: | Where-Object Name -Match '^CARGO_REGISTRIES_.*_TOKEN$')) {
+        Remove-Item "Env:$($entry.Name)"
+    }
+    if ($installer -eq 'ci') {
+        $installer = if ($sourcePrereq) { 'binstall' } else { 'install' }
     }
 
     # Already at or above the pin: skip. We don't downgrade tools the
@@ -7517,17 +7508,22 @@ _install-tool-core name version installer source_prereq="":
     # cached binaries and fail with "binary already exists in destination".
     $installed = $null
     $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
-    foreach ($line in (& cargo {{_anvil_stable_toolchain_args}} install --list 2>$null)) {
+    $listOutput = @(& cargo {{_anvil_stable_toolchain_args}} install --list)
+    if ($LASTEXITCODE -ne 0) {
+        throw "_install-tool-core: cargo install --list failed for '$name'"
+    }
+    foreach ($line in $listOutput) {
         if ($line -match $pattern) { $installed = $Matches[1]; break }
     }
     if ($installed) {
-        try {
-            if (([version]$installed) -ge ([version]$version)) {
-                Write-Host "$name >= $version (already satisfied; installed=$installed)"
-                exit 0
-            }
-        } catch {
-            # Fall through to reinstall when versions don't parse as [version].
+        $installedVersion = $null
+        $pinVersion = $null
+        if ([version]::TryParse($installed, [ref]$installedVersion) -and
+            [version]::TryParse($version, [ref]$pinVersion) -and
+            $installedVersion -ge $pinVersion -and
+            (Get-Command $name -ErrorAction SilentlyContinue)) {
+            Write-Host "$name >= $version (already satisfied; installed=$installed)"
+            exit 0
         }
     }
 
@@ -7535,20 +7531,17 @@ _install-tool-core name version installer source_prereq="":
     if ($installer -eq 'binstall') {
         if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
             Write-Host '  Bootstrapping cargo-binstall'
-            & cargo {{_anvil_stable_toolchain_args}} install --locked cargo-binstall
+            & cargo {{_anvil_stable_toolchain_args}} install --locked cargo-binstall --version '=1.21.0'
             if ($LASTEXITCODE -ne 0) {
                 Write-Error 'cargo-binstall bootstrap failed'
                 exit $LASTEXITCODE
             }
         }
-        # Keep source builds behind Anvil's prerequisite check instead of
-        # allowing binstall to compile before that check can run. Tools with
-        # no source prerequisite may still use binstall's compile strategy.
-        $binstallArgs = @('binstall', '--no-confirm', '--locked')
-        if ($sourcePrereq) {
-            $binstallArgs += @('--disable-strategies', 'compile')
-        }
+        # No credential discovery from gh/git configuration, and no implicit
+        # compilation before the source-prerequisite check below.
+        $binstallArgs = @('binstall', '--no-confirm', '--locked', '--disable-strategies', 'compile', '--no-discover-github-token')
         $binstallArgs += @($name, '--version', "=$version")
+        if ($installed) { $binstallArgs += '--force' }
         & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
@@ -7557,7 +7550,10 @@ _install-tool-core name version installer source_prereq="":
         & "{{just_executable()}}" $sourcePrereq
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
-    & cargo {{_anvil_stable_toolchain_args}} install --locked $name --version "=$version"
+    $installArgs = @('install', '--locked', $name, '--version', "=$version")
+    # Repair stale install metadata as well as old versions.
+    if ($installed) { $installArgs += '--force' }
+    & cargo {{_anvil_stable_toolchain_args}} @installArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Error "$name install FAILED"
         exit $LASTEXITCODE
