@@ -23,17 +23,12 @@ description: |
 runs:
   using: composite
   steps:
-    # anvil-setup with group=none bootstraps the rust toolchain +
-    # just + binstall + cache, but skips the full catalog install.
-    # We follow it with just the cargo-delta install (the only tool
-    # this composite needs). This keeps the impact stage lean -- it's
+    # Install only cargo-delta inside setup, after restore and before save.
+    # This keeps the impact stage lean -- it's
     # the critical-path gating dep for every PR-tier group job.
     - uses: ./.github/actions/anvil-setup
       with:
-        group: none
-    - name: Install cargo-delta
-      shell: bash
-      run: just anvil-tool-cargo-delta-install binstall
+        group: impact
     - name: Compute impact
       shell: bash
       # Run the shared anvil-impact recipe -- the same impact building block

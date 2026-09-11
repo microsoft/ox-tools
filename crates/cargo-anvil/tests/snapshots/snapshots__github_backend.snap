@@ -262,17 +262,12 @@ description: |
 runs:
   using: composite
   steps:
-    # anvil-setup with group=none bootstraps the rust toolchain +
-    # just + binstall + cache, but skips the full catalog install.
-    # We follow it with just the cargo-delta install (the only tool
-    # this composite needs). This keeps the impact stage lean -- it's
+    # Install only cargo-delta inside setup, after restore and before save.
+    # This keeps the impact stage lean -- it's
     # the critical-path gating dep for every PR-tier group job.
     - uses: ./.github/actions/anvil-setup
       with:
-        group: none
-    - name: Install cargo-delta
-      shell: bash
-      run: just anvil-tool-cargo-delta-install binstall
+        group: impact
     - name: Compute impact
       shell: bash
       # Run the shared anvil-impact recipe -- the same impact building block
@@ -547,8 +542,8 @@ inputs:
           `just anvil-setup` -- use for local "give me everything"
           flows.
         - "none": skip tool installation entirely; just restore the
-          Cargo cache and bootstrap just + binstall. Used by
-          anvil-impact, which installs only cargo-delta afterwards.
+          Cargo cache and bootstrap just + binstall.
+        - "impact": install only cargo-delta from source, before saving the cache.
         - a name containing only lowercase letters, digits, and hyphens:
           install only that group's prerequisites via
           `just anvil-<group>-setup`.
@@ -643,6 +638,8 @@ runs:
     # cargo-binstall keeps the cold bootstrap path fast.
     - name: Install cargo-binstall
       uses: cargo-bins/cargo-binstall@v1.21.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
+      with:
+        version: "1.21.0"
 
     - name: Install just
       shell: pwsh -NoProfile -Command ". '{0}'"
@@ -655,9 +652,9 @@ runs:
         }
         if ($null -eq $installed -or $installed -lt $minimum) {
           Write-Host "Installing just >= $minimum (installed: $(if ($installed) { $installed } else { 'not found' }))"
-          & cargo binstall --no-confirm --locked --version ">=$minimum" just
+          & cargo binstall --no-confirm --locked --no-discover-github-token --version "=$minimum" just
           if ($LASTEXITCODE -ne 0) {
-            & cargo install --locked --version ">=$minimum" just
+            & cargo install --locked --version "=$minimum" just
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
         }
@@ -681,8 +678,9 @@ runs:
         ANVIL_GROUP: ${{ inputs.group }}
       # When `group` is empty (the default), installs the full catalog
       # via `just anvil-setup binstall`. When `group` is "none",
-      # skips tool installation entirely (used by anvil-impact, which
-      # only needs cargo-delta and installs it itself afterwards). When
+      # skips tool installation entirely. The "impact" group source-installs
+      # cargo-delta before the cache save, avoiding release discovery on
+      # the impact stage's critical path. When
       # `group` is anything else, installs only what that group needs
       # via `just anvil-<group>-setup binstall`.
       #
@@ -700,6 +698,7 @@ runs:
 
         case "$ANVIL_GROUP" in
           none) echo "anvil-setup: group=none, skipping tool install" ;;
+          impact) just anvil-tool-cargo-delta-install install ;;
           "")   just anvil-setup binstall ;;
           *)    just "anvil-$ANVIL_GROUP-setup" binstall ;;
         esac
@@ -7548,6 +7547,7 @@ _install-tool-core name version installer source_prereq="":
         if ($sourcePrereq) {
             $binstallArgs += @('--disable-strategies', 'compile')
         }
+        $binstallArgs += '--no-discover-github-token'
         $binstallArgs += @($name, '--version', "=$version")
         & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
         if ($LASTEXITCODE -eq 0) { exit 0 }

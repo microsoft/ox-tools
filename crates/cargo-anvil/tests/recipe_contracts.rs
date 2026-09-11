@@ -394,6 +394,9 @@ _anvil-impact-include tier:
     let bin = tmp.path().join("fake-bin");
     fs::create_dir_all(&bin).unwrap();
     write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
+    // Installer fixtures must not depend on cargo-binstall being installed on
+    // the host. Fake Cargo owns the download/fallback outcomes.
+    write(&bin.join("cargo-binstall.ps1"), "exit 0\n");
     write(&bin.join("git.ps1"), "exit 0\n");
     write(
         &bin.join("rustc.ps1"),
@@ -1741,6 +1744,75 @@ source-prereq:
         !ordinary_binstall.contains("--disable-strategies compile"),
         "tools without source prerequisites retain binstall's compile strategy"
     );
+    assert!(
+        ordinary_binstall.contains("--no-discover-github-token"),
+        "binary installation must not discover credentials from gh/git configuration"
+    );
+}
+
+#[test]
+fn binary_hit_does_not_require_source_prerequisites_or_a_host_installer() {
+    assert!(tools_available(), "real Just and PowerShell are required for installer contracts");
+    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["_install-tool-core", "cargo-spellcheck", "0.15.7", "binstall", "must-not-run"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_INSTALL_LIST_OUTPUT", OsStr::new("")),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("0")),
+            ("FAKE_INSTALL_EXIT", OsStr::new("23")),
+        ],
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let calls = fs::read_to_string(log).unwrap();
+    assert!(calls.contains("binstall --no-confirm --locked --disable-strategies compile --no-discover-github-token"));
+    assert!(!calls.contains("install --locked"));
+}
+
+#[test]
+fn pinned_installer_choices_reuse_warm_cargo_metadata() {
+    assert!(tools_available(), "real Just and PowerShell are required for installer contracts");
+    for installer in ["install", "binstall"] {
+        for installed in ["", "1.2.3", "1.3.0", "1.2.2"] {
+            let tmp = fixture(
+                &[("versions.just", VERSIONS), ("tools.just", TOOLS)],
+                &["anvil-toolchain-stable-install"],
+            );
+            write(&tmp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.97\"\n");
+            let log = tmp.path().join("cargo.log");
+            let ledger = if installed.is_empty() {
+                String::new()
+            } else {
+                format!("cargo-fixture v{installed}:")
+            };
+            let output = run_just(
+                tmp.path(),
+                &["_install-tool", "cargo-fixture", "1.2.3", installer],
+                &[
+                    ("FAKE_CARGO_LOG", log.as_os_str()),
+                    ("FAKE_INSTALL_LIST_OUTPUT", OsStr::new(&ledger)),
+                    ("FAKE_INSTALL_LIST_EXIT", OsStr::new("0")),
+                    ("FAKE_BINSTALL_EXIT", OsStr::new("0")),
+                    ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+                    ("RUSTUP_TOOLCHAIN", OsStr::new("")),
+                    ("ANVIL_MSRV_TOOLCHAIN", OsStr::new("")),
+                ],
+            );
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let calls = fs::read_to_string(log).unwrap();
+            if installed == "1.2.3" || installed == "1.3.0" {
+                assert_eq!(calls.trim(), "install --list", "warm metadata must avoid either installer");
+            } else if installer == "install" {
+                assert!(calls.contains("install --locked cargo-fixture --version =1.2.3"));
+                assert!(!calls.contains("binstall"));
+            } else {
+                assert!(calls.contains("binstall --no-confirm --locked --no-discover-github-token cargo-fixture --version =1.2.3"));
+                assert!(!calls.contains("install --locked cargo-fixture"));
+            }
+        }
+    }
 }
 
 #[test]
