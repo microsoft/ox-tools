@@ -1,20 +1,27 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 //! `cargo-coverage-gate`: gate pull requests on per-crate line coverage.
 
 mod cli;
+mod collect;
 mod run;
 
 use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::CargoCli;
+use crate::cli::{CargoCli, CoverageGateCommand};
 
 fn main() -> ExitCode {
     let CargoCli::CoverageGate(args) = CargoCli::parse();
-    match run::run(&args) {
+    let result = match &args.command {
+        Some(CoverageGateCommand::Run(collection)) => collect::run(&args, collection),
+        None => run::run(&args),
+    };
+    match result {
         Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err}");

@@ -8,10 +8,12 @@
 //!
 //! A pull-request-time gate that compares per-package line coverage produced
 //! by [`cargo-llvm-cov`] against per-package thresholds carried in
-//! `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
-//! coverage lcov tracefile, resolves each package's base policy from a small
-//! three-layer lookup, applies any matching package target policy, and emits a
-//! verdict table to stdout (and,
+//! `Cargo.toml`. The accompanying `cargo-coverage-gate` binary can either read
+//! existing LCOV tracefiles or collect them through a portable
+//! cargo-llvm-cov and
+//! nextest. It resolves each package's base policy from a small three-layer
+//! lookup, applies any matching package target policy, and emits a verdict
+//! table to stdout (and,
 //! optionally, to a Markdown summary file for CI step summaries). A failing
 //! verdict includes actionable details without relying on a later
 //! coverage-service upload. A coverable line is a distinct LCOV `DA:` record.
@@ -129,10 +131,18 @@
 //! ## Binary usage
 //!
 //! ```text
-//! cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
-//!                      [--target <triple>]
-//!                      [--summary-file <path>] [--quiet]
+//! cargo coverage-gate [EVALUATION OPTIONS]
+//! cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [EVALUATION OPTIONS]
 //! ```
+//!
+//! The bare command evaluates existing LCOV files and remains backward
+//! compatible. `cargo coverage-gate run` collects `all-features` and
+//! `no-default-features` coverage with cargo-llvm-cov plus nextest by default,
+//! writes distinct LCOV files under `target/coverage`, and evaluates them
+//! in-process. Collection can be limited with repeatable `--package` selectors
+//! and a `--package-file` containing one exact `name@version` per nonempty
+//! UTF-8 line. Use repeatable `--configuration`, `--coverage-dir`, and
+//! `--jobs` options to customize collection.
 //!
 //! `--lcov` may be repeated; the tracefiles are merged at the line level
 //! (per-line counts summed) so multiple feature-config exports
@@ -140,10 +150,10 @@
 //! without a separate, platform-specific merge step.
 //!
 //! Exit codes: `0` if every gated package meets its threshold, `1` if any
-//! gated package falls below its threshold, and `2` for configuration
-//! errors (unparseable lcov, missing data for a gated package, a `--package`
-//! selector that matches no member, an out-of-range `min-lines-percent`
-//! value, …).
+//! gated package falls below its threshold, and `2` for configuration or
+//! operational errors (unparseable lcov, missing data for a gated package, a
+//! `--package` selector that matches no member, failed collection/export, an
+//! out-of-range `min-lines-percent` value, …).
 //!
 //! When `--summary-file` is unset, the binary falls back to
 //! `$GITHUB_STEP_SUMMARY` and then `$COVERAGE_GATE_SUMMARY` to decide
@@ -172,7 +182,8 @@
 //! text via [`EvaluatedReport::render_text`] or GitHub-flavored Markdown via
 //! [`EvaluatedReport::render_markdown`] and reduces to a [`Verdict`] via
 //! [`EvaluatedReport::verdict`]. The accompanying binary loads tracefiles from
-//! disk and orchestrates rendering plus the appropriate exit code.
+//! disk or collects it, then orchestrates rendering plus the appropriate exit
+//! code.
 //!
 //! [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 

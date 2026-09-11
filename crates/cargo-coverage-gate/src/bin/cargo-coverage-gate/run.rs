@@ -20,15 +20,19 @@ pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
     } else {
         args.lcov.clone()
     };
+    evaluate_paths(args, &lcov_paths, &args.packages)
+}
+
+pub(crate) fn evaluate_paths(args: &CoverageGateArgs, lcov_paths: &[PathBuf], gated_packages: &[String]) -> Result<ExitCode, AppError> {
     let mut lcov_texts: Vec<String> = Vec::with_capacity(lcov_paths.len());
-    for path in &lcov_paths {
+    for path in lcov_paths {
         let text = fs::read_to_string(path).into_app_err(format!("failed to read lcov tracefile `{}`", path.display()))?;
         lcov_texts.push(text);
     }
     let lcov_refs: Vec<&str> = lcov_texts.iter().map(String::as_str).collect();
 
     let report =
-        evaluate_many_for_target(&lcov_refs, None, &args.packages, args.target.as_deref()).into_app_err("failed to evaluate coverage")?;
+        evaluate_many_for_target(&lcov_refs, None, gated_packages, args.target.as_deref()).into_app_err("failed to evaluate coverage")?;
 
     write_text_output(&report, args.quiet).into_app_err("failed to write verdict to stdout")?;
 
