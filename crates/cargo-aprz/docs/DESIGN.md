@@ -59,6 +59,38 @@ service continues to use its default. Overriding an address does not change how
 the corresponding provider interprets the responses it receives, so a substitute
 service must speak the same protocol as the one it replaces.
 
+### GitHub credential discovery
+
+GitHub fact collection accepts anonymous access, but a dependency appraisal can
+exhaust anonymous API limits quickly. Credential resolution follows this order:
+
+1. the explicit `--github-token` command-line option;
+2. the `GITHUB_TOKEN` environment variable;
+3. the output of `gh auth token --hostname <host>` when the `gh` executable is
+   available and has an authenticated account for the configured GitHub host;
+4. anonymous access.
+
+`<host>` comes from the effective GitHub service address, so a
+`--github-url`/`APRZ_GITHUB_URL` override can use the matching GitHub Enterprise
+login rather than accidentally querying `github.com`.
+
+The `gh` fallback is convenience, not a prerequisite. A missing executable,
+missing login, nonzero `gh auth token` result, blank output, or non-UTF-8 output
+continues anonymously and retains the provider's existing rate-limit behavior.
+An explicit option or environment token is authoritative; cargo-aprz never
+invokes `gh` when either is present.
+
+The command is spawned directly without a shell. Its stdout is trimmed and used
+only as the request credential; it is never logged, cached, included in an
+error, or inherited by unrelated child processes. Stderr from a failed
+best-effort lookup is suppressed. Diagnostic tracing reports only the credential
+source, never the token. Before spawning, cargo-aprz resolves `gh` to an absolute
+path by scanning only explicit `PATH` entries; it does not use the process
+current directory unless that directory appears in `PATH`. On Windows,
+resolution follows `PATHEXT` ordering. Filesystem resolution runs on a blocking
+worker and the child process is awaited asynchronously so credential discovery
+does not block an async runtime worker.
+
 ## Cache storage
 
 Provider data is stored beneath a platform-specific cache root, partitioned by

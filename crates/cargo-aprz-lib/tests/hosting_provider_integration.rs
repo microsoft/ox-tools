@@ -19,7 +19,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use semver::Version;
 use serde_json::json;
 use url::Url;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// No-op progress reporter for testing
@@ -208,6 +208,64 @@ async fn derives_hosting_data_from_a_github_repository() {
     assert_eq!(data.merged_pr_age.avg, 2);
     assert_eq!(data.merged_pr_age_last_90_days.avg, 2);
     assert_eq!(data.open_pr_age.p50, 5);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "Miri cannot call CreateIoCompletionPort")]
+async fn scopes_credentials_to_their_host_without_leaking_them_in_errors() {
+    let server = MockServer::start().await;
+    let github_token = "github-diagnostic-secret";
+    let codeberg_token = "codeberg-diagnostic-secret";
+
+    Mock::given(method("GET"))
+        .and(path("/repos/github-owner/private"))
+        .and(header("authorization", format!("token {github_token}")))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repos/codeberg-owner/public"))
+        .and(header("authorization", format!("token {codeberg_token}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "stars_count": 3,
+            "forks_count": 2,
+            "watchers_count": 1,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/codeberg-owner/public/issues"))
+        .and(header("authorization", format!("token {codeberg_token}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<serde_json::Value>::new()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let endpoints = Endpoints::default().with_github_url(server.uri()).with_codeberg_url(server.uri());
+    let cache_dir = tempfile::tempdir().expect("creating a cache directory");
+    let provider = Provider::new(
+        Some(github_token),
+        Some(codeberg_token),
+        cache_in(cache_dir.path(), false),
+        bug_matcher(),
+        &endpoints,
+    )
+    .expect("credential headers are valid");
+
+    let github_error = expect_error(fetch_one(&provider, spec_for("private", "github.com", "github-owner", "private")).await);
+    assert!(!github_error.contains(github_token), "GitHub errors must redact credentials");
+    assert!(
+        !github_error.contains(codeberg_token),
+        "GitHub errors must not contain Codeberg credentials"
+    );
+
+    let codeberg_data = expect_found(fetch_one(&provider, spec_for("public", "codeberg.org", "codeberg-owner", "public")).await);
+    assert_eq!(codeberg_data.stars, 3);
+    assert_eq!(codeberg_data.forks, 2);
+    assert_eq!(codeberg_data.subscribers, 1);
 }
 
 #[tokio::test]
