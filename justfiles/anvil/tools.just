@@ -411,10 +411,9 @@ anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
 # or no-op if it is already installed at or above that version. The
 # `installer` parameter selects between:
 #   - "install"  (cargo install --locked, pure-source). Default.
-#   - "binstall" (anonymous binary download, with a checked source fallback).
-#   - "ci" (source install, except tools with native source prerequisites,
-#           which try anonymous binaries first). Avoids release discovery for
-#           ordinary Rust tools even when prebuilt binaries exist.
+#   - "binstall" (cargo binstall --no-confirm --locked, with a controlled
+#                 cargo install fallback for tools that declare source
+#                 prerequisites). Bootstraps cargo-binstall itself if not on PATH.
 # `source_prereq`, when set, runs immediately before a source installation,
 # including a binstall fallback.
 [script("pwsh", "-NoProfile")]
@@ -425,21 +424,9 @@ _install-tool-core name version installer source_prereq="":
     $installer = '{{installer}}'
     $sourcePrereq = '{{source_prereq}}'
 
-    if ($installer -notin @('install', 'binstall', 'ci')) {
-        Write-Error "_install-tool-core: unknown installer '$installer' (expected 'install', 'binstall', or 'ci')"
+    if ($installer -ne 'install' -and $installer -ne 'binstall') {
+        Write-Error "_install-tool-core: unknown installer '$installer' (expected 'install' or 'binstall')"
         exit 2
-    }
-
-    # This recipe runs in its own process: API checks in the parent retain
-    # their credentials, but installers and third-party build scripts do not.
-    foreach ($key in @('GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_ENTERPRISE_TOKEN', 'CARGO_REGISTRY_TOKEN')) {
-        Remove-Item "Env:$key" -ErrorAction SilentlyContinue
-    }
-    foreach ($entry in @(Get-ChildItem Env: | Where-Object Name -Match '^CARGO_REGISTRIES_.*_TOKEN$')) {
-        Remove-Item "Env:$($entry.Name)"
-    }
-    if ($installer -eq 'ci') {
-        $installer = if ($sourcePrereq) { 'binstall' } else { 'install' }
     }
 
     # Already at or above the pin: skip. We don't downgrade tools the
@@ -450,22 +437,17 @@ _install-tool-core name version installer source_prereq="":
     # cached binaries and fail with "binary already exists in destination".
     $installed = $null
     $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
-    $listOutput = @(& cargo {{_anvil_stable_toolchain_args}} install --list)
-    if ($LASTEXITCODE -ne 0) {
-        throw "_install-tool-core: cargo install --list failed for '$name'"
-    }
-    foreach ($line in $listOutput) {
+    foreach ($line in (& cargo {{_anvil_stable_toolchain_args}} install --list 2>$null)) {
         if ($line -match $pattern) { $installed = $Matches[1]; break }
     }
     if ($installed) {
-        $installedVersion = $null
-        $pinVersion = $null
-        if ([version]::TryParse($installed, [ref]$installedVersion) -and
-            [version]::TryParse($version, [ref]$pinVersion) -and
-            $installedVersion -ge $pinVersion -and
-            (Get-Command $name -ErrorAction SilentlyContinue)) {
-            Write-Host "$name >= $version (already satisfied; installed=$installed)"
-            exit 0
+        try {
+            if (([version]$installed) -ge ([version]$version)) {
+                Write-Host "$name >= $version (already satisfied; installed=$installed)"
+                exit 0
+            }
+        } catch {
+            # Fall through to reinstall when versions don't parse as [version].
         }
     }
 
@@ -473,17 +455,21 @@ _install-tool-core name version installer source_prereq="":
     if ($installer -eq 'binstall') {
         if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
             Write-Host '  Bootstrapping cargo-binstall'
-            & cargo {{_anvil_stable_toolchain_args}} install --locked cargo-binstall --version '=1.21.0'
+            & cargo {{_anvil_stable_toolchain_args}} install --locked cargo-binstall
             if ($LASTEXITCODE -ne 0) {
                 Write-Error 'cargo-binstall bootstrap failed'
                 exit $LASTEXITCODE
             }
         }
-        # No credential discovery from gh/git configuration, and no implicit
-        # compilation before the source-prerequisite check below.
-        $binstallArgs = @('binstall', '--no-confirm', '--locked', '--disable-strategies', 'compile', '--no-discover-github-token')
+        # Keep source builds behind Anvil's prerequisite check instead of
+        # allowing binstall to compile before that check can run. Tools with
+        # no source prerequisite may still use binstall's compile strategy.
+        $binstallArgs = @('binstall', '--no-confirm', '--locked')
+        if ($sourcePrereq) {
+            $binstallArgs += @('--disable-strategies', 'compile')
+        }
+        $binstallArgs += '--no-discover-github-token'
         $binstallArgs += @($name, '--version', "=$version")
-        if ($installed) { $binstallArgs += '--force' }
         & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
@@ -492,10 +478,7 @@ _install-tool-core name version installer source_prereq="":
         & "{{just_executable()}}" $sourcePrereq
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
-    $installArgs = @('install', '--locked', $name, '--version', "=$version")
-    # Repair stale install metadata as well as old versions.
-    if ($installed) { $installArgs += '--force' }
-    & cargo {{_anvil_stable_toolchain_args}} @installArgs
+    & cargo {{_anvil_stable_toolchain_args}} install --locked $name --version "=$version"
     if ($LASTEXITCODE -ne 0) {
         Write-Error "$name install FAILED"
         exit $LASTEXITCODE

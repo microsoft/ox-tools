@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn setup_action_takes_group_input_and_dispatches() {
         assert!(SETUP_ACTION.contains("group:"));
-        assert!(SETUP_ACTION.contains("just anvil-setup ci"));
+        assert!(SETUP_ACTION.contains("just anvil-setup binstall"));
         assert!(!SETUP_ACTION.contains("_anvil-resolve-stable"));
         assert!(!SETUP_ACTION.contains("just anvil-toolchain-stable-install"));
         assert!(!SETUP_ACTION.contains("rustc-version"));
@@ -208,79 +208,11 @@ mod tests {
         assert!(SETUP_ACTION.contains("$minimum = [version]'1.46.0'"));
         assert!(SETUP_ACTION.contains("cargo-anvil requires just >= $minimum"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
-        assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" ci"));
+        assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
         assert!(SETUP_ACTION.contains("::error::Invalid Anvil group;"));
         assert!(!SETUP_ACTION.contains("::error::Invalid Anvil group '$ANVIL_GROUP'"));
         assert!(SETUP_ACTION.contains("none)"));
-    }
-
-    #[test]
-    fn setup_keeps_installation_anonymous_and_caches_impact_tools() {
-        assert!(!SETUP_ACTION.contains("${{ github.token }}"));
-        assert!(!IMPACT_ACTION.contains("${{ github.token }}"));
-        let bootstrap = SETUP_ACTION
-            .split_once("    - name: Install just\n")
-            .unwrap()
-            .1
-            .split("\n    - name:")
-            .next()
-            .unwrap();
-        assert!(!bootstrap.contains("cargo binstall"));
-        assert!(bootstrap.contains("cargo install --locked --version \"=$minimum\" just"));
-        let restore = SETUP_ACTION.find("    - name: Restore cargo cache").unwrap();
-        let install = SETUP_ACTION.find("impact) just anvil-tool-cargo-delta-install ci").unwrap();
-        let save = SETUP_ACTION.find("    - name: Save cargo cache").unwrap();
-        assert!(restore < install && install < save);
-        assert!(!IMPACT_ACTION.contains("run: just anvil-tool-cargo-delta-install"));
-        let cache_save = &SETUP_ACTION[save..];
-        assert!(cache_save.contains("if: success() && steps.cargo-cache.outputs.cache-hit != 'true'"));
-        assert!(!SETUP_ACTION.contains("uses: cargo-bins/cargo-binstall"));
-        assert!(!PR_ROOT_WORKFLOW.contains("pull_request_target"));
-        assert_eq!(SETUP_ACTION.matches("uses: actions/cache/restore@").count(), 1);
-        assert_eq!(SETUP_ACTION.matches("uses: actions/cache/save@").count(), 1);
-        let cache_restore = &SETUP_ACTION[restore..SETUP_ACTION.find("    - name: Install just").unwrap()];
-        let primary_key = cache_restore.lines().find(|line| line.trim_start().starts_with("key:")).unwrap();
-        let restore_key = cache_restore
-            .lines()
-            .find(|line| line.trim_start().starts_with("anvil-v3-"))
-            .unwrap();
-        for key in [
-            "runner.os",
-            "runner.arch",
-            "'.cargo/config.toml'",
-            "'rust-toolchain'",
-            "'rust-toolchain.toml'",
-            "'justfiles/anvil/versions.just'",
-            "'justfiles/anvil/tools.just'",
-            "'.github/actions/anvil-setup/action.yml'",
-        ] {
-            assert!(
-                primary_key.contains(key) && restore_key.contains(key),
-                "both cache keys must include {key}"
-            );
-        }
-        for cache_step in [cache_restore, cache_save] {
-            let paths = cache_step
-                .split_once("        path: |\n")
-                .unwrap()
-                .1
-                .lines()
-                .take_while(|line| line.starts_with("          "))
-                .map(str::trim)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                paths,
-                [
-                    "~/.cargo/registry/cache/",
-                    "~/.cargo/registry/index/",
-                    "~/.cargo/bin/",
-                    "~/.cargo/.crates.toml",
-                    "~/.cargo/.crates2.json"
-                ],
-                "cache only archives/indexes, executables and install ledgers; never credentials or target"
-            );
-        }
     }
 
     #[test]
@@ -320,6 +252,31 @@ mod tests {
         assert!(SETUP_ACTION.contains(r"C:\Program Files (x86)\Android"));
         assert!(!SETUP_ACTION.contains("Install libclang"));
         assert!(!SETUP_ACTION.contains("apt-get install -y libclang-dev"));
+    }
+
+    #[test]
+    fn setup_avoids_implicit_installer_credentials_and_pins_bootstrap_downloads() {
+        for action in [SETUP_ACTION, IMPACT_ACTION] {
+            assert!(!action.contains("${{ github.token }}"));
+            assert!(!action.contains("Remove-Item Env:"));
+        }
+        let bootstrap = SETUP_ACTION
+            .split_once("    - name: Install just\n")
+            .unwrap()
+            .1
+            .split("\n    - name:")
+            .next()
+            .unwrap();
+        assert!(bootstrap.contains("cargo binstall --no-confirm --locked --no-discover-github-token --version \"=$minimum\" just"));
+        assert!(bootstrap.contains("cargo install --locked --version \"=$minimum\" just"));
+        let binstall = SETUP_ACTION
+            .split_once("    - name: Install cargo-binstall\n")
+            .unwrap()
+            .1
+            .split("\n    - name:")
+            .next()
+            .unwrap();
+        assert!(binstall.contains("version: \"1.21.0\""));
     }
 
     #[test]
@@ -484,14 +441,18 @@ export -f just
     }
 
     #[test]
-    fn impact_action_installs_delta_inside_setup_and_runs_the_shared_recipe() {
-        // The impact action reuses anvil-setup (group=impact) for cargo-delta
+    fn impact_action_installs_delta_before_saving_and_runs_the_shared_recipe() {
+        // The impact action reuses anvil-setup (group=impact) for the cargo-delta
         // install, then runs the same `just anvil-impact` recipe adopters run
         // locally and uploads the whole cache as a per-OS artifact. The include
         // lists reach group jobs through that downloaded cache, never job
         // outputs, so CI and local execution stay identical by construction.
         assert!(IMPACT_ACTION.contains("group: impact"));
-        assert!(SETUP_ACTION.contains("just anvil-tool-cargo-delta-install ci"));
+        assert!(!IMPACT_ACTION.contains("run: just anvil-tool-cargo-delta-install"));
+        let restore = SETUP_ACTION.find("    - name: Restore cargo cache").unwrap();
+        let install = SETUP_ACTION.find("impact) just anvil-tool-cargo-delta-install install").unwrap();
+        let save = SETUP_ACTION.find("    - name: Save cargo cache").unwrap();
+        assert!(restore < install && install < save);
         assert!(IMPACT_ACTION.contains("run: just anvil-impact"));
         assert!(IMPACT_ACTION.contains("uses: actions/upload-artifact"));
         assert!(IMPACT_ACTION.contains("name: anvil-impact-${{ runner.os }}"));

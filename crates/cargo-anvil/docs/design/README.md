@@ -388,10 +388,8 @@ outstanding owned-file proposals and managed-region refusals.
 - Generated GH composite actions and ADO step templates do nothing privileged on their own;
   they just invoke `just` recipes. The user's workflow / pipeline file controls permissions
   and secrets.
-- All cargo-tool installs use `--locked`. GitHub setup uses source-first installation;
-  native tools can use anonymous binary downloads with a checked source fallback.
-  Installers remove inherited GitHub and Cargo registry token environment variables.
-  API checks retain their separate token scope; this is not a build-script sandbox.
+- All cargo-tool installs done by the setup building blocks use `--locked`. No
+  `cargo-binstall`.
 - The tool never sources or executes content from any user-edited file at runtime;
   everything executable in the repo is plain `just` recipes the user can read.
 - Recommended user-workflow shape: `permissions: contents: read` on PR workflows; grant

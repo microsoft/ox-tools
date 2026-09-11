@@ -37,7 +37,6 @@ const README: &str = include_str!("../templates/justfiles/anvil/checks/readme-ch
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
-const SETUP: &str = include_str!("../templates/github/setup-action.yml");
 const APRZ: &str = include_str!("../templates/justfiles/anvil/checks/aprz.just");
 const MUTANTS_DIFF: &str = include_str!("../templates/justfiles/anvil/checks/mutants-diff.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
@@ -118,13 +117,6 @@ if ($env:FAKE_CARGO_TOOLCHAIN_LOG) {
 }
 if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL
-}
-if ($env:FAKE_INSTALL_CREDENTIALS_LOG) {
-    $present = @(Get-ChildItem Env: | Where-Object {
-        $_.Name -in @('GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_ENTERPRISE_TOKEN', 'CARGO_REGISTRY_TOKEN') -or
-        $_.Name -match '^CARGO_REGISTRIES_.*_TOKEN$'
-    } | ForEach-Object Name)
-    Add-Content -LiteralPath $env:FAKE_INSTALL_CREDENTIALS_LOG -Value "$joined|$($present -join ',')"
 }
 if ($args -contains 'each') {
     exit [int]$env:FAKE_EACH_EXIT
@@ -402,6 +394,9 @@ _anvil-impact-include tier:
     let bin = tmp.path().join("fake-bin");
     fs::create_dir_all(&bin).unwrap();
     write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
+    // Installer fixtures must not depend on cargo-binstall being installed on
+    // the host. Fake Cargo owns the download/fallback outcomes.
+    write(&bin.join("cargo-binstall.ps1"), "exit 0\n");
     write(&bin.join("git.ps1"), "exit 0\n");
     write(
         &bin.join("rustc.ps1"),
@@ -501,22 +496,9 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
     command.env_remove("GITHUB_ACTIONS");
     command.env_remove("TF_BUILD");
     for key in std::env::vars_os().map(|(key, _)| key) {
-        let name = key.to_string_lossy();
-        if name.starts_with("ANVIL_INCLUDE_") || name.starts_with("FAKE_") {
+        if key.to_string_lossy().starts_with("ANVIL_INCLUDE_") {
             command.env_remove(key);
         }
-    }
-    command.env("FAKE_WORKSPACE_ROOT", root);
-    for key in [
-        "RUSTUP_TOOLCHAIN",
-        "ANVIL_MSRV_TOOLCHAIN",
-        "GITHUB_TOKEN",
-        "GH_TOKEN",
-        "GITHUB_ENTERPRISE_TOKEN",
-        "GH_ENTERPRISE_TOKEN",
-        "CARGO_REGISTRY_TOKEN",
-    ] {
-        command.env_remove(key);
     }
     for &(key, value) in environment {
         command.env(key, value);
@@ -1759,290 +1741,76 @@ source-prereq:
         .find(|line| line.contains("binstall --no-confirm --locked"))
         .expect("ordinary tool must attempt binstall");
     assert!(
-        ordinary_binstall.contains("--disable-strategies compile --no-discover-github-token"),
-        "all binary installs use anonymous discovery and controlled source fallback"
+        !ordinary_binstall.contains("--disable-strategies compile"),
+        "tools without source prerequisites retain binstall's compile strategy"
+    );
+    assert!(
+        ordinary_binstall.contains("--no-discover-github-token"),
+        "binary installation must not discover credentials from gh/git configuration"
     );
 }
 
 #[test]
-fn install_tool_ci_cold_warm_and_stale_cache_paths() {
+fn binary_hit_does_not_require_source_prerequisites_or_a_host_installer() {
     assert!(tools_available(), "real Just and PowerShell are required for installer contracts");
-    for (installed, binary, should_install) in [
-        ("", false, true),
-        ("1.2.3", true, false),
-        ("1.3.0", true, false),
-        ("1.2.2", true, true),
-        ("1.2.3", false, true),
-        ("unparseable", true, true),
-    ] {
-        let tmp = installer_fixture();
-        if binary {
-            write(&tmp.path().join("fake-bin/cargo-fixture.ps1"), "exit 0\n");
-        }
-        let log = tmp.path().join("cargo.log");
-        let ledger = format!("cargo-fixture v{installed}:\n    cargo-fixture");
-        let output = run_just(
-            tmp.path(),
-            &["_install-tool", "cargo-fixture", "1.2.3", "ci"],
-            &[
-                ("FAKE_CARGO_LOG", log.as_os_str()),
-                ("FAKE_INSTALL_LIST_OUTPUT", OsStr::new(&ledger)),
-            ],
-        );
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let calls = fs::read_to_string(log).unwrap();
-        assert!(!calls.contains("binstall"), "ordinary CI tools must not perform release discovery");
-        assert_eq!(calls.contains("install --locked cargo-fixture --version =1.2.3"), should_install);
-        if should_install && !installed.is_empty() {
-            assert!(calls.contains("--force"), "stale metadata must not suppress repair");
-        }
-        if !should_install {
-            assert_eq!(calls.lines().count(), 1, "a warm hit must only query install metadata");
-        }
-    }
-}
-
-#[test]
-fn native_tool_cache_hit_skips_binstall_and_missing_binary_forces_repair() {
-    assert!(tools_available(), "real Just and PowerShell are required for installer contracts");
-    for binary in [true, false] {
-        let tmp = installer_fixture();
-        if binary {
-            write(&tmp.path().join("fake-bin/cargo-fixture.ps1"), "exit 0\n");
-        }
-        let log = tmp.path().join("cargo.log");
-        let output = run_just(
-            tmp.path(),
-            &["_install-tool", "cargo-fixture", "1.2.3", "ci", "must-not-run"],
-            &[
-                ("FAKE_CARGO_LOG", log.as_os_str()),
-                ("FAKE_INSTALL_LIST_OUTPUT", OsStr::new("cargo-fixture v1.2.3:\n    cargo-fixture")),
-            ],
-        );
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let calls = fs::read_to_string(log).unwrap();
-        if binary {
-            assert_eq!(
-                calls.trim(),
-                "install --list",
-                "native cache hit must avoid installers and prerequisites"
-            );
-        } else {
-            assert!(
-                calls.contains("cargo-fixture --version =1.2.3 --force"),
-                "binstall must not trust stale metadata: {calls}"
-            );
-        }
-        assert!(!calls.contains("install --locked cargo-fixture"));
-    }
-}
-
-#[test]
-fn installers_drop_inherited_tokens_without_changing_the_parent() {
-    assert!(tools_available(), "real Just and PowerShell are required for installer contracts");
-    for installer in ["install", "binstall", "ci"] {
-        let tmp = installer_fixture();
-        let log = tmp.path().join("credentials.log");
-        let justfile_path = tmp.path().join("Justfile");
-        let mut justfile = fs::read_to_string(&justfile_path).unwrap();
-        justfile.push_str(
-            r#"
-[script("pwsh", "-NoProfile")]
-parent installer:
-    & "{{just_executable()}}" _install-tool cargo-fixture 1.2.3 '{{installer}}'
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    if ($env:GITHUB_TOKEN -ne 'fixture-only' -or $env:GH_TOKEN -ne 'fixture-only') { exit 91 }
-"#,
-        );
-        write(&justfile_path, &justfile);
-        let output = run_just(
-            tmp.path(),
-            &["parent", installer],
-            &[
-                ("FAKE_INSTALL_CREDENTIALS_LOG", log.as_os_str()),
-                ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
-                ("GITHUB_TOKEN", OsStr::new("fixture-only")),
-                ("GH_TOKEN", OsStr::new("fixture-only")),
-                ("GITHUB_ENTERPRISE_TOKEN", OsStr::new("fixture-only")),
-                ("GH_ENTERPRISE_TOKEN", OsStr::new("fixture-only")),
-                ("CARGO_REGISTRY_TOKEN", OsStr::new("fixture-only")),
-                ("CARGO_REGISTRIES_FIXTURE_TOKEN", OsStr::new("fixture-only")),
-            ],
-        );
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let calls = fs::read_to_string(log).unwrap();
-        assert!(calls.contains("install --locked cargo-fixture --version =1.2.3|"));
-        assert!(
-            calls.lines().all(|line| line.ends_with('|')),
-            "install subprocesses received tokens: {calls}"
-        );
-        if installer == "binstall" {
-            assert!(calls.contains("--no-discover-github-token"));
-        }
-    }
-}
-
-#[test]
-fn ci_native_binary_hit_skips_source_prerequisites_but_miss_checks_them() {
-    assert!(tools_available(), "real Just and PowerShell are required for installer contracts");
-    for (binary_exit, prerequisite_exit, source_exit, success, source_runs) in [
-        ("0", "9", "23", true, false),
-        ("7", "0", "0", true, true),
-        ("7", "9", "0", false, false),
-        ("7", "0", "23", false, true),
-    ] {
-        let tmp = installer_fixture();
-        let justfile_path = tmp.path().join("Justfile");
-        let mut justfile = fs::read_to_string(&justfile_path).unwrap();
-        justfile.push_str(
-            r#"
-[script("pwsh", "-NoProfile")]
-source-prereq:
-    if ($env:GITHUB_TOKEN -or $env:GH_TOKEN) { exit 92 }
-    Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value 'source-prereq'
-    exit [int]$env:FAKE_PREREQ_EXIT
-"#,
-        );
-        write(&justfile_path, &justfile);
-        let log = tmp.path().join("cargo.log");
-        let output = run_just(
-            tmp.path(),
-            &["_install-tool", "cargo-fixture", "1.2.3", "ci", "source-prereq"],
-            &[
-                ("FAKE_CARGO_LOG", log.as_os_str()),
-                ("FAKE_BINSTALL_EXIT", OsStr::new(binary_exit)),
-                ("FAKE_PREREQ_EXIT", OsStr::new(prerequisite_exit)),
-                ("FAKE_INSTALL_EXIT", OsStr::new(source_exit)),
-                ("GITHUB_TOKEN", OsStr::new("fixture-only")),
-                ("GH_TOKEN", OsStr::new("fixture-only")),
-            ],
-        );
-        assert_eq!(output.status.success(), success, "{}", String::from_utf8_lossy(&output.stderr));
-        let calls = fs::read_to_string(log).unwrap();
-        assert!(calls.contains("binstall --no-confirm --locked --disable-strategies compile --no-discover-github-token"));
-        assert_eq!(calls.contains("source-prereq"), binary_exit != "0");
-        assert_eq!(calls.contains("install --locked cargo-fixture --version =1.2.3"), source_runs);
-        if source_runs {
-            assert!(calls.find("source-prereq").unwrap() < calls.find("install --locked cargo-fixture").unwrap());
-        }
-    }
-}
-
-#[test]
-fn installer_metadata_failure_does_not_start_a_build() {
-    assert!(tools_available(), "real Just and PowerShell are required for installer contracts");
-    let tmp = installer_fixture();
+    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
     let log = tmp.path().join("cargo.log");
     let output = run_just(
         tmp.path(),
-        &["_install-tool", "cargo-fixture", "1.2.3", "ci"],
-        &[("FAKE_CARGO_LOG", log.as_os_str()), ("FAKE_INSTALL_LIST_EXIT", OsStr::new("23"))],
+        &["_install-tool-core", "cargo-spellcheck", "0.15.7", "binstall", "must-not-run"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_INSTALL_LIST_OUTPUT", OsStr::new("")),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("0")),
+            ("FAKE_INSTALL_EXIT", OsStr::new("23")),
+        ],
     );
-    assert_failed(&output, "installer metadata failure");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("cargo install --list failed"));
-    assert_eq!(fs::read_to_string(log).unwrap().trim(), "install --list");
-}
-
-fn installer_fixture() -> TempDir {
-    let tmp = fixture(
-        &[("versions.just", VERSIONS), ("tools.just", TOOLS)],
-        &["anvil-toolchain-stable-install"],
-    );
-    write(&tmp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.97\"\n");
-    tmp
-}
-
-#[test]
-fn missing_binary_installer_bootstraps_at_a_pin_without_tokens() {
-    assert!(tools_available(), "real Just and PowerShell are required for installer contracts");
-    let tmp = installer_fixture();
-    let paths = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect::<Vec<_>>();
-    let just_name = if cfg!(windows) { "just.exe" } else { "just" };
-    let just_path = paths.iter().map(|path| path.join(just_name)).find(|path| path.is_file()).unwrap();
-    let template = just_command(tmp.path(), &["_install-tool", "cargo-fixture", "1.2.3", "binstall"], &[]);
-    let mut command = Command::new(just_path);
-    command.args(template.get_args()).current_dir(tmp.path());
-    for (key, value) in template.get_envs() {
-        if let Some(value) = value {
-            command.env(key, value);
-        } else {
-            command.env_remove(key);
-        }
-    }
-    let mut isolated_paths = vec![tmp.path().join("fake-bin")];
-    isolated_paths.extend(paths.into_iter().filter(|path| {
-        !["cargo-binstall", "cargo-binstall.exe", "cargo-binstall.ps1", "cargo-binstall.cmd"]
-            .iter()
-            .any(|name| path.join(name).exists())
-    }));
-    let log = tmp.path().join("credentials.log");
-    let output = command
-        .env("PATH", std::env::join_paths(isolated_paths).unwrap())
-        .env("FAKE_INSTALL_CREDENTIALS_LOG", &log)
-        .env("GITHUB_TOKEN", "fixture-only")
-        .env("GH_TOKEN", "fixture-only")
-        .env("CARGO_REGISTRIES_FIXTURE_TOKEN", "fixture-only")
-        .output()
-        .unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let calls = fs::read_to_string(log).unwrap();
-    let bootstrap = calls.find("install --locked cargo-binstall --version =1.21.0|").unwrap();
-    let download = calls
-        .find("binstall --no-confirm --locked --disable-strategies compile --no-discover-github-token")
-        .unwrap();
-    assert!(bootstrap < download);
-    assert!(calls.lines().all(|line| line.ends_with('|')), "{calls}");
+    assert!(calls.contains("binstall --no-confirm --locked --disable-strategies compile --no-discover-github-token"));
+    assert!(!calls.contains("install --locked"));
 }
 
 #[test]
-fn github_just_bootstrap_is_pinned_source_only_and_anonymous() {
+fn pinned_installer_choices_reuse_warm_cargo_metadata() {
     assert!(tools_available(), "real Just and PowerShell are required for installer contracts");
-    let body = SETUP
-        .split_once("    - name: Install just\n")
-        .unwrap()
-        .1
-        .split_once("      run: |\n")
-        .unwrap()
-        .1
-        .split("\n    #")
-        .next()
-        .unwrap();
-    let mut recipe = String::from("[script(\"pwsh\", \"-NoProfile\")]\nbootstrap:\n");
-    for line in body.lines() {
-        if let Some(code) = line.strip_prefix("        ") {
-            writeln!(recipe, "    {code}").unwrap();
-        }
-    }
-    for (installed, exit, success, should_install) in [
-        ("1.46.0", "23", true, false),
-        ("1.45.0", "0", true, true),
-        ("1.45.0", "23", false, true),
-    ] {
-        let tmp = fixture(&[("bootstrap.just", &recipe)], &[]);
-        let log = tmp.path().join("credentials.log");
-        write(
-            &tmp.path().join("fake-bin/just.ps1"),
-            r#"
-$version = if (Test-Path "$env:FAKE_INSTALL_CREDENTIALS_LOG") { '1.46.0' } else { $env:FAKE_JUST_VERSION }
-Write-Output "just $version"
-"#,
-        );
-        let output = run_just(
-            tmp.path(),
-            &["bootstrap"],
-            &[
-                ("FAKE_INSTALL_CREDENTIALS_LOG", log.as_os_str()),
-                ("FAKE_JUST_VERSION", OsStr::new(installed)),
-                ("FAKE_INSTALL_EXIT", OsStr::new(exit)),
-                ("GITHUB_TOKEN", OsStr::new("fixture-only")),
-                ("GH_TOKEN", OsStr::new("fixture-only")),
-                ("CARGO_REGISTRIES_FIXTURE_TOKEN", OsStr::new("fixture-only")),
-            ],
-        );
-        assert_eq!(output.status.success(), success, "{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(log.exists(), should_install);
-        if should_install {
-            assert_eq!(fs::read_to_string(log).unwrap().trim(), "install --locked --version =1.46.0 just|");
+    for installer in ["install", "binstall"] {
+        for installed in ["", "1.2.3", "1.3.0", "1.2.2"] {
+            let tmp = fixture(
+                &[("versions.just", VERSIONS), ("tools.just", TOOLS)],
+                &["anvil-toolchain-stable-install"],
+            );
+            write(&tmp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.97\"\n");
+            let log = tmp.path().join("cargo.log");
+            let ledger = if installed.is_empty() {
+                String::new()
+            } else {
+                format!("cargo-fixture v{installed}:")
+            };
+            let output = run_just(
+                tmp.path(),
+                &["_install-tool", "cargo-fixture", "1.2.3", installer],
+                &[
+                    ("FAKE_CARGO_LOG", log.as_os_str()),
+                    ("FAKE_INSTALL_LIST_OUTPUT", OsStr::new(&ledger)),
+                    ("FAKE_INSTALL_LIST_EXIT", OsStr::new("0")),
+                    ("FAKE_BINSTALL_EXIT", OsStr::new("0")),
+                    ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+                    ("RUSTUP_TOOLCHAIN", OsStr::new("")),
+                    ("ANVIL_MSRV_TOOLCHAIN", OsStr::new("")),
+                ],
+            );
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let calls = fs::read_to_string(log).unwrap();
+            if installed == "1.2.3" || installed == "1.3.0" {
+                assert_eq!(calls.trim(), "install --list", "warm metadata must avoid either installer");
+            } else if installer == "install" {
+                assert!(calls.contains("install --locked cargo-fixture --version =1.2.3"));
+                assert!(!calls.contains("binstall"));
+            } else {
+                assert!(calls.contains("binstall --no-confirm --locked --no-discover-github-token cargo-fixture --version =1.2.3"));
+                assert!(!calls.contains("install --locked cargo-fixture"));
+            }
         }
     }
 }
