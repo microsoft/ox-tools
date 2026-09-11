@@ -61,12 +61,14 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, AppError> {
+    absolute_path_with(path, env::current_dir)
+}
+
+fn absolute_path_with(path: &Path, current_dir: impl FnOnce() -> io::Result<PathBuf>) -> Result<PathBuf, AppError> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
     } else {
-        Ok(env::current_dir()
-            .into_app_err("failed to resolve the current directory")?
-            .join(path))
+        Ok(current_dir().into_app_err("failed to resolve the current directory")?.join(path))
     }
 }
 
@@ -188,39 +190,27 @@ fn selector_matches(selector: &str, member: &WorkspaceMember) -> bool {
 fn glob_matches(pattern: &str, name: &str) -> bool {
     let pattern = pattern.chars().collect::<Vec<_>>();
     let name = name.chars().collect::<Vec<_>>();
-    glob_matches_from(&pattern, 0, &name, 0)
+    glob_matches_from(&pattern, &name)
 }
 
-fn glob_matches_from(pattern: &[char], mut pattern_index: usize, name: &[char], mut name_index: usize) -> bool {
-    while pattern_index < pattern.len() {
-        match pattern[pattern_index] {
-            '?' => {
-                if name_index == name.len() {
-                    return false;
-                }
-                pattern_index += 1;
-                name_index += 1;
-            }
-            '*' => {
-                while pattern.get(pattern_index + 1) == Some(&'*') {
-                    pattern_index += 1;
-                }
-                pattern_index += 1;
-                if pattern_index == pattern.len() {
-                    return true;
-                }
-                return (name_index..=name.len()).any(|candidate| glob_matches_from(pattern, pattern_index, name, candidate));
-            }
-            expected => {
-                if name.get(name_index) != Some(&expected) {
-                    return false;
-                }
-                pattern_index += 1;
-                name_index += 1;
-            }
+fn glob_matches_from(pattern: &[char], name: &[char]) -> bool {
+    let Some((&token, remaining_pattern)) = pattern.split_first() else {
+        return name.is_empty();
+    };
+    match token {
+        '?' => name
+            .split_first()
+            .is_some_and(|(_, remaining_name)| glob_matches_from(remaining_pattern, remaining_name)),
+        '*' => {
+            glob_matches_from(remaining_pattern, name)
+                || name
+                    .split_first()
+                    .is_some_and(|(_, remaining_name)| glob_matches_from(pattern, remaining_name))
         }
+        expected => name
+            .split_first()
+            .is_some_and(|(&actual, remaining_name)| expected == actual && glob_matches_from(remaining_pattern, remaining_name)),
     }
-    name_index == name.len()
 }
 
 fn normalized_configurations(requested: &[FeatureConfiguration]) -> Vec<FeatureConfiguration> {
@@ -402,17 +392,12 @@ fn compiler_artifact_objects(line: &str) -> serde_json::Result<Vec<PathBuf>> {
 }
 
 fn is_coverage_object(path: &Path) -> bool {
-    let extension = path.extension().unwrap_or_default();
-    if extension == "d"
-        || extension == "rlib"
-        || extension == "rmeta"
-        || path.ends_with(".cargo-lock")
-        || path.ends_with(".cargo-build-lock")
-    {
+    if is_ignored_artifact_path(path) {
         return false;
     }
     #[cfg(windows)]
     {
+        let extension = path.extension().unwrap_or_default();
         if !(extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("dll")) {
             return false;
         }
@@ -427,10 +412,20 @@ fn is_coverage_object(path: &Path) -> bool {
     {
         use std::os::unix::fs::PermissionsExt as _;
 
-        metadata.permissions().mode() & 0o111 != 0
+        has_executable_mode(metadata.permissions().mode())
     }
     #[cfg(not(unix))]
     true
+}
+
+fn is_ignored_artifact_path(path: &Path) -> bool {
+    let extension = path.extension().unwrap_or_default();
+    extension == "d" || extension == "rlib" || extension == "rmeta" || path.ends_with(".cargo-lock") || path.ends_with(".cargo-build-lock")
+}
+
+#[cfg(any(unix, test))]
+fn has_executable_mode(mode: u32) -> bool {
+    mode & 0o111 != 0
 }
 
 fn discover_profraw_files(target_dir: &Path) -> Result<Vec<PathBuf>, AppError> {
@@ -748,6 +743,19 @@ mod tests {
     }
 
     #[test]
+    fn gated_names_are_emitted_only_for_explicit_selection() {
+        let members = vec![member("alpha", "1.2.3"), member("beta", "2.0.0")];
+        let explicit = Selection {
+            explicit: true,
+            members: members.clone(),
+        };
+        let implicit = Selection { explicit: false, members };
+
+        assert_eq!(explicit.gated_names(), ["alpha", "beta"]);
+        assert!(implicit.gated_names().is_empty());
+    }
+
+    #[test]
     fn glob_matching_covers_empty_and_repeated_star_branches() {
         assert!(glob_matches("*", ""));
         assert!(glob_matches("a**b", "axyzb"));
@@ -775,6 +783,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "uses temporary files and filesystem metadata, which Miri isolation does not support"
+    )]
     fn compiler_artifact_parser_includes_object_filenames_and_excludes_build_scripts() {
         let tmp = tempdir().expect("tempdir");
         let object = if cfg!(windows) {
@@ -814,6 +826,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "uses temporary files and filesystem metadata, which Miri isolation does not support"
+    )]
     fn object_filter_rejects_non_objects() {
         let tmp = tempdir().expect("tempdir");
         #[cfg(windows)]
@@ -840,6 +856,24 @@ mod tests {
     }
 
     #[test]
+    fn ignored_artifact_names_cover_each_exclusion() {
+        for ignored in ["artifact.d", "artifact.rlib", "artifact.rmeta", ".cargo-lock", ".cargo-build-lock"] {
+            assert!(is_ignored_artifact_path(Path::new(ignored)), "{ignored}");
+        }
+        assert!(!is_ignored_artifact_path(Path::new("artifact")));
+        assert!(!is_ignored_artifact_path(Path::new("artifact.exe")));
+    }
+
+    #[test]
+    fn executable_mode_accepts_each_execute_bit() {
+        assert!(has_executable_mode(0o100));
+        assert!(has_executable_mode(0o010));
+        assert!(has_executable_mode(0o001));
+        assert!(!has_executable_mode(0));
+        assert!(!has_executable_mode(0o600));
+    }
+
+    #[test]
     fn response_file_places_each_object_behind_object_flag() {
         let contents = object_response_contents(&[PathBuf::from("target/one"), PathBuf::from("target/object with spaces")])
             .expect("response contents");
@@ -863,6 +897,25 @@ mod tests {
     }
 
     #[test]
+    fn default_ignore_regex_names_workspace_tests_and_target_output() {
+        #[cfg(windows)]
+        let root = PathBuf::from(r"C:\workspace");
+        #[cfg(not(windows))]
+        let root = PathBuf::from("/workspace");
+        let workspace = WorkspaceInfo {
+            target_dir: root.join("target"),
+            root,
+            members: Vec::new(),
+        };
+
+        let regex = default_ignore_filename_regex(&workspace);
+        assert!(regex.contains("rustc"));
+        assert!(regex.contains("tests|examples|benches"));
+        assert!(regex.contains(&regex_escape(&workspace.root.to_string_lossy())));
+        assert!(regex.contains(&regex_escape(&workspace.target_dir.to_string_lossy())));
+    }
+
+    #[test]
     fn profile_and_object_lists_reject_non_utf8_paths() {
         let path = invalid_unicode_path();
         profile_list_contents(std::slice::from_ref(&path)).expect_err("profile paths must be UTF-8");
@@ -870,6 +923,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
     fn export_reports_an_unusable_temporary_directory() {
         let tmp = tempdir().expect("tempdir");
         let not_a_directory = tmp.path().join("not-a-directory");
@@ -897,6 +951,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
     fn remove_if_present_reports_a_directory() {
         let tmp = tempdir().expect("tempdir");
         let directory = tmp.path().join("directory");
@@ -906,6 +961,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files and filesystem rename, which Miri isolation does not support")]
     fn atomic_rename_reports_a_missing_staging_file() {
         let tmp = tempdir().expect("tempdir");
         let staging = TemporaryPath::new(tmp.path(), "missing");
@@ -915,16 +971,72 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
+    fn disarm_preserves_the_temporary_file() {
+        let tmp = tempdir().expect("tempdir");
+        let temporary = TemporaryPath::new(tmp.path(), "preserved");
+        let path = temporary.path().to_path_buf();
+        fs::write(&path, b"complete").expect("write temporary file");
+
+        temporary.disarm();
+
+        assert_eq!(fs::read(path).expect("read disarmed file"), b"complete");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
+    fn cleanup_removes_the_temporary_file() {
+        let tmp = tempdir().expect("tempdir");
+        let temporary = TemporaryPath::new(tmp.path(), "removed");
+        let path = temporary.path().to_path_buf();
+        fs::write(&path, b"temporary").expect("write temporary file");
+
+        temporary.cleanup().expect("clean temporary file");
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn cleanup_reports_an_unremovable_temporary_path() {
+        let tmp = tempdir().expect("tempdir");
+        let temporary = TemporaryPath::new(tmp.path(), "directory");
+        fs::create_dir(temporary.path()).expect("create directory at temporary path");
+
+        temporary
+            .cleanup()
+            .expect_err("explicit cleanup must report that a directory cannot be removed as a file");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
+    fn remove_if_present_accepts_a_missing_file() {
+        let tmp = tempdir().expect("tempdir");
+        remove_if_present(&tmp.path().join("missing")).expect("a missing file is already removed");
+    }
+
+    #[test]
     fn absolute_paths_are_preserved() {
-        let absolute = env::current_dir().expect("current directory").join("coverage");
-        assert_eq!(absolute_path(&absolute).expect("absolute path"), absolute);
+        #[cfg(windows)]
+        let absolute = PathBuf::from(r"C:\coverage");
+        #[cfg(not(windows))]
+        let absolute = PathBuf::from("/coverage");
+
+        assert_eq!(
+            absolute_path_with(&absolute, || panic!("absolute paths must not query the current directory")).expect("absolute path"),
+            absolute
+        );
     }
 
     #[test]
     fn relative_paths_are_anchored_to_the_invocation_directory() {
-        let current = env::current_dir().expect("current directory");
+        #[cfg(windows)]
+        let current = PathBuf::from(r"C:\workspace");
+        #[cfg(not(windows))]
+        let current = PathBuf::from("/workspace");
+
         assert_eq!(
-            absolute_path(Path::new("coverage")).expect("relative path"),
+            absolute_path_with(Path::new("coverage"), || Ok(current.clone())).expect("relative path"),
             current.join("coverage")
         );
     }

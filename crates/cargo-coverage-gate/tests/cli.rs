@@ -1022,11 +1022,19 @@ fn run_reports_rustc_tool_discovery_failures() {
     let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
+    let fake_rustc_dir = tools.rustc.parent().expect("fake rustc path must have a parent directory");
+    let fake_path = std::env::join_paths([fake_rustc_dir]).expect("fake tool directory must form a valid PATH");
     fake_collection_command(tmp.path(), &tools, &object)
         .env_remove("LLVM_COV")
         .env_remove("LLVM_PROFDATA")
         .env_remove("RUSTC")
+        .env("PATH", fake_path)
+        .env("FAKE_TARGET_LIBDIR", &tools.target_libdir)
         .assert()
-        .code(2)
-        .stderr(predicate::str::contains("llvm-profdata merge failed"));
+        .success();
+
+    let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
+    assert!(log.contains("rustc\t--print\ttarget-libdir"), "{log}");
+    assert!(log.contains("llvm-profdata\tmerge"), "{log}");
+    assert!(log.contains("llvm-cov\texport"), "{log}");
 }
