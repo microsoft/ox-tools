@@ -833,7 +833,7 @@ Other groups retain the action's disabled default.
    `cargo delta impact`, and writes the durable cache under `target/anvil/impact/`:
    the per-tier `include_<tier>.txt` lists (via `_anvil-impact-format`), `impact.json`,
    and the `snapshots/`.
-4. Uploads that whole directory as the `anvil-impact-<runner.os>` artifact
+3. Uploads that whole directory as the `anvil-impact-<runner.os>` artifact
    (`actions/upload-artifact`).
 
 ### 6.1 How the impact result propagates to the group jobs
