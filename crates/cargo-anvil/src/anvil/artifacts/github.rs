@@ -208,6 +208,19 @@ mod tests {
         assert!(SETUP_ACTION.contains("$minimum = [version]'1.46.0'"));
         assert!(SETUP_ACTION.contains("cargo-anvil requires just >= $minimum"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
+        for name in ["Install just", "Install anvil toolchains + tools"] {
+            let step = SETUP_ACTION
+                .split_once(&format!("    - name: {name}\n"))
+                .expect("setup contains the installation step")
+                .1
+                .split("\n    - name:")
+                .next()
+                .expect("split always produces a first element");
+            assert!(
+                step.contains("GITHUB_TOKEN: ${{ github.token }}"),
+                "{name} must authenticate release discovery to avoid anonymous API rate limits"
+            );
+        }
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
         assert!(SETUP_ACTION.contains("::error::Invalid Anvil group;"));

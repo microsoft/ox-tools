@@ -113,6 +113,8 @@ runs:
 
     - name: Install just
       shell: pwsh -NoProfile -Command ". '{0}'"
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         $minimum = [version]'1.46.0'
         $installed = if (Get-Command just -ErrorAction SilentlyContinue) {
@@ -146,6 +148,8 @@ runs:
       # composition.
       env:
         ANVIL_GROUP: ${{ inputs.group }}
+        # Authenticate binstall's release discovery before it falls back to source builds.
+        GITHUB_TOKEN: ${{ github.token }}
       # When `group` is empty (the default), installs the full catalog
       # via `just anvil-setup binstall`. When `group` is "none",
       # skips tool installation entirely (used by anvil-impact, which

@@ -794,6 +794,11 @@ annotation. The matcher promotes that existing diagnostic without wrapping
 Just, parsing its output in a custom runner, or repeating group membership
 in the action.
 
+The Just bootstrap and catalog tool installation steps receive the built-in
+`GITHUB_TOKEN`. Cargo-binstall uses it for authenticated release discovery,
+avoiding anonymous API rate limits that can trigger unnecessary source builds.
+This adds no token permissions and does not install system dependencies.
+
 The action expects the rustup proxies on `PATH` and installs a missing selected public
 toolchain (see §7).
 `anvil-impact` is described in §6 below.
