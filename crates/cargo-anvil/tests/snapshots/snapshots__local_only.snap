@@ -1136,6 +1136,44 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    # Explicitly selecting a binary-only package makes cargo test --doc fail.
+    if ($pkg -notcontains '--workspace') {
+        $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
+        if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-doc-test: cargo metadata failed'; exit $LASTEXITCODE }
+        try {
+            $metadata = $metadataJson | ConvertFrom-Json
+        } catch {
+            Write-Error "anvil-doc-test: could not parse cargo metadata output: $_"
+            exit 1
+        }
+        $libraryKinds = @('lib', 'rlib', 'dylib', 'cdylib', 'staticlib', 'proc-macro')
+        # Package names are case-sensitive and agree exactly with the affected
+        # selection, because both come from the same on-disk workspace. Use an
+        # Ordinal dictionary rather than PowerShell's default case-insensitive
+        # hashtable so case-distinct names (`Foo` vs `foo`) on a case-sensitive
+        # checkout stay separate instead of collapsing into one key and
+        # classifying a package by another package's targets.
+        $packages = [System.Collections.Generic.Dictionary[string, bool]]::new([System.StringComparer]::Ordinal)
+        foreach ($package in $metadata.packages) {
+            $packages[$package.name] = @($package.targets | Where-Object {
+                @($_.kind | Where-Object { $_ -in $libraryKinds }).Count -gt 0
+            }).Count -gt 0
+        }
+        $selected = @()
+        for ($i = 0; $i -lt $pkg.Count; $i += 2) {
+            if ($pkg[$i] -ne '--package' -or $i + 1 -ge $pkg.Count) {
+                throw "anvil-doc-test: invalid affected package selection: $include"
+            }
+            $spec = $pkg[$i + 1]
+            $name = ($spec -split '@', 2)[0]
+            if (-not $packages.ContainsKey($name)) {
+                throw "anvil-doc-test: affected package '$spec' is absent from cargo metadata"
+            }
+            if ($packages[$name]) { $selected += @('--package', $spec) }
+        }
+        $pkg = $selected
+        if ($pkg.Count -eq 0) { Write-Host 'anvil-doc-test: no affected library packages; skipping'; exit 0 }
+    }
     & cargo {{_anvil_stable_toolchain_args}} test --doc @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & cargo {{_anvil_stable_toolchain_args}} test --doc @pkg --locked
@@ -6215,6 +6253,13 @@ _install-tool-core name version installer source_prereq="":
         }
     }
 
+    # The step-scoped GITHUB_TOKEN exists only so cargo-binstall can query
+    # GitHub Releases as an authenticated caller instead of being rate-limited
+    # anonymously. Keep it out of every source install: those compile
+    # third-party crates and run their build scripts.
+    $releaseToken = $env:GITHUB_TOKEN
+    Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+
     Write-Host "Installing $name =$version (installer: $installer)"
     if ($installer -eq 'binstall') {
         if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
@@ -6226,14 +6271,22 @@ _install-tool-core name version installer source_prereq="":
             }
         }
         # Keep source builds behind Anvil's prerequisite check instead of
-        # allowing binstall to compile before that check can run. Tools with
-        # no source prerequisite may still use binstall's compile strategy.
+        # allowing binstall to compile before that check can run. Also disable
+        # the compile strategy whenever the release token is set: compiling
+        # under binstall would hand the workflow credential to third-party build
+        # scripts. Either way the tokenless `cargo install` below still covers a
+        # release miss.
         $binstallArgs = @('binstall', '--no-confirm', '--locked')
-        if ($sourcePrereq) {
+        if ($sourcePrereq -or $releaseToken) {
             $binstallArgs += @('--disable-strategies', 'compile')
         }
         $binstallArgs += @($name, '--version', "=$version")
-        & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
+        if ($releaseToken) { $env:GITHUB_TOKEN = $releaseToken }
+        try {
+            & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
+        } finally {
+            Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+        }
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }

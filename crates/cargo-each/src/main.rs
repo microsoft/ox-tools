@@ -99,6 +99,15 @@
 //! `1` under `--keep-going` if any command failed, or `2` for a `cargo-each`
 //! usage error (unknown selector, bad predicate, misused placeholder).
 //!
+//! On Windows, the inherited `PATH` is passed explicitly to each spawned
+//! command, so a `PATH` entry takes precedence over the directory holding the
+//! `cargo-each` executable itself. A bare command name such as `cargo` therefore
+//! resolves to the tool the caller selected on `PATH` rather than to an
+//! executable that merely sits next to `cargo-each` (for example a different
+//! Cargo toolchain proxy). An explicit executable path is still used as given,
+//! and the platform's own fallback search still applies when no `PATH` entry
+//! matches. Behavior on other platforms is unchanged.
+//!
 //! # Examples
 //!
 //! Run a per-manifest tool over every library crate:

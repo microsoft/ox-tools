@@ -20,6 +20,44 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    # Explicitly selecting a binary-only package makes cargo test --doc fail.
+    if ($pkg -notcontains '--workspace') {
+        $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
+        if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-doc-test: cargo metadata failed'; exit $LASTEXITCODE }
+        try {
+            $metadata = $metadataJson | ConvertFrom-Json
+        } catch {
+            Write-Error "anvil-doc-test: could not parse cargo metadata output: $_"
+            exit 1
+        }
+        $libraryKinds = @('lib', 'rlib', 'dylib', 'cdylib', 'staticlib', 'proc-macro')
+        # Package names are case-sensitive and agree exactly with the affected
+        # selection, because both come from the same on-disk workspace. Use an
+        # Ordinal dictionary rather than PowerShell's default case-insensitive
+        # hashtable so case-distinct names (`Foo` vs `foo`) on a case-sensitive
+        # checkout stay separate instead of collapsing into one key and
+        # classifying a package by another package's targets.
+        $packages = [System.Collections.Generic.Dictionary[string, bool]]::new([System.StringComparer]::Ordinal)
+        foreach ($package in $metadata.packages) {
+            $packages[$package.name] = @($package.targets | Where-Object {
+                @($_.kind | Where-Object { $_ -in $libraryKinds }).Count -gt 0
+            }).Count -gt 0
+        }
+        $selected = @()
+        for ($i = 0; $i -lt $pkg.Count; $i += 2) {
+            if ($pkg[$i] -ne '--package' -or $i + 1 -ge $pkg.Count) {
+                throw "anvil-doc-test: invalid affected package selection: $include"
+            }
+            $spec = $pkg[$i + 1]
+            $name = ($spec -split '@', 2)[0]
+            if (-not $packages.ContainsKey($name)) {
+                throw "anvil-doc-test: affected package '$spec' is absent from cargo metadata"
+            }
+            if ($packages[$name]) { $selected += @('--package', $spec) }
+        }
+        $pkg = $selected
+        if ($pkg.Count -eq 0) { Write-Host 'anvil-doc-test: no affected library packages; skipping'; exit 0 }
+    }
     & cargo {{_anvil_stable_toolchain_args}} test --doc @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & cargo {{_anvil_stable_toolchain_args}} test --doc @pkg --locked
