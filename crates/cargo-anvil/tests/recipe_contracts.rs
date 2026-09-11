@@ -2037,6 +2037,14 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
 
         let malformed = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_INVALID", OsStr::new("1"))]);
         assert_failed(&malformed, &format!("{recipe} malformed cargo metadata"));
+        // Failing is not enough: with `$ErrorActionPreference = 'Stop'` a bare
+        // ConvertFrom-Json surfaces PowerShell's own error, which never names the
+        // recipe that could not read Cargo's output.
+        assert!(
+            String::from_utf8_lossy(&malformed.stderr).contains(&format!("{recipe}: could not parse cargo metadata output")),
+            "{recipe} must diagnose malformed metadata itself:\n{}",
+            String::from_utf8_lossy(&malformed.stderr)
+        );
     }
 }
 

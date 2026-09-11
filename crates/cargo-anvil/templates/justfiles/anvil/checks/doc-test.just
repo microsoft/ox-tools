@@ -23,8 +23,13 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     # Explicitly selecting a binary-only package makes cargo test --doc fail.
     if ($pkg -notcontains '--workspace') {
         $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        $metadata = $metadataJson | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-doc-test: cargo metadata failed'; exit $LASTEXITCODE }
+        try {
+            $metadata = $metadataJson | ConvertFrom-Json
+        } catch {
+            Write-Error "anvil-doc-test: could not parse cargo metadata output: $_"
+            exit 1
+        }
         $libraryKinds = @('lib', 'rlib', 'dylib', 'cdylib', 'staticlib', 'proc-macro')
         # Package names are case-sensitive and agree exactly with the affected
         # selection, because both come from the same on-disk workspace. Use an
