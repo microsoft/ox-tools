@@ -175,10 +175,12 @@ impl Workspace {
             .get("workspace")
             .and_then(|workspace| workspace.get("package"))
             .and_then(|package| package.get("rust-version"));
-        let root_is_only_member = self.members.len() == 1 && self.members[0].manifest_path == self.root_manifest_path;
-        let package_floor = root_is_only_member
-            .then(|| manifest.get("package").and_then(|package| package.get("rust-version")))
-            .flatten();
+        let package_floor = match self.members.as_slice() {
+            [member] if member.manifest_path == self.root_manifest_path => {
+                manifest.get("package").and_then(|package| package.get("rust-version"))
+            }
+            _ => None,
+        };
         let floor = workspace_floor.or(package_floor).ok_or_else(|| {
             WorkspaceRustVersionError::new(
                 "the root manifest must declare `[workspace.package].rust-version`, or `[package].rust-version` for a single-package repository"
@@ -199,12 +201,14 @@ impl Workspace {
                 ))
                 .into());
             };
-            if member_floor.major != 1 || !member_floor.pre.is_empty() || !member_floor.build.is_empty() {
-                return Err(WorkspaceRustVersionError::new(format!(
-                    "workspace member `{}` exposes invalid Rust version `{member_floor}`; expected a Rust 1.x toolchain version",
-                    member.name
-                ))
-                .into());
+            if member_floor.major != 1 {
+                return Err(invalid_member_rust_version(member, member_floor));
+            }
+            if !member_floor.pre.is_empty() {
+                return Err(invalid_member_rust_version(member, member_floor));
+            }
+            if !member_floor.build.is_empty() {
+                return Err(invalid_member_rust_version(member, member_floor));
             }
             if member_floor > &parsed_floor {
                 return Err(WorkspaceRustVersionError::new(format!(
@@ -219,19 +223,35 @@ impl Workspace {
     }
 }
 
+fn invalid_member_rust_version(member: &Member, version: &Version) -> EachError {
+    WorkspaceRustVersionError::new(format!(
+        "workspace member `{}` exposes invalid Rust version `{version}`; expected a Rust 1.x toolchain version",
+        member.name
+    ))
+    .into()
+}
+
 fn parse_rust_version(value: &str) -> Result<Version, String> {
-    if value.contains('-') || value.contains('+') {
+    if value.contains('-') {
+        return Err("pre-release and build metadata are not valid Rust toolchain versions".to_owned());
+    }
+    if value.contains('+') {
         return Err("pre-release and build metadata are not valid Rust toolchain versions".to_owned());
     }
     let components: Vec<&str> = value.split('.').collect();
-    if !(2..=3).contains(&components.len())
-        || components
-            .iter()
-            .any(|component| component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()))
+    if !(2..=3).contains(&components.len()) {
+        return Err("expected `major.minor` or `major.minor.patch`".to_owned());
+    }
+    if components
+        .iter()
+        .any(|component| component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()))
     {
         return Err("expected `major.minor` or `major.minor.patch`".to_owned());
     }
-    if components.iter().any(|component| component.len() > 1 && component.starts_with('0')) {
+    if components
+        .iter()
+        .any(|component| component.strip_prefix('0').is_some_and(|remainder| !remainder.is_empty()))
+    {
         return Err("numeric components must not contain leading zeroes".to_owned());
     }
     let normalized = if components.len() == 2 {
@@ -260,7 +280,31 @@ pub(crate) fn parse_target_kind(kind: &str) -> Option<TargetKind> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::fs;
+
     use super::*;
+
+    fn member(name: &str, manifest_path: PathBuf, rust_version: &str) -> Member {
+        Member {
+            name: name.to_owned(),
+            version: "0.1.0".to_owned(),
+            rust_version: Some(rust_version.parse().expect("the test Rust version is semver")),
+            manifest_path,
+            publishable: true,
+            features: BTreeSet::new(),
+            targets: Vec::new(),
+            dependencies: BTreeSet::new(),
+            metadata: Value::Null,
+        }
+    }
+
+    fn workspace(root_manifest_path: PathBuf, members: Vec<Member>) -> Workspace {
+        Workspace {
+            members,
+            default_member_names: HashSet::new(),
+            root_manifest_path,
+        }
+    }
 
     #[test]
     fn parses_every_supported_target_kind() {
@@ -290,8 +334,82 @@ mod tests {
     fn parses_cargo_rust_version_forms() {
         assert_eq!(parse_rust_version("1.80").expect("minor form"), Version::new(1, 80, 0));
         assert_eq!(parse_rust_version("1.80.1").expect("patch form"), Version::new(1, 80, 1));
-        for value in ["1", "1.80.0-beta", "1.80+build", "1.080", "2.0", "one.80"] {
-            assert!(parse_rust_version(value).is_err(), "{value}");
+        assert_eq!(
+            parse_rust_version("1.80.0-beta"),
+            Err("pre-release and build metadata are not valid Rust toolchain versions".to_owned())
+        );
+        assert_eq!(
+            parse_rust_version("1.80+build"),
+            Err("pre-release and build metadata are not valid Rust toolchain versions".to_owned())
+        );
+        assert_eq!(
+            parse_rust_version("1"),
+            Err("expected `major.minor` or `major.minor.patch`".to_owned())
+        );
+        assert_eq!(
+            parse_rust_version("1.2.3.4"),
+            Err("expected `major.minor` or `major.minor.patch`".to_owned())
+        );
+        assert_eq!(
+            parse_rust_version("one.80"),
+            Err("expected `major.minor` or `major.minor.patch`".to_owned())
+        );
+        assert_eq!(
+            parse_rust_version("1.080"),
+            Err("numeric components must not contain leading zeroes".to_owned())
+        );
+        assert_eq!(parse_rust_version("2.0"), Err("expected a Rust 1.x toolchain version".to_owned()));
+    }
+
+    #[test]
+    fn root_package_floor_requires_the_root_to_be_the_only_member() {
+        let temp = tempfile::tempdir().expect("create temporary workspace");
+        let root = temp.path().join("Cargo.toml");
+        fs::write(&root, "[package]\nname = \"root\"\nversion = \"0.1.0\"\nrust-version = \"1.80\"\n")
+            .expect("write root package manifest");
+        let nested = member("nested", temp.path().join("nested/Cargo.toml"), "1.70.0");
+        let error = workspace(root, vec![nested])
+            .workspace_rust_version()
+            .expect_err("a nested sole member cannot use the root package floor");
+        assert!(error.to_string().contains("[workspace.package].rust-version"));
+    }
+
+    #[test]
+    fn invalid_resolved_member_versions_are_configuration_errors() {
+        let temp = tempfile::tempdir().expect("create temporary workspace");
+        let root = temp.path().join("Cargo.toml");
+        fs::write(&root, "[workspace]\n[workspace.package]\nrust-version = \"1.80\"\n").expect("write workspace manifest");
+
+        for version in ["2.0.0", "1.70.0-beta", "1.70.0+build"] {
+            let invalid = member("invalid", temp.path().join("invalid/Cargo.toml"), version);
+            let error = workspace(root.clone(), vec![invalid])
+                .workspace_rust_version()
+                .expect_err("a non-Rust member version must fail");
+            assert!(error.to_string().contains("invalid Rust version"), "{version}: {error}");
         }
+    }
+
+    #[test]
+    fn workspace_rust_version_reports_manifest_io_and_shape_errors() {
+        let temp = tempfile::tempdir().expect("create temporary workspace");
+        let missing = temp.path().join("missing.toml");
+        let error = workspace(missing, Vec::new())
+            .workspace_rust_version()
+            .expect_err("a missing root manifest must fail");
+        assert!(error.to_string().contains("could not read workspace manifest"));
+
+        let malformed = temp.path().join("malformed.toml");
+        fs::write(&malformed, "[workspace").expect("write malformed root manifest");
+        let error = workspace(malformed, Vec::new())
+            .workspace_rust_version()
+            .expect_err("a malformed root manifest must fail");
+        assert!(error.to_string().contains("could not parse workspace manifest"));
+
+        let non_string = temp.path().join("non-string.toml");
+        fs::write(&non_string, "[workspace]\n[workspace.package]\nrust-version = 180\n").expect("write non-string root floor");
+        let error = workspace(non_string, Vec::new())
+            .workspace_rust_version()
+            .expect_err("a non-string root floor must fail");
+        assert!(error.to_string().contains("must be a string"));
     }
 }

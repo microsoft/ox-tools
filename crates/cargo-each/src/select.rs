@@ -158,10 +158,12 @@ fn validate_package_file_spec<'a>(path: &str, line: usize, spec: &'a str) -> Res
     if pieces.next().is_some() {
         return Err(invalid("a package spec may contain at most one `@`"));
     }
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'*' | b'?'))
+    if name.is_empty() {
+        return Err(invalid("expected a package name or Unix glob, optionally followed by `@version`"));
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'*' | b'?'))
     {
         return Err(invalid("expected a package name or Unix glob, optionally followed by `@version`"));
     }
@@ -398,7 +400,17 @@ mod tests {
 
     #[test]
     fn package_file_lines_reject_comments_tokens_and_whitespace() {
-        for spec in ["# alpha", "--workspace", " alpha", "alpha ", "alpha beta", "alpha@", "alpha@1@2"] {
+        for spec in [
+            "# alpha",
+            "--workspace",
+            " alpha",
+            "alpha ",
+            "alpha beta",
+            "@1",
+            "alpha!",
+            "alpha@",
+            "alpha@1@2",
+        ] {
             validate_package_file_spec("packages.txt", 1, spec).expect_err(spec);
         }
         for spec in ["alpha", "alpha@1.2.3", "cargo-*", "?eta"] {

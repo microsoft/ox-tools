@@ -118,16 +118,25 @@ pub(crate) struct EachArgs {
 }
 
 fn parse_duration(value: &str) -> Result<Duration, String> {
+    enum Unit {
+        Milliseconds,
+        Seconds,
+        Minutes,
+    }
+
     let (digits, unit) = if let Some(digits) = value.strip_suffix("ms") {
-        (digits, "ms")
+        (digits, Unit::Milliseconds)
     } else if let Some(digits) = value.strip_suffix('s') {
-        (digits, "s")
+        (digits, Unit::Seconds)
     } else if let Some(digits) = value.strip_suffix('m') {
-        (digits, "m")
+        (digits, Unit::Minutes)
     } else {
         return Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
     };
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+    if digits.is_empty() {
+        return Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
+    }
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
     }
     let amount = digits.parse::<u64>().map_err(|error| format!("duration is too large: {error}"))?;
@@ -135,13 +144,12 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
         return Err("duration must be greater than zero".to_owned());
     }
     match unit {
-        "ms" => Ok(Duration::from_millis(amount)),
-        "s" => Ok(Duration::from_secs(amount)),
-        "m" => amount
+        Unit::Milliseconds => Ok(Duration::from_millis(amount)),
+        Unit::Seconds => Ok(Duration::from_secs(amount)),
+        Unit::Minutes => amount
             .checked_mul(60)
             .map(Duration::from_secs)
             .ok_or_else(|| "duration is too large".to_owned()),
-        _ => unreachable!("unit is selected from the three cases above"),
     }
 }
 
@@ -169,5 +177,12 @@ mod tests {
         for value in ["0s", "1", "1h", "-1s", "1.5s", "ms", "18446744073709551615m"] {
             assert!(parse_duration(value).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn malformed_duration_uses_the_grammar_diagnostic() {
+        let expected = Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
+        assert_eq!(parse_duration("ms"), expected);
+        assert_eq!(parse_duration("1.5s"), expected);
     }
 }

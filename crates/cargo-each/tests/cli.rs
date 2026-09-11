@@ -147,6 +147,10 @@ fn single_package_fixture(rust_version: &str) -> (TempDir, PathBuf) {
     (tmp, manifest)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the embedded standalone probe stays together so rustc compiles one auditable cross-platform fixture"
+)]
 fn compile_execution_probe(directory: &Path) -> PathBuf {
     let source = directory.join("execution-probe.rs");
     let executable = directory.join(format!("execution-probe{}", std::env::consts::EXE_SUFFIX));
@@ -158,11 +162,21 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::process::{self, Command};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn append(path: &str, value: &str) {
     let mut file = OpenOptions::new().create(true).append(true).open(path).expect("open log");
     writeln!(file, "{value}").expect("append log");
+}
+
+fn wait_for(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            process::exit(90);
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn main() {
@@ -182,14 +196,38 @@ fn main() {
         }
         "fail-stop" => {
             let name = &args[2];
-            append(&args[3], name);
-            thread::sleep(Duration::from_millis(if name == "alpha" { 40 } else { 250 }));
-            process::exit(if name == "alpha" { 7 } else { 0 });
+            let sync_dir = std::path::Path::new(&args[3]);
+            fs::write(sync_dir.join(format!("{name}.started")), "").expect("write start marker");
+            match name.as_str() {
+                "alpha" => {
+                    wait_for(&sync_dir.join("beta.started"));
+                    process::exit(7);
+                }
+                "beta" => {
+                    wait_for(&sync_dir.join("alpha.started"));
+                    process::exit(9);
+                }
+                _ => process::exit(0),
+            }
         }
         "keep-going" => {
             let name = &args[2];
             append(&args[3], name);
             process::exit(if name == "alpha" { 7 } else { 0 });
+        }
+        "timeout-fail-fast" => {
+            if args[2] == "alpha" {
+                thread::sleep(Duration::from_secs(5));
+            } else {
+                fs::write(&args[3], "later invocation ran").expect("write later marker");
+            }
+        }
+        "timeout-keep-going" => {
+            if args[2] == "alpha" {
+                thread::sleep(Duration::from_secs(5));
+            } else {
+                fs::write(&args[3], "later invocation ran").expect("write later marker");
+            }
         }
         "tree-parent" => {
             let marker = &args[2];
@@ -396,6 +434,17 @@ fn package_file_input_errors_fail_loudly() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("line 2").and(predicate::str::contains("command-line tokens")));
+
+    let comment = tmp.path().join("comment.packages");
+    fs::write(&comment, "#alpha\n").expect("write package file comment");
+    each(&manifest)
+        .arg("--package-file")
+        .arg(&comment)
+        .args(["--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("comments are not supported"));
 
     let unmatched = tmp.path().join("unmatched.packages");
     fs::write(&unmatched, "does-not-exist\n").expect("write unmatched package file");
@@ -1263,20 +1312,23 @@ fn parallel_fail_fast_chooses_failure_by_plan_order() {
 fn parallel_fail_fast_stops_launching_new_work() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
-    let launch_log = tmp.path().join("launch.log");
+    let sync_dir = tmp.path().join("fail-stop");
+    fs::create_dir(&sync_dir).expect("create synchronization directory");
     each(&manifest)
         .args(["--workspace", "--jobs", "2", "--"])
         .arg(probe)
         .args(["fail-stop", "{name}"])
-        .arg(&launch_log)
+        .arg(&sync_dir)
         .assert()
         .failure()
         .code(7);
-    let launched = fs::read_to_string(launch_log).expect("launch log");
-    assert!(launched.contains("alpha\n"), "{launched}");
-    assert!(launched.contains("beta\n"), "{launched}");
+    assert!(sync_dir.join("alpha.started").exists(), "the first initial worker must start");
+    assert!(sync_dir.join("beta.started").exists(), "the second initial worker must start");
     for name in ["delta", "epsilon", "gamma"] {
-        assert!(!launched.contains(name), "{name} must not launch after failure:\n{launched}");
+        assert!(
+            !sync_dir.join(format!("{name}.started")).exists(),
+            "{name} must not launch after either synchronized initial worker fails"
+        );
     }
 }
 
@@ -1298,6 +1350,48 @@ fn parallel_keep_going_runs_the_complete_plan() {
     for name in ["alpha", "beta", "delta", "epsilon", "gamma"] {
         assert!(launched.contains(name), "{name} must run under --keep-going:\n{launched}");
     }
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn sequential_timeout_fail_fast_does_not_run_later_members() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let later_marker = tmp.path().join("later-invocation");
+    each(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--timeout", "50ms", "--"])
+        .arg(probe)
+        .args(["timeout-fail-fast", "{name}"])
+        .arg(&later_marker)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("timed out after 50ms"));
+    assert!(
+        !later_marker.exists(),
+        "fail-fast must not launch the member after a timed-out invocation"
+    );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn sequential_timeout_keep_going_runs_later_members() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let later_marker = tmp.path().join("later-invocation");
+    each(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--timeout", "50ms", "--keep-going", "--"])
+        .arg(probe)
+        .args(["timeout-keep-going", "{name}"])
+        .arg(&later_marker)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("timed out after 50ms"));
+    assert!(
+        later_marker.exists(),
+        "--keep-going must launch the member after a timed-out invocation"
+    );
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
