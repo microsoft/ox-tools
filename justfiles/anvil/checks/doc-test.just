@@ -26,7 +26,13 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         $metadata = $metadataJson | ConvertFrom-Json
         $libraryKinds = @('lib', 'rlib', 'dylib', 'cdylib', 'staticlib', 'proc-macro')
-        $packages = @{}
+        # Package names are case-sensitive and agree exactly with the affected
+        # selection, because both come from the same on-disk workspace. Use an
+        # Ordinal dictionary rather than PowerShell's default case-insensitive
+        # hashtable so case-distinct names (`Foo` vs `foo`) on a case-sensitive
+        # checkout stay separate instead of collapsing into one key and
+        # classifying a package by another package's targets.
+        $packages = [System.Collections.Generic.Dictionary[string, bool]]::new([System.StringComparer]::Ordinal)
         foreach ($package in $metadata.packages) {
             $packages[$package.name] = @($package.targets | Where-Object {
                 @($_.kind | Where-Object { $_ -in $libraryKinds }).Count -gt 0

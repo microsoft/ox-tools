@@ -451,6 +451,13 @@ _install-tool-core name version installer source_prereq="":
         }
     }
 
+    # The step-scoped GITHUB_TOKEN exists only so cargo-binstall can query
+    # GitHub Releases as an authenticated caller instead of being rate-limited
+    # anonymously. Keep it out of every source install: those compile
+    # third-party crates and run their build scripts.
+    $releaseToken = $env:GITHUB_TOKEN
+    Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+
     Write-Host "Installing $name =$version (installer: $installer)"
     if ($installer -eq 'binstall') {
         if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
@@ -469,7 +476,12 @@ _install-tool-core name version installer source_prereq="":
             $binstallArgs += @('--disable-strategies', 'compile')
         }
         $binstallArgs += @($name, '--version', "=$version")
-        & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
+        if ($releaseToken) { $env:GITHUB_TOKEN = $releaseToken }
+        try {
+            & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
+        } finally {
+            Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+        }
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }

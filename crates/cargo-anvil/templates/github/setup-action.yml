@@ -126,6 +126,8 @@ runs:
           Write-Host "Installing just >= $minimum (installed: $(if ($installed) { $installed } else { 'not found' }))"
           & cargo binstall --no-confirm --locked --version ">=$minimum" just
           if ($LASTEXITCODE -ne 0) {
+            # Drop the release-discovery token before compiling third-party code.
+            Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
             & cargo install --locked --version ">=$minimum" just
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
@@ -148,7 +150,8 @@ runs:
       # composition.
       env:
         ANVIL_GROUP: ${{ inputs.group }}
-        # Authenticate binstall's release discovery before it falls back to source builds.
+        # Authenticate binstall's release discovery before it falls back to
+        # source builds. The tool installer drops it before any source install.
         GITHUB_TOKEN: ${{ github.token }}
       # When `group` is empty (the default), installs the full catalog
       # via `just anvil-setup binstall`. When `group` is "none",
