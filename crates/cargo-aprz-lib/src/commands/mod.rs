@@ -44,6 +44,7 @@ mod config;
 mod crates;
 mod deps;
 mod duration;
+mod github_credentials;
 mod host;
 mod init;
 mod progress_reporter;

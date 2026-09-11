@@ -167,14 +167,25 @@ results in very low rate limits. If `cargo-aprz` detects it is being throttled b
 to try the operation again.
 
 When using the `deps` command on a large project, it’s likely you’ll hit these rate limits, which can make the process take hours to complete fully.
-In such a case, you can provide a GitHub or Codeberg token on the command-line or through environment variables, which gives you substantially higher
+In such a case, you can provide a GitHub or Codeberg token on the command line or through environment variables, which gives you substantially higher
 rate limits.
 
 ```bash
 cargo aprz deps --github-token <GITHUB_TOKEN> --codeberg-token <CODEBERG_TOKEN>
 ```
 
-You can also set the `GITHUB_TOKEN` and `CODEBERG_TOKEN` environment variables, which `cargo-aprz` will automatically pick up.
+GitHub credentials are discovered in this order:
+
+1. `--github-token`
+1. `GITHUB_TOKEN`
+1. the token reported by `gh auth token --hostname <host>`
+1. anonymous access
+
+The host passed to `gh` comes from the effective GitHub service URL, including
+`--github-url` or `APRZ_GITHUB_URL` overrides for GitHub Enterprise. Missing
+`gh` authentication is ignored and retains the existing anonymous rate-limit
+behavior. Codeberg credentials continue to use `--codeberg-token` or
+`CODEBERG_TOKEN`.
 
 ### Reports
 
