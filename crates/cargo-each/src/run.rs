@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cargo_gamma_process::{MemoryRequest, ProcessTree, prepare};
+use cargo_gamma_process::{MemoryRequest, PreparedCommand, ProcessTree, prepare};
 use cargo_metadata::TargetKind;
 use ohno::{AppError, IntoAppError};
 
@@ -340,7 +340,7 @@ fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration) -> Invo
         Ok(command) => command,
         Err(message) => return InvocationResult::Infrastructure(message),
     };
-    let mut tree = match spawn_tree(command) {
+    let mut tree = match spawn_sealed_tree(command) {
         Ok(tree) => tree,
         Err(error) => {
             return InvocationResult::Infrastructure(format!("failed to spawn `{program}`: {error}"));
@@ -362,7 +362,7 @@ fn run_captured(invocation: &Invocation, timeout: Option<Duration>) -> BufferedO
     };
     let _ = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let process = match timeout {
-        Some(_) => spawn_tree(command).map(CapturedProcess::Contained),
+        Some(_) => spawn_sealed_tree(command).map(CapturedProcess::Contained),
         None => command
             .spawn()
             .map(|child| CapturedProcess::Ordinary(Some(child)))
@@ -468,11 +468,34 @@ fn command_for(invocation: &Invocation) -> Result<(&str, Command), String> {
     Ok((program, command))
 }
 
+#[cfg(test)]
 fn spawn_tree(command: Command) -> Result<ProcessTree, String> {
-    let prepared =
-        prepare(command, MemoryRequest::default()).map_err(|error| format!("could not prepare process-tree containment: {error}"))?;
+    let prepared = prepare_tree(command)?;
+    spawn_prepared_tree(prepared)
+}
+
+fn spawn_sealed_tree(command: Command) -> Result<ProcessTree, String> {
+    let prepared = prepare_tree(command)?;
+    spawn_if_sealed(prepared, PreparedCommand::sealed, spawn_prepared_tree)
+}
+
+fn prepare_tree(command: Command) -> Result<PreparedCommand, String> {
+    prepare(command, MemoryRequest::default()).map_err(|error| format!("could not prepare process-tree containment: {error}"))
+}
+
+fn spawn_prepared_tree(prepared: PreparedCommand) -> Result<ProcessTree, String> {
     let spawned = prepared.spawn().map_err(|failure| failure.to_string())?;
     ProcessTree::adopt(spawned).map_err(|error| format!("could not adopt child into process-tree containment: {error}"))
+}
+
+fn spawn_if_sealed<T, O>(prepared: T, sealed: impl FnOnce(&T) -> bool, spawn: impl FnOnce(T) -> Result<O, String>) -> Result<O, String> {
+    if !sealed(&prepared) {
+        return Err(
+            "timeout requires sealed process-tree containment, but this host only provides best-effort containment; the child was not started"
+                .to_owned(),
+        );
+    }
+    spawn(prepared)
 }
 
 enum CapturedProcess {
@@ -945,7 +968,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::num::NonZeroUsize;
     use std::process::{Command, ExitCode, ExitStatus, Stdio};
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
     use std::time::{Duration, Instant};
     use std::{io, thread};
@@ -954,8 +977,8 @@ mod tests {
         BufferedOutcome, CapturedProcess, CapturedStream, Invocation, InvocationResult, OutputReader, Plan, ReaderCompletion,
         RunningWorker, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM, combine_captured_output, display_duration,
         execute_parallel, exit_byte, failure_stops_launching, finish_output_reader, panic_description, run_captured, run_streamed,
-        run_streamed_with_timeout, spawn_output_reader, spawn_tree, terminate_ordinary_child, terminate_ordinary_with, wait_for_tree_with,
-        wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
+        run_streamed_with_timeout, spawn_if_sealed, spawn_output_reader, spawn_tree, terminate_ordinary_child, terminate_ordinary_with,
+        wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
     };
 
     const ORDINARY_BOUNDARY: &str = "ordinary process tree";
@@ -1430,6 +1453,45 @@ mod tests {
         )
         .expect_err("try_wait failure must be preserved");
         assert!(error.to_string().contains("observation failed"));
+    }
+
+    #[test]
+    fn unsealed_timeout_is_refused_before_spawn() {
+        struct FakePrepared {
+            sealed: bool,
+        }
+
+        let spawned = Arc::new(AtomicBool::new(false));
+        let spawn_observed = Arc::clone(&spawned);
+        let error = spawn_if_sealed(
+            FakePrepared { sealed: false },
+            |prepared| prepared.sealed,
+            move |_prepared| {
+                spawn_observed.store(true, Ordering::SeqCst);
+                Ok::<_, String>(())
+            },
+        )
+        .expect_err("an unsealed timeout launch must be refused");
+
+        assert!(
+            !spawned.load(Ordering::SeqCst),
+            "the child spawn path ran despite unsealed containment"
+        );
+        assert!(error.contains("timeout requires sealed process-tree containment"));
+        assert!(error.contains("child was not started"));
+
+        let spawned = Arc::new(AtomicBool::new(false));
+        let spawn_observed = Arc::clone(&spawned);
+        spawn_if_sealed(
+            FakePrepared { sealed: true },
+            |prepared| prepared.sealed,
+            move |_prepared| {
+                spawn_observed.store(true, Ordering::SeqCst);
+                Ok::<_, String>(())
+            },
+        )
+        .expect("sealed containment permits the spawn");
+        assert!(spawned.load(Ordering::SeqCst));
     }
 
     #[test]

@@ -251,7 +251,7 @@ filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 | `--target-required-feature <FEATURE>` | In per-target mode, retain targets whose `required-features` contains `FEATURE`. Repeatable; values are AND-combined. Requires `--each-target`. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
 | `--jobs <N>` | Run at most `N` per-package or per-target commands concurrently. Default `1`. With `--once`, values other than `1` are a usage error. |
-| `--timeout <DURATION>` | Terminate an invocation and its child process tree when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. No timeout by default. |
+| `--timeout <DURATION>` | Terminate an invocation and its child process tree when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. Requires sealed process-tree containment; unsupported hosts fail before the child starts. No timeout by default. |
 | `--chdir` | Run each per-package or per-target command from that member's crate root (the directory containing its `Cargo.toml`) instead of the caller's CWD. Combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
 | `--manifest-path <PATH>` | Workspace root `Cargo.toml`. Defaults to auto-detection from CWD. |
 | `--dry-run` | Print the fully-substituted commands that *would* run, one per line, without executing. |
@@ -325,7 +325,10 @@ no-op.
   after cargo-each returns. Termination gets a bounded 250 ms grace to reap the
   leader. If signalling fails and the leader is still running at that deadline,
   its handle is detached so neither termination nor Drop can defeat the
-  invocation timeout; cargo-each reports the infrastructure failure.
+  invocation timeout; cargo-each reports the infrastructure failure. A timeout
+  is accepted only when launch preparation reports a sealed cgroup or job
+  boundary. On a host with best-effort process-group containment, cargo-each
+  reports that timeout is unsupported and does not spawn the command.
 - **Child executable resolution follows `PATH`.** `cargo-each` explicitly
   copies an inherited `PATH` onto every child command. This is equivalent to
   ordinary inheritance on other platforms and makes Windows resolve a relative

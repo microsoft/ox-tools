@@ -77,6 +77,9 @@
 //! (default is fail-fast). `--jobs <N>` bounds concurrent per-package or
 //! per-target work (default `1`), while `--timeout <DURATION>` terminates each
 //! invocation and its process tree independently (`250ms`, `30s`, or `2m`).
+//! Timeouts require sealed process-tree containment; on a host that only
+//! offers best-effort containment, cargo-each reports an unsupported
+//! infrastructure failure before starting the child.
 //! `--chdir` runs each per-package or per-target command from that member crate
 //! root; `--dry-run` prints commands without running them.
 //!

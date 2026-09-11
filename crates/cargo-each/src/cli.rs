@@ -99,7 +99,9 @@ pub(crate) struct EachArgs {
     pub(crate) jobs: NonZeroUsize,
 
     /// Terminate each invocation and its process tree after this duration.
-    /// Accepts a positive integer followed by `ms`, `s`, or `m`.
+    /// Requires sealed process-tree containment; unsupported hosts fail before
+    /// starting the child. Accepts a positive integer followed by `ms`, `s`,
+    /// or `m`.
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     pub(crate) timeout: Option<Duration>,
 
