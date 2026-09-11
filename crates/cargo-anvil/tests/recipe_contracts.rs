@@ -24,6 +24,7 @@ const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
 const BUILD: &str = include_str!("../templates/justfiles/anvil/dev/build.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const DOC_BUILD: &str = include_str!("../templates/justfiles/anvil/checks/doc-build.just");
+const DOC_TEST: &str = include_str!("../templates/justfiles/anvil/checks/doc-test.just");
 const EXAMPLES: &str = include_str!("../templates/justfiles/anvil/checks/examples.just");
 const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
@@ -150,7 +151,10 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = $packageId
             manifest_path = $manifestPath
-            targets = @([pscustomobject]@{ name = $libName; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $libName
+                kind = @($(if ($env:FAKE_TARGET_KIND) { $env:FAKE_TARGET_KIND } else { 'lib' }))
+            })
             publish = if ($env:FAKE_PUBLISH_FALSE) {
                 # Preserve the empty array through expression output so JSON emits [] rather than null.
                 Write-Output -NoEnumerate @()
@@ -1744,11 +1748,212 @@ source-prereq:
 }
 
 #[test]
+fn doc_test_filters_binary_only_packages_and_preserves_feature_runs() {
+    if !tools_available() {
+        return;
+    }
+    for kind in ["bin", "lib", "proc-macro", "rlib", "dylib", "cdylib", "staticlib"] {
+        for selection in [
+            "--package fixture",
+            "--package fixture@0.1.0",
+            "--package fixture@0.1.0 --package library@0.1.0",
+            "--workspace",
+            "--skip",
+        ] {
+            let tmp = fixture(
+                &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+                &["anvil-doc-test-validate-prereqs", "anvil-doc-test-setup installer", "anvil-impact"],
+            );
+            seed_include(tmp.path(), "affected", selection);
+            let log = tmp.path().join("cargo.log");
+            let output = run_just(
+                tmp.path(),
+                &["anvil-doc-test"],
+                &[
+                    ("FAKE_CARGO_LOG", log.as_os_str()),
+                    ("FAKE_TARGET_KIND", OsStr::new(kind)),
+                    ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("library")),
+                    ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("library")),
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "kind={kind}, selection={selection}:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if selection == "--skip" {
+                assert!(!log.exists());
+                continue;
+            }
+            let calls = fs::read_to_string(&log).unwrap();
+            let metadata = calls.lines().filter(|line| line.starts_with("metadata ")).collect::<Vec<_>>();
+            if selection == "--workspace" {
+                assert!(metadata.is_empty());
+            } else {
+                assert_eq!(metadata, ["metadata --no-deps --format-version 1 --locked"]);
+            }
+            let tests = calls.lines().filter(|line| line.starts_with("test --doc ")).collect::<Vec<_>>();
+            if kind == "bin" && matches!(selection, "--package fixture" | "--package fixture@0.1.0") {
+                assert!(tests.is_empty());
+                assert!(String::from_utf8_lossy(&output.stdout).contains("no affected library packages"));
+            } else {
+                let expected = if kind == "bin" && selection != "--workspace" {
+                    "--package library@0.1.0"
+                } else {
+                    selection
+                };
+                assert_eq!(
+                    tests,
+                    [
+                        format!("test --doc {expected} --all-features --locked"),
+                        format!("test --doc {expected} --locked"),
+                    ]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn doc_test_keeps_case_distinct_package_targets_separate() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+        &["anvil-doc-test-validate-prereqs", "anvil-doc-test-setup installer", "anvil-impact"],
+    );
+    seed_include(tmp.path(), "affected", "--package Fixture@0.1.0 --package fixture@0.1.0");
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_PACKAGE_NAME", OsStr::new("Fixture")),
+            ("FAKE_TARGET_KIND", OsStr::new("bin")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("fixture")),
+            ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("library")),
+        ],
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let calls = fs::read_to_string(&log).unwrap();
+    let tests = calls.lines().filter(|line| line.starts_with("test --doc ")).collect::<Vec<_>>();
+    assert_eq!(
+        tests,
+        [
+            "test --doc --package fixture@0.1.0 --all-features --locked",
+            "test --doc --package fixture@0.1.0 --locked",
+        ]
+    );
+}
+
+#[test]
+fn doc_test_runs_real_cargo_for_a_mixed_workspace() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+        &["anvil-doc-test-validate-prereqs", "anvil-doc-test-setup installer", "anvil-impact"],
+    );
+    write(
+        &tmp.path().join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\nmembers = [\"app\", \"library\", \"macros\"]\n",
+    );
+    for (name, target) in [("app", ""), ("library", ""), ("macros", "\n[lib]\nproc-macro = true\n")] {
+        write(
+            &tmp.path().join(name).join("Cargo.toml"),
+            &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n{target}"),
+        );
+        write(
+            &tmp.path().join(name).join(if name == "app" { "src/main.rs" } else { "src/lib.rs" }),
+            if name == "app" {
+                "fn main() {}\n"
+            } else {
+                "//! ```\n//! assert_eq!(2 + 2, 4);\n//! ```\n"
+            },
+        );
+    }
+    write(
+        &tmp.path().join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [[package]]\nname = \"library\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"macros\"\nversion = \"0.1.0\"\n",
+    );
+    for selection in [
+        "--package app@0.1.0",
+        "--package app@0.1.0 --package library@0.1.0 --package macros@0.1.0",
+    ] {
+        seed_include(tmp.path(), "affected", selection);
+        let output = run_just_with_real_cargo(tmp.path(), &["anvil-doc-test"]);
+        assert!(
+            output.status.success(),
+            "selection={selection}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if selection == "--package app@0.1.0" {
+            assert!(stdout.contains("no affected library packages"));
+        } else {
+            assert_eq!(stdout.matches("1 passed").count(), 4, "{stdout}");
+        }
+    }
+    seed_include(tmp.path(), "affected", "--package app@9.9.9");
+    let output = run_just_with_real_cargo(tmp.path(), &["anvil-doc-test"]);
+    assert_failed(&output, "a missing binary package version must not become a successful skip");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("affected package 'app@9.9.9' is absent from cargo metadata"));
+}
+
+#[test]
+fn doc_test_rejects_invalid_selections_and_propagates_cargo_failure() {
+    if !tools_available() {
+        return;
+    }
+    for selection in [
+        "--package absent@0.1.0",
+        "--package fixture@",
+        "--package fixture@0.1.0@invalid",
+        "--package",
+        "--exclude fixture",
+        "--workspace --package fixture@0.1.0",
+        "--package fixture@0.1.0",
+    ] {
+        let tmp = fixture(
+            &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+            &["anvil-doc-test-validate-prereqs", "anvil-doc-test-setup installer", "anvil-impact"],
+        );
+        seed_include(tmp.path(), "affected", selection);
+        let log = tmp.path().join("cargo.log");
+        let output = run_just(
+            tmp.path(),
+            &["anvil-doc-test"],
+            &[
+                ("FAKE_CARGO_LOG", log.as_os_str()),
+                ("FAKE_CARGO_DEFAULT_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT)),
+            ],
+        );
+        assert_failed(&output, selection);
+        let calls = fs::read_to_string(&log).unwrap();
+        let tests = calls.lines().filter(|line| line.starts_with("test --doc ")).count();
+        assert_eq!(tests, usize::from(selection == "--package fixture@0.1.0"));
+        if selection != "--package fixture@0.1.0" {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("anvil-doc-test:"));
+        }
+    }
+}
+
+#[test]
 fn public_api_checks_fail_when_metadata_discovery_fails() {
     if !tools_available() {
         return;
     }
     for (recipe_file, contents, recipe, dependencies) in [
+        (
+            "doc-test.just",
+            DOC_TEST,
+            "anvil-doc-test",
+            &["anvil-doc-test-validate-prereqs", "anvil-doc-test-setup installer", "anvil-impact"][..],
+        ),
         (
             "semver.just",
             SEMVER,
@@ -1776,9 +1981,15 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
         seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
         let output = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))]);
         assert_failed(&output, &format!("{recipe} cargo metadata failure"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(&format!("{recipe}: cargo metadata failed")));
 
         let malformed = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_INVALID", OsStr::new("1"))]);
         assert_failed(&malformed, &format!("{recipe} malformed cargo metadata"));
+        assert!(
+            String::from_utf8_lossy(&malformed.stderr).contains(&format!("{recipe}: could not parse cargo metadata output")),
+            "{recipe} must diagnose malformed metadata itself:\n{}",
+            String::from_utf8_lossy(&malformed.stderr)
+        );
     }
 }
 
