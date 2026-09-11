@@ -396,10 +396,10 @@ outstanding owned-file proposals and managed-region refusals.
 - The built-in `GITHUB_TOKEN` is exposed to the GitHub setup steps only so
   `cargo-binstall` can discover releases as an authenticated caller instead of
   hitting anonymous rate limits. It is removed from the environment before any
-  source install, binstall's compile strategy is disabled while it is set, and
-  every generated PR job declares the narrowest permissions it needs, so the
-  token reaching those installers is read-only in every job except `pr-fast`.
-  It grants no permissions beyond those the user's own workflow already declares.
+  source install, and binstall's compile strategy is disabled while it is set,
+  so no third-party build ever runs with the credential in scope. Its *scopes*
+  stay the caller's choice, per the permissions rule above: the generated
+  implementation declares none of its own.
 - The tool never sources or executes content from any user-edited file at runtime;
   everything executable in the repo is plain `just` recipes the user can read.
 - Recommended user-workflow shape: `permissions: contents: read` on PR workflows; grant
