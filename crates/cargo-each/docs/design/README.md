@@ -309,15 +309,23 @@ no-op.
   final failure is chosen by plan order, not scheduler timing. A worker panic
   is converted into an infrastructure-failure outcome; each worker has a
   dedicated completion channel, so an unexpected exit is observable as
-  disconnection rather than leaving the scheduler blocked forever.
+  disconnection rather than leaving the scheduler blocked forever. Without
+  `--timeout`, parallel commands use the ordinary direct-child lifecycle:
+  cargo-each waits for the launched leader but does not contain or kill
+  background descendants.
+- **Output drain is bounded after every completion.** Readers get one second
+  after the leader completes to observe EOF. Complete output is preserved when
+  both pipes close within that grace. If a background or escaped descendant
+  keeps a pipe open, capture stops retaining new bytes, emits the partial bytes
+  already buffered, detaches the blocked reader, and reports an explicit
+  infrastructure failure rather than hanging or silently truncating.
 - **Timeouts terminate trees.** A timed-out command is a failure. cargo-each
   terminates the child process tree rather than only the immediate process, so
   compiler or test descendants cannot continue mutating the target directory
-  after cargo-each returns. If tree termination itself fails, cargo-each reports
-  that infrastructure failure without waiting indefinitely for surviving
-  descendants to close inherited output pipes: capture stops retaining new
-  bytes, emits the partial output already buffered, and detaches blocked
-  readers so the timeout remains bounded.
+  after cargo-each returns. Termination gets a bounded 250 ms grace to reap the
+  leader. If signalling fails and the leader is still running at that deadline,
+  its handle is detached so neither termination nor Drop can defeat the
+  invocation timeout; cargo-each reports the infrastructure failure.
 - **Child executable resolution follows `PATH`.** `cargo-each` explicitly
   copies an inherited `PATH` onto every child command. This is equivalent to
   ordinary inheritance on other platforms and makes Windows resolve a relative

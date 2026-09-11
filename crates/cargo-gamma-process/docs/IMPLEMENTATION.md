@@ -16,6 +16,15 @@ The contained output path takes stdout and stderr exactly once and drains them
 concurrently. It sweeps descendants after the leader exits so inherited write
 ends do not keep readers open indefinitely.
 
+## Bounded termination
+
+`ProcessTree::terminate_bounded` requests the same subtree and leader kills as
+ordinary termination, then polls `try_wait` until a caller-provided grace
+expires. It never follows a failed kill with blocking `wait`: at the deadline
+the leader handle is detached, the `ProcessTree` no longer owns a child that
+Drop could wait for, and the original cleanup failure is retained in the
+returned error.
+
 ## Platform composition
 
 Unix launch preparation holds the interrupt spawn window only across child

@@ -175,18 +175,19 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 manifest,
                 ..
             } => {
+                let original = replace_workspace_rust_version(arg.clone(), placeholders)?;
                 // The `{name}` / `{spec}` / … literals are cargo-each
                 // placeholder tokens, not Rust format-string arguments.
                 #[expect(
                     clippy::literal_string_with_formatting_args,
                     reason = "cargo-each placeholder tokens, not format args"
                 )]
-                let replaced = arg
+                let replaced = original
                     .replace("{name}", name)
                     .replace("{spec}", spec)
                     .replace("{version}", version)
                     .replace("{manifest}", manifest);
-                out.push(replace_workspace_rust_version(replaced, placeholders)?);
+                out.push(replaced);
             }
             Placeholders::Target {
                 name,
@@ -196,17 +197,18 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 target,
                 ..
             } => {
+                let original = replace_workspace_rust_version(arg.clone(), placeholders)?;
                 #[expect(
                     clippy::literal_string_with_formatting_args,
                     reason = "cargo-each placeholder tokens, not format args"
                 )]
-                let replaced = arg
+                let replaced = original
                     .replace("{name}", name)
                     .replace("{spec}", spec)
                     .replace("{version}", version)
                     .replace("{manifest}", manifest)
                     .replace(TARGET_TOKEN, target);
-                out.push(replace_workspace_rust_version(replaced, placeholders)?);
+                out.push(replaced);
             }
             Placeholders::Once { packages, .. } => {
                 // Validation above guarantees each arg is either exactly
@@ -343,6 +345,38 @@ mod tests {
         assert_eq!(
             substitute(&command, &once).expect("once substitution"),
             ["rustup", "toolchain", "install", "1.80"]
+        );
+    }
+
+    #[test]
+    fn package_values_are_not_rescanned_for_workspace_tokens() {
+        let placeholders = Placeholders::Package {
+            name: "crate".to_owned(),
+            spec: "crate@1.0.0".to_owned(),
+            version: "1.0.0".to_owned(),
+            manifest: "/ws/{workspace-rust-version}/crate/Cargo.toml".to_owned(),
+            workspace_rust_version: Some("1.80".to_owned()),
+        };
+        assert_eq!(
+            substitute(&args(&["{workspace-rust-version}", "{manifest}"]), &placeholders).expect("substitute package placeholders"),
+            ["1.80", "/ws/{workspace-rust-version}/crate/Cargo.toml"]
+        );
+    }
+
+    #[test]
+    fn target_values_are_not_rescanned_for_workspace_tokens() {
+        let placeholders = Placeholders::Target {
+            name: "crate".to_owned(),
+            spec: "crate@1.0.0".to_owned(),
+            version: "1.0.0".to_owned(),
+            manifest: "/ws/{workspace-rust-version}/crate/Cargo.toml".to_owned(),
+            target: "example".to_owned(),
+            workspace_rust_version: Some("1.80".to_owned()),
+        };
+        assert_eq!(
+            substitute(&args(&["{workspace-rust-version}", "{manifest}:{target}"]), &placeholders,)
+                .expect("substitute target placeholders"),
+            ["1.80", "/ws/{workspace-rust-version}/crate/Cargo.toml:example"]
         );
     }
 

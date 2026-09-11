@@ -126,10 +126,15 @@ are emitted in deterministic plan order. Fail-fast stops launching after
 the first observed failure, waits for running work, and chooses the final
 failure by plan order. `--keep-going` runs the complete plan. Worker panics
 and unexpected worker-channel disconnections become infrastructure-failure
-outcomes instead of blocking the scheduler.
-If timed-out tree cleanup fails, cargo-each reports the infrastructure
-failure and emits already-buffered output without waiting indefinitely for
-surviving descendants to close inherited pipes.
+outcomes instead of blocking the scheduler. Without `--timeout`, parallel
+commands retain ordinary direct-child semantics and do not kill background
+descendants.
+
+Output drain is bounded after every completion. Readers get one second to
+observe EOF; grace expiry preserves partial bytes and becomes an explicit
+infrastructure failure. Timed-out tree termination likewise gets a bounded
+250 ms leader-reap grace, after which the leader handle is detached so no
+wait or Drop path can defeat the timeout.
 Child commands inherit `PATH` explicitly. On Windows this makes relative
 program lookup honor the inherited `PATH` order instead of preferring an
 unrelated executable beside `cargo-each`.

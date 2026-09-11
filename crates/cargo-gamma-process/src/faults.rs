@@ -24,6 +24,13 @@ pub enum Fault {
 
     /// Terminating a contained subtree reports a cleanup failure.
     Terminate,
+
+    /// The direct leader and surrounding subtree refuse the termination
+    /// signal, leaving the leader running.
+    Kill,
+
+    /// The termination request reports success without signalling the leader.
+    Linger,
 }
 
 /// Arms `fault` on this thread until the returned value is dropped.
@@ -101,6 +108,8 @@ mod tests {
         assert!(!fired(Fault::Boundary));
         assert!(!fired(Fault::Window));
         assert!(!fired(Fault::Terminate));
+        assert!(!fired(Fault::Kill));
+        assert!(!fired(Fault::Linger));
     }
 
     #[test]

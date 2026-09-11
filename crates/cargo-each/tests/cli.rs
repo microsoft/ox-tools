@@ -242,6 +242,17 @@ fn main() {
             thread::sleep(Duration::from_millis(500));
             fs::write(&args[2], "survived").expect("write marker");
         }
+        "background-parent" => {
+            Command::new(env::current_exe().expect("current exe"))
+                .arg("background-child")
+                .arg(&args[2])
+                .spawn()
+                .expect("spawn background child");
+        }
+        "background-child" => {
+            thread::sleep(Duration::from_millis(100));
+            fs::write(&args[2], "completed").expect("write background marker");
+        }
         other => panic!("unknown probe mode: {other}"),
     }
 }
@@ -1350,6 +1361,25 @@ fn parallel_keep_going_runs_the_complete_plan() {
     for name in ["alpha", "beta", "delta", "epsilon", "gamma"] {
         assert!(launched.contains(name), "{name} must run under --keep-going:\n{launched}");
     }
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn parallel_without_timeout_preserves_ordinary_background_descendants() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let marker = tmp.path().join("background-completed");
+    each(&manifest)
+        .args(["-p", "alpha", "--jobs", "2", "--"])
+        .arg(probe)
+        .arg("background-parent")
+        .arg(&marker)
+        .assert()
+        .success();
+    assert!(
+        marker.exists(),
+        "parallel execution without --timeout must not kill an ordinary background descendant"
+    );
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
