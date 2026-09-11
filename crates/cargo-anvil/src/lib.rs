@@ -348,8 +348,10 @@
 //! ```
 //!
 //! The image contains the same tool versions used by the generated checks.
-//! Its tag is derived from the Dockerfile, toolchain, and generated recipe
-//! tree, so changes to those inputs select a different image. Docker is
+//! Its tag is derived from the Dockerfile and its ignore file, the generated
+//! recipe tree, the declared root MSRV, and a root `rust-toolchain` file where
+//! the repository owns one, so changes to those inputs select a different
+//! image. Docker is
 //! supported; Podman is available on a best-effort basis. Repositories that
 //! need private feeds can add a host-side credential hook without embedding
 //! credentials in the image or command line. See

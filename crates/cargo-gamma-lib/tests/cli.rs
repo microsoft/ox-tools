@@ -36,6 +36,23 @@ fn workspace(source: &str) -> TempDir {
     dir
 }
 
+/// Creates a registry-free stand-in for the runtime dependency before cargo-gamma redirects it.
+///
+/// The stub deliberately omits `gamma_rt::embedded`: the fixture only compiles after the
+/// dependency is redirected to cargo-gamma's real vendored runtime with `embedding` preserved.
+fn runtime_stub(root: &std::path::Path) {
+    let runtime = root.join("runtime-stub");
+
+    fs::create_dir_all(runtime.join("src")).expect("could not create the runtime stub");
+    fs::write(
+        runtime.join("Cargo.toml"),
+        "[package]\nname = \"cargo-gamma-rt\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+         [features]\nembedding = []\n",
+    )
+    .expect("could not write the runtime stub manifest");
+    fs::write(runtime.join("src/lib.rs"), "").expect("could not write the runtime stub library");
+}
+
 fn scratch_base(dir: &TempDir) -> Utf8PathBuf {
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
 
@@ -575,22 +592,12 @@ fn a_redirected_runtime_dependency_keeps_the_feature_gating_its_own_api() {
     let dir = TempDir::new().expect("could not create a temporary directory");
     let root = dir.path();
 
-    let runtime = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("this crate lives one level below `crates`")
-        .join("cargo-gamma-rt")
-        .into_string()
-        .replace('\\', "/");
-
-    // Cargo paths are portable when written with `/`, including on Windows; a native path with
-    // `\` is a string-escape sequence to a TOML parser, so writing it verbatim breaks on Windows.
+    runtime_stub(root);
 
     fs::write(
         root.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\ngamma_rt = {{ package = \"cargo-gamma-rt\", path = \"{runtime}\", features = [\"embedding\"] }}\n",
-        ),
+        "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"runtime-stub\", features = [\"embedding\"] }\n",
     )
     .expect("could not write the manifest");
 
@@ -615,22 +622,12 @@ fn a_workspace_inherited_runtime_dependency_keeps_the_feature_gating_its_own_api
     let dir = TempDir::new().expect("could not create a temporary directory");
     let root = dir.path();
 
-    let runtime = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("this crate lives one level below `crates`")
-        .join("cargo-gamma-rt")
-        .into_string()
-        .replace('\\', "/");
-
-    // Cargo paths are portable when written with `/`, including on Windows; a native path with
-    // `\` is a string-escape sequence to a TOML parser, so writing it verbatim breaks on Windows.
+    runtime_stub(root);
 
     fs::write(
         root.join("Cargo.toml"),
-        format!(
-            "[workspace]\nmembers = [\"subject\"]\nresolver = \"2\"\n\n\
-             [workspace.dependencies]\ngamma_rt = {{ package = \"cargo-gamma-rt\", path = \"{runtime}\", features = [\"embedding\"] }}\n",
-        ),
+        "[workspace]\nmembers = [\"subject\"]\nresolver = \"2\"\n\n\
+         [workspace.dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", path = \"runtime-stub\", features = [\"embedding\"] }\n",
     )
     .expect("could not write the workspace manifest");
 

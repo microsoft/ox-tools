@@ -77,6 +77,8 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         region::rustfmt(),
         region::delta(),
         region::spellcheck(),
+        region::spellcheck_hunspell(),
+        region::spellcheck_quirks(),
         region::clippy(),
         region::gitattributes(),
     ];
@@ -111,6 +113,61 @@ pub(crate) fn composed_hosts() -> Vec<ComposedHost> {
 mod tests {
     use super::*;
     use crate::catalog::{Catalog, HostSelector};
+
+    /// Catalog authors must compose valid TOML without array-of-table ownership.
+    #[test]
+    fn toml_regions_compose_for_every_workspace_shape() {
+        fn no_arrays(table: &toml_edit::Table) -> bool {
+            table
+                .iter()
+                .all(|(_, item)| !item.is_array_of_tables() && item.as_table().is_none_or(no_arrays))
+        }
+        for workspace in [false, true] {
+            let mut hosts = std::collections::BTreeMap::<String, String>::new();
+            for artifact in anvil_artifacts() {
+                let Artifact::Region(spec) = artifact else { continue };
+                let host = match spec.host {
+                    HostSelector::Path(path)
+                        if std::path::Path::new(&path)
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("toml")) =>
+                    {
+                        path
+                    }
+                    HostSelector::WorkspaceCargoToml if workspace => "Cargo.toml".into(),
+                    HostSelector::SingleCrateCargoToml if !workspace => "Cargo.toml".into(),
+                    HostSelector::EachMemberManifest if workspace => "member/Cargo.toml".into(),
+                    _ => continue,
+                };
+                let parsed = spec.body.parse::<toml_edit::DocumentMut>().unwrap();
+                assert!(no_arrays(parsed.as_table()), "{} claims an array of tables", spec.id.as_str());
+                let text = hosts.entry(host.clone()).or_default();
+                text.push_str(&spec.body);
+                text.push('\n');
+                text.parse::<toml_edit::DocumentMut>()
+                    .unwrap_or_else(|error| panic!("{host} catalog composition is invalid: {error}"));
+            }
+        }
+    }
+
+    #[test]
+    fn parser_rejects_conflicting_catalog_compositions() {
+        for (a, b) in [
+            ("[licenses]\nallow = ['MIT']\n", "[licenses]\nconfidence-threshold = 0.93\n"),
+            ("lints.rust.unsafe_code = 'deny'\n", "[lints]\nworkspace = true\n"),
+        ] {
+            format!("{a}{b}").parse::<toml_edit::DocumentMut>().unwrap_err();
+        }
+        // Reordering duplicate headers cannot make the catalog valid.
+        "[licenses]\nconfidence-threshold = 0.93\n[licenses]\nallow = ['MIT']\n"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_err();
+        let array = "[[bin]]\nname = 'app'\n".parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(
+            array["bin"].is_array_of_tables(),
+            "array-of-table ownership is deliberately unsupported"
+        );
+    }
 
     /// Every composed host must declare exactly the regions the built-in
     /// artifacts target at its path, in the same order.
@@ -180,6 +237,8 @@ mod tests {
             region::rustfmt(),
             region::delta(),
             region::spellcheck(),
+            region::spellcheck_hunspell(),
+            region::spellcheck_quirks(),
             region::clippy(),
             region::gitattributes(),
             github::setup_action(),

@@ -355,6 +355,26 @@ impl Manifest {
     pub fn has_region_host(&self, path: &str) -> bool {
         self.regions.keys().any(|key| key.host.as_str().eq_ignore_ascii_case(path))
     }
+
+    /// The checksum recorded for one managed region, tolerating a case-only
+    /// difference in the host for the reason [`Self::file_checksum`] gives.
+    ///
+    /// The id is matched exactly: ids come from the catalog, not from disk, so
+    /// two that differ only in case are two different regions. Only the host
+    /// travels through the filesystem and can come back respelled.
+    #[must_use]
+    pub fn region_checksum(&self, host: &str, id: &str) -> Option<&str> {
+        let key = RegionKey {
+            host: host.to_owned(),
+            id: id.to_owned(),
+        };
+        self.regions.get(&key).map(String::as_str).or_else(|| {
+            self.regions
+                .iter()
+                .find(|(key, _)| key.id == id && key.host.as_str().eq_ignore_ascii_case(host))
+                .map(|(_, checksum)| checksum.as_str())
+        })
+    }
 }
 
 // Suppress an unused-import lint when no callers reference `Array`/`Value`
@@ -606,6 +626,33 @@ mod tests {
         assert!(!manifest.has_region_host(".anvil/container/Other"));
         assert!(!Manifest::default().has_region_host(".anvil/container/Dockerfile"));
     }
+    /// The region counterpart of [`Manifest::file_checksum`]'s tolerance. The
+    /// host travels through the filesystem and can come back respelled; the id
+    /// comes from the catalog and never does, so two ids differing only in case
+    /// stay two different regions.
+    #[test]
+    fn region_checksum_tolerates_a_case_only_host_difference() {
+        let mut manifest = Manifest::default();
+        manifest.set_region("Deny.toml", "anvil-deny-licenses", "sha256:body");
+
+        assert_eq!(manifest.region_checksum("Deny.toml", "anvil-deny-licenses"), Some("sha256:body"));
+        assert_eq!(manifest.region_checksum("deny.toml", "anvil-deny-licenses"), Some("sha256:body"));
+        assert_eq!(manifest.region_checksum("deny.toml", "anvil-deny-bans"), None);
+        assert_eq!(manifest.region_checksum("deny.toml", "ANVIL-DENY-LICENSES"), None);
+    }
+
+    /// An exact match must win over a case-insensitive one, so a repository
+    /// holding two hosts differing only in case still reads its own.
+    #[test]
+    fn region_checksum_prefers_the_exact_host() {
+        let mut manifest = Manifest::default();
+        manifest.set_region("Deny.toml", "anvil-deny-licenses", "sha256:upper");
+        manifest.set_region("deny.toml", "anvil-deny-licenses", "sha256:lower");
+
+        assert_eq!(manifest.region_checksum("Deny.toml", "anvil-deny-licenses"), Some("sha256:upper"));
+        assert_eq!(manifest.region_checksum("deny.toml", "anvil-deny-licenses"), Some("sha256:lower"));
+    }
+
     #[test]
     fn rejects_a_file_path_that_escapes_the_repository() {
         for escape in [

@@ -20,13 +20,13 @@ use crate::catalog::artifact::{Artifact, ComposedHost, HostSelector, RegionSpec}
 use crate::checksum::{checksum_str, normalize_line_endings};
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
-use crate::emit::{ManagedRegionRequest, plan_managed_region, plan_owned_file};
+use crate::emit::{ManagedRegionRequest, RefusalRemedy, plan_managed_region, plan_owned_file, toml_introduction_refusal};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
-use crate::region::{CommentSyntax, RegionPlacement, find_region, remove_region, upsert_region_with_placement};
+use crate::region::{CommentSyntax, MarkerRepair, RegionPlacement, find_region, managed_region_ids, remove_region, repair_markers};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -156,6 +156,28 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
 /// against the discovered workspace (see [`push_region`]). Every path is
 /// resolved to its on-disk casing so anvil follows whatever a repo already
 /// uses (e.g. `justfile` vs `Justfile`).
+/// Every `(host, region id)` this pass declares, resolved to the casing on
+/// disk.
+///
+/// Computed before anything is planned, because the validity check each region
+/// runs has to know which of the regions already in its host are on their way
+/// out — and removals are not planned until every region has been visited.
+fn live_region_keys(repo_root: &Path, workspace: &Workspace, catalog: &Catalog) -> BTreeSet<(String, String)> {
+    catalog
+        .artifacts()
+        .iter()
+        .filter_map(|artifact| match artifact {
+            Artifact::Region(spec) => Some(spec),
+            Artifact::OwnedFile(_) => None,
+        })
+        .flat_map(|spec| {
+            region_host_paths(workspace, spec)
+                .into_iter()
+                .map(|host| (resolve_existing_case_insensitive(repo_root, host), spec.id.as_str().to_owned()))
+        })
+        .collect()
+}
+
 fn build_plan(
     repo_root: &Path,
     workspace: &Workspace,
@@ -167,7 +189,24 @@ fn build_plan(
     let mut hosts = HostTextCache::default();
     // Hosts already reported as unsafe to compose. Every region targeting one
     // hits the same fault, and four copies of one message is noise.
-    let mut composed = ComposedHosts::default();
+    let mut composed = ComposedHosts {
+        live: live_region_keys(repo_root, workspace, catalog),
+        ..ComposedHosts::default()
+    };
+    // Adoption, validation, and retirement must see the same repaired text.
+    // Extra complete pairs retain their bodies as unmanaged settings.
+    //
+    // Only regions on their way out are repaired here. A live one is repaired
+    // by `push_region_at` when it plans the region, with that region's own
+    // comment syntax rather than the `Hash` assumed below.
+    for key in manifest.regions.keys() {
+        let host = resolve_existing_case_insensitive(repo_root, &key.host);
+        if !composed.live.contains(&(host.clone(), key.id.clone())) {
+            // An unpaired result is left for the path that plans the region:
+            // it refuses there, where the region's own id is being handled.
+            let _ = repair_host_markers(repo_root, &mut plan, &mut hosts, &host, &key.id, CommentSyntax::Hash)?;
+        }
+    }
 
     for artifact in catalog.artifacts() {
         match artifact {
@@ -186,74 +225,7 @@ fn build_plan(
 
     plan_removals(repo_root, manifest, &mut plan, &mut hosts, &composed)?;
 
-    // Region proposals are computed eagerly as each region is visited, so a
-    // `Propose` planned before a sibling `Write`/`Remove` on the same host
-    // captures a stale host (missing the later update). The accumulator is
-    // fully composed now, so re-splice every proposal against it.
-    recompose_region_proposals(repo_root, &mut plan, &mut hosts)?;
-
     Ok(plan)
-}
-
-/// Re-splice every region `Propose` item's `.anvil-proposed` payload against
-/// the *final* composed host text — the in-memory host after all `Write` and
-/// region `Remove` operations for that host have been folded into the
-/// accumulator.
-///
-/// Proposals are planned eagerly as each region is visited (see
-/// [`push_region_at`]), so a proposal computed before a sibling `Write` or
-/// region `Remove` on the same host would otherwise capture a stale host
-/// (missing the later update). Applying such a proposal via
-/// `mv <host>.anvil-proposed <host>` would silently revert those sibling
-/// updates. Re-splicing here guarantees the proposed sibling is composed on
-/// top of every applied region update in the run, honoring `updates.md`'s
-/// "ready-to-use" proposal guarantee.
-///
-/// When several regions on one host propose, each proposal's new body is
-/// spliced on top of the others' too, so every proposal for the host (which
-/// all share the single `<host>.anvil-proposed` path) converges on the same
-/// fully-updated content instead of the last write clobbering the rest.
-fn recompose_region_proposals(repo_root: &Path, plan: &mut Plan, hosts: &mut HostTextCache) -> Result<(), AppError> {
-    // First pass: collect each region `Propose`'s (index, id, rendered body),
-    // grouped by host and preserving first-seen host order so the
-    // recomposition is deterministic.
-    let mut hosts_in_order: Vec<String> = Vec::new();
-    let mut grouped: HashMap<String, Vec<(usize, String, String)>> = HashMap::new();
-    for (idx, item) in plan.items().iter().enumerate() {
-        let Target::Region { host, id } = &item.target else {
-            continue;
-        };
-        if item.decision != Decision::Propose {
-            continue;
-        }
-        let body = item.rendered.clone().expect("region Propose carries its rendered body");
-        if !grouped.contains_key(host) {
-            hosts_in_order.push(host.clone());
-        }
-        grouped.entry(host.clone()).or_default().push((idx, id.clone(), body));
-    }
-
-    for host in &hosts_in_order {
-        let entries = &grouped[host];
-        let Some(mut composed) = hosts.get_or_read(repo_root, host)? else {
-            // Host file vanished (external race during the run); keep the
-            // eagerly-computed proposals rather than dropping them.
-            continue;
-        };
-        // Build the fully-updated host = final live host with every proposed
-        // region's new body spliced in. CommentSyntax is currently always
-        // Hash for managed regions (mirrors plan_managed_region /
-        // plan_removals); revisit when the manifest records per-region syntax.
-        for (_, id, body) in entries {
-            let placement = region_placement(id);
-            composed = upsert_region_with_placement(&composed, id, body, CommentSyntax::Hash, placement)?;
-        }
-        // Stamp the composed host onto every proposal for this host.
-        for (idx, _, _) in entries {
-            plan.items_mut()[*idx].spliced_host = Some(composed.clone());
-        }
-    }
-    Ok(())
 }
 
 /// In-memory accumulator of host-file text, shared across every region
@@ -272,6 +244,7 @@ fn recompose_region_proposals(repo_root: &Path, plan: &mut Plan, hosts: &mut Hos
 #[derive(Default)]
 struct HostTextCache {
     texts: HashMap<String, Option<String>>,
+    newlines: HashMap<String, &'static str>,
 }
 
 impl HostTextCache {
@@ -283,6 +256,8 @@ impl HostTextCache {
             return Ok(text.clone());
         }
         let text = read_file_if_present(&repo_root.join(host))?;
+        self.newlines
+            .insert(host.to_owned(), crate::region::text_newline(text.as_deref().unwrap_or("")));
         self.texts.insert(host.to_owned(), text.clone());
         Ok(text)
     }
@@ -290,15 +265,13 @@ impl HostTextCache {
     /// Record the host text that results from splicing a region in or out
     /// in memory, so later regions targeting the same host compose on top
     /// of it. Only operations that change the host file on disk (`Write`,
-    /// region `Remove`) update the cache; proposals leave the live host
-    /// untouched and so must not.
+    /// region `Remove`) update the cache; refusals leave its content untouched.
     fn set(&mut self, host: &str, text: String) {
         self.texts.insert(host.to_owned(), Some(text));
     }
 }
 
-/// Dispatch one managed-region artifact into the plan, expanding its host
-/// selector against the discovered workspace.
+/// The host paths one region spec targets in this workspace.
 ///
 /// - [`HostSelector::Path`] — a single literal host.
 /// - [`HostSelector::EachMemberManifest`] — one host per workspace member (no
@@ -306,6 +279,34 @@ impl HostTextCache {
 /// - [`HostSelector::WorkspaceCargoToml`] / [`HostSelector::SingleCrateCargoToml`]
 ///   — the root `Cargo.toml`, gated on whether it declares a `[workspace]`
 ///   table.
+///
+/// Shared with the live-key set [`build_plan`] computes up front, so the two
+/// cannot drift: a region skipped here because the workspace has the other
+/// shape must not be counted as live, or the pass would treat the region it is
+/// about to retire as one that is staying.
+fn region_host_paths<'a>(workspace: &'a Workspace, spec: &'a RegionSpec) -> Vec<&'a str> {
+    match &spec.host {
+        HostSelector::Path(path) => vec![path.as_str()],
+        HostSelector::WorkspaceCargoToml => {
+            if workspace.has_workspace_table {
+                vec!["Cargo.toml"]
+            } else {
+                Vec::new()
+            }
+        }
+        HostSelector::SingleCrateCargoToml => {
+            if workspace.has_workspace_table {
+                Vec::new()
+            } else {
+                vec!["Cargo.toml"]
+            }
+        }
+        HostSelector::EachMemberManifest => workspace.members.iter().map(|member| member.manifest_relpath.as_str()).collect(),
+    }
+}
+
+/// Dispatch one managed-region artifact into the plan, expanding its host
+/// selector against the discovered workspace.
 fn push_region(
     repo_root: &Path,
     workspace: &Workspace,
@@ -315,25 +316,8 @@ fn push_region(
     composed: &mut ComposedHosts,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
-    match &spec.host {
-        HostSelector::Path(path) => {
-            push_region_at(repo_root, manifest, plan, hosts, composed, path, spec)?;
-        }
-        HostSelector::WorkspaceCargoToml => {
-            if workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, hosts, composed, "Cargo.toml", spec)?;
-            }
-        }
-        HostSelector::SingleCrateCargoToml => {
-            if !workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, hosts, composed, "Cargo.toml", spec)?;
-            }
-        }
-        HostSelector::EachMemberManifest => {
-            for member in &workspace.members {
-                push_region_at(repo_root, manifest, plan, hosts, composed, &member.manifest_relpath, spec)?;
-            }
-        }
+    for host in region_host_paths(workspace, spec) {
+        push_region_at(repo_root, manifest, plan, hosts, composed, host, spec)?;
     }
     Ok(())
 }
@@ -357,62 +341,11 @@ fn push_region_at(
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     let host = resolve_existing_case_insensitive(repo_root, host);
-    let composed_host = composed_host_spec(&host);
-    if let Some(declared) = composed_host
-        && !composed.states.contains_key(&host)
-    {
-        let state = match hosts.get_or_read(repo_root, &host)? {
-            Some(text) => composed_host_state(declared.order, &host, &text, manifest),
-            // Nothing on disk. The scaffold becomes the base the first region
-            // splices into, carrying the parts of the file that cannot live
-            // inside a region -- the `# syntax=` parser directive above all. It
-            // is written once and never reconciled; everything outside the
-            // sentinels is the repository's from then on.
-            None => ComposedHostState::SeedFromScaffold,
-        };
-        // Resolved through a case variant. Case-insensitive resolution is right
-        // for an ordinary host, whose consumers open it by whatever name it
-        // has, but a composed host is read by something that requires the
-        // declared spelling: the container driver refuses any other, because
-        // `BuildKit` derives the ignore file's name from the Dockerfile's and
-        // there is no flag to point it elsewhere. Keeping the file up to date
-        // would leave the two halves disagreeing about one on-disk state, with
-        // the generator reporting the tree in sync while every recipe that uses
-        // it exits 1. The generator is the component that just wrote the file,
-        // so it is the one positioned to say so.
-        //
-        // A content state that already refuses keeps its own diagnosis: it
-        // describes the deeper problem, and its recovery -- move the file
-        // aside, restore the regions -- resolves the spelling along the way,
-        // whereas renaming first would only surface the same refusal again.
-        let state = if host == declared.path || matches!(state, ComposedHostState::Unsafe(_)) {
-            state
-        } else {
-            ComposedHostState::Unsafe(format!(
-                "it must be named exactly `{}`, and the recipes that consume it refuse any other \
-                 spelling, so anvil would be maintaining a file nothing can use. Rename it",
-                declared.path
-            ))
-        };
-        if matches!(state, ComposedHostState::SeedFromScaffold) {
-            hosts.set(&host, declared.scaffold.to_owned());
-        }
-        composed.states.insert(host.clone(), state);
+    if !repair_or_refuse(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false)? {
+        return Ok(());
     }
-    if let Some(ComposedHostState::Unsafe(reason)) = composed.states.get(&host) {
-        if composed.reported.insert(host.clone()) {
-            plan.refusal(format!(
-                "Refused to manage {host}: {reason}. Nothing was written to it, and other \
-                 artifacts were still planned."
-            ));
-        }
-        plan.push(PlanItem::noop(
-            Target::Region {
-                host,
-                id: spec.id.as_str().to_owned(),
-            },
-            Decision::LeaveAlone,
-        ));
+    let composed_host = composed_host_spec(&host);
+    if !settle_composed_host(repo_root, manifest, plan, hosts, composed, &host, spec)? {
         return Ok(());
     }
     let current = hosts.get_or_read(repo_root, &host)?;
@@ -433,7 +366,7 @@ fn push_region_at(
         );
     }
     let placement = composed_host.map_or_else(
-        || region_placement(spec.id.as_str()),
+        || region_placement(spec.id.as_str(), current.as_deref()),
         |declared| composed_placement(declared.order, declared.scaffold, spec.id.as_str(), current.as_deref()),
     );
     let body = match delta_region_body(current.as_deref(), spec) {
@@ -461,21 +394,32 @@ fn push_region_at(
             return Ok(());
         }
     };
-    let item = plan_managed_region(
-        manifest,
-        current.as_deref(),
-        ManagedRegionRequest {
-            host_relpath: &host,
-            region_id: spec.id.as_str(),
-            rendered_body: body,
-            syntax: spec.syntax,
-            placement,
-        },
-    )?;
-    // Only a `Write` mutates the live host on disk; fold its spliced
-    // output back into the accumulator so sibling regions compose. A
-    // `Propose` writes a sibling, not the host, so it must not advance the
-    // live host text.
+    let request = ManagedRegionRequest {
+        host_relpath: &host,
+        region_id: spec.id.as_str(),
+        rendered_body: body,
+        syntax: spec.syntax,
+        placement,
+        newline: hosts.newlines.get(&host).copied(),
+    };
+    let item = match plan_managed_region(manifest, current.as_deref(), request) {
+        Ok(item) => item,
+        Err(refusal) => {
+            refuse_region(plan, host, spec.id.as_str(), &refusal.reason.to_string(), refusal.remedy);
+            return Ok(());
+        }
+    };
+    let retiring = current
+        .as_deref()
+        .map(|text| composed.retiring_regions(manifest, &host, text, spec.syntax))
+        .unwrap_or_default();
+    if item.decision == Decision::Write
+        && let Some(refusal) = toml_introduction_refusal(current.as_deref(), request, &retiring)
+    {
+        refuse_region(plan, host, spec.id.as_str(), &refusal.reason, refusal.remedy);
+        return Ok(());
+    }
+    // Fold actual writes into the accumulator so later regions compose.
     if item.decision == Decision::Write
         && let Some(spliced) = &item.spliced_host
     {
@@ -483,6 +427,219 @@ fn push_region_at(
     }
     plan.push(item);
     Ok(())
+}
+
+/// Repair markers and classify a composed host once, before updating its bodies.
+///
+/// Split out of `push_region_at` because it answers a different question:
+/// whether the file on disk is the shape a composed host must be, independent
+/// of which region is being planned. Later regions targeting the same host see
+/// text this pass has already spliced, which is partially composed by
+/// construction, so the answer is computed once and cached.
+fn prepare_composed_host(
+    repo_root: &Path,
+    manifest: &Manifest,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    declared: ComposedHost,
+    host: &str,
+) -> Result<ComposedHostState, AppError> {
+    for id in declared.order {
+        // Each region of a composed host refuses for itself when it is planned;
+        // this pre-pass only performs the repairs that are safe.
+        let _ = repair_host_markers(repo_root, plan, hosts, host, id, CommentSyntax::Hash)?;
+    }
+    let state = match hosts.get_or_read(repo_root, host)? {
+        Some(text) => composed_host_state(declared.order, host, &text, manifest),
+        // Nothing on disk. The scaffold becomes the base the first region
+        // splices into, carrying the parts of the file that cannot live
+        // inside a region -- the `# syntax=` parser directive above all. It
+        // is written once and never reconciled; everything outside the
+        // sentinels is the repository's from then on.
+        None => ComposedHostState::SeedFromScaffold,
+    };
+    // Resolved through a case variant. Case-insensitive resolution is right
+    // for an ordinary host, whose consumers open it by whatever name it
+    // has, but a composed host is read by something that requires the
+    // declared spelling: the container driver refuses any other, because
+    // `BuildKit` derives the ignore file's name from the Dockerfile's and
+    // there is no flag to point it elsewhere. Keeping the file up to date
+    // would leave the two halves disagreeing about one on-disk state, with
+    // the generator reporting the tree in sync while every recipe that uses
+    // it exits 1. The generator is the component that just wrote the file,
+    // so it is the one positioned to say so.
+    //
+    // A content state that already refuses keeps its own diagnosis: it
+    // describes the deeper problem, and its recovery -- move the file
+    // aside, restore the regions -- resolves the spelling along the way,
+    // whereas renaming first would only surface the same refusal again.
+    if host == declared.path || matches!(state, ComposedHostState::Unsafe(_)) {
+        Ok(state)
+    } else {
+        Ok(ComposedHostState::Unsafe(format!(
+            "it must be named exactly `{}`, and the recipes that consume it refuse any other \
+             spelling, so anvil would be maintaining a file nothing can use. Rename it",
+            declared.path
+        )))
+    }
+}
+
+/// Record that one region was refused: a diagnostic naming the host, and a
+/// no-op so the plan still accounts for it.
+///
+/// The refusal is scoped to the region, not the run — every other artifact is
+/// still planned, which is what makes refusing an acceptable answer rather than
+/// a wall in front of onboarding.
+fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: RefusalRemedy) {
+    // Some reasons are whole sentences and some are a parser's error text, so
+    // the sentence break is supplied only when the reason has not already
+    // written one.
+    let stop = if reason.trim_end().ends_with('.') { "" } else { "." };
+    let remedy = match remedy {
+        RefusalRemedy::HandWrittenTable => "Reconcile the hand-written table with the managed one before retrying.",
+        RefusalRemedy::HostAlreadyUnparsable => {
+            "This file does not parse as it stands, before this region is written, so no run can write it \
+             until the existing TOML is repaired."
+        }
+        // Ordinary catalog growth reaches this while a table is moving between
+        // two managed regions: the pass that writes one of them settles the
+        // collision, and the next run writes the other. A catalog that
+        // *exchanges* tables never settles, so the reader is told what a
+        // repeat means rather than being left to re-run indefinitely.
+        RefusalRemedy::BetweenManagedRegions => {
+            "Both tables are declared by regions anvil manages, so nothing hand-written is involved. A table \
+             moving between managed regions is applied over two runs; re-run to complete it. If the same \
+             refusal repeats, the catalog is exchanging tables between two regions, which is not supported: \
+             retire the region giving the table up first, then add the one taking it."
+        }
+        // Retirement is the one refusal that is not about a parse at all, so
+        // the reason already carries the whole instruction. What it cannot say
+        // is why anvil stopped rather than removing the region, or that
+        // re-running changes nothing until someone acts.
+        RefusalRemedy::EditedRetirement => {
+            "The catalog no longer declares this region, so anvil would have removed it, but it carries \
+             changes anvil did not write and discarding those is not its call. Retirement stays \
+             incomplete, and this refusal repeats every run, until one of those is done."
+        }
+        // A live region whose body was edited. Nothing was parsed here either,
+        // so the hand-written-table advice would send the reader looking for a
+        // collision that does not exist.
+        RefusalRemedy::EditedRegion => {
+            "The body between the sentinels is anvil's to write, and it will not overwrite changes it did \
+             not make. Settings that must survive belong outside the sentinels, where anvil never touches \
+             them."
+        }
+        // The markers do not pair up, so nothing can be said about what lies
+        // between them -- and anvil must not guess, because guessing wrong
+        // duplicates a generated body and orphans the older copy.
+        RefusalRemedy::MalformedMarkers => {
+            "Without a matching pair of sentinels the boundary of the generated body cannot be established, \
+             so anvil will not write this region rather than risk appending a second copy of it. Restore the \
+             missing sentinel around the body anvil generated, or delete the stray one together with the \
+             body it was meant to enclose."
+        }
+    };
+    plan.refusal(format!(
+        "Refused to manage {host} [{id}]: {reason}{stop} This region was left unchanged; other regions in the same \
+         file and other artifacts may still be updated. {remedy}"
+    ));
+    plan.push(PlanItem::noop(Target::Region { host, id: id.to_owned() }, Decision::LeaveAlone));
+}
+
+/// Bring a composed host's state up to date and report whether the region may
+/// still be planned into it.
+///
+/// A host judged unsafe to compose is refused once, not once per region, and
+/// every region targeting it becomes a no-op.
+fn settle_composed_host(
+    repo_root: &Path,
+    manifest: &Manifest,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    composed: &mut ComposedHosts,
+    host: &str,
+    spec: &RegionSpec,
+) -> Result<bool, AppError> {
+    if let Some(declared) = composed_host_spec(host)
+        && !composed.states.contains_key(host)
+    {
+        let state = prepare_composed_host(repo_root, manifest, plan, hosts, declared, host)?;
+        if matches!(state, ComposedHostState::SeedFromScaffold) {
+            hosts.set(host, declared.scaffold.to_owned());
+        }
+        composed.states.insert(host.to_owned(), state);
+    }
+    let Some(ComposedHostState::Unsafe(reason)) = composed.states.get(host) else {
+        return Ok(true);
+    };
+    if composed.reported.insert(host.to_owned()) {
+        plan.refusal(format!(
+            "Refused to manage {host}: {reason}. Only marker cleanup, if needed, was written to it, and other \
+             artifacts were still planned."
+        ));
+    }
+    plan.push(PlanItem::noop(
+        Target::Region {
+            host: host.to_owned(),
+            id: spec.id.as_str().to_owned(),
+        },
+        Decision::LeaveAlone,
+    ));
+    Ok(false)
+}
+
+/// Repair a region's markers and, when they cannot be paired, refuse it.
+///
+/// Returns whether planning may continue. Refusing is the whole point: with
+/// one sentinel missing, a body anvil generated is still sitting in the file
+/// with no provable end, and treating it as absent makes the writer append the
+/// template beside it — two copies of the same content, only one of them
+/// tracked.
+fn repair_or_refuse(
+    repo_root: &Path,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    host: &str,
+    id: &str,
+    syntax: CommentSyntax,
+    retiring: bool,
+) -> Result<bool, AppError> {
+    if repair_host_markers(repo_root, plan, hosts, host, id, syntax)? != MarkerRepair::Unpaired {
+        return Ok(true);
+    }
+    let reason = if retiring {
+        "this retired managed region has marker lines that do not form a matching pair, so the span to remove cannot be established"
+    } else {
+        "this region's marker lines do not form a matching pair, so the boundary of any body anvil already generated cannot be established"
+    };
+    refuse_region(plan, host.to_owned(), id, reason, RefusalRemedy::MalformedMarkers);
+    Ok(false)
+}
+
+/// Persist cheap marker repairs independently of adopting or updating the body.
+///
+/// Reports whether the region's markers can be worked with at all. Unpaired
+/// markers are left exactly as found: see [`repair_markers`] for why removing
+/// them is the corrupting answer.
+fn repair_host_markers(
+    repo_root: &Path,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    host: &str,
+    id: &str,
+    syntax: CommentSyntax,
+) -> Result<MarkerRepair, AppError> {
+    let Some(text) = hosts.get_or_read(repo_root, host)? else {
+        return Ok(MarkerRepair::Repaired(String::new()));
+    };
+    let outcome = repair_markers(&text, id, syntax);
+    if let MarkerRepair::Repaired(repaired) = &outcome
+        && repaired != &text
+    {
+        hosts.set(host, repaired.clone());
+        plan.push(PlanItem::repair_region(host, id, repaired.clone()));
+    }
+    Ok(outcome)
 }
 
 /// Where a region belongs inside a composed host whose order is semantic.
@@ -537,12 +694,20 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
     RegionPlacement::At(if carries_directive { first_line.len() } else { 0 })
 }
 
-fn region_placement(region_id: &str) -> RegionPlacement {
-    if region_id == DELTA_REGION_ID {
-        RegionPlacement::Start
-    } else {
-        RegionPlacement::End
+fn region_placement(region_id: &str, current: Option<&str>) -> RegionPlacement {
+    if matches!(region_id, DELTA_REGION_ID | "anvil-spellcheck-root") {
+        return RegionPlacement::Start;
     }
+    if matches!(region_id, "anvil-spellcheck-hunspell" | "anvil-spellcheck-quirks")
+        && let Some(old) = current.and_then(|text| find_region(text, "anvil-spellcheck", CommentSyntax::Hash).ok().flatten())
+        && crate::region::ends_in_toml_table(old.body_str(), &["Hunspell", "quirks"])
+    {
+        // Install the replacement tables before retiring the combined block:
+        // its trailing user settings must still follow Hunspell.quirks. An
+        // empty block establishes no table context; append replacements instead.
+        return RegionPlacement::At(old.start_line.start);
+    }
+    RegionPlacement::End
 }
 
 /// The composed-host declaration for a host, when it has one.
@@ -587,6 +752,47 @@ struct ComposedHosts {
     /// Hosts whose refusal has already been reported, so one fault produces one
     /// diagnostic rather than one per region.
     reported: BTreeSet<String>,
+    /// Every `(host, region id)` this pass declares. A managed region found in
+    /// a host that is absent from this set is an orphan: the pass may be about
+    /// to remove it, in which case the tables it declares must not be held
+    /// against the region being written.
+    live: BTreeSet<(String, String)>,
+}
+
+impl ComposedHosts {
+    /// The managed regions of `host_text` this pass will actually remove.
+    ///
+    /// A region is retiring only if the catalog no longer declares it *and* the
+    /// removal decision is to remove it: a customized orphan is kept, stays in
+    /// the file, and so still owns the tables it declares. Getting that wrong
+    /// in either direction is a real fault — treating a kept orphan as gone
+    /// writes a duplicate header, and treating a removed one as staying refuses
+    /// a migration that is about to become valid.
+    fn retiring_regions(&self, manifest: &Manifest, host_relpath: &str, host_text: &str, syntax: CommentSyntax) -> BTreeSet<String> {
+        managed_region_ids(host_text, syntax)
+            .into_iter()
+            .filter(|id| !self.live.contains(&(host_relpath.to_owned(), id.clone())))
+            .filter(|id| {
+                let Some(last) = manifest.region_checksum(host_relpath, id) else {
+                    // Never recorded, so anvil does not own it and will not
+                    // remove it, whatever the sentinels say.
+                    //
+                    // The lookup tolerates a case-only difference in the host:
+                    // `host_relpath` is the file's real on-disk name and the
+                    // lock carries whatever casing it was written under, so an
+                    // exact comparison would call a recorded region unowned
+                    // after a case-only rename. It would then stay visible to
+                    // the parser while `plan_removals` — which does resolve the
+                    // casing — removes it in this same plan, and the
+                    // replacement declaring the same table would be refused as
+                    // a duplicate of a region that is on its way out.
+                    return false;
+                };
+                let region = find_region(host_text, id, syntax).ok().flatten();
+                region.is_some_and(|region| region.is_empty() || checksum_str(region.body_str()) == *last)
+            })
+            .collect()
+    }
 }
 
 /// Classify a composed host before anything is written to it.
@@ -719,8 +925,8 @@ fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionB
 /// Scan the previous manifest for entries that the active plan items
 /// don't cover. For each, classify as `Remove` (user untouched since the
 /// last render, or the file is already gone — the manifest entry is
-/// purged and the disk delete is a no-op when absent) or `OrphanedKept`
-/// (user customized — preserve and transfer ownership).
+/// purged and the disk delete is a no-op when absent). Edited owned files
+/// transfer ownership; edited managed regions refuse and retain tracking.
 ///
 /// This is what removes orphaned cloud-workflow artifacts, dropped catalog entries,
 /// disabled-backend files, and any other previously-tracked item that
@@ -743,6 +949,8 @@ fn plan_removals(
     let live_regions: BTreeSet<(String, String)> = plan
         .items()
         .iter()
+        // Marker-only writes do not make a retired catalog entry live again.
+        .filter(|item| item.decision != Decision::Write || item.rendered_checksum.is_some())
         .filter_map(|i| match &i.target {
             Target::Region { host, id } => Some((host.clone(), id.clone())),
             Target::File { .. } => None,
@@ -837,6 +1045,11 @@ fn plan_removals(
             }));
             continue;
         }
+        if !repair_or_refuse(repo_root, plan, hosts, &resolved_host, &key.id, CommentSyntax::Hash, true)? {
+            // The lock entry survives with the region, so the next run still
+            // knows it is anvil's to retire once the boundary is repaired.
+            continue;
+        }
         let Some(host_text) = hosts.get_or_read(repo_root, &resolved_host)? else {
             // Host file is gone entirely; just drop the manifest
             // entry. Emit OrphanedKept (no-op apply) so the plan
@@ -854,7 +1067,12 @@ fn plan_removals(
         let syntax = CommentSyntax::Hash;
         let region = find_region(&host_text, &key.id, syntax)?;
         let body_checksum = region.as_ref().map(|r| checksum_str(r.body_str()));
-        match decide_removal(last, body_checksum.as_deref()) {
+        let decision = if region.as_ref().is_some_and(crate::region::Region::is_empty) {
+            RemovalDecision::Remove
+        } else {
+            decide_removal(last, body_checksum.as_deref())
+        };
+        match decision {
             RemovalDecision::Remove => {
                 // Splice against — and update — the accumulated host text
                 // so a removal composes with the writes already planned
@@ -867,7 +1085,20 @@ fn plan_removals(
                 hosts.set(&resolved_host, spliced.clone());
                 plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
             }
-            RemovalDecision::OrphanedKept | RemovalDecision::AlreadyGone => {
+            RemovalDecision::OrphanedKept => {
+                // Named by the spelling on disk, not the one the lock
+                // recorded: this refusal says a file was left alone, so it has
+                // to name the file that is actually there. A case-only rename
+                // is exactly where the two diverge.
+                refuse_region(
+                    plan,
+                    resolved_host.clone(),
+                    &key.id,
+                    "this retired managed region contains edits. Restore its last generated body, empty it, or remove it to complete retirement",
+                    RefusalRemedy::EditedRetirement,
+                );
+            }
+            RemovalDecision::AlreadyGone => {
                 plan.push(PlanItem::orphaned_kept(Target::Region {
                     host: key.host.clone(),
                     id: key.id.clone(),
@@ -894,6 +1125,230 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, contents).unwrap();
+    }
+
+    /// `plan_removals` resolves the host's casing before deciding what to
+    /// remove, so this must too. A lock that records `Deny.toml` for a file now
+    /// spelled `deny.toml` still owns that region, and the same pass is about
+    /// to remove it — reading it as a region anvil does not own leaves it
+    /// visible to the parser and refuses the replacement declaring the same
+    /// table as a duplicate of something that is on its way out.
+    #[test]
+    fn a_case_only_host_rename_still_retires_a_clean_region() {
+        let body = "[licenses]\nallow = [\"MIT\"]\n";
+        let host_text = format!("# >>> anvil-managed: old\n{body}# <<< anvil-managed: old\n");
+        let mut manifest = Manifest::default();
+        manifest.set_region("Deny.toml", "old", checksum_str(body));
+
+        let composed = ComposedHosts::default();
+        let retiring = composed.retiring_regions(&manifest, "deny.toml", &host_text, CommentSyntax::Hash);
+
+        assert_eq!(
+            retiring,
+            BTreeSet::from(["old".to_owned()]),
+            "the recorded region is anvil's own however the host is spelled"
+        );
+    }
+
+    /// The counterpart: a region the lock does not record under any spelling of
+    /// the host is not anvil's to remove, so it stays and keeps the tables it
+    /// declares.
+    #[test]
+    fn an_unrecorded_region_is_not_treated_as_retiring() {
+        let host_text = "# >>> anvil-managed: old\n[licenses]\n# <<< anvil-managed: old\n";
+
+        let retiring = ComposedHosts::default().retiring_regions(&Manifest::default(), "deny.toml", host_text, CommentSyntax::Hash);
+
+        assert!(retiring.is_empty(), "a region anvil never wrote must not be masked away");
+    }
+
+    /// A composed host is only valid in one arrangement, so anvil classifies it
+    /// before writing. A region whose markers cannot be read is its own
+    /// diagnosis: folding it in with "absent" would report a broken region as a
+    /// missing one and send the reader looking for content that is in fact
+    /// right there, under a mismatched marker.
+    #[test]
+    fn a_malformed_sentinel_makes_a_composed_host_unsafe() {
+        let text = "# syntax=docker/dockerfile:1\n# >>> anvil-managed: base\nFROM scratch\n";
+
+        let state = composed_host_state(&["base", "layers"], "Dockerfile", text, &Manifest::default());
+
+        let ComposedHostState::Unsafe(reason) = state else {
+            panic!("a region that cannot be read must not be treated as absent");
+        };
+        assert!(
+            reason.contains("its 'base' region cannot be read"),
+            "the diagnosis must name the region carrying the broken marker: {reason}"
+        );
+    }
+
+    /// The body of the delta config depends on what the host already declares,
+    /// which means reading the host with its region removed. Markers that
+    /// cannot be read make that impossible, and guessing "no repository key"
+    /// from a file this could not parse would overwrite the repository's own
+    /// settings.
+    #[test]
+    fn malformed_delta_markers_are_reported_rather_than_guessed() {
+        let spec = RegionSpec {
+            host: HostSelector::Path(".delta.toml".to_owned()),
+            id: crate::catalog::artifact::RegionId::new(DELTA_REGION_ID),
+            body: String::new(),
+            syntax: CommentSyntax::Hash,
+        };
+        let host = format!("# >>> anvil-managed: {DELTA_REGION_ID}\n[delta]\nroot-files = []\n");
+
+        let DeltaRegionBody::Malformed(reason) = delta_region_body(Some(&host), &spec) else {
+            panic!("an unreadable host must not be silently treated as managed");
+        };
+        assert!(
+            reason.contains("managed-region markers are malformed"),
+            "the reason must say the markers are at fault, not the TOML: {reason}"
+        );
+    }
+
+    /// The refusal diagnostic joins a reason to a fixed remedy, and the two
+    /// classes of reason punctuate themselves differently: adoption writes
+    /// whole sentences, while the parser backstop appends `toml_edit`'s error
+    /// text, which does not end in a full stop. Supplying the break
+    /// unconditionally produced `TOML rejects.. This region`, and omitting it
+    /// unconditionally would run the parser's message straight into the remedy.
+    mod refuse_region {
+        use super::*;
+
+        fn refusal_for(reason: &str) -> String {
+            let mut plan = Plan::default();
+            super::super::refuse_region(
+                &mut plan,
+                "deny.toml".to_owned(),
+                "anvil-deny-advisories",
+                reason,
+                RefusalRemedy::HandWrittenTable,
+            );
+            plan.refusals().first().expect("a refusal is recorded").clone()
+        }
+
+        /// Each remedy answers a different question, and only one of the three
+        /// mentions a hand-written table. A reader sent to reconcile a file
+        /// they did not write has been told to look in the wrong place.
+        #[test]
+        fn each_fault_gets_its_own_remedy() {
+            let reason = "splicing the region would leave deny.toml unparsable as TOML: duplicate key";
+            let remedy_for = |remedy| {
+                let mut plan = Plan::default();
+                super::super::refuse_region(&mut plan, "deny.toml".to_owned(), "anvil-deny-advisories", reason, remedy);
+                plan.refusals().first().expect("a refusal is recorded").clone()
+            };
+
+            let hand_written = remedy_for(RefusalRemedy::HandWrittenTable);
+            assert!(hand_written.contains("Reconcile the hand-written table"), "{hand_written}");
+
+            let already = remedy_for(RefusalRemedy::HostAlreadyUnparsable);
+            assert!(already.contains("does not parse as it stands"), "{already}");
+            assert!(
+                !already.contains("Reconcile the hand-written table"),
+                "a pre-existing fault is not the reader's hand-written table: {already}"
+            );
+
+            let managed = remedy_for(RefusalRemedy::BetweenManagedRegions);
+            assert!(managed.contains("re-run to complete it"), "{managed}");
+            assert!(
+                managed.contains("exchanging tables between two regions, which is not supported"),
+                "a repeat has to be distinguishable from a move in progress: {managed}"
+            );
+            assert!(
+                !managed.contains("Reconcile the hand-written table"),
+                "nothing hand-written is involved: {managed}"
+            );
+
+            let retirement = remedy_for(RefusalRemedy::EditedRetirement);
+            assert!(
+                retirement.contains("no longer declares this region"),
+                "the reader is told why anvil stopped instead of removing it: {retirement}"
+            );
+            assert!(
+                !retirement.contains("Reconcile the hand-written table"),
+                "nothing was parsed and no table collided: {retirement}"
+            );
+
+            let edited = remedy_for(RefusalRemedy::EditedRegion);
+            assert!(
+                edited.contains("outside the sentinels"),
+                "an edited live region is told where its settings belong: {edited}"
+            );
+            assert!(
+                !edited.contains("Reconcile the hand-written table"),
+                "an edited body is not a table collision: {edited}"
+            );
+
+            let markers = remedy_for(RefusalRemedy::MalformedMarkers);
+            assert!(
+                markers.contains("second copy"),
+                "the reader is told what anvil refused to risk: {markers}"
+            );
+            assert!(
+                !markers.contains("Reconcile the hand-written table"),
+                "a marker fault has nothing to do with a table: {markers}"
+            );
+        }
+
+        #[test]
+        fn a_reason_that_ends_a_sentence_is_not_given_a_second_full_stop() {
+            let refusal = refusal_for("keeping both would repeat the key, which TOML rejects.");
+
+            assert!(
+                refusal.contains("which TOML rejects. This region was left unchanged"),
+                "one full stop, one space: {refusal}"
+            );
+            assert!(!refusal.contains(".."), "no doubled full stop: {refusal}");
+        }
+
+        #[test]
+        fn a_reason_without_a_full_stop_is_given_one() {
+            let refusal = refusal_for("splicing the region would leave deny.toml unparsable as TOML: expected `]`");
+
+            assert!(
+                refusal.contains("expected `]`. This region was left unchanged"),
+                "the reason is closed before the remedy begins: {refusal}"
+            );
+        }
+
+        /// Trailing whitespace on the reason must not defeat the check: the
+        /// break is decided by the last non-space character, and the reason is
+        /// still emitted exactly as it arrived.
+        #[test]
+        fn a_trailing_space_does_not_hide_the_full_stop() {
+            let refusal = refusal_for("which TOML rejects. ");
+
+            assert!(!refusal.contains(".."), "no doubled full stop: {refusal}");
+            assert!(
+                refusal.contains("which TOML rejects.  This region was left unchanged"),
+                "the reason's own trailing space is preserved: {refusal}"
+            );
+        }
+
+        /// The plan still accounts for the region it refused, as a no-op —
+        /// otherwise the summary would simply not mention it.
+        #[test]
+        fn the_refused_region_is_still_planned_as_a_no_op() {
+            let mut plan = Plan::default();
+            super::super::refuse_region(
+                &mut plan,
+                "deny.toml".to_owned(),
+                "anvil-deny-advisories",
+                "because.",
+                RefusalRemedy::HandWrittenTable,
+            );
+
+            let item = plan.items().first().expect("the region is planned");
+            assert_eq!(item.decision, Decision::LeaveAlone);
+            assert_eq!(
+                item.target,
+                Target::Region {
+                    host: "deny.toml".to_owned(),
+                    id: "anvil-deny-advisories".to_owned(),
+                }
+            );
+        }
     }
 
     /// `composed_placement` decides where an *absent* region lands in a host
@@ -1300,6 +1755,308 @@ mod tests {
         assert_eq!(saved.catalog_checksum, Some(catalog.checksum()));
     }
 
+    /// Redundant markers around a complete pair are still cleaned up, and the
+    /// result settles. Markers that do NOT pair up are a different case
+    /// entirely -- see `unpaired_markers_are_refused_rather_than_unmanaged`.
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn marker_recovery_preserves_content_and_settles_for_both_syntaxes() {
+        use crate::catalog::{CliMeta, RegionId};
+        for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash] {
+            let prefix = if syntax == CommentSyntax::Hash { "#" } else { "//" };
+            let open = format!("{prefix} >>> anvil-managed: repair\r\n");
+            let close = format!("{prefix} <<< anvil-managed: repair\r\n");
+            let catalog = Catalog::builder(CliMeta::new("anvil"))
+                .with_artifact(Artifact::region(RegionSpec {
+                    host: HostSelector::Path("host.txt".to_owned()),
+                    id: RegionId::new("repair"),
+                    body: "generated\n".to_owned(),
+                    syntax,
+                }))
+                .build()
+                .unwrap();
+            for input in [
+                format!("{open}{open}generated\r\n{close}user\r\n"),
+                format!("{open}generated\r\n{close}user\r\n{close}"),
+            ] {
+                let tmp = empty_workspace();
+                let path = tmp.path().join("host.txt");
+                write(&path, &input);
+                let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+                assert!(outcome.plan.refusals().is_empty());
+                let output = fs::read_to_string(&path).unwrap();
+                let region = find_region(&output, "repair", syntax).unwrap().unwrap();
+                assert_eq!(region.body_str(), "generated\r\n");
+                assert!(remove_region(&output, "repair", syntax).unwrap().contains("user"));
+                assert_eq!(output.matches(&open).count(), 1);
+                assert_eq!(output.matches(&close).count(), 1);
+                assert!(!output.replace("\r\n", "").contains('\n'));
+                assert!(!run_update(&catalog, &local_only(), tmp.path()).unwrap().plan.has_changes());
+                assert_eq!(fs::read_to_string(&path).unwrap(), output);
+            }
+        }
+    }
+
+    /// A region that has lost one of its sentinels still holds a body anvil
+    /// generated, and nothing can prove where that body ends. Discarding the
+    /// surviving marker -- which this used to do -- hands the body back to the
+    /// repository, and
+    /// the writer then appends the template beside it, leaving two copies of
+    /// the same content with only the newer one tracked. The file is left
+    /// exactly as found instead, and the region is refused until a human
+    /// restores the boundary.
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn unpaired_markers_are_refused_rather_than_unmanaged() {
+        use crate::catalog::{CliMeta, RegionId};
+        for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash] {
+            let prefix = if syntax == CommentSyntax::Hash { "#" } else { "//" };
+            let open = format!("{prefix} >>> anvil-managed: repair\r\n");
+            let close = format!("{prefix} <<< anvil-managed: repair\r\n");
+            let catalog = Catalog::builder(CliMeta::new("anvil"))
+                .with_artifact(Artifact::region(RegionSpec {
+                    host: HostSelector::Path("host.txt".to_owned()),
+                    id: RegionId::new("repair"),
+                    body: "generated\n".to_owned(),
+                    syntax,
+                }))
+                .build()
+                .unwrap();
+            // An opener whose closer is gone, and a closer that precedes the
+            // only opener -- neither yields a pair.
+            for input in [format!("{open}generated\r\nuser\r\n"), format!("{close}user\r\n{open}")] {
+                let tmp = empty_workspace();
+                let path = tmp.path().join("host.txt");
+                write(&path, &input);
+
+                let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+
+                let refusal = outcome
+                    .plan
+                    .refusals()
+                    .first()
+                    .unwrap_or_else(|| panic!("an unprovable boundary must be refused; got {:#?}", outcome.plan.refusals()))
+                    .clone();
+                assert!(
+                    refusal.contains("do not form a matching pair") || refusal.contains("sentinel"),
+                    "the refusal must name the marker fault: {refusal}"
+                );
+                assert!(
+                    !refusal.contains("Reconcile the hand-written table"),
+                    "no table is involved in a marker fault: {refusal}"
+                );
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap(),
+                    input,
+                    "the host must be left exactly as found, markers included"
+                );
+                // The generated body must not have been duplicated beside itself.
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap().matches("generated").count(),
+                    input.matches("generated").count()
+                );
+
+                // And a re-run must not quietly do it either.
+                let repeated = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+                assert_eq!(
+                    repeated.plan.refusals().len(),
+                    1,
+                    "the refusal repeats rather than resolving itself"
+                );
+                assert_eq!(fs::read_to_string(&path).unwrap(), input);
+            }
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn marker_cleanup_does_not_accept_body_edits_or_unmanaged_conflicts() {
+        let tmp = empty_workspace();
+        let path = tmp.path().join("deny.toml");
+        let catalog = one_region_catalog("deny.toml", "repair", "[advisories]\nyanked = \"deny\"\n");
+        run_update(&catalog, &local_only(), tmp.path()).unwrap();
+        let original = Manifest::load(tmp.path()).unwrap().regions;
+        let open = "# >>> anvil-managed: repair\n";
+        let close = "# <<< anvil-managed: repair\n";
+        for input in [
+            format!("{open}[advisories]\nyanked = \"warn\"\n{open}{close}"),
+            format!("{open}[advisories]\nyanked = \"warn\"\n"),
+        ] {
+            write(&path, &input);
+            let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+            assert_eq!(outcome.plan.refusals().len(), 1);
+            assert_eq!(Manifest::load(tmp.path()).unwrap().regions, original);
+            let output = fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                output.parse::<toml_edit::DocumentMut>().unwrap()["advisories"]["yanked"].as_str(),
+                Some("warn")
+            );
+            assert!(!tmp.path().join("deny.toml.anvil-proposed").exists());
+            assert_eq!(run_update(&catalog, &local_only(), tmp.path()).unwrap().plan.refusals().len(), 1);
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn edited_retirement_repeats_until_restored_emptied_or_removed() {
+        for recovery in ["[old]\na = 1\n", " \t\n", ""] {
+            let tmp = empty_workspace();
+            let path = tmp.path().join("shared.toml");
+            let old = one_region_catalog("shared.toml", "old", "[old]\na = 1\n");
+            run_update(&old, &local_only(), tmp.path()).unwrap();
+            let previous = Manifest::load(tmp.path()).unwrap().regions;
+            let next = one_region_catalog("shared.toml", "new", "[new]\nb = 2\n");
+            write(&path, &upsert_region("", "old", "[old]\na = 9\n", CommentSyntax::Hash).unwrap());
+            for _ in 0..2 {
+                let outcome = run_update(&next, &local_only(), tmp.path()).unwrap();
+                assert_eq!(outcome.plan.refusals().len(), 1);
+                let manifest = Manifest::load(tmp.path()).unwrap();
+                for (key, checksum) in &previous {
+                    assert_eq!(manifest.regions.get(key), Some(checksum));
+                }
+                let output = fs::read_to_string(&path).unwrap();
+                let parsed = output.parse::<toml_edit::DocumentMut>().unwrap();
+                assert_eq!(parsed["old"]["a"].as_integer(), Some(9));
+                assert_eq!(parsed["new"]["b"].as_integer(), Some(2));
+            }
+            let current = fs::read_to_string(&path).unwrap();
+            let reconciled = if recovery.is_empty() {
+                remove_region(&current, "old", CommentSyntax::Hash).unwrap()
+            } else {
+                upsert_region(&current, "old", recovery, CommentSyntax::Hash).unwrap()
+            };
+            write(&path, &reconciled);
+            assert!(run_update(&next, &local_only(), tmp.path()).unwrap().plan.refusals().is_empty());
+            assert!(!Manifest::load(tmp.path()).unwrap().regions.keys().any(|key| key.id == "old"));
+            assert!(!run_update(&next, &local_only(), tmp.path()).unwrap().plan.has_changes());
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn shipped_spellcheck_split_migrates_and_adopts_matching_root_settings() {
+        let header = "# Copyright (c) Microsoft Corporation.\n# Licensed under the MIT License.\n";
+        let body = [
+            include_str!("../templates/regions/spellcheck.toml"),
+            include_str!("../templates/regions/spellcheck-hunspell.toml"),
+            include_str!("../templates/regions/spellcheck-quirks.toml"),
+        ]
+        .join("\n");
+        for (managed, newline) in [(true, "\n"), (true, "\r\n"), (false, "\n")] {
+            let tmp = empty_workspace();
+            if managed {
+                let old = one_region_catalog("spellcheck.toml", "anvil-spellcheck", &body);
+                run_update(&old, &local_only(), tmp.path()).unwrap();
+            } else {
+                write(&tmp.path().join("spellcheck.toml"), &body);
+            }
+            let path = tmp.path().join("spellcheck.toml");
+            let input = format!(
+                "{header}{}\n# repository quirks\nallow_dashes = true\n",
+                fs::read_to_string(&path).unwrap()
+            )
+            .replace("\r\n", "\n")
+            .replace('\n', newline);
+            write(&path, &input);
+            let before = input.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(before["Hunspell"]["quirks"]["allow_dashes"].as_bool(), Some(true));
+            let catalog = Catalog::anvil();
+            let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+            assert!(outcome.plan.refusals().is_empty(), "{:?}", outcome.plan.refusals());
+            let output = fs::read_to_string(tmp.path().join("spellcheck.toml")).unwrap();
+            assert!(output.starts_with(&header.replace('\n', newline)), "{output}");
+            assert_eq!(output.matches("Copyright (c) Microsoft Corporation.").count(), 1);
+            assert!(find_region(&output, "anvil-spellcheck", CommentSyntax::Hash).unwrap().is_none());
+            let parsed = output.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(parsed["dev_comments"].as_bool(), Some(false));
+            assert_eq!(parsed["skip_readme"].as_bool(), Some(false));
+            assert!(parsed["Hunspell"]["quirks"].is_table());
+            assert_eq!(
+                parsed["Hunspell"]["quirks"].get("allow_dashes").and_then(toml_edit::Item::as_bool),
+                before["Hunspell"]["quirks"]["allow_dashes"].as_bool()
+            );
+            assert!(!parsed.contains_key("allow_dashes"));
+            assert!(output.contains("# repository quirks"));
+            if newline == "\r\n" {
+                assert!(!output.replace("\r\n", "").contains('\n'));
+            }
+            assert!(!run_update(&catalog, &local_only(), tmp.path()).unwrap().plan.has_changes());
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn empty_spellcheck_retirement_preserves_conflicting_user_root_settings() {
+        for body in ["", " \t\n"] {
+            let tmp = empty_workspace();
+            let path = tmp.path().join("spellcheck.toml");
+            let old = one_region_catalog("spellcheck.toml", "anvil-spellcheck", "[Hunspell.quirks]\n");
+            run_update(&old, &local_only(), tmp.path()).unwrap();
+            let input = format!(
+                "{}dev_comments = true\n",
+                upsert_region("", "anvil-spellcheck", body, CommentSyntax::Hash).unwrap()
+            );
+            write(&path, &input);
+            let before = input.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(before["dev_comments"].as_bool(), Some(true));
+            let catalog = Catalog::anvil();
+            for pass in 0..2 {
+                let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+                assert_eq!(outcome.plan.refusals().len(), 1);
+                assert!(outcome.plan.refusals()[0].contains("anvil-spellcheck-root"));
+                if pass == 1 {
+                    assert!(!outcome.plan.has_changes());
+                }
+                let output = fs::read_to_string(&path).unwrap();
+                let parsed = output.parse::<toml_edit::DocumentMut>().unwrap();
+                assert_eq!(
+                    parsed.get("dev_comments").and_then(toml_edit::Item::as_bool),
+                    before["dev_comments"].as_bool()
+                );
+                assert!(parsed["Hunspell"].get("dev_comments").is_none());
+                assert!(parsed["Hunspell"]["quirks"].get("dev_comments").is_none());
+                assert!(
+                    !Manifest::load(tmp.path())
+                        .unwrap()
+                        .regions
+                        .keys()
+                        .any(|key| key.id == "anvil-spellcheck")
+                );
+            }
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem")]
+    #[test]
+    fn retired_duplicate_pairs_expose_user_settings_before_adoption() {
+        for value in [2, 9] {
+            let tmp = empty_workspace();
+            let path = tmp.path().join("shared.toml");
+            let old = one_region_catalog("shared.toml", "old", "[old]\na = 1\n");
+            run_update(&old, &local_only(), tmp.path()).unwrap();
+            let input = format!(
+                "{}\n{}",
+                fs::read_to_string(&path).unwrap(),
+                upsert_region("", "old", &format!("[new]\nb = {value}\n"), CommentSyntax::Hash).unwrap()
+            );
+            write(&path, &input);
+            let before = input.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(before["new"]["b"].as_integer(), Some(value));
+            let next = one_region_catalog("shared.toml", "new", "[new]\nb = 2\n");
+            for _ in 0..2 {
+                let outcome = run_update(&next, &local_only(), tmp.path()).unwrap();
+                assert_eq!(outcome.plan.refusals().len(), usize::from(value != 2));
+                let output = fs::read_to_string(&path).unwrap();
+                let after = output.parse::<toml_edit::DocumentMut>().unwrap();
+                assert_eq!(after["new"]["b"].as_integer(), before["new"]["b"].as_integer());
+                assert!(!after.contains_key("old"));
+                let tracked = Manifest::load(tmp.path()).unwrap().regions;
+                assert!(!tracked.keys().any(|key| key.id == "old"));
+                assert_eq!(tracked.len(), usize::from(value == 2));
+            }
+        }
+    }
+
     fn local_only() -> Cli {
         Cli {
             backends: vec![],
@@ -1407,7 +2164,7 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn opted_out_region_is_skipped_on_second_run() {
+    fn emptied_region_is_regenerated_on_second_run() {
         let tmp = empty_workspace();
         let args = Cli {
             backends: vec![],
@@ -1432,12 +2189,13 @@ mod tests {
                     if host == "rustfmt.toml" && id == region::RUSTFMT_REGION_ID)
             })
             .expect("rustfmt region item missing from plan");
-        assert_eq!(rustfmt_item.decision, crate::decision::Decision::LeaveAlone);
+        assert_eq!(rustfmt_item.decision, crate::decision::Decision::Write);
+        assert_eq!(fs::read_to_string(&path).unwrap(), host);
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn user_edit_inside_region_left_alone_when_template_unchanged() {
+    fn user_edit_inside_region_is_refused_when_template_unchanged() {
         let tmp = empty_workspace();
         let args = Cli {
             backends: vec![],
@@ -1469,16 +2227,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rustfmt_item.decision, crate::decision::Decision::LeaveAlone);
+        assert_eq!(outcome.plan.refusals().len(), 1);
         let final_text = fs::read_to_string(&path).unwrap();
         assert!(final_text.contains("edition = \"2021\""));
     }
 
-    /// Verifies B6: after a Propose decision, the next run sees the
-    /// divergence as `LeaveAlone` (no re-proposal) until the template
-    /// itself moves again.
+    /// Refusals repeat without advancing the last-rendered checksum.
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn propose_burns_through_after_one_run() {
+    fn edited_region_refusal_repeats_until_reconciled() {
         use crate::checksum::checksum_str;
         use crate::manifest::{Manifest, RegionKey};
 
@@ -1508,18 +2265,18 @@ mod tests {
         // Simulate the template moving on by hand-editing the manifest's
         // recorded checksum for the region to a value other than what
         // the user has and other than the current template. That way
-        // the next run sees D ≠ L ≠ T → Propose.
+        // the next run sees D ≠ L ≠ T.
         let manifest_path = Manifest::path_for(tmp.path());
         let mut manifest = Manifest::load(tmp.path()).unwrap();
         let key = RegionKey {
             host: "rustfmt.toml".to_owned(),
             id: region::RUSTFMT_REGION_ID.to_owned(),
         };
-        manifest.regions.insert(key, checksum_str("synthetic old template"));
+        manifest.regions.insert(key.clone(), checksum_str("synthetic old template"));
         manifest.save(tmp.path()).unwrap();
         let _ = manifest_path; // sanity
 
-        // Second update: should Propose (user diverged + template moved).
+        // User diverged and the template moved: refuse without proposing.
         let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let item = second
             .plan
@@ -1530,15 +2287,14 @@ mod tests {
                     if host == "rustfmt.toml" && id == region::RUSTFMT_REGION_ID)
             })
             .unwrap();
-        assert_eq!(item.decision, crate::decision::Decision::Propose);
+        assert_eq!(item.decision, crate::decision::Decision::LeaveAlone);
+        assert_eq!(second.plan.refusals().len(), 1);
         assert!(
-            tmp.path().join("rustfmt.toml.anvil-proposed").is_file(),
-            "expected a proposed sibling after the Propose run"
+            !tmp.path().join("rustfmt.toml.anvil-proposed").exists(),
+            "managed regions never propose"
         );
 
-        // Third update: nothing has changed since the second run; the
-        // proposal should have been "burned through" and the next run
-        // should see LeaveAlone (D ≠ L, L = T) — not Propose.
+        // Nothing changed, so the refusal must remain visible.
         let third = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let item = third
             .plan
@@ -1552,8 +2308,13 @@ mod tests {
         assert_eq!(
             item.decision,
             crate::decision::Decision::LeaveAlone,
-            "Propose should bump L = T so subsequent runs see LeaveAlone"
+            "the edited region is never rewritten"
         );
+        assert_eq!(third.plan.refusals().len(), 1);
+        assert_eq!(Manifest::load(tmp.path()).unwrap().regions[&key], manifest.regions[&key]);
+        fs::write(&path, host).unwrap();
+        let reconciled = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        assert!(reconciled.plan.refusals().is_empty());
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -1695,9 +2456,10 @@ mod tests {
     #[test]
     fn legacy_delta_region_moves_to_start_and_settles() {
         let tmp = empty_workspace();
+        let header = "# Copyright (c) Microsoft Corporation.\n# Licensed under the MIT License.\n";
         let old_body = "[delta]\nroot-files = [\"Cargo.lock\", \"Cargo.toml\", \"rust-toolchain.toml\"]\n";
         let old_host = format!(
-            "[git]\nremote_branch = \"origin/main\"\n\n# >>> anvil-managed: {DELTA_REGION_ID}\n\
+            "{header}\n[git]\nremote_branch = \"origin/main\"\n\n# >>> anvil-managed: {DELTA_REGION_ID}\n\
              {old_body}# <<< anvil-managed: {DELTA_REGION_ID}\n"
         );
         fs::write(tmp.path().join(".delta.toml"), old_host).unwrap();
@@ -1709,7 +2471,7 @@ mod tests {
 
         let content = fs::read_to_string(tmp.path().join(".delta.toml")).unwrap();
         assert!(
-            content.starts_with(&format!("# >>> anvil-managed: {DELTA_REGION_ID}\n")),
+            content.starts_with(&format!("{header}\n# >>> anvil-managed: {DELTA_REGION_ID}\n")),
             "the upgraded root-level key must precede every TOML table:\n{content}"
         );
         let document: toml_edit::DocumentMut = content.parse().expect("upgraded delta config must be valid TOML");
@@ -1736,8 +2498,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn malformed_delta_host_is_left_untouched_while_other_artifacts_update() {
-        let malformed_marker = format!("# >>> anvil-managed: {DELTA_REGION_ID}\ntrip_wire_patterns = []\n");
-        for malformed in ["[git\nremote_branch = \"origin/main\"\n".to_owned(), malformed_marker] {
+        {
+            let malformed = "[git\nremote_branch = \"origin/main\"\n".to_owned();
             let tmp = empty_workspace();
             fs::write(tmp.path().join(".delta.toml"), &malformed).unwrap();
             let previous_checksum = checksum_str("previous managed body\n");
@@ -1981,7 +2743,7 @@ mod tests {
 
     /// Direct unit test of `plan_removals` for a region orphan whose host
     /// file exists with a customized (checksum-diverged) region body: it
-    /// must surface as `OrphanedKept`, preserving the user's edits.
+    /// must refuse, preserving the user's edits and tracking checksum.
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn plan_removals_region_orphan_customized_is_kept() {
@@ -2008,13 +2770,15 @@ mod tests {
         let orphans: Vec<(&str, &str)> = plan
             .items()
             .iter()
-            .filter(|i| i.decision == Decision::OrphanedKept)
+            .filter(|i| i.decision == Decision::LeaveAlone)
             .filter_map(|i| match &i.target {
                 Target::Region { host, id } => Some((host.as_str(), id.as_str())),
                 Target::File { .. } => None,
             })
             .collect();
         assert_eq!(orphans, vec![("Justfile", "anvil-r")]);
+        assert_eq!(plan.refusals().len(), 1);
+        assert_eq!(plan.projected_manifest(&previous).regions, previous.regions);
         // Host file untouched.
         assert!(
             fs::read_to_string(tmp.path().join("Justfile"))
@@ -2027,6 +2791,24 @@ mod tests {
     /// A catalog with two managed regions targeting the same host file —
     /// the shape that `deny.toml`'s per-section split uses. Built on the
     /// `anvil` identity so the single-tool guard stays satisfied.
+    /// One region on one host, for staging the state a later catalog grows out
+    /// of.
+    fn one_region_catalog(host: &str, id: &str, body: &str) -> Catalog {
+        use crate::catalog::CliMeta;
+        use crate::catalog::artifact::RegionId;
+
+        let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
+        Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path(host.to_owned()),
+                id: RegionId::new(id),
+                body: body.to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap()
+    }
+
     fn two_region_catalog(host: &str, id_a: &str, body_a: &str, id_b: &str, body_b: &str) -> Catalog {
         use crate::catalog::CliMeta;
         use crate::catalog::artifact::RegionId;
@@ -2080,6 +2862,188 @@ mod tests {
         assert!(!second.plan.has_changes(), "second run should be idempotent");
     }
 
+    /// Invalid synthetic catalog composition still hits the generic parse backstop.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn two_regions_claiming_one_table_refuse_the_second() {
+        let tmp = empty_workspace();
+        let catalog = two_region_catalog(
+            "shared.toml",
+            "anvil-sec-a",
+            "[licenses]\nallow = [\"MIT\"]\n",
+            "anvil-sec-b",
+            "[licenses]\nconfidence-threshold = 0.9\n",
+        );
+
+        let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        shared
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|error| panic!("the host must stay readable: {error}\n---\n{shared}\n---"));
+        assert_eq!(shared.matches("[licenses]").count(), 1, "no duplicate header:\n{shared}");
+        assert!(shared.contains("anvil-sec-a"), "the first claim is honored:\n{shared}");
+        assert!(!shared.contains("anvil-sec-b"), "the colliding sibling is not written:\n{shared}");
+
+        let refusal = outcome
+            .plan
+            .refusals()
+            .iter()
+            .find(|reason| reason.contains("anvil-sec-b"))
+            .unwrap_or_else(|| panic!("the collision is reported; got {:#?}", outcome.plan.refusals()));
+        assert!(refusal.contains("[licenses]"), "it names the table: {refusal}");
+        assert!(
+            refusal.contains("unparsable as TOML"),
+            "the generic parser backstop reports the fault: {refusal}"
+        );
+        assert_eq!(
+            outcome.plan.dry_run_exit_code(),
+            1,
+            "and a catalog defect fails the drift gate rather than passing quietly"
+        );
+    }
+
+    /// A sibling that is *already on disk* is the harder half of the same
+    /// fault, and the claim registry got it exactly backwards. `anvil-sec-b`
+    /// exists with `[licenses]`; a later catalog adds `anvil-sec-a` ahead of it
+    /// declaring the same table. Whichever region claimed first won, so A wrote
+    /// and B was refused — but refusing B leaves B's existing region **in the
+    /// file**, and the host ends up carrying two `[licenses]` headers, which is
+    /// the very outcome the backstop exists to prevent.
+    ///
+    /// Judging the host as this pass will leave it inverts that: B is staying,
+    /// so A is the one refused, and the file on disk stays readable.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_region_added_ahead_of_an_existing_sibling_does_not_break_the_host() {
+        let tmp = empty_workspace();
+        let threshold = "[licenses]\nconfidence-threshold = 0.9\n";
+        let existing = one_region_catalog("shared.toml", "anvil-sec-b", threshold);
+        run_update(&existing, &local_only(), tmp.path()).unwrap();
+
+        let grown = two_region_catalog(
+            "shared.toml",
+            "anvil-sec-a",
+            "[licenses]\nallow = [\"MIT\"]\n",
+            "anvil-sec-b",
+            threshold,
+        );
+        let outcome = run_update(&grown, &local_only(), tmp.path()).unwrap();
+
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        shared
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|error| panic!("the host must stay readable: {error}\n---\n{shared}\n---"));
+        assert_eq!(shared.matches("[licenses]").count(), 1, "no duplicate header:\n{shared}");
+        assert!(shared.contains("anvil-sec-b"), "the region already on disk is kept:\n{shared}");
+        assert!(
+            !shared.contains("anvil-sec-a"),
+            "the region that would collide is not written:\n{shared}"
+        );
+
+        let refusal = outcome
+            .plan
+            .refusals()
+            .iter()
+            .find(|reason| reason.contains("anvil-sec-a"))
+            .unwrap_or_else(|| panic!("the collision is reported; got {:#?}", outcome.plan.refusals()));
+        assert!(refusal.contains("unparsable as TOML"), "the parser reports the fault: {refusal}");
+    }
+
+    /// A dotted assignment declares its table exactly as a header does, so a
+    /// region writing `lints.rust.* = ...` and a sibling writing `[lints]`
+    /// compose into a file TOML rejects. The claim registry enumerated headers
+    /// only, so the dotted side claimed nothing and both regions passed. The
+    /// parser has no such blind spot.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_dotted_region_and_a_headed_sibling_do_not_compose_into_a_broken_host() {
+        let tmp = empty_workspace();
+        let catalog = two_region_catalog(
+            "shared.toml",
+            "anvil-sec-a",
+            "lints.rust.unsafe_code = \"deny\"\n",
+            "anvil-sec-b",
+            "[lints]\nworkspace = true\n",
+        );
+
+        let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        shared
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|error| panic!("the host must stay readable: {error}\n---\n{shared}\n---"));
+        assert!(
+            outcome.plan.refusals().iter().any(|reason| reason.contains("anvil-sec-b")),
+            "the collision is reported; got {:#?}",
+            outcome.plan.refusals()
+        );
+    }
+
+    /// A table moving from one live region to another, in the ordering that
+    /// costs a run: the region *gaining* the table is planned first, while the
+    /// one giving it up still declares it on disk.
+    ///
+    /// This is the shape behind the review's swap example, minus the swap. It
+    /// is not a deadlock — the giving side writes in the same pass, so the
+    /// second run completes the move — and pinning that here is what stops a
+    /// later change from turning one wasted run into a permanent refusal. A
+    /// catalog that *exchanges* tables never reaches this state and is not
+    /// supported; the refusal says so.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_table_moving_between_live_regions_settles_on_the_second_run() {
+        let tmp = empty_workspace();
+
+        let v1 = two_region_catalog("shared.toml", "anvil-sec-a", "a = 1\n", "anvil-sec-b", "[shared]\nk = 1\n");
+        assert!(run_update(&v1, &local_only(), tmp.path()).unwrap().applied);
+
+        // `[shared]` moves to the region planned FIRST, so it is spliced while
+        // the region giving it up has not been reached yet.
+        let v2 = two_region_catalog("shared.toml", "anvil-sec-a", "[shared]\nk = 1\n", "anvil-sec-b", "b = 2\n");
+
+        let second = run_update(&v2, &local_only(), tmp.path()).unwrap();
+        let refusal = second
+            .plan
+            .refusals()
+            .iter()
+            .find(|reason| reason.contains("anvil-sec-a"))
+            .unwrap_or_else(|| panic!("the move is reported; got {:#?}", second.plan.refusals()));
+        assert!(
+            refusal.contains("re-run to complete it"),
+            "the remedy must say a second run finishes the move: {refusal}"
+        );
+        assert!(
+            !refusal.contains("Reconcile the hand-written table"),
+            "nothing hand-written is involved: {refusal}"
+        );
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        shared
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|error| panic!("the host must stay readable: {error}\n---\n{shared}\n---"));
+
+        // The giving side wrote in that same pass, so the move now completes.
+        let third = run_update(&v2, &local_only(), tmp.path()).unwrap();
+        assert!(
+            third.plan.refusals().is_empty(),
+            "the second run must not repeat the refusal; got {:#?}",
+            third.plan.refusals()
+        );
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        shared
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap_or_else(|error| panic!("the host must stay readable: {error}\n---\n{shared}\n---"));
+        assert_eq!(
+            shared.matches("[shared]").count(),
+            1,
+            "the table moved rather than doubling:\n{shared}"
+        );
+        assert!(shared.contains("b = 2"), "the giving region kept its remaining body:\n{shared}");
+
+        let fourth = run_update(&v2, &local_only(), tmp.path()).unwrap();
+        assert!(!fourth.plan.has_changes(), "the move settles rather than oscillating");
+    }
+
     /// Splitting one region into several on the same host (the `deny.toml`
     /// migration): the old combined region is removed while the new
     /// per-section regions are written, all in one host. The removal must
@@ -2127,15 +3091,10 @@ mod tests {
         assert!(!third.plan.has_changes(), "post-split run should be idempotent");
     }
 
-    /// A region `Propose` (the user customized that region) planned *before*
-    /// a sibling `Write` on the same host must still produce a
-    /// `.anvil-proposed` sibling composed on top of that later write.
-    /// Otherwise the eagerly-spliced proposal captures a stale host and
-    /// `mv shared.toml.anvil-proposed shared.toml` would silently revert the
-    /// sibling region's update.
+    /// Refusing an edited region does not prevent a clean sibling's update.
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn region_proposal_is_recomposed_against_sibling_writes_on_same_host() {
+    fn edited_region_is_refused_while_sibling_updates() {
         let tmp = empty_workspace();
         let host = tmp.path().join("shared.toml");
 
@@ -2143,133 +3102,44 @@ mod tests {
         let v1 = two_region_catalog("shared.toml", "anvil-sec-a", "a = \"v1\"\n", "anvil-sec-b", "b = \"v1\"\n");
         assert!(run_update(&v1, &local_only(), tmp.path()).unwrap().applied);
 
-        // User customizes region a on disk, so next run classifies a as Propose.
         let cur = fs::read_to_string(&host).unwrap();
         let customized = upsert_region(&cur, "anvil-sec-a", "a = \"USER\"\n", CommentSyntax::Hash).unwrap();
         fs::write(&host, &customized).unwrap();
 
-        // Run 2: both region templates move. a -> Propose (user-edited),
-        // b -> Write (untouched). a is planned first, so without the
-        // recomposition pass its proposal is computed before b's write folds
-        // into the host.
+        let original = Manifest::load(tmp.path()).unwrap();
         let v2 = two_region_catalog("shared.toml", "anvil-sec-a", "a = \"v2\"\n", "anvil-sec-b", "b = \"v2\"\n");
-        assert!(run_update(&v2, &local_only(), tmp.path()).unwrap().applied);
+        let outcome = run_update(&v2, &local_only(), tmp.path()).unwrap();
+        assert_eq!(outcome.plan.refusals().len(), 1);
 
         // Live host: a keeps the user's content; b is updated to v2.
         let live = fs::read_to_string(&host).unwrap();
         assert!(live.contains("a = \"USER\""), "user's region a preserved live:\n{live}");
         assert!(live.contains("b = \"v2\""), "sibling region b written live:\n{live}");
 
-        // Proposed sibling: must carry BOTH a's proposed v2 AND b's new v2
-        // (not the stale v1), so applying it doesn't revert b.
-        let proposed = fs::read_to_string(tmp.path().join("shared.toml.anvil-proposed")).unwrap();
-        assert!(proposed.contains("a = \"v2\""), "proposal applies a's update:\n{proposed}");
-        assert!(
-            proposed.contains("b = \"v2\""),
-            "proposal composed on top of b's write:\n{proposed}"
-        );
-        assert!(!proposed.contains("b = \"v1\""), "stale sibling content must be gone:\n{proposed}");
+        live.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(!tmp.path().join("shared.toml.anvil-proposed").exists());
+        let key = crate::manifest::RegionKey {
+            host: "shared.toml".into(),
+            id: "anvil-sec-a".into(),
+        };
+        assert_eq!(Manifest::load(tmp.path()).unwrap().regions[&key], original.regions[&key]);
+        let repeated = run_update(&v2, &local_only(), tmp.path()).unwrap();
+        assert_eq!(repeated.plan.refusals().len(), 1);
+        assert_eq!(repeated.plan.dry_run_exit_code(), 1);
     }
 
-    /// When several regions on one host propose, every proposal converges on
-    /// the same fully-updated `<host>.anvil-proposed` content (each proposed
-    /// body composed on top of the others), rather than last-writer-wins.
+    /// The generated body under a widowed opener stays inside its marker and
+    /// stays anvil's, rather than being handed to the repository as ordinary
+    /// text that the next write would duplicate.
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn recompose_converges_multiple_proposals_on_one_host() {
-        let tmp = TempDir::new().unwrap();
-        let host = "deny.toml";
-        // Final live host carries both regions at the user's content.
-        let final_live = "# >>> anvil-managed: a\nUSER a\n# <<< anvil-managed: a\n\
-             # >>> anvil-managed: b\nUSER b\n# <<< anvil-managed: b\n"
-            .to_owned();
-        let mut hosts = HostTextCache::default();
-        hosts.set(host, final_live);
-
-        let mut plan = Plan::default();
-        // Two proposals on the same host with deliberately stale payloads.
-        plan.push(PlanItem::propose_region(host, "a", "NEW a\n".into(), "stale-a".into(), "sa".into()));
-        plan.push(PlanItem::propose_region(host, "b", "NEW b\n".into(), "stale-b".into(), "sb".into()));
-
-        recompose_region_proposals(tmp.path(), &mut plan, &mut hosts).unwrap();
-
-        let p0 = plan.items()[0].spliced_host.as_deref().unwrap();
-        let p1 = plan.items()[1].spliced_host.as_deref().unwrap();
-        assert_eq!(p0, p1, "both proposals must converge on the same fully-updated host");
-        assert!(p0.contains("NEW a") && p0.contains("NEW b"), "every proposed body present:\n{p0}");
-    }
-
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
-    fn malformed_non_delta_region_fails_planning() {
+    fn unmatched_opener_is_refused_without_unmanaging_its_content() {
         let tmp = empty_workspace();
-        fs::write(
-            tmp.path().join("rustfmt.toml"),
-            format!("# >>> anvil-managed: {}\nmax_width = 120\n", region::RUSTFMT_REGION_ID),
-        )
-        .unwrap();
+        let host = format!("# >>> anvil-managed: {}\nmax_width = 120\n", region::RUSTFMT_REGION_ID);
+        fs::write(tmp.path().join("rustfmt.toml"), &host).unwrap();
 
-        let error = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap_err();
-
-        assert!(
-            error.to_string().contains("opening sentinel but no closing sentinel"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
-    fn recompose_places_delta_proposal_before_toml_tables() {
-        let tmp = TempDir::new().unwrap();
-        let host = ".delta.toml";
-        let final_live = format!(
-            "[git]\nremote_branch = \"origin/main\"\n\n\
-             # >>> anvil-managed: {DELTA_REGION_ID}\nold = true\n# <<< anvil-managed: {DELTA_REGION_ID}\n"
-        );
-        let mut hosts = HostTextCache::default();
-        hosts.set(host, final_live);
-
-        let mut plan = Plan::default();
-        plan.push(PlanItem::propose_region(
-            host,
-            DELTA_REGION_ID,
-            "trip_wire_patterns = []\n".into(),
-            "stale".into(),
-            "checksum".into(),
-        ));
-
-        recompose_region_proposals(tmp.path(), &mut plan, &mut hosts).unwrap();
-
-        let proposed = plan.items()[0].spliced_host.as_deref().unwrap();
-        assert!(proposed.starts_with(&format!("# >>> anvil-managed: {DELTA_REGION_ID}\ntrip_wire_patterns = []\n")));
-        let _: toml_edit::DocumentMut = proposed.parse().expect("delta proposal must keep root keys before TOML tables");
-    }
-
-    /// If a Propose item's host file vanished mid-run (external race), the
-    /// recomposition pass leaves the eagerly-computed proposal untouched
-    /// rather than dropping it.
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
-    fn recompose_skips_when_host_file_is_absent() {
-        let tmp = TempDir::new().unwrap();
-        let mut plan = Plan::default();
-        let stale = "eagerly computed proposal\n".to_owned();
-        plan.push(PlanItem::propose_region(
-            "gone.toml",
-            "anvil-x",
-            "body\n".into(),
-            stale.clone(),
-            "sum".into(),
-        ));
-
-        // Empty cache + no file on disk -> get_or_read returns None.
-        let mut hosts = HostTextCache::default();
-        recompose_region_proposals(tmp.path(), &mut plan, &mut hosts).unwrap();
-
-        assert_eq!(
-            plan.items()[0].spliced_host.as_deref(),
-            Some(stale.as_str()),
-            "vanished host leaves the proposal as-is"
-        );
+        let outcome = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap();
+        assert!(outcome.plan.refusals().iter().any(|reason| reason.contains("rustfmt.toml")));
+        assert_eq!(fs::read_to_string(tmp.path().join("rustfmt.toml")).unwrap(), host);
     }
 }

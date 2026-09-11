@@ -13,10 +13,10 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 /// Write a fixture workspace with these members:
-/// - `alpha` (lib),
+/// - `alpha` (lib with a `loom` feature and matching required-feature test),
 /// - `beta` (bin only, with a path dev-dependency on `alpha` so `dep:alpha`
 ///   selects it),
-/// - `gamma` (lib, carrying `[package.metadata.role] = "script-only"`),
+/// - `gamma` (private lib carrying `[package.metadata.role] = "script-only"`),
 /// - `delta` (lib, versioned `1.2.3-beta.1+build` to exercise prerelease /
 ///   build-metadata version matching end-to-end),
 /// - `epsilon` (both a lib and a bin target, to exercise `--filter`
@@ -30,9 +30,23 @@ fn fixture() -> (TempDir, PathBuf) {
     )
     .expect("write workspace root");
 
-    write_lib(root, "alpha", "0.1.0", "");
+    write_lib(
+        root,
+        "alpha",
+        "0.1.0",
+        "\n[features]\nloom = []\n\n[[test]]\nname = \"loom-test\"\npath = \"tests/loom.rs\"\nrequired-features = [\"loom\"]\n",
+    );
+    fs::create_dir_all(root.join("alpha/tests")).expect("mkdir alpha tests");
+    fs::write(root.join("alpha/tests/loom.rs"), "#[test]\nfn loom_test() {}\n").expect("write loom test");
     write_bin(root, "beta", "\n[dev-dependencies]\nalpha = { path = \"../alpha\" }\n");
-    write_lib(root, "gamma", "0.1.0", "\n[package.metadata]\nrole = \"script-only\"\n");
+    fs::create_dir_all(root.join("beta/examples")).expect("mkdir beta examples");
+    fs::write(root.join("beta/examples/demo.rs"), "fn main() {}\n").expect("write beta example");
+    write_lib(
+        root,
+        "gamma",
+        "0.1.0",
+        "publish = false\n\n[package.metadata]\nrole = \"script-only\"\n",
+    );
     write_lib(root, "delta", "1.2.3-beta.1+build", "");
     write_lib_and_bin(root, "epsilon");
 
@@ -95,6 +109,60 @@ fn each(manifest: &Path) -> Command {
     let mut cmd = Command::cargo_bin("cargo-each").expect("binary");
     cmd.arg("each").arg("--manifest-path").arg(manifest);
     cmd
+}
+
+#[cfg(windows)]
+fn compile_probe(source: &Path, executable: &Path, marker: &str) {
+    fs::write(source, format!("fn main() {{ println!(\"{marker}\"); }}\n")).expect("write probe source");
+    let output = std::process::Command::new("rustc")
+        .arg(source)
+        .arg("-o")
+        .arg(executable)
+        .output()
+        .expect("rustc must be available to compile the Windows resolution probe");
+    assert!(
+        output.status.success(),
+        "failed to compile Windows resolution probe:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(windows)]
+#[cfg_attr(miri, ignore = "spawns cargo-each and child processes; miri supports neither")]
+#[test]
+fn relative_child_program_uses_path_before_cargo_each_directory() {
+    let (_workspace, manifest) = fixture();
+    let layout = tempfile::tempdir().expect("resolution layout");
+    let executable_dir = layout.path().join("executable");
+    let path_dir = layout.path().join("path");
+    fs::create_dir_all(&executable_dir).expect("create executable directory");
+    fs::create_dir_all(&path_dir).expect("create PATH directory");
+
+    let cargo_each = executable_dir.join("cargo-each.exe");
+    fs::copy(assert_cmd::cargo::cargo_bin!("cargo-each"), &cargo_each).expect("copy cargo-each");
+
+    let probe_name = "cargo-each-path-resolution-probe.exe";
+    compile_probe(
+        &layout.path().join("adjacent.rs"),
+        &executable_dir.join(probe_name),
+        "adjacent executable",
+    );
+    compile_probe(&layout.path().join("path.rs"), &path_dir.join(probe_name), "PATH executable");
+
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(path_dir).chain(std::env::split_paths(&inherited))).expect("fixture PATH must be valid");
+
+    Command::new(cargo_each)
+        .arg("each")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .args(["--package", "alpha", "--once", "--", probe_name])
+        .env("PATH", path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PATH executable"))
+        .stdout(predicate::str::contains("adjacent executable").not());
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -256,6 +324,74 @@ fn multiple_filters_intersect() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn boolean_filter_supports_grouped_or() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--filter",
+            "publishable and (feature:loom or target-kind:bin)",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("echo alpha")
+                .and(predicate::str::contains("echo beta"))
+                .and(predicate::str::contains("echo epsilon"))
+                .and(predicate::str::contains("echo gamma").not())
+                .and(predicate::str::contains("echo delta").not()),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn richer_package_predicates_use_cargo_metadata() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--filter",
+            "target-kind:example",
+            "--filter",
+            "publishable",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo beta").and(predicate::str::contains("echo gamma").not()));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn publishable_filter_excludes_publish_false() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "-p",
+            "alpha",
+            "-p",
+            "gamma",
+            "--filter",
+            "publishable",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo alpha").and(predicate::str::contains("echo gamma").not()));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn multiple_exclude_filters_union() {
     // `--exclude-filter` is OR-combined: dropping `bin` removes {beta, epsilon}
     // and dropping `metadata:role=script-only` removes {gamma}; their union
@@ -375,6 +511,91 @@ fn chdir_with_once_is_a_usage_error() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn per_target_mode_filters_required_features_and_substitutes_target() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--each-target",
+            "test",
+            "--target-required-feature",
+            "loom",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}::{target}",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("echo alpha::loom-test")
+                .and(predicate::str::contains("beta").not())
+                .and(predicate::str::contains("epsilon").not()),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn per_target_rejects_unknown_kind() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--each-target",
+            "unknown-kind",
+            "--dry-run",
+            "--",
+            "echo",
+            "{target}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("invalid target kind"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn per_target_and_once_are_mutually_exclusive() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--each-target",
+            "test",
+            "--once",
+            "--dry-run",
+            "--",
+            "echo",
+            "{target}",
+        ])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn target_required_feature_requires_target_mode() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--target-required-feature",
+            "loom",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--each-target"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn unknown_selector_is_a_usage_error() {
     let (_tmp, manifest) = fixture();
     each(&manifest)
@@ -387,14 +608,14 @@ fn unknown_selector_is_a_usage_error() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
-fn bad_predicate_is_a_usage_error() {
+fn bad_filter_expression_is_a_usage_error() {
     let (_tmp, manifest) = fixture();
     each(&manifest)
         .args(["--workspace", "--filter", "nonsense", "--dry-run", "--", "echo", "{name}"])
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("invalid filter predicate"));
+        .stderr(predicate::str::contains("invalid filter expression"));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -550,6 +771,31 @@ fn once_with_filter_uses_explicit_packages_not_workspace() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--package alpha").and(predicate::str::contains("--workspace").not()));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn once_with_boolean_filter_uses_explicit_packages_not_workspace() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--filter",
+            "feature:loom",
+            "--once",
+            "--dry-run",
+            "--",
+            "cargo",
+            "x",
+            "{packages}",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--package alpha")
+                .and(predicate::str::contains("--workspace").not())
+                .and(predicate::str::contains("--package beta").not()),
+        );
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]

@@ -80,6 +80,12 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # <<< anvil-managed: anvil-container-tools
 
 # >>> anvil-managed: anvil-container-setup
+# The context is copied whole rather than input by input, because one of the
+# inputs is optional: a repository that pins its compiler by other means owns no
+# root toolchain file, and a `COPY` of a path that may not exist is not portable
+# across the engines anvil supports. `.anvil/container/` rides along as a
+# consequence; the image never reads it.
+#
 # The whole recipe tree is copied because `just` parses it to reach the install
 # recipes.
 #
@@ -96,24 +102,37 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # volume over each, and an engine seeds a new volume from the image path it
 # covers; a path that does not exist seeds as root-owned 0755, which the
 # `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
-# The root manifest is copied for the MSRV, the one version `anvil-setup`
+# The root manifest is admitted for the MSRV, the one version `anvil-setup`
 # installs that is declared in repository source rather than pinned in
 # `versions.just`. `/opt/anvil` is the root the recipes already resolve against,
 # so the resolver reads it there with no container-specific path. The workspace
-# members it names are not copied and are not needed: the toolchain file selects
-# the compiler, which is the branch that skips workspace MSRV validation.
+# members it names are not admitted and are not needed: the one path that reads
+# them is workspace MSRV validation, which only
+# `anvil-tool-rustc-validate-prereqs` invokes, and nothing `anvil-setup`
+# reaches depends on it.
 #
 # It is deleted once the setup has read it, so it does not survive into the
 # finished image. The tag hashes the declared MSRV rather than the file, so an
 # unrelated dependency edit computes the same tag; a manifest left in place
 # would make that tag name two different filesystems, and a reused or published
 # image would carry a manifest that does not match any checkout.
+#
+# `rustup` was initialized with `--default-toolchain none`, so the image has no
+# default until something names one. Rustup sets it as a side effect of the
+# first `rustup toolchain install` that finds none set, which today is the
+# MSRV; that is an accident of the order `anvil-setup` reaches the install
+# recipes in, not something either side states. A checkout with a root
+# toolchain file never notices, because that file overrides the default. One
+# without has nothing else to select a compiler, so plain `cargo` in the
+# container would follow whichever toolchain the setup graph happened to
+# install first. The default is named here instead, from the same declared MSRV
+# the setup installs, while the manifest it is read from is still present.
 WORKDIR /opt/anvil
-COPY justfiles ./justfiles
-COPY rust-toolchain.toml ./
-COPY Cargo.toml ./
+COPY . ./
 RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && just anvil-setup binstall \
+    && msrv="$(just _anvil-resolve-stable root-msrv)" \
+    && if [ "${msrv}" != "none" ]; then rustup default "${msrv}"; fi \
     && rm -f Cargo.toml \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME:-/root}/.netrc" /root/.netrc \
@@ -140,9 +159,11 @@ CMD ["bash"]
 # `.dockerignore`, so this scopes the exec-image build context without the
 # repository having to own a root ignore file or having one silently overridden.
 #
-# The build context is the repository root but the image only needs two things.
-# Excluding everything else keeps a cold build from streaming the whole
-# worktree (and every stale `target/`) to the daemon.
+# The build context is the repository root but the image needs a small, named
+# set out of it. Excluding everything else keeps a cold build from streaming the
+# whole worktree (and every stale `target/`) to the daemon -- and, because the
+# setup region copies the context whole, this file decides what the image
+# contains.
 #
 # The context is narrowed to `justfiles/anvil/` rather than all of `justfiles/`
 # so that a cold build does not stream unrelated trees to the daemon. The
@@ -162,6 +183,11 @@ CMD ["bash"]
 # The root `Cargo.toml` is admitted for the declared MSRV, the only build input
 # that lives in repository source rather than in the recipe tree. The workspace
 # members it names stay out: they are a checkout, and the image is not one.
+#
+# Both spellings are admitted and neither is required: a repository that pins
+# by other means gets an image whose compiler is the declared MSRV, and
+# admitting only the TOML would give one that pins with the extensionless file
+# an image that disagreed with its own checkout.
 *
 !justfiles
 justfiles/*
@@ -172,6 +198,7 @@ justfiles/anvil/**/*.anvil-proposed
 !.anvil/container
 .anvil/container/**/*.anvil-proposed
 !rust-toolchain.toml
+!rust-toolchain
 !Cargo.toml
 
 === .delta.toml ===
@@ -519,7 +546,6 @@ clippy.should_panic_without_expect = "allow"
 clippy.significant_drop_tightening = "allow"
 # Blocked by Clippy bug: https://github.com/rust-lang/rust-clippy/issues/15036
 clippy.wildcard_imports = "allow"
-
 # <<< anvil-managed: anvil-workspace-lints
 
 === Justfile ===
@@ -3228,11 +3254,12 @@ _anvil-container-dockerfile:
 # Print the exec image reference for the current inputs, without building it.
 #
 # The tag is a SHA-256 over the image's declared inputs: the Dockerfile and its
-# ignore file, the pinned toolchain, the optional hook, the whole generated
-# recipe tree -- because the image installs its tools by running
-# `just anvil-setup`, whose dependency chain reaches the tier, group, check and
-# tool recipes alike -- and the declared root MSRV. Editing any of them can
-# change what the image contains, so any of them can rename it.
+# ignore file, the root toolchain file where the repository owns one, the
+# optional hook, the whole generated recipe tree -- because the image installs
+# its tools by running `just anvil-setup`, whose dependency chain reaches the
+# tier, group, check and tool recipes alike -- and the declared root MSRV.
+# Editing any of them can change what the image contains, so any of them can
+# rename it.
 #
 # This is the only recipe that computes the reference; everything else asks it.
 # It is public because a publisher needs the tag before there is an image to
@@ -3260,22 +3287,48 @@ anvil-container-tag:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $rootMsrv = "$rootMsrv".Trim()
 
-    # Both named rather than left to the walk, so that either one going missing
-    # is a hard failure at the check below. The walk cannot notice an absent
-    # file, and the ignore file's absence is the worse of the two: the build
-    # still succeeds, but BuildKit falls back to a root ignore file or none, so
-    # the context widens to files the digest does not hash and the tag stops
-    # covering what `COPY` puts in the image.
-    $inputs = @('rust-toolchain.toml', "$dockerfile.dockerignore")
+    # The ignore file is named rather than left to the walk, so that it going
+    # missing is a hard failure at the check below. The walk cannot notice an
+    # absent file, and this absence is silent: the build still succeeds, but
+    # BuildKit falls back to a root ignore file or none, so the context widens
+    # to files the digest does not hash and the tag stops covering what `COPY`
+    # puts in the image.
+    $inputs = @("$dockerfile.dockerignore")
+
+    # A repository may pin its compiler by other means and own neither
+    # spelling, so absence is legal here. Both are checked because the context
+    # admits both.
+    #
+    # A directory at either path is refused rather than skipped. The ignore
+    # file re-includes it, so `COPY . ./` copies its whole subtree into the
+    # image, while the digest walks only `.anvil/container/` and
+    # `justfiles/anvil/` -- two images differing anywhere under it would share
+    # a tag.
+    $toolchainFiles = @()
+    foreach ($spelling in @('rust-toolchain.toml', 'rust-toolchain')) {
+        $candidate = Join-Path $repoRoot $spelling
+        if (-not (Test-Path -LiteralPath $candidate)) { continue }
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            Write-Error "anvil: '$spelling' must be a regular file, but this repository has a directory there. The build context admits it and the image copies it whole, while the tag hashes nothing inside it, so the image would not match its own reference."
+            exit 1
+        }
+        $toolchainFiles += $spelling
+    }
+    $inputs += $toolchainFiles
+
     $links = @()
-    # The declared input and every directory on the way to a walk root are
+    # The declared inputs and every directory on the way to a walk root are
     # checked here, because a walk only ever reports descendants: a link that
     # *is* a root, or that is a parent of one, is traversed through and never
-    # appears in its own output. `COPY justfiles ./justfiles` copies from
-    # `justfiles`, not from `justfiles/anvil`, so a link at the parent is copied
-    # as a link while everything here reads through it -- the same divergence
-    # this guard exists to refuse, reached one level up.
-    foreach ($declared in @('rust-toolchain.toml', '.anvil', '.anvil/container', 'justfiles', 'justfiles/anvil')) {
+    # appears in its own output. `COPY . ./` copies from the context root, so a
+    # link at `justfiles` is copied as a link while everything here reads
+    # through it -- the same divergence this guard exists to refuse, reached one
+    # level up.
+    #
+    # The root manifest is checked too, though the digest reads a value out of
+    # it rather than hashing it: the context copies the link, so the resolver
+    # inside the image would meet a target the ignore file never admitted.
+    foreach ($declared in @('rust-toolchain.toml', 'rust-toolchain', 'Cargo.toml', '.anvil', '.anvil/container', 'justfiles', 'justfiles/anvil')) {
         $item = Get-Item -LiteralPath (Join-Path $repoRoot $declared) -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
             $links += $item.FullName
@@ -3436,7 +3489,7 @@ anvil-container-tag:
     # file admits, so an unstaged `chmod` on one of those would refuse a build
     # it cannot affect.
     $indexMode = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
-    $tracked = @('.anvil/container', 'justfiles/anvil', 'rust-toolchain.toml')
+    $tracked = @('.anvil/container', 'justfiles/anvil', 'rust-toolchain.toml', 'rust-toolchain')
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Write-Error 'anvil: git is required to compute the container image tag, because the image inputs are framed with the file modes git records. Without it two hosts would compute different tags for identical content. Install git, or set ANVIL_CONTAINER_ENGINE aside and build the image where git is available.'
         exit 1
@@ -4086,6 +4139,21 @@ anvil-container *command:
     # Forwarded by name and only when set, so an unset variable stays unset
     # rather than arriving as an empty string, which several of these treat as
     # a value.
+    # ANVIL_IMPACT_INPUT_DIR is deliberately NOT forwarded. `-e NAME` passes the
+    # host value unchanged, and the override is a host path that need not exist
+    # inside the container, so forwarding it cannot be made correct in general.
+    # Dropping it silently is worse: the container would fall back to
+    # target/anvil/impact and could scope off a different package list than the
+    # native run while still reporting green. Reject the combination instead --
+    # an explicit input that cannot be honored must fail, never fall back.
+    # Only under consume, because that is the only mode that reads the override;
+    # with ANVIL_IMPACT off or unset the variable is ignored, so a containerized
+    # run cannot diverge and there is nothing to reject.
+    if ($env:ANVIL_IMPACT -eq 'consume' -and (Test-Path -LiteralPath 'Env:ANVIL_IMPACT_INPUT_DIR') -and -not [string]::IsNullOrEmpty($env:ANVIL_IMPACT_INPUT_DIR)) {
+        Write-Error "anvil-container: ANVIL_IMPACT=consume and ANVIL_IMPACT_INPUT_DIR is set ($env:ANVIL_IMPACT_INPUT_DIR), but containerized checks cannot honor the override -- it names a host directory that need not exist inside the container, and forwarding it would let the run scope off a different cache than the native run. Unset it to run this check in a container, or run the check natively to use the injected cache."
+        exit 1
+    }
+
     foreach ($name in @(
         'PR_TITLE',
         'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH',
@@ -4729,7 +4797,9 @@ anvil-scheduled-test-validate-prereqs: \
 # environment variables. `$include` is one of:
 #
 #   * "--workspace" (affected/required) or "" (modified) - the tier is
-#     unscoped: ANVIL_IMPACT=off, or no impact cache is present. Recipes splat
+#     unscoped: ANVIL_IMPACT=off, or no impact cache is present outside consume
+#     mode (under consume a missing cache is a hard failure, not an unscoped
+#     run). Recipes splat
 #     "--workspace" (an empty string is NOT $null, so recipes test truthiness
 #     rather than `?? "--workspace"`, which would splat an empty arg cargo
 #     rejects).
@@ -4860,6 +4930,9 @@ _anvil-unscoped name:
 # cargo-delta nor a fetched base ref, which group jobs lack); it asserts the
 # downloaded include_<tier>.txt files are present -- failing loudly if any are
 # missing -- and the checks read them directly.
+# ANVIL_IMPACT_INPUT_DIR optionally selects a different read-only cache in
+# consume mode, for example a checked-in fixture. Unset/empty uses the default
+# target/anvil/impact directory. Computing impact never writes to this override.
 
 # Private. Produces the two cargo-delta snapshots under
 # target/anvil/impact/snapshots/ with two independent cache keys:
@@ -5171,6 +5244,7 @@ anvil-impact: _anvil-impact-snapshot
     }
     if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
     if ($env:ANVIL_IMPACT -eq 'consume') {
+        $inputDir = if ($env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
         # consume = trust an already-downloaded cache verbatim, so assert the
         # cache is actually present. If the CI download ever stops landing at
         # target/anvil/impact/ (renamed artifact, a missing download step, or
@@ -5179,9 +5253,9 @@ anvil-impact: _anvil-impact-snapshot
         # stay green. Fail loudly instead. (Presence only -- freshness stays a
         # deliberate non-goal in consume mode.)
         $missing = @('modified', 'affected', 'required') |
-            Where-Object { -not (Test-Path "target/anvil/impact/include_$_.txt") }
+            Where-Object { -not (Test-Path -LiteralPath (Join-Path $inputDir "include_$_.txt") -PathType Leaf) }
         if ($missing.Count -gt 0) {
-            Write-Error "anvil-impact: ANVIL_IMPACT=consume but the downloaded impact cache is missing ($($missing -join ', ') include file(s) absent under target/anvil/impact/). The impact artifact must be downloaded there before scoped checks run."
+            Write-Error "anvil-impact: ANVIL_IMPACT=consume but the input impact cache is missing ($($missing -join ', ') include file(s) absent under $inputDir). A complete cache holds include_modified.txt, include_affected.txt and include_required.txt. The read directory is ANVIL_IMPACT_INPUT_DIR when set, otherwise target/anvil/impact -- check that variable if the path above is not where you expected. Supply a complete impact cache before scoped checks run."
             exit 1
         }
         exit 0
@@ -5430,11 +5504,15 @@ _anvil-impact-format tier impactJson:
 # Private. Resolves an impact category's scope for a check recipe and echoes it on stdout.
 #   1. ANVIL_IMPACT=off            -> tier default (full-workspace / run).
 #   2. include_<tier>.txt present  -> its contents (a --package list or --skip).
-#   3. otherwise                   -> tier default.
+#   3. absent under ANVIL_IMPACT=consume -> hard failure (exit 1). consume trusts
+#      an already-supplied cache, so a missing include file is a defect, not a
+#      reason to widen scope.
+#   4. otherwise                   -> tier default.
 # Tier default: --workspace for affected/required; empty (run) for modified.
 # Each scoped check calls this directly (into a local $include variable) to
-# read its category's scope from the target/anvil/impact cache -- the same cache
-# both locally and in cloud workflows (where the group job downloaded it).
+# read its category's scope from the impact cache -- target/anvil/impact by
+# default, or ANVIL_IMPACT_INPUT_DIR when that is set under consume -- the same
+# cache both locally and in cloud workflows (where the group job downloaded it).
 
 # Resolve a tier's package scope from the impact cache.
 [script("pwsh", "-NoProfile")]
@@ -5449,9 +5527,13 @@ _anvil-impact-include tier:
         exit 2
     }
     if ($env:ANVIL_IMPACT -eq 'off') { Write-Output $default; exit 0 }
-    $file = "target/anvil/impact/include_$tier.txt"
-    if (Test-Path $file) {
-        Write-Output ("$(Get-Content -Raw $file)".Trim())
+    $inputDir = if ($env:ANVIL_IMPACT -eq 'consume' -and $env:ANVIL_IMPACT_INPUT_DIR) { $env:ANVIL_IMPACT_INPUT_DIR } else { 'target/anvil/impact' }
+    $file = Join-Path $inputDir "include_$tier.txt"
+    if (Test-Path -LiteralPath $file -PathType Leaf) {
+        Write-Output ("$(Get-Content -Raw -LiteralPath $file)".Trim())
+    } elseif ($env:ANVIL_IMPACT -eq 'consume') {
+        Write-Error "anvil-impact: ANVIL_IMPACT=consume but the input impact cache is missing ($file). A complete cache holds include_modified.txt, include_affected.txt and include_required.txt. The read directory is ANVIL_IMPACT_INPUT_DIR when set, otherwise target/anvil/impact -- check that variable if the path above is not where you expected. Supply a complete impact cache before scoped checks run."
+        exit 1
     } else {
         Write-Output $default
     }
@@ -6920,7 +7002,7 @@ group_imports = "StdExternalCrate"
 # <<< anvil-managed: anvil-rustfmt
 
 === spellcheck.toml ===
-# >>> anvil-managed: anvil-spellcheck
+# >>> anvil-managed: anvil-spellcheck-root
 # Check spelling in code comments marked as dev/developer comments
 # (e.g., `// TODO:`, `// FIXME:`). Set to false to skip them.
 dev_comments = false
@@ -6928,7 +7010,9 @@ dev_comments = false
 # Whether to skip spell checking README files. Set to false to include
 # README files in spell checking.
 skip_readme = false
+# <<< anvil-managed: anvil-spellcheck-root
 
+# >>> anvil-managed: anvil-spellcheck-hunspell
 [Hunspell]
 # Language dictionary. "en_US" uses the built-in English (US) dictionary.
 lang = "en_US"
@@ -6976,10 +7060,12 @@ use_builtin = true
 #   ASCII punctuation (default): ' ` & @
 #   Misc (default)              : \u00A7 section, \u00B6 pilcrow, \u2026 ellipsis
 tokenization_splitchars = "\",;:.!?#(){}[]|/_-\u2012\u2013\u2014\u2015\u2190\u2192\u2212'`&@\u00A7\u00B6\u2026"
+# <<< anvil-managed: anvil-spellcheck-hunspell
 
+# >>> anvil-managed: anvil-spellcheck-quirks
 [Hunspell.quirks]
 # Treat CamelCase identifiers as concatenations of dictionary words
 # (e.g., `TcpStream` = `Tcp` + `Stream`). Lowers false-positive rate
 # substantially on Rust codebases.
 allow_concatenation = true
-# <<< anvil-managed: anvil-spellcheck
+# <<< anvil-managed: anvil-spellcheck-quirks

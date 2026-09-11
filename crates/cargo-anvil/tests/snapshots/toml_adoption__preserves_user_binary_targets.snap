@@ -1,0 +1,35 @@
+---
+source: crates/cargo-anvil/tests/toml_adoption.rs
+assertion_line: 234
+expression: "report(before, &tmp, host, &outcome)"
+---
+--- crates/alpha/Cargo.toml, as the user wrote it ---
+[package]
+name = "alpha"
+version = "0.1.0"
+edition = "2024"
+[lints]
+workspace=true # our policy
+[[bin]]
+name = "extra"
+path = "src/main.rs"
+
+--- decisions ---
+anvil-lints: Write
+
+--- refusals ---
+(none)
+
+--- crates/alpha/Cargo.toml, as anvil left it ---
+[package]
+name = "alpha"
+version = "0.1.0"
+edition = "2024"
+[[bin]]
+name = "extra"
+path = "src/main.rs"
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

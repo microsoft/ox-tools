@@ -3,23 +3,23 @@
 
 //! The three-checksum decision algorithm.
 //!
-//! For every owned file and every managed region, `cargo-anvil` makes a
+//! For every owned file, `cargo-anvil` makes a
 //! single decision per run by comparing three inputs:
 //!
 //! - `last_rendered` (`L`) — what the manifest says anvil wrote last
 //!   time, or `None` if never seen.
 //! - `disk` (`D`) — what is on disk right now. `None` if the file is
-//!   missing or the region's host file is missing.
+//!   missing.
 //! - `template` (`T`) — what anvil's current catalog would render right
 //!   now.
 //!
-//! Opt-out via emptying needs no separate flag: an empty file or
-//! whitespace-only region body has a stable checksum that no template
+//! Opt-out via emptying needs no separate flag: an empty file
+//! has a stable checksum that no nonempty template
 //! ever produces, so `D ≠ L` lands the item in `LeaveAlone` (when the
 //! template is unchanged) or `Propose` (when it has moved). Both
 //! outcomes preserve the user's empty stub.
 //!
-//! See [`updates.md §5`](../../docs/design/updates.md) for the decision table.
+//! Managed regions use a stricter policy in the managed-region emitter.
 
 /// Inputs to one decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,12 +49,12 @@ pub enum UpdateDecision {
     Write,
     /// User has diverged AND the template changed since last render —
     /// write a `.anvil-proposed` sibling and leave the user's content
-    /// alone. Manifest stays unchanged.
+    /// alone. The planner records the proposed template checksum.
     Propose,
     /// User has diverged but the template hasn't changed; leave the
     /// user's content alone with no proposed file. Manifest stays
-    /// unchanged. Also the steady-state outcome for opt-out (empty file
-    /// or empty region body) when the template hasn't moved.
+    /// unchanged. Also the steady-state outcome for an empty owned file
+    /// when the template hasn't moved.
     LeaveAlone,
 }
 
@@ -86,12 +86,10 @@ pub enum Decision {
     Write,
     /// User has diverged AND the template changed since last render —
     /// write a `.anvil-proposed` sibling and leave the user's content
-    /// alone. Manifest stays unchanged.
+    /// alone. The planner records the proposed template checksum.
     Propose,
-    /// User has diverged but the template hasn't changed; leave the
-    /// user's content alone with no proposed file. Manifest stays
-    /// unchanged. Also the steady-state outcome for opt-out (empty file
-    /// or empty region body) when the template hasn't moved.
+    /// Preserve content and tracking without a proposal. Used for customized
+    /// owned files with unchanged templates and for refused managed regions.
     LeaveAlone,
     /// Item was in the previous manifest but is no longer in the
     /// catalog. The on-disk content still matches `last_rendered`, so
@@ -100,7 +98,7 @@ pub enum Decision {
     Remove,
     /// Item was in the previous manifest, is no longer in the catalog,
     /// and the user has customized it since the last render. Leave the
-    /// file/region in place but drop the manifest entry so ownership
+    /// owned file in place but drop the manifest entry so ownership
     /// transfers to the user (no more anvil tracking).
     OrphanedKept,
 }

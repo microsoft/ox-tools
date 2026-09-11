@@ -261,8 +261,9 @@ mod tests {
             name: name.to_owned(),
             version: "0.1.0".to_owned(),
             manifest_path: PathBuf::from(format!("/ws/{name}/Cargo.toml")),
-            has_lib: true,
-            has_bin: false,
+            publishable: true,
+            features: BTreeSet::new(),
+            targets: Vec::new(),
             dependencies: BTreeSet::new(),
             metadata: Value::Null,
         }
