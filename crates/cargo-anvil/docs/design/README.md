@@ -15,6 +15,9 @@ user-visible shape of the tool. Detail lives in companion documents:
 - [ado.md](./ado.md) — Azure DevOps Pipelines emission and compliance-template composition.
 - [containers.md](./containers.md) — containerized execution: the explicit `anvil-container`
   recipe, the content-addressed image, and the credential hook.
+- [consolidation.md](./consolidation.md) — proposed consolidation of generated
+  files under `.anvil/`, portable recipe bodies, and delimiter-free catalog
+  sections.
 - [../implementation.md](../implementation.md) — internal implementation guidance.
 - [../verification.md](../verification.md) — continuous-validation strategy: dogfooding,
   fixture tests, schema validation.
@@ -388,8 +391,10 @@ outstanding owned-file proposals and managed-region refusals.
 - Generated GH composite actions and ADO step templates do nothing privileged on their own;
   they just invoke `just` recipes. The user's workflow / pipeline file controls permissions
   and secrets.
-- All cargo-tool installs done by the setup building blocks use `--locked`. No
-  `cargo-binstall`.
+- All cargo-tool installs done by the setup building blocks use `--locked`.
+  Source installation is the default and the only mode used by internal ADO
+  pipelines. `cargo-binstall` is an explicit caller choice for environments
+  whose supply-chain policy permits prebuilt community artifacts.
 - The tool never sources or executes content from any user-edited file at runtime;
   everything executable in the repo is plain `just` recipes the user can read.
 - Recommended user-workflow shape: `permissions: contents: read` on PR workflows; grant
