@@ -119,6 +119,10 @@ if ($env:FAKE_CARGO_TOOLCHAIN_LOG) {
 if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL
 }
+if ($env:FAKE_CARGO_TOKEN_LOG) {
+    $seen = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { '<none>' }
+    Add-Content -LiteralPath $env:FAKE_CARGO_TOKEN_LOG -Value "$joined|$seen"
+}
 if ($args -contains 'each') {
     exit [int]$env:FAKE_EACH_EXIT
 }
@@ -496,6 +500,11 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
     command.env_remove("ANVIL_MIRI_JOBS");
     command.env_remove("GITHUB_ACTIONS");
     command.env_remove("TF_BUILD");
+    // The tool installer branches on GITHUB_TOKEN, and CI exports one for the
+    // whole Anvil group, so inheriting it here would silently flip fixtures onto
+    // the token path and make their assertions depend on where the suite runs.
+    // Tests that exercise the token contract set it explicitly.
+    command.env_remove("GITHUB_TOKEN");
     for key in std::env::vars_os().map(|(key, _)| key) {
         if key.to_string_lossy().starts_with("ANVIL_INCLUDE_") {
             command.env_remove(key);
@@ -1670,6 +1679,10 @@ fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
 [script("pwsh", "-NoProfile")]
 source-prereq:
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value 'source-prereq'
+    if ($env:FAKE_CARGO_TOKEN_LOG) {
+        $seen = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { '<none>' }
+        Add-Content -LiteralPath $env:FAKE_CARGO_TOKEN_LOG -Value "source-prereq|$seen"
+    }
     exit [int]$env:FAKE_PREREQ_EXIT
 "#,
     );
@@ -1744,6 +1757,82 @@ source-prereq:
     assert!(
         !ordinary_binstall.contains("--disable-strategies compile"),
         "tools without source prerequisites retain binstall's compile strategy"
+    );
+
+    // A release token changes both branches: binstall must stop compiling, and
+    // nothing downstream of it may still see the credential. Without this case a
+    // regression could quietly hand the workflow token to a third-party build
+    // while every other assertion here stayed green.
+    //
+    // This uses the tool WITHOUT a source prerequisite on purpose. For
+    // `cargo-spellcheck` the prerequisite alone already disables compilation, so
+    // it could not distinguish the token branch from the prerequisite branch;
+    // here the token is the only reason compilation may be disabled.
+    fs::remove_file(&log).unwrap();
+    let token_log = tmp.path().join("token.log");
+    let tokened = run_just(
+        tmp.path(),
+        &["_install-tool", "cargo-other", "1.2.3", "binstall", ""],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_CARGO_TOKEN_LOG", token_log.as_os_str()),
+            ("GITHUB_TOKEN", OsStr::new("sentinel-release-token")),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
+            ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+        ],
+    );
+    assert!(
+        tokened.status.success(),
+        "tokened install should still fall back and succeed:\n{}",
+        String::from_utf8_lossy(&tokened.stderr)
+    );
+    let token_contents = fs::read_to_string(&token_log).unwrap();
+    let observed = token_contents.lines().collect::<Vec<_>>();
+    let binstall_call = observed
+        .iter()
+        .find(|line| line.contains("binstall --no-confirm --locked"))
+        .expect("tokened run must still attempt binstall");
+    assert!(
+        binstall_call.contains("--disable-strategies compile"),
+        "a release token must disable binstall's compile strategy even without a source prerequisite:\n{binstall_call}"
+    );
+    assert!(
+        binstall_call.ends_with("|sentinel-release-token"),
+        "release discovery is the one step that should see the token:\n{binstall_call}"
+    );
+    let source_install_call = observed
+        .iter()
+        .find(|line| line.contains("install --locked cargo-other"))
+        .expect("tokened run must still reach the source install");
+    assert!(
+        source_install_call.ends_with("|<none>"),
+        "the source install must run without the token:\n{source_install_call}"
+    );
+
+    // And with a source prerequisite, the prerequisite recipe is tokenless too.
+    fs::remove_file(&log).unwrap();
+    fs::remove_file(&token_log).unwrap();
+    let tokened_prereq = run_just(
+        tmp.path(),
+        &["_install-tool", "cargo-spellcheck", "0.15.7", "binstall", "source-prereq"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_CARGO_TOKEN_LOG", token_log.as_os_str()),
+            ("GITHUB_TOKEN", OsStr::new("sentinel-release-token")),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
+            ("FAKE_PREREQ_EXIT", OsStr::new("0")),
+            ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+        ],
+    );
+    assert!(tokened_prereq.status.success());
+    let prereq_contents = fs::read_to_string(&token_log).unwrap();
+    let prereq_line = prereq_contents
+        .lines()
+        .find(|line| line.starts_with("source-prereq|"))
+        .expect("the tokened run must still exercise the source prerequisite");
+    assert!(
+        prereq_line.ends_with("|<none>"),
+        "the source prerequisite must run without the token:\n{prereq_line}"
     );
 }
 

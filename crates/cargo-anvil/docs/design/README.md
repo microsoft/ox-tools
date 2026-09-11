@@ -393,13 +393,15 @@ outstanding owned-file proposals and managed-region refusals.
   `cargo-binstall` to fetch pinned prebuilt release binaries, falling back to the
   same locked source install; `cargo-binstall` has unresolved compliance issues for
   ADO pipelines, so it is never used there. See [github.md](./github.md).
-- The built-in `GITHUB_TOKEN` is exposed to the GitHub setup steps only so
-  `cargo-binstall` can discover releases as an authenticated caller instead of
-  hitting anonymous rate limits. It is removed from the environment before any
-  source install, and binstall's compile strategy is disabled while it is set,
-  so no third-party build ever runs with the credential in scope. Its *scopes*
-  stay the caller's choice, per the permissions rule above: the generated
-  implementation declares none of its own.
+- The built-in `GITHUB_TOKEN` reaches two generated surfaces. The run-group action
+  has long exported it so checks that call GitHub's API get the authenticated
+  quota, and the setup steps now receive it so `cargo-binstall` can discover
+  releases as an authenticated caller instead of hitting anonymous rate limits.
+  On the installation path it is removed from the environment before any source
+  install, and binstall's compile strategy is disabled while it is set, so no
+  third-party build ever runs with the credential in scope. Its *scopes* stay the
+  caller's choice, per the permissions rule above: the generated implementation
+  declares none of its own.
 - The tool never sources or executes content from any user-edited file at runtime;
   everything executable in the repo is plain `just` recipes the user can read.
 - Recommended user-workflow shape: `permissions: contents: read` on PR workflows; grant
