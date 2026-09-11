@@ -1666,11 +1666,10 @@ fn semver_exit_code_contract_is_executed() {
     }
 }
 
-#[test]
-fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
-    if !tools_available() {
-        return;
-    }
+/// Fixture for the `_install-tool` contracts: the tools catalog plus a
+/// `source-prereq` recipe that records both that it ran and whether it could see
+/// a release token.
+fn install_tool_fixture() -> TempDir {
     let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
     let justfile_path = tmp.path().join("Justfile");
     let mut justfile = fs::read_to_string(&justfile_path).unwrap();
@@ -1687,6 +1686,15 @@ source-prereq:
 "#,
     );
     write(&justfile_path, &justfile);
+    tmp
+}
+
+#[test]
+fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = install_tool_fixture();
     let log = tmp.path().join("cargo.log");
 
     let fallback = run_just(
@@ -1756,20 +1764,27 @@ source-prereq:
         .expect("ordinary tool must attempt binstall");
     assert!(
         !ordinary_binstall.contains("--disable-strategies compile"),
-        "tools without source prerequisites retain binstall's compile strategy"
+        "without a release token, tools without source prerequisites retain binstall's compile strategy"
     );
+}
 
-    // A release token changes both branches: binstall must stop compiling, and
-    // nothing downstream of it may still see the credential. Without this case a
-    // regression could quietly hand the workflow token to a third-party build
-    // while every other assertion here stayed green.
-    //
-    // This uses the tool WITHOUT a source prerequisite on purpose. For
-    // `cargo-spellcheck` the prerequisite alone already disables compilation, so
-    // it could not distinguish the token branch from the prerequisite branch;
-    // here the token is the only reason compilation may be disabled.
-    fs::remove_file(&log).unwrap();
+/// A release token changes both branches: binstall must stop compiling, and
+/// nothing downstream of it may still see the credential. Without this a
+/// regression could quietly hand the workflow token to a third-party build while
+/// every assertion in the test above stayed green.
+#[test]
+fn install_tool_keeps_the_release_token_out_of_source_builds() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = install_tool_fixture();
+    let log = tmp.path().join("cargo.log");
     let token_log = tmp.path().join("token.log");
+
+    // Deliberately the tool with NO source prerequisite: for one that declares a
+    // prerequisite the prerequisite alone already disables compilation, so the
+    // case could not tell the token branch from the prerequisite branch and
+    // would pin nothing. Here the token is the only thing that can disable it.
     let tokened = run_just(
         tmp.path(),
         &["_install-tool", "cargo-other", "1.2.3", "binstall", ""],
