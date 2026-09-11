@@ -243,6 +243,14 @@ a usage error.
 - **No shell.** The command is spawned directly (argv, not a shell string), so
   there is no quoting/dialect surface. Placeholder expansion is textual and
   happens before spawn.
+- **Executable lookup.** On Windows, the inherited `PATH` is explicitly passed
+  to each child so its entries take precedence over the directory containing
+  `cargo-each`. An adjacent executable must not shadow a tool selected on `PATH`
+  (for example, a different Cargo toolchain proxy). Explicit executable paths
+  and the platform's fallback search when no `PATH` entry matches are unchanged.
+  No special substitution of `cargo` with the `CARGO` environment variable is
+  performed: that variable can name a raw Cargo binary which cannot interpret
+  a `+toolchain` argument.
 
 ## 6. How it simplifies cargo-anvil
 

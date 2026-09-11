@@ -97,6 +97,59 @@ fn each(manifest: &Path) -> Command {
     cmd
 }
 
+#[cfg(windows)]
+#[cfg_attr(miri, ignore = "spawns copied cargo-each binaries; unsupported under Miri")]
+#[test]
+fn child_lookup_prefers_path_over_the_runner_directory() {
+    let (tmp, manifest) = fixture();
+    let runner_dir = tmp.path().join("runner");
+    let path_dir = tmp.path().join("preferred tools");
+    fs::create_dir(&runner_dir).expect("create isolated runner directory");
+    fs::create_dir(&path_dir).expect("create preferred PATH directory");
+    let binary = env!("CARGO_BIN_EXE_cargo-each");
+    let runner = runner_dir.join("cargo-each.exe");
+    fs::copy(binary, &runner).expect("copy runner");
+    for name in ["cargo.exe", "probe.exe"] {
+        fs::copy(binary, path_dir.join(name)).expect("copy preferred executable");
+        fs::write(runner_dir.join(name), "not an executable").expect("write adjacent decoy");
+    }
+    let path =
+        std::env::join_paths(std::iter::once(path_dir).chain(std::env::split_paths(&std::env::var_os("PATH").expect("test runner PATH"))))
+            .expect("join test PATH");
+
+    for program in ["cargo", "cargo.exe", "probe", "probe.exe"] {
+        for mode in [&["--once"][..], &["--keep-going"][..], &["--chdir"][..]] {
+            Command::new(&runner)
+                .current_dir(tmp.path())
+                .env("PATH", &path)
+                // Workspace discovery must not use either fake cargo.exe.
+                .env("CARGO", env!("CARGO"))
+                .args(["each", "--manifest-path"])
+                .arg(&manifest)
+                .args(["-p", "alpha", "-p", "gamma"])
+                .args(mode)
+                .args(["--", program, "each", "--version"])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+        }
+    }
+
+    // An explicit path is authoritative, even when PATH has a working namesake.
+    Command::new(&runner)
+        .env("PATH", &path)
+        .env("CARGO", env!("CARGO"))
+        .args(["each", "--manifest-path"])
+        .arg(&manifest)
+        .args(["-p", "alpha", "--"])
+        .arg(runner_dir.join("probe.exe"))
+        .args(["each", "--version"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("failed to spawn"));
+}
+
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
 fn once_whole_workspace_expands_to_workspace_flag() {

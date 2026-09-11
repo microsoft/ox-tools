@@ -102,6 +102,13 @@ fn execute(plan: &Plan, keep_going: bool) -> Result<ExitCode, AppError> {
         let (program, rest) = inv.argv.split_first().expect("Plan::build never emits an empty argv");
         let mut command = Command::new(program);
         command.args(rest);
+        // An explicit child PATH makes Windows search it before this executable's
+        // directory, even when the value is unchanged. Otherwise an adjacent
+        // cargo/rustup proxy can shadow the toolchain proxy selected by the caller.
+        #[cfg(windows)]
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env("PATH", path);
+        }
         if let Some(dir) = &inv.work_dir {
             command.current_dir(dir);
         }
