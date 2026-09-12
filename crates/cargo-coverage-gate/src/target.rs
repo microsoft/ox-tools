@@ -3,8 +3,7 @@
 
 //! Rust target discovery and Cargo-style selector matching.
 
-use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::process::Command;
 use std::str::FromStr;
 
@@ -33,20 +32,27 @@ pub(crate) struct TargetContext {
 }
 
 impl TargetContext {
-    /// Resolve an explicit Rust target, or the rustc host target when omitted.
-    pub(crate) fn resolve(target: Option<&str>) -> Result<Self, CoverageGateError> {
-        let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
-        Self::resolve_with_rustc(target, &rustc).map_err(Into::into)
+    pub(crate) fn resolve_with_rustc_program(
+        target: Option<&str>,
+        rustc: &OsStr,
+        rustup_toolchain: Option<&OsStr>,
+    ) -> Result<Self, CoverageGateError> {
+        Self::resolve_with_rustc(target, rustc, rustup_toolchain).map_err(Into::into)
     }
 
     /// Spawns the real `rustc`, delegating every decision to [`Self::resolve_with_runner`].
     ///
     /// Deliberately thin: this is the only part of target resolution that touches a
     /// process, so it is the only part that cannot be exercised without one.
-    fn resolve_with_rustc(target: Option<&str>, rustc: &OsStr) -> Result<Self, ResolveTargetError> {
+    fn resolve_with_rustc(target: Option<&str>, rustc: &OsStr, rustup_toolchain: Option<&OsStr>) -> Result<Self, ResolveTargetError> {
         let rustc_display = rustc.to_string_lossy().into_owned();
         Self::resolve_with_runner(target, &rustc_display, |args| {
-            let output = Command::new(rustc).args(args).output()?;
+            let mut command = Command::new(rustc);
+            command.args(args);
+            if let Some(toolchain) = rustup_toolchain {
+                command.env("RUSTUP_TOOLCHAIN", toolchain);
+            }
+            let output = command.output()?;
             Ok(RustcRun {
                 success: output.status.success(),
                 status: output.status.to_string(),
@@ -175,7 +181,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "spawns rustc; miri isolation forbids process execution")]
     fn resolves_host_and_cfg_from_real_rustc() {
-        let target = TargetContext::resolve(None).expect("resolving the host target must succeed");
+        let target =
+            TargetContext::resolve_with_rustc_program(None, OsStr::new("rustc"), None).expect("resolving the host target must succeed");
 
         assert!(!target.triple.is_empty(), "rustc must report a host triple");
         assert!(target.matches(&Platform::from_str(&target.triple).expect("reported triple must parse")));
@@ -190,7 +197,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "spawns rustc; miri isolation forbids process execution")]
     fn resolves_explicit_target_from_real_rustc() {
-        let target = TargetContext::resolve(Some("x86_64-unknown-linux-gnu")).expect("resolving an explicit target must succeed");
+        let target = TargetContext::resolve_with_rustc_program(Some("x86_64-unknown-linux-gnu"), OsStr::new("rustc"), None)
+            .expect("resolving an explicit target must succeed");
 
         assert_eq!(target.triple, "x86_64-unknown-linux-gnu");
         assert!(target.matches(&Platform::from_str("cfg(unix)").expect("unix cfg")));
@@ -201,8 +209,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "spawns a process; miri isolation forbids that")]
     fn reports_a_rustc_that_cannot_be_launched() {
-        let error =
-            TargetContext::resolve_with_rustc(None, "cargo-coverage-gate-no-such-rustc".as_ref()).expect_err("a missing rustc must fail");
+        let error = TargetContext::resolve_with_rustc(None, "cargo-coverage-gate-no-such-rustc".as_ref(), None)
+            .expect_err("a missing rustc must fail");
 
         assert!(error.to_string().contains("failed to resolve"));
         assert!(error.source().is_some(), "resolve error must preserve its typed cause");

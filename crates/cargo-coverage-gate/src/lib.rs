@@ -8,10 +8,12 @@
 //!
 //! A pull-request-time gate that compares per-package line coverage produced
 //! by [`cargo-llvm-cov`] against per-package thresholds carried in
-//! `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
-//! coverage lcov tracefile, resolves each package's base policy from a small
-//! three-layer lookup, applies any matching package target policy, and emits a
-//! verdict table to stdout (and,
+//! `Cargo.toml`. The accompanying `cargo-coverage-gate` binary can either read
+//! existing LCOV tracefiles or collect them through a portable
+//! cargo-llvm-cov and
+//! nextest. It resolves each package's base policy from a small three-layer
+//! lookup, applies any matching package target policy, and emits a verdict
+//! table to stdout (and,
 //! optionally, to a Markdown summary file for CI step summaries). A failing
 //! verdict includes actionable details without relying on a later
 //! coverage-service upload. A coverable line is a distinct LCOV `DA:` record.
@@ -129,10 +131,30 @@
 //! ## Binary usage
 //!
 //! ```text
-//! cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
-//!                      [--target <triple>]
-//!                      [--summary-file <path>] [--quiet]
+//! cargo coverage-gate [EVALUATION OPTIONS]
+//! cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [EVALUATION OPTIONS]
 //! ```
+//!
+//! The bare command evaluates existing LCOV files and remains backward
+//! compatible. `cargo coverage-gate run` collects `all-features` and
+//! `no-default-features` coverage with cargo-llvm-cov plus nextest by default,
+//! writes distinct LCOV files under `target/coverage`, and evaluates them
+//! in-process. Collection can be limited with repeatable `--package` selectors
+//! and a `--package-file` containing one exact `name@version` per nonempty
+//! UTF-8 line. Use repeatable `--configuration`, `--coverage-dir`, and
+//! `--jobs` options to customize collection. Instrumented collection requires
+//! nightly Rust and cargo-llvm-cov 0.7.0 or newer. Select a pinned nightly with
+//! `--toolchain`, set `COVERAGE_GATE_TOOLCHAIN`, or use an active nightly
+//! toolchain. An explicit `RUSTUP` override must be an absolute executable
+//! path; otherwise rustup is resolved from explicit nonempty `PATH` entries
+//! without implicitly searching the repository working directory.
+//!
+//! Native `aarch64-pc-windows-msvc` runs and selections containing only
+//! effective zero thresholds execute plain nextest and return an explicit
+//! successful no-gate result without creating LCOV. Mixed selections remain
+//! instrumented, including zero-threshold packages whose tests may cover gated
+//! packages. `--quiet` suppresses all collection and verdict stdout while
+//! preserving stderr diagnostics and summary output.
 //!
 //! `--lcov` may be repeated; the tracefiles are merged at the line level
 //! (per-line counts summed) so multiple feature-config exports
@@ -140,10 +162,10 @@
 //! without a separate, platform-specific merge step.
 //!
 //! Exit codes: `0` if every gated package meets its threshold, `1` if any
-//! gated package falls below its threshold, and `2` for configuration
-//! errors (unparseable lcov, missing data for a gated package, a `--package`
-//! selector that matches no member, an out-of-range `min-lines-percent`
-//! value, …).
+//! gated package falls below its threshold, and `2` for configuration or
+//! operational errors (unparseable lcov, missing data for a gated package, a
+//! `--package` selector that matches no member, failed collection/export, an
+//! out-of-range `min-lines-percent` value, …).
 //!
 //! When `--summary-file` is unset, the binary falls back to
 //! `$GITHUB_STEP_SUMMARY` and then `$COVERAGE_GATE_SUMMARY` to decide
@@ -172,7 +194,8 @@
 //! text via [`EvaluatedReport::render_text`] or GitHub-flavored Markdown via
 //! [`EvaluatedReport::render_markdown`] and reduces to a [`Verdict`] via
 //! [`EvaluatedReport::verdict`]. The accompanying binary loads tracefiles from
-//! disk and orchestrates rendering plus the appropriate exit code.
+//! disk or collects it, then orchestrates rendering plus the appropriate exit
+//! code.
 //!
 //! [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 
@@ -182,6 +205,7 @@
 )]
 #![deny(unsafe_code)]
 
+use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 
@@ -248,6 +272,17 @@ impl EvaluatedReport {
     #[must_use]
     pub fn unattributed_count(&self) -> usize {
         self.inner.unattributed
+    }
+
+    /// Whether at least one selected package policy requires coverage data.
+    ///
+    /// Returns `false` only when every selected package has an effective
+    /// `min-lines-percent = 0` opt-out. Packages with positive thresholds and
+    /// packages asserting `expect-no-coverable-lines = true` both require an
+    /// instrumented collection so their policies can be evaluated.
+    #[must_use]
+    pub fn requires_coverage_collection(&self) -> bool {
+        self.inner.requires_coverage_collection()
     }
 
     /// Render the verdict table as plain text to `out`.
@@ -340,8 +375,27 @@ pub fn evaluate_many_for_target(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<EvaluatedReport, CoverageGateError> {
+    evaluate_many_for_target_with_tools(lcov_texts, manifest_path, gated_packages, target, None, None, None)
+}
+
+/// Evaluate tracefiles with explicit Cargo and rustc programs for metadata and
+/// target-policy queries.
+///
+/// This is used by the binary's collection layer so policy resolution
+/// and instrumentation observe the same toolchain. Callers evaluating
+/// externally produced LCOV should use [`evaluate_many_for_target`].
+#[doc(hidden)]
+pub fn evaluate_many_for_target_with_tools(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+    target: Option<&str>,
+    cargo: Option<&OsStr>,
+    rustc: Option<&OsStr>,
+    rustup_toolchain: Option<&OsStr>,
+) -> Result<EvaluatedReport, CoverageGateError> {
     let report = lcov_cov::CoverageReport::from_strs(lcov_texts)?;
-    let ws = workspace::Workspace::load(manifest_path, target)?;
+    let ws = workspace::Workspace::load_with_tools(manifest_path, target, cargo, rustc, rustup_toolchain)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
 }
