@@ -140,6 +140,10 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
         if env::var_os("FAKE_NO_PROFILE").is_none() {
             fs::write(target_dir.join("fake.profraw"), b"profile").map_err(|error| error.to_string())?;
         }
+        if let Ok(delay) = env::var("FAKE_NEXTEST_DELAY_MS") {
+            let delay = delay.parse::<u64>().map_err(|error| error.to_string())?;
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
 
         if env::var_os("FAKE_NEXTEST_TEXT").is_some() {
             println!("non-JSON nextest output");
@@ -267,11 +271,16 @@ fn log(name: &str, args: &[std::ffi::OsString]) -> Result<(), String> {
         .append(true)
         .open(path)
         .map_err(|error| error.to_string())?;
-    write!(log, "{name}").map_err(|error| error.to_string())?;
+    let mut line = name.to_owned();
     for argument in args {
-        write!(log, "\t{}", argument.to_string_lossy()).map_err(|error| error.to_string())?;
+        line.push('\t');
+        line.push_str(&argument.to_string_lossy());
     }
-    writeln!(log).map_err(|error| error.to_string())
+    if let Some(target_dir) = env::var_os("CARGO_LLVM_COV_TARGET_DIR") {
+        line.push_str("\tCOVERAGE_TARGET=");
+        line.push_str(&target_dir.to_string_lossy());
+    }
+    writeln!(log, "{line}").map_err(|error| error.to_string())
 }
 
 fn json_escape(value: &str) -> String {

@@ -13,7 +13,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cargo_metadata::{Metadata, MetadataCommand};
-use ohno::{AppError, IntoAppError};
+use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
 use serde_json::Value;
 
@@ -93,12 +93,12 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
     ))?;
 
     let tools = LlvmTools::discover(&toolchain)?;
-    let coverage_target_dir = workspace.target_dir.join("llvm-cov-target");
+    let coverage_target = TemporaryDirectory::create(&workspace.target_dir.join("coverage-gate"))?;
     let execution = CollectionExecution {
         workspace: &workspace,
         selection: &selection,
         args: &collection,
-        coverage_target_dir: &coverage_target_dir,
+        coverage_target_dir: coverage_target.path(),
         tools: &tools,
         target: args.target.as_deref(),
         toolchain: &toolchain,
@@ -110,14 +110,54 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         lcov_paths.push(lcov_path);
     }
 
-    crate::run::evaluate_paths_with_toolchain(
+    let evaluation = crate::run::evaluate_paths_with_toolchain(
         args,
         &lcov_paths,
         &gated_names,
         Some(toolchain.cargo()),
         Some(toolchain.rustc()),
         toolchain.name.as_deref(),
-    )
+    );
+    combine_evaluation_and_cleanup(evaluation, coverage_target.cleanup()).complete()
+}
+
+struct FinalizedRun {
+    result: Result<ExitCode, AppError>,
+    cleanup_warning: Option<AppError>,
+}
+
+impl FinalizedRun {
+    fn complete(self) -> Result<ExitCode, AppError> {
+        if let Some(cleanup) = self.cleanup_warning {
+            eprintln!("warning: coverage evaluation completed, but scratch cleanup failed: {cleanup}");
+        }
+        self.result
+    }
+}
+
+fn combine_evaluation_and_cleanup(evaluation: Result<ExitCode, AppError>, cleanup: Result<(), AppError>) -> FinalizedRun {
+    match (evaluation, cleanup) {
+        (Err(evaluation), Ok(())) => FinalizedRun {
+            result: Err(evaluation),
+            cleanup_warning: None,
+        },
+        (Err(evaluation), Err(cleanup)) => FinalizedRun {
+            result: Err(evaluation.enrich(format!("scratch cleanup also failed: {cleanup}"))),
+            cleanup_warning: None,
+        },
+        (Ok(code), Ok(())) => FinalizedRun {
+            result: Ok(code),
+            cleanup_warning: None,
+        },
+        (Ok(code), Err(cleanup)) if code != ExitCode::SUCCESS => FinalizedRun {
+            result: Ok(code),
+            cleanup_warning: Some(cleanup),
+        },
+        (Ok(_), Err(cleanup)) => FinalizedRun {
+            result: Err(cleanup.enrich("coverage evaluation passed, but scratch cleanup failed")),
+            cleanup_warning: None,
+        },
+    }
 }
 
 struct CollectionExecution<'a> {
@@ -246,22 +286,19 @@ fn is_executable_file(path: &Path, windows: bool) -> bool {
     if !metadata.is_file() {
         return false;
     }
-    platform_permissions_allow(&metadata, windows)
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        Some(metadata.permissions().mode())
+    };
+    #[cfg(not(unix))]
+    let mode = None;
+    platform_permissions_allow(mode, requires_execute_bit(windows, cfg!(unix)))
 }
 
-#[cfg(unix)]
-// Windows-host mutation runs cannot compile this Unix-only permission branch;
-// direct unit tests cover its arithmetic and Unix CI exercises the real mode.
-#[mutants::skip]
-fn platform_permissions_allow(metadata: &fs::Metadata, windows_semantics: bool) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    windows_semantics || has_executable_mode(metadata.permissions().mode())
-}
-
-#[cfg(not(unix))]
-fn platform_permissions_allow(_metadata: &fs::Metadata, _windows_semantics: bool) -> bool {
-    true
+fn requires_execute_bit(windows: bool, unix: bool) -> bool {
+    unix && !windows
 }
 
 fn executable_names(program: &OsStr, path_ext: Option<&OsStr>, windows: bool) -> Vec<OsString> {
@@ -769,12 +806,8 @@ fn is_coverage_object(path: &Path) -> bool {
     if is_ignored_artifact_path(path) {
         return false;
     }
-    #[cfg(windows)]
-    {
-        let extension = path.extension().unwrap_or_default();
-        if !(extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("dll")) {
-            return false;
-        }
+    if !object_extension_allowed(path, cfg!(windows)) {
+        return false;
     }
     let Ok(metadata) = fs::metadata(path) else {
         return false;
@@ -783,13 +816,23 @@ fn is_coverage_object(path: &Path) -> bool {
         return false;
     }
     #[cfg(unix)]
-    {
+    let mode = {
         use std::os::unix::fs::PermissionsExt as _;
 
-        has_executable_mode(metadata.permissions().mode())
-    }
+        Some(metadata.permissions().mode())
+    };
     #[cfg(not(unix))]
-    true
+    let mode = None;
+    platform_permissions_allow(mode, cfg!(unix))
+}
+
+fn object_extension_allowed(path: &Path, windows: bool) -> bool {
+    let extension = path.extension().unwrap_or_default();
+    !windows || extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("dll")
+}
+
+fn platform_permissions_allow(mode: Option<u32>, require_execute_bit: bool) -> bool {
+    !require_execute_bit || mode.is_some_and(has_executable_mode)
 }
 
 fn is_ignored_artifact_path(path: &Path) -> bool {
@@ -797,7 +840,6 @@ fn is_ignored_artifact_path(path: &Path) -> bool {
     extension == "d" || extension == "rlib" || extension == "rmeta" || path.ends_with(".cargo-lock") || path.ends_with(".cargo-build-lock")
 }
 
-#[cfg(any(unix, test))]
 fn has_executable_mode(mode: u32) -> bool {
     mode & 0o111 != 0
 }
@@ -829,10 +871,18 @@ fn profile_list_contents(paths: &[PathBuf]) -> Result<Vec<u8>, AppError> {
                 "raw profile path `{path}` contains a line break and cannot be written to the llvm-profdata input list"
             )));
         }
+
         output.extend_from_slice(path.as_bytes());
         output.push(b'\n');
     }
+
     Ok(output)
+}
+
+fn prefixed_path_argument(prefix: &str, path: &Path) -> OsString {
+    let mut argument = OsString::from(prefix);
+    argument.push(path.as_os_str());
+    argument
 }
 
 fn object_response_contents(objects: &[PathBuf]) -> Result<Vec<u8>, AppError> {
@@ -895,8 +945,8 @@ fn export_lcov(
         .current_dir(&workspace.root)
         .arg("export")
         .arg("-format=lcov")
-        .arg(format!("-instr-profile={}", profdata.display()))
-        .arg(format!("@{}", response.display()))
+        .arg(prefixed_path_argument("-instr-profile=", profdata))
+        .arg(prefixed_path_argument("@", response))
         .arg("-ignore-filename-regex")
         .arg(default_ignore_filename_regex(workspace));
     append_space_separated_env(&mut command, "LLVM_COV_FLAGS");
@@ -918,6 +968,9 @@ fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> 
 }
 
 #[cfg(windows)]
+// Unix mutation jobs cannot execute this Windows FFI branch. Windows unit and
+// integration tests cover replacement success, failure, and byte preservation.
+#[mutants::skip]
 fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
     use std::iter;
     use std::os::windows::ffi::OsStrExt as _;
@@ -926,12 +979,27 @@ fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> 
 
     let source = source.as_os_str().encode_wide().chain(iter::once(0)).collect::<Vec<_>>();
     let destination = destination.as_os_str().encode_wide().chain(iter::once(0)).collect::<Vec<_>>();
-    // SAFETY: both pointers reference live, NUL-terminated UTF-16 buffers for
-    // the duration of the call. The files are in the same directory, and the
-    // flags request an atomic replacement without exposing an absent final
-    // path.
-    let replaced = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), windows_replace_flags()) };
-    if replaced == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    retry_windows_replace(
+        || {
+            // SAFETY: both pointers reference live, NUL-terminated UTF-16
+            // buffers for the duration of each call.
+            let replaced = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), windows_replace_flags()) };
+            if replaced != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+        },
+        || std::thread::sleep(std::time::Duration::from_millis(10)),
+    )
+}
+
+#[cfg(windows)]
+fn retry_windows_replace(mut replace: impl FnMut() -> io::Result<()>, mut wait: impl FnMut()) -> io::Result<()> {
+    for _ in 0..99 {
+        match replace() {
+            Ok(()) => return Ok(()),
+            Err(error) if is_retryable_windows_replace_error(&error) => wait(),
+            Err(error) => return Err(error),
+        }
+    }
+    replace()
 }
 
 #[cfg(windows)]
@@ -943,6 +1011,12 @@ fn windows_replace_flags() -> u32 {
 
     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
 }
+
+#[cfg(windows)]
+fn is_retryable_windows_replace_error(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32))
+}
+
 fn append_space_separated_env(command: &mut Command, key: &str) {
     if let Some(flags) = env::var_os(key) {
         command.args(flags.to_string_lossy().split(' ').filter(|flag| !flag.trim_start().is_empty()));
@@ -1037,6 +1111,64 @@ struct TemporaryPath {
     armed: bool,
 }
 
+#[derive(Debug)]
+struct TemporaryDirectory {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TemporaryDirectory {
+    fn create(parent: &Path) -> Result<Self, AppError> {
+        fs::create_dir_all(parent).into_app_err(format!("failed to create coverage target parent `{}`", parent.display()))?;
+        Self::allocate(
+            parent,
+            || TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            |path| fs::create_dir(path),
+        )
+    }
+
+    fn allocate(
+        parent: &Path,
+        mut next_sequence: impl FnMut() -> u64,
+        mut create_dir: impl FnMut(&Path) -> io::Result<()>,
+    ) -> Result<Self, AppError> {
+        for _ in 0..100 {
+            let sequence = next_sequence();
+            let path = parent.join(format!("run-{}-{sequence}", std::process::id()));
+            match create_dir(&path) {
+                Ok(()) => return Ok(Self { path, armed: true }),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error).into_app_err(format!("failed to create isolated coverage target `{}`", path.display()));
+                }
+            }
+        }
+        Err(AppError::new(format!(
+            "could not allocate a unique coverage target beneath `{}`",
+            parent.display()
+        )))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn cleanup(mut self) -> Result<(), AppError> {
+        let cleanup =
+            remove_dir_if_present(&self.path).into_app_err(format!("failed to remove isolated coverage target `{}`", self.path.display()));
+        self.armed = false;
+        cleanup
+    }
+}
+
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 impl TemporaryPath {
     fn new(directory: &Path, label: &str) -> Self {
         let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -1102,6 +1234,14 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
+fn remove_dir_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -1127,6 +1267,61 @@ mod tests {
         WorkspaceMember {
             name: name.to_owned(),
             version: version.to_owned(),
+        }
+    }
+
+    fn app_error(message: &'static str) -> AppError {
+        AppError::new(message)
+    }
+
+    #[test]
+    fn evaluation_error_remains_primary_when_cleanup_also_fails() {
+        let finalized = combine_evaluation_and_cleanup(Err(app_error("evaluation failed")), Err(app_error("cleanup failed")));
+        let error = finalized.result.expect_err("evaluation must remain an error").to_string();
+        assert!(error.contains("evaluation failed"), "{error}");
+        assert!(error.contains("scratch cleanup also failed: cleanup failed"), "{error}");
+        assert!(finalized.cleanup_warning.is_none());
+    }
+
+    #[test]
+    fn evaluation_error_is_unchanged_when_cleanup_succeeds() {
+        let finalized = combine_evaluation_and_cleanup(Err(app_error("evaluation failed")), Ok(()));
+        assert_eq!(
+            finalized.result.expect_err("evaluation must remain an error").to_string(),
+            "evaluation failed"
+        );
+        assert!(finalized.cleanup_warning.is_none());
+    }
+
+    #[test]
+    fn policy_failure_survives_cleanup_failure_with_warning() {
+        let finalized = combine_evaluation_and_cleanup(Ok(ExitCode::from(1)), Err(app_error("cleanup failed")));
+        assert_eq!(
+            finalized
+                .cleanup_warning
+                .as_ref()
+                .expect("cleanup failure becomes a warning")
+                .to_string(),
+            "cleanup failed"
+        );
+        assert_eq!(finalized.complete().expect("policy result remains available"), ExitCode::from(1));
+    }
+
+    #[test]
+    fn successful_evaluation_becomes_error_when_cleanup_fails() {
+        let finalized = combine_evaluation_and_cleanup(Ok(ExitCode::SUCCESS), Err(app_error("cleanup failed")));
+        let error = finalized.result.expect_err("cleanup failure prevents complete success").to_string();
+        assert!(error.contains("cleanup failed"), "{error}");
+        assert!(error.contains("coverage evaluation passed, but scratch cleanup failed"), "{error}");
+        assert!(finalized.cleanup_warning.is_none());
+    }
+
+    #[test]
+    fn successful_cleanup_preserves_any_evaluation_exit_code() {
+        for code in [ExitCode::SUCCESS, ExitCode::from(1), ExitCode::from(2)] {
+            let finalized = combine_evaluation_and_cleanup(Ok(code), Ok(()));
+            assert_eq!(finalized.result.expect("exit code must be preserved"), code);
+            assert!(finalized.cleanup_warning.is_none());
         }
     }
 
@@ -1311,9 +1506,48 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_atomic_replace_uses_replace_and_write_through_flags() {
+        use std::cell::Cell;
+
         use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 
-        assert_eq!(windows_replace_flags(), MOVEFILE_REPLACE_EXISTING + MOVEFILE_WRITE_THROUGH);
+        assert_eq!(windows_replace_flags(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        assert!(is_retryable_windows_replace_error(&io::Error::from_raw_os_error(5)));
+        assert!(is_retryable_windows_replace_error(&io::Error::from_raw_os_error(32)));
+        assert!(!is_retryable_windows_replace_error(&io::Error::from_raw_os_error(2)));
+
+        let attempts = Cell::new(0);
+        let waits = Cell::new(0);
+        retry_windows_replace(
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err(io::Error::from_raw_os_error(32))
+                } else {
+                    Ok(())
+                }
+            },
+            || waits.set(waits.get() + 1),
+        )
+        .expect("sharing violation is retried");
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(waits.get(), 1);
+
+        retry_windows_replace(
+            || Err(io::Error::from_raw_os_error(2)),
+            || panic!("non-retryable errors must not wait"),
+        )
+        .expect_err("non-retryable error must surface");
+
+        let attempts = Cell::new(0);
+        retry_windows_replace(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(io::Error::from_raw_os_error(5))
+            },
+            || {},
+        )
+        .expect_err("the final retryable error must surface");
+        assert_eq!(attempts.get(), 100);
     }
 
     #[test]
@@ -1453,6 +1687,16 @@ mod tests {
     }
 
     #[test]
+    fn object_extension_rules_cover_windows_and_non_windows() {
+        assert!(object_extension_allowed(Path::new("test.exe"), true));
+        assert!(object_extension_allowed(Path::new("macro.dll"), true));
+        assert!(!object_extension_allowed(Path::new("test"), true));
+        assert!(!object_extension_allowed(Path::new("test.txt"), true));
+        assert!(object_extension_allowed(Path::new("test"), false));
+        assert!(object_extension_allowed(Path::new("test.txt"), false));
+    }
+
+    #[test]
     fn ignored_artifact_names_cover_each_exclusion() {
         for ignored in ["artifact.d", "artifact.rlib", "artifact.rmeta", ".cargo-lock", ".cargo-build-lock"] {
             assert!(is_ignored_artifact_path(Path::new(ignored)), "{ignored}");
@@ -1468,6 +1712,32 @@ mod tests {
         assert!(has_executable_mode(0o001));
         assert!(!has_executable_mode(0));
         assert!(!has_executable_mode(0o600));
+        assert!(platform_permissions_allow(None, false));
+        assert!(platform_permissions_allow(Some(0o600), false));
+        assert!(!platform_permissions_allow(None, true));
+        assert!(!platform_permissions_allow(Some(0o600), true));
+        assert!(platform_permissions_allow(Some(0o700), true));
+        assert!(!requires_execute_bit(true, true));
+        assert!(!requires_execute_bit(false, false));
+        assert!(requires_execute_bit(false, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "uses temporary files and filesystem metadata, which Miri isolation does not support"
+    )]
+    fn unix_object_filter_requires_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempdir().expect("tempdir");
+        let object = tmp.path().join("object");
+        fs::write(&object, b"object").expect("write object");
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o600)).expect("set non-executable mode");
+        assert!(!is_coverage_object(&object));
+        fs::set_permissions(&object, fs::Permissions::from_mode(0o700)).expect("set executable mode");
+        assert!(is_coverage_object(&object));
     }
 
     #[test]
@@ -1525,6 +1795,18 @@ mod tests {
             let error = profile_list_contents(&[PathBuf::from(path)]).expect_err("line-delimited profile paths must reject CR/LF");
             assert!(error.to_string().contains("line break"), "{error}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn llvm_path_arguments_preserve_non_utf8_bytes() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let path = PathBuf::from(OsString::from_vec(b"/coverage/\xfffile".to_vec()));
+        let profile = prefixed_path_argument("-instr-profile=", &path);
+        let response = prefixed_path_argument("@", &path);
+        assert_eq!(profile.as_os_str().as_bytes(), b"-instr-profile=/coverage/\xfffile");
+        assert_eq!(response.as_os_str().as_bytes(), b"@/coverage/\xfffile");
     }
 
     #[test]
@@ -1652,6 +1934,82 @@ mod tests {
     fn remove_if_present_accepts_a_missing_file() {
         let tmp = tempdir().expect("tempdir");
         remove_if_present(&tmp.path().join("missing")).expect("a missing file is already removed");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn isolated_coverage_targets_are_unique_and_cleaned() {
+        let tmp = tempdir().expect("tempdir");
+        let first = TemporaryDirectory::create(tmp.path()).expect("first target");
+        let second = TemporaryDirectory::create(tmp.path()).expect("second target");
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+        assert_ne!(first_path, second_path);
+        assert!(first_path.is_dir());
+        assert!(second_path.is_dir());
+
+        first.cleanup().expect("clean first target");
+        drop(second);
+
+        assert!(!first_path.exists());
+        assert!(!second_path.exists());
+    }
+
+    #[test]
+    fn isolated_target_allocation_retries_collisions_and_reports_failures() {
+        let parent = Path::new("coverage-target-parent");
+        let mut sequence = 0_u64;
+        let mut allocated = TemporaryDirectory::allocate(
+            parent,
+            || {
+                let current = sequence;
+                sequence += 1;
+                current
+            },
+            |path| {
+                if path.ends_with(format!("run-{}-0", std::process::id())) {
+                    Err(io::Error::new(io::ErrorKind::AlreadyExists, "collision"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect("allocation retries a collision");
+        assert!(allocated.path().ends_with(format!("run-{}-1", std::process::id())));
+        allocated.armed = false;
+        drop(allocated);
+
+        let create_attempts = std::cell::Cell::new(0);
+        let error = TemporaryDirectory::allocate(
+            parent,
+            || 7,
+            |_| {
+                create_attempts.set(create_attempts.get() + 1);
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+            },
+        )
+        .expect_err("non-collision creation failures must surface");
+        assert_eq!(create_attempts.get(), 1);
+        assert!(error.to_string().contains("failed to create isolated coverage target"));
+
+        TemporaryDirectory::allocate(parent, || 9, |_| Err(io::Error::new(io::ErrorKind::AlreadyExists, "collision")))
+            .expect_err("one hundred collisions must exhaust allocation");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
+    fn isolated_target_cleanup_accepts_missing_and_reports_non_directories() {
+        let tmp = tempdir().expect("tempdir");
+        let missing = TemporaryDirectory {
+            path: tmp.path().join("missing"),
+            armed: true,
+        };
+        missing.cleanup().expect("missing target is already clean");
+
+        let file = tmp.path().join("file");
+        fs::write(&file, b"not a directory").expect("write file");
+        let invalid = TemporaryDirectory { path: file, armed: true };
+        invalid.cleanup().expect_err("a file cannot be removed as a target directory");
     }
 
     #[test]

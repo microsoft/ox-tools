@@ -13,7 +13,7 @@
 #![cfg(not(miri))] // miri can't sandbox FS ops these tests do (TempDir, assert_cmd, etc.)
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Output, Stdio};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -95,7 +95,12 @@ fn coverage_gate(dir: &Path) -> Command {
         // The summary-file env vars must not leak in from the host
         // environment — tests that exercise them set them explicitly.
         .env_remove("GITHUB_STEP_SUMMARY")
-        .env_remove("COVERAGE_GATE_SUMMARY");
+        .env_remove("COVERAGE_GATE_SUMMARY")
+        // Keep generic collection tests on the instrumented path even when
+        // this test binary runs on native Windows ARM. ARM fallback tests pass
+        // the target explicitly and therefore still exercise that branch.
+        .env("PROCESSOR_ARCHITECTURE", "AMD64")
+        .env_remove("PROCESSOR_ARCHITEW6432");
     cmd
 }
 
@@ -195,6 +200,35 @@ fn fake_collection_command_inner(dir: &Path, tools: &FakeCoverageTools, object: 
         command.env("FAKE_EXPECT_TOOLCHAIN", toolchain);
     }
     command
+}
+
+fn run_concurrently(command: &Command) -> std::process::Child {
+    let mut process = ProcessCommand::new(command.get_program());
+    process.args(command.get_args());
+    if let Some(directory) = command.get_current_dir() {
+        process.current_dir(directory);
+    }
+    for (key, value) in command.get_envs() {
+        if let Some(value) = value {
+            process.env(key, value);
+        } else {
+            process.env_remove(key);
+        }
+    }
+    process
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn concurrent coverage-gate")
+}
+
+fn assert_success(output: &Output) {
+    assert!(
+        output.status.success(),
+        "command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -771,6 +805,39 @@ fn run_collects_both_configurations_with_response_files_and_evaluates() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns concurrent binaries and fake coverage tools")]
+fn concurrent_runs_use_isolated_coverage_targets_and_clean_them() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
+    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&object, b"object").expect("write fake object");
+    let tools = FakeCoverageTools::compile();
+
+    let mut first = fake_collection_command(tmp.path(), &tools, &object);
+    first.env("FAKE_NEXTEST_DELAY_MS", "250");
+    let mut second = fake_collection_command(tmp.path(), &tools, &object);
+    second.env("FAKE_NEXTEST_DELAY_MS", "250");
+
+    let first = run_concurrently(&first);
+    let second = run_concurrently(&second);
+    let first = first.wait_with_output().expect("wait for first collection");
+    let second = second.wait_with_output().expect("wait for second collection");
+    assert_success(&first);
+    assert_success(&second);
+
+    let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
+    let targets = log
+        .lines()
+        .filter(|line| line.contains("llvm-cov\tnextest"))
+        .filter_map(|line| line.split('\t').find_map(|field| field.strip_prefix("COVERAGE_TARGET=")))
+        .map(PathBuf::from)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(targets.len(), 2, "concurrent commands must use distinct targets:\n{log}");
+    assert!(targets.iter().all(|target| !target.exists()), "isolated targets must be cleaned");
+    assert!(tmp.path().join("coverage/lcov-all-features.info").is_file());
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
 fn run_passes_a_successful_empty_lcov_export_to_evaluation() {
     let tmp = TempDir::new().expect("tempdir");
@@ -859,6 +926,11 @@ fn run_export_failure_preserves_published_lcov_and_cleans_temporary_files() {
             .to_string_lossy()
             .starts_with(".coverage-gate-")),
         "collection failure must remove every temporary artifact"
+    );
+    let target_parent = tmp.path().join("target/coverage-gate");
+    assert!(
+        !target_parent.exists() || fs::read_dir(target_parent).expect("read coverage target parent").next().is_none(),
+        "failed collection must clean its isolated coverage target"
     );
 }
 

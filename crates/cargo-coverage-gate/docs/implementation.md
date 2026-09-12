@@ -25,6 +25,15 @@ The optional `run` mode keeps collection and evaluation separated internally:
    `cargo llvm-cov nextest --no-report --locked` run. Plain-nextest no-gate
    paths also pass `--locked`. Cargo's JSON messages provide the executable
    object paths; no target-directory scan or diagnostic parsing is needed.
+   The instrumented target is unique per invocation beneath
+   `target/coverage-gate/` and is removed by an RAII guard on every return
+   path. Concurrent runs therefore cannot clean or merge each other's
+   profiles.
+   After evaluation, a pure combiner gives evaluation errors precedence over
+   cleanup errors, preserves nonzero rendered verdicts with an explicit cleanup
+   warning, and converts a passing evaluation plus cleanup failure into an
+   operational error. Explicit cleanup disarms the guard after one attempt, so
+   `Drop` never retries the same failed deletion.
 4. `llvm-profdata merge -f` consumes an atomically written profile list.
    `llvm-cov export` receives every `-object` pair through an atomically written
    response file on every operating system.

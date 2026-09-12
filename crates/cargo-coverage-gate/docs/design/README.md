@@ -418,7 +418,8 @@ cargo coverage-gate \
 
 For each requested feature configuration, `run`:
 
-1. cleans stale workspace coverage state;
+1. allocates a unique per-invocation coverage target beneath
+   Cargo's target directory and cleans that isolated state;
 2. invokes cargo-llvm-cov with nextest, `--no-report`, and `--locked` for the
    selected package set;
 3. discovers the produced test objects from machine-readable Cargo output;
@@ -428,6 +429,19 @@ For each requested feature configuration, `run`:
 The selected package set is resolved to exact `name@version` specs before
 subprocess execution. With no selection options, the collector passes
 `--workspace`.
+
+Concurrent invocations never share instrumented build/profile state: each uses
+`target/coverage-gate/run-<pid>-<nonce>` (under Cargo's resolved target
+directory) and removes that directory on success or failure. Stable LCOV files
+remain shared publication names under `--coverage-dir`; their atomic
+replacement is intentionally last-writer-wins.
+
+Scratch cleanup has explicit result precedence. An evaluation error remains the
+primary error and carries any cleanup failure as additional context. A rendered
+policy failure keeps exit `1`; cleanup failure is reported as a warning instead
+of replacing the verdict. A passing evaluation cannot claim complete success
+when cleanup fails, so that case exits `2`. Successful cleanup never changes
+the evaluation outcome.
 
 The object list is always passed to LLVM through a response file rather than
 retrying only after a process command-line overflow. The response file is
@@ -778,7 +792,11 @@ Evaluation reads `Cargo.toml` files and coverage lcov tracefiles and writes only
 the selected summary file. `run` additionally writes beneath
 `--coverage-dir`, executes cargo-llvm-cov, nextest, Cargo, rustc, and LLVM, and
 deletes only temporary response/profile files and coverage state those tools
-created. It performs no network access or privileged operations.
+created. cargo-coverage-gate itself performs no network calls or privileged
+operations. Its Cargo and nextest children follow the caller's Cargo
+configuration and may fetch locked dependencies when they are not cached;
+callers that require network isolation must configure Cargo offline mode
+outside this tool.
 
 Workspace discovery invokes the read-only `cargo metadata` command through
 `cargo_metadata::MetadataCommand::exec()` to enumerate workspace members and
