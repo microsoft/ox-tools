@@ -172,6 +172,10 @@ hand, so every change appears in a PR diff and is reviewed.
   `target/coverage`. Each configuration gets a distinct LCOV file so CI can
   upload completed outputs even if evaluation later fails.
 
+Both instrumented cargo-llvm-cov/nextest runs and plain-nextest no-gate runs
+always pass `--locked`. Collection therefore measures the dependency graph
+recorded by the committed `Cargo.lock` and fails rather than updating it.
+
 The package selection controls which tests run and which packages are gated.
 It does not remove zero-threshold packages from instrumentation: their tests
 may cover source owned by another selected package.
@@ -415,8 +419,8 @@ cargo coverage-gate \
 For each requested feature configuration, `run`:
 
 1. cleans stale workspace coverage state;
-2. invokes cargo-llvm-cov with nextest and `--no-report` for the selected
-   package set;
+2. invokes cargo-llvm-cov with nextest, `--no-report`, and `--locked` for the
+   selected package set;
 3. discovers the produced test objects from machine-readable Cargo output;
 4. merges raw profiles and exports one LCOV file into `--coverage-dir`;
 5. passes all completed LCOV files to the ordinary evaluator.

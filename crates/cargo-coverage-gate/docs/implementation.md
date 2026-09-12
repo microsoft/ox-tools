@@ -22,9 +22,9 @@ The optional `run` mode keeps collection and evaluation separated internally:
    `Command` is created, so Windows cannot inject a project-root
    `rustup.exe` through implicit current-directory lookup.
 3. Each feature configuration gets an isolated clean, instrumented
-   `cargo llvm-cov nextest --no-report` run. Cargo's JSON messages provide the
-   executable object paths; no target-directory scan or diagnostic parsing is
-   needed.
+   `cargo llvm-cov nextest --no-report --locked` run. Plain-nextest no-gate
+   paths also pass `--locked`. Cargo's JSON messages provide the executable
+   object paths; no target-directory scan or diagnostic parsing is needed.
 4. `llvm-profdata merge -f` consumes an atomically written profile list.
    `llvm-cov export` receives every `-object` pair through an atomically written
    response file on every operating system.

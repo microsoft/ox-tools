@@ -750,6 +750,7 @@ fn run_collects_both_configurations_with_response_files_and_evaluates() {
     assert!(log.contains("--jobs\t3"), "{log}");
     assert!(log.contains("--build-jobs\t3"), "{log}");
     assert!(log.contains("--target\tx86_64-pc-windows-msvc"), "{log}");
+    assert_eq!(log.matches("\t--locked").count(), 2, "{log}");
     assert!(log.contains("--cargo-message-format=json-render-diagnostics"), "{log}");
     assert!(log.contains("llvm-profdata\tmerge\t-sparse\t-f"), "{log}");
     assert!(log.contains("-fake-profdata-flag"), "{log}");
@@ -1099,6 +1100,7 @@ fn zero_threshold_only_selection_runs_plain_tests_without_a_gate() {
 
     let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
     assert!(log.contains("cargo\tnextest\trun"), "{log}");
+    assert!(log.contains("cargo\tnextest\trun\t--workspace\t--all-features\t--locked"), "{log}");
     assert!(!log.contains("llvm-cov\tnextest"), "{log}");
     assert!(!tmp.path().join("coverage/lcov-all-features.info").exists());
 }
@@ -1122,6 +1124,7 @@ fn arm64_windows_target_runs_plain_tests_without_advertising_coverage() {
 
     let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
     assert!(log.contains("cargo\tnextest\trun"), "{log}");
+    assert!(log.contains("\t--locked"), "{log}");
     assert!(log.contains("--target\taarch64-pc-windows-msvc"), "{log}");
     assert!(!log.contains("llvm-cov\tnextest"), "{log}");
     assert!(!tmp.path().join("coverage/lcov-all-features.info").exists());

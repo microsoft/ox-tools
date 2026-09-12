@@ -725,7 +725,7 @@ fn append_package_selection(command: &mut Command, selection: &Selection) {
 }
 
 fn append_nextest_options(command: &mut Command, args: &CollectionArgs, configuration: FeatureConfiguration, target: Option<&str>) {
-    command.arg(configuration.cargo_flag());
+    command.arg(configuration.cargo_flag()).arg("--locked");
     if let Some(target) = target {
         command.arg("--target").arg(target);
     }
