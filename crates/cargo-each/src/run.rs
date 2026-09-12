@@ -357,13 +357,15 @@ fn run_captured(invocation: &Invocation, timeout: Option<Duration>) -> BufferedO
         "injected worker panic"
     );
 
-    run_captured_with_spawner(invocation, timeout, spawn_sealed_tree)
+    run_captured_with_spawner(invocation, timeout, |command| {
+        spawn_sealed_tree(command).map(CapturedProcess::Contained)
+    })
 }
 
 fn run_captured_with_spawner(
     invocation: &Invocation,
     timeout: Option<Duration>,
-    timed_spawner: impl FnOnce(Command) -> Result<ProcessTree, String>,
+    timed_spawner: impl FnOnce(Command) -> Result<CapturedProcess, String>,
 ) -> BufferedOutcome {
     let (program, mut command) = match command_for(invocation) {
         Ok(command) => command,
@@ -371,7 +373,7 @@ fn run_captured_with_spawner(
     };
     let _ = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let process = match timeout {
-        Some(_) => timed_spawner(command).map(CapturedProcess::Contained),
+        Some(_) => timed_spawner(command),
         None => command
             .spawn()
             .map(|child| CapturedProcess::Ordinary(Some(child)))
@@ -1285,6 +1287,13 @@ mod tests {
             label: Some(label.to_owned()),
             ..invocation(argv)
         }
+    }
+
+    fn spawn_ordinary_capture(mut command: Command) -> Result<CapturedProcess, String> {
+        command
+            .spawn()
+            .map(|child| CapturedProcess::Ordinary(Some(child)))
+            .map_err(|error| error.to_string())
     }
 
     fn result_infrastructure_message(result: InvocationResult) -> String {
@@ -2223,7 +2232,7 @@ mod tests {
             let outcome = run_captured_with_spawner(
                 &labelled_invocation(label, &["rustc", "--version"]),
                 Some(Duration::from_secs(1)),
-                spawn_tree,
+                spawn_ordinary_capture,
             );
             assert!(infrastructure_message(outcome).contains(expected), "contained {label}");
         }

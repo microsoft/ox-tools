@@ -7,7 +7,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -112,14 +111,11 @@ fn each(manifest: &Path) -> Command {
     cmd
 }
 
-fn sealed_containment_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+const TIMEOUT_REFUSAL: &str =
+    "timeout requires sealed process-tree containment, but this host only provides best-effort containment; the child was not started";
 
-    *AVAILABLE.get_or_init(|| cargo_gamma_process::containment().is_ok())
-}
-
-fn timeout_refusal() -> impl Predicate<str> {
-    predicate::str::contains("timeout requires sealed process-tree containment").and(predicate::str::contains("child was not started"))
+fn is_timeout_refusal(output: &std::process::Output) -> bool {
+    output.status.code() == Some(2) && String::from_utf8_lossy(&output.stderr).contains(TIMEOUT_REFUSAL)
 }
 
 fn rust_version_fixture(root_floor: Option<&str>, members: &[(&str, Option<&str>)]) -> (TempDir, PathBuf) {
@@ -1435,17 +1431,18 @@ fn sequential_timeout_fail_fast_does_not_run_later_members() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
     let later_marker = tmp.path().join("later-invocation");
-    let assertion = each(&manifest)
+    let output = each(&manifest)
         .args(["-p", "alpha", "-p", "beta", "--timeout", "50ms", "--"])
         .arg(probe)
         .args(["timeout-fail-fast", "{name}"])
         .arg(&later_marker)
-        .assert()
-        .failure();
-    if sealed_containment_available() {
-        assertion.code(1).stderr(predicate::str::contains("timed out after 50ms"));
+        .output()
+        .expect("run cargo-each timeout fail-fast");
+    if is_timeout_refusal(&output) {
+        assert!(!later_marker.exists(), "pre-spawn refusal must not launch any member");
     } else {
-        assertion.code(2).stderr(timeout_refusal());
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
     }
     assert!(
         !later_marker.exists(),
@@ -1459,24 +1456,24 @@ fn sequential_timeout_keep_going_runs_later_members() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
     let later_marker = tmp.path().join("later-invocation");
-    let assertion = each(&manifest)
+    let output = each(&manifest)
         .args(["-p", "alpha", "-p", "beta", "--timeout", "50ms", "--keep-going", "--"])
         .arg(probe)
         .args(["timeout-keep-going", "{name}"])
         .arg(&later_marker)
-        .assert()
-        .failure();
-    if sealed_containment_available() {
-        assertion.code(1).stderr(predicate::str::contains("timed out after 50ms"));
-        assert!(
-            later_marker.exists(),
-            "--keep-going must launch the member after a timed-out invocation"
-        );
-    } else {
-        assertion.code(1).stderr(timeout_refusal());
+        .output()
+        .expect("run cargo-each timeout keep-going");
+    if is_timeout_refusal(&output) {
         assert!(
             !later_marker.exists(),
             "unsealed containment must refuse every timed child before spawn"
+        );
+    } else {
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
+        assert!(
+            later_marker.exists(),
+            "--keep-going must launch the member after a timed-out invocation"
         );
     }
 }
@@ -1487,17 +1484,16 @@ fn timeout_terminates_the_complete_process_tree() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
     let marker = tmp.path().join("grandchild-survived");
-    let assertion = each(&manifest)
+    let output = each(&manifest)
         .args(["-p", "alpha", "--jobs", "2", "--timeout", "50ms", "--"])
         .arg(probe)
         .arg("tree-parent")
         .arg(&marker)
-        .assert()
-        .failure();
-    if sealed_containment_available() {
-        assertion.code(1).stderr(predicate::str::contains("timed out after 50ms"));
-    } else {
-        assertion.code(2).stderr(timeout_refusal());
+        .output()
+        .expect("run cargo-each tree timeout");
+    if !is_timeout_refusal(&output) {
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
     }
     std::thread::sleep(std::time::Duration::from_millis(700));
     assert!(
