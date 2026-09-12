@@ -10,6 +10,7 @@
 //! workspace default → built-in `100.0`) lives in [`crate::threshold`]
 //! and consumes the values surfaced here.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -80,16 +81,41 @@ impl Workspace {
     /// Runs `cargo metadata --no-deps`, which does not fetch or build
     /// dependencies and is therefore fast and side-effect-free.
     #[ohno::enrich_err("failed to load cargo workspace metadata")]
-    pub(crate) fn load(manifest_path: Option<&Path>, target: Option<&str>) -> Result<Self, CoverageGateError> {
-        Self::load_with_target_resolver(manifest_path, || TargetContext::resolve(target))
+    pub(crate) fn load_with_tools(
+        manifest_path: Option<&Path>,
+        target: Option<&str>,
+        cargo: Option<&OsStr>,
+        rustc: Option<&OsStr>,
+        rustup_toolchain: Option<&OsStr>,
+    ) -> Result<Self, CoverageGateError> {
+        Self::load_with_target_resolver_and_cargo(manifest_path, cargo, rustup_toolchain, || {
+            let rustc = rustc.map_or_else(|| std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()), OsStr::to_os_string);
+            TargetContext::resolve_with_rustc_program(target, &rustc, rustup_toolchain)
+        })
     }
 
+    #[cfg(test)]
     fn load_with_target_resolver(
         manifest_path: Option<&Path>,
         resolve_target: impl FnOnce() -> Result<TargetContext, CoverageGateError>,
     ) -> Result<Self, CoverageGateError> {
+        Self::load_with_target_resolver_and_cargo(manifest_path, None, None, resolve_target)
+    }
+
+    fn load_with_target_resolver_and_cargo(
+        manifest_path: Option<&Path>,
+        cargo: Option<&OsStr>,
+        rustup_toolchain: Option<&OsStr>,
+        resolve_target: impl FnOnce() -> Result<TargetContext, CoverageGateError>,
+    ) -> Result<Self, CoverageGateError> {
         let mut cmd = MetadataCommand::new();
         cmd.no_deps();
+        if let Some(cargo) = cargo {
+            cmd.cargo_path(cargo);
+        }
+        if let Some(toolchain) = rustup_toolchain {
+            cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+        }
         if let Some(path) = manifest_path {
             cmd.manifest_path(path);
         }

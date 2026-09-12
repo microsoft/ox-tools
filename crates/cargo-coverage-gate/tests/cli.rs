@@ -123,6 +123,7 @@ impl FakeCoverageTools {
         assert!(status.success(), "fake coverage tool must compile");
 
         let cargo = directory.path().join(format!("cargo{}", std::env::consts::EXE_SUFFIX));
+        let rustup = directory.path().join(format!("rustup{}", std::env::consts::EXE_SUFFIX));
         let rustc = directory.path().join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
         let rustlib = directory.path().join("rustlib");
         let llvm_bin = rustlib.join("bin");
@@ -132,6 +133,7 @@ impl FakeCoverageTools {
         let llvm_cov = llvm_bin.join(format!("llvm-cov{}", std::env::consts::EXE_SUFFIX));
         let llvm_profdata = llvm_bin.join(format!("llvm-profdata{}", std::env::consts::EXE_SUFFIX));
         fs::copy(&helper, &cargo).expect("copy fake cargo");
+        fs::copy(&helper, rustup).expect("copy fake rustup");
         fs::copy(&helper, &rustc).expect("copy fake rustc");
         fs::copy(&helper, &llvm_cov).expect("copy fake llvm-cov");
         fs::copy(&helper, &llvm_profdata).expect("copy fake llvm-profdata");
@@ -148,14 +150,40 @@ impl FakeCoverageTools {
 }
 
 fn fake_collection_command(dir: &Path, tools: &FakeCoverageTools, object: &Path) -> Command {
+    fake_collection_command_inner(dir, tools, object, Some("nightly-test"))
+}
+
+fn fake_collection_command_active(dir: &Path, tools: &FakeCoverageTools, object: &Path) -> Command {
+    fake_collection_command_inner(dir, tools, object, None)
+}
+
+fn fake_collection_command_inner(dir: &Path, tools: &FakeCoverageTools, object: &Path, toolchain: Option<&str>) -> Command {
     let real_cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let fake_path = std::env::join_paths(
+        std::iter::once(
+            tools
+                .cargo
+                .parent()
+                .expect("fake cargo path must have a parent directory")
+                .to_path_buf(),
+        )
+        .chain(std::env::split_paths(&inherited_path)),
+    )
+    .expect("fake tool directory must form a valid PATH");
     let mut command = coverage_gate(dir);
+    command.arg("run");
+    if let Some(toolchain) = toolchain {
+        command.args(["--toolchain", toolchain]);
+    }
     command
-        .arg("run")
         .args(["--configuration", "all-features"])
         .arg("--coverage-dir")
         .arg(dir.join("coverage"))
         .env("CARGO", &tools.cargo)
+        .env("RUSTC", &tools.rustc)
+        .env("PATH", fake_path)
+        .env_remove("RUSTUP")
         .env("LLVM_COV", &tools.llvm_cov)
         .env("LLVM_PROFDATA", &tools.llvm_profdata)
         .env("FAKE_REAL_CARGO", real_cargo)
@@ -163,6 +191,9 @@ fn fake_collection_command(dir: &Path, tools: &FakeCoverageTools, object: &Path)
         .env("FAKE_RESPONSE_LOG", dir.join("response.log"))
         .env("FAKE_WORKSPACE_ROOT", dir)
         .env("FAKE_COVERAGE_OBJECT", object);
+    if let Some(toolchain) = toolchain {
+        command.env("FAKE_EXPECT_TOOLCHAIN", toolchain);
+    }
     command
 }
 
@@ -686,6 +717,7 @@ fn run_collects_both_configurations_with_response_files_and_evaluates() {
         .arg("--coverage-dir")
         .arg(&coverage_dir)
         .env("CARGO", &tools.cargo)
+        .env("RUSTC", &tools.rustc)
         .env("LLVM_COV", &tools.llvm_cov)
         .env("LLVM_PROFDATA", &tools.llvm_profdata)
         .env("FAKE_REAL_CARGO", real_cargo)
@@ -756,6 +788,7 @@ fn run_passes_a_successful_empty_lcov_export_to_evaluation() {
         .arg("--coverage-dir")
         .arg(&coverage_dir)
         .env("CARGO", &tools.cargo)
+        .env("RUSTC", &tools.rustc)
         .env("LLVM_COV", &tools.llvm_cov)
         .env("LLVM_PROFDATA", &tools.llvm_profdata)
         .env("FAKE_REAL_CARGO", real_cargo)
@@ -793,10 +826,12 @@ fn run_export_failure_preserves_published_lcov_and_cleans_temporary_files() {
 
     coverage_gate(tmp.path())
         .arg("run")
+        .arg("--quiet")
         .args(["--configuration", "all-features"])
         .arg("--coverage-dir")
         .arg(&coverage_dir)
         .env("CARGO", &tools.cargo)
+        .env("RUSTC", &tools.rustc)
         .env("LLVM_COV", &tools.llvm_cov)
         .env("LLVM_PROFDATA", &tools.llvm_profdata)
         .env("FAKE_REAL_CARGO", real_cargo)
@@ -807,6 +842,8 @@ fn run_export_failure_preserves_published_lcov_and_cleans_temporary_files() {
         .env("FAKE_FAIL_COV", "1")
         .assert()
         .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("requested llvm-cov failure"))
         .stderr(predicate::str::contains("llvm-cov export failed"));
 
     assert_eq!(
@@ -895,11 +932,16 @@ fn run_reports_an_unusable_coverage_directory() {
     make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
     let coverage_dir = tmp.path().join("not-a-directory");
     fs::write(&coverage_dir, b"file").expect("write conflicting file");
+    let tools = FakeCoverageTools::compile();
+    let real_cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
 
     coverage_gate(tmp.path())
         .arg("run")
         .arg("--coverage-dir")
         .arg(&coverage_dir)
+        .env("CARGO", &tools.cargo)
+        .env("RUSTC", &tools.rustc)
+        .env("FAKE_REAL_CARGO", real_cargo)
         .assert()
         .code(2)
         .stderr(predicate::str::contains("failed to create coverage directory"));
@@ -909,6 +951,7 @@ fn run_reports_an_unusable_coverage_directory() {
 #[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
 fn run_reports_nextest_object_and_profile_failures() {
     for (variable, expected) in [
+        ("FAKE_FAIL_CLEAN", "cargo llvm-cov clean failed"),
         ("FAKE_FAIL_NEXTEST", "llvm-cov nextest --no-report"),
         ("FAKE_NO_OBJECT", "no executable object paths"),
         ("FAKE_NO_PROFILE", "no raw profiles"),
@@ -956,17 +999,222 @@ fn run_forwards_non_json_nextest_output() {
     let tools = FakeCoverageTools::compile();
 
     fake_collection_command(tmp.path(), &tools, &object)
+        .env("FAKE_CLEAN_STDOUT", "1")
         .env("FAKE_NEXTEST_TEXT", "1")
+        .env("FAKE_PROFDATA_STDOUT", "1")
         .assert()
         .success()
-        .stdout(predicate::str::contains("non-JSON nextest output"));
+        .stdout(predicate::str::contains("coverage-clean-stdout"))
+        .stdout(predicate::str::contains("non-JSON nextest output"))
+        .stdout(predicate::str::contains("profdata-stdout"));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn run_rejects_stable_rust_and_old_cargo_llvm_cov() {
+    for (variable, value, expected) in [
+        ("FAKE_FAIL_CARGO_VERSION", "1", "cargo toolchain validation failed"),
+        ("FAKE_STABLE_TOOLCHAIN", "1", "requires a nightly Rust toolchain"),
+        ("FAKE_STABLE_RUSTC", "1", "requires nightly rustc"),
+        ("FAKE_LLVM_COV_VERSION", "0.6.1", "requires cargo-llvm-cov >= 0.7.0"),
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
+        let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+        fs::write(&object, b"object").expect("write fake object");
+        let tools = FakeCoverageTools::compile();
+
+        fake_collection_command(tmp.path(), &tools, &object)
+            .env(variable, value)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(expected));
+
+        let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
+        assert!(!log.contains("llvm-cov\tnextest"), "{log}");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary")]
+fn run_rejects_an_empty_toolchain_selection() {
+    let tmp = TempDir::new().expect("tempdir");
+    coverage_gate(tmp.path())
+        .arg("run")
+        .args(["--toolchain", ""])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be empty"));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake Rustup")]
+fn run_reports_rustup_toolchain_resolution_failures() {
+    for (variable, expected) in [
+        ("FAKE_FAIL_RUSTUP", "exited with"),
+        ("FAKE_EMPTY_RUSTUP_OUTPUT", "did not report a program path"),
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        let tools = FakeCoverageTools::compile();
+        let object = tmp.path().join("unused-object");
+
+        fake_collection_command(tmp.path(), &tools, &object)
+            .env(variable, "1")
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(expected));
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn run_honors_coverage_gate_toolchain_environment() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
+    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&object, b"object").expect("write fake object");
+    let tools = FakeCoverageTools::compile();
+
+    fake_collection_command_active(tmp.path(), &tools, &object)
+        .env("COVERAGE_GATE_TOOLCHAIN", "nightly-env")
+        .env("FAKE_EXPECT_TOOLCHAIN", "nightly-env")
+        .assert()
+        .success();
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn zero_threshold_only_selection_runs_plain_tests_without_a_gate() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("0"))], None);
+    let object = tmp.path().join(format!("unused-object{}", std::env::consts::EXE_SUFFIX));
+    let tools = FakeCoverageTools::compile();
+
+    fake_collection_command(tmp.path(), &tools, &object)
+        .env("FAKE_PLAIN_NEXTEST_STDOUT", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("plain-nextest-stdout"))
+        .stderr(predicate::str::contains("tests passed without coverage collection or gating"));
+
+    let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
+    assert!(log.contains("cargo\tnextest\trun"), "{log}");
+    assert!(!log.contains("llvm-cov\tnextest"), "{log}");
+    assert!(!tmp.path().join("coverage/lcov-all-features.info").exists());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn arm64_windows_target_runs_plain_tests_without_advertising_coverage() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
+    let object = tmp.path().join(format!("unused-object{}", std::env::consts::EXE_SUFFIX));
+    let tools = FakeCoverageTools::compile();
+
+    fake_collection_command(tmp.path(), &tools, &object)
+        .args(["--target", "aarch64-pc-windows-msvc"])
+        .env("FAKE_PLAIN_NEXTEST_STDOUT", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("plain-nextest-stdout"))
+        .stderr(predicate::str::contains("does not support cargo-llvm-cov"))
+        .stderr(predicate::str::contains("without coverage collection or gating"));
+
+    let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
+    assert!(log.contains("cargo\tnextest\trun"), "{log}");
+    assert!(log.contains("--target\taarch64-pc-windows-msvc"), "{log}");
+    assert!(!log.contains("llvm-cov\tnextest"), "{log}");
+    assert!(!tmp.path().join("coverage/lcov-all-features.info").exists());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn quiet_suppresses_all_collection_stdout_and_still_writes_summary() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
+    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&object, b"object").expect("write fake object");
+    let tools = FakeCoverageTools::compile();
+    let summary = tmp.path().join("summary.md");
+
+    fake_collection_command(tmp.path(), &tools, &object)
+        .arg("--quiet")
+        .arg("--summary-file")
+        .arg(&summary)
+        .env("FAKE_CLEAN_STDOUT", "1")
+        .env("FAKE_NEXTEST_TEXT", "1")
+        .env("FAKE_PROFDATA_STDOUT", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    assert!(fs::read_to_string(summary).expect("read summary").contains("### coverage-gate"));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn quiet_suppresses_plain_nextest_stdout_but_preserves_skip_diagnostic() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("0"))], None);
+    let object = tmp.path().join(format!("unused-object{}", std::env::consts::EXE_SUFFIX));
+    let tools = FakeCoverageTools::compile();
+    let summary = tmp.path().join("summary.md");
+
+    fake_collection_command(tmp.path(), &tools, &object)
+        .arg("--quiet")
+        .arg("--summary-file")
+        .arg(&summary)
+        .env("FAKE_PLAIN_NEXTEST_STDOUT", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("tests passed without coverage collection or gating"));
+
+    assert!(
+        fs::read_to_string(summary)
+            .expect("read no-gate summary")
+            .contains("without coverage collection or gating")
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn plain_test_failures_propagate_for_zero_only_and_arm64_paths() {
+    for (threshold, target) in [("0", None), ("100", Some("aarch64-pc-windows-msvc"))] {
+        let tmp = TempDir::new().expect("tempdir");
+        make_workspace(tmp.path(), &[("alpha", Some(threshold))], None);
+        let object = tmp.path().join(format!("unused-object{}", std::env::consts::EXE_SUFFIX));
+        let tools = FakeCoverageTools::compile();
+        let mut command = fake_collection_command(tmp.path(), &tools, &object);
+        if let Some(target) = target {
+            command.args(["--target", target]);
+        }
+
+        command
+            .env("FAKE_FAIL_PLAIN_NEXTEST", "1")
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("requested plain nextest failure"))
+            .stderr(predicate::str::contains("cargo nextest failed"));
+    }
 }
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
 fn run_discovers_llvm_tools_from_rustc() {
     let tmp = TempDir::new().expect("tempdir");
-    make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
+    make_workspace_with_gate(
+        tmp.path(),
+        &[
+            (
+                "alpha",
+                "min-lines-percent = 100\n\n\
+                 [package.metadata.coverage-gate.target.'cfg(windows)']\n\
+                 min-lines-percent = 100",
+            ),
+            ("beta", "min-lines-percent = 100"),
+        ],
+    );
     let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
@@ -974,8 +1222,10 @@ fn run_discovers_llvm_tools_from_rustc() {
     fake_collection_command(tmp.path(), &tools, &object)
         .env_remove("LLVM_COV")
         .env_remove("LLVM_PROFDATA")
-        .env("RUSTC", &tools.rustc)
+        .env_remove("RUSTC")
         .env("FAKE_TARGET_LIBDIR", &tools.target_libdir)
+        .env("FAKE_EXPECT_RUSTC_TOOLCHAIN", "nightly-test")
+        .args(["--target", "x86_64-pc-windows-msvc"])
         .assert()
         .success();
 }
@@ -985,8 +1235,9 @@ fn run_discovers_llvm_tools_from_rustc() {
 fn run_reports_rustc_tool_discovery_failures() {
     for (variable, expected) in [
         ("FAKE_FAIL_RUSTC", "exited with"),
+        ("FAKE_FAIL_TARGET_LIBDIR", "requested target-libdir failure"),
         ("FAKE_INVALID_RUSTC_OUTPUT", "was not UTF-8"),
-        ("FAKE_EMPTY_RUSTC_OUTPUT", "had no parent directory"),
+        ("FAKE_EMPTY_TARGET_LIBDIR", "had no parent directory"),
     ] {
         let tmp = TempDir::new().expect("tempdir");
         make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
@@ -994,7 +1245,7 @@ fn run_reports_rustc_tool_discovery_failures() {
         fs::write(&object, b"object").expect("write fake object");
         let tools = FakeCoverageTools::compile();
 
-        fake_collection_command(tmp.path(), &tools, &object)
+        fake_collection_command_active(tmp.path(), &tools, &object)
             .env_remove("LLVM_COV")
             .env_remove("LLVM_PROFDATA")
             .env("RUSTC", &tools.rustc)
@@ -1009,7 +1260,7 @@ fn run_reports_rustc_tool_discovery_failures() {
     let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
-    fake_collection_command(tmp.path(), &tools, &object)
+    fake_collection_command_active(tmp.path(), &tools, &object)
         .env_remove("LLVM_COV")
         .env_remove("LLVM_PROFDATA")
         .env("RUSTC", tmp.path().join("missing-rustc"))
@@ -1024,7 +1275,7 @@ fn run_reports_rustc_tool_discovery_failures() {
     let tools = FakeCoverageTools::compile();
     let fake_rustc_dir = tools.rustc.parent().expect("fake rustc path must have a parent directory");
     let fake_path = std::env::join_paths([fake_rustc_dir]).expect("fake tool directory must form a valid PATH");
-    fake_collection_command(tmp.path(), &tools, &object)
+    fake_collection_command_active(tmp.path(), &tools, &object)
         .env_remove("LLVM_COV")
         .env_remove("LLVM_PROFDATA")
         .env_remove("RUSTC")

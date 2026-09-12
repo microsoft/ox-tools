@@ -37,7 +37,11 @@ clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-
 lcov = { workspace = true }
 mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
+semver = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

@@ -151,7 +151,19 @@ writes distinct LCOV files under `target/coverage`, and evaluates them
 in-process. Collection can be limited with repeatable `--package` selectors
 and a `--package-file` containing one exact `name@version` per nonempty
 UTF-8 line. Use repeatable `--configuration`, `--coverage-dir`, and
-`--jobs` options to customize collection.
+`--jobs` options to customize collection. Instrumented collection requires
+nightly Rust and cargo-llvm-cov 0.7.0 or newer. Select a pinned nightly with
+`--toolchain`, set `COVERAGE_GATE_TOOLCHAIN`, or use an active nightly
+toolchain. An explicit `RUSTUP` override must be an absolute executable
+path; otherwise rustup is resolved from explicit nonempty `PATH` entries
+without implicitly searching the repository working directory.
+
+Native `aarch64-pc-windows-msvc` runs and selections containing only
+effective zero thresholds execute plain nextest and return an explicit
+successful no-gate result without creating LCOV. Mixed selections remain
+instrumented, including zero-threshold packages whose tests may cover gated
+packages. `--quiet` suppresses all collection and verdict stdout while
+preserving stderr diagnostics and summary output.
 
 `--lcov` may be repeated; the tracefiles are merged at the line level
 (per-line counts summed) so multiple feature-config exports
@@ -198,7 +210,7 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbtAOmsS4yxbMbgXtYBULMe6Ib5wzUY6Ss4PQbc_WiFyKbVD1hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbjNca-_C4b28b-PwtvrYiWQcb5xg-GpQeEuEbiOiBm_nYJ-1hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
  [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many.html

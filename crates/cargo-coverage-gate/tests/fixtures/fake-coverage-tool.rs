@@ -30,12 +30,74 @@ fn run() -> Result<(), String> {
         "cargo" => run_cargo(&args),
         "llvm-profdata" => run_profdata(&args),
         "llvm-cov" => run_cov(&args),
-        "rustc" => run_rustc(),
+        "rustc" => run_rustc(&args),
+        "rustup" => run_rustup(&args),
         other => Err(format!("unexpected fake tool name `{other}`")),
     }
 }
 
+fn run_rustup(args: &[std::ffi::OsString]) -> Result<(), String> {
+    if env::var_os("FAKE_FAIL_RUSTUP").is_some() {
+        return Err("requested rustup failure".to_owned());
+    }
+    if env::var_os("FAKE_EMPTY_RUSTUP_OUTPUT").is_some() {
+        println!();
+        return Ok(());
+    }
+    if args.len() != 4 || args[0] != "which" || args[1] != "--toolchain" {
+        return Err(format!("unexpected rustup arguments: {args:?}"));
+    }
+    if let Some(expected) = env::var_os("FAKE_EXPECT_TOOLCHAIN")
+        && args[2] != expected
+    {
+        return Err(format!(
+            "expected rustup toolchain {}, got {}",
+            expected.to_string_lossy(),
+            args[2].to_string_lossy()
+        ));
+    }
+    let program = args[3]
+        .to_str()
+        .ok_or_else(|| "rustup program name is not UTF-8".to_owned())?;
+    let executable = env::current_exe().map_err(|error| error.to_string())?;
+    let path = executable
+        .parent()
+        .ok_or_else(|| "fake rustup has no parent directory".to_owned())?
+        .join(format!("{program}{}", env::consts::EXE_SUFFIX));
+    println!("{}", path.display());
+    Ok(())
+}
+
 fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
+    if let Some(expected) = env::var_os("FAKE_EXPECT_TOOLCHAIN")
+        && env::var_os("RUSTUP_TOOLCHAIN").as_ref() != Some(&expected)
+    {
+        return Err(format!(
+            "expected RUSTUP_TOOLCHAIN={}, got {}",
+            expected.to_string_lossy(),
+            env::var_os("RUSTUP_TOOLCHAIN")
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<unset>".to_owned())
+        ));
+    }
+    if args == ["--version", "--verbose"] {
+        if env::var_os("FAKE_FAIL_CARGO_VERSION").is_some() {
+            return Err("requested cargo version failure".to_owned());
+        }
+        let release = if env::var_os("FAKE_STABLE_TOOLCHAIN").is_some() {
+            "1.95.0"
+        } else {
+            "1.97.0-nightly"
+        };
+        println!("cargo {release}");
+        println!("release: {release}");
+        return Ok(());
+    }
+    if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "--version") {
+        let version = env::var("FAKE_LLVM_COV_VERSION").unwrap_or_else(|_| "0.9.0".to_owned());
+        println!("cargo-llvm-cov {version}");
+        return Ok(());
+    }
     if args.first().is_some_and(|arg| arg == "metadata") {
         let real_cargo = env::var_os("FAKE_REAL_CARGO").ok_or_else(|| "FAKE_REAL_CARGO is not set".to_owned())?;
         let status = Command::new(real_cargo)
@@ -48,7 +110,27 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
         return Err(format!("real cargo metadata exited with {status}"));
     }
 
-    if args.iter().any(|arg| arg == "nextest") {
+    if args.first().is_some_and(|arg| arg == "nextest") {
+        if env::var_os("FAKE_FAIL_PLAIN_NEXTEST").is_some() {
+            return Err("requested plain nextest failure".to_owned());
+        }
+        if env::var_os("FAKE_PLAIN_NEXTEST_STDOUT").is_some() {
+            println!("plain-nextest-stdout");
+        }
+        return Ok(());
+    }
+
+    if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "clean") {
+        if env::var_os("FAKE_FAIL_CLEAN").is_some() {
+            return Err("requested coverage clean failure".to_owned());
+        }
+        if env::var_os("FAKE_CLEAN_STDOUT").is_some() {
+            println!("coverage-clean-stdout");
+        }
+        return Ok(());
+    }
+
+    if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "nextest") {
         if env::var_os("FAKE_FAIL_NEXTEST").is_some() {
             return Err("requested nextest failure".to_owned());
         }
@@ -75,16 +157,52 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
     Ok(())
 }
 
-fn run_rustc() -> Result<(), String> {
+fn run_rustc(args: &[std::ffi::OsString]) -> Result<(), String> {
+    if let Some(expected) = env::var_os("FAKE_EXPECT_RUSTC_TOOLCHAIN")
+        && env::var_os("RUSTUP_TOOLCHAIN").as_ref() != Some(&expected)
+    {
+        return Err(format!(
+            "expected rustc RUSTUP_TOOLCHAIN={}, got {}",
+            expected.to_string_lossy(),
+            env::var_os("RUSTUP_TOOLCHAIN")
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<unset>".to_owned())
+        ));
+    }
     if env::var_os("FAKE_FAIL_RUSTC").is_some() {
         return Err("requested rustc failure".to_owned());
+    }
+    if env::var_os("FAKE_FAIL_TARGET_LIBDIR").is_some()
+        && args.iter().any(|arg| arg == "target-libdir")
+    {
+        return Err("requested target-libdir failure".to_owned());
     }
     if env::var_os("FAKE_INVALID_RUSTC_OUTPUT").is_some() {
         std::io::stdout().write_all(&[0xFF]).map_err(|error| error.to_string())?;
         return Ok(());
     }
-    if env::var_os("FAKE_EMPTY_RUSTC_OUTPUT").is_some() {
+    if env::var_os("FAKE_EMPTY_TARGET_LIBDIR").is_some()
+        && args.iter().any(|arg| arg == "target-libdir")
+    {
         println!();
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "cfg") {
+        println!("windows");
+        println!("target_arch=\"x86_64\"");
+        println!("target_os=\"windows\"");
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "-vV") {
+        let release = if env::var_os("FAKE_STABLE_TOOLCHAIN").is_some()
+            || env::var_os("FAKE_STABLE_RUSTC").is_some()
+        {
+            "1.95.0"
+        } else {
+            "1.97.0-nightly"
+        };
+        println!("release: {release}");
+        println!("host: x86_64-pc-windows-msvc");
         return Ok(());
     }
     println!(
@@ -97,6 +215,9 @@ fn run_rustc() -> Result<(), String> {
 }
 
 fn run_profdata(args: &[std::ffi::OsString]) -> Result<(), String> {
+    if env::var_os("FAKE_PROFDATA_STDOUT").is_some() {
+        println!("profdata-stdout");
+    }
     let output = value_after(args, "-o").ok_or_else(|| "llvm-profdata did not receive -o".to_owned())?;
     fs::write(output, b"profdata").map_err(|error| error.to_string())?;
     break_directory("FAKE_BREAK_DIRECTORY_AFTER_PROFDATA")

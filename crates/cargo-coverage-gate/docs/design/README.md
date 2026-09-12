@@ -141,13 +141,24 @@ Flags:
   `COVERAGE_GATE_SUMMARY` (any CI that pipes the file content through
   `##vso[task.uploadsummary]` or equivalent) automatically.
 - `--quiet` — suppress stdout output (the summary file, if any, is still
-  written).
+  written). In `run` mode this also suppresses stdout inherited or forwarded
+  from Cargo, cargo-llvm-cov, nextest, and LLVM. Stderr diagnostics and
+  operational errors remain visible.
 
 The tool never writes to `Cargo.toml`. All threshold values are set by
 hand, so every change appears in a PR diff and is reviewed.
 
 `run` additionally accepts:
 
+- `--toolchain <toolchain>` — Rustup toolchain used by metadata, target-policy
+  queries, nextest, cargo-llvm-cov, and LLVM discovery. When omitted,
+  `COVERAGE_GATE_TOOLCHAIN` is used, then the active toolchain. Instrumented
+  collection validates that the selected Cargo release is nightly and that
+  cargo-llvm-cov is at least 0.7.0 before cleaning or building.
+  Rustup itself is resolved from an absolute, nonempty `RUSTUP` override or
+  from explicit nonempty `PATH` entries (using `PATHEXT` on Windows). The
+  repository working directory is not searched implicitly; it participates
+  only when an entry such as `.` or its absolute path appears in `PATH`.
 - `--package-file <path>` — one `name@version` workspace package spec per
   nonempty UTF-8 line. A present empty file is an explicit empty selection and
   makes the command a successful no-op. It may be combined with repeatable
@@ -164,6 +175,21 @@ hand, so every change appears in a PR diff and is reviewed.
 The package selection controls which tests run and which packages are gated.
 It does not remove zero-threshold packages from instrumentation: their tests
 may cover source owned by another selected package.
+
+Two selections deliberately run tests without producing or evaluating
+coverage:
+
+- On native or explicitly selected `aarch64-pc-windows-msvc`,
+  cargo-llvm-cov is unsupported. `run` executes plain nextest for every
+  requested feature configuration, emits an explicit stderr diagnostic, and
+  returns success only when those tests pass.
+- If every selected package has an effective `min-lines-percent = 0`, there is
+  no coverage policy to evaluate. `run` likewise executes plain nextest and
+  reports a successful no-gate result. A mixed selection remains fully
+  instrumented, including its zero-threshold packages, because their tests may
+  cover a selected gated package.
+
+Neither path creates LCOV output or claims that coverage ran.
 
 ### 5.3 Policy metadata
 
@@ -411,6 +437,12 @@ so `expect-no-coverable-lines` policies retain their existing meaning. Each
 stable per-configuration LCOV is replaced atomically only after a successful
 new export. Clean, test, profile-merge, and export failures leave any previously
 completed artifact at that path byte-for-byte unchanged.
+
+On Unix, final publication uses same-directory atomic rename replacement. On
+Windows it uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` and
+`MOVEFILE_WRITE_THROUGH`, because the portable `std::fs::rename` contract does
+not guarantee replacement of an existing destination there. In both cases the
+old final path remains valid until the completed temporary export replaces it.
 
 ## 6. Inputs & Outputs in Detail
 
@@ -755,6 +787,9 @@ targets. Workspaces without target-specific policy do not invoke rustc.
 Child processes receive arguments directly rather than through a shell.
 Package specs read from a file are resolved against workspace metadata before
 execution; they are never interpreted as command fragments.
+When a named Rustup toolchain is selected, rustup is resolved to an absolute
+executable before spawning. This avoids Windows executable lookup searching the
+repository working directory ahead of `PATH`.
 
 ### 10.3 Monorepo / multi-workspace
 
@@ -790,6 +825,14 @@ Rust with `cargo-llvm-cov ≥ 0.7`**. Two reasons:
   JSON / lcov output even on nightly. Versions 0.7+ fix this. Older
   versions silently report inflated line counts, which then surface
   as low percentages in the gate.
+
+`cargo coverage-gate run` enforces these prerequisites before instrumented
+collection. Select a pinned nightly with `--toolchain`, set
+`COVERAGE_GATE_TOOLCHAIN`, or arrange for the active toolchain to be nightly.
+The selected toolchain is applied consistently to Cargo metadata, rustc
+target-policy queries, nextest, and cargo-llvm-cov. Plain-test no-gate paths
+(ARM64 Windows and all-zero-threshold selections) do not require
+cargo-llvm-cov.
 
 ### 10.5 Float comparison
 

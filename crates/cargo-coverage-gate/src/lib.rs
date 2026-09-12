@@ -142,7 +142,19 @@
 //! in-process. Collection can be limited with repeatable `--package` selectors
 //! and a `--package-file` containing one exact `name@version` per nonempty
 //! UTF-8 line. Use repeatable `--configuration`, `--coverage-dir`, and
-//! `--jobs` options to customize collection.
+//! `--jobs` options to customize collection. Instrumented collection requires
+//! nightly Rust and cargo-llvm-cov 0.7.0 or newer. Select a pinned nightly with
+//! `--toolchain`, set `COVERAGE_GATE_TOOLCHAIN`, or use an active nightly
+//! toolchain. An explicit `RUSTUP` override must be an absolute executable
+//! path; otherwise rustup is resolved from explicit nonempty `PATH` entries
+//! without implicitly searching the repository working directory.
+//!
+//! Native `aarch64-pc-windows-msvc` runs and selections containing only
+//! effective zero thresholds execute plain nextest and return an explicit
+//! successful no-gate result without creating LCOV. Mixed selections remain
+//! instrumented, including zero-threshold packages whose tests may cover gated
+//! packages. `--quiet` suppresses all collection and verdict stdout while
+//! preserving stderr diagnostics and summary output.
 //!
 //! `--lcov` may be repeated; the tracefiles are merged at the line level
 //! (per-line counts summed) so multiple feature-config exports
@@ -193,6 +205,7 @@
 )]
 #![deny(unsafe_code)]
 
+use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 
@@ -259,6 +272,17 @@ impl EvaluatedReport {
     #[must_use]
     pub fn unattributed_count(&self) -> usize {
         self.inner.unattributed
+    }
+
+    /// Whether at least one selected package policy requires coverage data.
+    ///
+    /// Returns `false` only when every selected package has an effective
+    /// `min-lines-percent = 0` opt-out. Packages with positive thresholds and
+    /// packages asserting `expect-no-coverable-lines = true` both require an
+    /// instrumented collection so their policies can be evaluated.
+    #[must_use]
+    pub fn requires_coverage_collection(&self) -> bool {
+        self.inner.requires_coverage_collection()
     }
 
     /// Render the verdict table as plain text to `out`.
@@ -351,8 +375,27 @@ pub fn evaluate_many_for_target(
     gated_packages: &[String],
     target: Option<&str>,
 ) -> Result<EvaluatedReport, CoverageGateError> {
+    evaluate_many_for_target_with_tools(lcov_texts, manifest_path, gated_packages, target, None, None, None)
+}
+
+/// Evaluate tracefiles with explicit Cargo and rustc programs for metadata and
+/// target-policy queries.
+///
+/// This is used by the binary's collection layer so policy resolution
+/// and instrumentation observe the same toolchain. Callers evaluating
+/// externally produced LCOV should use [`evaluate_many_for_target`].
+#[doc(hidden)]
+pub fn evaluate_many_for_target_with_tools(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+    target: Option<&str>,
+    cargo: Option<&OsStr>,
+    rustc: Option<&OsStr>,
+    rustup_toolchain: Option<&OsStr>,
+) -> Result<EvaluatedReport, CoverageGateError> {
     let report = lcov_cov::CoverageReport::from_strs(lcov_texts)?;
-    let ws = workspace::Workspace::load(manifest_path, target)?;
+    let ws = workspace::Workspace::load_with_tools(manifest_path, target, cargo, rustc, rustup_toolchain)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
 }

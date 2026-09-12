@@ -59,7 +59,9 @@ pub(crate) struct CoverageGateArgs {
     #[arg(long, value_name = "PATH", global = true)]
     pub(crate) summary_file: Option<PathBuf>,
 
-    /// Suppress stdout output (the summary file, if any, is still written).
+    /// Suppress verdict and collection stdout.
+    ///
+    /// Stderr diagnostics and the summary file, if any, are still written.
     #[arg(long, global = true)]
     pub(crate) quiet: bool,
 
@@ -78,6 +80,14 @@ pub(crate) enum CoverageGateCommand {
 /// Options specific to portable coverage collection.
 #[derive(Args, Debug, Clone)]
 pub(crate) struct CollectionArgs {
+    /// Rustup toolchain used for collection.
+    ///
+    /// Instrumented collection requires a nightly toolchain. When omitted,
+    /// `$COVERAGE_GATE_TOOLCHAIN` is used, then the active toolchain. An
+    /// explicit `$RUSTUP` must be an absolute executable path.
+    #[arg(long, value_name = "TOOLCHAIN")]
+    pub(crate) toolchain: Option<String>,
+
     /// Read exact `name@version` workspace package specs from this file.
     ///
     /// Each nonempty UTF-8 line is one package. The file's packages are
@@ -139,6 +149,8 @@ mod tests {
             "cargo",
             "coverage-gate",
             "run",
+            "--toolchain",
+            "nightly-test",
             "--package-file",
             "packages.txt",
             "--configuration",
@@ -156,6 +168,7 @@ mod tests {
 
         let CoverageGateCommand::Run(run) = args.command.expect("run subcommand must be selected");
         assert_eq!(run.package_file, Some(PathBuf::from("packages.txt")));
+        assert_eq!(run.toolchain.as_deref(), Some("nightly-test"));
         assert_eq!(run.configurations, [FeatureConfiguration::AllFeatures]);
         assert_eq!(run.jobs.map(NonZeroUsize::get), Some(4));
         assert_eq!(run.coverage_dir, PathBuf::from("coverage"));
