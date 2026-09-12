@@ -362,6 +362,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary filesystem manifests")]
     fn root_package_floor_requires_the_root_to_be_the_only_member() {
         let temp = tempfile::tempdir().expect("create temporary workspace");
         let root = temp.path().join("Cargo.toml");
@@ -375,6 +376,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary filesystem manifests")]
     fn invalid_resolved_member_versions_are_configuration_errors() {
         let temp = tempfile::tempdir().expect("create temporary workspace");
         let root = temp.path().join("Cargo.toml");
@@ -390,6 +392,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary filesystem manifests")]
     fn workspace_rust_version_reports_manifest_io_and_shape_errors() {
         let temp = tempfile::tempdir().expect("create temporary workspace");
         let missing = temp.path().join("missing.toml");

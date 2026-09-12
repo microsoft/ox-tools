@@ -356,13 +356,21 @@ fn run_captured(invocation: &Invocation, timeout: Option<Duration>) -> BufferedO
         "injected worker panic"
     );
 
+    run_captured_with_spawner(invocation, timeout, spawn_sealed_tree)
+}
+
+fn run_captured_with_spawner(
+    invocation: &Invocation,
+    timeout: Option<Duration>,
+    timed_spawner: impl FnOnce(Command) -> Result<ProcessTree, String>,
+) -> BufferedOutcome {
     let (program, mut command) = match command_for(invocation) {
         Ok(command) => command,
         Err(message) => return BufferedOutcome::infrastructure(message),
     };
     let _ = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let process = match timeout {
-        Some(_) => spawn_sealed_tree(command).map(CapturedProcess::Contained),
+        Some(_) => timed_spawner(command).map(CapturedProcess::Contained),
         None => command
             .spawn()
             .map(|child| CapturedProcess::Ordinary(Some(child)))
@@ -967,6 +975,10 @@ fn exit_byte(raw: Option<i32>) -> u8 {
 mod tests {
     use std::collections::VecDeque;
     use std::num::NonZeroUsize;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt as _;
     use std::process::{Command, ExitCode, ExitStatus, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -976,9 +988,10 @@ mod tests {
     use super::{
         BufferedOutcome, CapturedProcess, CapturedStream, Invocation, InvocationResult, OutputReader, Plan, ReaderCompletion,
         RunningWorker, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM, combine_captured_output, display_duration,
-        execute_parallel, exit_byte, failure_stops_launching, finish_output_reader, panic_description, run_captured, run_streamed,
-        run_streamed_with_timeout, spawn_if_sealed, spawn_output_reader, spawn_tree, terminate_ordinary_child, terminate_ordinary_with,
-        wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
+        execute_parallel, exit_byte, failure_stops_launching, finish_output_reader, panic_description, run_captured,
+        run_captured_with_spawner, run_streamed, run_streamed_with_timeout, spawn_if_sealed, spawn_output_reader, spawn_tree,
+        terminate_ordinary_child, terminate_ordinary_with, wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker,
+        with_cleanup_failure,
     };
 
     const ORDINARY_BOUNDARY: &str = "ordinary process tree";
@@ -1129,10 +1142,7 @@ mod tests {
     }
 
     fn successful_status() -> ExitStatus {
-        Command::new("rustc")
-            .arg("--version")
-            .status()
-            .expect("rustc is available to the crate's test suite")
+        ExitStatus::from_raw(0)
     }
 
     fn infrastructure_message(outcome: BufferedOutcome) -> String {
@@ -1382,6 +1392,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns and terminates a child process")]
     fn ordinary_termination_kills_polls_and_reaps_a_real_child() {
         let mut child = Command::new(std::env::current_exe().expect("the test binary knows its path"))
             .args(["--exact", "run::tests::ordinary_child_sleep_probe", "--nocapture"])
@@ -1534,6 +1545,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns child processes through the scheduler")]
     fn worker_spawn_failures_are_reported_during_initial_and_replacement_launches() {
         let initial = Plan {
             invocations: vec![invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM])],
@@ -1551,6 +1563,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns child processes")]
     fn direct_runners_report_empty_and_unspawnable_commands() {
         let empty = invocation(&[]);
         assert!(result_infrastructure_message(run_streamed(&empty)).contains("empty argument vector"));
@@ -1825,6 +1838,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns a contained child process")]
     fn process_tree_control_delegates_real_exit_observation() {
         let mut command = Command::new("rustc");
         let _ = command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
@@ -1846,6 +1860,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns ordinary and contained child processes")]
     fn captured_runner_reports_stream_setup_failures() {
         for (label, expected) in [
             ("__cargo_each_missing_stdout", "failed to capture child stdout"),
@@ -1864,12 +1879,17 @@ mod tests {
             ("__cargo_each_missing_stderr", "failed to capture child stderr"),
             ("__cargo_each_stderr_reader_failure", "injected stderr reader failure"),
         ] {
-            let outcome = run_captured(&labelled_invocation(label, &["rustc", "--version"]), Some(Duration::from_secs(1)));
+            let outcome = run_captured_with_spawner(
+                &labelled_invocation(label, &["rustc", "--version"]),
+                Some(Duration::from_secs(1)),
+                spawn_tree,
+            );
             assert!(infrastructure_message(outcome).contains(expected), "contained {label}");
         }
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns ordinary and contained child processes")]
     fn captured_process_rejects_mismatched_timeout_modes() {
         let mut ordinary_command = Command::new("rustc");
         let _ = ordinary_command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());

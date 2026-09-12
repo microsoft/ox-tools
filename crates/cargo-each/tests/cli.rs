@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -109,6 +110,16 @@ fn each(manifest: &Path) -> Command {
     let mut cmd = Command::cargo_bin("cargo-each").expect("binary");
     cmd.arg("each").arg("--manifest-path").arg(manifest);
     cmd
+}
+
+fn sealed_containment_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+    *AVAILABLE.get_or_init(|| cargo_gamma_process::containment().is_ok())
+}
+
+fn timeout_refusal() -> impl Predicate<str> {
+    predicate::str::contains("timeout requires sealed process-tree containment").and(predicate::str::contains("child was not started"))
 }
 
 fn rust_version_fixture(root_floor: Option<&str>, members: &[(&str, Option<&str>)]) -> (TempDir, PathBuf) {
@@ -1388,18 +1399,21 @@ fn sequential_timeout_fail_fast_does_not_run_later_members() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
     let later_marker = tmp.path().join("later-invocation");
-    each(&manifest)
+    let assertion = each(&manifest)
         .args(["-p", "alpha", "-p", "beta", "--timeout", "50ms", "--"])
         .arg(probe)
         .args(["timeout-fail-fast", "{name}"])
         .arg(&later_marker)
         .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("timed out after 50ms"));
+        .failure();
+    if sealed_containment_available() {
+        assertion.code(1).stderr(predicate::str::contains("timed out after 50ms"));
+    } else {
+        assertion.code(2).stderr(timeout_refusal());
+    }
     assert!(
         !later_marker.exists(),
-        "fail-fast must not launch the member after a timed-out invocation"
+        "fail-fast or pre-spawn refusal must not launch the later member"
     );
 }
 
@@ -1409,19 +1423,26 @@ fn sequential_timeout_keep_going_runs_later_members() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
     let later_marker = tmp.path().join("later-invocation");
-    each(&manifest)
+    let assertion = each(&manifest)
         .args(["-p", "alpha", "-p", "beta", "--timeout", "50ms", "--keep-going", "--"])
         .arg(probe)
         .args(["timeout-keep-going", "{name}"])
         .arg(&later_marker)
         .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("timed out after 50ms"));
-    assert!(
-        later_marker.exists(),
-        "--keep-going must launch the member after a timed-out invocation"
-    );
+        .failure();
+    if sealed_containment_available() {
+        assertion.code(1).stderr(predicate::str::contains("timed out after 50ms"));
+        assert!(
+            later_marker.exists(),
+            "--keep-going must launch the member after a timed-out invocation"
+        );
+    } else {
+        assertion.code(1).stderr(timeout_refusal());
+        assert!(
+            !later_marker.exists(),
+            "unsealed containment must refuse every timed child before spawn"
+        );
+    }
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -1430,18 +1451,21 @@ fn timeout_terminates_the_complete_process_tree() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
     let marker = tmp.path().join("grandchild-survived");
-    each(&manifest)
+    let assertion = each(&manifest)
         .args(["-p", "alpha", "--jobs", "2", "--timeout", "50ms", "--"])
         .arg(probe)
         .arg("tree-parent")
         .arg(&marker)
         .assert()
-        .failure()
-        .code(1)
-        .stderr(predicate::str::contains("timed out after 50ms"));
+        .failure();
+    if sealed_containment_available() {
+        assertion.code(1).stderr(predicate::str::contains("timed out after 50ms"));
+    } else {
+        assertion.code(2).stderr(timeout_refusal());
+    }
     std::thread::sleep(std::time::Duration::from_millis(700));
     assert!(
         !marker.exists(),
-        "a timed-out invocation's grandchild must not survive to write its marker"
+        "a timed-out grandchild must be terminated, and an unsupported timed child must never start"
     );
 }
