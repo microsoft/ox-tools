@@ -312,7 +312,12 @@ no-op.
   disconnection rather than leaving the scheduler blocked forever. Without
   `--timeout`, parallel commands use the ordinary direct-child lifecycle:
   cargo-each waits for the launched leader but does not contain or kill
-  background descendants.
+  background descendants. Buffering is memory-bounded per stream: after 1 MiB,
+  output spills to a unique file in the system temporary directory. The
+  invocation outcome owns that file through deterministic plan-order emission,
+  so every success, failure, and panic path removes it through RAII. Spill
+  creation, write, seek, or read failures are infrastructure failures; output
+  is never intentionally truncated on a successful path.
 - **Output drain is bounded after every completion.** Readers get one second
   after the leader completes to observe EOF. Complete output is preserved when
   both pipes close within that grace. If a background or escaped descendant

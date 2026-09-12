@@ -131,7 +131,10 @@ failure by plan order. `--keep-going` runs the complete plan. Worker panics
 and unexpected worker-channel disconnections become infrastructure-failure
 outcomes instead of blocking the scheduler. Without `--timeout`, parallel
 commands retain ordinary direct-child semantics and do not kill background
-descendants.
+descendants. Each output stream retains at most 1 MiB in memory before
+spilling to a unique system-temporary file owned by the invocation outcome;
+spill failures are infrastructure failures and spill files are removed by
+RAII after deterministic plan-order emission.
 
 Output drain is bounded after every completion. Readers get one second to
 observe EOF; grace expiry preserves partial bytes and becomes an explicit

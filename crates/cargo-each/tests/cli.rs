@@ -226,6 +226,19 @@ fn main() {
             append(&args[3], name);
             process::exit(if name == "alpha" { 7 } else { 0 });
         }
+        "large-output" => {
+            let name = &args[2];
+            let size = 1_100_000;
+            let stdout_byte = if name == "alpha" { b'A' } else { b'B' };
+            let stderr_byte = if name == "alpha" { b'C' } else { b'D' };
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "{name}:stdout").expect("write stdout header");
+            stdout.write_all(&vec![stdout_byte; size]).expect("write large stdout");
+            let mut stderr = std::io::stderr().lock();
+            writeln!(stderr, "{name}:stderr").expect("write stderr header");
+            stderr.write_all(&vec![stderr_byte; size]).expect("write large stderr");
+            process::exit(if name == "alpha" { 7 } else { 0 });
+        }
         "timeout-fail-fast" => {
             if args[2] == "alpha" {
                 thread::sleep(Duration::from_secs(5));
@@ -1372,6 +1385,29 @@ fn parallel_keep_going_runs_the_complete_plan() {
     for name in ["alpha", "beta", "delta", "epsilon", "gamma"] {
         assert!(launched.contains(name), "{name} must run under --keep-going:\n{launched}");
     }
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn parallel_spills_large_stdout_and_stderr_without_truncating_plan_order() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let output = each(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--jobs", "2", "--keep-going", "--"])
+        .arg(probe)
+        .args(["large-output", "{name}"])
+        .output()
+        .expect("run cargo-each with large output");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("probe stdout is ASCII");
+    let stderr = String::from_utf8(output.stderr).expect("probe stderr is ASCII");
+    assert!(stdout.find("alpha:stdout").expect("alpha stdout header") < stdout.find("beta:stdout").expect("beta stdout header"));
+    assert!(stderr.find("alpha:stderr").expect("alpha stderr header") < stderr.find("beta:stderr").expect("beta stderr header"));
+    assert_eq!(stdout.bytes().filter(|byte| *byte == b'A').count(), 1_100_000);
+    assert_eq!(stdout.bytes().filter(|byte| *byte == b'B').count(), 1_100_000);
+    assert_eq!(stderr.bytes().filter(|byte| *byte == b'C').count(), 1_100_000);
+    assert_eq!(stderr.bytes().filter(|byte| *byte == b'D').count(), 1_100_000);
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]

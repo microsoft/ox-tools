@@ -94,7 +94,8 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) keep_going: bool,
 
-    /// Run at most N per-package or per-target commands concurrently.
+    /// Run at most N per-package or per-target commands concurrently. Buffered
+    /// output spills to unique system-temporary files beyond 1 MiB per stream.
     #[arg(long, default_value_t = NonZeroUsize::MIN, value_name = "N")]
     pub(crate) jobs: NonZeroUsize,
 
