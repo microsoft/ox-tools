@@ -111,6 +111,188 @@ fn each(manifest: &Path) -> Command {
     cmd
 }
 
+const TIMEOUT_REFUSAL: &str =
+    "timeout requires sealed process-tree containment, but this host only provides best-effort containment; the child was not started";
+
+fn is_timeout_refusal(output: &std::process::Output) -> bool {
+    output.status.code() == Some(2) && String::from_utf8_lossy(&output.stderr).contains(TIMEOUT_REFUSAL)
+}
+
+fn rust_version_fixture(root_floor: Option<&str>, members: &[(&str, Option<&str>)]) -> (TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let member_names = members.iter().map(|(name, _)| format!("\"{name}\"")).collect::<Vec<_>>().join(", ");
+    let workspace_package = root_floor.map_or_else(String::new, |floor| format!("\n[workspace.package]\nrust-version = \"{floor}\"\n"));
+    fs::write(
+        root.join("Cargo.toml"),
+        format!("[workspace]\nresolver = \"2\"\nmembers = [{member_names}]\n{workspace_package}"),
+    )
+    .expect("write workspace root");
+    for (name, rust_version) in members {
+        let declaration = match rust_version {
+            Some("workspace") => "rust-version.workspace = true\n".to_owned(),
+            Some(version) => format!("rust-version = \"{version}\"\n"),
+            None => String::new(),
+        };
+        write_lib(root, name, "0.1.0", &declaration);
+    }
+    let manifest = root.join("Cargo.toml");
+    (tmp, manifest)
+}
+
+fn single_package_fixture(rust_version: &str) -> (TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::write(
+        root.join("Cargo.toml"),
+        format!("[package]\nname = \"single\"\nversion = \"0.1.0\"\nedition = \"2021\"\nrust-version = \"{rust_version}\"\n"),
+    )
+    .expect("write package manifest");
+    fs::write(root.join("src/lib.rs"), "// fixture\n").expect("write lib");
+    let manifest = root.join("Cargo.toml");
+    (tmp, manifest)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the embedded standalone probe stays together so rustc compiles one auditable cross-platform fixture"
+)]
+fn compile_execution_probe(directory: &Path) -> PathBuf {
+    let source = directory.join("execution-probe.rs");
+    let executable = directory.join(format!("execution-probe{}", std::env::consts::EXE_SUFFIX));
+    fs::write(
+        &source,
+        r#"
+use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::process::{self, Command};
+use std::thread;
+use std::time::{Duration, Instant};
+
+fn append(path: &str, value: &str) {
+    let mut file = OpenOptions::new().create(true).append(true).open(path).expect("open log");
+    writeln!(file, "{value}").expect("append log");
+}
+
+fn wait_for(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            process::exit(90);
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    match args[1].as_str() {
+        "ordered" => {
+            let name = &args[2];
+            println!("{name}:start");
+            thread::sleep(Duration::from_millis(if name == "alpha" { 250 } else { 20 }));
+            println!("{name}:end");
+            append(&args[3], name);
+        }
+        "fail-order" => {
+            let name = &args[2];
+            thread::sleep(Duration::from_millis(if name == "alpha" { 180 } else { 20 }));
+            process::exit(if name == "alpha" { 7 } else { 9 });
+        }
+        "fail-stop" => {
+            let name = &args[2];
+            let sync_dir = std::path::Path::new(&args[3]);
+            fs::write(sync_dir.join(format!("{name}.started")), "").expect("write start marker");
+            match name.as_str() {
+                "alpha" => {
+                    wait_for(&sync_dir.join("beta.started"));
+                    process::exit(7);
+                }
+                "beta" => {
+                    wait_for(&sync_dir.join("alpha.started"));
+                    process::exit(9);
+                }
+                _ => process::exit(0),
+            }
+        }
+        "keep-going" => {
+            let name = &args[2];
+            append(&args[3], name);
+            process::exit(if name == "alpha" { 7 } else { 0 });
+        }
+        "large-output" => {
+            let name = &args[2];
+            let size = 1_100_000;
+            let stdout_byte = if name == "alpha" { b'A' } else { b'B' };
+            let stderr_byte = if name == "alpha" { b'C' } else { b'D' };
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "{name}:stdout").expect("write stdout header");
+            stdout.write_all(&vec![stdout_byte; size]).expect("write large stdout");
+            let mut stderr = std::io::stderr().lock();
+            writeln!(stderr, "{name}:stderr").expect("write stderr header");
+            stderr.write_all(&vec![stderr_byte; size]).expect("write large stderr");
+            process::exit(if name == "alpha" { 7 } else { 0 });
+        }
+        "timeout-fail-fast" => {
+            if args[2] == "alpha" {
+                thread::sleep(Duration::from_secs(5));
+            } else {
+                fs::write(&args[3], "later invocation ran").expect("write later marker");
+            }
+        }
+        "timeout-keep-going" => {
+            if args[2] == "alpha" {
+                thread::sleep(Duration::from_secs(5));
+            } else {
+                fs::write(&args[3], "later invocation ran").expect("write later marker");
+            }
+        }
+        "tree-parent" => {
+            let marker = &args[2];
+            Command::new(env::current_exe().expect("current exe"))
+                .arg("tree-child")
+                .arg(marker)
+                .spawn()
+                .expect("spawn tree child");
+            thread::sleep(Duration::from_secs(5));
+        }
+        "tree-child" => {
+            thread::sleep(Duration::from_millis(500));
+            fs::write(&args[2], "survived").expect("write marker");
+        }
+        "background-parent" => {
+            Command::new(env::current_exe().expect("current exe"))
+                .arg("background-child")
+                .arg(&args[2])
+                .spawn()
+                .expect("spawn background child");
+        }
+        "background-child" => {
+            thread::sleep(Duration::from_millis(100));
+            fs::write(&args[2], "completed").expect("write background marker");
+        }
+        other => panic!("unknown probe mode: {other}"),
+    }
+}
+"#,
+    )
+    .expect("write execution probe");
+    let output = std::process::Command::new("rustc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("rustc must be available to compile the execution probe");
+    assert!(
+        output.status.success(),
+        "failed to compile execution probe:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    executable
+}
+
 #[cfg(windows)]
 fn compile_probe(source: &Path, executable: &Path, marker: &str) {
     fs::write(source, format!("fn main() {{ println!(\"{marker}\"); }}\n")).expect("write probe source");
@@ -185,6 +367,135 @@ fn per_package_runs_once_per_selected_member() {
         .assert()
         .success()
         .stdout(predicate::str::contains("echo alpha").and(predicate::str::contains("echo gamma")));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn package_files_union_with_direct_packages_and_each_other() {
+    let (tmp, manifest) = fixture();
+    let first = tmp.path().join("first.packages");
+    let second = tmp.path().join("second.packages");
+    fs::write(&first, "alpha\n\ngamma@0.1\n").expect("write first package file");
+    fs::write(&second, "beta\n").expect("write second package file");
+
+    each(&manifest)
+        .arg("--package-file")
+        .arg(&first)
+        .arg("--package-file")
+        .arg(&second)
+        .args(["--package", "delta", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("echo alpha")
+                .and(predicate::str::contains("echo beta"))
+                .and(predicate::str::contains("echo delta"))
+                .and(predicate::str::contains("echo gamma")),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn present_empty_package_file_is_an_explicit_empty_selection() {
+    let (tmp, manifest) = default_members_fixture();
+    let packages = tmp.path().join("empty.packages");
+    fs::write(&packages, "").expect("write empty package file");
+
+    each(&manifest)
+        .arg("--package-file")
+        .arg(packages)
+        .args(["--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("nothing to do"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn package_file_precedence_matches_the_selection_contract() {
+    let (tmp, manifest) = fixture();
+    let packages = tmp.path().join("alpha.packages");
+    fs::write(&packages, "alpha\n").expect("write package file");
+
+    each(&manifest)
+        .arg("--package-file")
+        .arg(&packages)
+        .args(["--workspace", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("echo alpha")
+                .and(predicate::str::contains("echo beta"))
+                .and(predicate::str::contains("echo gamma")),
+        );
+
+    each(&manifest)
+        .arg("--package-file")
+        .arg(packages)
+        .args(["--none", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("nothing to do"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn package_file_input_errors_fail_loudly() {
+    let (tmp, manifest) = fixture();
+    let invalid_utf8 = tmp.path().join("invalid-utf8.packages");
+    fs::write(&invalid_utf8, [0xFF, 0xFE]).expect("write invalid UTF-8");
+    each(&manifest)
+        .arg("--package-file")
+        .arg(&invalid_utf8)
+        .args(["--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("not valid UTF-8"));
+
+    let malformed = tmp.path().join("malformed.packages");
+    fs::write(&malformed, "alpha\n--workspace\n").expect("write malformed package file");
+    each(&manifest)
+        .arg("--package-file")
+        .arg(&malformed)
+        .args(["--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("line 2").and(predicate::str::contains("command-line tokens")));
+
+    let comment = tmp.path().join("comment.packages");
+    fs::write(&comment, "#alpha\n").expect("write package file comment");
+    each(&manifest)
+        .arg("--package-file")
+        .arg(&comment)
+        .args(["--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("comments are not supported"));
+
+    let unmatched = tmp.path().join("unmatched.packages");
+    fs::write(&unmatched, "does-not-exist\n").expect("write unmatched package file");
+    each(&manifest)
+        .arg("--package-file")
+        .arg(&unmatched)
+        .args(["--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("did not match"));
+
+    each(&manifest)
+        .arg("--package-file")
+        .arg(tmp.path().join("missing.packages"))
+        .args(["--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("could not read package file"));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -864,4 +1175,329 @@ fn bare_invocation_runs_only_default_members() {
         .assert()
         .success()
         .stdout(predicate::str::contains("echo alpha").and(predicate::str::contains("echo beta").not()));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn workspace_rust_version_expands_in_all_modes_and_accepts_lower_members() {
+    let (_tmp, manifest) = rust_version_fixture(Some("1.80"), &[("alpha", Some("1.70")), ("beta", Some("workspace"))]);
+    each(&manifest)
+        .args(["--workspace", "--dry-run", "--", "echo", "{name}:{workspace-rust-version}"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo alpha:1.80").and(predicate::str::contains("echo beta:1.80")));
+
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--each-target",
+            "lib",
+            "--dry-run",
+            "--",
+            "echo",
+            "{target}:{workspace-rust-version}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(":1.80"));
+
+    each(&manifest)
+        .args([
+            "--package",
+            "alpha",
+            "--once",
+            "--dry-run",
+            "--",
+            "echo",
+            "{workspace-rust-version}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo 1.80"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn workspace_rust_version_validation_is_lazy() {
+    let (_tmp, manifest) = rust_version_fixture(Some("1.80"), &[("alpha", Some("1.70")), ("beta", None)]);
+    each(&manifest)
+        .args(["--workspace", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success();
+    each(&manifest)
+        .args([
+            "--package",
+            "alpha",
+            "--once",
+            "--dry-run",
+            "--",
+            "echo",
+            "{workspace-rust-version}",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("beta").and(predicate::str::contains("rust-version")));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn workspace_rust_version_rejects_newer_members() {
+    let (_tmp, manifest) = rust_version_fixture(Some("1.80"), &[("alpha", Some("1.81")), ("beta", Some("1.70"))]);
+    each(&manifest)
+        .args(["--workspace", "--once", "--dry-run", "--", "echo", "{workspace-rust-version}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("alpha").and(predicate::str::contains("newer than")));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn workspace_rust_version_rejects_missing_or_invalid_root_floor() {
+    let (_missing, missing_manifest) = rust_version_fixture(None, &[("alpha", Some("1.70"))]);
+    each(&missing_manifest)
+        .args(["--workspace", "--once", "--dry-run", "--", "echo", "{workspace-rust-version}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("[workspace.package].rust-version"));
+
+    let (_invalid, invalid_manifest) = rust_version_fixture(Some("2.0"), &[("alpha", Some("1.70"))]);
+    each(&invalid_manifest)
+        .args(["--workspace", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success();
+    each(&invalid_manifest)
+        .args(["--workspace", "--once", "--dry-run", "--", "echo", "{workspace-rust-version}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("2.0").and(predicate::str::contains("Rust 1.x")));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn workspace_rust_version_uses_root_package_for_single_package_repository() {
+    let (_tmp, manifest) = single_package_fixture("1.75");
+    each(&manifest)
+        .args(["--once", "--dry-run", "--", "echo", "{workspace-rust-version}"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo 1.75"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn once_rejects_jobs_greater_than_one() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["--workspace", "--once", "--jobs", "2", "--dry-run", "--", "echo", "{packages}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--jobs").and(predicate::str::contains("--once")));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn parallel_output_is_buffered_in_plan_order() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let completion_log = tmp.path().join("completion.log");
+    let output = each(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--jobs", "2", "--"])
+        .arg(&probe)
+        .args(["ordered", "{name}"])
+        .arg(&completion_log)
+        .output()
+        .expect("run cargo-each");
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 probe output");
+    let alpha = stdout.find("alpha:start").expect("alpha output");
+    let beta = stdout.find("beta:start").expect("beta output");
+    assert!(alpha < beta, "buffered blocks must follow plan order:\n{stdout}");
+    assert_eq!(
+        fs::read_to_string(completion_log).expect("completion log"),
+        "beta\nalpha\n",
+        "the probe must finish out of order to prove cargo-each reordered complete blocks"
+    );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn parallel_fail_fast_chooses_failure_by_plan_order() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    each(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--jobs", "2", "--"])
+        .arg(probe)
+        .args(["fail-order", "{name}"])
+        .assert()
+        .failure()
+        .code(7);
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn parallel_fail_fast_stops_launching_new_work() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let sync_dir = tmp.path().join("fail-stop");
+    fs::create_dir(&sync_dir).expect("create synchronization directory");
+    each(&manifest)
+        .args(["--workspace", "--jobs", "2", "--"])
+        .arg(probe)
+        .args(["fail-stop", "{name}"])
+        .arg(&sync_dir)
+        .assert()
+        .failure()
+        .code(7);
+    assert!(sync_dir.join("alpha.started").exists(), "the first initial worker must start");
+    assert!(sync_dir.join("beta.started").exists(), "the second initial worker must start");
+    for name in ["delta", "epsilon", "gamma"] {
+        assert!(
+            !sync_dir.join(format!("{name}.started")).exists(),
+            "{name} must not launch after either synchronized initial worker fails"
+        );
+    }
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn parallel_keep_going_runs_the_complete_plan() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let launch_log = tmp.path().join("launch.log");
+    each(&manifest)
+        .args(["--workspace", "--jobs", "2", "--keep-going", "--"])
+        .arg(probe)
+        .args(["keep-going", "{name}"])
+        .arg(&launch_log)
+        .assert()
+        .failure()
+        .code(1);
+    let launched = fs::read_to_string(launch_log).expect("launch log");
+    for name in ["alpha", "beta", "delta", "epsilon", "gamma"] {
+        assert!(launched.contains(name), "{name} must run under --keep-going:\n{launched}");
+    }
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn parallel_spills_large_stdout_and_stderr_without_truncating_plan_order() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let output = each(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--jobs", "2", "--keep-going", "--"])
+        .arg(probe)
+        .args(["large-output", "{name}"])
+        .output()
+        .expect("run cargo-each with large output");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("probe stdout is ASCII");
+    let stderr = String::from_utf8(output.stderr).expect("probe stderr is ASCII");
+    assert!(stdout.find("alpha:stdout").expect("alpha stdout header") < stdout.find("beta:stdout").expect("beta stdout header"));
+    assert!(stderr.find("alpha:stderr").expect("alpha stderr header") < stderr.find("beta:stderr").expect("beta stderr header"));
+    assert_eq!(stdout.bytes().filter(|byte| *byte == b'A').count(), 1_100_000);
+    assert_eq!(stdout.bytes().filter(|byte| *byte == b'B').count(), 1_100_000);
+    assert_eq!(stderr.bytes().filter(|byte| *byte == b'C').count(), 1_100_000);
+    assert_eq!(stderr.bytes().filter(|byte| *byte == b'D').count(), 1_100_000);
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn parallel_without_timeout_preserves_ordinary_background_descendants() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let marker = tmp.path().join("background-completed");
+    each(&manifest)
+        .args(["-p", "alpha", "--jobs", "2", "--"])
+        .arg(probe)
+        .arg("background-parent")
+        .arg(&marker)
+        .assert()
+        .success();
+    assert!(
+        marker.exists(),
+        "parallel execution without --timeout must not kill an ordinary background descendant"
+    );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn sequential_timeout_fail_fast_does_not_run_later_members() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let later_marker = tmp.path().join("later-invocation");
+    let output = each(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--timeout", "50ms", "--"])
+        .arg(probe)
+        .args(["timeout-fail-fast", "{name}"])
+        .arg(&later_marker)
+        .output()
+        .expect("run cargo-each timeout fail-fast");
+    if is_timeout_refusal(&output) {
+        assert!(!later_marker.exists(), "pre-spawn refusal must not launch any member");
+    } else {
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
+    }
+    assert!(
+        !later_marker.exists(),
+        "fail-fast or pre-spawn refusal must not launch the later member"
+    );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn sequential_timeout_keep_going_runs_later_members() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let later_marker = tmp.path().join("later-invocation");
+    let output = each(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--timeout", "50ms", "--keep-going", "--"])
+        .arg(probe)
+        .args(["timeout-keep-going", "{name}"])
+        .arg(&later_marker)
+        .output()
+        .expect("run cargo-each timeout keep-going");
+    if is_timeout_refusal(&output) {
+        assert!(
+            !later_marker.exists(),
+            "unsealed containment must refuse every timed child before spawn"
+        );
+    } else {
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
+        assert!(
+            later_marker.exists(),
+            "--keep-going must launch the member after a timed-out invocation"
+        );
+    }
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn timeout_terminates_the_complete_process_tree() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let marker = tmp.path().join("grandchild-survived");
+    let output = each(&manifest)
+        .args(["-p", "alpha", "--jobs", "2", "--timeout", "50ms", "--"])
+        .arg(probe)
+        .arg("tree-parent")
+        .arg(&marker)
+        .output()
+        .expect("run cargo-each tree timeout");
+    if !is_timeout_refusal(&output) {
+        assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    assert!(
+        !marker.exists(),
+        "a timed-out grandchild must be terminated, and an unsupported timed child must never start"
+    );
 }

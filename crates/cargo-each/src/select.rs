@@ -6,26 +6,22 @@
 //!
 //! Mirrors `cargo build`'s selection surface: `-p`/`--package` (with glob
 //! support and optional `@version` qualifier), `--workspace`/`--all`, and
-//! `--exclude`, plus the `cargo-each`-specific `--none` (explicit empty set).
-//! When nothing is named the default is cargo's `default-members`, exactly
-//! like `cargo build`.
-//!
-//! A computed selection (e.g. an impact tier) is fed in as ordinary flags via
-//! shell expansion by the caller; this module has no notion of files or
-//! environment variables.
+//! `--exclude`, plus a repeatable `--package-file` and the
+//! `cargo-each`-specific `--none` (explicit empty set). When nothing is named
+//! the default is cargo's `default-members`, exactly like `cargo build`.
 
 use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use cargo_metadata::semver::Version;
 
-use crate::error::{EachError, UnknownSelectorError};
+use crate::error::{EachError, InvalidPackageFileLineError, PackageFileReadError, PackageFileUtf8Error, UnknownSelectorError};
 use crate::workspace::{Member, Workspace};
 
 /// A parsed package selection, before it is resolved against a workspace.
 ///
-/// Populated from command-line flags. A caller with a computed selection
-/// (e.g. an impact tier) passes it as ordinary `-p` / `--workspace` / `--none`
-/// flags via shell expansion.
+/// Populated from command-line flags and package files.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Selection {
     /// `-p` / `--package` selectors (name, `name@version`, or glob).
@@ -36,9 +32,42 @@ pub(crate) struct Selection {
     pub(crate) exclude: Vec<String>,
     /// `--none`: explicitly resolve to the empty set.
     pub(crate) none: bool,
+    /// Whether at least one `--package-file` was present, even if every file
+    /// was empty.
+    pub(crate) package_file_supplied: bool,
 }
 
 impl Selection {
+    /// Build a selection from direct package specs and package files.
+    ///
+    /// Package files are always read and validated, even when `--none` or
+    /// `--workspace` will win selection precedence, so a broken declared input
+    /// never silently passes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EachError`] when a package file cannot be read as UTF-8 or
+    /// contains a malformed nonempty line.
+    pub(crate) fn from_sources(
+        packages: &[String],
+        package_files: &[PathBuf],
+        all: bool,
+        exclude: &[String],
+        none: bool,
+    ) -> Result<Self, EachError> {
+        let mut combined = packages.to_vec();
+        for path in package_files {
+            combined.extend(read_package_file(path)?);
+        }
+        Ok(Self {
+            packages: combined,
+            all,
+            exclude: exclude.to_vec(),
+            none,
+            package_file_supplied: !package_files.is_empty(),
+        })
+    }
+
     /// Whether the resolved set is the whole workspace with no narrowing.
     ///
     /// True when selected via `--workspace` / `--all` with no narrowing
@@ -73,6 +102,8 @@ impl Selection {
             workspace.members.iter().collect()
         } else if !self.packages.is_empty() {
             resolve_selectors(workspace, &self.packages)?
+        } else if self.package_file_supplied {
+            Vec::new()
         } else {
             workspace
                 .members
@@ -91,6 +122,55 @@ impl Selection {
 
         Ok(base)
     }
+}
+
+fn read_package_file(path: &Path) -> Result<Vec<String>, EachError> {
+    let display = path.display().to_string();
+    let bytes = fs::read(path).map_err(|error| PackageFileReadError::caused_by(display.clone(), error))?;
+    let contents = String::from_utf8(bytes).map_err(|error| PackageFileUtf8Error::caused_by(display.clone(), error))?;
+    contents
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            if line.is_empty() {
+                None
+            } else {
+                Some(validate_package_file_spec(&display, index + 1, line).map(str::to_owned))
+            }
+        })
+        .collect()
+}
+
+fn validate_package_file_spec<'a>(path: &str, line: usize, spec: &'a str) -> Result<&'a str, EachError> {
+    let invalid = |reason: &str| InvalidPackageFileLineError::new(path.to_owned(), line, spec.to_owned(), reason.to_owned()).into();
+    if spec.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return Err(invalid("leading, trailing, and embedded whitespace are not allowed"));
+    }
+    if spec.starts_with('#') {
+        return Err(invalid("comments are not supported"));
+    }
+    if spec.starts_with('-') {
+        return Err(invalid("command-line tokens are not package specs"));
+    }
+    let mut pieces = spec.split('@');
+    let name = pieces.next().expect("split always yields at least one element");
+    let version = pieces.next();
+    if pieces.next().is_some() {
+        return Err(invalid("a package spec may contain at most one `@`"));
+    }
+    if name.is_empty() {
+        return Err(invalid("expected a package name or Unix glob, optionally followed by `@version`"));
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'*' | b'?'))
+    {
+        return Err(invalid("expected a package name or Unix glob, optionally followed by `@version`"));
+    }
+    if version.is_some_and(str::is_empty) {
+        return Err(invalid("the version qualifier after `@` must not be empty"));
+    }
+    Ok(spec)
 }
 
 /// Resolve a list of selectors against the workspace, deduplicating and
@@ -250,7 +330,6 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::BTreeSet;
-    use std::path::PathBuf;
 
     use serde_json::Value;
 
@@ -260,6 +339,7 @@ mod tests {
         Member {
             name: name.to_owned(),
             version: "0.1.0".to_owned(),
+            rust_version: Some("1.70.0".parse().expect("valid Rust version")),
             manifest_path: PathBuf::from(format!("/ws/{name}/Cargo.toml")),
             publishable: true,
             features: BTreeSet::new(),
@@ -273,6 +353,7 @@ mod tests {
         Workspace {
             members: vec![member("alpha"), member("beta"), member("gamma")],
             default_member_names: defaults.iter().map(|s| (*s).to_owned()).collect(),
+            root_manifest_path: PathBuf::from("/ws/Cargo.toml"),
         }
     }
 
@@ -305,6 +386,36 @@ mod tests {
         let ws = workspace(&["alpha", "gamma"]);
         let sel = Selection::default();
         assert_eq!(names(&sel.resolve(&ws).expect("resolve")), ["alpha", "gamma"]);
+    }
+
+    #[test]
+    fn an_empty_package_file_source_selects_nothing() {
+        let ws = workspace(&["alpha", "gamma"]);
+        let sel = Selection {
+            package_file_supplied: true,
+            ..Selection::default()
+        };
+        assert!(sel.resolve(&ws).expect("resolve").is_empty());
+    }
+
+    #[test]
+    fn package_file_lines_reject_comments_tokens_and_whitespace() {
+        for spec in [
+            "# alpha",
+            "--workspace",
+            " alpha",
+            "alpha ",
+            "alpha beta",
+            "@1",
+            "alpha!",
+            "alpha@",
+            "alpha@1@2",
+        ] {
+            validate_package_file_spec("packages.txt", 1, spec).expect_err(spec);
+        }
+        for spec in ["alpha", "alpha@1.2.3", "cargo-*", "?eta"] {
+            assert_eq!(validate_package_file_spec("packages.txt", 1, spec).expect(spec), spec);
+        }
     }
 
     #[test]

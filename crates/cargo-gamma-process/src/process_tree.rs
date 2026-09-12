@@ -10,6 +10,7 @@ use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Output,
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use cargo_gamma_unsafe::cgroup::Cgroup;
@@ -1293,6 +1294,72 @@ impl ProcessTree {
         Ok(reaped)
     }
 
+    /// Requests termination, then waits no longer than `grace` for the leader
+    /// to exit.
+    ///
+    /// Unlike [`Self::terminate`], this method never performs a blocking
+    /// [`Child::wait`] after signalling. If the leader remains alive at the
+    /// deadline, its handle is detached and this process tree is left without
+    /// a child for [`Drop`] to wait on. The surrounding cgroup or job handle
+    /// remains owned by `self` and is released normally when the process tree
+    /// is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns the observation error if `try_wait` fails, the termination
+    /// error if the leader exits after signalling but cleanup had failed, or a
+    /// timed-out error (including an earlier termination error, when present)
+    /// if the leader is still running after `grace`.
+    pub fn terminate_bounded(&mut self, grace: Duration) -> io::Result<ExitStatus> {
+        let started = Instant::now();
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| io::Error::other("the subtree leader was already reaped"))?;
+
+        #[cfg(any(test, feature = "fault-injection"))]
+        let killed = if faults::fired(faults::Fault::Kill) {
+            Err(io::Error::other("subtree termination was refused as requested by a test"))
+        } else if faults::fired(faults::Fault::Linger) {
+            Ok(())
+        } else {
+            self.kill(&mut child)
+        };
+        #[cfg(not(any(test, feature = "fault-injection")))]
+        let killed = self.kill(&mut child);
+        let mut kill_error = killed.err();
+        self.release();
+
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if let Some(error) = kill_error.take() {
+                        return Err(error);
+                    }
+
+                    #[cfg(any(test, feature = "fault-injection"))]
+                    if faults::fired(faults::Fault::Terminate) {
+                        return Err(io::Error::other("subtree termination failed as requested by a test"));
+                    }
+
+                    return Ok(status);
+                }
+                Ok(None) => {}
+                Err(error) => return Err(error),
+            }
+
+            let Some(remaining) = grace.checked_sub(started.elapsed()) else {
+                drop(child);
+                let deadline_error = format!("subtree leader did not exit within {} ms after termination", grace.as_millis());
+                return Err(kill_error.take().map_or_else(
+                    || io::Error::new(io::ErrorKind::TimedOut, deadline_error.clone()),
+                    |error| io::Error::new(error.kind(), format!("{error}; {deadline_error}")),
+                ));
+            };
+            thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+    }
+
     /// Ends descendants while their leader's process-group id is still reserved.
     ///
     /// An exited leader can leave servers and inherited pipe handles behind. This private
@@ -1569,7 +1636,6 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::io::{BufRead as _, Write as _};
-    use std::time::Instant;
 
     use camino::Utf8Path;
 
@@ -2214,6 +2280,159 @@ mod tests {
         thread::sleep(Duration::from_secs(4));
 
         assert!(!finished.exists(), "the grandchild kept working after the subtree was killed");
+    }
+
+    #[test]
+    fn bounded_termination_does_not_wait_forever_after_a_failed_kill() {
+        let work = testing::workdir("gamma-bounded-termination");
+        let finished = Utf8Path::from_path(work.path())
+            .expect("the temporary path is UTF-8")
+            .join("finished");
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.args([
+            testing::directive("sleep:250"),
+            testing::directive(format_args!("touch:{finished}")),
+        ]);
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+        let _failed_kill = faults::arm(faults::Fault::Kill);
+
+        let started = Instant::now();
+        let error = subtree
+            .terminate_bounded(Duration::from_millis(25))
+            .expect_err("the injected failed kill must reach its deadline");
+
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "bounded termination exceeded its grace"
+        );
+        assert!(error.to_string().contains("termination was refused"), "{error}");
+        assert!(error.to_string().contains("did not exit within 25 ms"), "{error}");
+        assert!(subtree.child.is_none(), "Drop must have no leader left to wait for");
+
+        thread::sleep(Duration::from_millis(350));
+        assert!(finished.exists(), "the deliberately un-killed leader did not finish on its own");
+    }
+
+    #[test]
+    fn bounded_termination_reaps_a_killed_leader() {
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.arg(testing::directive("sleep:30000"));
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+
+        let status = subtree
+            .terminate_bounded(Duration::from_secs(1))
+            .expect("the killed leader exits within the grace");
+
+        assert!(!status.success(), "a killed leader must not report success");
+        assert!(subtree.child.is_none(), "the leader was not reaped");
+        assert!(
+            subtree.terminate_bounded(Duration::ZERO).is_err(),
+            "an already-reaped leader must fail"
+        );
+    }
+
+    #[test]
+    fn bounded_termination_preserves_a_failed_kill_after_natural_exit() {
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.arg(testing::directive("sleep:50"));
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+        let _failed_kill = faults::arm(faults::Fault::Kill);
+
+        let error = subtree
+            .terminate_bounded(Duration::from_secs(1))
+            .expect_err("natural exit must not hide the failed termination request");
+
+        assert!(error.to_string().contains("termination was refused"), "{error}");
+    }
+
+    #[test]
+    fn bounded_termination_reports_post_reap_cleanup_failure() {
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.arg(testing::directive("sleep:30000"));
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+        let _failed_cleanup = faults::arm(faults::Fault::Terminate);
+
+        let error = subtree
+            .terminate_bounded(Duration::from_secs(1))
+            .expect_err("the injected post-reap cleanup failure must be preserved");
+
+        assert!(error.to_string().contains("failed as requested by a test"), "{error}");
+    }
+
+    #[test]
+    fn bounded_termination_times_out_when_a_successful_signal_is_ignored() {
+        let work = testing::workdir("gamma-bounded-linger");
+        let finished = Utf8Path::from_path(work.path())
+            .expect("the temporary path is UTF-8")
+            .join("finished");
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.args([
+            testing::directive("sleep:250"),
+            testing::directive(format_args!("touch:{finished}")),
+        ]);
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+        let _ignored_kill = faults::arm(faults::Fault::Linger);
+
+        let error = subtree
+            .terminate_bounded(Duration::from_millis(25))
+            .expect_err("an ignored successful signal must time out");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("did not exit within 25 ms"), "{error}");
+        thread::sleep(Duration::from_millis(350));
+        assert!(finished.exists(), "the deliberately un-signalled leader did not finish");
+    }
+
+    #[test]
+    fn ordinary_termination_reports_post_reap_cleanup_failure() {
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.arg(testing::directive("sleep:30000"));
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+        let _failed_cleanup = faults::arm(faults::Fault::Terminate);
+
+        let error = subtree
+            .terminate()
+            .expect_err("the ordinary termination fault must be preserved after reaping");
+
+        assert!(error.to_string().contains("failed as requested by a test"), "{error}");
+    }
+
+    #[test]
+    fn observation_cleanup_classifies_pending_cleanup_and_dual_failures() {
+        let pending: Observation<()> = cleanup_after_observation(false, || unreachable!(), || unreachable!());
+        assert!(matches!(pending, Observation::Pending));
+
+        let cleanup_failed = cleanup_after_observation(
+            true,
+            || Err(io::Error::new(io::ErrorKind::PermissionDenied, "cleanup failed")),
+            || Ok("reaped"),
+        );
+        assert!(matches!(
+            cleanup_failed,
+            Observation::CleanupFailed(error) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+
+        let both_failed = cleanup_after_observation(
+            true,
+            || Err(io::Error::other("cleanup failed")),
+            || Err::<(), _>(io::Error::new(io::ErrorKind::Interrupted, "reap failed")),
+        );
+        assert!(matches!(
+            both_failed,
+            Observation::ReapFailed(error) if error.kind() == io::ErrorKind::Interrupted
+        ));
     }
 
     /// Killing a subtree reaches a grandchild that left the process group.

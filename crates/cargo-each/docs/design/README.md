@@ -48,18 +48,19 @@ target (with placeholder substitution), or exactly once for the whole set.
    flag surface is already familiar and the impact step's `--package name@version`
    output can be consumed verbatim.
 2. **Absorb the CI skip/default dance.** A resolved-empty selection is a no-op
-   that exits 0 — no `--skip` sentinel in callers. cargo-each is entirely
-   flag-driven: a computed selection (an impact tier) is fed in as ordinary
-   `-p` / `--workspace` / `--none` flags via shell expansion, so cargo-each
-   stays agnostic about where the selectors came from and callers never write
-   a skip/default conditional.
+   that exits 0 — no `--skip` sentinel in callers. A computed selection can be
+   supplied as ordinary `-p` flags or as one Cargo package spec per line in a
+   `--package-file`, so callers do not need shell array expansion. cargo-each
+   stays agnostic about who produced the file and what the selection means.
 3. **Three execution modes.** *per-package* (run the command once per member,
    substituting `{name}`/`{spec}`/`{version}`/`{manifest}`) covers per-manifest
    tools; *once* (run the command a single time when the set is non-empty)
    covers workspace-wide tools and single-invocation cargo commands, with a
    `{packages}` placeholder that expands to the cargo selection flags; and
    *per-target* runs once for each Cargo target of requested kinds, preserving
-   the package placeholders and adding `{target}`.
+   the package placeholders and adding `{target}`. The workspace-scoped
+   `{workspace-rust-version}` placeholder exposes the root compatibility floor
+   to commands that provision or validate a shared toolchain.
 4. **A small, general filter language** (`--filter` and `--exclude-filter`)
    with `not`, `and`, `or`, and parentheses over cargo metadata — target kinds,
    publication state, declared features and dependencies, and
@@ -67,7 +68,10 @@ target (with placeholder substitution), or exactly once for the whole set.
    recipes collapses to flags.
 5. **Bare names for free.** `{name}` yields the un-qualified package name, so
    `@version` stripping disappears from callers even though the input carries it.
-6. **Works identically locally and in CI**, on any platform, with no shell
+6. **Bounded execution.** Per-package and per-target commands may run with a
+   caller-selected concurrency limit and timeout. Defaults remain sequential and
+   unbounded for backward compatibility.
+7. **Works identically locally and in CI**, on any platform, with no shell
    dialect assumptions. **Open source**: ships from `ox-tools` to crates.io.
 
 ## 3. Non-Goals
@@ -78,10 +82,12 @@ target (with placeholder substitution), or exactly once for the whole set.
   aggregation, llvm-cov's dual-config instrumentation, and the per-crate readme
   `doc2readme` reconciliation stay in their recipes. `cargo-each` owns only the
   selection → filter → iterate spine those recipes wrap.
-- **Parallel scheduling / job pools.** Commands run sequentially. Parallelism, if
-  ever wanted, is a later, additive concern.
 - **A general templating engine.** Placeholder substitution is a fixed, small set
   of `{token}` replacements, not an expression language.
+- **Tool installation or workflow orchestration.** cargo-each can execute
+  `rustup` or another installer when the caller asks it to, but it does not
+  decide which tools a repository needs, select binary versus source
+  installation, inspect Git, collect coverage, or understand Anvil tiers.
 - **A public library API.** `cargo-each` ships as an executable only. Its
   modules are crate-internal (`pub(crate)`), so there is no semver-committed
   library surface, no `check-external-types` obligation, and nothing to consume
@@ -168,24 +174,31 @@ beyond placeholder substitution.
 | Flag | Meaning |
 |------|---------|
 | `-p`, `--package <SPEC>` | Select a member. Repeatable. `SPEC` is a package name, a `name@version` spec, or a Unix glob (`tokio-*`), matching `cargo-coverage-gate`'s existing `-p` idiom. |
+| `--package-file <PATH>` | Read package specs from a UTF-8 file, one spec per nonempty line. Repeatable; specs are unioned with `--package`. A present empty file is an explicit empty selection. |
 | `--workspace`, `--all` | Select every workspace member. |
 | `--exclude <SPEC>` | Remove a member from the selection (requires `--workspace`). Repeatable. |
 | `--none` | Explicitly select zero members. Resolves to an empty set (a no-op, exit 0). Emitted by the impact hand-off when a tier is empty; replaces the `--skip` sentinel. |
 
-A computed selection (e.g. an impact tier) is fed in as ordinary flags via
-shell expansion — cargo-each has no `--from-file` / `--from-env` source, so it
-stays agnostic about origin. See section 6 for the anvil hand-off.
+A package file contains only package specs, not command-line tokens, comments,
+an impact-tier name, or policy. `foo@1.2.3` has the same meaning whether it came
+from `--package foo@1.2.3` or a file. A missing, unreadable, non-UTF-8, or
+malformed file is an error. This keeps cargo-each independent of cargo-delta
+while allowing cargo-delta output to be consumed without command substitution.
 
 **Resolution order.** The literal flags resolve to:
 
 1. If `--none` appears anywhere → empty set.
 2. Else if `--workspace`/`--all` appears → all members, minus `--exclude`.
-3. Else if any `-p` matched → the matched members.
-4. Else → `default-members` (exactly like `cargo build`; pass `--workspace`
+3. Else if any direct or file-supplied spec exists → the matching members.
+4. Else if at least one `--package-file` was supplied → empty set.
+5. Else → `default-members` (exactly like `cargo build`; pass `--workspace`
    for the whole workspace).
 
-A `-p` selector that matches no member is an error (same policy as
+A selector that matches no member is an error (same policy as
 `cargo-coverage-gate`), so typos fail loudly rather than silently skipping.
+An empty package file is different: it is the producer's explicit statement
+that the computed set is empty and therefore exits successfully without
+running the command.
 
 ### 4.2 Filters
 
@@ -237,6 +250,8 @@ filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 | `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
 | `--target-required-feature <FEATURE>` | In per-target mode, retain targets whose `required-features` contains `FEATURE`. Repeatable; values are AND-combined. Requires `--each-target`. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
+| `--jobs <N>` | Run at most `N` per-package or per-target commands concurrently. Default `1`. With `--once`, values other than `1` are a usage error. |
+| `--timeout <DURATION>` | Terminate an invocation and its child process tree when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. Requires sealed process-tree containment; unsupported hosts fail before the child starts. No timeout by default. |
 | `--chdir` | Run each per-package or per-target command from that member's crate root (the directory containing its `Cargo.toml`) instead of the caller's CWD. Combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
 | `--manifest-path <PATH>` | Workspace root `Cargo.toml`. Defaults to auto-detection from CWD. |
 | `--dry-run` | Print the fully-substituted commands that *would* run, one per line, without executing. |
@@ -253,10 +268,20 @@ Substituted inside each `ARG` of the command template:
 | `{manifest}` | absolute path to the member's `Cargo.toml` | per-package |
 | `{target}` | Cargo target name | per-target |
 | `{packages}` | the cargo selection flags for the resolved set: `--workspace` when the whole workspace was selected via `--workspace`/`--all` with no excludes **and no package filters applied**, else `--package name@version …` (one pair per member). Only valid as a standalone `ARG`; it expands to multiple tokens. | once |
+| `{workspace-rust-version}` | Root `[workspace.package].rust-version`, or root `[package].rust-version` in a single-package repository. | all |
 
 Per-target mode accepts all per-package placeholders plus `{target}`. Using a
 per-package or per-target token in `--once` mode, `{target}` in per-package
 mode, or `{packages}` outside `--once` is a usage error.
+
+`{workspace-rust-version}` is workspace-scoped rather than tied to one selected
+member. Resolving it requires a root declaration. cargo-each also requires every
+workspace member to expose a resolved `rust_version` no newer than the root
+floor. Missing values, a member requiring a newer compiler, or a non-Rust
+semantic version is a configuration error. Lower member minima are valid. This
+matches the meaning of one compiler selected for a complete workspace; it is
+not a per-package toolchain matrix. The validation is lazy: commands that do
+not contain the placeholder do not require a workspace Rust version.
 
 Targets run in package-name order and then target-name order. A target matching
 more than one requested kind runs once. No matching targets is a successful
@@ -277,6 +302,38 @@ no-op.
 - **No shell.** The command is spawned directly (argv, not a shell string), so
   there is no quoting/dialect surface. Placeholder expansion is textual and
   happens before spawn.
+- **Bounded concurrency.** With `--jobs > 1`, output from each invocation is
+  buffered and emitted as one block in deterministic plan order. Fail-fast
+  stops launching new work after the first observed failure and waits for
+  already-running children; `--keep-going` launches the complete plan. The
+  final failure is chosen by plan order, not scheduler timing. A worker panic
+  is converted into an infrastructure-failure outcome; each worker has a
+  dedicated completion channel, so an unexpected exit is observable as
+  disconnection rather than leaving the scheduler blocked forever. Without
+  `--timeout`, parallel commands use the ordinary direct-child lifecycle:
+  cargo-each waits for the launched leader but does not contain or kill
+  background descendants. Buffering is memory-bounded per stream: after 1 MiB,
+  output spills to a unique file in the system temporary directory. The
+  invocation outcome owns that file through deterministic plan-order emission,
+  so every success, failure, and panic path removes it through RAII. Spill
+  creation, write, seek, or read failures are infrastructure failures; output
+  is never intentionally truncated on a successful path.
+- **Output drain is bounded after every completion.** Readers get one second
+  after the leader completes to observe EOF. Complete output is preserved when
+  both pipes close within that grace. If a background or escaped descendant
+  keeps a pipe open, capture stops retaining new bytes, emits the partial bytes
+  already buffered, detaches the blocked reader, and reports an explicit
+  infrastructure failure rather than hanging or silently truncating.
+- **Timeouts terminate trees.** A timed-out command is a failure. cargo-each
+  terminates the child process tree rather than only the immediate process, so
+  compiler or test descendants cannot continue mutating the target directory
+  after cargo-each returns. Termination gets a bounded 250 ms grace to reap the
+  leader. If signalling fails and the leader is still running at that deadline,
+  its handle is detached so neither termination nor Drop can defeat the
+  invocation timeout; cargo-each reports the infrastructure failure. A timeout
+  is accepted only when launch preparation reports a sealed cgroup or job
+  boundary. On a host with best-effort process-group containment, cargo-each
+  reports that timeout is unsupported and does not spawn the command.
 - **Child executable resolution follows `PATH`.** `cargo-each` explicitly
   copies an inherited `PATH` onto every child command. This is equivalent to
   ordinary inheritance on other platforms and makes Windows resolve a relative
@@ -285,17 +342,12 @@ no-op.
 
 ## 6. How it simplifies cargo-anvil
 
-The recipes stop parsing the impact selection and metadata by hand. anvil's
-`_anvil-impact-include <tier>` helper reads
-`target/anvil/impact/include_<tier>.txt`, applies the `ANVIL_IMPACT=off`
-override, and emits a **concrete selector for every tier** — `--workspace`
-(unscoped / local / off), `--package name@version …` (scoped), or `--none`
-(empty tier). A `cargo-each` check just splats that output straight in as
-flags. Because the helper always emits a concrete selector, cargo-each never
-falls back to `default-members`, so no per-call default flag is needed.
-Illustrative before/after (the recipe keeps its own comments, setup deps,
-`: anvil-impact` dependency, and any domain glue; only the selection spine
-changes):
+The recipes stop parsing impact selections and metadata by hand. cargo-delta
+writes one `name@version` package file per tier under
+`target/anvil/impact/`. A cargo-each check supplies the appropriate file
+directly. An empty tier is an empty file and therefore a successful no-op.
+Illustrative before/after (the recipe keeps its own setup and `anvil-impact`
+dependencies; only the selection spine changes):
 
 **clippy** (affected tier, single invocation):
 
@@ -305,9 +357,9 @@ if (-not $env:ANVIL_INCLUDE_AFFECTED) { $env:ANVIL_INCLUDE_AFFECTED = (& just _a
 if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
 & cargo clippy @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) --all-targets --all-features --locked -- -D warnings
 ```
-```powershell
+```just
 # after
-cargo each @(& {{ just_executable() }} _anvil-impact-include affected) --once -- \
+cargo each --package-file target/anvil/impact/affected.packages --once -- \
     cargo clippy {packages} --all-targets --all-features --locked -- -D warnings
 ```
 
@@ -315,52 +367,38 @@ cargo each @(& {{ just_executable() }} _anvil-impact-include affected) --once --
 name-to-manifest map, `--workspace` branch, `@version` strip, and iteration loop
 collapse to:
 
-```powershell
-cargo each @(& {{ just_executable() }} _anvil-impact-include affected) --filter lib -- \
+```just
+cargo each --package-file target/anvil/impact/affected.packages --filter lib -- \
     cargo +{{ rust_nightly_external_types }} check-external-types --manifest-path {manifest}
 ```
 
 **loom** (affected packages that depend on loom):
 
-```powershell
-cargo each @(& {{ just_executable() }} _anvil-impact-include affected) --filter dep:loom -- \
+```just
+cargo each --package-file target/anvil/impact/affected.packages --filter dep:loom -- \
     cargo +{{ rust_nightly }} test --package {name} ...
 ```
 
-**llvm-cov opt-out drop** (exclude coverage-opted-out members):
+**per-target examples** (run each selected example with a timeout):
 
-```powershell
-cargo each @(& {{ just_executable() }} _anvil-impact-include affected) \
-    --exclude-filter metadata:coverage-gate.min-lines-percent=0 --once -- <measure...>
+```just
+cargo each --package-file target/anvil/impact/affected.packages \
+    --each-target example --timeout 30s -- \
+    cargo run --package {spec} --example {target}
 ```
 
-Recipes whose only per-tier logic is the skip/splat preamble (bench, clippy,
-doc-build, examples, miri*, doc-test, cargo-hack, udeps, careful) become a
-single `cargo each … --once` line. Modified-tier workspace-wide tools (fmt,
-cargo-sort, license-headers, spellcheck, ensure-no-*) become
-`cargo each @(& just _anvil-impact-include modified) --once -- <tool>` — the
-`--once` skip-when-empty behavior replaces the `--skip` guard while the tool
-still runs workspace-wide.
+Recipes whose only per-tier logic is the skip/splat preamble become one
+`cargo each --package-file …` command. Unscoped runs pass `--workspace`
+instead; choosing scoped versus unscoped input remains caller policy and is not
+encoded into cargo-each.
 
-Three small `anvil-impact` adjustments complete the picture (all part of the
-adoption change, not this crate):
+The setup graph can use `{workspace-rust-version}` to install the single root
+MSRV fallback without parsing Cargo TOML in a shell:
 
-- **Emit `--none`, not `--skip`, for an empty tier**, and drop the modified
-  tier's empty default: `_anvil-impact-include` emits `--workspace` /
-  `--package …` / `--none` **uniformly across all three tiers**. cargo-delta
-  makes no fundamental distinction between the tiers — they are just three
-  package sets — so neither should the helper. `--none` is `cargo-each`'s
-  native "select zero members" token, so the include file needs no
-  anvil-specific sentinel and `cargo each` skips the tier with no caller guard.
-- **Print one token per line** from `_anvil-impact-include`, so the recipe's
-  `@(& …)` capture is a ready-to-splat array — no `-split`, no `if/else`.
-- **Stop version-qualifying.** `_anvil-impact-format` can emit bare package
-  names; `cargo-each` derives `{spec}`/`{packages}` (the `name@version` form a
-  child cargo command needs) from live metadata itself.
-
-With the helper's output splatted straight into `cargo each`, the per-check
-`_anvil-impact-include` *self-populate* line and the `ANVIL_INCLUDE_<TIER>`
-environment variable are no longer needed by scoped checks.
+```just
+cargo each --workspace --once -- \
+    rustup toolchain install {workspace-rust-version} --profile minimal
+```
 
 ## 7. Rejected alternatives
 
@@ -373,11 +411,9 @@ environment variable are no longer needed by scoped checks.
 - **A generic expression language for filters.** Over-built for the handful of
   predicates the recipes actually need; the fixed predicate set covers every
   current `cargo metadata` filter and stays trivially auditable.
-- **A `--from-file` / `--from-env` selection source.** Rejected: it would pull
-  the impact artifact layout (and the `ANVIL_IMPACT=off` widening + tier-default
-  policy) into cargo-each, duplicating logic that already lives in anvil's
-  `_anvil-impact-include` helper. Keeping cargo-each flag-only and letting the
-  caller splat that helper's output in is smaller and keeps the impact policy in
-  one place.
+- **An Anvil-aware selection source.** Rejected: cargo-each does not accept a
+  tier name, inspect `ANVIL_IMPACT`, or assume a `target/anvil` layout.
+  `--package-file` is deliberately generic: one Cargo package spec per line,
+  with an empty file meaning an explicitly empty set.
 - **Reuse `cargo xtask`/a justfile function.** Neither is cargo-native selection;
   both re-introduce a shell dialect. A small binary is portable and testable.

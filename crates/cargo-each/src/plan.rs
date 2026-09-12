@@ -63,6 +63,17 @@ pub(crate) struct Plan {
     pub(crate) invocations: Vec<Invocation>,
 }
 
+/// Inputs that control how a selected member set becomes invocations.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BuildOptions<'a> {
+    pub(crate) mode: Mode,
+    pub(crate) chdir: bool,
+    pub(crate) packages: PackagesExpansion,
+    pub(crate) target_kinds: &'a BTreeSet<TargetKind>,
+    pub(crate) target_required_features: &'a BTreeSet<String>,
+    pub(crate) workspace_rust_version: Option<&'a str>,
+}
+
 impl Plan {
     /// Build the plan.
     ///
@@ -81,15 +92,15 @@ impl Plan {
     ///
     /// Returns [`EachError`] if `chdir` is combined with [`Mode::Once`], or if
     /// a placeholder in `command` is used in the wrong mode.
-    pub(crate) fn build(
-        members: &[&Member],
-        mode: Mode,
-        chdir: bool,
-        packages: PackagesExpansion,
-        target_kinds: &BTreeSet<TargetKind>,
-        target_required_features: &BTreeSet<String>,
-        command: &[String],
-    ) -> Result<Self, EachError> {
+    pub(crate) fn build(members: &[&Member], command: &[String], options: BuildOptions<'_>) -> Result<Self, EachError> {
+        let BuildOptions {
+            mode,
+            chdir,
+            packages,
+            target_kinds,
+            target_required_features,
+            workspace_rust_version,
+        } = options;
         if chdir && mode == Mode::Once {
             return Err(ChdirConflictsWithOnceError::new().into());
         }
@@ -111,6 +122,7 @@ impl Plan {
                         spec: m.spec(),
                         version: m.version.clone(),
                         manifest: m.manifest_path.display().to_string(),
+                        workspace_rust_version: workspace_rust_version.map(str::to_owned),
                     };
                     Ok(Invocation {
                         label: Some(m.name.clone()),
@@ -138,6 +150,7 @@ impl Plan {
                                 version: member.version.clone(),
                                 manifest: member.manifest_path.display().to_string(),
                                 target: target.name.clone(),
+                                workspace_rust_version: workspace_rust_version.map(str::to_owned),
                             };
                             Ok(Invocation {
                                 label: Some(format!("{}::{}", member.name, target.name)),
@@ -149,7 +162,10 @@ impl Plan {
                 .collect::<Result<Vec<_>, EachError>>()?,
             Mode::Once => {
                 let packages = packages_flags(members, packages);
-                let placeholders = Placeholders::Once { packages };
+                let placeholders = Placeholders::Once {
+                    packages,
+                    workspace_rust_version: workspace_rust_version.map(str::to_owned),
+                };
                 vec![Invocation {
                     label: None,
                     argv: substitute(command, &placeholders)?,
@@ -188,6 +204,7 @@ mod tests {
         Member {
             name: name.to_owned(),
             version: "1.2.3".to_owned(),
+            rust_version: Some("1.70.0".parse().expect("valid Rust version")),
             manifest_path: PathBuf::from(format!("/ws/{name}/Cargo.toml")),
             publishable: true,
             features: BTreeSet::new(),
@@ -202,7 +219,18 @@ mod tests {
     }
 
     fn build(members: &[&Member], mode: Mode, chdir: bool, packages: PackagesExpansion, command: &[String]) -> Result<Plan, EachError> {
-        Plan::build(members, mode, chdir, packages, &BTreeSet::new(), &BTreeSet::new(), command)
+        Plan::build(
+            members,
+            command,
+            BuildOptions {
+                mode,
+                chdir,
+                packages,
+                target_kinds: &BTreeSet::new(),
+                target_required_features: &BTreeSet::new(),
+                workspace_rust_version: None,
+            },
+        )
     }
 
     #[test]
@@ -333,12 +361,15 @@ mod tests {
         let required = std::iter::once("loom".to_owned()).collect();
         let plan = Plan::build(
             &[&a],
-            Mode::PerTarget,
-            false,
-            PackagesExpansion::Explicit,
-            &kinds,
-            &required,
             &cmd(&["cargo", "test", "-p", "{name}", "--test", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &kinds,
+                target_required_features: &required,
+                workspace_rust_version: None,
+            },
         )
         .expect("build target plan");
         assert_eq!(plan.invocations.len(), 1);
@@ -357,14 +388,36 @@ mod tests {
         let kinds = std::iter::once(TargetKind::Example).collect();
         let plan = Plan::build(
             &[&a],
-            Mode::PerTarget,
-            true,
-            PackagesExpansion::Explicit,
-            &kinds,
-            &BTreeSet::new(),
             &cmd(&["echo", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: true,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &kinds,
+                target_required_features: &BTreeSet::new(),
+                workspace_rust_version: None,
+            },
         )
         .expect("build target plan");
         assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(PathBuf::from("/ws/alpha").as_path()));
+    }
+
+    #[test]
+    fn workspace_rust_version_is_available_in_once_mode() {
+        let a = member("alpha");
+        let plan = Plan::build(
+            &[&a],
+            &cmd(&["rustup", "toolchain", "install", "{workspace-rust-version}"]),
+            BuildOptions {
+                mode: Mode::Once,
+                chdir: false,
+                packages: PackagesExpansion::Workspace,
+                target_kinds: &BTreeSet::new(),
+                target_required_features: &BTreeSet::new(),
+                workspace_rust_version: Some("1.80"),
+            },
+        )
+        .expect("build");
+        assert_eq!(plan.invocations[0].argv, ["rustup", "toolchain", "install", "1.80"]);
     }
 }
