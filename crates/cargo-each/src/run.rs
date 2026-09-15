@@ -591,10 +591,19 @@ impl CapturedProcess {
     }
 }
 
-fn finish_ordinary_termination(mut child: Child, result: io::Result<ExitStatus>) -> io::Result<ExitStatus> {
-    match child.try_wait() {
+fn finish_ordinary_termination(child: Child, result: io::Result<ExitStatus>) -> io::Result<ExitStatus> {
+    finish_ordinary_termination_with(child, result, Child::try_wait, reap_later)
+}
+
+fn finish_ordinary_termination_with<T>(
+    mut control: T,
+    result: io::Result<ExitStatus>,
+    observe: impl FnOnce(&mut T) -> io::Result<Option<ExitStatus>>,
+    reap: impl FnOnce(T) -> io::Result<()>,
+) -> io::Result<ExitStatus> {
+    match observe(&mut control) {
         Ok(Some(_status)) => result,
-        Ok(None) | Err(_) => match reap_later(child) {
+        Ok(None) | Err(_) => match reap(control) {
             Ok(()) => result,
             Err(reaper) => match result {
                 Ok(_status) => Err(io::Error::other(format!(
@@ -609,9 +618,18 @@ fn finish_ordinary_termination(mut child: Child, result: io::Result<ExitStatus>)
     }
 }
 
-fn finish_ordinary_wait(mut child: Child, mut outcome: TreeOutcome) -> TreeOutcome {
-    if !matches!(child.try_wait(), Ok(Some(_status)))
-        && let Err(error) = reap_later(child)
+fn finish_ordinary_wait(child: Child, outcome: TreeOutcome) -> TreeOutcome {
+    finish_ordinary_wait_with(child, outcome, Child::try_wait, reap_later)
+}
+
+fn finish_ordinary_wait_with<T>(
+    mut control: T,
+    mut outcome: TreeOutcome,
+    observe: impl FnOnce(&mut T) -> io::Result<Option<ExitStatus>>,
+    reap: impl FnOnce(T) -> io::Result<()>,
+) -> TreeOutcome {
+    if !matches!(observe(&mut control), Ok(Some(_status)))
+        && let Err(error) = reap(control)
     {
         outcome.result = add_infrastructure_failure(outcome.result, format!("the detached child reaper could not be started: {error}"));
     }
@@ -671,6 +689,7 @@ fn wait_for_captured_process<T>(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn finish_wait_with_cleanup<T>(
     control: &mut T,
     waited: io::Result<ExitStatus>,
@@ -1336,10 +1355,10 @@ mod tests {
         BufferedOutcome, CapturedOutput, CapturedProcess, CapturedStream, Invocation, InvocationResult, OutputEmitError, OutputReader,
         Plan, ReaderCompletion, RunningWorker, SpillFile, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
         combine_captured_output, display_duration, emit_buffered, emit_buffered_to, execute_parallel, exit_byte, failure_stops_launching,
-        finish_output_reader, finish_wait_with_cleanup, panic_description, run_captured, run_captured_with_spawner, run_streamed,
-        run_streamed_with_timeout, spawn_if_sealed, spawn_output_reader, spawn_output_reader_with, spawn_tree, terminate_ordinary_child,
-        terminate_ordinary_with, wait_for_captured_process, wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker,
-        with_cleanup_failure,
+        finish_ordinary_termination_with, finish_ordinary_wait_with, finish_output_reader, finish_wait_with_cleanup, panic_description,
+        run_captured, run_captured_with_spawner, run_streamed, run_streamed_with_timeout, spawn_if_sealed, spawn_output_reader,
+        spawn_output_reader_with, spawn_tree, terminate_ordinary_child, terminate_ordinary_with, wait_for_captured_process,
+        wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
     };
 
     const ORDINARY_BOUNDARY: &str = "ordinary process tree";
@@ -1716,6 +1735,148 @@ mod tests {
         assert!(process.termination.is_none(), "reader failure must trigger process cleanup");
         let _stdout = finish_output_reader(stdout, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
         let _stderr = finish_output_reader(stderr, "stderr", Duration::from_secs(1), ORDINARY_BOUNDARY);
+    }
+
+    #[test]
+    fn ordinary_child_handoff_preserves_primary_and_reaper_failures() {
+        let status = finish_ordinary_termination_with((), Ok(successful_status()), |()| Ok(None), |()| Ok(()))
+            .expect("a successful handoff preserves the termination status");
+        assert!(status.success());
+
+        let error = finish_ordinary_termination_with(
+            (),
+            Ok(successful_status()),
+            |()| Ok(None),
+            |()| Err(io::Error::other("reaper unavailable")),
+        )
+        .expect_err("a failed handoff must replace a successful cleanup result");
+        assert!(error.to_string().contains("reaper unavailable"), "{error}");
+
+        let error = finish_ordinary_termination_with(
+            (),
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "termination failed")),
+            |()| Err(io::Error::other("observation failed")),
+            |()| Err(io::Error::other("reaper unavailable")),
+        )
+        .expect_err("the termination and handoff failures must both be retained");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("termination failed"), "{error}");
+        assert!(error.to_string().contains("reaper unavailable"), "{error}");
+
+        let outcome = finish_ordinary_wait_with(
+            (),
+            TreeOutcome::new(InvocationResult::Exited(successful_status())),
+            |()| Ok(None),
+            |()| Err(io::Error::other("wait reaper unavailable")),
+        );
+        assert!(
+            result_infrastructure_message(outcome.result).contains("wait reaper unavailable"),
+            "a post-wait handoff failure must become infrastructure failure"
+        );
+
+        let outcome = finish_ordinary_wait_with(
+            (),
+            TreeOutcome::new(InvocationResult::Exited(successful_status())),
+            |()| Ok(Some(successful_status())),
+            |()| -> io::Result<()> { panic!("an already reaped child must not be handed off") },
+        );
+        let InvocationResult::Exited(status) = outcome.result else {
+            panic!("an already reaped child must preserve its exit status");
+        };
+        assert!(status.success());
+    }
+
+    #[test]
+    fn captured_wait_classifies_timeout_cleanup_results() {
+        for (termination, expected) in [
+            (Ok(successful_status()), None),
+            (Err(io::Error::other("timeout cleanup failed")), Some("timeout cleanup failed")),
+        ] {
+            let mut process = FakeProcess {
+                observations: VecDeque::from([Ok(None)]),
+                termination: Some(termination),
+            };
+            let mut stdout = spawn_output_reader(io::empty(), "timeout-empty-stdout").expect("create empty stdout reader");
+            let mut stderr = spawn_output_reader(io::empty(), "timeout-empty-stderr").expect("create empty stderr reader");
+
+            let outcome = wait_for_captured_process(
+                &mut process,
+                Some(Duration::ZERO),
+                &mut stdout,
+                &mut stderr,
+                "observe fake process",
+                FakeProcess::observe,
+                FakeProcess::terminate,
+            );
+            match expected {
+                None => assert!(matches!(outcome.result, InvocationResult::TimedOut(duration) if duration.is_zero())),
+                Some(expected) => assert!(result_infrastructure_message(outcome.result).contains(expected)),
+            }
+            let _stdout = finish_output_reader(stdout, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
+            let _stderr = finish_output_reader(stderr, "stderr", Duration::from_secs(1), ORDINARY_BOUNDARY);
+        }
+    }
+
+    #[test]
+    fn reader_completion_observation_is_idempotent() {
+        let (sender, completion) = mpsc::channel::<ReaderCompletion>();
+        drop(sender);
+        let mut reader = OutputReader {
+            thread: thread::spawn(|| {}),
+            completion,
+            output: Arc::new(Mutex::new(CapturedOutput::empty())),
+            retaining: Arc::new(AtomicBool::new(true)),
+            reported: None,
+            failure_claimed: false,
+        };
+
+        assert!(
+            reader
+                .take_failure("stdout")
+                .is_some_and(|failure| failure.contains("without reporting completion"))
+        );
+        assert!(reader.take_failure("stdout").is_none());
+        let captured = finish_output_reader(reader, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
+        assert!(captured.failure.is_none(), "the process outcome already claimed the reader failure");
+    }
+
+    #[test]
+    fn reader_finish_reports_join_panics_and_failed_cancellation() {
+        for completion in [
+            ReaderCompletion::Finished(Ok(())),
+            ReaderCompletion::Finished(Err(io::Error::other("reported read failure"))),
+        ] {
+            let (sender, receiver) = mpsc::channel();
+            let thread = thread::spawn(move || {
+                sender.send(completion).expect("the synthetic completion receiver remains alive");
+                panic!("panic after reader completion");
+            });
+            let reader = OutputReader {
+                thread,
+                completion: receiver,
+                output: Arc::new(Mutex::new(CapturedOutput::empty())),
+                retaining: Arc::new(AtomicBool::new(true)),
+                reported: None,
+                failure_claimed: false,
+            };
+            let captured = finish_output_reader(reader, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
+            let failure = captured.failure.expect("the join panic must be reported");
+            assert!(failure.contains("panic after reader completion"), "{failure}");
+        }
+
+        let (_sender, completion) = mpsc::channel();
+        let reader = OutputReader {
+            thread: thread::spawn(|| {}),
+            completion,
+            output: Arc::new(Mutex::new(CapturedOutput::empty())),
+            retaining: Arc::new(AtomicBool::new(true)),
+            reported: None,
+            failure_claimed: true,
+        };
+        let captured = finish_output_reader(reader, "stderr", Duration::ZERO, ORDINARY_BOUNDARY);
+        let failure = captured.failure.expect("failed cancellation must be reported");
+        assert!(failure.contains("reader did not stop"), "{failure}");
+        assert!(!failure.contains("remained open"), "{failure}");
     }
 
     #[test]
