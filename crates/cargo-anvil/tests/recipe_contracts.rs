@@ -2408,14 +2408,12 @@ fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
     assert!(!calls.contains("llvm-cov"), "coverage commands must not run:\n{calls}");
 }
 
-// --- container-specific behaviour ------------------------------------------
+// --- credential-specific behaviour -----------------------------------------
 
-/// `anvil-aprz` warns and proceeds when it cannot obtain a token, rather than
-/// throwing. That change exists so a containerized tier is not aborted by a
-/// missing credential, and nothing else covers it: the dogfood run normally has
-/// a host token, and the tokenless container E2E case runs a custom echo recipe.
+/// Native `anvil-aprz` must not preempt cargo-aprz's host-aware credential
+/// discovery with a token hard-coded for github.com.
 #[test]
-fn aprz_without_a_token_warns_and_still_runs() {
+fn aprz_leaves_native_credential_discovery_to_cargo_aprz() {
     if !tools_available() {
         return;
     }
@@ -2426,25 +2424,20 @@ fn aprz_without_a_token_warns_and_still_runs() {
             "anvil-tool-cargo-aprz-install installer=\"install\"",
         ],
     );
-    // A gh that yields no token: the recipe must fall through to the warnings
-    // rather than treating a failed lookup as fatal.
-    //
-    // Three stubs because command lookup differs by platform and the fallback
-    // is the developer's real, signed-in `gh`: on Windows only `.cmd` is in
-    // PATHEXT, so a `.ps1` stub is skipped; on Unix a bare `gh` must exist and
-    // be executable. Getting this wrong does not fail the test -- it makes it
-    // pass while exercising the authenticated path, which is the opposite of
-    // what the name claims.
-    write(&tmp.path().join("fake-bin/gh.cmd"), "@exit /b 1\r\n");
-    write(&tmp.path().join("fake-bin/gh.ps1"), "exit 1\n");
-    let unix_stub = tmp.path().join("fake-bin/gh");
-    write(&unix_stub, "#!/bin/sh\nexit 1\n");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&unix_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
     let log = tmp.path().join("cargo.log");
+
+    let plan = run_just(tmp.path(), &["--dry-run", "anvil-aprz"], &[]);
+    assert!(
+        plan.status.success(),
+        "the container driver must be able to plan anvil-aprz\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&plan.stdout),
+        String::from_utf8_lossy(&plan.stderr)
+    );
+    let planned = format!("{}{}", String::from_utf8_lossy(&plan.stdout), String::from_utf8_lossy(&plan.stderr));
+    assert!(
+        planned.contains("$null = $env:GITHUB_TOKEN"),
+        "the executable plan must signal that the container needs token forwarding:\n{planned}"
+    );
 
     let output = run_just(
         tmp.path(),
@@ -2452,31 +2445,26 @@ fn aprz_without_a_token_warns_and_still_runs() {
         &[
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("GITHUB_TOKEN", OsStr::new("")),
-            ("ANVIL_IN_CONTAINER", OsStr::new("1")),
+            ("APRZ_GITHUB_URL", OsStr::new("https://github.example.test/api/v3")),
         ],
     );
 
     assert!(
         output.status.success(),
-        "a missing token must not fail the check\nstdout:\n{}\nstderr:\n{}",
+        "credential discovery must be left to cargo-aprz\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    // PowerShell's warning stream surfaces on stdout once `just` has run the
-    // script, so assert on what the developer actually sees rather than on a
-    // particular stream.
     let seen = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        seen.contains("GITHUB_TOKEN is not set"),
-        "the warning must name the variable:\n{seen}"
+        !seen.contains("gh auth token"),
+        "the wrapper must not perform its own GitHub CLI lookup:\n{seen}"
     );
-    assert!(seen.contains("gh auth login"), "the warning must say how to fix it:\n{seen}");
 
-    // The point of warning rather than throwing: the check still runs.
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(calls.contains("aprz deps"), "cargo aprz must still be invoked:\n{calls}");
 }

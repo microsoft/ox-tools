@@ -159,6 +159,8 @@ impl MockWorld {
             service_uri.clone(),
             "--github-url".to_owned(),
             service_uri.clone(),
+            "--github-token".to_owned(),
+            "integration-github-token".to_owned(),
             "--codeberg-url".to_owned(),
             service_uri,
             "--color".to_owned(),

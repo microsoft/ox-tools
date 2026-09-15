@@ -19,6 +19,7 @@ use ohno::IntoAppError;
 use super::ProgressReporter;
 use super::cache_dir::platform_cache_dir;
 use super::config::Config;
+use super::github_credentials::{GitHubToken, discover};
 use crate::Result;
 use crate::expr::{ExpressionDisposition, ExpressionOutcome, Risk, evaluate};
 use crate::facts::{Collector, CrateFacts, CrateRef, Endpoints, ProviderResult};
@@ -76,9 +77,12 @@ pub enum ConsoleSection {
 /// Common arguments shared between crates and deps commands
 #[derive(Args, Debug)]
 pub struct CommonArgs {
-    /// GitHub personal access token
-    #[arg(long, value_name = "TOKEN", env = "GITHUB_TOKEN")]
-    pub github_token: Option<String>,
+    /// GitHub token.
+    ///
+    /// Defaults to `GITHUB_TOKEN`, then the authenticated `gh` token for the
+    /// configured GitHub host. If none is available, GitHub access is anonymous.
+    #[arg(long, value_name = "TOKEN")]
+    pub github_token: Option<GitHubToken>,
 
     /// Codeberg personal access token
     #[arg(long, value_name = "TOKEN", env = "CODEBERG_TOKEN")]
@@ -260,8 +264,11 @@ impl<'a, H: super::Host> Common<'a, H> {
 
         let progress_reporter = ProgressReporter::new(delay, use_colors_for_progress);
 
+        let endpoints = args.endpoints();
+        let github_token = discover(args.github_token.as_ref(), &endpoints).await;
+
         let collector = Collector::new(
-            args.github_token.as_deref(),
+            github_token.as_ref().map(GitHubToken::expose_secret),
             args.codeberg_token.as_deref(),
             &cache_dir,
             config.crates_cache_ttl,
@@ -272,7 +279,7 @@ impl<'a, H: super::Host> Common<'a, H> {
             args.ignore_cached,
             config.bug_label_matcher()?.into(),
             progress_reporter,
-            &args.endpoints(),
+            &endpoints,
         )
         .await?;
 

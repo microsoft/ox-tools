@@ -10,12 +10,10 @@
 # capped at 60 requests an hour, and on a full workspace it exhausts that
 # and then waits for the quota to reset rather than failing; an
 # authenticated token raises the cap to 5000/hour. CI injects GITHUB_TOKEN
-# (github.token). For local runs, if GITHUB_TOKEN is unset we borrow the
-# gh CLI's stored token (non-interactive: `gh auth token` prints the
-# active account's token for github.com and never opens a browser/auth
-# prompt). If neither is available we warn with instructions and proceed
-# unauthenticated. In a container the driver resolves the token the same
-# way and forwards it by name, because the image has no gh CLI of its own.
+# (github.token). For native local runs, cargo-aprz performs host-aware
+# discovery from GITHUB_TOKEN and the gh CLI. In a container the driver
+# resolves and forwards GITHUB_TOKEN by name because the image has no gh CLI
+# of its own.
 #
 # Unscoped (consults external risk DB).
 
@@ -23,19 +21,9 @@
 [script("pwsh", "-NoProfile")]
 anvil-aprz: anvil-aprz-validate-prereqs
     $ErrorActionPreference = 'Stop'
-    if (-not $env:GITHUB_TOKEN) {
-        $tok = $null
-        if (Get-Command gh -ErrorAction SilentlyContinue) {
-            try { $tok = (gh auth token --hostname github.com 2>$null) } catch { $tok = $null }
-        }
-        if ($tok) {
-            $env:GITHUB_TOKEN = $tok.Trim()
-        } else {
-            Write-Warning 'anvil-aprz: GITHUB_TOKEN is not set and no token could be obtained from the gh CLI.'
-            Write-Warning 'cargo-aprz will use the unauthenticated GitHub API, which allows 60 requests an hour. On a full workspace it exhausts that and then blocks, for up to an hour, waiting for the quota to reset.'
-            Write-Warning 'To fix: run `gh auth login` (recommended), or set $env:GITHUB_TOKEN to a GitHub token, then re-run.'
-        }
-    }
+    # Load-bearing no-op: the container driver scans the executable dry-run
+    # plan for this variable before deriving a token for its gh-less image.
+    $null = $env:GITHUB_TOKEN
     & cargo {{_anvil_stable_toolchain_args}} aprz deps --error-if-high-risk --console appraisal
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
