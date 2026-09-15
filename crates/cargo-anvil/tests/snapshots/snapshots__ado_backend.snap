@@ -7406,6 +7406,7 @@ _install-tool-core name version installer source_prereq="":
         if ($sourcePrereq) {
             $binstallArgs += @('--disable-strategies', 'compile')
         }
+        $binstallArgs += '--no-discover-github-token'
         $binstallArgs += @($name, '--version', "=$version")
         & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
         if ($LASTEXITCODE -eq 0) { exit 0 }

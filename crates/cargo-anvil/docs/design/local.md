@@ -229,11 +229,9 @@ catalog edit (changing a variable in `versions.just`), not an upstream-release-t
 surprise.
 
 `cargo-binstall` and `just` are bootstrap utilities rather than catalog checks.
-When absent, setup installs the latest compatible release available at that time;
-when present, setup accepts it. They are intentionally outside the catalog's exact
-installation guarantee so the bootstrap does not recursively require a versioned
-installer. Their versions can therefore vary across cold environments, while every
-tool that determines a catalog check's verdict remains catalog-controlled.
+GitHub setup pins their downloads to cargo-binstall 1.21.0 and Just 1.46.0, while
+accepting newer installed Just versions. The local cargo-binstall source bootstrap
+continues to install the latest compatible release when the binary is absent.
 
 ### 3.2 Detecting installed versions
 
@@ -307,6 +305,10 @@ The `installer` argument:
   declared prerequisite, when present, runs immediately before that fallback.
   A successful binary path cuts the cold-runner install phase from ~30 min to ~1 min.
   `cargo-binstall` itself needs to be on PATH; the GH setup composite arranges this.
+
+Binstall calls use `--no-discover-github-token` to avoid reading credentials from
+GitHub CLI or Git configuration. Explicit token environment variables and Cargo
+registry credentials are unchanged. This is not isolation from caller credentials.
 
 The GitHub composite setup action calls `just anvil-<group>-setup binstall`
 (or just `anvil-setup binstall` when no group is scoped). The ADO setup step

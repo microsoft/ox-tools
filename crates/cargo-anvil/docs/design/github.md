@@ -778,8 +778,11 @@ prerequisites provision the selected compiler and tools. Its
 
 - empty (default): runs `just anvil-setup binstall` -- the full catalog. Use
   for local "give me everything" flows.
-- `none`: skips the group/full tool fan-out. Used by `anvil-impact`, which only
-  needs `cargo-delta` and installs it itself afterwards.
+- `none`: skips the group/full tool fan-out.
+- `impact`: runs `just anvil-tool-cargo-delta-install install` before saving the
+  existing Cargo cache. A cold miss builds the exact catalog pin with `--locked`;
+  a warm hit reuses the installed tool. This avoids release discovery for delta
+  in the impact stage, not because delta binaries are unavailable.
 - any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
   `just anvil-<group>-setup binstall` -- only the tools, components, and
   toolchains that group actually needs. Ordinary group names contain only
@@ -798,6 +801,13 @@ The action expects the rustup proxies on `PATH` and installs a missing selected 
 toolchain (see §7).
 `anvil-impact` is described in §6 below.
 
+Setup does not forward `github.token` to installers. Binstall calls disable token
+discovery from GitHub CLI and Git configuration. Explicit caller credentials are
+not removed. The later run-group step retains its existing API token scope.
+Bootstrap downloads pin cargo-binstall to 1.21.0 and Just to 1.46.0; newer installed
+Just versions remain accepted. Other groups retain binary-first installation and
+the existing prerequisite-checked source fallback for spellcheck.
+
 Its optional `free-disk-space` input defaults to `false`. When enabled on a
 GitHub-hosted runner, it removes pre-installed toolchains that anvil's Rust checks do
 not use: Android, Haskell/GHC, Swift and browser drivers on Linux; Android and
@@ -813,18 +823,17 @@ Other groups retain the action's disabled default.
 `anvil-impact` recipe — the same impact building block adopters run locally (see
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe)). It:
 
-1. `./.github/actions/anvil-setup` with `group: none` (bootstrap rust + just +
-   cache; no catalog tools).
-2. `just anvil-tool-cargo-delta-install binstall` -- the only tool this composite
-   needs. **This is the only job that runs cargo-delta to compute the impact
+1. `./.github/actions/anvil-setup` with `group: impact` restores Cargo home,
+   bootstraps tools, and source-installs cargo-delta before the cache save.
+   **This is the only job that runs cargo-delta to compute the impact
    set.** (Group setup jobs also install cargo-delta as a prerequisite, but in
    `consume` mode they never run it -- they read the downloaded impact cache.)
-3. `just anvil-impact`, which resolves the base ref (`_anvil-base-ref`), snapshots the
+2. `just anvil-impact`, which resolves the base ref (`_anvil-base-ref`), snapshots the
    base ref (in a throwaway worktree) and the working tree, runs
    `cargo delta impact`, and writes the durable cache under `target/anvil/impact/`:
    the per-tier `include_<tier>.txt` lists (via `_anvil-impact-format`), `impact.json`,
    and the `snapshots/`.
-4. Uploads that whole directory as the `anvil-impact-<runner.os>` artifact
+3. Uploads that whole directory as the `anvil-impact-<runner.os>` artifact
    (`actions/upload-artifact`).
 
 ### 6.1 How the impact result propagates to the group jobs
