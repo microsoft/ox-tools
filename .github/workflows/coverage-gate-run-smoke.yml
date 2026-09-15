@@ -31,10 +31,10 @@ jobs:
           group: none
       - name: Install existing Anvil coverage prerequisites
         shell: pwsh
-        run: >-
+        run: |
           just anvil-component-nightly-llvm-tools-install
-          anvil-tool-cargo-llvm-cov-install
-          anvil-tool-cargo-nextest-install
+          just anvil-tool-cargo-llvm-cov-install
+          just anvil-tool-cargo-nextest-install
       - name: Collect and gate real coverage
         shell: pwsh
         run: >-
