@@ -786,6 +786,12 @@ prerequisites provision the selected compiler and tools. Its
   lowercase letters, digits, and hyphens. `anvil-run-group` passes its group
   input here, so a `pr-fast` matrix leg never installs cargo-mutants.
 
+The cargo-binstall release action is the fast path. If its binary download
+fails, setup builds the same pinned cargo-binstall version with Cargo before
+continuing and emits a warning that the slower path is active. This keeps
+transient release-hosting failures from disabling every job in the workflow
+matrix without hiding persistent fast-path failures.
+
 Before invoking Just, the action registers the generated
 `just-problem-matcher.json`. Just already prints the exact failed dependency
 recipe (for example, ``error: recipe `anvil-license-headers` failed with exit

@@ -255,6 +255,31 @@ mod tests {
     }
 
     #[test]
+    fn setup_action_falls_back_when_binstall_release_is_unavailable() {
+        let (fast_path, fallback) = SETUP_ACTION
+            .split_once("    - name: Build cargo-binstall when its release is unavailable")
+            .expect("setup action should contain the cargo-binstall source fallback");
+        let fast_path = fast_path
+            .rsplit_once("    - name: Install cargo-binstall")
+            .expect("setup action should contain the cargo-binstall release fast path")
+            .1;
+        assert!(fast_path.contains("id: cargo-binstall"));
+        assert!(fast_path.contains("continue-on-error: true"));
+
+        let version = fast_path
+            .split_once("uses: cargo-bins/cargo-binstall@v")
+            .expect("fast path should pin the cargo-binstall action")
+            .1
+            .split_whitespace()
+            .next()
+            .expect("cargo-binstall action should have a version");
+        assert!(fast_path.contains(&format!("version: \"{version}\"")));
+        assert!(fallback.contains("if: steps.cargo-binstall.outcome == 'failure'"));
+        assert!(fallback.contains(&format!("cargo install --force --locked --version {version} cargo-binstall")));
+        assert!(fallback.contains("::warning::cargo-binstall release install failed"));
+    }
+
+    #[test]
     fn run_group_action_captures_and_reports_results() {
         assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-setup"));
         assert!(RUN_GROUP_ACTION.contains("group: ${{ inputs.group }}"));

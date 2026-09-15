@@ -109,7 +109,21 @@ runs:
 
     # cargo-binstall keeps the cold bootstrap path fast.
     - name: Install cargo-binstall
+      id: cargo-binstall
+      continue-on-error: true
       uses: cargo-bins/cargo-binstall@v1.21.0 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
+      with:
+        version: "1.21.0"
+
+    # Release downloads occasionally return transient 5xx responses. Building
+    # the same pinned version is slower, but keeps setup available during an
+    # outage instead of failing every matrix job.
+    - name: Build cargo-binstall when its release is unavailable
+      if: steps.cargo-binstall.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "::warning::cargo-binstall release install failed; building the pinned version from source"
+        cargo install --force --locked --version 1.21.0 cargo-binstall
 
     - name: Install just
       shell: pwsh -NoProfile -Command ". '{0}'"
