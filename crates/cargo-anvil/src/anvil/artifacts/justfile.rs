@@ -85,6 +85,7 @@ fn aprz_leaves_native_github_credential_discovery_to_cargo_aprz() {
         .expect("aprz.just is registered in CHECK_FILES below");
     assert!(!aprz.contains("Get-Command gh"));
     assert!(!aprz.contains("$env:GITHUB_TOKEN ="));
+    assert!(aprz.contains("$null = $env:GITHUB_TOKEN"));
     assert!(aprz.contains("cargo {{_anvil_stable_toolchain_args}} aprz deps"));
 }
 

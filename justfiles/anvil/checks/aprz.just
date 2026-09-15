@@ -21,6 +21,9 @@
 [script("pwsh", "-NoProfile")]
 anvil-aprz: anvil-aprz-validate-prereqs
     $ErrorActionPreference = 'Stop'
+    # Load-bearing no-op: the container driver scans the executable dry-run
+    # plan for this variable before deriving a token for its gh-less image.
+    $null = $env:GITHUB_TOKEN
     & cargo {{_anvil_stable_toolchain_args}} aprz deps --error-if-high-risk --console appraisal
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

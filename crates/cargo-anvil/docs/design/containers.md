@@ -402,6 +402,9 @@ has no gh CLI of its own. Native `anvil-aprz` leaves discovery to cargo-aprz, wh
 effective GitHub endpoint and therefore respects GitHub Enterprise overrides. `anvil-aprz` runs in the
 `scheduled-advisories` group and queries the GitHub advisory API, which allows 60 requests an hour unauthenticated and
 then sleeps until the quota resets, so a tier needs the token to terminate rather than merely to run quickly.
+The native recipe retains a no-op executable read of `GITHUB_TOKEN`: it does not select or change the credential, but
+keeps the variable visible in `just --dry-run anvil-aprz` so the container driver knows that its gh-less image needs
+the host-derived token forwarded.
 
 The two sources are not treated alike. An **exported** `GITHUB_TOKEN` is forwarded whatever the target is — that is
 exact parity, since a native run exposes it to every process the shell spawns too. A token **derived** from the gh CLI

@@ -2426,6 +2426,19 @@ fn aprz_leaves_native_credential_discovery_to_cargo_aprz() {
     );
     let log = tmp.path().join("cargo.log");
 
+    let plan = run_just(tmp.path(), &["--dry-run", "anvil-aprz"], &[]);
+    assert!(
+        plan.status.success(),
+        "the container driver must be able to plan anvil-aprz\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&plan.stdout),
+        String::from_utf8_lossy(&plan.stderr)
+    );
+    let planned = format!("{}{}", String::from_utf8_lossy(&plan.stdout), String::from_utf8_lossy(&plan.stderr));
+    assert!(
+        planned.contains("$null = $env:GITHUB_TOKEN"),
+        "the executable plan must signal that the container needs token forwarding:\n{planned}"
+    );
+
     let output = run_just(
         tmp.path(),
         &["anvil-aprz"],
