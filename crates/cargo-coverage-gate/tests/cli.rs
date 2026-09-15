@@ -1083,11 +1083,13 @@ fn run_preserves_nextest_output_and_rendered_compiler_diagnostics() {
         .env("FAKE_CLEAN_STDOUT", "1")
         .env("FAKE_NEXTEST_TEXT", "1")
         .env("FAKE_COMPILER_MESSAGE", "1")
+        .env("FAKE_REPORT_STDOUT", "1")
         .assert()
         .success()
         .stdout(predicate::str::contains("coverage-clean-stdout"))
         .stdout(predicate::str::contains("non-JSON nextest output"))
-        .stdout(predicate::str::contains("fake compiler diagnostic"));
+        .stdout(predicate::str::contains("fake compiler diagnostic"))
+        .stdout(predicate::str::contains("report-stdout"));
 
     let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
     assert!(!log.contains("--cargo-message-format"), "{log}");
@@ -1230,6 +1232,7 @@ fn quiet_suppresses_all_collection_stdout_and_still_writes_summary() {
         .env("FAKE_CLEAN_STDOUT", "1")
         .env("FAKE_NEXTEST_TEXT", "1")
         .env("FAKE_COMPILER_MESSAGE", "1")
+        .env("FAKE_REPORT_STDOUT", "1")
         .assert()
         .success()
         .stdout(predicate::str::is_empty());

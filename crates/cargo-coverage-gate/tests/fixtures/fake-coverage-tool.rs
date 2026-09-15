@@ -154,6 +154,9 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
         break_directory("FAKE_BREAK_DIRECTORY_AFTER_NEXTEST")?;
     }
     if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "report") {
+        if env::var_os("FAKE_REPORT_STDOUT").is_some() {
+            println!("report-stdout");
+        }
         if env::var_os("FAKE_NO_PROFILE").is_some() {
             return Err("no raw profiles found".to_owned());
         }
