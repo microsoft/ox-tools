@@ -154,7 +154,9 @@ hand, so every change appears in a PR diff and is reviewed.
   queries, nextest, cargo-llvm-cov, and LLVM discovery. When omitted,
   `COVERAGE_GATE_TOOLCHAIN` is used, then the active toolchain. Instrumented
   collection validates that the selected Cargo release is nightly and that
-  cargo-llvm-cov is at least 0.7.0 before cleaning or building.
+  cargo-llvm-cov is at least 0.8.0 before cleaning or building. Version 0.8.0
+  is the first release that accepts the exact `name@version` package specs
+  passed by the collector.
   Rustup itself is resolved from an absolute, nonempty `RUSTUP` override or
   from explicit nonempty `PATH` entries (using `PATHEXT` on Windows). The
   repository working directory is not searched implicitly; it participates
@@ -422,19 +424,26 @@ For each requested feature configuration, `run`:
    Cargo's target directory and cleans that isolated state;
 2. invokes cargo-llvm-cov with nextest, `--no-report`, and `--locked` for the
    selected package set;
-3. discovers the produced test objects from machine-readable Cargo output;
-4. merges raw profiles and exports one LCOV file into `--coverage-dir`;
-5. passes all completed LCOV files to the ordinary evaluator.
+3. invokes `cargo llvm-cov report --lcov` for the same package and target
+   selection, delegating raw-profile merging, ordinary and nested trybuild
+   object discovery, and the complete default filename exclusions to
+   cargo-llvm-cov;
+4. keeps that report at an invocation-private path, atomically publishes a
+   copy to the stable consumer path under `--coverage-dir`, and passes the
+   private report to the ordinary evaluator.
 
 The selected package set is resolved to exact `name@version` specs before
 subprocess execution. With no selection options, the collector passes
 `--workspace`.
 
 Concurrent invocations never share instrumented build/profile state: each uses
-`target/coverage-gate/run-<pid>-<nonce>` (under Cargo's resolved target
-directory) and removes that directory on success or failure. Stable LCOV files
-remain shared publication names under `--coverage-dir`; their atomic
-replacement is intentionally last-writer-wins.
+`target/coverage-gate/run-<pid>-<nonce>/cargo-target` (under Cargo's resolved
+target directory) and removes the whole invocation-private directory on
+success or failure. Stable LCOV files remain shared publication names under
+`--coverage-dir`; their atomic
+replacement is intentionally last-writer-wins. Evaluation reads the retained
+invocation-private reports, not those shared publication paths, so another
+publisher cannot change an in-flight invocation's verdict.
 
 Scratch cleanup has explicit result precedence. An evaluation error remains the
 primary error and carries any cleanup failure as additional context. A rendered
@@ -443,24 +452,27 @@ of replacing the verdict. A passing evaluation cannot claim complete success
 when cleanup fails, so that case exits `2`. Successful cleanup never changes
 the evaluation outcome.
 
-The object list is always passed to LLVM through a response file rather than
-retrying only after a process command-line overflow. The response file is
-written atomically beneath the coverage directory and removed after export.
-All platforms use the same path, avoiding platform-dependent collection
-behavior.
+cargo-llvm-cov normally launches LLVM with its discovered object set and full
+filename filter. If that launch exceeds the Windows command-line limit,
+`run` extracts cargo-llvm-cov's complete failed `llvm-cov export` argument
+list and retries it through an LLVM response file. This preserves upstream
+object discovery and exclusions instead of maintaining a second,
+necessarily incomplete implementation. The response file lives in the
+invocation-private target and is removed with that target.
 
 Failure in any collection phase is operational failure, not missing coverage,
 and exits `2`. A structurally valid empty LCOV export continues to the evaluator
 so `expect-no-coverable-lines` policies retain their existing meaning. Each
 stable per-configuration LCOV is replaced atomically only after a successful
-new export. Clean, test, profile-merge, and export failures leave any previously
+new export. Clean, test, report, and publication failures leave any previously
 completed artifact at that path byte-for-byte unchanged.
 
 On Unix, final publication uses same-directory atomic rename replacement. On
-Windows it uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` and
-`MOVEFILE_WRITE_THROUGH`, because the portable `std::fs::rename` contract does
-not guarantee replacement of an existing destination there. In both cases the
-old final path remains valid until the completed temporary export replaces it.
+Windows, `std::fs::rename` already replaces an existing file, but the collector
+calls `MoveFileExW` directly to add `MOVEFILE_WRITE_THROUGH` and bounded retries
+for transient sharing violations and access-denied failures.
+`MOVEFILE_REPLACE_EXISTING` retains the replacement behavior. In both cases the
+old final path remains valid until the completed temporary copy replaces it.
 
 ## 6. Inputs & Outputs in Detail
 
@@ -791,7 +803,7 @@ comparison rounds to the same precision before comparing — see
 Evaluation reads `Cargo.toml` files and coverage lcov tracefiles and writes only
 the selected summary file. `run` additionally writes beneath
 `--coverage-dir`, executes cargo-llvm-cov, nextest, Cargo, rustc, and LLVM, and
-deletes only temporary response/profile files and coverage state those tools
+deletes only temporary report/response files and coverage state those tools
 created. cargo-coverage-gate itself performs no network calls or privileged
 operations. Its Cargo and nextest children follow the caller's Cargo
 configuration and may fetch locked dependencies when they are not cached;
@@ -801,10 +813,11 @@ outside this tool.
 Workspace discovery invokes the read-only `cargo metadata` command through
 `cargo_metadata::MetadataCommand::exec()` to enumerate workspace members and
 resolve the workspace root. When any package declares target-specific policy,
-the tool also invokes the executable selected by `RUSTC` (or `rustc` when
-unset). It runs `rustc -vV` only when it must discover the host target, then
-runs `rustc --print cfg --target <triple>` for both explicit and discovered
-targets. Workspaces without target-specific policy do not invoke rustc.
+evaluation also invokes the executable selected by `RUSTC` (or `rustc` when
+unset). It runs `rustc -vV` when it must discover the host target, then runs
+`rustc --print cfg --target <triple>` for both explicit and discovered targets.
+`run` additionally reads the selected rustc host triple when `--target` is
+omitted so native Windows ARM64 reliably selects its plain-nextest path.
 
 Child processes receive arguments directly rather than through a shell.
 Package specs read from a file are resolved against workspace metadata before
@@ -837,7 +850,7 @@ records) are hard errors with exit code 2.
 #### Tooling requirements
 
 To get faithful numbers, run the tracefile-producing step on **nightly
-Rust with `cargo-llvm-cov ≥ 0.7`**. Two reasons:
+Rust with `cargo-llvm-cov ≥ 0.8`**. Three reasons:
 
 - `#[coverage(off)]` is gated behind `feature(coverage_attribute)`,
   which is nightly-only. On stable, files annotated with
@@ -847,6 +860,9 @@ Rust with `cargo-llvm-cov ≥ 0.7`**. Two reasons:
   JSON / lcov output even on nightly. Versions 0.7+ fix this. Older
   versions silently report inflated line counts, which then surface
   as low percentages in the gate.
+- cargo-llvm-cov 0.8.0 added support for the exact `name@version` package
+  selectors that `run` resolves from workspace metadata and passes to both
+  test and report commands.
 
 `cargo coverage-gate run` enforces these prerequisites before instrumented
 collection. Select a pinned nightly with `--toolchain`, set

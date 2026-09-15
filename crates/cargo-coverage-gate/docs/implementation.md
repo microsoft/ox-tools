@@ -14,7 +14,9 @@ The optional `run` mode keeps collection and evaluation separated internally:
 2. The selected toolchain comes from `--toolchain`,
    `COVERAGE_GATE_TOOLCHAIN`, or the active Rustup toolchain, in that order.
    Instrumented runs validate a nightly Cargo release and cargo-llvm-cov
-   0.7.0 or newer. The same Rustup selection is applied to metadata,
+   0.8.0 or newer. Version 0.8.0 is required because it introduced support for
+   the exact `name@version` selectors passed by the collector. The same Rustup
+   selection is applied to metadata,
    target-policy rustc queries, and collection commands.
    The rustup executable comes from a validated absolute `RUSTUP` override or
    a manual search of nonempty `PATH` entries, with Windows `PATHEXT`
@@ -23,8 +25,9 @@ The optional `run` mode keeps collection and evaluation separated internally:
    `rustup.exe` through implicit current-directory lookup.
 3. Each feature configuration gets an isolated clean, instrumented
    `cargo llvm-cov nextest --no-report --locked` run. Plain-nextest no-gate
-   paths also pass `--locked`. Cargo's JSON messages provide the executable
-   object paths; no target-directory scan or diagnostic parsing is needed.
+   paths also pass `--locked`. Nextest and Cargo retain their ordinary output,
+   including rendered compiler diagnostics; the collector does not request or
+   filter machine-readable Cargo messages.
    The instrumented target is unique per invocation beneath
    `target/coverage-gate/` and is removed by an RAII guard on every return
    path. Concurrent runs therefore cannot clean or merge each other's
@@ -34,19 +37,24 @@ The optional `run` mode keeps collection and evaluation separated internally:
    warning, and converts a passing evaluation plus cleanup failure into an
    operational error. Explicit cleanup disarms the guard after one attempt, so
    `Drop` never retries the same failed deletion.
-4. `llvm-profdata merge -f` consumes an atomically written profile list.
-   `llvm-cov export` receives every `-object` pair through an atomically written
-   response file on every operating system.
-5. LCOV output is first written to a same-directory temporary file and renamed
-   to its stable per-configuration name only after a successful export. An
+4. `cargo llvm-cov report --lcov` receives the same package and target
+   selection. cargo-llvm-cov therefore owns raw-profile merging, ordinary and
+   nested trybuild object discovery, build-directory handling, and its full
+   default filename filter. On Windows command-line overflow only, the
+   collector replays cargo-llvm-cov's complete failed export arguments through
+   an LLVM response file.
+5. LCOV output remains at an invocation-private path for evaluation. A copy is
+   first written to a same-directory temporary file and renamed to its stable
+   per-configuration consumer name only after a successful report. An
    existing stable file is never removed before collection, so clean, test,
-   merge, and export failures preserve the last completed artifact byte for
-   byte. Response files, profile lists, merged profiles, and partial LCOV files
-   are removed on both success and failure.
-   Unix uses atomic rename replacement; Windows uses `MoveFileExW` replacement
-   with write-through.
-6. The completed LCOV files are passed directly to the same in-process
-   evaluation path used by the legacy bare command.
+   report, and publication failures preserve the last completed artifact byte
+   for byte. Temporary response and LCOV files are removed on success and
+   failure. Unix uses atomic rename replacement. Windows uses `MoveFileExW` to
+   add write-through and bounded retries for sharing/access failures to the
+   replacement behavior already provided by `std::fs::rename`.
+6. The invocation-private LCOV files are passed directly to the same
+   in-process evaluation path used by the legacy bare command. Shared stable
+   publication paths therefore cannot race an in-flight verdict.
 
 An empty package file is represented as an explicit empty selection rather
 than as the absence of selection. This distinction lets automation request a
@@ -59,9 +67,10 @@ diagnostic. The same plain path handles `aarch64-pc-windows-msvc`, where
 cargo-llvm-cov is unsupported. Mixed selections continue through the
 instrumented path without dropping zero-threshold test packages.
 
-All child stderr is inherited. Normal collection stdout is inherited or, for
-Cargo JSON, forwarded after parsing. `--quiet` redirects or drops each of those
-stdout channels while leaving errors and summary-file rendering intact.
+All child stderr is inherited or captured and immediately forwarded when
+Windows overflow detection requires inspection. Normal collection stdout is
+inherited. `--quiet` redirects or drops each stdout channel while leaving
+errors and summary-file rendering intact.
 
 ## Diagnostic pipeline
 

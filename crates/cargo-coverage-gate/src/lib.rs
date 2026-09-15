@@ -143,7 +143,7 @@
 //! and a `--package-file` containing one exact `name@version` per nonempty
 //! UTF-8 line. Use repeatable `--configuration`, `--coverage-dir`, and
 //! `--jobs` options to customize collection. Instrumented collection requires
-//! nightly Rust and cargo-llvm-cov 0.7.0 or newer. Select a pinned nightly with
+//! nightly Rust and cargo-llvm-cov 0.8.0 or newer. Select a pinned nightly with
 //! `--toolchain`, set `COVERAGE_GATE_TOOLCHAIN`, or use an active nightly
 //! toolchain. An explicit `RUSTUP` override must be an absolute executable
 //! path; otherwise rustup is resolved from explicit nonempty `PATH` entries

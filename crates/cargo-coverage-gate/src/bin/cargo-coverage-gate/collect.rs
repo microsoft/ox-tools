@@ -6,21 +6,20 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead as _, BufReader, Write as _};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cargo_metadata::{Metadata, MetadataCommand};
 use ohno::{AppError, EnrichableExt as _, IntoAppError};
 use semver::Version;
-use serde_json::Value;
 
 use crate::cli::{CollectionArgs, CoverageGateArgs, FeatureConfiguration};
 
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-const MIN_CARGO_LLVM_COV_VERSION: &str = "0.7.0";
+const MIN_CARGO_LLVM_COV_VERSION: &str = "0.8.0";
 const ARM64_WINDOWS_TARGET: &str = "aarch64-pc-windows-msvc";
 const TOOLCHAIN_ENV: &str = "COVERAGE_GATE_TOOLCHAIN";
 
@@ -42,7 +41,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
     collection.coverage_dir = absolute_path(&collection.coverage_dir)?;
     let configurations = normalized_configurations(&collection.configurations);
 
-    if is_unsupported_arm64_windows_target(args.target.as_deref()) {
+    if is_unsupported_arm64_windows_target(args.target.as_deref(), &toolchain)? {
         let result =
             format!("`{ARM64_WINDOWS_TARGET}` does not support cargo-llvm-cov; tests passed without coverage collection or gating");
         run_plain_configurations(
@@ -92,14 +91,14 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         collection.coverage_dir.display()
     ))?;
 
-    let tools = LlvmTools::discover(&toolchain)?;
-    let coverage_target = TemporaryDirectory::create(&workspace.target_dir.join("coverage-gate"))?;
+    let coverage_scratch = TemporaryDirectory::create(&workspace.target_dir.join("coverage-gate"))?;
+    let coverage_target_dir = coverage_scratch.path().join("cargo-target");
     let execution = CollectionExecution {
         workspace: &workspace,
         selection: &selection,
         args: &collection,
-        coverage_target_dir: coverage_target.path(),
-        tools: &tools,
+        scratch_dir: coverage_scratch.path(),
+        coverage_target_dir: &coverage_target_dir,
         target: args.target.as_deref(),
         toolchain: &toolchain,
         quiet: args.quiet,
@@ -118,7 +117,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         Some(toolchain.rustc()),
         toolchain.name.as_deref(),
     );
-    combine_evaluation_and_cleanup(evaluation, coverage_target.cleanup()).complete()
+    combine_evaluation_and_cleanup(evaluation, coverage_scratch.cleanup()).complete()
 }
 
 struct FinalizedRun {
@@ -164,8 +163,8 @@ struct CollectionExecution<'a> {
     workspace: &'a WorkspaceInfo,
     selection: &'a Selection,
     args: &'a CollectionArgs,
+    scratch_dir: &'a Path,
     coverage_target_dir: &'a Path,
-    tools: &'a LlvmTools,
     target: Option<&'a str>,
     toolchain: &'a ToolchainSelection,
     quiet: bool,
@@ -295,6 +294,14 @@ fn is_executable_file(path: &Path, windows: bool) -> bool {
     #[cfg(not(unix))]
     let mode = None;
     platform_permissions_allow(mode, requires_execute_bit(windows, cfg!(unix)))
+}
+
+fn platform_permissions_allow(mode: Option<u32>, require_execute_bit: bool) -> bool {
+    !require_execute_bit || mode.is_some_and(has_executable_mode)
+}
+
+fn has_executable_mode(mode: u32) -> bool {
+    mode & 0o111 != 0
 }
 
 fn requires_execute_bit(windows: bool, unix: bool) -> bool {
@@ -520,28 +527,17 @@ impl FeatureConfiguration {
     }
 }
 
-fn is_unsupported_arm64_windows_target(target: Option<&str>) -> bool {
-    let processor = env::var("PROCESSOR_ARCHITECTURE").ok();
-    let wow64_processor = env::var("PROCESSOR_ARCHITEW6432").ok();
-    is_arm64_windows_target(target, cfg!(windows), processor.as_deref(), wow64_processor.as_deref())
-}
-
-fn is_arm64_windows_target(
-    target: Option<&str>,
-    host_is_windows: bool,
-    processor_architecture: Option<&str>,
-    wow64_processor_architecture: Option<&str>,
-) -> bool {
-    match target {
-        Some(target) => target == ARM64_WINDOWS_TARGET,
-        None => {
-            host_is_windows
-                && [processor_architecture, wow64_processor_architecture]
-                    .into_iter()
-                    .flatten()
-                    .any(|architecture| architecture.eq_ignore_ascii_case("ARM64"))
-        }
+fn is_unsupported_arm64_windows_target(target: Option<&str>, toolchain: &ToolchainSelection) -> Result<bool, AppError> {
+    if let Some(target) = target {
+        return Ok(target == ARM64_WINDOWS_TARGET);
     }
+
+    let mut rustc_version = Command::new(toolchain.rustc());
+    rustc_version.arg("-vV");
+    toolchain.apply_to_command(&mut rustc_version);
+    let rustc_version = read_stdout(&mut rustc_version, "rustc host-target discovery")?;
+    let host = rustc_host(&rustc_version).ok_or_else(|| AppError::new("`rustc -vV` did not report a host target"))?;
+    Ok(host == ARM64_WINDOWS_TARGET)
 }
 
 fn validate_instrumentation_toolchain(workspace: &WorkspaceInfo, toolchain: &ToolchainSelection) -> Result<(), AppError> {
@@ -587,6 +583,10 @@ fn cargo_release(output: &str) -> Option<&str> {
 
 fn rustc_release(output: &str) -> Option<&str> {
     output.lines().find_map(|line| line.strip_prefix("release: "))
+}
+
+fn rustc_host(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| line.strip_prefix("host: "))
 }
 
 fn cargo_llvm_cov_is_supported(version: &Version, minimum: &Version) -> bool {
@@ -645,6 +645,7 @@ fn collect_configuration(execution: &CollectionExecution<'_>, configuration: Fea
         .args
         .coverage_dir
         .join(format!("lcov-{}.info", configuration.artifact_name()));
+    let evaluation_lcov = execution.scratch_dir.join(format!("lcov-{}.info", configuration.artifact_name()));
 
     run_clean(
         execution.workspace,
@@ -652,49 +653,10 @@ fn collect_configuration(execution: &CollectionExecution<'_>, configuration: Fea
         execution.toolchain,
         execution.quiet,
     )?;
-    let objects = run_nextest(execution, configuration)?;
-    if objects.is_empty() {
-        return Err(AppError::new(format!(
-            "cargo-llvm-cov produced no executable object paths for the `{}` configuration",
-            configuration.artifact_name()
-        )));
-    }
-
-    let profraw_files = discover_profraw_files(execution.coverage_target_dir)?;
-    if profraw_files.is_empty() {
-        return Err(AppError::new(format!(
-            "cargo-llvm-cov produced no raw profiles for the `{}` configuration",
-            configuration.artifact_name()
-        )));
-    }
-
-    let profile_list = TemporaryPath::write_atomic(
-        &execution.args.coverage_dir,
-        &format!("{}-profraw-list", configuration.artifact_name()),
-        &profile_list_contents(&profraw_files)?,
-    )?;
-    let profdata = TemporaryPath::new(&execution.args.coverage_dir, &format!("{}.profdata", configuration.artifact_name()));
-    run_profdata_merge(execution.tools, profile_list.path(), profdata.path(), execution.quiet)?;
-
-    let response = TemporaryPath::write_atomic(
-        &execution.args.coverage_dir,
-        &format!("{}-objects.rsp", configuration.artifact_name()),
-        &object_response_contents(&objects)?,
-    )?;
-    export_lcov(
-        execution.workspace,
-        execution.tools,
-        profdata.path(),
-        response.path(),
-        &final_lcov,
-        &execution.args.coverage_dir,
-        configuration,
-    )?;
-
-    response.cleanup()?;
-    profile_list.cleanup()?;
-    profdata.cleanup()?;
-    Ok(final_lcov)
+    run_nextest(execution, configuration)?;
+    run_report(execution, configuration, &evaluation_lcov)?;
+    publish_lcov(&evaluation_lcov, &final_lcov, &execution.args.coverage_dir, configuration)?;
+    Ok(evaluation_lcov)
 }
 
 fn cargo_command(workspace: &WorkspaceInfo, toolchain: &ToolchainSelection) -> Command {
@@ -721,34 +683,15 @@ fn run_clean(workspace: &WorkspaceInfo, coverage_target_dir: &Path, toolchain: &
     run_status(&mut command, "cargo llvm-cov clean")
 }
 
-fn run_nextest(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<Vec<PathBuf>, AppError> {
+fn run_nextest(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<(), AppError> {
     let mut command = coverage_command(execution.workspace, execution.coverage_target_dir, execution.toolchain);
     command.args(["llvm-cov", "nextest", "--no-report"]);
     append_package_selection(&mut command, execution.selection);
     append_nextest_options(&mut command, execution.args, configuration, execution.target);
-    command.arg("--cargo-message-format=json-render-diagnostics");
-    command.stdout(Stdio::piped());
-
-    let display = command_display(&command);
-    let mut child = command.spawn().into_app_err(format!("failed to execute `{display}`"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .expect("stdout was configured as piped immediately before spawn");
-    let mut objects = BTreeSet::new();
-    for line in BufReader::new(stdout).lines() {
-        let line = line.into_app_err(format!("failed to read output from `{display}`"))?;
-        match compiler_artifact_objects(&line) {
-            Ok(artifact_objects) => objects.extend(artifact_objects),
-            Err(_error) if !execution.quiet => println!("{line}"),
-            Err(_error) => {}
-        }
+    if execution.quiet {
+        command.stdout(Stdio::null());
     }
-    let status = child.wait().into_app_err(format!("failed to wait for `{display}`"))?;
-    if !status.success() {
-        return Err(AppError::new(format!("`{display}` exited with {status}")));
-    }
-    Ok(objects.into_iter().collect())
+    run_status(&mut command, "cargo llvm-cov nextest")
 }
 
 fn append_package_selection(command: &mut Command, selection: &Selection) {
@@ -772,166 +715,123 @@ fn append_nextest_options(command: &mut Command, args: &CollectionArgs, configur
     }
 }
 
-fn compiler_artifact_objects(line: &str) -> serde_json::Result<Vec<PathBuf>> {
-    let message: Value = serde_json::from_str(line)?;
-    if message.get("reason").and_then(Value::as_str) != Some("compiler-artifact") {
-        return Ok(Vec::new());
-    }
-    if message
-        .get("target")
-        .and_then(|target| target.get("kind"))
-        .and_then(Value::as_array)
-        .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("custom-build")))
-    {
-        return Ok(Vec::new());
-    }
-
-    let mut objects = BTreeSet::new();
-    if let Some(executable) = message.get("executable").and_then(Value::as_str) {
-        objects.insert(PathBuf::from(executable));
-    }
-    if let Some(filenames) = message.get("filenames").and_then(Value::as_array) {
-        objects.extend(
-            filenames
-                .iter()
-                .filter_map(Value::as_str)
-                .map(PathBuf::from)
-                .filter(|path| is_coverage_object(path)),
-        );
-    }
-    Ok(objects.into_iter().collect())
-}
-
-fn is_coverage_object(path: &Path) -> bool {
-    if is_ignored_artifact_path(path) {
-        return false;
-    }
-    if !object_extension_allowed(path, cfg!(windows)) {
-        return false;
-    }
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    let mode = {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        Some(metadata.permissions().mode())
-    };
-    #[cfg(not(unix))]
-    let mode = None;
-    platform_permissions_allow(mode, cfg!(unix))
-}
-
-fn object_extension_allowed(path: &Path, windows: bool) -> bool {
-    let extension = path.extension().unwrap_or_default();
-    !windows || extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("dll")
-}
-
-fn platform_permissions_allow(mode: Option<u32>, require_execute_bit: bool) -> bool {
-    !require_execute_bit || mode.is_some_and(has_executable_mode)
-}
-
-fn is_ignored_artifact_path(path: &Path) -> bool {
-    let extension = path.extension().unwrap_or_default();
-    extension == "d" || extension == "rlib" || extension == "rmeta" || path.ends_with(".cargo-lock") || path.ends_with(".cargo-build-lock")
-}
-
-fn has_executable_mode(mode: u32) -> bool {
-    mode & 0o111 != 0
-}
-
-fn discover_profraw_files(target_dir: &Path) -> Result<Vec<PathBuf>, AppError> {
-    let entries =
-        fs::read_dir(target_dir).into_app_err(format!("failed to inspect coverage target directory `{}`", target_dir.display()))?;
-    let mut files = Vec::new();
-    for entry in entries {
-        let path = entry
-            .into_app_err(format!("failed to inspect coverage target directory `{}`", target_dir.display()))?
-            .path();
-        if path.extension() == Some(OsStr::new("profraw")) {
-            files.push(path);
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
-fn profile_list_contents(paths: &[PathBuf]) -> Result<Vec<u8>, AppError> {
-    let mut output = Vec::new();
-    for path in paths {
-        let Some(path) = path.to_str() else {
-            return Err(AppError::new(format!("raw profile path `{}` is not valid UTF-8", path.display())));
-        };
-        if path.contains(['\n', '\r']) {
-            return Err(AppError::new(format!(
-                "raw profile path `{path}` contains a line break and cannot be written to the llvm-profdata input list"
-            )));
-        }
-
-        output.extend_from_slice(path.as_bytes());
-        output.push(b'\n');
-    }
-
-    Ok(output)
-}
-
+#[cfg(windows)]
 fn prefixed_path_argument(prefix: &str, path: &Path) -> OsString {
     let mut argument = OsString::from(prefix);
     argument.push(path.as_os_str());
     argument
 }
 
-fn object_response_contents(objects: &[PathBuf]) -> Result<Vec<u8>, AppError> {
-    let mut output = Vec::new();
-    for object in objects {
-        let Some(object) = object.to_str() else {
-            return Err(AppError::new(format!("object path `{}` is not valid UTF-8", object.display())));
-        };
-        output.extend_from_slice(b"-object\n");
-        output.extend_from_slice(quote_response_argument(object)?.as_bytes());
-        output.push(b'\n');
-    }
-    Ok(output)
-}
-
-fn quote_response_argument(argument: &str) -> Result<String, AppError> {
-    if argument.contains(['\0', '\n', '\r']) {
-        return Err(AppError::new(
-            "LLVM response-file arguments cannot contain NUL or newline characters",
-        ));
-    }
-    #[cfg(windows)]
-    let argument = argument.replace('\\', "/");
+fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, evaluation_lcov: &Path) -> Result<(), AppError> {
     #[cfg(not(windows))]
-    let argument = argument.to_owned();
-    Ok(format!("\"{}\"", argument.replace('\\', "\\\\").replace('"', "\\\"")))
-}
-
-fn run_profdata_merge(tools: &LlvmTools, profile_list: &Path, output: &Path, quiet: bool) -> Result<(), AppError> {
-    let mut command = Command::new(&tools.profdata);
-    command.args(["merge", "-sparse", "-f"]).arg(profile_list).arg("-o").arg(output);
-    append_space_separated_env(&mut command, "LLVM_PROFDATA_FLAGS");
-    if quiet {
-        command.stdout(Stdio::null());
+    let _ = configuration;
+    let mut command = coverage_command(execution.workspace, execution.coverage_target_dir, execution.toolchain);
+    command.args(["llvm-cov", "report", "--lcov", "--output-path"]).arg(evaluation_lcov);
+    append_package_selection(&mut command, execution.selection);
+    if let Some(target) = execution.target {
+        command.arg("--target").arg(target);
     }
-    run_status(&mut command, "llvm-profdata merge")
+
+    let display = command_display(&command);
+    let output = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .into_app_err(format!("failed to execute `{display}`"))?;
+    forward_output(&output, execution.quiet)?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    if let Some(arguments) = command_too_long_response_arguments(&String::from_utf8_lossy(&output.stderr)) {
+        eprintln!("coverage-gate: cargo-llvm-cov could not launch llvm-cov directly; retrying its export through an LLVM response file");
+        return run_windows_report_fallback(execution, configuration, evaluation_lcov, arguments);
+    }
+
+    Err(AppError::new(format!(
+        "cargo llvm-cov report failed: `{display}` exited with {}",
+        output.status
+    )))
 }
 
-fn export_lcov(
-    workspace: &WorkspaceInfo,
-    tools: &LlvmTools,
-    profdata: &Path,
-    response: &Path,
-    final_lcov: &Path,
-    coverage_dir: &Path,
+fn forward_output(output: &Output, quiet: bool) -> Result<(), AppError> {
+    if !quiet {
+        io::stdout()
+            .write_all(&output.stdout)
+            .into_app_err("failed to forward cargo-llvm-cov stdout")?;
+    }
+    io::stderr()
+        .write_all(&output.stderr)
+        .into_app_err("failed to forward cargo-llvm-cov stderr")
+}
+
+#[cfg(any(windows, test))]
+fn command_too_long_response_arguments(stderr: &str) -> Option<&str> {
+    if !stderr.contains("(os error 206)") {
+        return None;
+    }
+    let command = stderr
+        .split_once("could not execute process `")?
+        .1
+        .split_once("` (never executed)")?
+        .0;
+    let arguments = command.split_once(" export ")?.1;
+    (!arguments.is_empty()).then_some(arguments)
+}
+
+#[cfg(windows)]
+fn run_windows_report_fallback(
+    execution: &CollectionExecution<'_>,
     configuration: FeatureConfiguration,
+    evaluation_lcov: &Path,
+    arguments: &str,
 ) -> Result<(), AppError> {
-    let temporary_lcov = TemporaryPath::new(coverage_dir, &format!("{}.lcov", configuration.artifact_name()));
+    let response = TemporaryPath::write_atomic(
+        execution.scratch_dir,
+        &format!("{}-objects.rsp", configuration.artifact_name()),
+        arguments.as_bytes(),
+    )?;
+    remove_if_present(evaluation_lcov).into_app_err(format!(
+        "failed to remove partial LCOV file `{}` before retry",
+        evaluation_lcov.display()
+    ))?;
     let output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(evaluation_lcov)
+        .into_app_err(format!("failed to create private LCOV file `{}`", evaluation_lcov.display()))?;
+    let llvm_cov = discover_llvm_cov(execution.toolchain)?;
+    let mut command = Command::new(llvm_cov);
+    command
+        .current_dir(&execution.workspace.root)
+        .arg("export")
+        .arg(prefixed_path_argument("@", response.path()))
+        .stdout(Stdio::from(output));
+    run_status(&mut command, "llvm-cov export response-file fallback")?;
+    response.cleanup()
+}
+
+#[cfg(windows)]
+fn discover_llvm_cov(toolchain: &ToolchainSelection) -> Result<PathBuf, AppError> {
+    if let Some(cov) = env::var_os("LLVM_COV") {
+        return Ok(PathBuf::from(cov));
+    }
+
+    let mut command = Command::new(toolchain.rustc());
+    command.args(["--print", "target-libdir"]);
+    toolchain.apply_to_command(&mut command);
+    let target_libdir = read_stdout(&mut command, "rustc LLVM-tool discovery")?;
+    let rustlib = Path::new(target_libdir.trim())
+        .parent()
+        .ok_or_else(|| AppError::new("rustc target-libdir output had no parent directory"))?;
+    Ok(rustlib.join("bin").join(format!("llvm-cov{}", env::consts::EXE_SUFFIX)))
+}
+
+fn publish_lcov(private_lcov: &Path, final_lcov: &Path, coverage_dir: &Path, configuration: FeatureConfiguration) -> Result<(), AppError> {
+    let temporary_lcov = TemporaryPath::new(coverage_dir, &format!("{}.lcov", configuration.artifact_name()));
+    let mut source = File::open(private_lcov).into_app_err(format!("failed to open private LCOV file `{}`", private_lcov.display()))?;
+    let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(temporary_lcov.path())
@@ -939,19 +839,14 @@ fn export_lcov(
             "failed to create temporary LCOV file `{}`",
             temporary_lcov.path().display()
         ))?;
-
-    let mut command = Command::new(&tools.cov);
-    command
-        .current_dir(&workspace.root)
-        .arg("export")
-        .arg("-format=lcov")
-        .arg(prefixed_path_argument("-instr-profile=", profdata))
-        .arg(prefixed_path_argument("@", response))
-        .arg("-ignore-filename-regex")
-        .arg(default_ignore_filename_regex(workspace));
-    append_space_separated_env(&mut command, "LLVM_COV_FLAGS");
-    command.stdout(Stdio::from(output));
-    run_status(&mut command, "llvm-cov export")?;
+    io::copy(&mut source, &mut output).into_app_err(format!(
+        "failed to stage private LCOV file `{}` for publication",
+        private_lcov.display()
+    ))?;
+    output
+        .sync_all()
+        .into_app_err(format!("failed to flush temporary LCOV file `{}`", temporary_lcov.path().display()))?;
+    drop(output);
 
     replace_file_atomically(temporary_lcov.path(), final_lcov)
         .into_app_err(format!("failed to publish LCOV file `{}`", final_lcov.display()))?;
@@ -990,7 +885,7 @@ fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> 
     )
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn retry_windows_replace(mut replace: impl FnMut() -> io::Result<()>, mut wait: impl FnMut()) -> io::Result<()> {
     for _ in 0..99 {
         match replace() {
@@ -1012,38 +907,9 @@ fn windows_replace_flags() -> u32 {
     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn is_retryable_windows_replace_error(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(5 | 32))
-}
-
-fn append_space_separated_env(command: &mut Command, key: &str) {
-    if let Some(flags) = env::var_os(key) {
-        command.args(flags.to_string_lossy().split(' ').filter(|flag| !flag.trim_start().is_empty()));
-    }
-}
-
-fn default_ignore_filename_regex(workspace: &WorkspaceInfo) -> String {
-    let separator = if cfg!(windows) { r"\\" } else { "/" };
-    let root = regex_escape(&workspace.root.to_string_lossy());
-    let target = regex_escape(&workspace.target_dir.to_string_lossy());
-    format!(
-        r"{separator}rustc{separator}([0-9a-f]+|[0-9]+\.[0-9]+\.[0-9]+){separator}|^{root}({separator}.*)?{separator}(tests|examples|benches){separator}|^{root}({separator}.*)?{separator}(tests\.rs|[0-9A-Za-z_-]+[_-]tests\.rs)$|^{target}($|{separator})"
-    )
-}
-
-fn regex_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        if matches!(
-            character,
-            '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$' | '\\'
-        ) {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
 }
 
 fn run_status(command: &mut Command, description: &str) -> Result<(), AppError> {
@@ -1062,47 +928,6 @@ fn command_display(command: &Command) -> String {
         .map(|argument| argument.to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-#[derive(Debug)]
-struct LlvmTools {
-    cov: PathBuf,
-    profdata: PathBuf,
-}
-
-impl LlvmTools {
-    fn discover(toolchain: &ToolchainSelection) -> Result<Self, AppError> {
-        let cov = env::var_os("LLVM_COV").map(PathBuf::from);
-        let profdata = env::var_os("LLVM_PROFDATA").map(PathBuf::from);
-        if let (Some(cov), Some(profdata)) = (cov.clone(), profdata.clone()) {
-            return Ok(Self { cov, profdata });
-        }
-
-        let rustc = toolchain.rustc();
-        let mut command = Command::new(rustc);
-        command.args(["--print", "target-libdir"]);
-        toolchain.apply_to_command(&mut command);
-        let output = command
-            .output()
-            .into_app_err(format!("failed to execute `{}` to locate LLVM tools", Path::new(rustc).display()))?;
-        if !output.status.success() {
-            return Err(AppError::new(format!(
-                "`{} --print target-libdir` exited with {}: {}",
-                Path::new(rustc).display(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let target_libdir = String::from_utf8(output.stdout).into_app_err("rustc target-libdir output was not UTF-8")?;
-        let Some(rustlib) = Path::new(target_libdir.trim()).parent() else {
-            return Err(AppError::new("rustc target-libdir output had no parent directory"));
-        };
-        let bin = rustlib.join("bin");
-        Ok(Self {
-            cov: cov.unwrap_or_else(|| bin.join(format!("llvm-cov{}", env::consts::EXE_SUFFIX))),
-            profdata: profdata.unwrap_or_else(|| bin.join(format!("llvm-profdata{}", env::consts::EXE_SUFFIX))),
-        })
-    }
 }
 
 #[derive(Debug)]
@@ -1178,6 +1003,7 @@ impl TemporaryPath {
         }
     }
 
+    #[cfg(any(windows, test))]
     fn write_atomic(directory: &Path, label: &str, contents: &[u8]) -> Result<Self, AppError> {
         let published = Self::new(directory, label);
         let staging = Self::new(directory, &format!("{label}.staging"));
@@ -1204,6 +1030,7 @@ impl TemporaryPath {
         self.armed = false;
     }
 
+    #[cfg(any(windows, test))]
     fn cleanup(mut self) -> Result<(), AppError> {
         remove_if_present(&self.path).into_app_err(format!("failed to remove temporary file `{}`", self.path.display()))?;
         self.armed = false;
@@ -1248,20 +1075,6 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-
-    #[cfg(unix)]
-    fn invalid_unicode_path() -> PathBuf {
-        use std::os::unix::ffi::OsStringExt as _;
-
-        OsString::from_vec(vec![0xFF]).into()
-    }
-
-    #[cfg(windows)]
-    fn invalid_unicode_path() -> PathBuf {
-        use std::os::windows::ffi::OsStringExt as _;
-
-        OsString::from_wide(&[0xD800]).into()
-    }
 
     fn member(name: &str, version: &str) -> WorkspaceMember {
         WorkspaceMember {
@@ -1334,13 +1147,16 @@ mod tests {
     }
 
     #[test]
-    fn arm64_windows_detection_honors_explicit_target_and_native_architecture() {
-        assert!(is_arm64_windows_target(Some(ARM64_WINDOWS_TARGET), false, None, None));
-        assert!(!is_arm64_windows_target(Some("x86_64-pc-windows-msvc"), true, Some("ARM64"), None));
-        assert!(is_arm64_windows_target(None, true, Some("ARM64"), None));
-        assert!(is_arm64_windows_target(None, true, Some("AMD64"), Some("arm64")));
-        assert!(!is_arm64_windows_target(None, false, Some("ARM64"), Some("ARM64")));
-        assert!(!is_arm64_windows_target(None, true, Some("AMD64"), None));
+    fn arm64_windows_detection_honors_explicit_target_without_invoking_rustc() {
+        let toolchain = ToolchainSelection {
+            name: None,
+            cargo: OsString::from("unused-cargo"),
+            rustc: OsString::from("unused-rustc"),
+        };
+        assert!(is_unsupported_arm64_windows_target(Some(ARM64_WINDOWS_TARGET), &toolchain).expect("explicit target needs no discovery"));
+        assert!(
+            !is_unsupported_arm64_windows_target(Some("x86_64-pc-windows-msvc"), &toolchain,).expect("explicit target needs no discovery")
+        );
     }
 
     #[test]
@@ -1355,12 +1171,15 @@ mod tests {
             Some("1.97.0-nightly")
         );
         assert_eq!(
+            rustc_host("rustc 1.97.0-nightly\nhost: aarch64-pc-windows-msvc\n"),
+            Some(ARM64_WINDOWS_TARGET)
+        );
+        assert_eq!(
             cargo_llvm_cov_version("cargo-llvm-cov 0.9.0\n").expect("valid version"),
             Version::new(0, 9, 0)
         );
-        let minimum = Version::new(0, 7, 0);
-        assert!(!cargo_llvm_cov_is_supported(&Version::new(0, 6, 9), &minimum));
-        assert!(cargo_llvm_cov_is_supported(&Version::new(0, 7, 0), &minimum));
+        let minimum = Version::new(0, 8, 0);
+        assert!(!cargo_llvm_cov_is_supported(&Version::new(0, 7, 1), &minimum));
         assert!(cargo_llvm_cov_is_supported(&Version::new(0, 8, 0), &minimum));
         cargo_llvm_cov_version("cargo llvm-cov 0.9.0\n").expect_err("missing package version prefix must fail");
         cargo_llvm_cov_version("cargo-llvm-cov development\n").expect_err("non-semver version must fail");
@@ -1506,11 +1325,15 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_atomic_replace_uses_replace_and_write_through_flags() {
-        use std::cell::Cell;
-
         use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 
         assert_eq!(windows_replace_flags(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    }
+
+    #[test]
+    fn windows_atomic_replace_retries_only_sharing_and_access_failures() {
+        use std::cell::Cell;
+
         assert!(is_retryable_windows_replace_error(&io::Error::from_raw_os_error(5)));
         assert!(is_retryable_windows_replace_error(&io::Error::from_raw_os_error(32)));
         assert!(!is_retryable_windows_replace_error(&io::Error::from_raw_os_error(2)));
@@ -1595,117 +1418,6 @@ mod tests {
     }
 
     #[test]
-    fn compiler_artifact_parser_returns_executable_field() {
-        assert_eq!(
-            compiler_artifact_objects(r#"{"reason":"compiler-artifact","executable":"target/debug/deps/alpha"}"#).expect("Cargo JSON"),
-            [PathBuf::from("target/debug/deps/alpha")]
-        );
-        assert!(
-            compiler_artifact_objects(r#"{"reason":"compiler-artifact","executable":null}"#)
-                .expect("Cargo JSON")
-                .is_empty()
-        );
-        assert!(
-            compiler_artifact_objects(r#"{"reason":"build-finished","success":true}"#)
-                .expect("Cargo JSON")
-                .is_empty()
-        );
-        compiler_artifact_objects("not json").expect_err("non-JSON output must be rejected");
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "uses temporary files and filesystem metadata, which Miri isolation does not support"
-    )]
-    fn compiler_artifact_parser_includes_object_filenames_and_excludes_build_scripts() {
-        let tmp = tempdir().expect("tempdir");
-        let object = if cfg!(windows) {
-            tmp.path().join("proc_macro.dll")
-        } else {
-            tmp.path().join("proc_macro")
-        };
-        fs::write(&object, b"object").expect("write object");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            let mut permissions = fs::metadata(&object).expect("object metadata").permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&object, permissions).expect("mark object executable");
-        }
-        let rlib = tmp.path().join("library.rlib");
-        fs::write(&rlib, b"rlib").expect("write rlib");
-        let message = serde_json::json!({
-            "reason": "compiler-artifact",
-            "target": { "kind": ["proc-macro"] },
-            "filenames": [object, rlib],
-            "executable": null
-        })
-        .to_string();
-        let objects = compiler_artifact_objects(&message).expect("Cargo JSON");
-        assert_eq!(objects.as_slice(), std::slice::from_ref(&object));
-
-        let build_script = serde_json::json!({
-            "reason": "compiler-artifact",
-            "target": { "kind": ["custom-build"] },
-            "filenames": [object],
-            "executable": "build-script"
-        })
-        .to_string();
-        assert!(compiler_artifact_objects(&build_script).expect("Cargo JSON").is_empty());
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "uses temporary files and filesystem metadata, which Miri isolation does not support"
-    )]
-    fn object_filter_rejects_non_objects() {
-        let tmp = tempdir().expect("tempdir");
-        #[cfg(windows)]
-        {
-            let wrong_extension = tmp.path().join("object.txt");
-            fs::write(&wrong_extension, b"object").expect("write non-object");
-            assert!(!is_coverage_object(&wrong_extension));
-        }
-
-        let missing = if cfg!(windows) {
-            tmp.path().join("missing.dll")
-        } else {
-            tmp.path().join("missing")
-        };
-        assert!(!is_coverage_object(&missing));
-
-        let directory = if cfg!(windows) {
-            tmp.path().join("directory.dll")
-        } else {
-            tmp.path().join("directory")
-        };
-        fs::create_dir(&directory).expect("create object-shaped directory");
-        assert!(!is_coverage_object(&directory));
-    }
-
-    #[test]
-    fn object_extension_rules_cover_windows_and_non_windows() {
-        assert!(object_extension_allowed(Path::new("test.exe"), true));
-        assert!(object_extension_allowed(Path::new("macro.dll"), true));
-        assert!(!object_extension_allowed(Path::new("test"), true));
-        assert!(!object_extension_allowed(Path::new("test.txt"), true));
-        assert!(object_extension_allowed(Path::new("test"), false));
-        assert!(object_extension_allowed(Path::new("test.txt"), false));
-    }
-
-    #[test]
-    fn ignored_artifact_names_cover_each_exclusion() {
-        for ignored in ["artifact.d", "artifact.rlib", "artifact.rmeta", ".cargo-lock", ".cargo-build-lock"] {
-            assert!(is_ignored_artifact_path(Path::new(ignored)), "{ignored}");
-        }
-        assert!(!is_ignored_artifact_path(Path::new("artifact")));
-        assert!(!is_ignored_artifact_path(Path::new("artifact.exe")));
-    }
-
-    #[test]
     fn executable_mode_accepts_each_execute_bit() {
         assert!(has_executable_mode(0o100));
         assert!(has_executable_mode(0o010));
@@ -1722,119 +1434,53 @@ mod tests {
         assert!(requires_execute_bit(false, true));
     }
 
-    #[cfg(unix)]
     #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "uses temporary files and filesystem metadata, which Miri isolation does not support"
-    )]
-    fn unix_object_filter_requires_an_executable_file() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let tmp = tempdir().expect("tempdir");
-        let object = tmp.path().join("object");
-        fs::write(&object, b"object").expect("write object");
-        fs::set_permissions(&object, fs::Permissions::from_mode(0o600)).expect("set non-executable mode");
-        assert!(!is_coverage_object(&object));
-        fs::set_permissions(&object, fs::Permissions::from_mode(0o700)).expect("set executable mode");
-        assert!(is_coverage_object(&object));
-    }
-
-    #[test]
-    fn response_file_places_each_object_behind_object_flag() {
-        let contents = object_response_contents(&[PathBuf::from("target/one"), PathBuf::from("target/object with spaces")])
-            .expect("response contents");
-        let contents = String::from_utf8(contents).expect("UTF-8 response");
-        assert_eq!(contents.matches("-object\n").count(), 2);
-        assert!(contents.contains("\"target/one\""));
-        assert!(contents.contains("\"target/object with spaces\""));
-    }
-
-    #[test]
-    fn response_argument_rejects_line_breaks() {
-        quote_response_argument("one\nobject").expect_err("line feeds must be rejected");
-        quote_response_argument("one\robject").expect_err("carriage returns must be rejected");
-        quote_response_argument("one\0object").expect_err("NUL characters must be rejected");
-    }
-
-    #[test]
-    fn regex_escape_covers_every_metacharacter_used_by_paths() {
-        assert_eq!(regex_escape(r"a.b[c]\d+$"), r"a\.b\[c\]\\d\+\$");
-        assert_eq!(regex_escape("plain/path"), "plain/path");
-    }
-
-    #[test]
-    fn default_ignore_regex_names_workspace_tests_and_target_output() {
-        #[cfg(windows)]
-        let root = PathBuf::from(r"C:\workspace");
-        #[cfg(not(windows))]
-        let root = PathBuf::from("/workspace");
-        let workspace = WorkspaceInfo {
-            target_dir: root.join("target"),
-            root,
-            members: Vec::new(),
-        };
-
-        let regex = default_ignore_filename_regex(&workspace);
-        assert!(regex.contains("rustc"));
-        assert!(regex.contains("tests|examples|benches"));
-        assert!(regex.contains(&regex_escape(&workspace.root.to_string_lossy())));
-        assert!(regex.contains(&regex_escape(&workspace.target_dir.to_string_lossy())));
-    }
-
-    #[test]
-    fn profile_and_object_lists_reject_non_utf8_paths() {
-        let path = invalid_unicode_path();
-        profile_list_contents(std::slice::from_ref(&path)).expect_err("profile paths must be UTF-8");
-        object_response_contents(&[path]).expect_err("object paths must be UTF-8");
-    }
-
-    #[test]
-    fn profile_lists_reject_carriage_returns_and_line_feeds() {
-        for path in ["target/bad\nprofile.profraw", "target/bad\rprofile.profraw"] {
-            let error = profile_list_contents(&[PathBuf::from(path)]).expect_err("line-delimited profile paths must reject CR/LF");
-            assert!(error.to_string().contains("line break"), "{error}");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn llvm_path_arguments_preserve_non_utf8_bytes() {
-        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-
-        let path = PathBuf::from(OsString::from_vec(b"/coverage/\xfffile".to_vec()));
-        let profile = prefixed_path_argument("-instr-profile=", &path);
-        let response = prefixed_path_argument("@", &path);
-        assert_eq!(profile.as_os_str().as_bytes(), b"-instr-profile=/coverage/\xfffile");
-        assert_eq!(response.as_os_str().as_bytes(), b"@/coverage/\xfffile");
+    fn command_too_long_parser_preserves_upstream_export_arguments() {
+        let stderr = concat!(
+            "error: failed to generate report: could not execute process `",
+            "\"C:\\Program Files\\Rust\\llvm-cov.exe\" export -format=lcov ",
+            "-object \"target\\object one.exe\" ",
+            "-ignore-filename-regex \"UPSTREAM_DEFAULTS\"",
+            "` (never executed): The filename or extension is too long. (os error 206)"
+        );
+        let arguments = command_too_long_response_arguments(stderr).expect("Windows error 206 export");
+        assert!(arguments.starts_with("-format=lcov"));
+        assert!(arguments.contains("-object \"target\\object one.exe\""));
+        assert!(arguments.contains("-ignore-filename-regex \"UPSTREAM_DEFAULTS\""));
+        assert!(command_too_long_response_arguments("unrelated error").is_none());
+        assert!(command_too_long_response_arguments("could not execute process `llvm-cov show` (never executed) (os error 206)").is_none());
     }
 
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn export_reports_an_unusable_temporary_directory() {
+    fn publishing_reports_an_unusable_temporary_directory() {
         let tmp = tempdir().expect("tempdir");
         let not_a_directory = tmp.path().join("not-a-directory");
         fs::write(&not_a_directory, b"file").expect("write conflicting file");
-        let workspace = WorkspaceInfo {
-            root: tmp.path().to_path_buf(),
-            target_dir: tmp.path().join("target"),
-            members: Vec::new(),
-        };
-        let tools = LlvmTools {
-            cov: PathBuf::from("unused-llvm-cov"),
-            profdata: PathBuf::from("unused-llvm-profdata"),
-        };
+        let private = tmp.path().join("private.info");
+        fs::write(&private, b"private").expect("write private LCOV");
 
-        export_lcov(
-            &workspace,
-            &tools,
-            Path::new("unused.profdata"),
-            Path::new("unused.rsp"),
+        publish_lcov(
+            &private,
             &tmp.path().join("unused.info"),
             &not_a_directory,
             FeatureConfiguration::AllFeatures,
         )
-        .expect_err("temporary LCOV creation must fail before spawning llvm-cov");
+        .expect_err("temporary LCOV creation must fail");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
+    fn publishing_retains_invocation_private_evaluation_data() {
+        let tmp = tempdir().expect("tempdir");
+        let private = tmp.path().join("private.info");
+        let published = tmp.path().join("published.info");
+        fs::write(&private, b"private LCOV").expect("write private LCOV");
+
+        publish_lcov(&private, &published, tmp.path(), FeatureConfiguration::AllFeatures).expect("publish LCOV");
+
+        assert_eq!(fs::read(&private).expect("read private LCOV"), b"private LCOV");
+        assert_eq!(fs::read(&published).expect("read published LCOV"), b"private LCOV");
     }
 
     #[test]

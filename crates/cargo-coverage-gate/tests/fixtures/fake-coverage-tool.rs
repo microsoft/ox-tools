@@ -148,15 +148,35 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
         if env::var_os("FAKE_NEXTEST_TEXT").is_some() {
             println!("non-JSON nextest output");
         }
-        if env::var_os("FAKE_NO_OBJECT").is_none() {
-            let object = env::var("FAKE_COVERAGE_OBJECT").map_err(|error| error.to_string())?;
-            println!(
-                "{{\"reason\":\"compiler-artifact\",\"executable\":\"{}\"}}",
-                json_escape(&object)
-            );
+        if env::var_os("FAKE_COMPILER_MESSAGE").is_some() {
+            println!("fake compiler diagnostic");
         }
-        println!("{{\"reason\":\"build-finished\",\"success\":true}}");
         break_directory("FAKE_BREAK_DIRECTORY_AFTER_NEXTEST")?;
+    }
+    if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "report") {
+        if env::var_os("FAKE_NO_PROFILE").is_some() {
+            return Err("no raw profiles found".to_owned());
+        }
+        if env::var_os("FAKE_REPORT_COMMAND_TOO_LONG").is_some() {
+            let llvm_cov = env::var("LLVM_COV").map_err(|error| error.to_string())?;
+            let object = env::var("FAKE_COVERAGE_OBJECT").map_err(|error| error.to_string())?;
+            eprintln!(
+                "error: failed to generate report: could not execute process `\"{llvm_cov}\" export -format=lcov -instr-profile=\"fake.profdata\" -object \"{object}\" -ignore-filename-regex \"UPSTREAM_DEFAULTS\"` (never executed): The filename or extension is too long. (os error 206)"
+            );
+            return Err("requested command-too-long report failure".to_owned());
+        }
+        if env::var_os("FAKE_FAIL_COV").is_some() {
+            return Err("requested llvm-cov failure".to_owned());
+        }
+        let output =
+            value_after(args, "--output-path").ok_or_else(|| "cargo llvm-cov report did not receive --output-path".to_owned())?;
+        let contents = if env::var_os("FAKE_EMPTY_LCOV").is_some() {
+            String::new()
+        } else {
+            fake_lcov()?
+        };
+        fs::write(output, contents).map_err(|error| error.to_string())?;
+        break_directory("FAKE_BREAK_DIRECTORY_AFTER_REPORT")?;
     }
     Ok(())
 }
@@ -236,24 +256,27 @@ fn run_cov(args: &[std::ffi::OsString]) -> Result<(), String> {
     let response_log = env::var_os("FAKE_RESPONSE_LOG").ok_or_else(|| "FAKE_RESPONSE_LOG is not set".to_owned())?;
     fs::write(response_log, response_contents).map_err(|error| error.to_string())?;
 
-    if env::var_os("FAKE_FAIL_COV").is_some() {
-        return Err("requested llvm-cov failure".to_owned());
-    }
-    if env::var_os("FAKE_EMPTY_LCOV").is_some() {
-        return Ok(());
-    }
+    print!("{}", fake_lcov()?);
+    Ok(())
+}
+
+fn fake_lcov() -> Result<String, String> {
+    use std::fmt::Write as _;
 
     let workspace = PathBuf::from(env::var_os("FAKE_WORKSPACE_ROOT").ok_or_else(|| "FAKE_WORKSPACE_ROOT is not set".to_owned())?);
+    let hits = env::var("FAKE_LCOV_HITS").unwrap_or_else(|_| "1".to_owned());
+    let covered = u8::from(hits != "0");
+    let mut output = String::new();
     for package in ["alpha", "beta"] {
         let source = workspace.join(package).join("src").join("lib.rs");
-        println!("TN:");
-        println!("SF:{}", source.display());
-        println!("DA:1,1");
-        println!("LF:1");
-        println!("LH:1");
-        println!("end_of_record");
+        writeln!(output, "TN:").map_err(|error| error.to_string())?;
+        writeln!(output, "SF:{}", source.display()).map_err(|error| error.to_string())?;
+        writeln!(output, "DA:1,{hits}").map_err(|error| error.to_string())?;
+        writeln!(output, "LF:1").map_err(|error| error.to_string())?;
+        writeln!(output, "LH:{covered}").map_err(|error| error.to_string())?;
+        writeln!(output, "end_of_record").map_err(|error| error.to_string())?;
     }
-    Ok(())
+    Ok(output)
 }
 
 fn value_after<'a>(args: &'a [std::ffi::OsString], expected: &str) -> Option<&'a Path> {
@@ -281,10 +304,6 @@ fn log(name: &str, args: &[std::ffi::OsString]) -> Result<(), String> {
         line.push_str(&target_dir.to_string_lossy());
     }
     writeln!(log, "{line}").map_err(|error| error.to_string())
-}
-
-fn json_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn break_directory(variable: &str) -> Result<(), String> {
