@@ -44,6 +44,11 @@ mod tests {
         let catalog = Catalog::anvil();
         assert_eq!(catalog.cli().subcommand, "anvil");
         assert_eq!(catalog.cli().bin_name, "cargo-anvil");
+        assert_eq!(
+            catalog.cli().about,
+            "Update local recipes, cloud-workflow building blocks, and managed regions for the anvil unified build setup"
+        );
+        assert_eq!(catalog.cli().version, env!("CARGO_PKG_VERSION"));
         assert!(!catalog.artifacts().is_empty());
     }
 }

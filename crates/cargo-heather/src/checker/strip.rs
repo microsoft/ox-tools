@@ -137,8 +137,12 @@ pub(super) fn prepend_after_optional_shebang(content: &str, header_text: &str, s
 /// found, the body is preserved verbatim (leading blanks included).
 pub(super) fn fix_script_content(content: &str, header_text: &str, style: CommentStyle, line_ending: &str) -> String {
     let mut iter = content.lines();
-    let shebang = iter.next().unwrap_or("");
-    let dash_open = iter.next().unwrap_or("---");
+    let shebang = iter
+        .next()
+        .expect("caller classifies content as CargoScript only when a shebang is present");
+    let dash_open = iter
+        .next()
+        .expect("caller classifies content as CargoScript only when an opening frontmatter delimiter follows the shebang");
     let body_lines: Vec<&str> = iter.collect();
 
     let body_start = find_header_end(&body_lines, style).unwrap_or(0);
@@ -268,8 +272,7 @@ fn main() {}
     #[test]
     fn fix_shebang_content_with_shebang_only_emits_header_without_body() {
         let s = fix_shebang_content("#!/bin/sh\n", "New", CommentStyle::DoubleSlash, "\n");
-        assert!(s.starts_with("#!/bin/sh\n"), "{s}");
-        assert!(s.contains("// New"), "{s}");
+        assert_eq!(s, "#!/bin/sh\n// New\n");
     }
 
     #[test]
@@ -281,8 +284,7 @@ fn main() {}
     #[test]
     fn fix_script_content_with_no_body_emits_frontmatter_and_header() {
         let s = fix_script_content("#!/usr/bin/env cargo\n---\n// Old\n", "New", CommentStyle::DoubleSlash, "\n");
-        assert!(s.starts_with("#!/usr/bin/env cargo\n---\n"), "{s}");
-        assert!(s.contains("// New"), "{s}");
+        assert_eq!(s, "#!/usr/bin/env cargo\n---\n// New\n");
     }
 
     #[test]

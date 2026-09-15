@@ -40,7 +40,7 @@ impl Provider {
     #[must_use]
     pub fn new(cache: Cache, base_url: Option<&str>) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("cargo-aprz")
+            .user_agent(crate::HTTP_USER_AGENT)
             .build()
             .expect("unable to create HTTP client");
 
@@ -48,6 +48,7 @@ impl Provider {
             client: Arc::new(client),
             cache,
             base_url: base_url.unwrap_or(DOCS_BASE_URL).to_string(),
+            // #[gamma::skip(expr.increment, expr.decrement, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
         }
     }
@@ -250,9 +251,40 @@ mod tests {
     use semver::Version;
 
     use super::*;
+    use crate::facts::Progress;
 
     fn test_crate_spec(name: &str, version: &str) -> CrateSpec {
         CrateSpec::from_arcs(Arc::from(name), Arc::new(Version::parse(version).unwrap()))
+    }
+
+    #[derive(Debug)]
+    struct NoOpProgress;
+
+    impl Progress for NoOpProgress {
+        fn set_phase(&self, _phase: &str) {}
+        fn set_determinate(&self, _callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {}
+        fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
+        fn println(&self, _msg: &str) {}
+        fn done(&self) {}
+    }
+
+    #[tokio::test]
+    async fn batch_request_accounting_balances_issued_and_completed() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let provider = Provider::new(Cache::new(temp_dir.path(), core::time::Duration::MAX, false), Some(&server.uri()));
+        let progress: Arc<dyn Progress> = Arc::new(NoOpProgress);
+        let tracker = RequestTracker::new(&progress);
+        let crates: Arc<[CrateSpec]> = Arc::from([test_crate_spec("missing", "1.0.0")]);
+
+        let results: Vec<_> = provider.get_docs_data(crates, &tracker).await.collect();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(tracker.request_counts(TrackedTopic::Docs), (1, 1));
     }
 
     #[derive(Debug)]

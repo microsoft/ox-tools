@@ -37,7 +37,7 @@ impl Provider {
     #[must_use]
     pub fn new(cache: Cache, base_url: Option<&str>) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent("cargo-aprz")
+            .user_agent(crate::HTTP_USER_AGENT)
             .build()
             .expect("unable to create HTTP client");
 
@@ -45,6 +45,7 @@ impl Provider {
             client: Arc::new(client),
             cache,
             base_url: base_url.unwrap_or(CODECOV_BASE_URL).to_string(),
+            // #[gamma::skip(expr.increment, expr.decrement, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
         }
     }

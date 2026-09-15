@@ -304,6 +304,13 @@ tokio = { version = "1.0" }
     }
 
     #[test]
+    fn workspace_dependencies_must_be_a_table() {
+        let error = validate_dependencies("[workspace]\ndependencies = \"serde\"\n", &[])
+            .expect_err("a scalar dependency section must be rejected");
+        assert_eq!(error.to_string(), "[workspace.dependencies] is not a table");
+    }
+
+    #[test]
     fn test_validate_no_workspace_no_package() {
         let content = r#"
 [some-other-section]
@@ -414,6 +421,13 @@ tokio = { version = "1.0" }
         let (errors, _, sections) = validate_dependencies(content, &[]).unwrap();
         assert_eq!(errors.len(), 2, "Should have 2 errors");
         assert_eq!(sections, vec!["[dependencies]"]);
+    }
+
+    #[test]
+    fn package_dependencies_must_be_a_table() {
+        let error = validate_dependencies("dependencies = \"serde\"\n[package]\nname = \"demo\"\nversion = \"0.1.0\"\n", &[])
+            .expect_err("a scalar dependency section must be rejected");
+        assert_eq!(error.to_string(), "[dependencies] is not a table");
     }
 
     #[test]

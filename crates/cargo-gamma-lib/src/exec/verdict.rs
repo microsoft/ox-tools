@@ -6,12 +6,13 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, BufReader, Read};
 use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
-use std::{fmt, thread};
+use std::{fmt, fs, thread};
 
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use cargo_gamma_process::{MemoryRequest, MemoryUsage, PlatformError, PreparedCommand, ProcessTree, SpawnedCommand, prepare};
 use serde::Serialize;
 
@@ -286,15 +287,47 @@ pub(super) struct FailureEvidence {
 /// as soon as a test fails rather than running the whole binary. `confirm` turns it off, at the
 /// price of a score that counts flakes as kills and cannot show which ones they were.
 pub(super) fn run_binary(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, confirm: bool) -> Verdict {
-    let confirmed = settle_suspicions(attempt, |attempt| observe(work, binary, attempt).verdict);
+    run_binary_observed(work, binary, attempt, confirm).verdict
+}
+
+#[derive(Debug)]
+pub(super) struct BinaryRun {
+    pub(super) verdict: Verdict,
+    pub(super) reach: ReachObservation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReachObservation {
+    Reached,
+    NotReached,
+    Unknown,
+}
+
+pub(super) fn reach_hint_is_final(attempt: Attempt<'_>, confirm: bool) -> bool {
+    attempt.timeout.is_none() && attempt.stall.budget.is_none() && !attempt.request.meter && !confirm
+}
+
+pub(super) fn run_binary_observed(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, confirm: bool) -> BinaryRun {
+    let mut reach = ReachObservation::Unknown;
+    let confirmed = settle_suspicions(attempt, |attempt| {
+        let observed = observe(work, binary, attempt);
+        if observed.reach == ReachObservation::Reached {
+            reach = ReachObservation::Reached;
+        } else if reach != ReachObservation::Reached && observed.reach == ReachObservation::NotReached {
+            reach = ReachObservation::NotReached;
+        }
+        observed.verdict
+    });
 
     // Reached from the first run and from a confirmation alike: a suspected timeout that turns out
     // to be a failing test is exactly as much of a suspicion as one reported straight away.
-    match confirmed {
+    let verdict = match confirmed {
         Verdict::Failed(test) if confirm => confirm_kill(work, binary, attempt, test),
         Verdict::TestEnumerationFailed(output) => confirm_enumeration(work, binary, attempt, output),
         other => other,
-    }
+    };
+
+    BinaryRun { verdict, reach }
 }
 
 /// How many times a spawn refused for want of a machine resource is attempted in all.
@@ -626,6 +659,7 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>) -> Result<Com
         }
 
         let _ = command.current_dir(working_directory(work, binary).as_std_path());
+        work.inherit_test_cache_home(&mut command);
 
         return Ok(command);
     };
@@ -1265,6 +1299,9 @@ const DRAIN_GRACE: Duration = Duration::from_secs(5);
 pub(super) struct Observation {
     pub(super) verdict: Verdict,
 
+    /// Whether the active mutation guard was observed during this same subprocess.
+    pub(super) reach: ReachObservation,
+
     /// Process termination and bounded output, retained only for a failed observation.
     pub(super) failure: Option<FailureEvidence>,
 
@@ -1309,8 +1346,14 @@ pub(super) fn observe_baseline(work: &Workspace, binary: &TestBinary, attempt: A
 }
 
 fn observe_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, retain_failure: bool) -> Observation {
+    let capture = ReachCapture::new(work, attempt);
+    let attempt = capture.as_ref().map_or(attempt, |capture| Attempt {
+        census: Some(&capture.path),
+        ..attempt
+    });
     let progress = Arc::new(Mutex::new(Progress::new(watch(work))));
     let (verdict, usage, failure) = run_with(work, binary, attempt, &progress, retain_failure);
+    let reach = capture.map_or(ReachObservation::Unknown, ReachCapture::finish);
     let quiet = quiet_of(&progress);
 
     #[expect(clippy::unwrap_used, reason = "the reader only panics if the whole process is unwinding")]
@@ -1318,10 +1361,73 @@ fn observe_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, ret
 
     Observation {
         verdict,
+        reach,
         failure,
         quiet,
         tests,
         peak: usage.peak,
+    }
+}
+
+static NEXT_REACH_CAPTURE: AtomicUsize = AtomicUsize::new(0);
+
+struct ReachCapture {
+    path: Utf8PathBuf,
+    ordinal: u32,
+}
+
+impl ReachCapture {
+    fn new(work: &Workspace, attempt: Attempt<'_>) -> Option<Self> {
+        let ordinal = attempt.active?;
+        if attempt.census.is_some() {
+            return None;
+        }
+
+        let sequence = NEXT_REACH_CAPTURE.fetch_add(1, Ordering::Relaxed);
+        let path = work.target.join(format!(".gamma-reach-{}-{sequence}.bin", std::process::id()));
+        let _created = fs::create_dir_all(work.target.as_std_path());
+        let _removed = fs::remove_file(path.as_std_path());
+
+        Some(Self { path, ordinal })
+    }
+
+    fn finish(self) -> ReachObservation {
+        let bytes = fs::read(self.path.as_std_path());
+        let _removed = fs::remove_file(self.path.as_std_path());
+        let Ok(bytes) = bytes else {
+            return ReachObservation::Unknown;
+        };
+
+        let mut sealed = false;
+        let mut reached = false;
+        for record in bytes.chunks_exact(core::mem::size_of::<u32>()) {
+            let value = u32::from_le_bytes(record.try_into().expect("chunks_exact yields exactly one runtime reach record"));
+            if value == self.ordinal {
+                reached = true;
+            }
+            if value == gamma_rt::OVERFLOW {
+                sealed = false;
+                break;
+            }
+            if value == gamma_rt::SEAL {
+                if sealed {
+                    sealed = false;
+                    break;
+                }
+                sealed = true;
+            } else if sealed {
+                sealed = false;
+                break;
+            }
+        }
+
+        if reached {
+            ReachObservation::Reached
+        } else if sealed && bytes.len().is_multiple_of(core::mem::size_of::<u32>()) {
+            ReachObservation::NotReached
+        } else {
+            ReachObservation::Unknown
+        }
     }
 }
 
@@ -1786,6 +1892,334 @@ mod fuzz {
 #[cfg(all(test, not(loom), not(miri)))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attempts_and_diagnostic_errors_preserve_their_user_visible_details() {
+        let attempt = Attempt {
+            active: Some(7),
+            timeout: None,
+            stall: Stall::NONE,
+            request: MemoryRequest::default(),
+            only: Only::All,
+            census: None,
+        };
+        assert_eq!(attempt.patient().timeout, None);
+
+        assert_eq!(Termination::ExitCode(17).to_string(), "exit code 17");
+        assert_eq!(Termination::Unknown.to_string(), "an unknown process termination");
+        assert_eq!(ReaderStream::Stderr.to_string(), "standard error");
+
+        let error = ReaderStartError {
+            stream: ReaderStream::Stderr,
+            cause: io::Error::other("reader refused"),
+        };
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string).as_deref(),
+            Some("reader refused")
+        );
+    }
+
+    #[test]
+    fn a_runtime_environment_marker_has_a_standalone_verdict() {
+        let progress = Mutex::new(Progress::new(Watch::Libtest));
+        assert_eq!(environment_verdict(&progress), None);
+
+        progress
+            .lock()
+            .expect("the progress lock is not poisoned")
+            .heard(core::str::from_utf8(gamma_rt::ENVIRONMENT_ERROR_MARKER).expect("the marker is ASCII"));
+
+        assert!(matches!(environment_verdict(&progress), Some(Verdict::Unmetered(reason)) if reason.contains("startup")));
+    }
+
+    fn reach_fixture(records: &[u32], ordinal: u32) -> ReachObservation {
+        let directory = tempfile::tempdir().expect("the reach fixture directory is created");
+        let path = Utf8PathBuf::from_path_buf(directory.path().join("reach.bin")).expect("the fixture path is UTF-8");
+        let bytes: Vec<u8> = records.iter().flat_map(|record| record.to_le_bytes()).collect();
+        fs::write(path.as_std_path(), bytes).expect("the reach fixture is written");
+
+        ReachCapture { path, ordinal }.finish()
+    }
+
+    #[test]
+    fn positive_reach_survives_an_incomplete_observation_but_negative_reach_does_not() {
+        assert_eq!(reach_fixture(&[7], 7), ReachObservation::Reached);
+        assert_eq!(reach_fixture(&[gamma_rt::SEAL], 7), ReachObservation::NotReached);
+        assert_eq!(reach_fixture(&[], 7), ReachObservation::Unknown);
+        assert_eq!(reach_fixture(&[gamma_rt::OVERFLOW, gamma_rt::SEAL], 7), ReachObservation::Unknown);
+    }
+
+    #[test]
+    fn reach_hints_are_final_only_without_canonical_precedence_policies() {
+        let base = Attempt {
+            active: Some(1),
+            timeout: None,
+            stall: Stall::NONE,
+            request: MemoryRequest::default(),
+            only: Only::All,
+            census: None,
+        };
+        assert!(reach_hint_is_final(base, false));
+        assert!(!reach_hint_is_final(
+            Attempt {
+                timeout: Some(Duration::from_secs(1)),
+                ..base
+            },
+            false
+        ));
+        assert!(!reach_hint_is_final(
+            Attempt {
+                stall: Stall {
+                    budget: Some(Duration::from_secs(1)),
+                },
+                ..base
+            },
+            false
+        ));
+        assert!(!reach_hint_is_final(
+            Attempt {
+                request: MemoryRequest { meter: true, limit: None },
+                ..base
+            },
+            false
+        ));
+        assert!(!reach_hint_is_final(base, true));
+    }
+
+    #[test]
+    fn an_ordinary_mutant_run_harvests_reach_without_an_extra_launch() {
+        let directive = format!("write-le:{}|7|{}", gamma_rt::CENSUS_VAR, gamma_rt::SEAL);
+        let (_directory, work) = crate::testing::helper_workspace("reach-observation", &[&directive]);
+        let binary = crate::testing::helper();
+
+        let run = run_binary_observed(
+            &work,
+            &binary,
+            Attempt {
+                active: Some(7),
+                timeout: None,
+                stall: Stall::NONE,
+                request: MemoryRequest::default(),
+                only: Only::All,
+                census: None,
+            },
+            false,
+        );
+
+        assert_eq!(run.verdict, Verdict::Passed);
+        assert_eq!(run.reach, ReachObservation::Reached);
+    }
+
+    #[test]
+    fn malformed_reach_streams_are_never_negative_evidence() {
+        assert_eq!(reach_fixture(&[gamma_rt::SEAL, gamma_rt::SEAL], 7), ReachObservation::Unknown);
+        assert_eq!(reach_fixture(&[gamma_rt::SEAL, 9], 7), ReachObservation::Unknown);
+        assert_eq!(reach_fixture(&[9, gamma_rt::SEAL], 7), ReachObservation::NotReached);
+        assert_eq!(reach_fixture(&[9, gamma_rt::OVERFLOW], 7), ReachObservation::Unknown);
+    }
+
+    #[test]
+    fn collection_preserves_each_stream_and_every_completeness_flag() {
+        let (sink, drained) = mpsc::channel();
+        sink.send(Drained {
+            text: b"stdout".to_vec(),
+            tail: b"stdout-tail".to_vec(),
+            tail_truncated: true,
+            complete: true,
+            authoritative: true,
+            stream: ReaderStream::Stdout,
+        })
+        .expect("stdout record");
+        sink.send(Drained {
+            text: b"stderr".to_vec(),
+            tail: b"stderr-tail".to_vec(),
+            tail_truncated: false,
+            complete: false,
+            authoritative: false,
+            stream: ReaderStream::Stderr,
+        })
+        .expect("stderr record");
+        drop(sink);
+
+        let collected = collected(&drained, Duration::from_secs(1));
+        assert_eq!(collected.text, b"stdoutstderr");
+        assert_eq!(collected.authoritative, b"stdout");
+        assert_eq!(collected.stdout_tail, b"stdout-tail");
+        assert_eq!(collected.stderr_tail, b"stderr-tail");
+        assert!(collected.tail_truncated);
+        assert!(!collected.whole);
+
+        let evidence = collected.failure_evidence(Some(Termination::ExitCode(9)));
+        assert_eq!(evidence.termination, Some(Termination::ExitCode(9)));
+        assert!(evidence.output_truncated);
+    }
+
+    #[test]
+    fn diagnostic_tail_has_an_exact_line_boundary() {
+        let exact = "line\n".repeat(OUTPUT_TAIL_LINES);
+        let expected = exact.strip_suffix('\n').expect("the fixture ends in a newline");
+        let (text, truncated) = diagnostic_tail(exact.as_bytes());
+        assert_eq!(text, expected);
+        assert!(!truncated);
+
+        let over = format!("discarded\n{exact}");
+        let (text, truncated) = diagnostic_tail(over.as_bytes());
+        assert_eq!(text, expected);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn bounded_tail_retains_the_exact_suffix_and_reports_eviction() {
+        let mut tail = VecDeque::from(vec![b'a'; OUTPUT_TAIL_CAP - 2]);
+        assert!(!retain_output_tail(&mut tail, b"bc"));
+        assert_eq!(tail.len(), OUTPUT_TAIL_CAP);
+        assert_eq!(tail.back(), Some(&b'c'));
+
+        assert!(retain_output_tail(&mut tail, b"def"));
+        assert_eq!(tail.len(), OUTPUT_TAIL_CAP);
+        assert_eq!(tail.iter().rev().take(3).copied().collect::<Vec<_>>(), b"fed");
+
+        let replacement = vec![b'z'; OUTPUT_TAIL_CAP + 1];
+        assert!(retain_output_tail(&mut tail, &replacement));
+        assert_eq!(tail, VecDeque::from(vec![b'z'; OUTPUT_TAIL_CAP]));
+    }
+
+    #[test]
+    fn nextest_failures_keep_their_classification_and_diagnostic() {
+        let usage = MemoryUsage::default();
+        let (verdict, _) = settle(true, Some(7), Some(nextest::NO_TESTS_RUN), b"ignored", b"", usage);
+        assert!(matches!(verdict, Verdict::Unmetered(reason) if reason == "`cargo nextest` matched no tests for a binary this run built"));
+
+        let reason = nextest_runner_failure(Some(17), "  useful detail  ");
+        assert_eq!(
+            reason,
+            "`cargo nextest` exited with code 17, which does not describe a test run:\nuseful detail"
+        );
+        assert_eq!(
+            nextest_runner_failure(None, ""),
+            "`cargo nextest` exited with a signal, which does not describe a test run"
+        );
+    }
+
+    #[test]
+    fn baseline_and_binary_environments_record_every_controlled_value() {
+        let (_directory, work) = crate::testing::helper_workspace("verdict-environment", &[]);
+        work.calibrate_harness(1);
+        let environment = baseline_environment(&work);
+        let set = environment["set"].as_object().expect("the set is an object");
+
+        assert_eq!(set[UNDER_GAMMA_VAR], "1");
+        assert_eq!(set[INSTA_UPDATE_VAR], "no");
+        assert_eq!(set[INSTA_FORCE_PASS_VAR], "0");
+        assert_eq!(
+            environment["removed"],
+            serde_json::json!([gamma_rt::ACTIVE_VAR, gamma_rt::CENSUS_VAR])
+        );
+        assert_eq!(environment["valuesOmitted"], serde_json::json!([STACK_VAR]));
+
+        let binary = TestBinary {
+            manifest_dir: Utf8PathBuf::from("manifest"),
+            ..crate::testing::helper()
+        };
+        let launch = Launch::derive(&[]);
+        let mut command = Command::new("test");
+        configure(
+            &mut command,
+            &binary,
+            &launch,
+            Some("3"),
+            Some(11),
+            Some(Utf8Path::new("census.bin")),
+        );
+        let env: BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+
+        assert_eq!(env["RUST_BACKTRACE"].as_deref(), Some("0"));
+        assert_eq!(env[UNDER_GAMMA_VAR].as_deref(), Some("1"));
+        assert_eq!(env[INSTA_UPDATE_VAR].as_deref(), Some("no"));
+        assert_eq!(env[INSTA_FORCE_PASS_VAR].as_deref(), Some("0"));
+        assert_eq!(env[TEST_THREADS_VAR].as_deref(), Some("3"));
+        assert_eq!(env[gamma_rt::ACTIVE_VAR].as_deref(), Some("11"));
+        assert_eq!(env[gamma_rt::CENSUS_VAR].as_deref(), Some("census.bin"));
+        assert_eq!(env["CARGO_MANIFEST_DIR"].as_deref(), Some("manifest"));
+    }
+
+    #[test]
+    fn output_reader_diagnostics_name_the_stream_and_cause() {
+        assert_eq!(ReaderStream::Stdout.to_string(), "standard output");
+        let error = ReaderStartError {
+            stream: ReaderStream::Stdout,
+            cause: io::Error::other("refused"),
+        };
+        assert_eq!(error.to_string(), "the standard output reader could not be started: refused");
+    }
+
+    #[test]
+    fn suspicion_attempts_scale_only_the_budget_they_are_confirming() {
+        let base = Attempt {
+            active: Some(7),
+            timeout: Some(Duration::from_secs(2)),
+            stall: Stall {
+                budget: Some(Duration::from_secs(3)),
+            },
+            request: MemoryRequest {
+                meter: true,
+                limit: Some(100),
+            },
+            only: Only::All,
+            census: None,
+        };
+
+        let patient = base.patient();
+        assert_eq!(patient.timeout, Some(Duration::from_secs(2)));
+        assert_eq!(patient.stall.budget, Some(Duration::from_secs(9)));
+        assert_eq!(patient.active, Some(7));
+        assert_eq!(patient.request.limit, Some(100));
+    }
+
+    #[test]
+    fn progress_helpers_distinguish_nextest_partial_failure_and_last_test() {
+        let progress = Mutex::new(Progress::new(Watch::Nextest));
+        assert_eq!(unfinished_nextest_failure(false, &progress), None);
+        assert_eq!(unfinished_nextest_failure(true, &progress), None);
+
+        {
+            let mut progress = progress.lock().expect("progress lock");
+            progress.failed = Some("module::failed".to_owned());
+            progress.test = Some("module::running".to_owned());
+        }
+
+        assert!(
+            matches!(unfinished_nextest_failure(true, &progress), Some(Verdict::Unmetered(reason)) if reason.contains("did not finish"))
+        );
+        assert_eq!(last_test(&progress).as_deref(), Some("module::running"));
+    }
+
+    #[test]
+    fn collection_timeout_is_partial_even_when_every_received_chunk_was_complete() {
+        let (sink, drained) = mpsc::channel();
+        sink.send(Drained {
+            text: b"prefix".to_vec(),
+            tail: b"tail".to_vec(),
+            tail_truncated: false,
+            complete: true,
+            authoritative: true,
+            stream: ReaderStream::Stdout,
+        })
+        .expect("chunk");
+
+        let collected = collected(&drained, Duration::from_millis(1));
+        assert_eq!(collected.text, b"prefix");
+        assert!(!collected.whole);
+        drop(sink);
+    }
 
     /// A pipe that fails part way through is not reported as a stream that simply ended.
     ///
@@ -3766,9 +4200,14 @@ mod tests {
         let binary = crate::testing::helper();
         let command = launcher(&work, &binary, Only::All).expect("a direct launch needs nothing from a runner");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        let cache_home = command
+            .get_envs()
+            .find(|(name, _value)| *name == crate::testing::CACHE_HOME_VAR)
+            .and_then(|(_name, value)| value);
 
         assert_eq!(command.get_program(), binary.path.as_str());
         assert_eq!(args, vec!["--gamma-step=exit:0"]);
+        assert!(cache_home.is_some(), "a nested Cargo Gamma process could escape the test cache");
     }
 
     /// A run narrowed to one test asks libtest for that name and for an exact match.
@@ -3911,48 +4350,6 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "the wait ran to its timeout despite being signalled"
-        );
-    }
-
-    /// A binary that exits at once is judged at once, not one wait later.
-    ///
-    /// Measured over a run of launches, because a single one is dominated by process creation and
-    /// would only be measuring the platform. If the reader threads ever stop signalling, each launch
-    /// falls back to the cap and the total blows past this bound by an order of magnitude — which is
-    /// exactly the regression worth catching, since it costs a wait per reachable binary per mutant.
-    #[cfg_attr(
-        any(coverage_nightly, windows),
-        ignore = "coverage instrumentation or Windows process startup makes this wall-clock assertion meaningless"
-    )]
-    #[test]
-    fn a_binary_that_exits_at_once_is_not_waited_on() {
-        let (_directory, work) = scripted(&["exit:0"]);
-        let quick = crate::testing::helper();
-        let launches = 20;
-        let started = Instant::now();
-
-        for _ in 0..launches {
-            let verdict = run_binary(
-                &work,
-                &quick,
-                Attempt {
-                    active: None,
-                    timeout: Some(Duration::from_mins(1)),
-                    stall: Stall::NONE,
-                    request: MemoryRequest::default(),
-                    only: Only::All,
-                    census: None,
-                },
-                false,
-            );
-
-            assert!(matches!(verdict, Verdict::Passed), "{verdict:?}");
-        }
-
-        assert!(
-            started.elapsed() < WAIT_CAP * launches,
-            "{launches} instant launches took {:?}, which is at least a full wait each",
-            started.elapsed()
         );
     }
 

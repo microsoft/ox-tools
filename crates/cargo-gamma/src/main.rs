@@ -1625,8 +1625,28 @@ use real_host::RealHost;
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn main() {
+fn main() -> ! {
+    if let Some(code) = cargo_gamma_lib::run_rustc_wrapper_if_requested(env::args_os()) {
+        process::exit(wrapper_exit_code(code));
+    }
+
     // `run` returns the process exit code rather than exiting itself, so that every code path
     // through the CLI is reachable from an ordinary integration test.
     process::exit(run(&mut RealHost, env::args_os()));
+}
+
+fn wrapper_exit_code(code: process::ExitCode) -> i32 {
+    if code == process::ExitCode::SUCCESS { 0 } else { 1 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrapper_exit_codes_are_reduced_to_shell_success_or_failure() {
+        assert_eq!(wrapper_exit_code(process::ExitCode::SUCCESS), 0);
+        assert_eq!(wrapper_exit_code(process::ExitCode::FAILURE), 1);
+        assert_eq!(wrapper_exit_code(process::ExitCode::from(7)), 1);
+    }
 }

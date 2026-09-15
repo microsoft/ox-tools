@@ -28,11 +28,12 @@ use super::faults::{self, Fault};
 use super::loader::{Launch, toolchain_libraries};
 use super::manifest::{CAP_LINTS, Manifest, RUNTIME_CRATE, RUNTIME_PACKAGE, WorkspaceRuntimeFeatures, anchor_cargo_config, cap_lints};
 use super::nextest::Harness;
+use super::rustc_wrapper::{CAPTURE_DIR_VAR, ORIGINAL_WRAPPER_VAR, reset_capture_directory, wrapper_path};
 use super::sync::sync_or_copy;
 use super::test_binary::{TEST_THREADS_VAR, TestBinary, harness_threads};
-use crate::Result;
 use crate::discover::TargetFile;
 use crate::error::error;
+use crate::{Result, cfg};
 
 /// The workspace and optional redirected-cache locks claimed as one handoff unit.
 pub(crate) struct CacheLocks {
@@ -53,6 +54,9 @@ pub(crate) const fn cache_lock_identity(locks: &CacheLocks) -> usize {
 
 /// Identifies the workspace allowed to reuse a cache directory.
 const CACHE_OWNER: &str = ".cargo-gamma-owner";
+
+/// The private cache home propagated only by Cargo Gamma's own test harness.
+const TEST_CACHE_HOME_VAR: &str = "CARGO_GAMMA_TEST_CACHE_HOME";
 
 /// Generous marker bound allowing 32,767 Windows UTF-16 code units at four UTF-8 bytes each.
 const MAX_CACHE_OWNER_LEN: u64 = 32_767 * 4;
@@ -113,6 +117,10 @@ pub struct Workspace {
     /// afterwards that would fix it. Every launch shares this one answer, so the baseline and the
     /// sweep still cannot disagree about the width of the workload they measure and judge.
     harness_threads: OnceLock<Option<String>>,
+
+    /// The private cache home inherited by nested Cargo Gamma processes in self-tests.
+    #[cfg(any(test, feature = "internals"))]
+    test_cache_home: Option<Utf8PathBuf>,
 
     /// Held for the life of the run so that another cargo-gamma command targeting the same original
     /// workspace is turned away. Released when the process ends, however it ends, so a crash cannot
@@ -226,6 +234,9 @@ impl Workspace {
         let source = &absolute(source);
         let base = gamma_base(source, config.cache_dir.as_deref());
 
+        if config.cache_dir.is_none() {
+            validate_default_cache_base(source, &base)?;
+        }
         ensure_copy_terminates(source, &base)?;
 
         let root = base.join("workspace");
@@ -283,6 +294,8 @@ impl Workspace {
             nextest: None,
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
+            #[cfg(any(test, feature = "internals"))]
+            test_cache_home: crate::testing::cache_home(source),
             _workspace_lock: workspace_lock,
             _cache_lock: cache_lock,
             torn_down: false,
@@ -388,6 +401,8 @@ impl Workspace {
     /// because it belongs to whatever created it rather than to this handle.
     #[cfg(any(test, feature = "internals"))]
     pub(crate) fn adopt(root: Utf8PathBuf, target: Utf8PathBuf) -> Self {
+        let test_cache_home = crate::testing::cache_home(&root);
+
         Self {
             runtime: root.join("gamma-rt"),
             root,
@@ -399,6 +414,8 @@ impl Workspace {
             leak: true,
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
+            #[cfg(any(test, feature = "internals"))]
+            test_cache_home,
             _workspace_lock: tempfile::tempfile().expect("a temporary file should be creatable"),
             _cache_lock: None,
             torn_down: false,
@@ -420,6 +437,7 @@ impl Workspace {
         let _ = command.current_dir(self.root.as_std_path());
         let _ = command.env("CARGO_TARGET_DIR", self.target.as_std_path());
         let _ = command.env("CARGO_TERM_COLOR", if self.cargo.color { "always" } else { "never" });
+        self.inherit_test_cache_home(&mut command);
 
         cap_ambient_rustflags(&mut command);
 
@@ -430,7 +448,40 @@ impl Workspace {
         // user debugging a mutant by hand may export it.
         let _ = command.env_remove(gamma_rt::ACTIVE_VAR);
 
+        if let Some(wrapper) = wrapper_path()
+            && let Some(original) = cfg::rustc_wrapper_chain(&self.root)
+        {
+            let captures = self.target.join(".cargo-gamma-rustc");
+            reset_capture_directory(&captures);
+            let _ = command.env(CAPTURE_DIR_VAR, captures.as_std_path());
+
+            if let Some(original) = original {
+                let _ = command.env(ORIGINAL_WRAPPER_VAR, original);
+            } else {
+                let _ = command.env_remove(ORIGINAL_WRAPPER_VAR);
+            }
+
+            let _ = command.env("RUSTC_WRAPPER", wrapper.as_std_path());
+        }
+
         command
+    }
+
+    /// The persistent compiler-capture directory, only when this process can populate it.
+    pub(super) fn rustc_captures(&self) -> Option<Utf8PathBuf> {
+        wrapper_path()?;
+        cfg::rustc_wrapper_chain(&self.root)?;
+
+        Some(self.target.join(".cargo-gamma-rustc"))
+    }
+
+    /// Propagates the self-test cache boundary to Cargo, test binaries, and nested Gamma commands.
+    pub(super) fn inherit_test_cache_home(&self, command: &mut Command) {
+        #[cfg(any(test, feature = "internals"))]
+        crate::testing::inherit_cache_home(command, self.test_cache_home.as_deref());
+
+        #[cfg(not(any(test, feature = "internals")))]
+        let _ = command;
     }
 
     /// Marks the run as having got far enough that its build artifacts are worth keeping.
@@ -723,10 +774,30 @@ pub fn gamma_base(root: &Utf8Path, cache: Option<&Utf8Path>) -> Utf8PathBuf {
 
 /// The directory every default per-workspace cache is a child of.
 fn default_cache_home(root: &Utf8Path) -> Utf8PathBuf {
-    env::var_os("XDG_CACHE_HOME")
+    #[cfg(any(test, feature = "internals"))]
+    if let Some(home) = crate::testing::cache_home(root) {
+        return home.join("cargo-gamma");
+    }
+
+    if let Some(home) = env::var_os(TEST_CACHE_HOME_VAR).and_then(absolute_cache_home) {
+        return home.join("cargo-gamma");
+    }
+
+    default_cache_home_with(root, |name| env::var_os(name))
+}
+
+/// The default base a normal process derives without any self-test override.
+#[cfg(any(test, feature = "internals"))]
+pub(crate) fn production_gamma_base(root: &Utf8Path) -> Utf8PathBuf {
+    let root = absolute(root);
+    absolute(&default_cache_home_with(&root, |name| env::var_os(name)).join(workspace_identity(&root)))
+}
+
+fn default_cache_home_with(root: &Utf8Path, mut get: impl FnMut(&str) -> Option<OsString>) -> Utf8PathBuf {
+    get("XDG_CACHE_HOME")
         .and_then(absolute_cache_home)
-        .or_else(|| env::var_os("LOCALAPPDATA").and_then(absolute_cache_home))
-        .or_else(|| env::var_os("HOME").and_then(absolute_cache_home).map(|home| home.join(".cache")))
+        .or_else(|| get("LOCALAPPDATA").and_then(absolute_cache_home))
+        .or_else(|| get("HOME").and_then(absolute_cache_home).map(|home| home.join(".cache")))
         .unwrap_or_else(|| absolute(root).parent().unwrap_or(root).join(".cargo-gamma-cache"))
         .join("cargo-gamma")
 }
@@ -761,7 +832,7 @@ fn workspace_identity(root: &Utf8Path) -> String {
 /// Digests the already-normalized spelling that defines one workspace's cache identity.
 fn digest_workspace_path(root: &Utf8Path) -> String {
     let digest = blake3::hash(root.as_str().as_bytes());
-    let mut identity = [0_u8; 8];
+    let mut identity = [u8::MIN; 8];
 
     identity.copy_from_slice(digest.as_bytes().get(..8).expect("a BLAKE3 digest is 32 bytes long"));
 
@@ -785,6 +856,8 @@ fn digest_workspace_path(root: &Utf8Path) -> String {
 pub fn clean_cache(root: &Utf8Path) -> Result<bool> {
     let base = gamma_base(root, None);
     let mut removed = false;
+
+    validate_default_cache_base(root, &base)?;
 
     if base.exists() {
         reject_linked_cache(&base)?;
@@ -829,7 +902,7 @@ fn remove_cached(entry: &fs::DirEntry) -> Result<()> {
 ///
 /// Purely textual, so it never touches the filesystem and never fails: the paths it is given are
 /// scratch directories that do not exist yet, which is exactly when canonicalising cannot answer.
-pub(super) fn absolute(path: &Utf8Path) -> Utf8PathBuf {
+pub(crate) fn absolute(path: &Utf8Path) -> Utf8PathBuf {
     let rooted = if path.is_absolute() {
         path.to_owned()
     } else {
@@ -1443,14 +1516,52 @@ fn claim(base: &Utf8Path) -> Result<File> {
 pub(crate) fn claim_workspace(root: &Utf8Path) -> Result<File> {
     let base = gamma_base(root, None);
 
+    claim_workspace_at(root, &base)
+}
+
+/// Claims an already-derived default base after checking its production shape.
+fn claim_workspace_at(root: &Utf8Path, base: &Utf8Path) -> Result<File> {
+    validate_default_cache_base(root, base)?;
+
     fs::create_dir_all(base.as_std_path())
         .map_err(|cause| error!("could not create cargo-gamma's workspace cache at `{base}`").caused_by(cause))?;
 
-    let lock = claim(&base)?;
+    let lock = claim(base)?;
 
-    validate_cache_owner(root, &base, CacheKind::Default)?;
+    validate_cache_owner(root, base, CacheKind::Default)?;
 
     Ok(lock)
+}
+
+/// Refuses a malformed default base before any directory, lock, marker, or cached entry is touched.
+///
+/// This is deliberately independent of [`gamma_base`]'s joins. Mutation testing changes one
+/// expression at a time, so removing the namespace or identity join from the derivation leaves
+/// this structural check intact and turns the mutant into a refusal rather than a write to the
+/// platform cache home.
+fn validate_default_cache_base(root: &Utf8Path, base: &Utf8Path) -> Result<()> {
+    let root = absolute(root);
+    let expected_identity = workspace_identity(&root);
+    let shaped = base.file_name() == Some(expected_identity.as_str())
+        && base.parent().is_some_and(|namespace| namespace.file_name() == Some("cargo-gamma"));
+
+    if !shaped {
+        return Err(error!(
+            "cargo-gamma refused the malformed default cache path `{base}`: \
+             a default cache must be an identity directory beneath the `cargo-gamma` cache namespace"
+        ));
+    }
+
+    #[cfg(any(test, feature = "internals"))]
+    if let Some(home) = crate::testing::cache_home(&root)
+        && !base.starts_with(&home)
+    {
+        return Err(error!(
+            "cargo-gamma's self-test cache path `{base}` escaped its private cache home `{home}`"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Takes every lock needed to use one workspace's reusable state.
@@ -1727,6 +1838,285 @@ mod tests {
             failure.to_string().contains("`cargo metadata` did not print valid UTF-8"),
             "{failure}"
         );
+    }
+
+    #[test]
+    fn scratch_files_create_parents_and_nextest_deduplicates_packages() {
+        let directory = crate::testing::workdir("workspace-scratch-write-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("tree")).expect("UTF-8 root");
+        let target = Utf8PathBuf::from_path_buf(directory.path().join("target")).expect("UTF-8 target");
+        fs::create_dir_all(&root).expect("root");
+        let work = Workspace::adopt(root, target.clone());
+
+        let written = work.write_scratch("nested/data.json", "{}").expect("scratch file");
+        assert_eq!(written, target.join("nested/data.json"));
+        assert_eq!(fs::read_to_string(&written).expect("scratch contents"), "{}");
+
+        let binaries = [
+            TestBinary {
+                package: "fallback".to_owned(),
+                package_id: String::new(),
+                ..crate::testing::test_binary("/first")
+            },
+            TestBinary {
+                package: "fallback".to_owned(),
+                package_id: String::new(),
+                ..crate::testing::test_binary("/second")
+            },
+            TestBinary {
+                package: "ignored".to_owned(),
+                package_id: "precise-id".to_owned(),
+                ..crate::testing::test_binary("/third")
+            },
+        ];
+        let command = work.nextest_list_command(&binaries);
+        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+
+        assert_eq!(args.iter().filter(|arg| *arg == "fallback").count(), 1);
+        assert_eq!(args.iter().filter(|arg| *arg == "precise-id").count(), 1);
+    }
+
+    #[test]
+    fn cargo_commands_preserve_the_workspace_environment_and_selection() {
+        let directory = crate::testing::workdir("workspace-command-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("root")).expect("UTF-8 root");
+        let target = Utf8PathBuf::from_path_buf(directory.path().join("target")).expect("UTF-8 target");
+        fs::create_dir_all(&root).expect("root");
+        let mut work = Workspace::adopt(root.clone(), target.clone());
+        work.cargo.color = true;
+
+        let command = work.cargo();
+        assert_eq!(command.get_current_dir(), Some(root.as_std_path()));
+        let env: BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(env["CARGO_TARGET_DIR"].as_deref(), Some(target.as_str()));
+        assert_eq!(env["CARGO_TERM_COLOR"].as_deref(), Some("always"));
+        assert!(env.contains_key(gamma_rt::ACTIVE_VAR));
+        assert_eq!(env[gamma_rt::ACTIVE_VAR], None);
+
+        work.cargo.color = false;
+        let command = work.cargo();
+        let color = command
+            .get_envs()
+            .find(|(name, _value)| *name == "CARGO_TERM_COLOR")
+            .and_then(|(_name, value)| value);
+        assert_eq!(color, Some(OsStr::new("never")));
+    }
+
+    #[test]
+    fn workspace_lifecycle_removes_only_unsettled_unleaked_trees() {
+        let directory = crate::testing::workdir("workspace-lifecycle-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("root")).expect("UTF-8 root");
+        let target = Utf8PathBuf::from_path_buf(directory.path().join("target")).expect("UTF-8 target");
+        fs::create_dir_all(&root).expect("root");
+        fs::create_dir_all(&target).expect("target");
+
+        let mut work = Workspace::adopt(root.clone(), target.clone());
+        work.leak = false;
+        work.settled.store(false, Ordering::Relaxed);
+        work.teardown().expect("teardown");
+        assert!(work.torn_down);
+        assert!(!root.exists());
+        assert!(!target.exists());
+        work.teardown().expect("a second teardown is inert");
+
+        let kept_root = Utf8PathBuf::from_path_buf(directory.path().join("kept-root")).expect("UTF-8 root");
+        let kept_target = Utf8PathBuf::from_path_buf(directory.path().join("kept-target")).expect("UTF-8 target");
+        fs::create_dir_all(&kept_root).expect("root");
+        fs::create_dir_all(&kept_target).expect("target");
+        let mut kept = Workspace::adopt(kept_root.clone(), kept_target.clone());
+        kept.leak = false;
+        kept.teardown().expect("settled teardown");
+        assert!(kept_root.exists());
+        assert!(kept_target.exists());
+    }
+
+    #[test]
+    fn harness_calibration_is_stable_after_its_first_decision() {
+        let directory = crate::testing::workdir("workspace-harness-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+
+        work.calibrate_harness(1);
+        let first = work.harness_threads().map(str::to_owned);
+        work.calibrate_harness(usize::MAX);
+        assert_eq!(work.harness_threads(), first.as_deref());
+    }
+
+    #[test]
+    fn cargo_metadata_capture_is_nonempty_json_from_the_adopted_root() {
+        let directory = crate::testing::workdir("workspace-metadata-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        fs::create_dir_all(root.join("src")).expect("src");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"metadata-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n",
+        )
+        .expect("manifest");
+        fs::write(root.join("src/lib.rs"), "").expect("lib");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+
+        let metadata = work.capture_cargo_metadata().expect("cargo metadata");
+        let parsed: serde_json::Value = serde_json::from_str(&metadata).expect("metadata JSON");
+        assert_eq!(parsed["packages"][0]["name"], "metadata-fixture");
+        let metadata_root = parsed["workspace_root"]
+            .as_str()
+            .expect("cargo metadata always reports a string workspace root");
+        assert_eq!(physical(Utf8Path::new(metadata_root)), physical(&root));
+    }
+
+    #[test]
+    fn overwrite_requires_a_real_file_inside_the_scratch_root_and_avoids_rewrites() {
+        let directory = crate::testing::workdir("workspace-overwrite-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("root")).expect("UTF-8 root");
+        let file = root.join("src/lib.rs");
+        fs::create_dir_all(file.parent().expect("parent")).expect("parent");
+        fs::write(&file, "old").expect("file");
+
+        assert!(!Workspace::overwrite(&root, &file, "old").expect("identical contents"));
+        assert!(Workspace::overwrite(&root, &file, "new").expect("changed contents"));
+        assert_eq!(fs::read_to_string(&file).expect("contents"), "new");
+
+        let directory_path = root.join("src");
+        let error = Workspace::overwrite(&root, &directory_path, "no").expect_err("a directory is not source");
+        assert!(error.to_string().contains("link or a device"), "{error}");
+
+        let absent = root.join("missing.rs");
+        let error = Workspace::overwrite(&root, &absent, "no").expect_err("an absent file was not copied");
+        assert!(error.to_string().contains("did not create"), "{error}");
+    }
+
+    #[test]
+    fn manifest_lookup_stops_at_the_scratch_root_and_never_uses_an_outer_manifest() {
+        let directory = crate::testing::workdir("workspace-manifest-lookup-");
+        let outer = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        fs::write(outer.join("Cargo.toml"), "[workspace]\n").expect("outer manifest");
+        let root = outer.join("scratch");
+        fs::create_dir_all(root.join("crate/src")).expect("source");
+        fs::write(root.join("crate/Cargo.toml"), "[package]\nname=\"inside\"\nversion=\"0.0.0\"\n").expect("inner manifest");
+        let work = Workspace::adopt(root.clone(), outer.join("target"));
+        let files = [TargetFile {
+            path: Utf8PathBuf::from("crate/src/lib.rs"),
+            absolute: root.join("crate/src/lib.rs"),
+            package: "inside".to_owned(),
+        }];
+
+        assert_eq!(work.manifest_of("inside", &files), Some(root.join("crate/Cargo.toml")));
+        assert_eq!(work.manifest_of("absent", &files), None);
+
+        fs::remove_file(root.join("crate/Cargo.toml")).expect("inner manifest");
+        assert_eq!(work.manifest_of("inside", &files), None);
+    }
+
+    #[test]
+    fn cache_home_fallbacks_follow_cargo_precedence() {
+        let root = absolute(Utf8Path::new("workspace"));
+        let local = root.join("local");
+        let home = root.join("home");
+
+        let from_local = default_cache_home_with(&root, |name| (name == "LOCALAPPDATA").then(|| OsString::from(local.as_str())));
+        assert_eq!(from_local, local.join("cargo-gamma"));
+
+        let from_home = default_cache_home_with(&root, |name| (name == "HOME").then(|| OsString::from(home.as_str())));
+        assert_eq!(from_home, home.join(".cache/cargo-gamma"));
+
+        let fallback = default_cache_home_with(&root, |_name| None);
+        assert_eq!(
+            fallback,
+            root.parent()
+                .expect("absolute workspace has a parent")
+                .join(".cargo-gamma-cache/cargo-gamma")
+        );
+    }
+
+    #[test]
+    fn physical_paths_preserve_a_completely_unresolvable_spelling() {
+        let path = Utf8Path::new("");
+        assert_eq!(physical(path), path);
+    }
+
+    #[test]
+    fn copy_pruning_predicates_distinguish_lexical_relationships() {
+        let source = Utf8Path::new("workspace");
+        let inside = Utf8Path::new("workspace/cache");
+        let outside = Utf8Path::new("cache");
+
+        assert!(prunes(source, inside));
+        assert!(!prunes(source, source));
+        assert!(!prunes(source, outside));
+        assert!(prunes_in_practice(source, inside, source, inside));
+        assert!(!prunes_in_practice(source, outside, source, outside));
+    }
+
+    #[test]
+    fn a_workspace_without_vcs_metadata_can_be_relocated() {
+        let directory = crate::testing::workdir("workspace-no-vcs-");
+        let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("UTF-8 source");
+        let scratch = Utf8PathBuf::from_path_buf(directory.path().join("scratch")).expect("UTF-8 scratch");
+        fs::create_dir_all(&source).expect("source");
+
+        ensure_vcs_visibility(&source, &scratch).expect("there is no metadata to hide");
+    }
+
+    #[test]
+    fn git_directories_and_pointer_files_are_exposed_to_the_scratch_tree() {
+        let directory = crate::testing::workdir("workspace-expose-vcs-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        let source = root.join("source");
+        let scratch = source.join("scratch");
+        let git = source.join(".git");
+        fs::create_dir_all(&git).expect("git directory");
+        fs::create_dir_all(&scratch).expect("scratch");
+
+        expose_vcs_metadata(&source, &scratch).expect("directory metadata");
+        assert_eq!(
+            fs::read_to_string(scratch.join(".git")).expect("git pointer"),
+            format!("gitdir: {}\n", absolute(&git))
+        );
+
+        fs::remove_file(scratch.join(".git")).expect("first pointer");
+        fs::remove_dir_all(&git).expect("git directory");
+        let actual_git = root.join("actual-git");
+        fs::create_dir_all(&actual_git).expect("actual git");
+        fs::write(&git, "gitdir: ../actual-git\n").expect("git pointer source");
+
+        expose_vcs_metadata(&source, &scratch).expect("pointer metadata");
+        assert_eq!(
+            fs::read_to_string(scratch.join(".git")).expect("rewritten pointer"),
+            format!("gitdir: {}\n", absolute(&actual_git))
+        );
+    }
+
+    #[test]
+    fn empty_and_non_utf8_owner_markers_are_rejected() {
+        let directory = crate::testing::workdir("workspace-owner-invalid-");
+        let base = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 base");
+        let source = base.join("source");
+        let owner = base.join(CACHE_OWNER);
+
+        fs::write(&owner, "").expect("empty owner");
+        let empty = validate_cache_owner(&source, &base, CacheKind::Redirected).expect_err("empty marker");
+        assert!(empty.to_string().contains("invalid length"), "{empty}");
+
+        fs::write(&owner, [0xff]).expect("non-UTF-8 owner");
+        let invalid = validate_cache_owner(&source, &base, CacheKind::Redirected).expect_err("non-UTF-8 marker");
+        assert!(invalid.to_string().contains("could not read"), "{invalid}");
+    }
+
+    #[test]
+    fn a_cache_containing_only_its_lock_has_no_unowned_entries() {
+        let directory = crate::testing::workdir("workspace-owned-lock-");
+        let base = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 base");
+        fs::write(base.join("lock"), "lock").expect("lock");
+
+        assert!(!has_unowned_entries(&base).expect("cache scan"));
     }
 
     /// Exercises every step of preparing a scratch tree — creating the base, claiming the lock,
@@ -2416,6 +2806,7 @@ mod tests {
             leak: false,
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
+            test_cache_home: crate::testing::cache_home(root),
             _workspace_lock: File::create(base.join("lock").as_std_path()).unwrap(),
             _cache_lock: None,
             torn_down: false,
@@ -2697,6 +3088,8 @@ mod tests {
     /// Spelled out rather than deriving from [`unsettled_default`] with struct update syntax:
     /// `Workspace` implements `Drop`, so its fields cannot be moved out of another instance.
     fn unsettled_at(root: Utf8PathBuf, runtime: Utf8PathBuf) -> Workspace {
+        let test_cache_home = crate::testing::cache_home(&root);
+
         Workspace {
             root,
             runtime,
@@ -2708,6 +3101,7 @@ mod tests {
             leak: true,
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
+            test_cache_home,
             _workspace_lock: tempfile::tempfile().unwrap(),
             _cache_lock: None,
             torn_down: false,
@@ -2729,6 +3123,7 @@ mod tests {
             leak: true,
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
+            test_cache_home: None,
             _workspace_lock: tempfile::tempfile().unwrap(),
             _cache_lock: None,
             torn_down: false,
@@ -2919,6 +3314,50 @@ mod tests {
         assert_eq!(absolute_cache_home(OsString::new()), None);
     }
 
+    #[test]
+    fn the_xdg_cache_variable_and_tool_directory_define_the_default_home() {
+        let root = absolute(Utf8Path::new("."));
+        let cache = root.join("xdg");
+        let mut requested = Vec::new();
+        let actual = default_cache_home_with(&root, |name| {
+            requested.push(name.to_owned());
+            (name == "XDG_CACHE_HOME").then(|| cache.clone().into())
+        });
+
+        assert_eq!(requested, ["XDG_CACHE_HOME"]);
+        assert_eq!(actual, cache.join("cargo-gamma"));
+    }
+
+    /// A broken derivation is stopped before it can claim the cache home or namespace itself.
+    #[test]
+    fn malformed_default_cache_paths_are_refused_before_any_state_is_written() {
+        let directory = crate::testing::workdir("malformed-default-cache-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the temporary path is UTF-8");
+        let source = root.join("source");
+        let home = root.join("platform-cache");
+        let namespace = home.join("cargo-gamma");
+        let wrong_identity = namespace.join("not-the-workspace-identity");
+
+        fs::create_dir_all(&source).expect("workspace");
+        fs::create_dir_all(&namespace).expect("cache namespace");
+
+        for malformed in [&home, &namespace, &wrong_identity] {
+            let failure = claim_workspace_at(&source, malformed).expect_err("a malformed default cache must be refused");
+
+            assert!(failure.to_string().contains("malformed default cache path"), "{failure}");
+            assert!(!malformed.join("lock").exists(), "a lock escaped to `{malformed}`");
+            assert!(!malformed.join(CACHE_OWNER).exists(), "an owner marker escaped to `{malformed}`");
+        }
+    }
+
+    #[test]
+    fn relative_scratch_paths_are_made_absolute() {
+        let path = absolute(Utf8Path::new("nested/cache"));
+
+        assert!(path.is_absolute(), "{path}");
+        assert!(path.ends_with("nested/cache"), "{path}");
+    }
+
     /// Filesystem aliases of one Windows workspace share one cache and lock identity.
     #[cfg(windows)]
     #[test]
@@ -2928,7 +3367,7 @@ mod tests {
         let alias = Utf8PathBuf::from(root.as_str().to_uppercase());
 
         assert_eq!(workspace_identity(&root), workspace_identity(&alias));
-        assert_eq!(gamma_base(&root, None), gamma_base(&alias, None));
+        assert_eq!(production_gamma_base(&root), production_gamma_base(&alias));
     }
 
     /// A truncated digest can collide, so the directory says which workspace it belongs to and a
@@ -2996,7 +3435,7 @@ mod tests {
     #[test]
     fn the_default_scratch_tree_cannot_rediscover_workspace_cargo_configuration() {
         let root = Utf8Path::new("/workspace");
-        let base = gamma_base(root, None);
+        let base = production_gamma_base(root);
 
         assert!(!base.starts_with(root), "{base}");
         assert!(
@@ -3008,7 +3447,9 @@ mod tests {
     #[test]
     fn array_rustflags_from_workspace_config_reach_scratch_cargo_once() {
         let directory = crate::testing::workdir("scratch-config-once");
+        let cache_directory = tempfile::tempdir().expect("a cache directory");
         let source = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf8");
+        let cache = Utf8PathBuf::from_path_buf(cache_directory.path().to_path_buf()).expect("utf8");
         let capture = source.join("captured-flags");
 
         fs::create_dir_all(source.join(".cargo").as_std_path()).expect(".cargo");
@@ -3029,9 +3470,9 @@ mod tests {
             "[build]\nrustflags = [\"--cfg\", \"gamma_once\"]\n",
         )
         .expect("config");
-
         let mut events = crate::testing::Recorder::default();
-        let work = Workspace::prepare(&source, &Config::default(), &mut events).expect("prepare");
+        let work =
+            crate::testing::with_cache_home_at(cache, || Workspace::prepare(&source, &Config::default(), &mut events)).expect("prepare");
         let mut command = work.cargo();
         let status = command
             .env_remove("CARGO_ENCODED_RUSTFLAGS")
@@ -3077,7 +3518,7 @@ mod tests {
         ensure_copy_terminates(Utf8Path::new("/workspace"), &base).expect("a scratch directory outside the workspace is fine");
 
         // An explicitly selected path inside the workspace is fine as long as the copy prunes it.
-        let inside = gamma_base(Utf8Path::new("/workspace"), None);
+        let inside = production_gamma_base(Utf8Path::new("/workspace"));
 
         ensure_copy_terminates(Utf8Path::new("/workspace"), &inside).expect("the default base is outside the copy");
         assert!(!inside.starts_with("/workspace"), "{inside}");
@@ -3465,6 +3906,19 @@ mod tests {
         // The lock serializes commands targeting the same original workspace.
         assert!(cause.is_usage());
         assert!(cause.to_string().contains("already using"), "{cause}");
+    }
+
+    #[test]
+    fn claiming_a_lock_never_truncates_its_existing_contents() {
+        let temporary = tempfile::tempdir().unwrap();
+        let base = Utf8PathBuf::from_path_buf(temporary.path().to_path_buf()).unwrap();
+        let path = base.join("lock");
+        fs::write(&path, "owner marker").unwrap();
+
+        let held = claim(&base).expect("lock can be claimed");
+        drop(held);
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "owner marker");
     }
 
     /// A filesystem that cannot lock at all is reported as such, not as another run holding it.

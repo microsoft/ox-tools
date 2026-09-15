@@ -6,6 +6,7 @@
 //! Walks the project directory tree, collecting all supported source files
 //! while skipping build artifacts and hidden directories.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use cargo_heather::CommentStyle;
@@ -33,7 +34,7 @@ pub(crate) fn find_source_files(project_dir: &Path, exclude_path: Option<&Path>,
         })
         .collect();
 
-    let mut files: Vec<PathBuf> = WalkDir::new(project_dir)
+    WalkDir::new(project_dir)
         .into_iter()
         .filter_entry(|entry| !should_skip_dir(entry))
         .filter_map(Result::ok)
@@ -63,10 +64,9 @@ pub(crate) fn find_source_files(project_dir: &Path, exclude_path: Option<&Path>,
 
             true
         })
-        .collect();
-
-    files.sort();
-    files
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn should_skip_dir(entry: &walkdir::DirEntry) -> bool {

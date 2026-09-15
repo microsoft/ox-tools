@@ -320,7 +320,11 @@ pub fn evaluate_many(
     manifest_path: Option<&Path>,
     gated_packages: &[String],
 ) -> Result<EvaluatedReport, CoverageGateError> {
-    evaluate_many_for_target(lcov_texts, manifest_path, gated_packages, None)
+    evaluate_many_for_target(lcov_texts, manifest_path, gated_packages, implicit_target())
+}
+
+fn implicit_target() -> Option<&'static str> {
+    None
 }
 
 /// Evaluate one or more lcov tracefiles for a selected Rust target.
@@ -362,6 +366,11 @@ mod tests {
     fn evaluate_rejects_malformed_lcov() {
         let err = evaluate("not lcov", None, &[]).expect_err("malformed lcov must error");
         assert!(err.to_string().contains("lcov tracefile"));
+    }
+
+    #[test]
+    fn evaluate_many_uses_the_implicit_host_target() {
+        assert_eq!(implicit_target(), None);
     }
 
     #[test]

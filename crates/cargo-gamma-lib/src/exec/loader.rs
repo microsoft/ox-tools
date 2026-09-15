@@ -128,8 +128,10 @@ fn joined(libraries: &[Utf8PathBuf], existing: Option<OsString>) -> Option<OsStr
 pub(super) fn toolchain_libraries(root: &Utf8Path, target: &Utf8Path) -> Vec<Utf8PathBuf> {
     let mut libraries = vec![target.join("debug").join("deps")];
 
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the process-wide compiler override cannot be mutated safely by parallel tests; output parsing is exercised through append_toolchain_libraries")]
     let output = Command::new(env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
         .current_dir(root.as_std_path())
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "these rustc query flags cross a process boundary whose process-wide override cannot be replaced safely; their two-line protocol is pinned by append_toolchain_libraries tests")]
         .args(["--print", "target-libdir", "--print", "sysroot"])
         .output();
 
@@ -137,19 +139,23 @@ pub(super) fn toolchain_libraries(root: &Utf8Path, target: &Utf8Path) -> Vec<Utf
         && output.status.success()
         && let Ok(printed) = String::from_utf8(output.stdout)
     {
-        let mut lines = printed.lines();
-
-        if let Some(libdir) = lines.next() {
-            libraries.push(Utf8PathBuf::from(libdir.trim()));
-        }
-
-        // Host-side libraries, such as those a proc macro links against, live here instead.
-        if let Some(sysroot) = lines.next() {
-            libraries.push(Utf8PathBuf::from(sysroot.trim()).join("lib"));
-        }
+        append_toolchain_libraries(&mut libraries, &printed);
     }
 
     libraries
+}
+
+fn append_toolchain_libraries(libraries: &mut Vec<Utf8PathBuf>, printed: &str) {
+    let mut lines = printed.lines();
+
+    if let Some(libdir) = lines.next() {
+        libraries.push(Utf8PathBuf::from(libdir.trim()));
+    }
+
+    // Host-side libraries, such as those a proc macro links against, live here instead.
+    if let Some(sysroot) = lines.next() {
+        libraries.push(Utf8PathBuf::from(sysroot.trim()).join("lib"));
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +192,65 @@ mod tests {
             STACK_FLOOR.to_string(),
             "an unparsable value is ignored"
         );
+        assert_eq!(stack_floor(Some(&STACK_FLOOR.to_string())), STACK_FLOOR.to_string());
+        assert_eq!(stack_floor(Some("0")), STACK_FLOOR.to_string());
+    }
+
+    #[test]
+    fn configuring_a_loader_sets_only_the_platform_loader_variable() {
+        let path = env::join_paths([PathBuf::from("/toolchain"), PathBuf::from("/inherited")]).expect("loader path");
+        let launch = Launch {
+            loader: Some(path.clone()),
+            stack: STACK_FLOOR.to_string(),
+        };
+        let mut command = Command::new("unused");
+
+        configure_loader(&mut command, &launch);
+
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _value)| *name == LOADER_VAR)
+                .and_then(|(_name, value)| value),
+            Some(path.as_os_str())
+        );
+    }
+
+    #[test]
+    fn configuring_a_loader_with_no_path_changes_no_environment() {
+        let launch = Launch {
+            loader: None,
+            stack: STACK_FLOOR.to_string(),
+        };
+        let mut command = Command::new("unused");
+
+        configure_loader(&mut command, &launch);
+
+        assert_eq!(command.get_envs().count(), 0);
+    }
+
+    #[test]
+    fn rustc_library_output_contributes_target_and_host_directories_in_order() {
+        let mut libraries = vec![Utf8PathBuf::from("/target/debug/deps")];
+
+        append_toolchain_libraries(&mut libraries, " /toolchain/target/lib \n /toolchain \nignored\n");
+
+        assert_eq!(
+            libraries,
+            [
+                Utf8PathBuf::from("/target/debug/deps"),
+                Utf8PathBuf::from("/toolchain/target/lib"),
+                Utf8PathBuf::from("/toolchain/lib"),
+            ]
+        );
+
+        let mut one = Vec::new();
+        append_toolchain_libraries(&mut one, "/only-target\n");
+        assert_eq!(one, [Utf8PathBuf::from("/only-target")]);
+
+        let mut none = Vec::new();
+        append_toolchain_libraries(&mut none, "");
+        assert!(none.is_empty());
     }
 
     #[test]

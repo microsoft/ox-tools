@@ -51,7 +51,9 @@ pub(super) fn scan_comments(text: &str, lines: &[usize]) -> Vec<Comment> {
     comment_spans(text)
         .into_iter()
         .map(|span| {
-            let raw = text.get(span.clone()).unwrap_or("");
+            let raw = text
+                .get(span.clone())
+                .expect("comment_spans returns UTF-8-boundary ranges within this same text");
 
             build_comment(
                 if raw.starts_with("//") {
@@ -79,15 +81,19 @@ pub(crate) fn comment_spans(text: &str) -> Vec<Range<usize>> {
             let end = line_comment_end(bytes, i);
 
             comments.push(i..end);
+            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not advancing to the comment end rediscovers it forever")]
             i = end;
         } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
             let end = block_comment_end(bytes, i);
 
             comments.push(i..end);
+            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not advancing to the comment end rediscovers it forever")]
             i = end;
         } else if let Some(end) = literal_end(text, i) {
+            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not advancing to the literal end retries it forever")]
             i = end;
         } else {
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing the fallback cursor leaves the scanner on one byte forever")]
             i += 1;
         }
     }
@@ -102,6 +108,7 @@ pub(crate) fn literal_end(text: &str, start: usize) -> Option<usize> {
         b'"' => string_end(bytes, start),
         b'r' if matches!(bytes.get(start + 1), Some(b'"' | b'#')) => raw_string_end(bytes, start),
         b'\'' => quote_end(bytes, start),
+        // #[gamma::skip(option.none_to_some, reason = "claiming ordinary syntax starts a zero-width literal leaves the outer scanner non-progressing")]
         _ => return None,
     };
 
@@ -151,8 +158,13 @@ fn build_comment(kind: CommentKind, raw: &str, span: Range<usize>, text: &str, l
         Err(insertion) => insertion.saturating_sub(1),
     };
 
-    let line_start = lines.get(line_index).copied().unwrap_or(0);
-    let before = text.get(line_start..span.start).unwrap_or("");
+    let line_start = lines
+        .get(line_index)
+        .copied()
+        .expect("line_starts contains the line covering every comment");
+    let before = text
+        .get(line_start..span.start)
+        .expect("line and comment starts are ordered boundaries in this text");
 
     Comment {
         kind,
@@ -168,6 +180,7 @@ fn line_comment_end(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 2;
 
     while i < bytes.len() && bytes[i] != b'\n' {
+        // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through comment text leaves the scan on one byte forever")]
         i += 1;
     }
 
@@ -175,6 +188,7 @@ fn line_comment_end(bytes: &[u8], start: usize) -> usize {
 }
 
 /// Returns the offset just past the end of a `/* */` comment, which may nest.
+// #[gamma::skip(fn_value.zero, fn_value.one, reason = "a fixed endpoint prevents the outer scanner from advancing and exhausts its resource budget")]
 fn block_comment_end(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 2;
     let mut depth = 1_usize;
@@ -182,15 +196,18 @@ fn block_comment_end(bytes: &[u8], start: usize) -> usize {
     while i < bytes.len() {
         if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
             depth += 1;
+            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_to_zero, reason = "not advancing past an opener repeatedly counts it until overflow or timeout")]
             i += 2;
         } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
             depth -= 1;
+            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, reason = "not advancing past a closer repeatedly consumes it until overflow or timeout")]
             i += 2;
 
             if depth == 0 {
                 return i;
             }
         } else {
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through block-comment text leaves the scan on one byte forever")]
             i += 1;
         }
     }
@@ -199,14 +216,19 @@ fn block_comment_end(bytes: &[u8], start: usize) -> usize {
 }
 
 /// Returns the offset just past the end of a `"..."` literal.
+// #[gamma::skip(fn_value.zero, fn_value.one, reason = "a fixed endpoint prevents the outer scanner from advancing and exhausts its resource budget")]
 fn string_end(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 1;
 
     while i < bytes.len() {
         match bytes[i] {
+            // #[gamma::skip(assign.add_to_sub, literal.int_to_zero, reason = "moving backward or not moving over an escape makes the scan non-progressing")]
             b'\\' => i += 2,
             b'"' => return i + 1,
-            _ => i += 1,
+            _ => {
+                // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through string text leaves the scan on one byte forever")]
+                i += 1;
+            }
         }
     }
 
@@ -220,6 +242,7 @@ fn raw_string_end(bytes: &[u8], start: usize) -> usize {
 
     while bytes.get(i) == Some(&b'#') {
         hashes += 1;
+        // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through raw-string hashes leaves the scan on one byte forever")]
         i += 1;
     }
 
@@ -228,9 +251,11 @@ fn raw_string_end(bytes: &[u8], start: usize) -> usize {
         return start + 1;
     }
 
+    // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing past the raw-string quote leaves the scan on one byte forever")]
     i += 1;
 
     while i < bytes.len() {
+        // #[gamma::skip(cond.negate, relational.eq_to_ne, reason = "treating non-quotes as closing candidates makes this scan exceed its test budget")]
         if bytes[i] == b'"' {
             let closing = i + 1;
             let found = bytes[closing..].iter().take_while(|b| **b == b'#').count();
@@ -240,6 +265,7 @@ fn raw_string_end(bytes: &[u8], start: usize) -> usize {
             }
         }
 
+        // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through raw-string text leaves the scan on one byte forever")]
         i += 1;
     }
 
@@ -257,7 +283,9 @@ fn quote_end(bytes: &[u8], start: usize) -> usize {
     if bytes.get(start + 1) == Some(&b'\\') {
         let mut i = start + 3;
 
+        // #[gamma::skip(cond.negate, reason = "negating the bounded quote search can index past the slice or exhaust the test budget")]
         while i < bytes.len() && bytes[i] != b'\'' {
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through an escaped character leaves the scan on one byte forever")]
             i += 1;
         }
 
@@ -565,5 +593,49 @@ mod tests {
         let bodies: Vec<&str> = file.comments.iter().map(|c| file.slice(&c.body)).collect();
 
         assert_eq!(bodies, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn literal_and_comment_endpoints_have_exact_oracles() {
+        assert_eq!(literal_end("plain", 0), None);
+        assert_eq!(literal_end("\"x\" tail", 0), Some(3));
+        assert_eq!(literal_end("r##\"x\"## tail", 0), Some(8));
+        assert_eq!(literal_end("'é' tail", 0), Some(4));
+        assert_eq!(literal_end("'name", 0), None);
+
+        assert_eq!(line_comment_end(b"//abc\nnext", 0), 5);
+        assert_eq!(line_comment_end(b"//abc", 0), 5);
+        assert_eq!(block_comment_end(b"/*a/*b*/c*/next", 0), 11);
+        assert_eq!(string_end(br#""a\"b"tail"#, 0), 6);
+        assert_eq!(raw_string_end(br##"r#"a"#tail"##, 0), 6);
+        assert_eq!(quote_end("'é'".as_bytes(), 0), 4);
+    }
+
+    #[test]
+    fn comment_kind_and_body_boundaries_cover_lookalike_delimiters() {
+        assert_eq!(line_comment_kind("//! inner"), CommentKind::InnerDoc);
+        assert_eq!(line_comment_kind("/// outer"), CommentKind::OuterDoc);
+        assert_eq!(line_comment_kind("//// plain"), CommentKind::Line);
+        assert_eq!(block_comment_kind("/*! inner */"), CommentKind::InnerDoc);
+        assert_eq!(block_comment_kind("/** outer */"), CommentKind::OuterDoc);
+        assert_eq!(block_comment_kind("/**/"), CommentKind::Block);
+        assert_eq!(block_comment_kind("/*** plain */"), CommentKind::Block);
+
+        let text = "code();  //  body  \n";
+        let comments = scan_comments(text, &line_starts(text));
+
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].span, 9..19);
+        assert_eq!(comments[0].body, 13..17);
+        assert_eq!(comments[0].line, 1);
+        assert!(comments[0].trailing);
+    }
+
+    #[test]
+    fn utf8_width_covers_every_leading_byte_class() {
+        assert_eq!(utf8_width(b'a'), 1);
+        assert_eq!(utf8_width("é".as_bytes()[0]), 2);
+        assert_eq!(utf8_width("€".as_bytes()[0]), 3);
+        assert_eq!(utf8_width("🦀".as_bytes()[0]), 4);
     }
 }

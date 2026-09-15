@@ -60,6 +60,27 @@ fn push_line_range(ranges: &mut Vec<String>, start: u32, end: u32) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::aggregate::LineTotals;
+    use crate::threshold::{Threshold, ThresholdSource};
+
+    fn outcome(status: Status) -> PackageOutcome {
+        PackageOutcome {
+            name: "alpha".to_owned(),
+            threshold: Threshold {
+                min_lines_percent: 80.0,
+                source: ThresholdSource::Package,
+            },
+            totals: LineTotals { count: 10, covered: 10 },
+            status,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn passing_statuses_have_no_failure_detail() {
+        assert!(failure_detail(&outcome(Status::Ok)).is_none());
+        assert!(failure_detail(&outcome(Status::NoCoverableLines)).is_none());
+    }
 
     #[test]
     fn line_ranges_compress_only_adjacent_lines() {

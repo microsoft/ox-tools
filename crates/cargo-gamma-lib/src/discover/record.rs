@@ -18,7 +18,7 @@ use super::killers::Killers;
 use super::workspace_snapshot::WorkspaceSnapshot;
 use super::{Plan, input};
 use crate::cfg::Build;
-use crate::model::{Mutant, MutantId, Outcome};
+use crate::model::{Mutant, MutantId, Outcome, normalize_site_text};
 use crate::{HashMap, HashSet};
 
 /// What the cache format is; a file written by any other version is discarded rather than read.
@@ -408,6 +408,10 @@ pub struct RunRecord {
     /// cold on exactly the runs, after an edit or a feature change, where it is worth the most.
     #[serde(default)]
     hints: HashMap<MutantId, Killer>,
+
+    /// Score-neutral knowledge shared with the checked-in hints artifact.
+    #[serde(default)]
+    generalized: GeneralizedHints,
 }
 
 /// The test that caught a mutant, and the binary it lives in.
@@ -433,6 +437,129 @@ impl Killer {
     pub fn names(&self, package: &str, target: &str) -> bool {
         self.package == package && self.target == target
     }
+}
+
+/// Schema version for generalized, score-neutral hint tiers.
+pub const GENERALIZED_HINTS_VERSION: u32 = 1;
+
+/// Durable P4/P6 knowledge that can only affect execution order.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneralizedHints {
+    /// Version of these optional tiers, independent of the enclosing record.
+    pub version: u32,
+
+    /// Ranked exact test candidates for stable `(file, item)` identities.
+    #[serde(default)]
+    pub items: Vec<ItemHints>,
+
+    /// Ranked test binaries for stable source files.
+    #[serde(default)]
+    pub binaries: Vec<FileBinaryHints>,
+
+    /// Interned test sets used by `reach`.
+    #[serde(default)]
+    pub test_sets: Vec<Vec<Killer>>,
+
+    /// Stable mutation sites mapped to an interned census reach set.
+    #[serde(default)]
+    pub reach: Vec<ReachCluster>,
+}
+
+impl GeneralizedHints {
+    /// Returns these tiers only when their schema is understood.
+    #[must_use]
+    pub fn supported(&self) -> Option<&Self> {
+        (self.version == GENERALIZED_HINTS_VERSION).then_some(self)
+    }
+
+    /// Returns an empty, supported collection.
+    #[must_use]
+    pub const fn empty_supported() -> Self {
+        Self {
+            version: GENERALIZED_HINTS_VERSION,
+            items: Vec::new(),
+            binaries: Vec::new(),
+            test_sets: Vec::new(),
+            reach: Vec::new(),
+        }
+    }
+
+    /// Whether no generalized tier contains an entry.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.binaries.is_empty() && self.reach.is_empty()
+    }
+}
+
+/// One ranked candidate and its score-neutral observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankedHint<T> {
+    pub candidate: T,
+    pub hits: u32,
+    pub misses: u32,
+    pub measured_ms: u64,
+    pub samples: u32,
+    pub order: u64,
+}
+
+/// Ranked exact test candidates for one enclosing item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemHints {
+    pub file: Utf8PathBuf,
+    pub item: String,
+    pub candidates: Vec<RankedHint<Killer>>,
+}
+
+/// Stable identity of a test binary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BinaryHint {
+    pub package: String,
+    pub target: String,
+}
+
+/// Ranked test-binary candidates for one source file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBinaryHints {
+    pub file: Utf8PathBuf,
+    pub candidates: Vec<RankedHint<BinaryHint>>,
+}
+
+/// Stable identity of a mutation site, independent of its generated mutant id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteIdentity {
+    pub file: Utf8PathBuf,
+    pub item: String,
+    pub mutator: String,
+    pub normalized_text: String,
+    pub occurrence: u32,
+}
+
+impl SiteIdentity {
+    /// Builds the stable site identity used by reach clusters.
+    #[must_use]
+    pub fn from_mutant(mutant: &Mutant) -> Self {
+        Self {
+            file: mutant.file.to_path_buf(),
+            item: mutant.item_path.to_string(),
+            mutator: mutant.mutator.to_string(),
+            normalized_text: normalize_site_text(&mutant.original).to_string(),
+            occurrence: mutant.occurrence,
+        }
+    }
+}
+
+/// One stable site's reference to an interned reach set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReachCluster {
+    pub site: SiteIdentity,
+    pub test_set: u32,
 }
 
 /// The recorded mutants of one source file, and the digest of the file they were judged in.
@@ -602,6 +729,15 @@ impl RunRecord {
         &self.hints
     }
 
+    /// Generalized ordering knowledge, empty when this record carries an unsupported tier version.
+    #[must_use]
+    pub fn generalized(&self) -> GeneralizedHints {
+        self.generalized
+            .supported()
+            .cloned()
+            .unwrap_or_else(GeneralizedHints::empty_supported)
+    }
+
     /// Every verdict the record holds, paired with the mutant it belongs to.
     ///
     /// Named `iter` rather than for what it yields, because that is the spelling a caller looks
@@ -617,6 +753,7 @@ impl RunRecord {
     pub fn iter(&self) -> Entries<'_> {
         Entries {
             files: self.files.iter(),
+            // #[gamma::skip(option.none_to_some, reason = "slice::Iter::default() is an empty iterator, so both states make the first next() advance to the first file")]
             mutants: None,
         }
     }
@@ -672,17 +809,25 @@ impl RunRecord {
     ///
     /// A failure is reported as a deferred note rather than failing the run.
     pub fn store_probes(base: &Utf8Path, probes: &HashMap<MutantId, Killer>) {
+        Self::store_knowledge(base, probes, None);
+    }
+
+    /// Replaces exact probes and, when supplied, generalized hints in one atomic record update.
+    pub fn store_knowledge(base: &Utf8Path, probes: &HashMap<MutantId, Killer>, generalized: Option<&GeneralizedHints>) {
         let mut record = Self::load_raw(base).unwrap_or_default();
 
         record.version = VERSION;
         record.hints.clone_from(probes);
+        if let Some(generalized) = generalized {
+            record.generalized.clone_from(generalized);
+        }
 
         let Ok(text) = serde_json::to_string(&record) else {
             return;
         };
 
         if let Err(failure) = crate::elements::write(&base.join(FILE), &text) {
-            crate::notes::note(format!("could not save run-record probes: {failure}"));
+            crate::notes::note(format!("could not save run-record hints: {failure}"));
         }
     }
 
@@ -913,6 +1058,7 @@ impl RunRecord {
             inputs,
             compilation_roots,
             hints: HashMap::default(),
+            generalized: GeneralizedHints::default(),
         })
     }
 
@@ -1029,6 +1175,11 @@ impl RunRecord {
                 earlier.hints.clone()
             } else {
                 self.hints.clone()
+            },
+            generalized: if self.generalized.is_empty() {
+                earlier.generalized.clone()
+            } else {
+                self.generalized.clone()
             },
         }
     }
@@ -1494,6 +1645,45 @@ mod tests {
 
     use super::*;
     use crate::fixtures;
+
+    #[test]
+    fn record_iteration_skips_empty_files_and_visits_every_later_entry() {
+        let entry = |id: &str, outcome| Entry {
+            id: id.to_owned().into(),
+            outcome,
+            killed_by: None,
+            killer_file: None,
+            elapsed_ms: 0,
+        };
+        let file = |path: &str, mutants| RecordedFile {
+            path: path.into(),
+            package: "subject".to_owned(),
+            digest: String::new(),
+            size: 0,
+            mutants,
+        };
+        let record = RunRecord {
+            files: vec![
+                file("empty.rs", Vec::new()),
+                file("first.rs", vec![entry("first", Outcome::Killed)]),
+                file("also-empty.rs", Vec::new()),
+                file(
+                    "last.rs",
+                    vec![entry("second", Outcome::Survived), entry("third", Outcome::CompileError)],
+                ),
+            ],
+            ..RunRecord::default()
+        };
+
+        assert_eq!(
+            record.iter().collect::<Vec<_>>(),
+            [
+                ("first", Outcome::Killed),
+                ("second", Outcome::Survived),
+                ("third", Outcome::CompileError),
+            ]
+        );
+    }
     use crate::testing::workdir;
 
     fn mutant(id: &str, file: &str, outcome: Outcome) -> Mutant {
@@ -1507,6 +1697,50 @@ mod tests {
             outcome,
             ..fixtures::mutant()
         }
+    }
+
+    #[test]
+    fn site_identity_is_independent_of_mutant_id_and_replacement_index() {
+        let first = mutant("old-id", "src/lib.rs", Outcome::Killed);
+        let changed_replacement = Mutant {
+            id: "new-id".into(),
+            replacement_index: first.replacement_index + 1,
+            replacement: "*".into(),
+            ..first.clone()
+        };
+
+        assert_eq!(SiteIdentity::from_mutant(&first), SiteIdentity::from_mutant(&changed_replacement));
+    }
+
+    #[test]
+    fn site_identity_does_not_alias_distinct_text_or_occurrences() {
+        let first = mutant("first", "src/lib.rs", Outcome::Killed);
+        let distinct_text = Mutant {
+            id: "distinct-text".into(),
+            original: " /* formatting */ - ".into(),
+            ..first.clone()
+        };
+        let shifted_occurrence = Mutant {
+            id: "shifted-occurrence".into(),
+            occurrence: first.occurrence + 1,
+            ..first.clone()
+        };
+
+        assert_ne!(SiteIdentity::from_mutant(&first), SiteIdentity::from_mutant(&distinct_text));
+        assert_ne!(SiteIdentity::from_mutant(&first), SiteIdentity::from_mutant(&shifted_occurrence));
+    }
+
+    #[test]
+    fn site_identity_serializes_normalized_source_text() {
+        let spaced = Mutant {
+            original: "left /* reason */  +\n right".into(),
+            ..mutant("site", "src/lib.rs", Outcome::Killed)
+        };
+
+        let value = serde_json::to_value(SiteIdentity::from_mutant(&spaced)).expect("site identity should serialize");
+
+        assert_eq!(value["normalizedText"], "left + right");
+        assert!(value.get("replacementIndex").is_none());
     }
 
     fn workspace(prefix: &str, body: &str) -> (tempfile::TempDir, Utf8PathBuf) {

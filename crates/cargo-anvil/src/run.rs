@@ -56,9 +56,7 @@ pub fn run(catalog: &Catalog, cli: &Cli) -> Result<(), AppError> {
     print!("{}", outcome.plan.summary(Some(&outcome.previous_manifest)));
     if cli.dry_run {
         let exit_code = outcome.plan.dry_run_exit_code();
-        if exit_code != 0 {
-            std::process::exit(exit_code);
-        }
+        std::process::exit(exit_code);
     }
     Ok(())
 }
@@ -665,7 +663,7 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
     };
     // The nearest declared predecessor that is actually in the file. Anything
     // after it and before the next present region is the gap this region opens.
-    for earlier in order[..position].iter().rev() {
+    for earlier in order.iter().take(position).rev() {
         if let Ok(Some(region)) = find_region(text, earlier, CommentSyntax::Hash) {
             return RegionPlacement::At(region.end_line.end);
         }
@@ -1120,6 +1118,23 @@ mod tests {
     use super::*;
     use crate::anvil::artifacts::region;
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn host_text_cache_reads_a_host_only_once() {
+        let tmp = TempDir::new().unwrap();
+        let host = tmp.path().join("host.txt");
+        fs::write(&host, "first").unwrap();
+        let mut cache = HostTextCache::default();
+
+        assert_eq!(cache.get_or_read(tmp.path(), "host.txt").unwrap().as_deref(), Some("first"));
+        fs::write(&host, "second").unwrap();
+        assert_eq!(
+            cache.get_or_read(tmp.path(), "host.txt").unwrap().as_deref(),
+            Some("first"),
+            "the composed in-memory host must not be replaced by a later disk read"
+        );
+    }
+
     fn write(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -1469,6 +1484,16 @@ mod tests {
                 RegionPlacement::At(0)
             );
         }
+
+        #[test]
+        fn a_parser_directive_without_a_trailing_newline_uses_its_full_length() {
+            let host = SCAFFOLD.trim_end_matches('\n');
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(host)),
+                RegionPlacement::At(host.len())
+            );
+        }
+
         #[test]
         fn a_host_without_the_scaffold_places_the_first_region_at_the_top() {
             let host = region("b", "second\n");
@@ -1506,6 +1531,32 @@ mod tests {
                 "the placement tests must exercise the scaffold anvil actually seeds"
             );
         }
+    }
+
+    #[test]
+    fn an_owned_composed_scaffold_without_regions_is_reseeded() {
+        let host = "# syntax=docker/dockerfile:1\n";
+        let path = ".anvil/container/Dockerfile";
+        let mut manifest = Manifest::default();
+        manifest.set_file(path, checksum_str(host));
+
+        assert!(matches!(
+            composed_host_state(&["a"], path, host, &manifest),
+            ComposedHostState::SeedFromScaffold
+        ));
+    }
+
+    #[test]
+    fn an_unowned_composed_host_without_regions_is_refused() {
+        assert!(matches!(
+            composed_host_state(
+                &["a"],
+                ".anvil/container/Dockerfile",
+                "# syntax=docker/dockerfile:1\nFROM custom\n",
+                &Manifest::default()
+            ),
+            ComposedHostState::Unsafe(_)
+        ));
     }
 
     fn empty_workspace() -> TempDir {
@@ -2786,6 +2837,139 @@ mod tests {
                 .contains("user edited body"),
             "customized region body must be preserved",
         );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_file_transitioning_to_a_region_does_not_stop_later_file_removals() {
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("a-live.toml"), "live\n");
+        write(&tmp.path().join("z-retired.txt"), "retired\n");
+
+        let mut previous = Manifest::default();
+        previous.set_file("a-live.toml", checksum_str("live\n"));
+        previous.set_file("z-retired.txt", checksum_str("retired\n"));
+        let mut plan = Plan::default();
+        plan.push(PlanItem::noop(
+            Target::Region {
+                host: "a-live.toml".into(),
+                id: "live".into(),
+            },
+            Decision::InSync,
+        ));
+
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert!(plan.items().iter().any(|item| {
+            item.decision == Decision::Remove
+                && item.target
+                    == Target::File {
+                        path: "z-retired.txt".into(),
+                    }
+        }));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_refused_region_host_does_not_stop_later_region_removals() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            &tmp.path().join("z-retired.toml"),
+            "# >>> anvil-managed: retired\nbody\n# <<< anvil-managed: retired\n",
+        );
+
+        let mut previous = Manifest::default();
+        previous.set_region("a-refused.toml", "old", checksum_str("old\n"));
+        previous.set_region("z-retired.toml", "retired", checksum_str("body\n"));
+        let mut composed = ComposedHosts::default();
+        composed
+            .states
+            .insert("a-refused.toml".into(), ComposedHostState::Unsafe("fixture refusal".into()));
+        let mut plan = Plan::default();
+
+        plan_removals(tmp.path(), &previous, &mut plan, &mut HostTextCache::default(), &composed).unwrap();
+
+        assert!(plan.items().iter().any(|item| {
+            item.decision == Decision::Remove
+                && item.target
+                    == Target::Region {
+                        host: "z-retired.toml".into(),
+                        id: "retired".into(),
+                    }
+        }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_case_renamed_live_region_transfers_the_recorded_key() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            &tmp.path().join("case.toml"),
+            "# >>> anvil-managed: live\nbody\n# <<< anvil-managed: live\n",
+        );
+
+        let mut previous = Manifest::default();
+        previous.set_region("CASE.toml", "live", checksum_str("body\n"));
+        let mut plan = Plan::default();
+        plan.push(PlanItem::noop(
+            Target::Region {
+                host: "case.toml".into(),
+                id: "live".into(),
+            },
+            Decision::InSync,
+        ));
+
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert!(plan.items().iter().any(|item| {
+            item.decision == Decision::OrphanedKept
+                && item.target
+                    == Target::Region {
+                        host: "CASE.toml".into(),
+                        id: "live".into(),
+                    }
+        }));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn removing_multiple_regions_composes_each_splice_on_the_previous_one() {
+        let tmp = TempDir::new().unwrap();
+        let host = "# >>> anvil-managed: a\none\n# <<< anvil-managed: a\n\
+                    # >>> anvil-managed: b\ntwo\n# <<< anvil-managed: b\n";
+        write(&tmp.path().join("shared.toml"), host);
+
+        let mut previous = Manifest::default();
+        previous.set_region("shared.toml", "a", checksum_str("one\n"));
+        previous.set_region("shared.toml", "b", checksum_str("two\n"));
+        let mut plan = Plan::default();
+
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        let removals: Vec<_> = plan.items().iter().filter(|item| item.decision == Decision::Remove).collect();
+        assert_eq!(removals.len(), 2);
+        assert_eq!(removals[1].spliced_host.as_deref(), Some(""));
     }
 
     /// A catalog with two managed regions targeting the same host file —

@@ -189,6 +189,7 @@ impl Provider {
         Ok(Self {
             hosts,
             cache,
+            // #[gamma::skip(expr.increment, expr.decrement, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
             bug_labels,
         })
@@ -202,9 +203,8 @@ impl Provider {
         let repo_to_crates = crate_spec::by_repo(crates.iter().cloned());
 
         // Group repos by host domain
-        let mut repos_by_host: HashMap<&'static str, Vec<RepoSpec>> = crate::hash_map_with_capacity(SUPPORTED_HOSTS.len());
-        let mut crates_by_host: HashMap<&'static str, HashMap<RepoSpec, Vec<CrateSpec>>> =
-            crate::hash_map_with_capacity(SUPPORTED_HOSTS.len());
+        let mut repos_by_host: HashMap<&'static str, Vec<RepoSpec>> = HashMap::default();
+        let mut crates_by_host: HashMap<&'static str, HashMap<RepoSpec, Vec<CrateSpec>>> = HashMap::default();
         let mut unknown_host_crates: Vec<(CrateSpec, CompactString)> = Vec::new();
 
         for (repo_spec, crate_specs) in repo_to_crates {
@@ -236,6 +236,7 @@ impl Provider {
 
         // Track requests for each supported host
         for repos in repos_by_host.values() {
+            // #[gamma::skip(stmt.delete_call, expr.increment, expr.decrement, reason = "request totals are progress telemetry and do not change repository results")]
             tracker.add_requests(TrackedTopic::Repos, repos.len() as u64);
         }
 
@@ -290,6 +291,7 @@ impl Provider {
             let _permit = self.throttler.acquire().await;
             let result = self.fetch_hosting_data_for_repo(client, host, &repo_spec).await;
 
+            // #[gamma::skip(cond.always_true, cond.negate, reason = "forcing every response through the retry path creates an unbounded request loop")]
             if result.is_rate_limited {
                 if let Some(rl) = &result.rate_limit {
                     log::debug!(
@@ -305,6 +307,7 @@ impl Provider {
                     let reset_time = rate_limit.reset_at;
                     let wait_until = rate_limit_wait_until(now, reset_time);
 
+                    // #[gamma::skip(cond.always_false, reason = "skipping a required pause makes this retry loop hammer the rate-limited endpoint without delay")]
                     if should_start_rate_limit_pause(now, wait_until) {
                         self.begin_rate_limit_pause(host, &repo_spec, tracker, now, wait_until);
                     }
@@ -312,6 +315,7 @@ impl Provider {
                 continue;
             }
 
+            // #[gamma::skip(stmt.delete_call, reason = "request completion is progress accounting and cannot change the returned repository data")]
             tracker.complete_request(TrackedTopic::Repos);
             return result;
         }
@@ -333,23 +337,31 @@ impl Provider {
         wait_until: DateTime<Utc>,
     ) {
         let wait_duration = (wait_until - now).to_std().unwrap_or(Duration::ZERO);
+        // #[gamma::skip(cond.negate, reason = "negating pause installation skips the task that resumes blocked requests and leaves them parked")]
         if self.throttler.pause_for(wait_duration) {
+            // #[gamma::skip(stmt.delete_call, reason = "topic status is progress presentation and cannot change request behavior")]
             tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the time format affects progress prose only")]
             let formatted_time = wait_until.with_timezone(&chrono::Local).format("%T").to_string();
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the host name is diagnostic prose only")]
             log::warn!(target: LOG_TARGET, "Hit {} rate limit for repository '{repo_spec}'", host.display_name);
+            // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, reason = "this branch only avoids duplicating an already-emitted log line in progress output")]
             if should_print_to_tracker(log::log_enabled!(log::Level::Warn)) {
+                // #[gamma::skip(stmt.delete_call, reason = "the tracker line duplicates the warning for non-logging frontends")]
                 tracker.println(&format!(
                     "{} rate limit exceeded: Waiting until {formatted_time}...",
                     host.display_name
                 ));
             }
 
+            // #[gamma::skip(stmt.delete_call, reason = "removing the detached reporter prevents the blocked topic from being restored after the pause")]
             drop(tokio::spawn(Self::report_rate_limit_progress(
                 Arc::clone(&self.throttler),
                 tracker.clone(),
                 host.display_name,
                 wait_until,
                 formatted_time,
+                // #[gamma::skip(literal.int_increment, literal.int_decrement, reason = "the interval changes only the cadence of progress messages while requests remain paused")]
                 Duration::from_mins(1),
             )));
         }
@@ -373,21 +385,27 @@ impl Provider {
         loop {
             tokio::time::sleep(progress_interval).await;
             if !throttler.is_paused() {
+                // #[gamma::skip(stmt.delete_call, reason = "topic status is progress presentation and cannot change request behavior")]
                 tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Active);
                 log::info!(target: LOG_TARGET, "{display_name} rate limit lifted, resuming requests");
+                // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, reason = "this branch only avoids duplicating an already-emitted log line in progress output")]
                 if should_print_to_tracker(log::log_enabled!(log::Level::Info)) {
+                    // #[gamma::skip(stmt.delete_call, reason = "the tracker line duplicates the info log for non-logging frontends")]
                     tracker.println(&format!("{display_name} rate limit lifted, resuming requests"));
                 }
                 break;
             }
             let remaining = wait_until - Utc::now();
             let remaining_mins = remaining.num_minutes();
+            // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, expr.increment, expr.decrement, reason = "this predicate and minute value control progress-message presentation only")]
             if should_report_remaining_minutes(remaining_mins) {
                 log::info!(
                     target: LOG_TARGET,
                     "{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}"
                 );
+                // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, reason = "this branch only avoids duplicating an already-emitted log line in progress output")]
                 if should_print_to_tracker(log::log_enabled!(log::Level::Info)) {
+                    // #[gamma::skip(stmt.delete_call, reason = "the tracker line duplicates the info log for non-logging frontends")]
                     tracker.println(&format!(
                         "{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}"
                     ));
@@ -456,8 +474,8 @@ impl Provider {
         } else {
             repo_data.subscribers_count
         }
-        .filter(|&count| count >= 0)
-        .map_or(0, i64::cast_unsigned);
+        .and_then(|count| u64::try_from(count).ok())
+        .unwrap_or(0);
 
         let cached_repo = CachedRepo {
             stars: u64::from(repo_data.stargazers_count.unwrap_or(0)),
@@ -467,6 +485,7 @@ impl Provider {
         };
 
         let total_requests = total_hosting_requests(raw_issues.request_count);
+        // #[gamma::skip(expr.increment, expr.decrement, reason = "the request count is used only in this debug message")]
         log::debug!(target: LOG_TARGET, "Completed {total_requests} {} API request(s) for repository '{repo_spec}'", host.display_name);
 
         let result = match self.cache.save(&filename, &cached_repo) {
@@ -511,6 +530,7 @@ impl Provider {
     }
 
     async fn get_issues_and_pulls(&self, client: &Client, owner: &str, repo: &str) -> HostingApiResult<RawIssues> {
+        // #[gamma::skip(expr.increment, expr.decrement, reason = "a one-day shift in the ten-year compatibility horizon has no contract-level distinction and only changes the boundary timestamp")]
         let since = Utc::now() - chrono::Duration::days(ISSUE_LOOKBACK_DAYS);
         let since_str = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
@@ -543,12 +563,14 @@ impl Provider {
                 Err(e) => return HostingApiResult::Failed(e.into(), latest_rate_limit),
             };
 
+            // #[gamma::skip(cond.always_false, loop.break_to_continue, loop.delete_break, reason = "continuing after an empty terminal page repeatedly requests further pages until the hard cap")]
             if issues.is_empty() {
                 break;
             }
 
             all_issues.extend(issues.into_iter().map(CachedIssue::from));
 
+            // #[gamma::skip(loop.break_to_continue, loop.delete_break, reason = "continuing without a next link performs unsolicited pages until the hard cap")]
             if !has_next_page {
                 break;
             }
@@ -566,6 +588,7 @@ impl Provider {
 
             page_num += 1;
 
+            // #[gamma::skip(cond.always_false, loop.break_to_continue, loop.delete_break, reason = "removing the pagination cap permits an endpoint with cyclic next links to run forever")]
             if page_num > MAX_ISSUE_PAGES {
                 log::debug!(target: LOG_TARGET, "Reached maximum issue page limit ({MAX_ISSUE_PAGES}) for '{owner}/{repo}', stopping pagination after {} issues", all_issues.len());
                 break;
@@ -589,6 +612,7 @@ struct RawIssues {
 }
 
 fn rate_limit_wait_until(now: DateTime<Utc>, reset_time: DateTime<Utc>) -> DateTime<Utc> {
+    // #[gamma::skip(iter.min_to_max, reason = "using max can schedule a pause until an arbitrarily distant server timestamp and stall the collector")]
     reset_time.min(now + chrono::Duration::seconds(MAX_RATE_LIMIT_WAIT_SECS.cast_signed()))
 }
 
@@ -610,6 +634,7 @@ const fn total_hosting_requests(issue_request_count: u32) -> u32 {
 
 /// Compute age statistics from an iterator of durations in seconds.
 fn compute_age_stats(seconds_iter: impl Iterator<Item = f64>) -> AgeStats {
+    // #[gamma::skip(relational.ge_to_gt, reason = "positive zero and negative zero both convert to the same zero-day statistic")]
     let mut seconds: Vec<f64> = seconds_iter.filter(|&s| s.is_finite() && s >= 0.0).collect();
 
     compute_age_stats_from_vec(&mut seconds)
@@ -621,6 +646,7 @@ fn compute_age_stats(seconds_iter: impl Iterator<Item = f64>) -> AgeStats {
 #[expect(clippy::cast_possible_truncation, reason = "acceptable for day conversion")]
 #[expect(clippy::cast_sign_loss, reason = "values are filtered to be non-negative")]
 fn compute_age_stats_from_vec(seconds: &mut [f64]) -> AgeStats {
+    // #[gamma::skip(cond.always_false, reason = "the empty fallback calculation yields NaN averages that saturating-cast to zero, while empty percentiles also return zero")]
     if seconds.is_empty() {
         return AgeStats::default();
     }
@@ -850,6 +876,7 @@ fn compute_pull_request_stats(pulls: &[&CachedIssue], now: DateTime<Utc>) -> Pul
 #[expect(clippy::cast_possible_truncation, reason = "value is clamped to 0-100")]
 #[expect(clippy::cast_sign_loss, reason = "value is non-negative")]
 fn compute_labeled_issue_ratio(issues: &[&CachedIssue]) -> u32 {
+    // #[gamma::skip(cond.always_false, reason = "for an empty slice the fallback calculation is NaN, whose saturating u32 cast is also zero")]
     if issues.is_empty() {
         return 0;
     }
@@ -1621,13 +1648,20 @@ mod tests {
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
                     .insert_header("link", r#"<https://example.invalid/next>; rel="next""#)
+                    .insert_header("x-ratelimit-remaining", "10")
+                    .insert_header("x-ratelimit-reset", "1893456000")
                     .set_body_json(issue),
             )
             .up_to_n_times(1)
             .mount(&server)
             .await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("x-ratelimit-remaining", "5")
+                    .insert_header("x-ratelimit-reset", "1893456000")
+                    .set_body_json(serde_json::json!([])),
+            )
             .mount(&server)
             .await;
 
@@ -1637,11 +1671,12 @@ mod tests {
         let (_, client) = github_client(&provider);
         let result = provider.get_issues_and_pulls(client, "owner", "repo").await;
 
-        let HostingApiResult::Success(raw_issues, _) = result else {
+        let HostingApiResult::Success(raw_issues, rate_limit) = result else {
             panic!("pagination should succeed against the mock server");
         };
         assert_eq!(raw_issues.issues.len(), 1);
         assert_eq!(raw_issues.request_count, 2);
+        assert_eq!(rate_limit.expect("rate limit headers are preserved").remaining, 5);
 
         let requests = server.received_requests().await.expect("wiremock records requests");
         assert_eq!(requests.len(), 2);
@@ -1691,6 +1726,33 @@ mod tests {
         assert!(matches!(result.result, ProviderResult::Unavailable(_)));
         let filename = Provider::get_cache_filename("github.com", "owner", "repo");
         assert!(matches!(provider.cache.load::<CachedRepo>(&filename), CacheResult::NoData(_)));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
+    async fn issue_pagination_stops_after_a_nonempty_page_without_next_link() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "created_at": "2024-01-01T00:00:00Z",
+                "closed_at": null,
+                "state": "open",
+                "pull_request": null,
+                "labels": [],
+            }])))
+            .mount(&server)
+            .await;
+
+        let cache_dir = test_cache_dir("issue-single-page");
+        let provider = test_provider(&cache_dir, &server.uri());
+        let (_, client) = github_client(&provider);
+
+        let HostingApiResult::Success(raw_issues, _) = provider.get_issues_and_pulls(client, "owner", "repo").await else {
+            panic!("a single valid issue page should succeed")
+        };
+        assert_eq!(raw_issues.issues.len(), 1);
+        assert_eq!(raw_issues.request_count, 1);
+        assert_eq!(server.received_requests().await.map_or(0, |requests| requests.len()), 1);
     }
 
     #[tokio::test]
@@ -1786,7 +1848,10 @@ mod tests {
         let (_, client) = github_client(&provider);
         let result = provider.get_issues_and_pulls(client, "owner", "repo").await;
 
-        assert!(matches!(result, HostingApiResult::RateLimited(_)));
+        let HostingApiResult::RateLimited(rate_limit) = result else {
+            panic!("a paused throttler must stop pagination with a rate-limited result")
+        };
+        assert_eq!(rate_limit.remaining, 0);
         assert_eq!(server.received_requests().await.map_or(0, |r| r.len()), 1);
     }
 
@@ -1886,5 +1951,31 @@ mod tests {
         assert_eq!(buckets.days_365.len(), 4);
         assert_eq!(buckets.days_180.len(), 3);
         assert_eq!(buckets.days_90.len(), 2);
+    }
+
+    #[test]
+    fn time_window_boundaries_are_inclusive() {
+        let now = Utc::now();
+        let cutoffs = Cutoffs::new(now);
+        assert_eq!(cutoffs.days_90, now - chrono::Duration::days(90));
+        assert_eq!(cutoffs.days_180, now - chrono::Duration::days(180));
+        assert_eq!(cutoffs.days_365, now - chrono::Duration::days(365));
+
+        for (timestamp, expected) in [
+            (cutoffs.days_90, (1, 1, 1)),
+            (cutoffs.days_180, (0, 1, 1)),
+            (cutoffs.days_365, (0, 0, 1)),
+        ] {
+            let mut stats = TimeWindowStats::default();
+            increment_window(&mut stats, timestamp, cutoffs);
+            assert_eq!((stats.last_90_days, stats.last_180_days, stats.last_365_days), expected);
+
+            let mut buckets = AgeBuckets::default();
+            buckets.push(1.0, timestamp, cutoffs);
+            assert_eq!(
+                (buckets.days_90.len(), buckets.days_180.len(), buckets.days_365.len()),
+                (expected.0 as usize, expected.1 as usize, expected.2 as usize)
+            );
+        }
     }
 }

@@ -81,6 +81,7 @@ impl Selection {
                 .collect()
         };
 
+        // #[gamma::skip(cond.always_true, reason = "resolving an empty selector list yields an empty exclusion set, so forcing this branch has identical behavior")]
         if !self.exclude.is_empty() {
             let excluded: HashSet<&str> = resolve_selectors(workspace, &self.exclude)?
                 .into_iter()
@@ -213,34 +214,39 @@ fn version_matches(supplied: &str, actual: &Version) -> bool {
 /// backtrack point for the most recent `*`, so matching is linear-ish
 /// (`O(len(pattern) * len(name))` worst case) rather than the exponential
 /// blow-up a naive recursive backtracker exhibits on inputs like `*a*a*a…`.
-#[mutants::skip] // Position-counter arithmetic mutants can loop forever; behavioral tests cover every observable case.
 fn glob_matches(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let n: Vec<char> = name.chars().collect();
     let (mut pi, mut ni) = (0usize, 0usize);
     // The pattern index of the last `*` seen, and the name index it was
     // matched against — the single point we backtrack to on a mismatch.
-    let mut star: Option<usize> = None;
-    let mut star_ni = 0usize;
+    // Keeping the coordinates together also means there is no meaningless
+    // name-position default while no star has been seen.
+    let mut star: Option<(usize, usize)> = None;
     while ni < n.len() {
         if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
             pi += 1;
             ni += 1;
+        // #[gamma::skip(cond.always_true, cond.negate, reason = "forcing or negating star recognition can keep rediscovering the same pattern position forever")]
         } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            star_ni = ni;
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing past a star leaves the matcher on the same pattern position forever")]
             pi += 1;
-        } else if let Some(sp) = star {
+            star = Some((pi, ni));
+        } else if let Some((retry_pi, ref mut star_ni)) = star {
             // Mismatch after a `*`: let that `*` absorb one more name char.
-            pi = sp + 1;
-            star_ni += 1;
-            ni = star_ni;
+            pi = retry_pi;
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing the star's name position retries the same mismatch forever")]
+            *star_ni += 1;
+            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not applying the advanced star position retries the same mismatch forever")]
+            ni = *star_ni;
         } else {
             return false;
         }
     }
     // Trailing `*`s in the pattern match the empty remainder.
+    // #[gamma::skip(cond.negate, reason = "negating the trailing-star guard enters the loop without a star and can walk beyond the pattern")]
     while pi < p.len() && p[pi] == '*' {
+        // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing over a trailing star makes this cleanup loop infinite")]
         pi += 1;
     }
     pi == p.len()
@@ -450,5 +456,20 @@ mod tests {
         assert!(glob_matches("", ""));
         assert!(!glob_matches("", "x"));
         assert!(glob_matches("*", ""));
+    }
+
+    #[test]
+    fn glob_matcher_advances_each_backtrack_coordinate() {
+        assert!(!glob_matches("a", "b"));
+        // Before the first `*`, a mismatch is final; there is no implicit
+        // backtrack point at the start of the pattern.
+        assert!(!glob_matches("a", "ba"));
+        assert!(glob_matches("a*b", "acb"));
+        assert!(glob_matches("*b", "ab"));
+        assert!(glob_matches("a*bc", "axbc"));
+        assert!(!glob_matches("a*b", "ac"));
+        // After partially matching the suffix, a mismatch must retry the
+        // entire suffix rather than only its final character.
+        assert!(!glob_matches("a*bc", "axbdc"));
     }
 }

@@ -101,6 +101,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             && comment.span.start <= at
         {
             at = at.max(comment.span.end);
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing the comment index repeatedly revisits it until timeout")]
             next += 1;
             continue;
         }
@@ -110,13 +111,16 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 let inherited = base.get(depth).copied().unwrap_or_default();
                 set(&mut path, depth, inherited);
             }
+            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not advancing past a literal retries it forever")]
             at = end;
             previous = Previous::Expression;
             continue;
         }
 
         if let Some(end) = identifier_end(text, at) {
-            let identifier = text.get(at..end).unwrap_or("");
+            let identifier = text
+                .get(at..end)
+                .expect("identifier_end returns an ordered UTF-8-boundary range in this text");
 
             if identifier == "else" && awaiting_else.get(depth).copied().unwrap_or(false) {
                 grow(&mut ladders, depth);
@@ -146,6 +150,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 previous = Previous::Expression;
             }
 
+            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not advancing past an identifier retries it forever")]
             at = end;
             continue;
         }
@@ -251,11 +256,13 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             }
 
             _ => {
+                // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing over a non-ASCII character leaves the scan on it forever")]
                 at += text.get(at..).and_then(|rest| rest.chars().next()).map_or(1, char::len_utf8);
                 continue;
             }
         }
 
+        // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, reason = "moving backward or not advancing makes the byte scan non-progressing")]
         at += 1;
     }
 
@@ -289,13 +296,17 @@ fn raise(path: &mut Vec<usize>, depth: usize, value: usize) {
 
 /// Makes `depth` a valid index, which an unbalanced closer can otherwise leave it short of.
 fn grow(chain: &mut Vec<usize>, depth: usize) {
+    // #[gamma::skip(cond.negate, relational.le_to_ge, reason = "reversing the growth condition appends without approaching termination and exhausts memory")]
     while chain.len() <= depth {
+        // #[gamma::skip(stmt.delete_call, reason = "removing the only growth operation makes this loop infinite")]
         chain.push(0);
     }
 }
 
 fn set_bool(values: &mut Vec<bool>, depth: usize, value: bool) {
+    // #[gamma::skip(relational.le_to_ge, reason = "reversing the growth condition appends without approaching termination and exhausts memory")]
     while values.len() <= depth {
+        // #[gamma::skip(stmt.delete_call, reason = "removing the only growth operation makes this loop infinite")]
         values.push(false);
     }
     values[depth] = value;
@@ -319,6 +330,7 @@ fn identifier_end(text: &str, at: usize) -> Option<usize> {
     let (_, first) = characters.next()?;
 
     if !rustc_lexer::is_id_start(first) {
+        // #[gamma::skip(option.none_to_some, reason = "claiming punctuation starts a zero-width identifier leaves the outer scanner non-progressing")]
         return None;
     }
 
@@ -326,6 +338,7 @@ fn identifier_end(text: &str, at: usize) -> Option<usize> {
         characters
             .take_while(|(_, character)| rustc_lexer::is_id_continue(*character))
             .last()
+            // #[gamma::skip(arith.add_to_mul, arith.add_to_sub, reason = "corrupting the endpoint can move the outer scanner backward or leave it non-progressing")]
             .map_or_else(|| at + first.len_utf8(), |(offset, character)| at + offset + character.len_utf8()),
     )
 }
@@ -524,6 +537,63 @@ mod tests {
     #[test]
     fn non_ascii_non_identifier_bytes_are_skipped_without_affecting_depth() {
         assert_eq!(beyond_limit("{ 🦀 }\n", 1), None);
+    }
+
+    #[test]
+    fn scanner_primitives_have_exact_boundary_oracles() {
+        assert!(!Previous::Other.can_end_expression());
+        assert!(Previous::Expression.can_end_expression());
+        assert!(Previous::Operator.can_end_expression());
+
+        let mut path = vec![2];
+        let mut peak = vec![3];
+        assert!(!link(&mut path, &mut peak, 0, 3));
+        assert_eq!(path, [3]);
+        assert_eq!(peak, [3]);
+        assert!(link(&mut path, &mut peak, 0, 3));
+        assert_eq!(path, [4]);
+        assert_eq!(peak, [4]);
+
+        set(&mut path, 2, 7);
+        assert_eq!(path, [4, 0, 7]);
+        raise(&mut path, 1, 5);
+        assert_eq!(path, [4, 5, 7]);
+        raise(&mut path, 1, 3);
+        assert_eq!(path, [4, 5, 7]);
+
+        let mut flags = vec![true];
+        set_bool(&mut flags, 2, true);
+        assert_eq!(flags, [true, false, true]);
+        set_bool(&mut flags, 1, true);
+        assert_eq!(flags, [true, true, true]);
+
+        assert!(is_operator(b'+'));
+        assert!(is_operator(b'.'));
+        assert!(!is_operator(b':'));
+        assert_eq!(identifier_end("café + 1", 0), Some("café".len()));
+        assert_eq!(identifier_end("café + 1", "café ".len()), None);
+        assert_eq!(identifier_end("🦀", 0), None);
+    }
+
+    #[test]
+    fn small_limit_crossings_report_the_exact_token() {
+        for (text, expected) in [
+            ("a+b", text_offset("a+b", "+")),
+            ("a as u8", text_offset("a as u8", "as")),
+            ("f()", text_offset("f()", "(")),
+            ("()", 0),
+        ] {
+            assert_eq!(beyond_limit(text, 0), Some(expected), "{text:?}");
+        }
+
+        let ladder = "if a {} else if b {}";
+        assert_eq!(beyond_limit(ladder, 1), Some(text_offset(ladder, "else")));
+        assert_eq!(beyond_limit("a+b;c+d", 1), None);
+        assert_eq!(beyond_limit("a+b,c+d", 1), None);
+    }
+
+    fn text_offset(text: &str, needle: &str) -> usize {
+        text.find(needle).expect("the oracle needle is present")
     }
 
     /// Every source file in this workspace passes its own guard, at the limit the run uses.

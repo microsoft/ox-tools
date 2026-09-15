@@ -216,6 +216,7 @@ fn find_workspace_root(package_cargo_toml: &Path) -> Result<(PathBuf, CargoManif
 
         match current.parent() {
             Some(parent) => current = parent,
+            // #[gamma::skip(loop.break_to_continue, reason = "continuing at the filesystem root repeats the same parent lookup forever")]
             None => break,
         }
     }
@@ -331,6 +332,13 @@ mod tests {
         assert!(cfg.scripts); // default true
         assert!(!cfg.dot_toml); // default false
         assert!(cfg.exclude.is_empty());
+    }
+
+    #[test]
+    fn fallback_config_enables_scripts_and_disables_dot_toml() {
+        let cfg = HeatherConfig::with_defaults("header".to_owned());
+        assert!(cfg.scripts);
+        assert!(!cfg.dot_toml);
     }
 
     #[test]

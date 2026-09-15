@@ -101,7 +101,7 @@ const GITATTRIBUTES_BODY: &str = include_str!("../../../templates/regions/gitatt
 /// header followed by the embedded catalog.
 #[must_use]
 fn render_workspace_lints_body() -> String {
-    let mut out = String::with_capacity(LINTS_BODY.len() + 32);
+    let mut out = String::new();
     out.push_str("[workspace.lints]\n");
     out.push_str(LINTS_BODY);
     out
@@ -111,7 +111,7 @@ fn render_workspace_lints_body() -> String {
 /// followed by the embedded catalog.
 #[must_use]
 fn render_single_crate_lints_body() -> String {
-    let mut out = String::with_capacity(LINTS_BODY.len() + 16);
+    let mut out = String::new();
     out.push_str("[lints]\n");
     out.push_str(LINTS_BODY);
     out

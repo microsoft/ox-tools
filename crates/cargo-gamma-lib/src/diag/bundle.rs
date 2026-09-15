@@ -438,6 +438,12 @@ pub struct SweepPhase {
 
     /// How many of those launches were hint-directed probes.
     pub probes: usize,
+    pub exact_probes: usize,
+    pub exact_hits: usize,
+    pub generalized_probes: usize,
+    pub generalized_hits: usize,
+    pub launches_saved: usize,
+    pub reach_launches_saved: usize,
 }
 
 /// The distribution of mutant durations.
@@ -709,6 +715,12 @@ fn phases_of(session: &Session) -> Phases {
             elapsed_ms: millis(sweep.elapsed),
             launches: sweep.launches,
             probes: sweep.probes,
+            exact_probes: sweep.exact_probes,
+            exact_hits: sweep.exact_hits,
+            generalized_probes: sweep.generalized_probes,
+            generalized_hits: sweep.generalized_hits,
+            launches_saved: sweep.launches_saved,
+            reach_launches_saved: sweep.reach_launches_saved,
         }),
     }
 }
@@ -897,6 +909,12 @@ mod tests {
                 elapsed: Duration::from_secs(42),
                 launches: 47,
                 probes: 12,
+                exact_probes: 5,
+                exact_hits: 4,
+                generalized_probes: 7,
+                generalized_hits: 3,
+                launches_saved: 9,
+                reach_launches_saved: 4,
             }),
         };
 
@@ -975,6 +993,12 @@ mod tests {
                 elapsed: Duration::from_millis(3),
                 launches: 4,
                 probes: 5,
+                exact_probes: 2,
+                exact_hits: 1,
+                generalized_probes: 3,
+                generalized_hits: 2,
+                launches_saved: 1,
+                reach_launches_saved: 1,
             }),
         };
 
@@ -984,6 +1008,7 @@ mod tests {
         assert!(json.contains("\"elapsedMs\""), "{json}");
         assert!(json.contains("\"launches\""), "{json}");
         assert!(json.contains("\"probes\""), "{json}");
+        assert!(json.contains("\"reachLaunchesSaved\": 1"), "{json}");
 
         // The census did not run, so it must not appear as a key at all.
         assert!(!json.contains("\"census\""), "an absent census must be omitted, not null: {json}");
@@ -1028,6 +1053,21 @@ mod tests {
         assert_eq!(bundle(&plan(), None, &context()).schema_version, "3");
     }
 
+    #[test]
+    fn serialized_bundle_names_the_tool_and_preserves_exact_mutant_cpu_milliseconds() {
+        let mut plan = plan();
+        let mut measured = mutant("subject", "arith.add_to_sub");
+        measured.elapsed_ms = 41;
+        plan.mutants = vec![measured];
+
+        let json = to_json(&bundle(&plan, None, &context())).expect("serialized bundle");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid bundle");
+
+        assert_eq!(value["tool"]["name"], "cargo-gamma");
+        assert_eq!(value["redaction"], "hashed");
+        assert_eq!(value["run"]["cpuMs"], 41);
+    }
+
     /// The first question to ask of a slow run, so the split has to be right rather than plausible.
     #[test]
     fn the_fixed_and_testing_split_adds_up_to_the_wall_time() {
@@ -1059,6 +1099,12 @@ mod tests {
         let toolchain = Some(format!(
             "rustc=/toolchains/rustc\ncargo=/toolchains/cargo\nrustc_wrapper=\nrustc_workspace_wrapper={private}\nrustc 1.90.0\ncargo 1.90.0"
         ));
+
+        assert_eq!(
+            redact_toolchain(toolchain.clone(), Redaction::Names),
+            toolchain,
+            "unredacted rendering must preserve every tool prefix and version line exactly"
+        );
 
         for redaction in [Redaction::Hashed, Redaction::Omitted] {
             let redacted = redact_toolchain(toolchain.clone(), redaction).expect("toolchain");
@@ -1147,6 +1193,85 @@ mod tests {
     #[test]
     fn a_run_that_measured_nothing_has_no_duration_distribution() {
         assert!(durations_of(&[]).is_none());
+    }
+
+    #[test]
+    fn duration_distribution_filters_zeroes_sorts_and_preserves_every_endpoint() {
+        let mut plan = plan();
+        plan.mutants = [0_u64, 40, 10, 30, 20]
+            .into_iter()
+            .map(|elapsed_ms| {
+                let mut mutant = mutant("subject", "arith.add_to_sub");
+                mutant.elapsed_ms = elapsed_ms;
+                mutant
+            })
+            .collect();
+
+        let durations = durations_of(&plan.mutants).expect("positive measurements");
+        assert_eq!(
+            (
+                durations.evaluated,
+                durations.min_ms,
+                durations.p50_ms,
+                durations.p90_ms,
+                durations.p99_ms,
+                durations.max_ms,
+            ),
+            (4, 10, 30, 40, 40, 40)
+        );
+    }
+
+    #[test]
+    fn ordering_hint_diagnostics_exist_when_either_input_dimension_is_nonzero() {
+        for ordering in [
+            crate::exec::OrderingHints {
+                offered: 1,
+                confirmed: 0,
+                rounds: 0,
+            },
+            crate::exec::OrderingHints {
+                offered: 0,
+                confirmed: 0,
+                rounds: 1,
+            },
+        ] {
+            let session = Session {
+                ordering,
+                ..session_with(crate::exec::Phases::default())
+            };
+            let hints = bundle(&plan(), Some(&session), &context())
+                .build
+                .expect("build")
+                .ordering_hints
+                .expect("one nonzero dimension is meaningful");
+            assert_eq!(hints.offered, ordering.offered);
+            assert_eq!(hints.rounds, ordering.rounds);
+        }
+
+        assert!(
+            bundle(&plan(), Some(&session_with(crate::exec::Phases::default())), &context())
+                .build
+                .expect("build")
+                .ordering_hints
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn breakdown_keeps_exactly_the_twenty_most_expensive_groups() {
+        let limit = u64::try_from(TOP).expect("the twenty-row bound fits in u64");
+        let mutants: Vec<_> = (0_u64..limit + 2)
+            .map(|index| {
+                let mut mutant = mutant(&format!("package-{index}"), "arith.add_to_sub");
+                mutant.elapsed_ms = index + 1;
+                mutant
+            })
+            .collect();
+
+        let rows = breakdown(&mutants, Redaction::Names, |mutant| mutant.package.to_string());
+        assert_eq!(rows.len(), TOP);
+        assert_eq!(rows.first().and_then(|row| row.name.as_deref()), Some("package-21"));
+        assert_eq!(rows.last().and_then(|row| row.name.as_deref()), Some("package-2"));
     }
 
     /// A mutator name is ours, and it is the most useful axis in the document; hashing it would

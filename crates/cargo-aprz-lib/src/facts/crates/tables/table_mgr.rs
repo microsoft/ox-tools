@@ -78,6 +78,7 @@ macro_rules! define_tables {
 
                 let finished_tables = Arc::new(core::sync::atomic::AtomicU64::new(0));
                 let finished_tables_clone = Arc::clone(&finished_tables);
+                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "this progress label is presentation-only and cannot change opened tables")]
                 progress.set_determinate(Box::new(move || {
                     (NUM_TABLES, finished_tables_clone.load(Ordering::Relaxed), "FOpening tables".to_string())
                 }));
@@ -119,6 +120,7 @@ macro_rules! define_tables {
 
                 let finished_tables = Arc::new(core::sync::atomic::AtomicU64::new(0));
                 let finished_tables_clone = Arc::clone(&finished_tables);
+                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "this progress label is presentation-only and cannot change opened tables")]
                 progress.set_determinate(Box::new(move || {
                     (NUM_TABLES, finished_tables_clone.load(Ordering::Relaxed), "Opening tables".to_string())
                 }));
@@ -305,6 +307,7 @@ impl TableMgr {
 
         match prep_tables(source, tables_root, max_ttl, now, progress).await {
             Ok(table_mgr) => Ok(table_mgr),
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "this context changes only diagnostic text on an already-failed download")]
             Err(e) => Err(e.enrich("could not prepare crates.io tables")),
         }
     }
@@ -343,6 +346,7 @@ impl TableMgr {
             let elapsed_ms = cleanup_elapsed_ms(start);
 
             // If we've already waited MAX_WAIT_MS, give up
+            // #[gamma::skip(cond.always_false, relational.ge_to_gt, reason = "removing or moving the retry deadline past the exact cap makes locked table cleanup wait forever")]
             if elapsed_ms >= MAX_WAIT_MS {
                 return Err(ohno::app_err!(
                     "unable to remove all table files in {}: some files remain locked after {}ms of retrying",
@@ -374,6 +378,7 @@ impl TableMgr {
             cleanup_sleep(Duration::from_millis(sleep_ms));
 
             // Exponential backoff for next iteration, capped at MAX_DELAY_MS
+            // #[gamma::skip(expr.increment, expr.decrement, reason = "a one-millisecond change to the private sleep cap only changes retry timing")]
             delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
         }
     }
@@ -404,6 +409,7 @@ fn cleanup_elapsed_ms(start: Instant) -> u64 {
         }
     }
 
+    // #[gamma::skip(expr.increment, reason = "adding one millisecond to a wall-clock sample only changes retry timing")]
     start.elapsed().as_millis() as u64
 }
 
@@ -417,6 +423,7 @@ fn cleanup_sleep(duration: Duration) {
         }
     }
 
+    // #[gamma::skip(stmt.delete_call, reason = "removing the real fallback sleep turns locked-file cleanup into a CPU-spinning resource loop")]
     thread::sleep(duration);
 }
 
@@ -481,6 +488,8 @@ async fn prep_tables(
     let tables_root = tables_root.as_ref().to_path_buf();
     let source = source.clone();
 
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the operation name is telemetry-only")]
+    // #[gamma::skip(option.some_to_none, reason = "removing the download deadline permits a stalled dump endpoint to wait forever")]
     crate::facts::resilient_http::resilient_download(
         "crates_db_download",
         (source, tables_root, max_ttl, now, progress),
@@ -502,12 +511,14 @@ async fn prep_tables_core(
     log::info!(target: LOG_TARGET, "Starting crates database download from {source}");
 
     let client = reqwest::Client::builder()
-        .user_agent("cargo-aprz")
+        .user_agent(crate::HTTP_USER_AGENT)
         .build()
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the static client configuration cannot fail; this context has no reachable observation")]
         .into_app_err("creating HTTP client")?;
 
     let response = crate::facts::resilient_http::resilient_get(&client, source.as_str())
         .await
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "this context changes diagnostic text only after the download has already failed")]
         .into_app_err("starting crates database dump download")?;
 
     if !response.status().is_success() {
@@ -517,23 +528,29 @@ async fn prep_tables_core(
     let content_length = response.content_length();
 
     // Set up progress callback for download
+    // #[gamma::skip(literal.int_increment, reason = "the initial counter is progress telemetry and is replaced by streamed-byte accounting before completion")]
     let downloaded_bytes = Arc::new(core::sync::atomic::AtomicU64::new(0));
     let downloaded_bytes_clone = Arc::clone(&downloaded_bytes);
 
     if let Some(total) = content_length {
         // Determinate: we know the total size
+        // #[gamma::skip(stmt.delete_call, reason = "installing the callback affects progress presentation only, not downloaded or decoded data")]
         progress.set_determinate(Box::new(move || {
             let downloaded_bytes = downloaded_bytes_clone.load(Ordering::Relaxed);
+            // #[gamma::skip(expr.increment, expr.decrement, reason = "a one-byte change is below the whole-mebibyte resolution of this progress message")]
             determinate_download_progress(total, downloaded_bytes)
         }));
     } else {
         // Indeterminate: we don't know the total size
+        // #[gamma::skip(stmt.delete_call, reason = "installing the callback affects progress presentation only, not downloaded or decoded data")]
         progress.set_indeterminate(Box::new(move || {
             let downloaded_bytes = downloaded_bytes_clone.load(Ordering::Relaxed);
+            // #[gamma::skip(expr.increment, reason = "a one-byte change is below the whole-mebibyte resolution of this progress message")]
             indeterminate_download_progress(downloaded_bytes)
         }));
     }
 
+    // #[gamma::skip(expr.increment, expr.decrement, reason = "channel capacity only changes buffering throughput and not downloaded bytes")]
     let (tx, rx) = mpsc::channel::<Result<Bytes>>(NUM_CHANNEL_BUFFERS);
     let processing_progress = Arc::clone(&progress);
     let processing_handle =
@@ -541,9 +558,11 @@ async fn prep_tables_core(
     stream_download(response, &tx, &downloaded_bytes).await;
 
     if let Some(total) = content_length {
+        // #[gamma::skip(expr.increment, expr.decrement, reason = "the final store only makes progress telemetry display exactly 100 percent after all bytes were already processed")]
         downloaded_bytes.store(total, Ordering::Relaxed);
     }
 
+    // #[gamma::skip(stmt.delete_call, reason = "the blocking decoder waits for channel closure, so retaining this sender deadlocks the join")]
     drop(tx);
     let table_mgr = processing_handle.await??;
 
@@ -557,12 +576,15 @@ async fn stream_download(response: reqwest::Response, tx: &mpsc::Sender<Result<B
     while let Some(chunk) = stream.next().await {
         match chunk {
             Ok(bytes) => {
+                // #[gamma::skip(expr.increment, expr.decrement, reason = "a one-byte change is below the whole-mebibyte resolution of download progress and cannot change streamed bytes")]
                 let _ = downloaded_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                // #[gamma::skip(cond.negate, loop.break_to_continue, loop.delete_break, reason = "continuing after the decoder closes retains or repeatedly sends response chunks until the network stream ends")]
                 if tx.send(Ok(bytes)).await.is_err() {
                     break;
                 }
             }
             Err(error) => {
+                // #[gamma::skip(result.err_to_ok, loop.break_to_continue, loop.delete_break, reason = "the first transport error must terminate streaming; continuing can keep a failed or unbounded response alive")]
                 let _ = tx.send(Err(error.into())).await;
                 break;
             }
@@ -586,6 +608,7 @@ fn process_download(
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
+        // #[gamma::skip(literal.str_to_xyzzy, reason = "the fallback is reachable only for a non-UTF-8 archive filename, which cannot match any ASCII crates.io table name")]
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         let start = Instant::now();
@@ -627,6 +650,7 @@ impl BufRead for ChannelReader {
             match self.rx.blocking_recv() {
                 Some(Ok(chunk)) => {
                     self.current_chunk = Some(chunk);
+                    // #[gamma::skip(assign_value.default, reason = "usize::default() is exactly zero")]
                     self.position = 0;
                 }
                 Some(Err(e)) => return Err(IoError::other(e.to_string())),
@@ -655,15 +679,16 @@ impl Read for ChannelReader {
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
-    use std::io::ErrorKind;
+    use std::io::{ErrorKind, Read as _};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
     use tempfile::TempDir;
 
     use super::{
-        CratesTable, DELETE_ALL_TABLES_HOOK, ELAPSED_MS_HOOK, IoError, Path, SHARING_VIOLATION, SLEEP_HOOK, SLEEP_SECONDS_HOOK, Table,
-        TableMgr, delete_all_tables, determinate_download_progress, fs, indeterminate_download_progress, removal_left_file_locked,
+        ChannelReader, CratesTable, DELETE_ALL_TABLES_HOOK, ELAPSED_MS_HOOK, IoError, Path, SHARING_VIOLATION, SLEEP_HOOK,
+        SLEEP_SECONDS_HOOK, Table, TableMgr, delete_all_tables, determinate_download_progress, fs, indeterminate_download_progress, mpsc,
+        process_download, removal_left_file_locked,
     };
 
     static CLEANUP_HOOK_TEST_LOCK: StdMutex<()> = StdMutex::new(());
@@ -848,6 +873,20 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_tables_reports_when_locked_files_outlive_the_deadline() {
+        let _lock = CLEANUP_HOOK_TEST_LOCK.lock().expect("cleanup hook test mutex is not poisoned");
+        let _guard = install_cleanup_hooks();
+        *DELETE_ALL_TABLES_HOOK.lock().expect("cleanup delete hook mutex is not poisoned") = Some(Box::new(|_| Ok(false)));
+        *ELAPSED_MS_HOOK.lock().expect("cleanup elapsed hook mutex is not poisoned") = Some(Box::new(|| 4_001));
+
+        let error = TableMgr::cleanup_tables(Path::new("locked")).expect_err("the cleanup deadline is fatal");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("locked"));
+        assert!(message.contains("4001ms"));
+    }
+
+    #[test]
     fn cleanup_timing_helpers_use_their_real_fallbacks_without_hooks() {
         let _lock = CLEANUP_HOOK_TEST_LOCK.lock().expect("cleanup hook test mutex is not poisoned");
         let _guard = install_cleanup_hooks();
@@ -860,6 +899,7 @@ mod tests {
     #[test]
     fn download_progress_messages_report_mebibytes() {
         let mib = 1024 * 1024;
+        let just_below_mib = mib - 1;
 
         assert_eq!(
             determinate_download_progress(5 * mib, 3 * mib),
@@ -869,5 +909,66 @@ mod tests {
             indeterminate_download_progress(7 * mib),
             "7 MB: Downloading crates database".to_owned()
         );
+        assert_eq!(
+            determinate_download_progress(just_below_mib, just_below_mib),
+            (just_below_mib, just_below_mib, "0/0 MB: Downloading crates database".to_owned())
+        );
+        assert_eq!(
+            indeterminate_download_progress(just_below_mib),
+            "0 MB: Downloading crates database".to_owned()
+        );
+    }
+
+    #[test]
+    fn channel_reader_crosses_chunk_boundaries_without_losing_bytes() {
+        let (tx, rx) = mpsc::channel(3);
+        tx.blocking_send(Ok(bytes::Bytes::from_static(b"abc"))).unwrap();
+        tx.blocking_send(Ok(bytes::Bytes::from_static(b"defg"))).unwrap();
+        drop(tx);
+
+        let mut reader = ChannelReader::new(rx);
+        let mut first = [0; 2];
+        assert_eq!(reader.read(&mut first).unwrap(), 2);
+        assert_eq!(&first, b"ab");
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"cdefg");
+        assert_eq!(reader.read(&mut [0; 1]).unwrap(), 0);
+    }
+
+    #[test]
+    fn channel_reader_propagates_source_errors() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.blocking_send(Err(ohno::app_err!("synthetic stream failure"))).unwrap();
+        drop(tx);
+
+        let mut reader = ChannelReader::new(rx);
+        let error = reader.read(&mut [0; 1]).expect_err("source errors must reach the decoder");
+        assert!(error.to_string().contains("synthetic stream failure"));
+    }
+
+    #[test]
+    fn processed_tables_preserve_the_dump_timestamp() {
+        #[derive(Debug)]
+        struct NoOpProgress;
+
+        impl crate::facts::progress::Progress for NoOpProgress {
+            fn set_phase(&self, _phase: &str) {}
+            fn set_determinate(&self, _callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {}
+            fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
+            fn println(&self, _msg: &str) {}
+            fn done(&self) {}
+        }
+
+        let dump = crate::facts::collector::portable_tests::minimal_dump();
+        let (tx, rx) = mpsc::channel(1);
+        tx.blocking_send(Ok(bytes::Bytes::from(dump))).unwrap();
+        drop(tx);
+        let dir = TempDir::new().expect("creating table directory");
+        let now = chrono::DateTime::from_timestamp(1_768_521_617, 0).expect("fixed timestamp is valid");
+
+        let manager = process_download(rx, dir.path(), Duration::from_hours(1), now, &NoOpProgress).expect("the minimal dump is valid");
+
+        assert_eq!(manager.created_at(), now);
     }
 }

@@ -468,7 +468,6 @@ pub use region::CommentSyntax;
 /// ```
 #[must_use]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[mutants::skip] // Entry point: tracing/clap setup + dispatch to run; behavior is integration-tested via run_update.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "public one-call entry point that owns the catalog for the process lifetime by design"
@@ -476,6 +475,7 @@ pub use region::CommentSyntax;
 pub fn run_app(catalog: Catalog) -> ExitCode {
     use tracing_subscriber::fmt::format::FmtSpan;
 
+    // #[gamma::skip(stmt.delete_call, literal.bool_flip, reason = "process-global diagnostic presentation is intentionally outside the update engine's test oracle")]
     tracing_subscriber::fmt()
         .with_target(false)
         .with_level(false)

@@ -785,4 +785,155 @@ mod tests {
 
         assert!(payload(&reference, 0).is_none());
     }
+
+    #[test]
+    fn expression_shape_predicates_have_exact_positive_and_negative_cases() {
+        for expression in [
+            parse_quote!(1),
+            parse_quote!(VALUE),
+            parse_quote!([1, -2]),
+            parse_quote!((1, VALUE)),
+            parse_quote!([1; 2]),
+            parse_quote!(&(-1)),
+        ] {
+            assert!(is_promotable(&expression), "{expression:?}");
+        }
+        for expression in [parse_quote!([1, call()]), parse_quote!(!true), parse_quote!(call())] {
+            assert!(!is_promotable(&expression), "{expression:?}");
+        }
+
+        assert!(binds_a_pattern(&parse_quote!(let Some(value) = option)));
+        assert!(binds_a_pattern(&parse_quote!(ready && (let Some(value) = option))));
+        assert!(!binds_a_pattern(&parse_quote!(ready || matches!(option, Some(_)))));
+        assert_eq!(boolean_literal(&parse_quote!((true))), Some(true));
+        assert_eq!(boolean_literal(&parse_quote!(value)), None);
+        assert!(is_integer_zero_literal(&parse_quote!((0u8))));
+        assert!(!is_integer_zero_literal(&parse_quote!(0.0)));
+        assert!(!is_integer_zero_literal(&parse_quote!(1)));
+    }
+
+    #[test]
+    fn loop_value_detection_respects_labels_shadowing_and_boundaries() {
+        let cases: [(ExprLoop, bool); 5] = [
+            (
+                parse_quote!(loop {
+                    break 1;
+                }),
+                true,
+            ),
+            (
+                parse_quote!(loop {
+                    loop {
+                        break 1;
+                    }
+                }),
+                false,
+            ),
+            (
+                parse_quote!('outer: loop {
+                    loop {
+                        break 'outer 1;
+                    }
+                }),
+                true,
+            ),
+            (
+                parse_quote!('outer: loop {
+                    'outer: loop {
+                        break 'outer 1;
+                    }
+                }),
+                false,
+            ),
+            (
+                parse_quote!(loop {
+                    let _closure = || {
+                        break 1;
+                    };
+                }),
+                false,
+            ),
+        ];
+
+        for (node, expected) in cases {
+            assert_eq!(loop_produces_value(&node), expected, "{node:?}");
+        }
+    }
+
+    #[test]
+    fn textual_numeric_and_pattern_classifiers_use_the_written_shape() {
+        assert!(is_textual(&parse_quote!(std::format!("x"))));
+        assert!(is_textual(&parse_quote!(String::from("a") + "b")));
+        assert!(!is_textual(&parse_quote!(module::format)));
+        assert!(!is_textual(&parse_quote!(1 + 2)));
+
+        assert!(is_constant_case("HTTP_2"));
+        assert!(!is_constant_case("Http2"));
+        assert!(!is_constant_case("lower"));
+        assert!(is_numeric_type("NonZeroUsize"));
+        assert!(!is_numeric_type("Duration"));
+        assert!(returns_numeric("subsec_nanos"));
+        assert!(!returns_numeric("checked_add"));
+        assert!(is_numeric_receiver("to_be_bytes"));
+        assert!(!is_numeric_receiver("max"));
+        assert!(is_capacity_call("try_reserve_exact"));
+        assert!(!is_capacity_call("resize"));
+        assert!(is_diagnostic_message("expect_err", 1));
+        assert!(!is_diagnostic_message("expect_err", 2));
+
+        assert!(is_catch_all(&parse_quote!(_)));
+        assert!(is_catch_all(&parse_quote!((other))));
+        assert!(!is_catch_all(&parse_quote!(Some(other))));
+        assert!(!is_catch_all(&parse_quote!(name @ Some(_))));
+        assert!(!is_catch_all(&parse_quote!(None)));
+    }
+
+    #[test]
+    fn divergence_and_pattern_helpers_cover_each_recursive_form() {
+        for expression in [
+            parse_quote!(return 1),
+            parse_quote!(break),
+            parse_quote!(continue),
+            parse_quote!(std::panic!()),
+            parse_quote!(loop {}),
+            parse_quote!(({ return 1 })),
+            parse_quote!(unsafe { return 1 }),
+            parse_quote!(if ready { return 1 } else { panic!() }),
+            parse_quote!(match value {
+                Some(_) => return 1,
+                None => panic!(),
+            }),
+        ] {
+            assert!(diverges(&expression), "{expression:?}");
+        }
+        for expression in [
+            parse_quote!(loop {
+                break;
+            }),
+            parse_quote!(if ready {
+                return 1;
+            }),
+            parse_quote!(match value {}),
+            parse_quote!(match value {
+                Some(_) => return 1,
+                None => 0,
+            }),
+            parse_quote!({
+                return 1;
+                0
+            }),
+        ] {
+            assert!(!diverges(&expression), "{expression:?}");
+        }
+
+        assert_eq!(declared_name(&parse_quote!(value)), Some("value".to_owned()));
+        assert_eq!(declared_name(&parse_quote!((value))), None);
+        let typed: Stmt = parse_quote!(let value: usize;);
+        let Stmt::Local(typed) = typed else {
+            panic!("the fixture is a local statement");
+        };
+        assert_eq!(declared_name(&typed.pat), Some("value".to_owned()));
+        assert_eq!(declared_name(&parse_quote!(value @ Some(_))), None);
+        assert_eq!(declared_name(&parse_quote!(_)), None);
+    }
 }

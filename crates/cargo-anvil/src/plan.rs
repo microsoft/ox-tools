@@ -545,6 +545,7 @@ fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> 
                 return Err(error).into_app_err_with(|| format!("failed to resolve {} while checking containment", probe.display()));
             }
         }
+        // #[gamma::skip(stmt.delete_assign, reason = "deleting the ancestor-walk update makes containment checks loop forever")]
         probe = probe
             .parent()
             .expect("the walk reaches a filesystem root, which always resolves, before running out of components");
@@ -770,6 +771,55 @@ mod tests {
         let plan = Plan::default();
         assert!(!plan.has_changes());
         assert_eq!(plan.dry_run_exit_code(), 0);
+        assert_eq!(plan.summary(None), "cargo-anvil plan: 0 item(s)\n");
+    }
+
+    #[test]
+    fn plan_item_constructors_set_every_payload_field() {
+        let noop = PlanItem::noop(Target::File { path: "a".into() }, Decision::LeaveAlone);
+        assert_eq!(noop.rendered, None);
+        assert_eq!(noop.spliced_host, None);
+        assert_eq!(noop.rendered_checksum, None);
+
+        let write = PlanItem::write_file("a", "body".into(), "sum".into());
+        assert_eq!(write.rendered.as_deref(), Some("body"));
+        assert_eq!(write.spliced_host, None);
+        assert_eq!(write.rendered_checksum.as_deref(), Some("sum"));
+
+        let insync = PlanItem::insync(Target::File { path: "a".into() }, "sum".into());
+        assert_eq!(insync.rendered, None);
+        assert_eq!(insync.spliced_host, None);
+        assert_eq!(insync.rendered_checksum.as_deref(), Some("sum"));
+
+        let file_proposal = PlanItem::propose_file("a", "body".into(), "sum".into());
+        assert_eq!(file_proposal.rendered.as_deref(), Some("body"));
+        assert_eq!(file_proposal.spliced_host, None);
+        assert_eq!(file_proposal.rendered_checksum.as_deref(), Some("sum"));
+
+        let region_write = PlanItem::write_region("host", "id", "body".into(), "spliced".into(), "sum".into());
+        assert_eq!(region_write.rendered.as_deref(), Some("body"));
+        assert_eq!(region_write.spliced_host.as_deref(), Some("spliced"));
+        assert_eq!(region_write.rendered_checksum.as_deref(), Some("sum"));
+
+        let proposal = PlanItem::propose_region("host", "id", "body".into(), "spliced".into(), "sum".into());
+        assert_eq!(proposal.rendered.as_deref(), Some("body"));
+        assert_eq!(proposal.spliced_host.as_deref(), Some("spliced"));
+        assert_eq!(proposal.rendered_checksum.as_deref(), Some("sum"));
+
+        let remove = PlanItem::remove_region("host", "id", "without".into());
+        assert_eq!(remove.rendered, None);
+        assert_eq!(remove.spliced_host.as_deref(), Some("without"));
+        assert_eq!(remove.rendered_checksum, None);
+
+        let file_remove = PlanItem::remove_file("a");
+        assert_eq!(file_remove.rendered, None);
+        assert_eq!(file_remove.spliced_host, None);
+        assert_eq!(file_remove.rendered_checksum, None);
+
+        let orphan = PlanItem::orphaned_kept(Target::File { path: "a".into() });
+        assert_eq!(orphan.rendered, None);
+        assert_eq!(orphan.spliced_host, None);
+        assert_eq!(orphan.rendered_checksum, None);
     }
 
     #[test]

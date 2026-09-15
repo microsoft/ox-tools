@@ -11,6 +11,7 @@
 //!
 //! See the [design doc](../../docs/design/README.md) for the file layout.
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use ohno::{AppError, IntoAppError as _, app_err, bail};
@@ -165,23 +166,22 @@ fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMemb
             // Pattern with no matches is not an error — Cargo itself tolerates this.
             return Ok(());
         }
-        let mut entries: Vec<_> = std::fs::read_dir(&parent_path)
+        let entries = std::fs::read_dir(&parent_path)
             .into_app_err_with(|| format!("failed to read directory {}", parent_path.display()))?
             .filter_map(Result::ok)
             .filter(|e| e.path().is_dir())
             .filter(|e| e.path().join("Cargo.toml").is_file())
-            .collect();
-        entries.sort_by_key(std::fs::DirEntry::file_name);
+            .collect::<Vec<_>>();
+        let mut relpaths = BTreeSet::new();
         for entry in entries {
             let name = entry.file_name();
             let name_str = name
                 .to_str()
                 .ok_or_else(|| app_err!("non-UTF-8 directory name in {}", parent_path.display()))?;
             let relpath = format!("{parent}/{name_str}/Cargo.toml");
-            out.push(WorkspaceMember {
-                manifest_relpath: normalize_relpath(&relpath),
-            });
+            relpaths.insert(normalize_relpath(&relpath));
         }
+        out.extend(relpaths.into_iter().map(|manifest_relpath| WorkspaceMember { manifest_relpath }));
         return Ok(());
     }
 
@@ -261,8 +261,8 @@ resolver = "2"
 members = ["crates/*"]
 "#,
         );
-        write(&root.join("crates/alpha/Cargo.toml"), "[package]\nname='a'\nversion='0.1.0'\n");
         write(&root.join("crates/beta/Cargo.toml"), "[package]\nname='b'\nversion='0.1.0'\n");
+        write(&root.join("crates/alpha/Cargo.toml"), "[package]\nname='a'\nversion='0.1.0'\n");
         // Non-crate directory in the glob target — should be ignored.
         write(&root.join("crates/notacrate/README.md"), "no manifest");
 
@@ -293,6 +293,26 @@ members = ["alpha", "nested/beta"]
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
+    fn duplicate_member_patterns_are_deduplicated() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/alpha\", \"crates/*\"]\n",
+        );
+        write(&root.join("crates/alpha/Cargo.toml"), "[package]\nname='a'\nversion='0.1.0'\n");
+
+        let ws = load_workspace(root).unwrap();
+        assert_eq!(
+            ws.members,
+            vec![WorkspaceMember {
+                manifest_relpath: "crates/alpha/Cargo.toml".into()
+            }]
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
     fn walks_up_to_workspace_root() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
@@ -308,6 +328,20 @@ members = ["crates/alpha"]
         // Starting deep inside a member should still find the workspace root.
         let found = find_workspace_root(&root.join("crates/alpha/src")).unwrap();
         assert_eq!(found.canonicalize().unwrap(), root.canonicalize().unwrap());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn nearest_package_manifest_wins_without_a_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let outer = tmp.path();
+        let inner = outer.join("nested");
+        write(&outer.join("Cargo.toml"), "[package]\nname='outer'\nversion='0.1.0'\n");
+        write(&inner.join("Cargo.toml"), "[package]\nname='inner'\nversion='0.1.0'\n");
+        write(&inner.join("src/lib.rs"), "");
+
+        let found = find_workspace_root(&inner.join("src")).unwrap();
+        assert_eq!(found.canonicalize().unwrap(), inner.canonicalize().unwrap());
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

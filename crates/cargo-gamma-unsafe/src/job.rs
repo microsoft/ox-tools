@@ -40,7 +40,7 @@ use crate::native_faults::{self, NativeCall};
 /// Production and tests run the same algorithms. Tests replace only this dependency with a backend
 /// that can return one requested native failure before delegating every other call to Windows.
 trait NativeCalls {
-    fn thread_snapshot(&self, process: u32) -> HANDLE;
+    fn thread_snapshot(&self) -> HANDLE;
     fn first_thread(&self, snapshot: HANDLE, entry: &mut THREADENTRY32) -> bool;
     fn next_thread(&self, snapshot: HANDLE, entry: &mut THREADENTRY32) -> bool;
     fn open_thread(&self, thread: u32) -> HANDLE;
@@ -50,34 +50,46 @@ trait NativeCalls {
     fn associate_completion_port(&self, job: HANDLE, association: &mut JOBOBJECT_ASSOCIATE_COMPLETION_PORT) -> bool;
     fn configure_job(&self, job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> bool;
     fn assign_process(&self, job: HANDLE, process: HANDLE) -> bool;
-    fn query_accounting(&self, job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION, returned: &mut u32) -> bool;
+    fn query_accounting(&self, job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> bool;
     fn completion_status(&self, completion: HANDLE, message: &mut u32, key: &mut usize, overlapped: &mut *mut OVERLAPPED) -> bool;
     fn terminate_job(&self, job: HANDLE) -> bool;
 }
 
 struct SystemCalls;
 
+const THREAD_SNAPSHOT_FLAGS: u32 = TH32CS_SNAPTHREAD;
+const SNAPSHOT_PROCESS_ID: u32 = 0;
+const INHERIT_THREAD_HANDLE: i32 = 0;
+const COMPLETION_KEY: usize = 0;
+const COMPLETION_CONCURRENCY: u32 = 1;
+
+const fn thread_identifier(thread: u32) -> u32 {
+    thread
+}
+
 impl NativeCalls for SystemCalls {
-    fn thread_snapshot(&self, process: u32) -> HANDLE {
+    fn thread_snapshot(&self) -> HANDLE {
         // SAFETY: the arguments are a flag word and a process id, and no caller memory is touched.
-        unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, process) }
+        unsafe { CreateToolhelp32Snapshot(THREAD_SNAPSHOT_FLAGS, SNAPSHOT_PROCESS_ID) }
     }
 
     fn first_thread(&self, snapshot: HANDLE, entry: &mut THREADENTRY32) -> bool {
         // SAFETY: `snapshot` is live and `entry` declares its initialized structure size.
-        unsafe { Thread32First(snapshot, core::ptr::from_mut(entry)) != 0 }
+        win32_succeeded(unsafe { Thread32First(snapshot, core::ptr::from_mut(entry)) })
     }
 
+    // #[gamma::skip(fn_value.bool_true, reason = "claiming the snapshot always has another entry makes enumeration repeat past its end forever")]
     fn next_thread(&self, snapshot: HANDLE, entry: &mut THREADENTRY32) -> bool {
         // SAFETY: the arguments retain the validity established for `first_thread`.
-        unsafe { Thread32Next(snapshot, core::ptr::from_mut(entry)) != 0 }
+        win32_succeeded(unsafe { Thread32Next(snapshot, core::ptr::from_mut(entry)) })
     }
 
     fn open_thread(&self, thread: u32) -> HANDLE {
         // SAFETY: the arguments are an access mask, an inheritance flag and a thread identifier.
-        unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread) }
+        unsafe { OpenThread(THREAD_SUSPEND_RESUME, INHERIT_THREAD_HANDLE, thread_identifier(thread)) }
     }
 
+    // #[gamma::skip(fn_value.one, fn_value.zero, reason = "returning without calling ResumeThread reports a still-suspended child as released, so its owner waits for a process that can never run")]
     fn resume_thread(&self, thread: HANDLE) -> u32 {
         // SAFETY: the handle was opened with `THREAD_SUSPEND_RESUME`.
         unsafe { ResumeThread(thread) }
@@ -90,61 +102,70 @@ impl NativeCalls for SystemCalls {
 
     fn create_completion_port(&self) -> HANDLE {
         // SAFETY: these documented sentinel arguments request a new completion port.
-        unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), 0, 1) }
+        unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), COMPLETION_KEY, COMPLETION_CONCURRENCY) }
     }
 
     fn associate_completion_port(&self, job: HANDLE, association: &mut JOBOBJECT_ASSOCIATE_COMPLETION_PORT) -> bool {
         // SAFETY: the information class matches the initialized structure and its exact size.
-        unsafe {
+        win32_succeeded(unsafe {
             SetInformationJobObject(
                 job,
                 JobObjectAssociateCompletionPortInformation,
                 core::ptr::from_mut(association).cast::<c_void>(),
-                u32::try_from(size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>()).unwrap_or(0),
-            ) != 0
-        }
+                u32::try_from(size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>())
+                    .expect("the Win32 information structure size always fits in u32"),
+            )
+        })
     }
 
     fn configure_job(&self, job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> bool {
         // SAFETY: the information class matches the initialized structure and its exact size.
-        unsafe {
+        win32_succeeded(unsafe {
             SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
                 core::ptr::from_mut(limits).cast::<c_void>(),
-                u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap_or(0),
-            ) != 0
-        }
+                u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                    .expect("the Win32 information structure size always fits in u32"),
+            )
+        })
     }
 
     fn assign_process(&self, job: HANDLE, process: HANDLE) -> bool {
         // SAFETY: both handles are live kernel object references for the duration of the call.
-        unsafe { AssignProcessToJobObject(job, process.cast::<c_void>()) != 0 }
+        win32_succeeded(unsafe { AssignProcessToJobObject(job, process.cast::<c_void>()) })
     }
 
-    fn query_accounting(&self, job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION, returned: &mut u32) -> bool {
+    fn query_accounting(&self, job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> bool {
         // SAFETY: the information class matches the writable structure and its exact size.
-        unsafe {
+        win32_succeeded(unsafe {
             QueryInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
                 core::ptr::from_mut(limits).cast::<c_void>(),
-                u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap_or(0),
-                core::ptr::from_mut(returned),
-            ) != 0
-        }
+                u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                    .expect("the Win32 information structure size always fits in u32"),
+                core::ptr::null_mut(),
+            )
+        })
     }
 
+    // #[gamma::skip(fn_value.bool_true, relational.ne_to_eq, literal.int_decrement, literal.int_increment, reason = "claiming an empty queue produced a message loops forever; decrementing zero waits forever, while a one-millisecond wait at every high-volume poll exceeded the four-minute mutation budget without changing any result")]
     fn completion_status(&self, completion: HANDLE, message: &mut u32, key: &mut usize, overlapped: &mut *mut OVERLAPPED) -> bool {
         // SAFETY: the completion port is live, output references are writable, and the zero timeout
         // makes the operation non-blocking.
         unsafe { GetQueuedCompletionStatus(completion, message, key, overlapped, 0) != 0 }
     }
 
+    // #[gamma::skip(fn_value.bool_true, reason = "reporting termination without calling the kernel leaves the child alive while its owner waits to reap it")]
     fn terminate_job(&self, job: HANDLE) -> bool {
         // SAFETY: `job` is a live job handle and the exit code is an arbitrary payload.
-        unsafe { TerminateJobObject(job, 1) != 0 }
+        win32_succeeded(unsafe { TerminateJobObject(job, u32::from(true)) })
     }
+}
+
+const fn win32_succeeded(result: i32) -> bool {
+    result != 0
 }
 
 #[cfg(test)]
@@ -152,11 +173,11 @@ struct FaultInjectingCalls;
 
 #[cfg(test)]
 impl NativeCalls for FaultInjectingCalls {
-    fn thread_snapshot(&self, process: u32) -> HANDLE {
+    fn thread_snapshot(&self) -> HANDLE {
         if native_faults::fired(NativeCall::Snapshot) {
             INVALID_HANDLE_VALUE
         } else {
-            SystemCalls.thread_snapshot(process)
+            SystemCalls.thread_snapshot()
         }
     }
 
@@ -212,12 +233,17 @@ impl NativeCalls for FaultInjectingCalls {
         !native_faults::fired(NativeCall::AssignProcess) && SystemCalls.assign_process(job, process)
     }
 
-    fn query_accounting(&self, job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION, returned: &mut u32) -> bool {
-        !native_faults::fired(NativeCall::QueryAccounting) && SystemCalls.query_accounting(job, limits, returned)
+    fn query_accounting(&self, job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> bool {
+        !native_faults::fired(NativeCall::QueryAccounting) && SystemCalls.query_accounting(job, limits)
     }
 
     fn completion_status(&self, completion: HANDLE, message: &mut u32, key: &mut usize, overlapped: &mut *mut OVERLAPPED) -> bool {
-        !native_faults::fired(NativeCall::CompletionStatus) && SystemCalls.completion_status(completion, message, key, overlapped)
+        if native_faults::fired(NativeCall::MemoryLimitMessage) {
+            *message = JOB_OBJECT_MSG_JOB_MEMORY_LIMIT;
+            true
+        } else {
+            !native_faults::fired(NativeCall::CompletionStatus) && SystemCalls.completion_status(completion, message, key, overlapped)
+        }
     }
 
     fn terminate_job(&self, job: HANDLE) -> bool {
@@ -257,6 +283,7 @@ pub fn suppress_error_dialogs() {
 pub fn start_suspended(command: &mut Command) {
     use std::os::windows::process::CommandExt as _;
 
+    // #[gamma::skip(expr.decrement, expr.increment, reason = "changing the suspension flag can create a running or invalid child, after which assignment failure leaves no safe process handle to resume and the owner waits indefinitely")]
     let _ = command.creation_flags(CREATE_SUSPENDED);
 }
 
@@ -267,10 +294,12 @@ pub fn start_suspended(command: &mut Command) {
 /// on the machine, which is why the owning process is checked; the child cannot be confused
 /// with anything else, since its id cannot be reused while this run still holds it open.
 #[must_use]
+// #[gamma::skip(fn_value.bool_true, reason = "reporting release without resuming the child's only thread leaves its owner waiting indefinitely for a process that cannot run")]
 pub fn release(process: u32) -> bool {
-    let snapshot = thread_snapshot(process);
+    let snapshot = thread_snapshot();
 
-    if snapshot.is_null() || snapshot == INVALID_HANDLE_VALUE {
+    // #[gamma::skip(cond.always_false, reason = "letting either Win32 failure sentinel reach OwnedHandle::from_raw_handle would violate that unsafe constructor's live-handle precondition, so the mutant cannot be observed safely")]
+    if !valid_snapshot(snapshot) {
         return false;
     }
 
@@ -283,8 +312,12 @@ pub fn release(process: u32) -> bool {
 }
 
 /// Takes the thread snapshot [`release`] scans.
-fn thread_snapshot(process: u32) -> HANDLE {
-    NATIVE_CALLS.thread_snapshot(process)
+fn thread_snapshot() -> HANDLE {
+    NATIVE_CALLS.thread_snapshot()
+}
+
+fn valid_snapshot(snapshot: HANDLE) -> bool {
+    !snapshot.is_null() && snapshot != INVALID_HANDLE_VALUE
 }
 
 /// The id of the one thread a suspended child has, if the snapshot still lists it.
@@ -292,28 +325,41 @@ fn main_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
     let mut entry = THREADENTRY32 {
         // The API rejects an entry whose declared size is not its own, which is how it tells
         // the versions of this structure apart.
-        dwSize: u32::try_from(size_of::<THREADENTRY32>()).unwrap_or(0),
+        dwSize: u32::try_from(size_of::<THREADENTRY32>()).expect("the Win32 thread-entry structure size always fits in u32"),
         ..Default::default()
     };
 
     let mut found = NATIVE_CALLS.first_thread(snapshot.as_raw_handle(), &mut entry);
 
     while found {
-        if entry.th32OwnerProcessID == process {
-            return Some(entry.th32ThreadID);
+        if let Some(thread) = thread_owned_by(&entry, process) {
+            return Some(thread);
         }
 
+        // #[gamma::skip(stmt.delete_assign, reason = "not advancing the thread snapshot repeats the first unrelated entry forever")]
         found = NATIVE_CALLS.next_thread(snapshot.as_raw_handle(), &mut entry);
     }
 
+    // #[gamma::skip(option.none_to_some, reason = "the default thread id is zero, which Win32 never assigns; attempting to open it also reports release failure, so the public result remains false")]
     None
 }
 
+const fn thread_owned_by(entry: &THREADENTRY32, process: u32) -> Option<u32> {
+    if entry.th32OwnerProcessID == process {
+        Some(entry.th32ThreadID)
+    } else {
+        None
+    }
+}
+
 /// Resumes one thread, reporting whether it actually came out of suspension.
+// #[gamma::skip(fn_value.bool_true, reason = "reporting success without opening and resuming the thread leaves the suspended child alive forever")]
 fn resume(thread: u32) -> bool {
     let handle = open_thread(thread);
 
-    if handle.is_null() {
+    // #[gamma::skip(cond.always_false, reason = "letting a null OpenThread result reach OwnedHandle::from_raw_handle would violate that unsafe constructor's live-handle precondition, so the mutant cannot be observed safely")]
+    if !valid_handle(handle) {
+        // #[gamma::skip(literal.bool_flip, reason = "reporting a failed OpenThread as success leaves the child suspended while its owner waits indefinitely")]
         return false;
     }
 
@@ -326,13 +372,18 @@ fn resume(thread: u32) -> bool {
 
 /// Opens the child's one thread for resumption.
 fn open_thread(thread: u32) -> HANDLE {
-    NATIVE_CALLS.open_thread(thread)
+    NATIVE_CALLS.open_thread(thread_identifier(thread))
+}
+
+fn valid_handle(handle: HANDLE) -> bool {
+    !handle.is_null()
 }
 
 /// Brings one thread out of suspension, reporting `u32::MAX` when it stayed suspended.
 ///
 /// The handle is still owned by the caller, so the failure a test injects here leaves it to be
 /// closed on the way out exactly as a real failure would.
+// #[gamma::skip(fn_value.one, fn_value.zero, expr.decrement, expr.increment, reason = "replacing the ResumeThread call with a count reports success without releasing the child, so the owner waits indefinitely")]
 fn previous_suspension_count(handle: &OwnedHandle) -> u32 {
     NATIVE_CALLS.resume_thread(handle.as_raw_handle())
 }
@@ -381,14 +432,15 @@ impl Job {
     pub fn create(limit: Option<u64>) -> Option<Self> {
         let handle = create_job_object();
 
-        if handle.is_null() {
+        // #[gamma::skip(cond.always_false, reason = "a null job handle is rejected again by the mandatory configuration call below, so both paths return None and no live handle exists to preserve")]
+        if !valid_handle(handle) {
             return None;
         }
 
         let completion = if limit.is_some() {
             let completion = create_completion_port();
 
-            if completion.is_null() {
+            if !valid_handle(completion) {
                 // SAFETY: `handle` was just created above and has no other owner.
                 let _closed = unsafe { CloseHandle(handle) };
 
@@ -476,9 +528,7 @@ impl Job {
             // SAFETY: the structure is plain old data whose every field is an integer, and the
             // call below either overwrites it entirely or is reported as having failed.
             unsafe { mem::zeroed() };
-        let mut returned: u32 = 0;
-
-        let queried = NATIVE_CALLS.query_accounting(self.handle, &mut limits, &mut returned);
+        let queried = NATIVE_CALLS.query_accounting(self.handle, &mut limits);
 
         let peak = queried.then(|| u64::try_from(limits.PeakJobMemoryUsed).ok()).flatten();
         let memory_limit_hit = self.limit.is_some_and(|_| self.memory_limit_was_hit());
@@ -493,15 +543,17 @@ impl Job {
         };
         let mut hit = self.memory_limit_hit.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
+        // #[gamma::skip(cond.always_false, reason = "once true, draining an already-empty non-blocking completion queue leaves the retained flag true and returns the same answer")]
         if *hit {
             return true;
         }
 
         loop {
-            let (mut message, mut key, mut overlapped) = (0_u32, 0_usize, core::ptr::null_mut());
+            let (mut message, mut key, mut overlapped) = (u32::default(), usize::default(), core::ptr::null_mut());
 
             let received = NATIVE_CALLS.completion_status(completion.as_raw_handle(), &mut message, &mut key, &mut overlapped);
 
+            // #[gamma::skip(cond.always_false, cond.negate, unary.remove_not, reason = "continuing after a non-blocking completion-port read reports an empty queue spins forever")]
             if !received {
                 return *hit;
             }
@@ -517,7 +569,9 @@ impl Job {
     /// # Errors
     ///
     /// Returns the operating system's reason when the job could not be terminated.
+    // #[gamma::skip(fn_value.ok, reason = "returning success without terminating the job leaves its child alive while the caller waits to reap it")]
     pub fn terminate(&self) -> io::Result<()> {
+        // #[gamma::skip(cond.always_true, reason = "pretending the kernel terminated the job leaves its child alive while the caller waits to reap it")]
         if NATIVE_CALLS.terminate_job(self.handle) {
             Ok(())
         } else {
@@ -576,14 +630,27 @@ pub fn in_any_job(child: &Child) -> Option<bool> {
     use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 
     let handle = child.as_raw_handle().cast::<c_void>();
-    let mut inside = 0;
+    let mut inside = i32::default();
 
     // SAFETY: the handle is the child's own process handle, which `Child` keeps open for as long
     // as it lives. A null job argument asks about any job at all rather than about a particular
     // one, and the final argument is a live `i32` the call writes through.
     let queried = unsafe { IsProcessInJob(handle, core::ptr::null_mut(), &raw mut inside) };
 
-    (queried != 0).then_some(inside != 0)
+    in_job_answer(JobMembershipQuery { queried, inside })
+}
+
+struct JobMembershipQuery {
+    queried: i32,
+    inside: i32,
+}
+
+const fn in_job_answer(answer: JobMembershipQuery) -> Option<bool> {
+    if win32_succeeded(answer.queried) {
+        Some(win32_succeeded(answer.inside))
+    } else {
+        None
+    }
 }
 
 #[cfg(all(test, not(miri)))]
@@ -592,7 +659,8 @@ mod tests {
     use std::sync::Arc;
     use std::{env, thread};
 
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+    use windows_sys::Win32::System::IO::PostQueuedCompletionStatus;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThreadId, GetProcessHandleCount, TerminateThread};
 
     use super::*;
 
@@ -610,6 +678,174 @@ mod tests {
     const HANDLE_LEAK_WARMUPS: u32 = 8;
     const ALLOWED_HANDLE_DRIFT: u32 = 8;
     const FAULT_TEST_LIMIT: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn win32_boolean_results_distinguish_failure_from_every_success_value() {
+        assert!(!win32_succeeded(0));
+        assert!(win32_succeeded(1));
+        assert!(win32_succeeded(-1));
+    }
+
+    #[test]
+    fn native_call_constants_match_the_documented_win32_contract() {
+        assert_eq!(THREAD_SNAPSHOT_FLAGS, TH32CS_SNAPTHREAD);
+        assert_eq!(SNAPSHOT_PROCESS_ID, 0);
+        assert_eq!(INHERIT_THREAD_HANDLE, 0);
+        assert_eq!(COMPLETION_KEY, 0);
+        assert_eq!(COMPLETION_CONCURRENCY, 1);
+        assert_eq!(thread_identifier(0), 0);
+        assert_eq!(thread_identifier(41), 41);
+        assert_eq!(thread_identifier(u32::MAX), u32::MAX);
+    }
+
+    #[test]
+    fn snapshot_validity_rejects_both_win32_failure_sentinels() {
+        assert!(!valid_snapshot(core::ptr::null_mut()));
+        assert!(!valid_snapshot(INVALID_HANDLE_VALUE));
+        assert!(valid_snapshot(core::ptr::dangling_mut::<c_void>()));
+    }
+
+    #[test]
+    fn ordinary_handle_validity_rejects_null_alone() {
+        assert!(!valid_handle(core::ptr::null_mut()));
+        assert!(valid_handle(INVALID_HANDLE_VALUE));
+        assert!(valid_handle(core::ptr::dangling_mut::<c_void>()));
+    }
+
+    #[test]
+    fn thread_ownership_requires_the_exact_process_identifier() {
+        let entry = THREADENTRY32 {
+            th32OwnerProcessID: 41,
+            th32ThreadID: 73,
+            ..Default::default()
+        };
+
+        assert_eq!(thread_owned_by(&entry, 41), Some(73));
+        assert_eq!(thread_owned_by(&entry, 40), None);
+        assert_eq!(thread_owned_by(&entry, 42), None);
+    }
+
+    #[test]
+    fn system_thread_calls_honor_the_win32_snapshot_contract() {
+        let snapshot = SystemCalls.thread_snapshot();
+
+        assert!(valid_snapshot(snapshot), "the system thread snapshot can be taken");
+
+        // SAFETY: the successful snapshot call above returned this newly owned handle.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+        let mut entry = THREADENTRY32 {
+            dwSize: u32::try_from(size_of::<THREADENTRY32>()).expect("the Win32 thread-entry structure size always fits in u32"),
+            ..Default::default()
+        };
+
+        assert!(
+            SystemCalls.first_thread(snapshot.as_raw_handle(), &mut entry),
+            "a system-wide thread snapshot has a first entry"
+        );
+
+        while SystemCalls.next_thread(snapshot.as_raw_handle(), &mut entry) {}
+
+        let invalid = core::ptr::null_mut();
+
+        assert!(!SystemCalls.first_thread(invalid, &mut entry));
+        assert!(!SystemCalls.next_thread(invalid, &mut entry));
+    }
+
+    #[test]
+    fn system_open_thread_uses_the_requested_identifier() {
+        // SAFETY: this takes no arguments and returns the calling thread's numeric identifier.
+        let current = unsafe { GetCurrentThreadId() };
+        let opened = SystemCalls.open_thread(current);
+
+        assert!(!opened.is_null(), "the current thread can be opened for resumption");
+
+        // SAFETY: the successful call above returned this newly owned handle.
+        drop(unsafe { OwnedHandle::from_raw_handle(opened) });
+
+        assert!(
+            SystemCalls.open_thread(u32::MAX).is_null(),
+            "an impossible thread identifier must not open some other thread"
+        );
+    }
+
+    #[test]
+    fn system_open_thread_does_not_grant_termination_access() {
+        let mut command = sleeper();
+        let mut child = command.spawn().expect("the child starts suspended");
+        let snapshot = SystemCalls.thread_snapshot();
+
+        assert!(valid_snapshot(snapshot));
+
+        // SAFETY: the successful snapshot call above returned this newly owned handle.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+        let thread = main_thread(&snapshot, child.id()).expect("the suspended child's thread is listed");
+        let opened = SystemCalls.open_thread(thread);
+
+        assert!(valid_handle(opened), "the child thread can be opened for resumption");
+
+        // SAFETY: `opened` is a live handle to a disposable external child's thread. The
+        // production access mask deliberately lacks termination rights, so this call fails
+        // without affecting the child; granting one extra access bit makes it observable.
+        let terminated = unsafe { TerminateThread(opened, 37) };
+
+        // SAFETY: the successful open call above returned this newly owned handle.
+        drop(unsafe { OwnedHandle::from_raw_handle(opened) });
+
+        if !win32_succeeded(terminated) {
+            let _killed = child.kill();
+        }
+        let _status = child.wait().expect("the suspended child is reaped");
+
+        assert!(
+            !win32_succeeded(terminated),
+            "the suspend/resume handle unexpectedly granted thread-termination access"
+        );
+    }
+
+    #[test]
+    fn invalid_handles_make_each_fallible_system_job_call_fail() {
+        let invalid = core::ptr::null_mut();
+        let mut association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+            CompletionKey: core::ptr::null_mut(),
+            CompletionPort: core::ptr::null_mut(),
+        };
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+            // SAFETY: this Win32 information structure is plain old data.
+            unsafe { mem::zeroed() };
+
+        assert!(!SystemCalls.associate_completion_port(invalid, &mut association));
+        assert!(!SystemCalls.configure_job(invalid, &mut limits));
+        assert!(!SystemCalls.assign_process(invalid, invalid));
+        assert!(!SystemCalls.query_accounting(INVALID_HANDLE_VALUE, &mut limits));
+    }
+
+    #[test]
+    fn a_system_completion_read_reports_the_posted_message() {
+        let completion = SystemCalls.create_completion_port();
+
+        assert!(!completion.is_null(), "a completion port is created");
+
+        // SAFETY: the successful call above returned this newly owned handle.
+        let completion = unsafe { OwnedHandle::from_raw_handle(completion) };
+        // SAFETY: the completion handle is live, and a null overlapped pointer is a valid packet
+        // payload because this test reads only the message and key.
+        let posted = unsafe {
+            PostQueuedCompletionStatus(
+                completion.as_raw_handle(),
+                JOB_OBJECT_MSG_JOB_MEMORY_LIMIT,
+                37,
+                core::ptr::null_mut(),
+            )
+        };
+
+        assert!(win32_succeeded(posted), "the completion packet is posted");
+
+        let (mut message, mut key, mut overlapped) = (u32::default(), usize::default(), core::ptr::null_mut());
+
+        assert!(SystemCalls.completion_status(completion.as_raw_handle(), &mut message, &mut key, &mut overlapped));
+        assert_eq!(message, JOB_OBJECT_MSG_JOB_MEMORY_LIMIT);
+        assert_eq!(key, 37);
+    }
 
     /// A child that outlives any test unless something kills it.
     ///
@@ -691,6 +927,27 @@ mod tests {
     /// Loader failures happen before a child can report anything through its own stderr.
     #[test]
     fn the_process_and_its_children_suppress_system_error_dialogs() {
+        const CHILD: &str = "CARGO_GAMMA_ERROR_MODE_CHILD";
+
+        if env::var_os(CHILD).is_none() {
+            let output = Command::new(env::current_exe().expect("the test binary knows its own path"))
+                .args([
+                    "--exact",
+                    "job::tests::the_process_and_its_children_suppress_system_error_dialogs",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("the isolated error-mode test starts");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            assert!(output.status.success(), "the isolated error-mode test failed: {}", stderr);
+            return;
+        }
+
+        // SAFETY: the isolated subprocess owns its process-wide error mode.
+        let _previous = unsafe { SetErrorMode(0) };
+
         suppress_error_dialogs();
 
         // SAFETY: this reads the process's integer error-mode flags and touches no memory.
@@ -698,6 +955,52 @@ mod tests {
         let required = SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX;
 
         assert_eq!(mode & required, required, "the process still allows a child error dialog");
+    }
+
+    #[test]
+    fn start_suspended_keeps_an_immediate_child_from_running() {
+        let job = Job::create(None).expect("a job is created");
+        let mut command = Command::new("cmd");
+        let _ = command.args(["/C", "exit", "/B", "0"]);
+
+        start_suspended(&mut command);
+
+        let mut child = command.spawn().expect("the child starts suspended");
+
+        assert!(job.assign(&child), "the suspended child can be assigned");
+        thread::sleep(core::time::Duration::from_millis(100));
+        assert!(
+            child.try_wait().expect("the child status can be queried").is_none(),
+            "the child ran before release"
+        );
+        assert!(release(child.id()), "the child is released");
+        assert!(child.wait().expect("the released child exits").success());
+    }
+
+    #[test]
+    fn the_system_resume_call_reports_the_previous_suspension_count() {
+        let mut command = Command::new("cmd");
+        let _ = command.args(["/C", "exit", "/B", "0"]);
+
+        start_suspended(&mut command);
+
+        let mut child = command.spawn().expect("the child starts suspended");
+        let snapshot = SystemCalls.thread_snapshot();
+
+        assert!(valid_snapshot(snapshot));
+
+        // SAFETY: the successful snapshot call above returned this newly owned handle.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+        let thread = main_thread(&snapshot, child.id()).expect("the suspended child's thread is listed");
+        let handle = SystemCalls.open_thread(thread);
+
+        assert!(!handle.is_null(), "the suspended thread can be opened");
+
+        // SAFETY: the successful open call above returned this newly owned handle.
+        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+
+        assert_eq!(SystemCalls.resume_thread(handle.as_raw_handle()), 1);
+        assert!(child.wait().expect("the resumed child exits").success());
     }
 
     /// Closing the last handle to a job takes everything in it.
@@ -752,6 +1055,33 @@ mod tests {
         assert!(!usage.1, "a job with no limit reported exhaustion: {usage:?}");
     }
 
+    #[test]
+    fn an_unlimited_job_has_no_completion_port_or_memory_limit_flag() {
+        let job = Job::create(None).expect("a job is created");
+
+        assert!(job.completion.is_none());
+        assert!(job.limit.is_none());
+        assert_eq!(flags(&job) & JOB_OBJECT_LIMIT_JOB_MEMORY, 0);
+    }
+
+    #[test]
+    fn a_limited_job_installs_its_completion_port_and_memory_limit() {
+        let job = Job::create(Some(FAULT_TEST_LIMIT)).expect("a limited job is created");
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
+            // SAFETY: the structure is plain old data and the call below overwrites it.
+            unsafe { mem::zeroed() };
+        let queried = SystemCalls.query_accounting(job.handle, &mut limits);
+
+        assert!(queried, "the limited job can be queried");
+        assert!(job.completion.is_some());
+        assert_eq!(job.limit, Some(FAULT_TEST_LIMIT));
+        assert_ne!(flags(&job) & JOB_OBJECT_LIMIT_JOB_MEMORY, 0);
+        assert_eq!(
+            u64::try_from(limits.JobMemoryLimit).expect("usize always fits in u64 on Windows"),
+            FAULT_TEST_LIMIT
+        );
+    }
+
     /// A high-water mark is measurement, not evidence that the next commit was refused.
     #[test]
     fn a_peak_equal_to_the_limit_without_a_violation_is_not_exhaustion() {
@@ -767,6 +1097,25 @@ mod tests {
         let usage = usage_from(Some(4096), Some(4095), true);
 
         assert!(usage.1, "{usage:?}");
+    }
+
+    #[test]
+    fn a_completion_message_is_consumed_once_and_then_remembered() {
+        let job = Job::create(Some(FAULT_TEST_LIMIT)).expect("a limited job is created");
+        let _message = native_faults::arm(NativeCall::MemoryLimitMessage);
+
+        let first = job.usage();
+        let second = job.usage();
+
+        assert!(first.1, "the injected kernel message marks the first reading exhausted");
+        assert!(second.1, "the consumed kernel message remains remembered");
+    }
+
+    #[test]
+    fn a_job_without_a_completion_port_cannot_report_a_memory_limit_hit() {
+        let job = Job::create(None).expect("an unlimited job is created");
+
+        assert!(!job.memory_limit_was_hit());
     }
 
     #[test]
@@ -878,7 +1227,9 @@ mod tests {
 
         job.terminate().expect("the live test job can be terminated");
 
-        wait_for_end(&mut child);
+        let status = child.wait().expect("the terminated child exits");
+
+        assert_eq!(status.code(), Some(1), "the job termination code is preserved");
     }
 
     /// The number of kernel handles this process currently holds.
@@ -1100,6 +1451,30 @@ mod tests {
         let (_peak, exhausted) = job.usage();
 
         assert!(!exhausted, "a failed completion-port read invented a limit violation");
+    }
+
+    #[test]
+    fn in_job_answers_preserve_failure_outside_and_inside() {
+        assert_eq!(in_job_answer(JobMembershipQuery { queried: 0, inside: 0 }), None);
+        assert_eq!(in_job_answer(JobMembershipQuery { queried: 1, inside: 0 }), Some(false));
+        assert_eq!(in_job_answer(JobMembershipQuery { queried: 1, inside: 1 }), Some(true));
+    }
+
+    #[test]
+    fn in_any_job_distinguishes_an_unassigned_child_from_an_assigned_one() {
+        let job = Job::create(None).expect("a job is created");
+        let mut command = sleeper();
+        let mut child = command.spawn().expect("the child starts suspended");
+
+        assert!(
+            in_any_job(&child).is_some(),
+            "the child's pre-assignment containment can be queried"
+        );
+        assert!(job.assign(&child), "the job accepts the child");
+        assert_eq!(in_any_job(&child), Some(true));
+
+        job.terminate().expect("the assigned child can be terminated");
+        wait_for_end(&mut child);
     }
 
     /// A termination that did not happen is not mistaken for one that did.

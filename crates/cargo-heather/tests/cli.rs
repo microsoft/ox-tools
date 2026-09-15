@@ -361,6 +361,22 @@ fn scanner_exclude_list_filters_directory_subtree() {
 }
 
 #[test]
+fn scanner_excludes_a_path_matching_only_one_of_multiple_entries() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    let cfg = format!("{CONFIG_MIT}exclude = [\"b.rs\", \"vendor\"]\n");
+    write(&p.join(".cargo-heather.toml"), &cfg);
+    write(&p.join("a.rs"), &format!("{HEADER_TEXT}\nfn a() {{}}\n"));
+    write(&p.join("b.rs"), "fn b() {}\n");
+    fs::create_dir_all(p.join("vendor")).unwrap();
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "a match against either exclude must be sufficient: {stderr}");
+    assert!(stderr.contains("Checking 1 file(s)"), "{stderr}");
+}
+
+#[test]
 fn scanner_warns_on_unresolvable_exclude_entry() {
     let dir = TempDir::new().unwrap();
     let p = dir.path();
@@ -749,6 +765,19 @@ fn scanner_skips_hidden_directories_at_any_depth() {
         "hidden dir contents must not be scanned: {stderr}"
     );
     assert!(!stderr.contains("inner.rs"), "hidden dir contents must not be scanned: {stderr}");
+}
+
+#[test]
+fn scanner_includes_dot_prefixed_rust_files() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CONFIG_MIT);
+    write(&p.join(".generated.rs"), &format!("{HEADER_TEXT}\nfn generated() {{}}\n"));
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "dot-prefixed files are not hidden directories: {stderr}");
+    assert!(stderr.contains("Checking 1 file(s)"), "{stderr}");
 }
 
 #[test]

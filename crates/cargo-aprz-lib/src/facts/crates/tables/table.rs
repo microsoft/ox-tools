@@ -76,6 +76,7 @@ pub trait Table: Sized {
             .into_app_err_with(|| format!("creating table file: {}", path.display()))?;
 
         // Use a 1MB buffer for better performance with large tables
+        // #[gamma::skip(arith, literal.int_to_zero, literal.int_to_one, literal.int_increment, literal.int_decrement, reason = "writer capacity is only a throughput hint and cannot change table bytes")]
         let mut buf_writer = BufWriter::with_capacity(1024 * 1024, file);
 
         // Write header placeholder
@@ -113,7 +114,6 @@ pub trait Table: Sized {
     // Runtime data access
     fn iter(&self) -> impl Iterator<Item = (Self::Row<'_>, Self::Index)>;
     fn get(&self, index: Self::Index) -> Self::Row<'_>;
-    fn len(&self) -> usize;
     fn timestamp(&self) -> DateTime<Utc>;
 }
 
@@ -190,11 +190,6 @@ macro_rules! define_table {
                 fn get(&self, index: Self::Index) -> Self::Row<'_> {
                     let mut reader = super::RowReader::new(&self.mmap[super::TABLE_HEADER_SIZE + index.0..]);
                     Self::read_row(&mut reader)
-                }
-
-                #[expect(clippy::cast_possible_truncation, reason = "Tables won't exceed usize::MAX entries in practice")]
-                fn len(&self) -> usize {
-                    self.count as usize
                 }
 
                 fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
@@ -380,5 +375,21 @@ mod tests {
 
         assert_eq!(count, 7);
         assert_eq!(timestamp, now - chrono::TimeDelta::seconds(60));
+    }
+
+    #[test]
+    fn rejects_bad_magic_and_out_of_range_timestamp() {
+        let now = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
+
+        let mut bad_magic = header(0, now.timestamp().cast_unsigned());
+        bad_magic[0] ^= 1;
+        let (_dir, mmap) = map_header(&bad_magic);
+        let error = validate_table_header(&mmap, Duration::MAX, now).unwrap_err();
+        assert!(error.to_string().contains("invalid table format"), "{error}");
+
+        let bad_timestamp = header(0, u64::MAX);
+        let (_dir, mmap) = map_header(&bad_timestamp);
+        let error = validate_table_header(&mmap, Duration::MAX, now).unwrap_err();
+        assert!(error.to_string().contains("timestamp out of range for i64"), "{error}");
     }
 }

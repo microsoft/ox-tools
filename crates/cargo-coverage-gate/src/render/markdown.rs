@@ -64,6 +64,7 @@ fn write_failure_details(out: &mut dyn io::Write, report: &Report) -> io::Result
         writeln!(out, "- **{}:** {}", outcome.name, detail)?;
         let mut remaining = MAX_DIAGNOSTIC_LINES;
         for diagnostic in &outcome.diagnostics {
+            // #[gamma::skip(loop.break_to_continue, reason = "once remaining is zero, continuing only visits the finite remainder of the diagnostics without writing; output and termination are unchanged")]
             if remaining == 0 {
                 break;
             }
@@ -121,6 +122,7 @@ mod tests {
         assert!(s.starts_with("### coverage-gate"));
         assert!(s.contains("| Package | Lines |"));
         assert!(s.contains("|-------|------:|"));
+        assert!(!s.contains("#### Failure details"), "passing reports have no failure section:\n{s}");
     }
 
     #[test]
@@ -187,6 +189,21 @@ mod tests {
     }
 
     #[test]
+    fn one_omitted_failure_location_is_reported() {
+        let mut failed = outcome("alpha", 101, 0, 80.0, ThresholdSource::Package, Status::Fail);
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/lib.rs".into(),
+            lines: (1..=101).collect(),
+        });
+        let report = Report {
+            outcomes: vec![failed],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("... 1 more line locations omitted"), "got:\n{s}");
+    }
+
+    #[test]
     fn renders_no_data_with_warning_emoji() {
         let report = Report {
             outcomes: vec![outcome("gamma", 0, 0, 100.0, ThresholdSource::Default, Status::NoData)],
@@ -202,11 +219,11 @@ mod tests {
     fn renders_unattributed_warning_when_present() {
         let report = Report {
             outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
-            unattributed: 2,
+            unattributed: 1,
         };
         let s = render_to_string(&report);
         assert!(s.contains("_Note:"), "expected italicized unattributed warning, got:\n{s}");
-        assert!(s.contains("2 files"));
+        assert!(s.contains("1 file"));
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! features, dependencies, targets, and the freeform `package.metadata`
 //! block.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use cargo_metadata::{MetadataCommand, TargetKind};
@@ -98,14 +98,14 @@ impl Workspace {
     /// example a missing or invalid manifest.
     #[ohno::enrich_err("failed to load cargo workspace metadata")]
     pub(crate) fn load(manifest_path: Option<&Path>) -> Result<Self, EachError> {
-        let mut cmd = MetadataCommand::new();
-        cmd.no_deps();
+        let mut command = MetadataCommand::new();
+        let cmd = command.no_deps();
         if let Some(path) = manifest_path {
             cmd.manifest_path(path);
         }
         let metadata = cmd.exec().map_err(LoadMetadataError::caused_by)?;
 
-        let mut members: Vec<Member> = metadata
+        let members: Vec<Member> = metadata
             .workspace_packages()
             .iter()
             .map(|pkg| {
@@ -131,8 +131,9 @@ impl Workspace {
                     metadata: pkg.metadata.clone(),
                 }
             })
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
             .collect();
-        members.sort_by(|a, b| a.name.cmp(&b.name));
 
         let default_member_names = metadata
             .workspace_default_packages()

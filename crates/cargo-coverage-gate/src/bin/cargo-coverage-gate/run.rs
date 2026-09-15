@@ -4,6 +4,7 @@
 //! Implementation of the `cargo coverage-gate` command.
 
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,10 @@ use cargo_coverage_gate::{EvaluatedReport, evaluate_many_for_target};
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::CoverageGateArgs;
+
+const EVALUATE_ERROR_CONTEXT: &str = "failed to evaluate coverage";
+const STDOUT_ERROR_CONTEXT: &str = "failed to write verdict to stdout";
+const SUMMARY_ENV_VARS: [&str; 2] = ["GITHUB_STEP_SUMMARY", "COVERAGE_GATE_SUMMARY"];
 
 pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
     let lcov_paths: Vec<PathBuf> = if args.lcov.is_empty() {
@@ -27,10 +32,9 @@ pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
     }
     let lcov_refs: Vec<&str> = lcov_texts.iter().map(String::as_str).collect();
 
-    let report =
-        evaluate_many_for_target(&lcov_refs, None, &args.packages, args.target.as_deref()).into_app_err("failed to evaluate coverage")?;
+    let report = evaluate_many_for_target(&lcov_refs, None, &args.packages, args.target.as_deref()).into_app_err(EVALUATE_ERROR_CONTEXT)?;
 
-    write_text_output(&report, args.quiet).into_app_err("failed to write verdict to stdout")?;
+    write_text_output(&report, args.quiet).into_app_err(STDOUT_ERROR_CONTEXT)?;
 
     if let Some(path) = summary_target(args) {
         write_summary_file(&report, &path).into_app_err(format!("failed to write summary file `{}`", path.display()))?;
@@ -62,15 +66,58 @@ fn write_summary_file(report: &EvaluatedReport, path: &Path) -> io::Result<()> {
 /// `GITHUB_STEP_SUMMARY` environment variable, then the
 /// `COVERAGE_GATE_SUMMARY` environment variable.
 fn summary_target(args: &CoverageGateArgs) -> Option<PathBuf> {
+    summary_target_with_env(args, |name| env::var_os(name))
+}
+
+fn summary_target_with_env(args: &CoverageGateArgs, mut var_os: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
     if let Some(p) = &args.summary_file {
         return Some(p.clone());
     }
-    for var in ["GITHUB_STEP_SUMMARY", "COVERAGE_GATE_SUMMARY"] {
-        if let Some(v) = env::var_os(var)
+    for var in SUMMARY_ENV_VARS {
+        if let Some(v) = var_os(var)
             && !v.is_empty()
         {
             return Some(PathBuf::from(v));
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(summary_file: Option<&str>) -> CoverageGateArgs {
+        CoverageGateArgs {
+            lcov: Vec::new(),
+            packages: Vec::new(),
+            target: None,
+            summary_file: summary_file.map(PathBuf::from),
+            quiet: false,
+        }
+    }
+
+    #[test]
+    fn error_contexts_are_specific() {
+        assert_eq!(EVALUATE_ERROR_CONTEXT, "failed to evaluate coverage");
+        assert_eq!(STDOUT_ERROR_CONTEXT, "failed to write verdict to stdout");
+    }
+
+    #[test]
+    fn summary_environment_falls_back_in_priority_order() {
+        let mut queried = Vec::new();
+        let target = summary_target_with_env(&args(None), |name| {
+            queried.push(name.to_owned());
+            (name == "COVERAGE_GATE_SUMMARY").then(|| OsString::from("coverage.md"))
+        });
+
+        assert_eq!(queried, ["GITHUB_STEP_SUMMARY", "COVERAGE_GATE_SUMMARY"]);
+        assert_eq!(target, Some(PathBuf::from("coverage.md")));
+    }
+
+    #[test]
+    fn explicit_summary_file_skips_environment_lookup() {
+        let target = summary_target_with_env(&args(Some("explicit.md")), |_| panic!("environment must not be queried"));
+        assert_eq!(target, Some(PathBuf::from("explicit.md")));
+    }
 }

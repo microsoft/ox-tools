@@ -146,6 +146,7 @@ where
 async fn open_db(cache_dir: impl AsRef<Path>, progress: &dyn Progress) -> Result<Database> {
     let cache_path = cache_dir.as_ref().to_path_buf();
 
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "success verb is progress prose only and cannot change advisory database results")]
     run_blocking_with_progress(progress, "Opening the advisory database", "opening", move || {
         Database::open(&cache_path).map_err(Into::into)
     })

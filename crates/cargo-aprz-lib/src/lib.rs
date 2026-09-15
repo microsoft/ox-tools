@@ -29,12 +29,15 @@
 pub type Result<T, E = ohno::AppError> = core::result::Result<T, E>;
 pub(crate) type HashMap<K, V> = rustc_hash::FxHashMap<K, V>;
 pub(crate) type HashSet<V> = rustc_hash::FxHashSet<V>;
+pub(crate) const HTTP_USER_AGENT: &str = "cargo-aprz";
 
 pub(crate) fn hash_map_with_capacity<K, V>(capacity: usize) -> HashMap<K, V> {
+    // #[gamma::skip(expr.increment, reason = "capacity is an allocation hint and does not change map behavior")]
     HashMap::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher)
 }
 
 pub(crate) fn hash_set_with_capacity<V>(capacity: usize) -> HashSet<V> {
+    // #[gamma::skip(expr.increment, expr.decrement, reason = "capacity is an allocation hint and does not change set behavior")]
     HashSet::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher)
 }
 
@@ -43,6 +46,14 @@ mod expr;
 mod facts;
 mod metrics;
 mod reports;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn http_user_agent_identifies_the_tool() {
+        assert_eq!(super::HTTP_USER_AGENT, "cargo-aprz");
+    }
+}
 
 /// Re-exports the crate internals for the crate's own integration tests.
 ///

@@ -31,7 +31,9 @@ impl Throttler {
     /// Create a new throttler that allows at most `max_concurrent` tasks at a time.
     pub fn new(max_concurrent: usize) -> Arc<Self> {
         Arc::new(Self {
+            // #[gamma::skip(expr.decrement, reason = "decrementing a one-slot throttler creates a zero-permit semaphore and parks every acquirer forever")]
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            // #[gamma::skip(literal.bool_flip, reason = "starting paused without a scheduled resume parks every initial acquirer forever")]
             paused: AtomicBool::new(false),
             resume: Notify::new(),
             resume_at: std::sync::Mutex::new(None),
@@ -53,6 +55,7 @@ impl Throttler {
             tokio::pin!(notified);
             let _ = notified.as_mut().enable();
 
+            // #[gamma::skip(cond.always_true, cond.negate, reason = "forcing the pre-acquire pause branch parks forever when no pause notification is scheduled")]
             if self.paused.load(Ordering::Acquire) {
                 notified.await;
                 continue;
@@ -65,6 +68,7 @@ impl Throttler {
 
             // Double-check: if a pause started while we were waiting for the
             // semaphore, release the permit and wait for the pause to lift.
+            // #[gamma::skip(cond.always_true, cond.negate, reason = "forcing the post-acquire pause branch repeatedly releases every permit and never returns")]
             if self.paused.load(Ordering::Acquire) {
                 drop(permit);
                 continue;

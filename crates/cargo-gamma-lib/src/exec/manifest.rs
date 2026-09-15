@@ -728,6 +728,53 @@ fn append_flag(flags: &mut Item) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn feature_array_union_preserves_order_deduplicates_and_handles_malformed_values() {
+        let left = Value::Array(["a", "b"].into_iter().collect());
+        let right = Value::Array(["b", "c"].into_iter().collect());
+        let merged = merge_feature_arrays(Some(left.clone()), Some(right)).expect("merged features");
+        let merged = merged.as_array().expect("feature array");
+        let names: Vec<_> = merged.iter().filter_map(Value::as_str).collect();
+
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(
+            merge_feature_arrays(Some(left.clone()), None).map(|value| value.to_string()),
+            Some(left.to_string())
+        );
+        assert_eq!(
+            merge_feature_arrays(None, Some(left.clone())).map(|value| value.to_string()),
+            Some(left.to_string())
+        );
+        assert_eq!(
+            merge_feature_arrays(Some(left.clone()), Some(Value::from("malformed"))).map(|value| value.to_string()),
+            Some(left.to_string())
+        );
+        assert!(merge_feature_arrays(None, None).is_none());
+    }
+
+    #[test]
+    fn appending_the_lint_cap_distinguishes_arrays_strings_and_unsupported_values() {
+        let mut array = Item::Value(Value::Array(["-Cdebuginfo=1"].into_iter().collect()));
+        assert!(append_flag(&mut array));
+        assert_eq!(
+            array
+                .as_array()
+                .expect("array")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>(),
+            ["-Cdebuginfo=1", CAP_LINTS]
+        );
+
+        let mut string = Item::Value(Value::from("-Cdebuginfo=1"));
+        assert!(append_flag(&mut string));
+        assert_eq!(string.as_str(), Some("-Cdebuginfo=1 --cap-lints=allow"));
+
+        let mut unsupported = Item::Value(Value::from(7));
+        assert!(!append_flag(&mut unsupported));
+        assert_eq!(unsupported.as_integer(), Some(7));
+    }
+
     fn fixed(text: &str, original: &str) -> String {
         within(text, original, "")
     }

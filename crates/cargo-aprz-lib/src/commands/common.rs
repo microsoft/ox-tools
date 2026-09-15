@@ -177,25 +177,32 @@ pub struct CommonArgs {
 impl CommonArgs {
     /// Build the set of service addresses, applying any overrides supplied on the command line.
     #[must_use]
+    // #[gamma::skip(fn_value.default, reason = "discarding every endpoint override sends hermetic command tests to live services until their resource budget expires")]
     pub fn endpoints(&self) -> Endpoints {
         let mut endpoints = Endpoints::default();
 
         if let Some(url) = &self.dump_url {
+            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "discarding the dump override sends hermetic command tests to the live crates.io dump until their resource budget expires")]
             endpoints = endpoints.with_dump_url(url);
         }
         if let Some(url) = &self.docs_url {
+            // #[gamma::skip(assign_value.default, reason = "discarding the docs override sends hermetic command tests to live docs.rs until their resource budget expires")]
             endpoints = endpoints.with_docs_url(url);
         }
         if let Some(url) = &self.coverage_url {
+            // #[gamma::skip(assign_value.default, reason = "discarding the coverage override sends hermetic command tests to live Codecov until their resource budget expires")]
             endpoints = endpoints.with_coverage_url(url);
         }
         if let Some(url) = &self.github_url {
+            // #[gamma::skip(assign_value.default, reason = "discarding the GitHub override sends hermetic command tests to the live GitHub API until their resource budget expires")]
             endpoints = endpoints.with_github_url(url);
         }
         if let Some(url) = &self.codeberg_url {
+            // #[gamma::skip(assign_value.default, reason = "discarding the Codeberg override sends hermetic command tests to the live Codeberg API until their resource budget expires")]
             endpoints = endpoints.with_codeberg_url(url);
         }
         if let Some(url) = &self.advisory_url {
+            // #[gamma::skip(assign_value.default, reason = "discarding the advisory override sends hermetic command tests to the live advisory repository until their resource budget expires")]
             endpoints = endpoints.with_advisory_url(url);
         }
 
@@ -243,20 +250,10 @@ impl<'a, H: super::Host> Common<'a, H> {
         // Determine cache directory: use provided path or default cache directory for the platform
         let cache_dir = Self::resolve_cache_dir(args.cache_dir.as_deref())?;
 
-        let delay = if args.log_level == LogLevel::None {
-            Duration::from_millis(300)
-        } else {
-            Duration::from_hours(365 * 24)
-        };
+        let delay = progress_delay(args.log_level);
 
-        let use_colors_for_progress = match args.color {
-            ColorMode::Always => true,
-            ColorMode::Never => false,
-            ColorMode::Auto => {
-                use std::io::{IsTerminal, stderr};
-                stderr().is_terminal()
-            }
-        };
+        use std::io::{IsTerminal, stderr};
+        let use_colors_for_progress = use_colors(args.color, stderr().is_terminal());
 
         let progress_reporter = ProgressReporter::new(delay, use_colors_for_progress);
 
@@ -303,28 +300,24 @@ impl<'a, H: super::Host> Common<'a, H> {
     }
 
     fn resolve_cache_dir(cache_dir: Option<&Utf8Path>) -> Result<PathBuf> {
+        Self::resolve_cache_dir_from(cache_dir, platform_cache_dir())
+    }
+
+    fn resolve_cache_dir_from(cache_dir: Option<&Utf8Path>, platform_dir: Option<PathBuf>) -> Result<PathBuf> {
         if let Some(cache_path) = cache_dir {
             Ok(cache_path.as_std_path().to_path_buf())
         } else {
-            Ok(platform_cache_dir()
-                .into_app_err("could not determine cache directory")?
-                .join("cargo-aprz"))
+            Ok(platform_dir.into_app_err("could not determine cache directory")?.join("cargo-aprz"))
         }
     }
 
     /// Initialize logger based on log level
     fn init_logging(log_level: LogLevel) {
-        let Some(level) = log_filter(log_level) else {
+        let Some(mut builder) = logger_builder(log_level) else {
             return;
         };
 
-        let env = env_logger::Env::default().filter_or("RUST_LOG", level);
-
-        env_logger::Builder::from_env(env)
-            .format_timestamp(None)
-            .format_module_path(false)
-            .format_target(matches!(log_level, LogLevel::Debug | LogLevel::Trace))
-            .init();
+        builder.init();
     }
 
     // The collector only fails as a whole if a provider gives up before it can report per-crate
@@ -336,6 +329,7 @@ impl<'a, H: super::Host> Common<'a, H> {
 
         match results {
             Ok(facts_iter) => Ok(facts_iter.collect()),
+            // #[gamma::skip(result.err_to_ok, reason = "Collector::collect currently has no error-producing path")]
             Err(e) => {
                 eprintln!("{e:#}");
                 Err(e)
@@ -344,127 +338,170 @@ impl<'a, H: super::Host> Common<'a, H> {
     }
 
     pub fn report(&mut self, processed_crates: impl IntoIterator<Item = CrateFacts>) -> Result<()> {
-        // Filter out crates with missing core data (can't be reported)
-        let (analyzable_crates, failed_crates): (Vec<_>, Vec<_>) =
-            processed_crates.into_iter().partition(|facts| facts.crates_data.is_found());
-
-        // Log crates that couldn't be analyzed
-        if !failed_crates.is_empty() {
-            let mut error_output = self.host.error();
-            report_unanalyzable_crates(&mut error_output, &failed_crates);
-        }
-
-        // Flatten crate facts into metrics and optionally evaluate, creating ReportableCrate instances
-        let has_expressions = !self.config.high_risk.is_empty() || !self.config.eval.is_empty();
-        let should_eval = has_expressions || self.error_if_high_risk || self.error_if_medium_risk;
-
-        // A single instant is used for every crate: expressions such as `now - crate.updated_at`
-        // must compare each crate against the same baseline, and it avoids a clock lookup per crate.
-        let now = Local::now();
-
-        let mut reportable_crates: Vec<ReportableCrate> = if should_eval {
-            analyzable_crates
-                .into_iter()
-                .map(|facts| {
-                    let metrics: Vec<_> = flatten(&facts).collect();
-                    let evaluation = evaluate(
-                        &self.config.high_risk,
-                        &self.config.eval,
-                        &metrics,
-                        now,
-                        self.config.medium_risk_threshold,
-                        self.config.low_risk_threshold,
-                    );
-
-                    ReportableCrate::new(
-                        Arc::clone(facts.crate_spec.name_arc()),
-                        Arc::clone(facts.crate_spec.version_arc()),
-                        metrics,
-                        Some(evaluation),
-                    )
-                })
-                .collect()
-        } else {
-            analyzable_crates
-                .into_iter()
-                .map(|facts| {
-                    let metrics: Vec<_> = flatten(&facts).collect();
-                    ReportableCrate::new(
-                        Arc::clone(facts.crate_spec.name_arc()),
-                        Arc::clone(facts.crate_spec.version_arc()),
-                        metrics,
-                        None,
-                    )
-                })
-                .collect()
-        };
-
-        // Sort crates by name and version for consistent ordering
-        reportable_crates.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()).then_with(|| a.version.cmp(&b.version)));
-
-        let generating_reports = self.html.is_some() || self.excel.is_some() || self.csv.is_some() || self.json.is_some();
-
-        // Show console output if:
-        // - --console flag is explicitly set, OR
-        // - No reports are being generated AND no --error-if flag is set
-        let error_if = self.error_if_high_risk || self.error_if_medium_risk;
-        let default_mode = ConsoleOutputMode::full();
-        let console_mode = match &self.console {
-            Some(mode) => Some(mode),
-            None if !generating_reports && !error_if => Some(&default_mode),
-            None => None,
-        };
-
-        if let Some(mode) = console_mode
-            && !reportable_crates.is_empty()
-        {
-            let mut console_output = String::new();
-            let use_colors = match self.color {
-                ColorMode::Always => true,
-                ColorMode::Never => false,
-                ColorMode::Auto => {
-                    use std::io::{IsTerminal, stdout};
-                    stdout().is_terminal()
-                }
-            };
-            _ = generate_console(&reportable_crates, use_colors, mode, &mut console_output);
-            let _ = write!(self.host.output(), "{console_output}");
-        }
-
-        if let Some(filename) = &self.html {
-            let mut html = String::new();
-            generate_html(&reportable_crates, Local::now(), &mut html)?;
-            fs::write(filename, html)?;
-        }
-
-        if let Some(filename) = &self.excel {
-            let mut file = fs::File::create(filename)?;
-            generate_xlsx(&reportable_crates, &mut file)?;
-        }
-
-        if let Some(filename) = &self.csv {
-            let mut csv_output = String::new();
-            generate_csv(&reportable_crates, &mut csv_output)?;
-            fs::write(filename, csv_output)?;
-        }
-
-        if let Some(filename) = &self.json {
-            let mut json_output = String::new();
-            generate_json(&reportable_crates, &mut json_output)?;
-            fs::write(filename, json_output)?;
-        }
-
-        // If --error-if-medium-risk flag is set, return error if any non-allowed crate is medium or high risk
-        // If --error-if-high-risk flag is set, return error if any non-allowed crate is high risk
-        check_risk_errors(
-            &reportable_crates,
+        report_processed_crates(
+            self.host,
             &self.config,
-            self.error_if_medium_risk,
-            self.error_if_high_risk,
-            should_include_rejection_details(console_mode),
-        )?;
+            ReportOptions {
+                color: self.color,
+                error_if_high_risk: self.error_if_high_risk,
+                error_if_medium_risk: self.error_if_medium_risk,
+                console: self.console.as_ref(),
+                html: self.html.as_deref(),
+                excel: self.excel.as_deref(),
+                csv: self.csv.as_deref(),
+                json: self.json.as_deref(),
+            },
+            processed_crates,
+        )
+    }
+}
 
-        Ok(())
+#[derive(Clone, Copy)]
+struct ReportOptions<'a> {
+    color: ColorMode,
+    error_if_high_risk: bool,
+    error_if_medium_risk: bool,
+    console: Option<&'a ConsoleOutputMode>,
+    html: Option<&'a Utf8Path>,
+    excel: Option<&'a Utf8Path>,
+    csv: Option<&'a Utf8Path>,
+    json: Option<&'a Utf8Path>,
+}
+
+fn report_processed_crates<H: super::Host>(
+    host: &mut H,
+    config: &Config,
+    options: ReportOptions<'_>,
+    processed_crates: impl IntoIterator<Item = CrateFacts>,
+) -> Result<()> {
+    // Filter out crates with missing core data (can't be reported)
+    let (analyzable_crates, failed_crates): (Vec<_>, Vec<_>) = processed_crates.into_iter().partition(|facts| facts.crates_data.is_found());
+
+    // Log crates that couldn't be analyzed
+    if !failed_crates.is_empty() {
+        let mut error_output = host.error();
+        report_unanalyzable_crates(&mut error_output, &failed_crates);
+    }
+
+    // Flatten crate facts into metrics and optionally evaluate, creating ReportableCrate instances
+    let has_expressions = !config.high_risk.is_empty() || !config.eval.is_empty();
+    let should_eval = has_expressions || options.error_if_high_risk || options.error_if_medium_risk;
+
+    // A single instant is used for every crate: expressions such as `now - crate.updated_at`
+    // must compare each crate against the same baseline, and it avoids a clock lookup per crate.
+    let now = Local::now();
+
+    let mut reportable_crates: Vec<ReportableCrate> = if should_eval {
+        analyzable_crates
+            .into_iter()
+            .map(|facts| {
+                let metrics: Vec<_> = flatten(&facts).collect();
+                let evaluation = evaluate(
+                    &config.high_risk,
+                    &config.eval,
+                    &metrics,
+                    now,
+                    config.medium_risk_threshold,
+                    config.low_risk_threshold,
+                );
+
+                ReportableCrate::new(
+                    Arc::clone(facts.crate_spec.name_arc()),
+                    Arc::clone(facts.crate_spec.version_arc()),
+                    metrics,
+                    Some(evaluation),
+                )
+            })
+            .collect()
+    } else {
+        analyzable_crates
+            .into_iter()
+            .map(|facts| {
+                let metrics: Vec<_> = flatten(&facts).collect();
+                ReportableCrate::new(
+                    Arc::clone(facts.crate_spec.name_arc()),
+                    Arc::clone(facts.crate_spec.version_arc()),
+                    metrics,
+                    None,
+                )
+            })
+            .collect()
+    };
+
+    // Sort crates by name and version for consistent ordering
+    reportable_crates.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()).then_with(|| a.version.cmp(&b.version)));
+
+    let generating_reports = options.html.is_some() || options.excel.is_some() || options.csv.is_some() || options.json.is_some();
+
+    // Show console output if:
+    // - --console flag is explicitly set, OR
+    // - No reports are being generated AND no --error-if flag is set
+    let error_if = options.error_if_high_risk || options.error_if_medium_risk;
+    let default_mode = ConsoleOutputMode::full();
+    let console_mode = match options.console {
+        Some(mode) => Some(mode),
+        None if !generating_reports && !error_if => Some(&default_mode),
+        None => None,
+    };
+
+    if let Some(mode) = console_mode
+        && !reportable_crates.is_empty()
+    {
+        let mut console_output = String::new();
+        use std::io::{IsTerminal, stdout};
+        let use_colors = use_colors(options.color, stdout().is_terminal());
+        _ = generate_console(&reportable_crates, use_colors, mode, &mut console_output);
+        let _ = write!(host.output(), "{console_output}");
+    }
+
+    if let Some(filename) = options.html {
+        let mut html = String::new();
+        generate_html(&reportable_crates, Local::now(), &mut html)?;
+        fs::write(filename, html)?;
+    }
+
+    if let Some(filename) = options.excel {
+        let mut file = fs::File::create(filename)?;
+        generate_xlsx(&reportable_crates, &mut file)?;
+    }
+
+    if let Some(filename) = options.csv {
+        let mut csv_output = String::new();
+        generate_csv(&reportable_crates, &mut csv_output)?;
+        fs::write(filename, csv_output)?;
+    }
+
+    if let Some(filename) = options.json {
+        let mut json_output = String::new();
+        generate_json(&reportable_crates, &mut json_output)?;
+        fs::write(filename, json_output)?;
+    }
+
+    // If --error-if-medium-risk flag is set, return error if any non-allowed crate is medium or high risk
+    // If --error-if-high-risk flag is set, return error if any non-allowed crate is high risk
+    check_risk_errors(
+        &reportable_crates,
+        config,
+        options.error_if_medium_risk,
+        options.error_if_high_risk,
+        should_include_rejection_details(console_mode),
+    )?;
+
+    Ok(())
+}
+
+const fn progress_delay(log_level: LogLevel) -> Duration {
+    match log_level {
+        LogLevel::None => Duration::from_millis(300),
+        LogLevel::Error | LogLevel::Warn | LogLevel::Info | LogLevel::Debug | LogLevel::Trace => Duration::from_hours(365 * 24),
+    }
+}
+
+const fn use_colors(color: ColorMode, is_terminal: bool) -> bool {
+    match color {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => is_terminal,
     }
 }
 
@@ -478,6 +515,17 @@ const fn log_filter(log_level: LogLevel) -> Option<&'static str> {
         LogLevel::Debug => Some("debug"),
         LogLevel::Trace => Some("trace"),
     }
+}
+
+fn logger_builder(log_level: LogLevel) -> Option<env_logger::Builder> {
+    let level = log_filter(log_level)?;
+    let env = env_logger::Env::default().filter_or("RUST_LOG", level);
+    let mut builder = env_logger::Builder::from_env(env);
+    builder
+        .format_timestamp(None)
+        .format_module_path(false)
+        .format_target(matches!(log_level, LogLevel::Debug | LogLevel::Trace));
+    Some(builder)
 }
 
 /// Explain, on the error stream, why each crate could not be appraised.
@@ -678,18 +726,151 @@ fn should_include_rejection_details(console_mode: Option<&ConsoleOutputMode>) ->
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use chrono::{TimeZone, Utc};
     use clap::Parser;
+    use env_logger::Target;
+    use log::{Level, Log, Metadata, Record};
     use semver::{Version, VersionReq};
 
     use super::*;
     use crate::commands::config::AllowListEntry;
     use crate::expr::Appraisal;
+    use crate::facts::crates::{CrateOverallData, CrateVersionData, CratesData};
 
     /// A minimal command whose only job is to parse `CommonArgs` the way the real CLI does.
     #[derive(Parser)]
     struct ArgsHarness {
         #[command(flatten)]
         common: CommonArgs,
+    }
+
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("the log capture lock is not poisoned").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn render_log(log_level: LogLevel) -> String {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let mut builder = logger_builder(log_level).expect("this helper is only called with logging enabled");
+        builder
+            .filter_level(log::LevelFilter::Trace)
+            .target(Target::Pipe(Box::new(SharedWriter(Arc::clone(&bytes)))));
+        let logger = builder.build();
+        assert!(logger.enabled(&Metadata::builder().level(Level::Error).target("wire-target").build()));
+        logger.log(
+            &Record::builder()
+                .level(Level::Error)
+                .target("wire-target")
+                .module_path(Some("wire_module"))
+                .args(format_args!("captured message"))
+                .build(),
+        );
+        drop(logger);
+
+        let output = bytes.lock().expect("the log capture lock is not poisoned").clone();
+        String::from_utf8(output).expect("env_logger emits UTF-8")
+    }
+
+    fn analyzable(name: &str, version: Version) -> CrateFacts {
+        let now = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        CrateFacts {
+            crate_spec: crate::facts::CrateSpec::from_arcs(Arc::from(name), Arc::new(version)),
+            crates_data: ProviderResult::Found(CratesData::new(
+                CrateVersionData {
+                    description: "Test crate".into(),
+                    homepage: None,
+                    documentation: None,
+                    license: "MIT".into(),
+                    rust_version: "1.85.0".into(),
+                    edition: None,
+                    features: BTreeMap::new(),
+                    created_at: now,
+                    updated_at: now,
+                    yanked: false,
+                    downloads: 100,
+                    monthly_downloads: vec![],
+                },
+                CrateOverallData {
+                    created_at: now,
+                    updated_at: now,
+                    repository: None,
+                    categories: vec![],
+                    keywords: vec![],
+                    owners: vec![],
+                    monthly_downloads: vec![],
+                    downloads: 1_000,
+                    dependents: 10,
+                    versions_last_90_days: 1,
+                    versions_last_180_days: 1,
+                    versions_last_365_days: 1,
+                },
+            )),
+            hosting_data: ProviderResult::Unavailable("not needed".into()),
+            advisory_data: ProviderResult::Unavailable("not needed".into()),
+            codebase_data: ProviderResult::Unavailable("not needed".into()),
+            coverage_data: ProviderResult::Unavailable("not needed".into()),
+            docs_data: ProviderResult::Unavailable("not needed".into()),
+        }
+    }
+
+    fn empty_config() -> Config {
+        let mut config = Config::default();
+        config.high_risk.clear();
+        config.eval.clear();
+        config
+    }
+
+    const fn report_options() -> ReportOptions<'static> {
+        ReportOptions {
+            color: ColorMode::Never,
+            error_if_high_risk: false,
+            error_if_medium_risk: false,
+            console: None,
+            html: None,
+            excel: None,
+            csv: None,
+            json: None,
+        }
+    }
+
+    fn report_artifact_path(filename: &str) -> Utf8PathBuf {
+        let directory = Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/common-report-tests")
+            .join(std::process::id().to_string());
+        fs::create_dir_all(&directory).expect("creating the report test directory");
+        directory.join(filename)
+    }
+
+    fn write_json_report(config: &Config, options: ReportOptions<'static>, filename: &str) -> serde_json::Value {
+        let path = report_artifact_path(filename);
+        let options = ReportOptions {
+            json: Some(&path),
+            ..options
+        };
+        let mut host = crate::commands::host::TestHost::new();
+        let result = report_processed_crates(&mut host, config, options, [analyzable("fixture", Version::new(1, 0, 0))]);
+        let text = fs::read_to_string(&path).expect("reading the generated JSON report");
+        fs::remove_file(&path).expect("removing the generated JSON report");
+        let value = serde_json::from_str(&text).expect("the generated report is JSON");
+        if let Err(error) = result {
+            assert!(
+                options.error_if_high_risk || options.error_if_medium_risk,
+                "only a requested risk rejection may fail this helper: {error}"
+            );
+        }
+        value
     }
 
     #[test]
@@ -709,6 +890,57 @@ mod tests {
             Some(cache_dir) => assert_eq!(resolved.expect("a known cache location resolves"), cache_dir.join("cargo-aprz")),
             None => assert!(resolved.is_err(), "an unknown cache location is an error, not a path"),
         }
+    }
+
+    #[test]
+    fn cache_directory_failure_has_actionable_context() {
+        let error = Common::<crate::commands::host::TestHost>::resolve_cache_dir_from(None, None)
+            .expect_err("a missing platform cache location must fail");
+        assert_eq!(error.to_string(), "could not determine cache directory");
+    }
+
+    #[test]
+    fn progress_configuration_distinguishes_logging_and_color_modes() {
+        assert_eq!(progress_delay(LogLevel::None), Duration::from_millis(300));
+        for level in [LogLevel::Error, LogLevel::Warn, LogLevel::Info, LogLevel::Debug, LogLevel::Trace] {
+            assert_eq!(progress_delay(level), Duration::from_hours(8_760), "{level:?}");
+        }
+
+        assert!(use_colors(ColorMode::Always, false));
+        assert!(!use_colors(ColorMode::Never, true));
+        assert!(!use_colors(ColorMode::Auto, false));
+        assert!(use_colors(ColorMode::Auto, true));
+    }
+
+    #[test]
+    fn logger_builder_omits_timestamp_module_and_low_level_target() {
+        let output = render_log(LogLevel::Error);
+        assert_eq!(output, "[ERROR] captured message\n");
+    }
+
+    #[test]
+    fn logger_builder_includes_target_for_debug_and_trace() {
+        for level in [LogLevel::Debug, LogLevel::Trace] {
+            let output = render_log(level);
+            assert_eq!(output, "[ERROR wire-target] captured message\n", "{level:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn common_new_reports_metadata_context() {
+        let mut parsed = ArgsHarness::parse_from(["aprz"]);
+        parsed.common.manifest_path = "target/common-report-tests/missing/Cargo.toml".into();
+        let mut host = crate::commands::host::TestHost::new();
+
+        let error = match Common::new(&mut host, &parsed.common).await {
+            Ok(_) => panic!("a missing manifest must fail"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("retrieving workspace metadata"),
+            "metadata failures need operation context: {error}"
+        );
     }
 
     #[test]
@@ -750,6 +982,142 @@ mod tests {
         assert_eq!(endpoints.host_url("github.com"), Some("http://github.test"));
         assert_eq!(endpoints.host_url("codeberg.org"), Some("http://codeberg.test"));
         assert_eq!(endpoints.advisory_url(), "http://advisory.test");
+    }
+
+    #[test]
+    fn report_filters_failures_sorts_crates_and_defaults_to_console() {
+        let mut host = crate::commands::host::TestHost::new();
+        let crates = [
+            analyzable("zeta", Version::new(2, 0, 0)),
+            unanalyzable("missing", not_found(&[])),
+            analyzable("alpha", Version::new(1, 0, 0)),
+            analyzable("zeta", Version::new(1, 0, 0)),
+        ];
+
+        report_processed_crates(&mut host, &empty_config(), report_options(), crates).unwrap();
+
+        let output = String::from_utf8(host.output_buf).expect("console output is UTF-8");
+        let alpha = output.find("alpha v1.0.0 was not appraised").expect("alpha is reported");
+        let zeta_one = output.find("zeta v1.0.0 was not appraised").expect("zeta 1 is reported");
+        let zeta_two = output.find("zeta v2.0.0 was not appraised").expect("zeta 2 is reported");
+        assert!(alpha < zeta_one && zeta_one < zeta_two, "crate reports must be sorted: {output}");
+
+        let error = String::from_utf8(host.error_buf).expect("error output is UTF-8");
+        assert!(error.contains("Unable to analyze 1 crate(s)"), "{error}");
+        assert!(error.contains("Could not find information on crate 'missing'"), "{error}");
+    }
+
+    #[test]
+    fn report_omits_console_for_empty_input() {
+        let mut host = crate::commands::host::TestHost::new();
+        report_processed_crates(&mut host, &empty_config(), report_options(), []).unwrap();
+        assert!(host.output_buf.is_empty());
+        assert!(host.error_buf.is_empty());
+    }
+
+    #[test]
+    fn every_file_report_suppresses_the_default_console() {
+        for (kind, filename) in [
+            ("html", "only-html.html"),
+            ("excel", "only-excel.xlsx"),
+            ("csv", "only-csv.csv"),
+            ("json", "only-json.json"),
+        ] {
+            let path = report_artifact_path(filename);
+            let mut options = report_options();
+            match kind {
+                "html" => options.html = Some(&path),
+                "excel" => options.excel = Some(&path),
+                "csv" => options.csv = Some(&path),
+                "json" => options.json = Some(&path),
+                _ => unreachable!("the table contains every report kind"),
+            }
+            let mut host = crate::commands::host::TestHost::new();
+
+            report_processed_crates(&mut host, &empty_config(), options, [analyzable("fixture", Version::new(1, 0, 0))]).unwrap();
+
+            assert!(host.output_buf.is_empty(), "{kind} alone suppresses default console output");
+            assert!(
+                fs::metadata(&path).expect("the report was generated").len() > 0,
+                "{kind} report is nonempty"
+            );
+            fs::remove_file(path).expect("removing the generated report");
+        }
+    }
+
+    #[test]
+    fn explicit_console_is_honored_while_generating_a_file_report() {
+        let mode = ConsoleOutputMode {
+            appraisal: true,
+            reasons: false,
+            metrics: false,
+        };
+        let path = report_artifact_path("explicit-console.json");
+        let options = ReportOptions {
+            console: Some(&mode),
+            json: Some(&path),
+            ..report_options()
+        };
+        let mut host = crate::commands::host::TestHost::new();
+
+        report_processed_crates(&mut host, &empty_config(), options, [analyzable("fixture", Version::new(1, 0, 0))]).unwrap();
+
+        assert_eq!(
+            String::from_utf8(host.output_buf).expect("console output is UTF-8"),
+            "fixture v1.0.0 was not appraised\n"
+        );
+        fs::remove_file(path).expect("removing the generated JSON report");
+    }
+
+    #[test]
+    fn report_evaluates_for_each_expression_and_error_trigger() {
+        let empty = empty_config();
+        let without_evaluation = write_json_report(&empty, report_options(), "evaluation-none.json");
+        assert!(without_evaluation["crates"][0].get("appraisal").is_none(), "{without_evaluation}");
+
+        let mut high_risk_only = Config::default();
+        high_risk_only.eval.clear();
+        assert!(!high_risk_only.high_risk.is_empty());
+        let high_risk = write_json_report(&high_risk_only, report_options(), "evaluation-high-risk.json");
+        assert!(high_risk["crates"][0].get("appraisal").is_some(), "{high_risk}");
+
+        let mut eval_only = Config::default();
+        eval_only.high_risk.clear();
+        assert!(!eval_only.eval.is_empty());
+        let eval = write_json_report(&eval_only, report_options(), "evaluation-weighted.json");
+        assert!(eval["crates"][0].get("appraisal").is_some(), "{eval}");
+
+        let high_flag = ReportOptions {
+            error_if_high_risk: true,
+            ..report_options()
+        };
+        let high_flag_report = write_json_report(&empty, high_flag, "evaluation-high-flag.json");
+        assert!(high_flag_report["crates"][0].get("appraisal").is_some(), "{high_flag_report}");
+
+        let medium_flag = ReportOptions {
+            error_if_medium_risk: true,
+            ..report_options()
+        };
+        let medium_flag_report = write_json_report(&empty, medium_flag, "evaluation-medium-flag.json");
+        assert!(medium_flag_report["crates"][0].get("appraisal").is_some(), "{medium_flag_report}");
+    }
+
+    #[test]
+    fn either_error_trigger_suppresses_default_console() {
+        for options in [
+            ReportOptions {
+                error_if_high_risk: true,
+                ..report_options()
+            },
+            ReportOptions {
+                error_if_medium_risk: true,
+                ..report_options()
+            },
+        ] {
+            let mut host = crate::commands::host::TestHost::new();
+            let _ = report_processed_crates(&mut host, &empty_config(), options, [analyzable("fixture", Version::new(1, 0, 0))]);
+            assert!(host.output_buf.is_empty());
+        }
     }
 
     fn make_crate(name: &str, version: Version, risk: Risk) -> ReportableCrate {
@@ -1022,7 +1390,12 @@ mod tests {
         let crates = vec![make_crate("foo", Version::new(1, 0, 0), Risk::Medium)];
         let config = Config::default();
         let error = check_risk_errors(&crates, &config, true, false, false).unwrap_err();
-        assert!(error.to_string().contains("- foo v1.0.0: MEDIUM RISK (score 0)"));
+        let message = error.to_string();
+        assert!(
+            message.starts_with("1 crate was appraised as medium or high risk and caused rejection:"),
+            "{message}"
+        );
+        assert!(message.contains("- foo v1.0.0: MEDIUM RISK (score 0)"));
     }
 
     #[test]
@@ -1233,6 +1606,29 @@ mod tests {
             "INCONCLUSIVE: Advisory facts; could not evaluate requirement: Advisory facts must be \
              available. (error: service unavailable)"
         ));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_check_risk_errors_suppresses_unscored_details_when_console_has_them() {
+        let appraisal = Appraisal::weighted_evaluation_failure(vec![ExpressionOutcome::new(
+            "Advisory facts".into(),
+            "Advisory facts must be available.".into(),
+            ExpressionDisposition::Failed("service unavailable".into()),
+        )]);
+        let crates = vec![ReportableCrate::new(
+            "foo".into(),
+            Arc::new(Version::new(1, 0, 0)),
+            vec![],
+            Some(appraisal),
+        )];
+
+        let error = check_risk_errors(&crates, &Config::default(), false, true, false).unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("- foo v1.0.0: HIGH RISK (weighted score not calculated)"));
+        assert!(!message.contains("Advisory facts"), "{message}");
+        assert!(!message.contains("weighted check"), "{message}");
     }
 
     fn unanalyzable(name: &str, crates_data: ProviderResult<crate::facts::CratesData>) -> CrateFacts {

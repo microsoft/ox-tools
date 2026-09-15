@@ -86,9 +86,11 @@ impl Position {
     #[must_use]
     pub(crate) fn from_zero_based(line: usize, column: usize) -> Self {
         let one_based = |count: usize| {
-            let widened = u32::try_from(count).unwrap_or(u32::MAX - 1);
-
-            NonZeroU32::new(widened.saturating_add(1)).expect("a saturating increment of an unsigned count is never zero")
+            u32::try_from(count)
+                .ok()
+                .and_then(|count| count.checked_add(1))
+                .and_then(NonZeroU32::new)
+                .unwrap_or(NonZeroU32::MAX)
         };
 
         Self {
@@ -215,12 +217,12 @@ struct Slots {
 /// every guard in one ascending sweep instead makes the total character-counting work proportional
 /// to the text once, with the sweep never re-reading a byte it has already counted.
 fn positions(text: &str, spans: &HashMap<u32, (Range<usize>, Range<usize>)>) -> HashMap<u32, Guard> {
-    let mut starts: Vec<usize> = Vec::with_capacity(text.len() / 32);
+    let mut starts: Vec<usize> = Vec::new();
 
     starts.push(0);
     starts.extend(text.match_indices('\n').map(|(at, _matched)| at + 1));
 
-    let mut requests: Vec<(usize, u32, Slot)> = Vec::with_capacity(spans.len() * 4);
+    let mut requests: Vec<(usize, u32, Slot)> = Vec::new();
 
     for (ordinal, (site, mutated)) in spans {
         requests.push((site.start, *ordinal, Slot::SiteStart));
@@ -338,7 +340,7 @@ pub fn instrument_with_guards(text: &str, mutants: &[AssignedMutant<'_>]) -> Res
     });
 
     let roots = build_tree(&sites)?;
-    let mut out = String::with_capacity(text.len() + text.len() / 4);
+    let mut out = String::new();
     let mut spans = HashMap::default();
     let mut cursor = 0;
 
@@ -393,6 +395,7 @@ fn build_tree<'a>(sites: &[&'a AssignedMutant<'a>]) -> Result<Vec<Node<'a>>> {
     for mutant in sites {
         // Close every open node this site is not inside.
         while let Some(top) = stack.last() {
+            // #[gamma::skip(loop.break_to_continue, reason = "continuing after finding the containing node repeatedly inspects that same node forever")]
             if mutant.span.start < top.span.end {
                 break;
             }

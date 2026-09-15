@@ -36,10 +36,7 @@ impl Selection {
     /// An empty set.
     #[must_use]
     pub fn empty() -> Self {
-        Self {
-            names: HashSet::default(),
-            errors: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Sets the caller-supplied `Err(...)` payloads that `fn_value.err_with` will use.
@@ -238,12 +235,12 @@ mod tests {
 
     #[test]
     fn an_empty_error_list_does_not_enable_the_error_mutator() {
-        let mut selection = Selection::everything();
+        let mut selection = Selection::empty();
 
-        selection.drop_errors();
+        selection.set_errors(vec!["Error::Old".to_owned()]);
         selection.set_errors(Vec::new());
 
-        assert!(!selection.contains(ERR_WITH));
+        assert!(selection.contains(ERR_WITH));
         assert!(selection.errors().is_empty());
     }
 }

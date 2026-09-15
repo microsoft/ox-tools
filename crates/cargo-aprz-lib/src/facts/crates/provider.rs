@@ -25,7 +25,7 @@ use super::tables::{
 use crate::facts::crate_spec::CrateSpec;
 use crate::facts::progress::Progress;
 use crate::facts::{CrateRef, ProviderResult};
-use crate::{HashMap, HashSet, Result, hash_map_with_capacity, hash_set_with_capacity};
+use crate::{HashMap, HashSet, Result};
 
 const LOG_TARGET: &str = "    crates";
 const LOG_TARGET_DB_CONTENT: &str = "db_content";
@@ -257,8 +257,8 @@ impl Provider {
         HashMap<CrateId, PerCrateData>,
         HashMap<CompactString, Vec<CompactString>>,
     ) {
-        let mut crate_name_to_id = hash_map_with_capacity(requested_names.len());
-        let mut crate_data = hash_map_with_capacity(requested_names.len());
+        let mut crate_name_to_id = HashMap::default();
+        let mut crate_data = HashMap::default();
 
         // Pre-compute normalized versions of requested names for efficient similarity matching (only if suggestions enabled)
         let normalized_requested: HashMap<CompactString, CompactString> = if suggestions {
@@ -388,8 +388,8 @@ impl Provider {
         requested: &[CrateRef],
         crate_name_to_id: &HashMap<CompactString, CrateId>,
     ) -> (HashMap<CrateId, HashMap<SemverVersion, CrateRef>>, HashMap<CrateId, CrateRef>) {
-        let mut needed_versions = hash_map_with_capacity(requested.len());
-        let mut need_latest_version = hash_map_with_capacity(requested.len());
+        let mut needed_versions = HashMap::default();
+        let mut need_latest_version = HashMap::default();
 
         for crate_ref in requested {
             if let Some(&crate_id) = crate_name_to_id.get(crate_ref.name()) {
@@ -423,18 +423,13 @@ impl Provider {
         crate_data: &HashMap<CrateId, PerCrateData>,
     ) -> (HashSet<VersionId>, HashMap<CrateId, HashSet<VersionId>>) {
         let mut needed_version_ids = HashSet::default();
-        let mut crate_to_dependent_versions = hash_map_with_capacity(crate_data.len());
-
-        // No requested crate exists in the database, so every row would be rejected.
-        if crate_data.is_empty() {
-            return (needed_version_ids, crate_to_dependent_versions);
-        }
+        let mut crate_to_dependent_versions = HashMap::default();
 
         for (row, _) in self.table_mgr.dependencies_table().iter() {
-            if crate_data.contains_key(&row.crate_id) {
+            if let Some((&crate_id, _)) = crate_data.get_key_value(&row.crate_id) {
                 let _ = needed_version_ids.insert(row.version_id);
                 let _ = crate_to_dependent_versions
-                    .entry(row.crate_id)
+                    .entry(crate_id)
                     .or_insert_with(HashSet::default)
                     .insert(row.version_id);
             }
@@ -471,24 +466,17 @@ impl Provider {
     ) -> VersionScanResult {
         let total_needed_versions: usize = needed_versions.values().map(HashMap::len).sum();
 
-        let initial_version_capacity = total_needed_versions.saturating_add(need_latest_version.len());
-        let mut version_data_map = hash_map_with_capacity(initial_version_capacity);
-        let mut resolved_versions = hash_map_with_capacity(need_latest_version.len());
+        let mut version_data_map = HashMap::default();
+        let mut resolved_versions = HashMap::default();
         // The third tuple element records whether the candidate is a release users would
         // normally get: not yanked and not a pre-release.
-        let mut latest_version_indices: HashMap<CrateId, (VersionsTableIndex, SemverVersion, bool)> =
-            hash_map_with_capacity(need_latest_version.len());
-        let mut version_ids = hash_set_with_capacity(initial_version_capacity);
-        let mut version_id_to_crate_id = hash_map_with_capacity(needed_version_ids.len());
+        let mut latest_version_indices: HashMap<CrateId, (VersionsTableIndex, SemverVersion, bool)> = HashMap::default();
+        let mut version_ids = HashSet::default();
+        let mut version_id_to_crate_id = HashMap::default();
         let mut all_version_to_crate = HashMap::default();
 
         let mut remaining_versions = total_needed_versions;
         let mut remaining_mappings = needed_version_ids.len();
-
-        // Calculate cutoff dates for counting versions in the last 90/180/365 days
-        let cutoff_90 = self.now - chrono::Duration::days(90);
-        let cutoff_180 = self.now - chrono::Duration::days(180);
-        let cutoff_365 = self.now - chrono::Duration::days(365);
 
         for (lean_row, index) in self.table_mgr.versions_table().iter_lean() {
             // For versions belonging to our crates: do a full row read to access num and created_at.
@@ -497,15 +485,10 @@ impl Provider {
                 let row = self.table_mgr.versions_table().get_query(index);
 
                 let _ = all_version_to_crate.insert(lean_row.id, lean_row.crate_id);
-                if row.created_at >= cutoff_365 {
-                    data.versions_last_365_days += 1;
-                    if row.created_at >= cutoff_180 {
-                        data.versions_last_180_days += 1;
-                        if row.created_at >= cutoff_90 {
-                            data.versions_last_90_days += 1;
-                        }
-                    }
-                }
+                let (last_90, last_180, last_365) = version_age_buckets(row.created_at, self.now);
+                data.versions_last_90_days += u64::from(last_90);
+                data.versions_last_180_days += u64::from(last_180);
+                data.versions_last_365_days += u64::from(last_365);
 
                 // Check if this is one of our requested versions
                 let requested_version = (remaining_versions != 0)
@@ -519,7 +502,7 @@ impl Provider {
                 }
 
                 // Check if this crate needs latest version resolution
-                if need_latest_version.contains_key(&lean_row.crate_id) {
+                if let Some((&crate_id, _)) = need_latest_version.get_key_value(&lean_row.crate_id) {
                     use std::collections::hash_map::Entry;
                     // Resolving "latest" must not land on a yanked or pre-release version:
                     // semver orders `2.0.0-alpha` above `1.9.0`, and a yanked release is one
@@ -527,7 +510,7 @@ impl Provider {
                     // never actually build against. Such versions are only used when the crate
                     // has no ordinary release at all.
                     let preferred = !row.yanked && row.num.pre.is_empty();
-                    match latest_version_indices.entry(lean_row.crate_id) {
+                    match latest_version_indices.entry(crate_id) {
                         Entry::Vacant(e) => {
                             let _ = e.insert((index, row.num.clone(), preferred));
                         }
@@ -609,10 +592,6 @@ impl Provider {
     /// Each table is scanned once in full (no early-exit possible since crates can have
     /// multiple owners/categories/keywords).
     fn phase6_populate_join_table_data(&self, crate_data: &mut HashMap<CrateId, PerCrateData>) {
-        if crate_data.is_empty() {
-            return;
-        }
-
         // Each scan reads an independent table and only needs to know which crates are wanted, so
         // they run on separate threads and collect into their own maps. Merging afterwards is
         // bounded by the number of requested crates rather than by the table sizes.
@@ -663,7 +642,7 @@ impl Provider {
         all_version_to_crate: &HashMap<VersionId, CrateId>,
     ) -> (HashMap<VersionId, Vec<(NaiveDate, u64)>>, HashMap<CrateId, Vec<(NaiveDate, u64)>>) {
         self.collect_crate_downloads(crate_data);
-        self.aggregate_all_monthly_downloads(version_ids, all_version_to_crate, crate_data)
+        self.aggregate_all_monthly_downloads(version_ids, all_version_to_crate)
     }
 
     /// Assemble a single query result from collected data.
@@ -751,7 +730,7 @@ impl Provider {
     }
 
     fn load_categories(&self) -> HashMap<CategoryId, CategoriesTableIndex> {
-        let mut map = hash_map_with_capacity(self.table_mgr.categories_table().len());
+        let mut map = HashMap::default();
         for (row, index) in self.table_mgr.categories_table().iter() {
             let _ = map.insert(row.id, index);
         }
@@ -759,7 +738,7 @@ impl Provider {
     }
 
     fn load_keywords(&self) -> HashMap<KeywordId, KeywordsTableIndex> {
-        let mut map = hash_map_with_capacity(self.table_mgr.keywords_table().len());
+        let mut map = HashMap::default();
         for (row, index) in self.table_mgr.keywords_table().iter() {
             let _ = map.insert(row.id, index);
         }
@@ -767,7 +746,7 @@ impl Provider {
     }
 
     fn load_users(&self) -> HashMap<UserId, UsersTableIndex> {
-        let mut map = hash_map_with_capacity(self.table_mgr.users_table().len());
+        let mut map = HashMap::default();
         for (row, index) in self.table_mgr.users_table().iter() {
             let _ = map.insert(row.id, index);
         }
@@ -775,7 +754,7 @@ impl Provider {
     }
 
     fn load_teams(&self) -> HashMap<TeamId, TeamsTableIndex> {
-        let mut map = hash_map_with_capacity(self.table_mgr.teams_table().len());
+        let mut map = HashMap::default();
         for (row, index) in self.table_mgr.teams_table().iter() {
             let _ = map.insert(row.id, index);
         }
@@ -783,30 +762,30 @@ impl Provider {
     }
 
     fn collect_crate_owners(&self, crate_data: &HashMap<CrateId, PerCrateData>) -> HashMap<CrateId, Vec<TableOwnerKind>> {
-        let mut collected = hash_map_with_capacity(crate_data.len());
+        let mut collected = HashMap::default();
         for (row, _) in self.table_mgr.crate_owners_table().iter() {
-            if crate_data.contains_key(&row.crate_id) {
-                collected.entry(row.crate_id).or_insert_with(Vec::new).push(row.owner());
+            if let Some((&crate_id, _)) = crate_data.get_key_value(&row.crate_id) {
+                collected.entry(crate_id).or_insert_with(Vec::new).push(row.owner());
             }
         }
         collected
     }
 
     fn collect_crate_categories(&self, crate_data: &HashMap<CrateId, PerCrateData>) -> HashMap<CrateId, Vec<CategoryId>> {
-        let mut collected = hash_map_with_capacity(crate_data.len());
+        let mut collected = HashMap::default();
         for (row, _) in self.table_mgr.crates_categories_table().iter() {
-            if crate_data.contains_key(&row.crate_id) {
-                collected.entry(row.crate_id).or_insert_with(Vec::new).push(row.category_id);
+            if let Some((&crate_id, _)) = crate_data.get_key_value(&row.crate_id) {
+                collected.entry(crate_id).or_insert_with(Vec::new).push(row.category_id);
             }
         }
         collected
     }
 
     fn collect_crate_keywords(&self, crate_data: &HashMap<CrateId, PerCrateData>) -> HashMap<CrateId, Vec<KeywordId>> {
-        let mut collected = hash_map_with_capacity(crate_data.len());
+        let mut collected = HashMap::default();
         for (row, _) in self.table_mgr.crates_keywords_table().iter() {
-            if crate_data.contains_key(&row.crate_id) {
-                collected.entry(row.crate_id).or_insert_with(Vec::new).push(row.keyword_id);
+            if let Some((&crate_id, _)) = crate_data.get_key_value(&row.crate_id) {
+                collected.entry(crate_id).or_insert_with(Vec::new).push(row.keyword_id);
             }
         }
         collected
@@ -838,15 +817,9 @@ impl Provider {
         &self,
         version_ids: &HashSet<VersionId>,
         all_version_to_crate: &HashMap<VersionId, CrateId>,
-        crate_data: &HashMap<CrateId, PerCrateData>,
     ) -> (HashMap<VersionId, Vec<(NaiveDate, u64)>>, HashMap<CrateId, Vec<(NaiveDate, u64)>>) {
-        let mut version_monthly: HashMap<VersionId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(version_ids.len());
-        let mut crate_monthly: HashMap<CrateId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(crate_data.len());
-
-        // Nothing was resolved, so every row would be rejected: skip the largest scan entirely.
-        if all_version_to_crate.is_empty() {
-            return (HashMap::default(), HashMap::default());
-        }
+        let mut version_monthly: HashMap<VersionId, BTreeMap<(i32, u32), u64>> = HashMap::default();
+        let mut crate_monthly: HashMap<CrateId, BTreeMap<(i32, u32), u64>> = HashMap::default();
 
         // Only the recent window is aggregated. The daily rows can extend arbitrarily far
         // back, and consumers of this series report downloads over the last 90 days: taking
@@ -1017,6 +990,14 @@ fn monthly_btree_to_vec<K: Eq + core::hash::Hash>(monthly: HashMap<K, BTreeMap<(
         .collect()
 }
 
+fn version_age_buckets(created_at: DateTime<Utc>, now: DateTime<Utc>) -> (bool, bool, bool) {
+    (
+        created_at >= now - chrono::Duration::days(90),
+        created_at >= now - chrono::Duration::days(180),
+        created_at >= now - chrono::Duration::days(365),
+    )
+}
+
 /// Normalize a crate name for similarity matching by converting to lowercase and removing separators.
 fn normalize_name_into(name: &str, buffer: &mut CompactString) {
     buffer.clear();
@@ -1043,7 +1024,7 @@ fn count_dependents(
     version_id_to_crate_id: &HashMap<VersionId, CrateId>,
 ) {
     // Map version_ids to crate_ids using prebuilt HashMap (no table scan!)
-    let mut dependents: HashMap<CrateId, HashSet<CrateId>> = hash_map_with_capacity(crate_data.len());
+    let mut dependents: HashMap<CrateId, HashSet<CrateId>> = HashMap::default();
     for (depended_upon, version_set) in crate_to_dependent_versions {
         for &version_id in version_set {
             if let Some(&crate_id) = version_id_to_crate_id.get(&version_id) {
@@ -1077,7 +1058,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::{Provider, normalize_name};
+    use super::{Provider, normalize_name, version_age_buckets};
     use crate::facts::{CrateRef, Progress, ProviderResult};
 
     struct NoOpProgress;
@@ -1435,6 +1416,18 @@ mod tests {
         assert_eq!(normalize_name("_"), "");
         assert_eq!(normalize_name(" "), "");
         assert_eq!(normalize_name("Mi-X_Ed Case"), "mixedcase");
+    }
+
+    #[test]
+    fn version_age_buckets_include_each_exact_boundary() {
+        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(version_age_buckets(now - Duration::days(89), now), (true, true, true));
+        assert_eq!(version_age_buckets(now - Duration::days(90), now), (true, true, true));
+        assert_eq!(version_age_buckets(now - Duration::days(91), now), (false, true, true));
+        assert_eq!(version_age_buckets(now - Duration::days(180), now), (false, true, true));
+        assert_eq!(version_age_buckets(now - Duration::days(181), now), (false, false, true));
+        assert_eq!(version_age_buckets(now - Duration::days(365), now), (false, false, true));
+        assert_eq!(version_age_buckets(now - Duration::days(366), now), (false, false, false));
     }
 
     #[tokio::test]

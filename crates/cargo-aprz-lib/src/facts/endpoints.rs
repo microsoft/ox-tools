@@ -109,6 +109,7 @@ impl Endpoints {
 
     /// Redirect the GitHub API.
     #[must_use]
+    // #[gamma::skip(fn_value.default, reason = "defaulting the whole builder result discards all previously redirected endpoints and sends integration tests to live services")]
     pub fn with_github_url(mut self, url: impl Into<String>) -> Self {
         self.github_url = url.into();
         self
@@ -116,6 +117,7 @@ impl Endpoints {
 
     /// Redirect the Codeberg API.
     #[must_use]
+    // #[gamma::skip(fn_value.default, reason = "defaulting the whole builder result discards all previously redirected endpoints and sends integration tests to live services")]
     pub fn with_codeberg_url(mut self, url: impl Into<String>) -> Self {
         self.codeberg_url = url.into();
         self

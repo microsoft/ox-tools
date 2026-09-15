@@ -13,7 +13,7 @@
 //! See the [design doc](../../docs/design/README.md) for the resolution order.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
 
 use ohno::{AppError, IntoAppError as _, app_err};
 
@@ -76,6 +76,7 @@ pub fn detect_from_url(url: &str) -> Vec<Backend> {
 fn extract_host(url: &str) -> Option<&str> {
     let url = url.trim();
     if url.is_empty() {
+        // #[gamma::skip(cond.always_false, reason = "an empty string contains neither a URL scheme nor the `@host:` delimiters required by the two parsers below, so falling through also returns None")]
         return None;
     }
 
@@ -116,9 +117,12 @@ pub fn read_origin_url(repo_root: &Path) -> Result<String, AppError> {
     let output = Command::new("git")
         .args(["config", "--get", "remote.origin.url"])
         .current_dir(repo_root)
-        .output()
-        .into_app_err("failed to invoke `git config` — is git installed and on PATH?")?;
+        .output();
+    origin_url_from_output(output, repo_root)
+}
 
+fn origin_url_from_output(output: std::io::Result<Output>, repo_root: &Path) -> Result<String, AppError> {
+    let output = output.into_app_err("failed to invoke `git config` — is git installed and on PATH?")?;
     if !output.status.success() {
         return Err(app_err!(
             "`git config --get remote.origin.url` exited with {} in {}",
@@ -180,7 +184,27 @@ pub fn resolve(flag_backends: &[String], no_backends: bool, repo_root: &Path) ->
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::io;
+
     use super::*;
+
+    fn output(success: bool, stdout: Vec<u8>) -> Output {
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(if success { 0 } else { 1 << 8 })
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt as _;
+            std::process::ExitStatus::from_raw(u32::from(!success))
+        };
+        Output {
+            status,
+            stdout,
+            stderr: Vec::new(),
+        }
+    }
 
     #[test]
     fn parse_backend_names() {
@@ -198,7 +222,9 @@ mod tests {
 
     #[test]
     fn extract_host_https() {
+        assert_eq!(extract_host("x://github.com/owner/repo"), Some("github.com"));
         assert_eq!(extract_host("https://github.com/foo/bar.git"), Some("github.com"));
+        assert_eq!(extract_host("https://github.com"), Some("github.com"));
         assert_eq!(extract_host("https://dev.azure.com/org/proj/_git/repo"), Some("dev.azure.com"));
         assert_eq!(
             extract_host("https://acme.visualstudio.com/proj/_git/repo"),
@@ -227,12 +253,16 @@ mod tests {
         assert_eq!(extract_host("   "), None);
         assert_eq!(extract_host("not-a-url"), None);
         assert_eq!(extract_host("://nohost"), None);
+        assert_eq!(extract_host("https:///missing-authority"), None);
+        assert_eq!(extract_host("git@:owner/repo"), None);
     }
 
     #[test]
     fn detect_github() {
         assert_eq!(detect_from_url("https://github.com/foo/bar.git"), vec![Backend::GitHub]);
         assert_eq!(detect_from_url("git@github.com:foo/bar.git"), vec![Backend::GitHub]);
+        assert_eq!(detect_from_url("https://enterprise.github.com/foo/bar.git"), vec![Backend::GitHub]);
+        assert!(detect_from_url("https://github.com.evil.example/foo/bar.git").is_empty());
     }
 
     #[test]
@@ -256,7 +286,7 @@ mod tests {
 
     #[test]
     fn resolve_explicit_backends_skip_autodetect() {
-        let result = resolve(&["github".to_owned(), "ado".to_owned()], false, Path::new("/nonexistent")).unwrap();
+        let result = resolve(&["ado".to_owned(), "github".to_owned()], false, Path::new("/nonexistent")).unwrap();
         assert_eq!(result, vec![Backend::GitHub, Backend::Ado]);
     }
 
@@ -271,5 +301,32 @@ mod tests {
         let result = resolve(&["gitlab".to_owned()], false, Path::new("/nonexistent"));
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown backend 'gitlab'"));
+    }
+
+    #[test]
+    fn origin_output_reports_each_failure_boundary() {
+        let root = Path::new("repo");
+
+        let invocation = origin_url_from_output(Err(io::Error::new(io::ErrorKind::NotFound, "missing")), root)
+            .unwrap_err()
+            .to_string();
+        assert!(invocation.contains("failed to invoke `git config`"), "{invocation}");
+
+        let status = origin_url_from_output(Ok(output(false, Vec::new())), root).unwrap_err().to_string();
+        assert!(status.contains("`git config --get remote.origin.url` exited with"), "{status}");
+        assert!(status.contains("repo"), "{status}");
+
+        let utf8 = origin_url_from_output(Ok(output(true, vec![0xff])), root).unwrap_err().to_string();
+        assert!(utf8.contains("git config output was not valid UTF-8"), "{utf8}");
+
+        let empty = origin_url_from_output(Ok(output(true, b" \n".to_vec())), root)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(empty, "no `origin` remote configured in repo");
+
+        assert_eq!(
+            origin_url_from_output(Ok(output(true, b" https://github.com/o/r.git \n".to_vec())), root).unwrap(),
+            "https://github.com/o/r.git"
+        );
     }
 }

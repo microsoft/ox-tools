@@ -66,6 +66,7 @@ pub const fn capacity() -> usize {
         reason = "the cross-platform API reports containment errors, although Windows job objects need no fallible setup"
     )
 )]
+// #[gamma::skip(fn_value.ok, reason = "Windows containment already returns Ok and the unsupported-platform error branch cannot be compiled and exercised on that target")]
 pub fn containment() -> Result<(), PlatformError> {
     #[cfg(target_os = "linux")]
     {
@@ -468,8 +469,7 @@ pub fn output(mut command: Command, request: MemoryRequest) -> Result<Output, Ou
 
     let prepared = prepare(command, request)?;
     let spawned = prepared.spawn().map_err(|failure| {
-        let (cause, prepared) = failure.into_parts();
-        drop(prepared);
+        let (cause, _prepared) = failure.into_parts();
 
         OutputError::Io(cause)
     })?;
@@ -653,11 +653,13 @@ pub fn prepare(command: Command, request: MemoryRequest) -> Result<PreparedComma
         // instruction. Assigning an already-running process would leave it a window in which it is
         // bounded by nothing, and a test that allocates immediately — the one shape a ceiling
         // exists for — would spend that window doing exactly that.
+        // #[gamma::skip(stmt.delete_call, reason = "without suspended creation the child can allocate or spawn descendants before the job and its limits are assigned")]
         job::start_suspended(&mut command);
 
         Ok(PreparedCommand {
             command,
             guard: SpawnGuard {
+                // #[gamma::skip(option.some_to_none, reason = "dropping the only Windows job handle leaves a suspended child that cannot be resumed or cleaned up")]
                 job: Some(job),
                 metered: request.wanted(),
             },
@@ -898,6 +900,7 @@ impl ProcessTree {
 
                 // The child has been waiting since it was created. It is now inside the new job,
                 // where termination can reach every descendant it creates.
+                // #[gamma::skip(cond.always_false, reason = "pretending the suspended child was resumed leaves it waiting forever")]
                 if !job::release(child.id()) {
                     return Err(abandoning(
                         PlatformError::new_static(
@@ -912,7 +915,7 @@ impl ProcessTree {
 
             Ok(Self {
                 child: Some(child),
-                output_cleanup_unproven: false,
+                output_cleanup_unproven: bool::default(),
                 job: guard.job,
                 metered: guard.metered,
             })
@@ -955,15 +958,15 @@ impl ProcessTree {
     /// be terminated, or the child could not be observed or reaped. A reader-thread panic is
     /// reported as [`io::ErrorKind::Other`].
     pub fn wait_with_output(mut self) -> io::Result<Output> {
-        let stdout = output_reader(self.take_stdout(), "cargo-gamma-process-stdout")?;
-        let stderr = match output_reader(self.take_stderr(), "cargo-gamma-process-stderr") {
+        let stdout = output_reader(self.take_stdout(), STDOUT_READER_THREAD)?;
+        let stderr = match output_reader(self.take_stderr(), STDERR_READER_THREAD) {
             Ok(stderr) => stderr,
             Err(cause) => {
                 if let Err(cleanup) = self.terminate() {
                     discard_output_reader(stdout.as_ref());
                     return Err(cleanup);
                 }
-                let _stdout = join_output_reader(stdout, "stdout")?;
+                let _stdout = join_output_reader(stdout, STDOUT_STREAM)?;
 
                 return Err(cause);
             }
@@ -991,8 +994,8 @@ impl ProcessTree {
 
         // Both joins are attempted before either result is returned. If one reader failed, the
         // other must still be allowed to finish rather than being detached from this lifecycle.
-        let stdout = join_output_reader(stdout, "stdout");
-        let stderr = join_output_reader(stderr, "stderr");
+        let stdout = join_output_reader(stdout, STDOUT_STREAM);
+        let stderr = join_output_reader(stderr, STDERR_STREAM);
 
         Ok(Output {
             status: status?,
@@ -1084,6 +1087,7 @@ impl ProcessTree {
             reason = "only the Unix watch list has a slot to hand back, and the signature is shared"
         )
     )]
+    // #[gamma::skip(fn_value.unit, reason = "the shared method is necessarily empty on non-Unix targets; Unix tests assert that it removes the exact watched slot")]
     fn release(&mut self) {
         #[cfg(unix)]
         if let Some((slot, group)) = self.slot.take().zip(self.group) {
@@ -1134,6 +1138,7 @@ impl ProcessTree {
     /// the leader, so its pid and process-group id may already belong to somebody else. Every
     /// capability naming either of them is revoked before this returns, and every later lifecycle
     /// call on this subtree then reports an already-reaped leader rather than signalling a stranger.
+    // #[gamma::skip(fn_value.ok, reason = "returning without observing and cleaning the process tree leaves descendants running and their output readers blocked")]
     pub fn observe(&mut self) -> io::Result<Option<ExitStatus>> {
         let mut child = self
             .child
@@ -1212,7 +1217,6 @@ impl ProcessTree {
                 // Windows jobs retain object handles rather than numeric process identifiers, and
                 // platforms without groups have no identifier that a sweep could reuse.
                 let swept = self.sweep();
-                self.release();
 
                 if let Err(cause) = swept {
                     self.output_cleanup_unproven = true;
@@ -1280,6 +1284,7 @@ impl ProcessTree {
             .ok_or_else(|| io::Error::other("the subtree leader was already reaped"))?;
 
         let killed = self.kill(&mut child);
+        // #[gamma::skip(stmt.delete_call, reason = "release has no effect on non-Unix mutation hosts; Unix tests assert termination frees the watched slot before reaping")]
         self.release();
 
         let reaped = child.wait()?;
@@ -1343,6 +1348,11 @@ struct OutputReader {
     retaining: Arc<AtomicBool>,
 }
 
+const STDOUT_READER_THREAD: &str = "cargo-gamma-process-stdout";
+const STDERR_READER_THREAD: &str = "cargo-gamma-process-stderr";
+const STDOUT_STREAM: &str = "stdout";
+const STDERR_STREAM: &str = "stderr";
+
 fn output_reader<R>(pipe: Option<R>, name: &'static str) -> io::Result<Option<OutputReader>>
 where
     R: io::Read + Send + 'static,
@@ -1353,14 +1363,19 @@ where
         let captured = Arc::clone(&bytes);
         let capture_enabled = Arc::clone(&retaining);
         let thread = thread::Builder::new().name(name.to_owned()).spawn(move || {
+            // The initialization value is not observed: `Read` initializes the reported prefix,
+            // and the unreported suffix is never copied into the capture.
+            // #[gamma::skip(literal.int_increment, reason = "the reader overwrites every byte in the reported prefix and the untouched suffix is never observed")]
             let mut chunk = [0_u8; 8192];
 
             loop {
                 let read = match pipe.read(&mut chunk) {
                     Ok(read) => read,
+                    // #[gamma::skip(match_guard.always_true, match_guard.negate, reason = "retrying every read error spins forever instead of terminating the output reader")]
                     Err(cause) if cause.kind() == io::ErrorKind::Interrupted => continue,
                     Err(cause) => return Err(cause),
                 };
+                // #[gamma::skip(cond.always_false, cond.negate, relational.eq_to_ne, literal.int_increment, reason = "failing to recognize EOF leaves the output reader blocked or spinning after the child exits")]
                 if read == 0 {
                     return Ok(());
                 }
@@ -1381,8 +1396,8 @@ fn discard_output_reader(reader: Option<&OutputReader>) {
     if let Some(reader) = reader {
         reader.retaining.store(false, Ordering::Release);
         let mut bytes = reader.bytes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        bytes.clear();
-        bytes.shrink_to_fit();
+        // #[gamma::skip(assign_value.default, reason = "Vec::with_capacity(0) and Vec::default() are both empty, allocation-free vectors with the same observable state")]
+        *bytes = Vec::with_capacity(0);
     }
 }
 
@@ -1408,6 +1423,7 @@ fn wait_for_output(subtree: &mut ProcessTree) -> io::Result<ExitStatus> {
             return Ok(status);
         }
 
+        // #[gamma::skip(stmt.delete_call, literal.int_decrement, literal.int_increment, reason = "this positive delay only throttles polling; zero or deletion busy-spins, while one or two milliseconds has the same result")]
         thread::sleep(Duration::from_millis(1));
     }
 }
@@ -1548,12 +1564,17 @@ fn cleanup_after_observation<T>(
 
 impl Drop for ProcessTree {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _killed = self.kill(&mut child);
-            self.release();
+        let mut child = self.child.take();
+
+        if let Some(child) = child.as_mut() {
+            let _killed = self.kill(child);
+        }
+
+        // #[gamma::skip(stmt.delete_call, reason = "release is a no-op on non-Unix mutation hosts; Unix tests assert both empty and live drops free the exact watched slot")]
+        self.release();
+
+        if let Some(mut child) = child {
             let _reaped = child.wait();
-        } else {
-            self.release();
         }
     }
 }
@@ -1620,10 +1641,11 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("the watchdog observes the first captured chunk");
         discard_output_reader(Some(&reader));
-        assert!(
-            reader.bytes.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty(),
-            "detachment retained bytes already captured"
-        );
+        {
+            let bytes = reader.bytes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(bytes.is_empty(), "detachment retained bytes already captured");
+            assert_eq!(bytes.capacity(), 0, "detachment retained the capture allocation");
+        }
 
         resume.send(()).expect("the blocked reader is released");
         assert!(
@@ -1687,6 +1709,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn captured_streams_keep_distinct_thread_and_error_names() {
+        assert_eq!(STDOUT_READER_THREAD, "cargo-gamma-process-stdout");
+        assert_eq!(STDERR_READER_THREAD, "cargo-gamma-process-stderr");
+        assert_eq!(STDOUT_STREAM, "stdout");
+        assert_eq!(STDERR_STREAM, "stderr");
+        assert_ne!(STDOUT_READER_THREAD, STDERR_READER_THREAD);
+        assert_ne!(STDOUT_STREAM, STDERR_STREAM);
+    }
+
+    #[test]
+    fn terminating_an_already_reaped_subtree_reports_the_exact_reason() {
+        let mut subtree = ProcessTree {
+            child: None,
+            output_cleanup_unproven: false,
+            #[cfg(unix)]
+            group: None,
+            #[cfg(unix)]
+            slot: None,
+            #[cfg(target_os = "linux")]
+            cgroup: None,
+            #[cfg(target_os = "linux")]
+            metered: false,
+            #[cfg(windows)]
+            job: None,
+            #[cfg(windows)]
+            metered: false,
+        };
+
+        let reason = subtree.terminate().expect_err("an absent leader was already reaped");
+
+        assert_eq!(reason.to_string(), "the subtree leader was already reaped");
+    }
+
     /// Why the containment tests below are ignored by default, and how to run them.
     ///
     /// A boundary a member cannot leave is not something every host has to offer. On Linux it needs
@@ -1717,11 +1773,12 @@ mod tests {
         assert!(containment().is_ok(), "{NEEDS_CONTAINMENT}: {:?}", containment().err());
 
         #[cfg(windows)]
-        assert!(
-            containment().is_ok(),
-            "a Windows host always has a job object: {:?}",
-            containment().err()
-        );
+        {
+            let result = containment();
+            let failure = format!("{:?}", result.as_ref().err());
+
+            assert!(result.is_ok(), "a Windows host always has a job object: {failure}");
+        }
     }
 
     fn wait_for(subtree: &mut ProcessTree) -> ExitStatus {
@@ -1749,6 +1806,21 @@ mod tests {
     #[cfg(not(windows))]
     fn no_op_command() -> Command {
         Command::new("true")
+    }
+
+    #[test]
+    fn platform_capacity_and_spawned_id_are_observable() {
+        assert!(capacity() > 0);
+
+        let prepared = prepare(no_op_command(), MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let actual_child_id = spawned.child.as_ref().expect("the spawned child is retained").id();
+        let id = spawned.id();
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+
+        assert_eq!(id, actual_child_id);
+        assert!(id > 1);
+        assert!(wait_for(&mut subtree).success());
     }
 
     /// Reaping this fake leader instantly reuses its numeric group id for an unrelated process.
@@ -1794,13 +1866,17 @@ mod tests {
 
         assert!(matches!(result, Observation::Reaped(())));
 
-        let group = group.into_inner();
+        let mut group = group.into_inner();
 
         assert!(group.original_signalled, "the original subtree was not swept");
         assert!(
             !group.replacement_signalled,
             "cleanup signalled the replacement group after the leader's id was reused"
         );
+
+        group.reaped = true;
+        group.sweep();
+        assert!(group.replacement_signalled);
     }
 
     #[test]
@@ -1834,6 +1910,46 @@ mod tests {
             result,
             Observation::ReapFailed(ref cause) if cause.kind() == io::ErrorKind::Interrupted
         ));
+
+        let result = cleanup_after_observation(
+            true,
+            || Err(io::Error::new(io::ErrorKind::PermissionDenied, "cleanup failed")),
+            || Err::<(), _>(io::Error::new(io::ErrorKind::BrokenPipe, "reap failed")),
+        );
+
+        assert!(matches!(
+            result,
+            Observation::ReapFailed(ref cause) if cause.kind() == io::ErrorKind::BrokenPipe
+        ));
+    }
+
+    #[test]
+    fn a_pending_observation_neither_cleans_nor_reaps() {
+        let cleaned = RefCell::new(false);
+        let reaped = RefCell::new(false);
+        let result = cleanup_after_observation(
+            false,
+            || {
+                *cleaned.borrow_mut() = true;
+                Ok(())
+            },
+            || {
+                *reaped.borrow_mut() = true;
+                Ok(())
+            },
+        );
+
+        assert!(matches!(result, Observation::Pending));
+        assert!(!*cleaned.borrow(), "a live subtree was cleaned as though it had exited");
+        assert!(!*reaped.borrow(), "a live subtree leader was waited for");
+    }
+
+    #[test]
+    fn killing_an_already_exited_child_accepts_the_exit_race() {
+        let mut child = no_op_command().spawn().expect("the no-op child starts");
+        let _status = child.wait().expect("the no-op child exits");
+
+        kill_if_running(&mut child).expect("an already-exited child needs no further kill");
     }
 
     /// A request that asks for nothing gets containment without an accounting boundary.
@@ -1904,11 +2020,12 @@ mod tests {
         assert!(crate::support().is_ok(), "{NEEDS_CONTAINMENT}: {:?}", crate::support().err());
 
         #[cfg(windows)]
-        assert!(
-            crate::support().is_ok(),
-            "a Windows host always accounts for a job object: {:?}",
-            crate::support().err()
-        );
+        {
+            let result = crate::support();
+            let failure = format!("{:?}", result.as_ref().err());
+
+            assert!(result.is_ok(), "a Windows host always accounts for a job object: {failure}");
+        }
     }
 
     /// A metered child's peak is reported through the subtree, on a host that can measure one.
@@ -2005,6 +2122,65 @@ mod tests {
         assert!(!status.success(), "{status:?}");
     }
 
+    #[cfg(windows)]
+    fn delayed_marker_child(prefix: &str) -> (tempfile::TempDir, camino::Utf8PathBuf, Child) {
+        let work = testing::workdir(prefix);
+        let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
+        let (started, finished) = (base.join("started"), base.join("finished"));
+        let child = Command::new(testing::helper_binary_path().as_std_path())
+            .args([
+                testing::directive(format_args!("touch:{started}")),
+                testing::directive("sleep:500"),
+                testing::directive(format_args!("touch:{finished}")),
+            ])
+            .spawn()
+            .expect("spawn");
+
+        for _attempt in 0..600 {
+            if started.exists() {
+                return (work, finished, child);
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!("the delayed-marker child never started");
+    }
+
+    /// Even the test-only jobless state retains cleanup-on-drop as a final safety net.
+    #[cfg(windows)]
+    #[test]
+    fn dropping_a_jobless_spawned_command_stops_its_child() {
+        let (_work, finished, child) = delayed_marker_child("gamma-jobless-spawned-drop");
+        let spawned = SpawnedCommand {
+            child: Some(child),
+            guard: Some(SpawnGuard { job: None, metered: false }),
+        };
+
+        drop(spawned);
+        thread::sleep(Duration::from_secs(1));
+
+        assert!(!finished.exists(), "the dropped spawned state left its child running");
+    }
+
+    /// `ProcessTree::drop` directly kills a child when no job handle can do it by ownership.
+    #[cfg(windows)]
+    #[test]
+    fn dropping_a_jobless_subtree_stops_its_child() {
+        let (_work, finished, child) = delayed_marker_child("gamma-jobless-subtree-drop");
+        let subtree = ProcessTree {
+            child: Some(child),
+            output_cleanup_unproven: false,
+            job: None,
+            metered: false,
+        };
+
+        drop(subtree);
+        thread::sleep(Duration::from_secs(1));
+
+        assert!(!finished.exists(), "the dropped subtree left its child running");
+    }
+
     /// A contained child is inside a job object, which is what a later kill reaches through.
     ///
     /// The Windows counterpart of `a_contained_child_leads_its_own_process_group`. Both say the
@@ -2048,6 +2224,28 @@ mod tests {
         };
 
         drop(subtree);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_an_empty_subtree_releases_its_watched_slot() {
+        let group = 0x0060_0d2e;
+        let spawning = interrupt::spawning();
+        let slot = spawning.watch(group).expect("a free slot");
+        let subtree = ProcessTree {
+            child: None,
+            output_cleanup_unproven: false,
+            group: Some(group),
+            slot: Some(slot),
+            #[cfg(target_os = "linux")]
+            cgroup: None,
+            #[cfg(target_os = "linux")]
+            metered: false,
+        };
+
+        drop(subtree);
+
+        assert_eq!(interrupt::watched(slot), 0, "drop retained an empty subtree's watch slot");
     }
 
     /// Releasing a subtree frees its slot there and then, rather than at the drop.
@@ -2782,6 +2980,26 @@ mod tests {
         assert!(wait_for(&mut subtree).success());
     }
 
+    #[test]
+    fn backing_off_waits_before_reopening_the_window() {
+        let command = no_op_command();
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let delay = Duration::from_millis(20);
+        let started = Instant::now();
+
+        let prepared = prepared.backoff(delay).expect("the window reopens after the wait");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= delay,
+            "spawn retry resumed before its requested backoff elapsed: {elapsed:?}"
+        );
+
+        let spawned = prepared.spawn().expect("spawn");
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+        let _status = subtree.terminate().expect("termination");
+    }
+
     /// A window fault refuses to open a spawn window, rather than reaching the real registry.
     #[cfg(unix)]
     #[test]
@@ -2897,21 +3115,54 @@ mod tests {
     }
 
     /// An adopt fault abandons the freshly spawned child and refuses to hand back a subtree.
-    #[cfg(unix)]
     #[test]
     fn an_adopt_fault_abandons_the_child_and_refuses() {
-        let mut command = Command::new("sh");
-        let _ = command.args(["-c", "sleep 30"]);
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.args([testing::directive("sleep:30000"), testing::directive("exit:0")]);
 
         let prepared = prepare(command, MemoryRequest::default()).expect("containment");
         let spawned = prepared.spawn().expect("spawn");
+        #[cfg(unix)]
         let pid = i32::try_from(spawned.id()).expect("pid fits");
 
         let armed = faults::arm(faults::Fault::Adopt);
         let reason = ProcessTree::adopt(spawned).expect_err("the fault should refuse adoption");
 
         assert!(reason.to_string().contains("would not take the child"), "{reason}");
+        #[cfg(unix)]
         assert!(gone_soon(pid), "an adopt fault must still kill the child it refused");
+
+        drop(armed);
+    }
+
+    #[test]
+    fn termination_reports_only_an_armed_fault_and_still_finishes_cleanup() {
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.args([testing::directive("sleep:30000"), testing::directive("exit:0")]);
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+
+        let status = subtree.terminate().expect("an unarmed termination succeeds");
+
+        assert!(!status.success(), "the sleeping child exited before termination reached it");
+        assert!(subtree.released(), "termination retained its interrupt registration");
+
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.args([testing::directive("sleep:30000"), testing::directive("exit:0")]);
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+        let armed = faults::arm(faults::Fault::Terminate);
+
+        let reason = subtree.terminate().expect_err("the armed termination fault is reported");
+
+        assert!(reason.to_string().contains("failed as requested"), "{reason}");
+        assert!(subtree.released(), "fault reporting retained the interrupt registration");
+        assert!(
+            subtree.terminate().is_err(),
+            "fault reporting left a supposedly terminated child in the lifecycle"
+        );
 
         drop(armed);
     }
@@ -3079,12 +3330,12 @@ mod tests {
         let started = Instant::now();
 
         let captured = output(command, MemoryRequest::default()).expect("capture");
+        let elapsed = started.elapsed();
 
         assert!(captured.status.success(), "{:?}", captured.status);
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "capture waited for a descendant that should have been swept: {:?}",
-            started.elapsed()
+            elapsed < Duration::from_secs(5),
+            "capture waited for a descendant that should have been swept: {elapsed:?}"
         );
     }
 
@@ -3096,10 +3347,10 @@ mod tests {
 
         let reason = output(command, MemoryRequest::default()).expect_err("the missing program cannot start");
 
-        match reason {
-            OutputError::Io(cause) => assert_eq!(cause.kind(), io::ErrorKind::NotFound),
-            OutputError::Containment(other) => panic!("expected a spawn error, got {other}"),
-        }
+        assert!(
+            matches!(reason, OutputError::Io(ref cause) if cause.kind() == io::ErrorKind::NotFound),
+            "expected a not-found spawn error"
+        );
     }
 
     /// Both contained-output error variants preserve their source and display text.

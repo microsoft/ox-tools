@@ -170,12 +170,9 @@ fn build_or_reuse_helper(name: &str) -> Utf8PathBuf {
         .arg(&source)
         .output()
         .expect("rustc should be available to the test suite");
+    let stderr = String::from_utf8_lossy(&built.stderr);
 
-    assert!(
-        built.status.success(),
-        "the test helper should compile: {}",
-        String::from_utf8_lossy(&built.stderr)
-    );
+    assert!(built.status.success(), "the test helper should compile: {}", stderr);
 
     let _moved = fs::rename(&staged, helper.as_std_path());
 

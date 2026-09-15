@@ -20,6 +20,7 @@ impl Drop for CacheLockGuard {
     // operating system misbehaving, so the failure arm is unreachable in a test.
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[mutants::skip] // Dropping the owned file closes it and releases the lock even if this explicit unlock is removed.
+    // #[gamma::skip(fn_value.unit, reason = "explicit unlock is best-effort diagnostics; closing the owned file releases the advisory lock")]
     fn drop(&mut self) {
         // Lock is automatically released when the file is closed
         // Log if unlock fails (shouldn't happen in normal operation)
@@ -37,6 +38,7 @@ pub async fn acquire_cache_lock(cache_dir: &Path) -> Result<CacheLockGuard> {
     let file = OpenOptions::new()
         .write(true)
         .create(true)
+        // #[gamma::skip(literal.bool_flip, reason = "the lock file carries no data, so truncating or preserving its empty contents has identical locking behavior")]
         .truncate(false)
         .open(&lock_path)
         .into_app_err_with(|| format!("opening cache lock file at '{}'", lock_path.display()))?;
@@ -50,6 +52,7 @@ pub async fn acquire_cache_lock(cache_dir: &Path) -> Result<CacheLockGuard> {
         Ok::<_, ohno::AppError>(file)
     })
     .await
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "this context is reachable only if Tokio itself loses the non-panicking lock closure")]
     .into_app_err("lock task panicked")??;
 
     Ok(CacheLockGuard(file))

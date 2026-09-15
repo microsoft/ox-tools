@@ -389,6 +389,13 @@ landing on the same name is refused with a usage error naming both roots and sug
 `--cache-dir`. An unmarked cache containing anything other than the lock created while claiming it
 is refused rather than adopted.
 
+Before creating, claiming, or cleaning a default cache, cargo-gamma independently verifies that the
+derived path is an identity directory directly beneath the dedicated `cargo-gamma` namespace. A
+malformed path that names the platform cache home, the namespace itself, or a differently named
+child is refused before a lock, ownership marker, synchronized workspace, Cargo target, or removal
+can touch it. This check is deliberately separate from path construction so a defect in the latter
+cannot redefine what counts as a valid default cache.
+
 An explicit `--cache-dir` names the cache base itself and must be empty on first use. cargo-gamma
 writes an ownership marker tying it to the original workspace and takes a second process-held lock
 for that cache. An unmarked non-empty directory and a cache owned by another workspace are refused
@@ -441,8 +448,11 @@ so tests in unrelated workspace packages are not presented as costs of the run.
 
 ### Baseline
 
-The unmutated test binaries run first. A red baseline stops the campaign: if a test already fails,
-every mutant appears detected and the mutation score becomes meaningless.
+The unmutated test binaries run first. A test-failing binary receives one clean retry so that a
+transient host or tool failure does not discard an otherwise valid campaign. If that retry also
+fails, the red baseline stops the campaign: if a test already fails, every mutant appears detected
+and the mutation score becomes meaningless. Timeouts, stalls, resource failures, and infrastructure
+failures are not retried because repeating them cannot establish a trustworthy calibration.
 
 The baseline also measures:
 
@@ -468,6 +478,10 @@ inner loop.
 After removing per-mutant builds, test execution is the dominant cost. cargo-gamma narrows it using
 evidence that preserves the verdict.
 
+The complete operational sequence—from loading hints through census admission, mutant queue
+construction, and per-mutant test selection—is summarized in
+[Scheduling](SCHEDULING.md).
+
 ### Package reachability
 
 By default, each mutant is judged only by test binaries from the package that owns it. A
@@ -476,8 +490,18 @@ letting reverse dependents improve another package's score. `--test-package` nam
 oracle, and `--test-workspace` admits every workspace package.
 
 Within the admitted package set, a test binary cannot execute code it does not link. The Cargo
-dependency graph identifies binaries that cannot reach a mutated package, and those binaries are
-omitted. Uncertain relationships are treated as reachable.
+dependency graph first identifies binaries that cannot reach a mutated package. Cargo Gamma then
+interposes on the successful preflight's rustc invocations and combines their exact artifact,
+primary-source, dependency-file, and `--extern` relationships with Cargo's artifact messages. Test
+targets proven not to link any pending mutated source are omitted from subsequent builds, baseline
+measurement, census, and mutant judgement.
+
+Compiler capture is an optimization, never an oracle by itself. A missing or corrupt capture,
+ambiguous artifact association, unsupported target kind, opaque path dependency, or untraceable
+workspace `--extern` abandons target-level narrowing and retains package-level behavior. If a build
+using exact Cargo target selectors fails, the same build is retried with all test targets before
+the failure can affect a verdict. Unknown relationships therefore run or build more tests; they
+never hide one.
 
 ### Guard census
 
@@ -486,22 +510,26 @@ guard runtime therefore has a census mode in which guards record that their site
 always returning the original branch.
 
 Only test binaries that can reach selected pending mutants are census candidates, and only those
-mutants' sites are retained. Each test is run separately when the census proceeds. Its recorded site
-set becomes the exact candidate set for that test under deterministic execution:
+mutants' sites are retained. The census first runs deterministic groups: top-level libtest module
+prefixes when test names expose a hierarchy, or stable contiguous chunks otherwise. A group's
+recorded sites are conservatively attributed to every test in that group. Mixed groups are
+subdivided only when their measured launch cost is clearly less than the remaining mutant work
+that finer attribution could save. This produces the same safe relation as an exact per-case walk:
 
 - if the baseline test reaches a site, it can observe that site's mutant;
 - if it does not reach the site, activating the site cannot change anything before the site is
   reached, so that test remains irrelevant.
 
-Case selection must pay for itself. Listing launch time is multiplied by the number of listed cases
-as a startup-cost estimate. The census is skipped when that estimate is at least the serial upper
-bound on everything selection could save: one whole baseline duration per reachable
-mutant/binary pair. If it proceeds, that upper bound is also the census deadline. Sampling a binary
-stops once every selected site has been reached by more than half its tests, because the sweep would
-run that binary whole for every such site regardless of further attribution.
+Case selection must pay for itself. Listing launch time and observed group costs estimate the
+sampling work. The census is skipped when that estimate is at least the serial upper bound on
+everything selection could save: one whole baseline duration per reachable mutant/binary pair. If
+it proceeds, that upper bound is also the census deadline. Refinement stops when its extra launches
+cannot conservatively repay themselves, or once every selected site has been attributed to more
+than half the suite, because the sweep would run that binary whole for those sites regardless.
 
-Only a complete, non-empty census can exclude a test or establish that a site is uncovered. Positive
-reach observations collected before the deadline are retained as checked hints. A filtered census
+Only a complete, internally consistent census hierarchy can exclude a group or establish that a
+site is uncovered. Positive reach observations collected before the deadline, or before a failed
+or inconsistent subdivision, are retained as checked hints. A filtered census
 failure is provisional and the whole binary is rerun before assigning its canonical outcome,
 because filtering changes runtime, peak memory, and failure order. Incomplete-census cases run
 first only when filtering cannot bypass another outcome from that binary, and any result other than
@@ -536,6 +564,29 @@ only a hint: when its test is rerun, it must convict again, and filtering is use
 binary cannot instead produce a resource, confirmation-flake, or metering outcome. If the hint
 cannot be used or does not convict, normal testing continues. Stale hints can waste work but cannot
 settle or change a verdict.
+
+Learning generalizes successful exact probes within one run and across promoted run records. Exact
+tests learned from the same `(source file, enclosing item)` are ranked ahead of test binaries that
+killed another mutant in the source file. Hits, misses, and observed cost rank candidates; two
+misses demote an atypical candidate. The first worker for an item scouts while siblings wait for a
+bounded interval derived from the candidate cost and number of siblings that could benefit. A
+sibling that proceeds after that wait still publishes a killer it discovers, without replacing
+knowledge another worker already published.
+
+The durable generalized-hint schema stores those item and file rankings plus interned census reach
+sets keyed by stable source-site identity. It is independently versioned and shared by the run
+record and checked-in hints artifact. Unsupported generalized tiers are ignored without discarding
+exact per-mutant probes. Generalized attempts and hits are reported separately from exact probes,
+and every generalized candidate is rerun before use; persistence never turns reach or historical
+ordering into a verdict.
+
+Ordinary mutant launches reuse the census wire protocol to report whether the active guard was
+reached, without another subprocess. Positive observations promote that binary for later mutants
+in the same item or file. A sealed, passing, whole-binary observation that did not reach the guard
+may exclude that binary only for another replacement of the exact same stable source site, and only
+while deterministic reach narrowing is enabled. Filtered, failed, incomplete, or nondeterministic
+observations never establish absence. Reports count launches avoided by sweep-derived reach
+evidence separately from other learned-order savings.
 
 The first observed test failure settles a mutant, so remaining tests are stopped. This is safe only
 when harness output is unambiguous; modes that interleave user output with harness protocol disable

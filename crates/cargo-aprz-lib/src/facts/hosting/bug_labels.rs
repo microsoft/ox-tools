@@ -41,6 +41,7 @@ impl BugLabelMatcher {
         let patterns = RegexSetBuilder::new(patterns)
             .case_insensitive(true)
             .build()
+            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "all patterns were compiled individually above, so this fallback context is unreachable for pattern errors")]
             .into_app_err("compiling bug label patterns")?;
 
         Ok(Self { patterns })
