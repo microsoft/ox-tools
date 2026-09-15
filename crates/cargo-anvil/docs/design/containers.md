@@ -396,10 +396,12 @@ otherwise the engine leaves it as `/`, and anything falling back to `$HOME` writ
 
 ### 5.3 Environment
 
-The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and forwards `GITHUB_TOKEN` by name, resolved the way the recipe resolves
-it natively: the environment first, then the gh CLI's stored token. `anvil-aprz` runs in the `scheduled-advisories` group and
-queries the GitHub advisory API, which allows 60 requests an hour unauthenticated and then sleeps until the quota
-resets, so a tier needs the token to terminate rather than merely to run quickly.
+The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and forwards `GITHUB_TOKEN` by name, resolved from the environment first
+and then the gh CLI's stored `github.com` token. This wrapper lookup is only for container execution, because the image
+has no gh CLI of its own. Native `anvil-aprz` leaves discovery to cargo-aprz, which selects the gh login from its
+effective GitHub endpoint and therefore respects GitHub Enterprise overrides. `anvil-aprz` runs in the
+`scheduled-advisories` group and queries the GitHub advisory API, which allows 60 requests an hour unauthenticated and
+then sleeps until the quota resets, so a tier needs the token to terminate rather than merely to run quickly.
 
 The two sources are not treated alike. An **exported** `GITHUB_TOKEN` is forwarded whatever the target is — that is
 exact parity, since a native run exposes it to every process the shell spawns too. A token **derived** from the gh CLI

@@ -77,8 +77,10 @@ login rather than accidentally querying `github.com`.
 The `gh` fallback is convenience, not a prerequisite. A missing executable,
 missing login, nonzero `gh auth token` result, blank output, or non-UTF-8 output
 continues anonymously and retains the provider's existing rate-limit behavior.
-An explicit option or environment token is authoritative; cargo-aprz never
-invokes `gh` when either is present.
+An explicit option is authoritative, as is a nonblank environment token;
+cargo-aprz never invokes `gh` when either applies. Environment values are
+trimmed; an empty or whitespace-only `GITHUB_TOKEN` is treated as absent so
+host-aware `gh` discovery can continue.
 
 The command is spawned directly without a shell. Its stdout is trimmed and used
 only as the request credential; it is never logged, cached, included in an
@@ -86,10 +88,13 @@ error, or inherited by unrelated child processes. Stderr from a failed
 best-effort lookup is suppressed. Diagnostic tracing reports only the credential
 source, never the token. Before spawning, cargo-aprz resolves `gh` to an absolute
 path by scanning only explicit `PATH` entries; it does not use the process
-current directory unless that directory appears in `PATH`. On Windows,
-resolution follows `PATHEXT` ordering. Filesystem resolution runs on a blocking
-worker and the child process is awaited asynchronously so credential discovery
-does not block an async runtime worker.
+current directory unless that directory appears in `PATH`. On Windows, only
+directly executable `.COM` and `.EXE` images are considered, in `PATHEXT`
+ordering; `.BAT` and `.CMD` shims are excluded so lookup never delegates
+argument parsing to `cmd.exe`. Filesystem resolution runs on a blocking worker
+and the child process is awaited asynchronously with a ten-second deadline.
+Expiry terminates the child and continues anonymously, so credential discovery
+does not block an async runtime worker indefinitely.
 
 ## Cache storage
 

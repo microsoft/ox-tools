@@ -78,16 +78,14 @@ macro_rules! split_recipe_files {
 const DEV_FILES: &[(&str, &str)] = split_recipe_files!("dev", ["build"]);
 
 #[test]
-fn aprz_forwards_a_github_token_into_the_container() {
+fn aprz_leaves_native_github_credential_discovery_to_cargo_aprz() {
     let aprz = CHECK_FILES
         .iter()
         .find_map(|(path, body)| path.ends_with("/aprz.just").then_some(*body))
         .expect("aprz.just is registered in CHECK_FILES below");
-    // The container driver forwards GITHUB_TOKEN by name, so the check reads
-    // the variable and says how to obtain one rather than reaching for a
-    // mounted secret path.
-    assert!(aprz.contains("GITHUB_TOKEN"));
-    assert!(aprz.contains("gh auth"));
+    assert!(!aprz.contains("Get-Command gh"));
+    assert!(!aprz.contains("$env:GITHUB_TOKEN ="));
+    assert!(aprz.contains("cargo {{_anvil_stable_toolchain_args}} aprz deps"));
 }
 
 /// One `justfiles/anvil/checks/<check>.just` file per catalog check
