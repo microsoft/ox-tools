@@ -716,6 +716,9 @@ fn append_nextest_options(command: &mut Command, args: &CollectionArgs, configur
 }
 
 #[cfg(windows)]
+// Linux mutation jobs cannot execute this Windows argument construction; the
+// Windows response-file integration test verifies the resulting invocation.
+#[mutants::skip]
 fn prefixed_path_argument(prefix: &str, path: &Path) -> OsString {
     let mut argument = OsString::from(prefix);
     argument.push(path.as_os_str());
@@ -781,6 +784,9 @@ fn command_too_long_response_arguments(stderr: &str) -> Option<&str> {
 }
 
 #[cfg(windows)]
+// Linux mutation jobs cannot execute this Windows response-file boundary. The
+// Windows integration test covers the fallback command and published LCOV.
+#[mutants::skip]
 // The spawned-binary integration test covers this fallback, but the outer
 // coverage report cannot include that child binary's coverage object.
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -816,6 +822,9 @@ fn run_windows_report_fallback(
 }
 
 #[cfg(windows)]
+// Linux mutation jobs cannot execute Windows LLVM discovery. The Windows
+// integration fallback covers both the explicit override and discovered tool.
+#[mutants::skip]
 // Exercised through the spawned-binary fallback integration test.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn discover_llvm_cov(toolchain: &ToolchainSelection) -> Result<PathBuf, AppError> {
@@ -901,6 +910,9 @@ fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> 
 }
 
 #[cfg(windows)]
+// Sleeping is a trivial system delegation whose duration is intentionally not
+// asserted; retry count and error selection are covered through injected waits.
+#[mutants::skip]
 // A real sharing violation is nondeterministic; retry scheduling is covered
 // through the injected wait callback in retry_windows_replace.
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1026,7 +1038,7 @@ impl TemporaryPath {
         }
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(windows)]
     fn write_atomic(directory: &Path, label: &str, contents: &[u8]) -> Result<Self, AppError> {
         let published = Self::new(directory, label);
         let staging = Self::new(directory, &format!("{label}.staging"));
@@ -1061,6 +1073,7 @@ impl TemporaryPath {
     }
 }
 
+#[cfg(any(windows, test))]
 fn atomic_rename(staging: &TemporaryPath, published: &TemporaryPath) -> Result<(), AppError> {
     fs::rename(staging.path(), published.path()).into_app_err(format!(
         "failed to atomically publish temporary file `{}`",
@@ -1076,6 +1089,7 @@ impl Drop for TemporaryPath {
     }
 }
 
+#[cfg(any(windows, test))]
 fn remove_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
