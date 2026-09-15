@@ -107,6 +107,13 @@ impl Report {
         }
         if has_fail { Verdict::Fail } else { Verdict::Pass }
     }
+
+    pub(crate) fn requires_coverage_collection(&self) -> bool {
+        self.outcomes.iter().any(|outcome| {
+            outcome.threshold.min_lines_percent > 0.0
+                || matches!(outcome.status, Status::NoCoverableLines | Status::UnexpectedCoverableLines)
+        })
+    }
 }
 
 /// Evaluate a parsed coverage report against the resolved workspace.
@@ -376,6 +383,37 @@ mod tests {
         let r = evaluate(&report, &ws, &[]).expect("evaluate");
         assert_eq!(r.verdict(), Verdict::Pass);
         assert!(r.outcomes.iter().all(|o| o.status == Status::Ok));
+    }
+
+    #[test]
+    fn collection_is_required_unless_every_package_is_opted_out() {
+        let empty = make_report(Vec::new());
+        let opted_out = make_workspace(
+            vec![
+                make_member("alpha", "/repo/crates/alpha", Some(0.0)),
+                make_member("beta", "/repo/crates/beta", Some(0.0)),
+            ],
+            None,
+        );
+        assert!(
+            !evaluate(&empty, &opted_out, &[])
+                .expect("evaluate opt-outs")
+                .requires_coverage_collection()
+        );
+
+        let positive = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", Some(1.0))], None);
+        assert!(
+            evaluate(&empty, &positive, &[])
+                .expect("evaluate threshold")
+                .requires_coverage_collection()
+        );
+
+        let expect_empty = make_workspace(vec![make_member_expect_empty("alpha", "/repo/crates/alpha")], None);
+        assert!(
+            evaluate(&empty, &expect_empty, &[])
+                .expect("evaluate assertion")
+                .requires_coverage_collection()
+        );
     }
 
     #[test]
