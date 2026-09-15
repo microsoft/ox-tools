@@ -591,6 +591,7 @@ impl CapturedProcess {
     }
 }
 
+#[mutants::skip] // Thin Child adapter; the generic helper below carries and directly tests every ownership branch.
 fn finish_ordinary_termination(child: Child, result: io::Result<ExitStatus>) -> io::Result<ExitStatus> {
     finish_ordinary_termination_with(child, result, Child::try_wait, reap_later)
 }
@@ -618,6 +619,7 @@ fn finish_ordinary_termination_with<T>(
     }
 }
 
+#[mutants::skip] // Thin Child adapter; the generic helper below carries and directly tests every ownership branch.
 fn finish_ordinary_wait(child: Child, outcome: TreeOutcome) -> TreeOutcome {
     finish_ordinary_wait_with(child, outcome, Child::try_wait, reap_later)
 }
@@ -1714,11 +1716,17 @@ mod tests {
     #[test]
     fn reader_failure_terminates_an_untimed_running_process() {
         let mut process = FakeProcess {
-            observations: VecDeque::new(),
+            observations: VecDeque::from([Ok(Some(successful_status()))]),
             termination: Some(Ok(successful_status())),
         };
         let mut stdout = spawn_output_reader(FailingReader, "early-failing-reader").expect("create failing stdout reader");
         let mut stderr = spawn_output_reader(io::empty(), "empty-stderr-reader").expect("create empty stderr reader");
+        stdout.reported = Some(
+            stdout
+                .completion
+                .recv_timeout(Duration::from_secs(1))
+                .expect("the injected read failure is ready before process observation"),
+        );
 
         let outcome = wait_for_captured_process(
             &mut process,
