@@ -3679,7 +3679,12 @@ _anvil-container-image:
                 . $hookPath
                 if (Get-Command Anvil-ResolveImage -CommandType Function -ErrorAction SilentlyContinue) {
                     [Console]::Error.WriteLine("anvil: running Anvil-ResolveImage from $hookRel")
-                    $resolved = @(Anvil-ResolveImage $image | Where-Object { $_ }) | Select-Object -Last 1
+                    $resolveArgs = @{}
+                    $parameters = (Get-Command Anvil-ResolveImage).Parameters
+                    if ($parameters.ContainsKey('Engine') -and $parameters.ContainsKey('EnginePrefix')) {
+                        $resolveArgs = @{ Engine = $engineExe; EnginePrefix = $enginePrefix }
+                    }
+                    $resolved = @(Anvil-ResolveImage $image @resolveArgs | Where-Object { $_ }) | Select-Object -Last 1
                 }
             } catch {
                 [Console]::Error.WriteLine("anvil: $hookRel failed: $($_.Exception.Message)")

@@ -512,7 +512,9 @@ mod tests {
         // inside the cache guard (NO_CACHE must defeat a remote cache too) and
         // before the NO_REBUILD guard, because fetching is not building.
         let inspect = RECIPE.find("image inspect $image").expect("the local check must exist");
-        let resolve = RECIPE.find("Anvil-ResolveImage $image").expect("the resolve call must exist");
+        let resolve = RECIPE
+            .find("Anvil-ResolveImage $image @resolveArgs")
+            .expect("the resolve call must exist");
         let build = RECIPE.find("anvil: building $image").expect("the build must exist");
         assert!(
             inspect < resolve && resolve < build,
@@ -544,7 +546,9 @@ mod tests {
         // claims. Trusting the hook is the contract; this only keeps a
         // reference the hook never fetched from failing later, under
         // `--pull=never`, a long way from the cause.
-        let resolve = RECIPE.find("Anvil-ResolveImage $image").expect("the resolve call must exist");
+        let resolve = RECIPE
+            .find("Anvil-ResolveImage $image @resolveArgs")
+            .expect("the resolve call must exist");
         let verify = RECIPE[resolve..]
             .find("image inspect $resolved")
             .expect("a resolved reference must be inspected before use");
@@ -552,6 +556,14 @@ mod tests {
             .find("Write-Output $resolved")
             .expect("a resolved reference must be returned");
         assert!(verify < accept, "check the resolved reference before returning it");
+    }
+
+    #[test]
+    fn resolver_context_is_optional_and_uses_the_selected_engine() {
+        assert!(RECIPE.contains("$resolveArgs = @{}"));
+        assert!(RECIPE.contains("if ($parameters.ContainsKey('Engine') -and $parameters.ContainsKey('EnginePrefix'))"));
+        assert!(RECIPE.contains("$resolveArgs = @{ Engine = $engineExe; EnginePrefix = $enginePrefix }"));
+        assert!(RECIPE.contains("Anvil-ResolveImage $image @resolveArgs"));
     }
 
     #[test]

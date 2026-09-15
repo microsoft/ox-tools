@@ -610,13 +610,23 @@ ahead of the `NO_REBUILD` guard, since fetching a published image is not buildin
 implements it; without one, the build proceeds.
 
 ```powershell
-function Anvil-ResolveImage($tag) {
+function Anvil-ResolveImage {
+    param(
+        [string]$tag,
+        [string]$Engine,
+        [string[]]$EnginePrefix
+    )
     $remote = "myregistry.azurecr.io/anvil:$($tag.Split(':')[-1])"
     az acr login --name myregistry | Out-Null
-    docker pull $remote | Out-Null
+    & $Engine @EnginePrefix pull $remote | Out-Null
     if ($LASTEXITCODE -eq 0) { $remote }
 }
 ```
+
+The image argument is the stable contract. A hook that also declares both
+`Engine` and `EnginePrefix` receives the exact executable and argument prefix
+selected by the driver. Hooks that declare neither parameter continue to
+receive only the image argument.
 
 Three properties are load-bearing:
 
