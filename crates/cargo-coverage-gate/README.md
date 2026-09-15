@@ -187,13 +187,13 @@ disk and orchestrates rendering plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb3wjNoVxGaCAbpkmpjr98NCcbw-HRsqJQXfkb8-afvWiSredhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb3wjNoVxGaCAbpkmpjr98NCcbw-HRsqJQXfkb8-afvWiSredhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC41LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
- [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many.html
- [__link3]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
- [__link4]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/struct.EvaluatedReport.html
- [__link5]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link6]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link7]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/enum.Verdict.html
- [__link8]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/fn.evaluate.html
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/fn.evaluate_many.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/struct.EvaluatedReport.html
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link7]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/enum.Verdict.html
+ [__link8]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/?search=EvaluatedReport::verdict

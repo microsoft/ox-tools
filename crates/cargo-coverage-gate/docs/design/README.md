@@ -684,10 +684,10 @@ per-package aggregation must produce the same percentage byte-for-byte given
 the same lcov input, regardless of file iteration order. This holds for
 free because the aggregation step sums integer line counters (commutative
 and associative), and the f64 percentage is computed once at the end.
-The displayed value rounds to one decimal place (matching
-cargo-llvm-cov's default text-summary precision), and the pass/fail
-comparison rounds to the same precision before comparing — see
-§10.5 for the rationale.
+The displayed measured percentage rounds down to one decimal place.
+Configured thresholds display to one decimal place using normal numeric
+formatting. Pass/fail evaluation uses the unrounded values so presentation
+precision cannot weaken the configured threshold — see §10.5.
 
 ### 10.2 Security
 
@@ -740,12 +740,20 @@ Rust with `cargo-llvm-cov ≥ 0.7`**. Two reasons:
 
 ### 10.5 Float comparison
 
-Percentage comparisons round both sides to the displayed precision (one
-decimal place) before comparing: `round(pct * 10) >= round(threshold * 10)`.
-This guarantees the rendered "Δ vs threshold" column always agrees with the
-pass/fail verdict — anything that prints as ≥ the threshold passes,
-anything that prints as below it fails. There is no separate tolerance
-constant to tune.
+Percentage comparisons use the unrounded measured value:
+`pct >= threshold`. Display rounding is presentation-only and never relaxes
+the configured floor. In particular, a `100.0` threshold passes only when
+every coverable line is covered.
+
+A measured percentage is rounded down to one decimal place directly from the
+integer covered/coverable line counts, so binary floating-point representation
+cannot push an exact decimal tenth downward. A near-boundary failure remains
+visibly below its threshold: `1999 / 2000 = 99.95%` displays as `99.9%` and
+fails a `100.0%` threshold. Non-zero deltas whose raw magnitude is below
+`0.1pp` retain their direction as `+<0.1pp` or `-<0.1pp`; exact `0.1pp`
+boundaries use ordinary one-decimal rendering, and only an exact match displays
+as `0.0pp`. The status and exact covered/coverable line counts remain
+authoritative.
 
 ## 11. Out-of-Scope, Possible Extensions
 

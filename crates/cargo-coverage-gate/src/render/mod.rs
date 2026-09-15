@@ -34,8 +34,15 @@ fn format_lines(outcome: &PackageOutcome) -> String {
             let n = outcome.totals.count;
             if n == 1 { "1 line".to_owned() } else { format!("{n} lines") }
         }
-        _ => outcome.percent().map_or_else(|| "(no data)".to_owned(), |p| format!("{p:.1}%")),
+        _ if outcome.totals.count == 0 => "(no data)".to_owned(),
+        _ => format_percent_for_display(outcome),
     }
+}
+
+/// Format a coverage percentage rounded down to one decimal place.
+fn format_percent_for_display(outcome: &PackageOutcome) -> String {
+    let tenths = u64::from(outcome.totals.covered) * 1_000 / u64::from(outcome.totals.count);
+    format!("{}.{:01}%", tenths / 10, tenths % 10)
 }
 
 /// Human-readable text for the `Threshold` column.
@@ -57,10 +64,16 @@ fn format_delta(outcome: &PackageOutcome) -> String {
         return "—".to_owned();
     };
     let delta = pct - outcome.threshold.min_lines_percent;
-    // Round to the displayed precision (one decimal place) before choosing a sign
-    // so sub-precision floating-point noise doesn't render as a misleading
-    // "-0.0pp" or "+0.0pp". Verdict classification also rounds to one decimal
-    // place, so the rendered value always agrees with the OK/FAIL status.
+    // A non-zero sub-precision margin retains its direction so the rendered row
+    // cannot obscure why the unrounded comparison passed or failed.
+    if delta > 0.0 && pct < outcome.threshold.min_lines_percent + 0.1 {
+        return "+<0.1pp".to_owned();
+    }
+    if delta < 0.0 && pct > outcome.threshold.min_lines_percent - 0.1 {
+        return "-<0.1pp".to_owned();
+    }
+
+    // Ordinary values use the displayed precision of one decimal place.
     let rounded = (delta * 10.0).round() / 10.0;
     if rounded > 0.0 {
         format!("+{rounded:.1}pp")
@@ -202,39 +215,45 @@ mod tests {
     }
 
     #[test]
-    fn format_delta_collapses_sub_precision_noise_to_unsigned_zero() {
-        // 82/100 - 82.0 is exactly zero algebraically but the recomputed
-        // percentage can drift by ~1e-13 due to f64 representation.
-        // We must not render "-0.0pp" or "+0.0pp" — just "0.0pp".
-        let o = outcome(100, 82, 82.0);
-        assert_eq!(format_delta(&o), "0.0pp");
+    fn format_delta_preserves_sub_precision_direction() {
+        assert_eq!(format_delta(&outcome(10_000, 8_196, 81.95)), "+<0.1pp");
+        assert_eq!(format_delta(&outcome(2_000, 1_999, 100.0)), "-<0.1pp");
+        assert_eq!(format_delta(&outcome(10_000, 8_200, 81.91)), "+<0.1pp");
+        assert_eq!(format_delta(&outcome(10_000, 8_200, 82.09)), "-<0.1pp");
+    }
 
-        // Tiny positive drift below the displayed precision rounds to zero too.
-        let mut o = outcome(100, 82, 82.0);
-        o.totals = LineTotals {
-            count: 100_000_000,
-            covered: 82_000_001,
-        };
-        // 82.000001 - 82.0 = 1e-6 -> rounds to 0.0pp.
-        assert_eq!(format_delta(&o), "0.0pp");
+    #[test]
+    fn format_delta_renders_exact_tenth_boundaries_normally() {
+        assert_eq!(format_delta(&outcome(1_000, 821, 82.0)), "+0.1pp");
+        assert_eq!(format_delta(&outcome(1_000, 820, 82.1)), "-0.1pp");
+        assert_eq!(format_delta(&outcome(5_000, 4_107, 82.04)), "+0.1pp");
+        assert_eq!(format_delta(&outcome(5_000, 4_102, 82.14)), "-0.1pp");
+    }
 
-        // Tiny negative drift below the displayed precision must also render as
-        // unsigned "0.0pp", not "-0.0pp". `f64::round` on a sub-precision negative
-        // value yields `-0.0`, so the `< 0.0` branch must reject it (and not be
-        // weakened to `<= 0.0`, which would print "-0.0pp").
-        let mut o = outcome(100, 82, 82.0);
-        o.totals = LineTotals {
-            count: 100_000_000,
-            covered: 81_999_999,
-        };
-        // 81.999999 - 82.0 = -1e-6 -> rounds to -0.0 -> must render as "0.0pp".
-        assert_eq!(format_delta(&o), "0.0pp");
+    #[test]
+    fn format_delta_renders_exact_match_as_zero() {
+        assert_eq!(format_delta(&outcome(100, 82, 82.0)), "0.0pp");
     }
 
     #[test]
     fn format_delta_returns_dash_for_no_data() {
         let o = outcome(0, 0, 80.0);
         assert_eq!(format_delta(&o), "—");
+    }
+
+    #[test]
+    fn measured_percentages_round_down_for_display() {
+        assert_eq!(format_lines(&outcome(2_000, 1_999, 100.0)), "99.9%");
+        assert_eq!(format_lines(&outcome(10_000, 8_195, 82.0)), "81.9%");
+        assert_eq!(format_lines(&outcome(1_000, 821, 82.1)), "82.1%");
+        assert_eq!(format_lines(&outcome(100, 100, 100.0)), "100.0%");
+    }
+
+    #[test]
+    fn format_percent_for_display_uses_exact_line_counts() {
+        assert_eq!(format_percent_for_display(&outcome(2_000, 1_999, 100.0)), "99.9%");
+        assert_eq!(format_percent_for_display(&outcome(1_000, 821, 82.1)), "82.1%");
+        assert_eq!(format_percent_for_display(&outcome(100, 100, 100.0)), "100.0%");
     }
 
     #[test]
