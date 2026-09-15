@@ -37,6 +37,7 @@ mod nextest;
 mod progress;
 #[cfg(target_os = "linux")]
 pub(crate) mod relaunch;
+mod rustc_wrapper;
 mod session;
 mod stall;
 mod sweep;
@@ -67,6 +68,8 @@ pub use memory::{DEFAULT_HEADROOM, DEFAULT_MULTIPLIER, Demand, MemoryControl, Me
 // Named for its subject at this level, where `support` alone would say nothing about what is
 // supported. The module itself is private unless the `internals` feature exposes it.
 pub(crate) use memory::{implied_memory_control, support as memory_support};
+#[doc(hidden)]
+pub use rustc_wrapper::run_if_requested as run_rustc_wrapper_if_requested;
 #[doc(inline)]
 pub use session::{CensusCost, Phases, Session, SweepCost};
 #[doc(inline)]
@@ -77,7 +80,9 @@ pub use verdict::READERS;
 #[cfg(loom)]
 pub(crate) use verdict::run_loom_models;
 #[cfg(any(test, feature = "internals"))]
-pub(crate) use workspace::cache_lock_identity;
+pub(crate) use workspace::production_gamma_base;
 #[doc(inline)]
 pub use workspace::{Workspace, clean_cache, footprint, gamma_base, scratch_tree};
+#[cfg(any(test, feature = "internals"))]
+pub(crate) use workspace::{absolute as absolute_test_path, cache_lock_identity};
 pub(crate) use workspace::{claim_cache, claim_workspace};

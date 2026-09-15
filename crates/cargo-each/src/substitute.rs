@@ -200,8 +200,8 @@ mod tests {
 
     #[test]
     fn per_package_tokens_expand() {
-        let out = substitute(&args(&["check-external-types", "--manifest-path", "{manifest}"]), &pkg()).expect("substitute");
-        assert_eq!(out, ["check-external-types", "--manifest-path", "/ws/cargo-anvil/Cargo.toml"]);
+        let out = substitute(&args(&["{name}", "{spec}", "{version}", "{manifest}"]), &pkg()).expect("substitute");
+        assert_eq!(out, ["cargo-anvil", "cargo-anvil@0.4.0", "0.4.0", "/ws/cargo-anvil/Cargo.toml"]);
     }
 
     #[test]
@@ -213,7 +213,10 @@ mod tests {
     #[test]
     fn packages_token_rejected_in_per_package_mode() {
         let err = substitute(&args(&["clippy", "{packages}"]), &pkg()).expect_err("misuse");
-        assert!(err.to_string().contains("{packages}"));
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{packages}` cannot be used here: only valid in --once mode"
+        );
     }
 
     #[test]
@@ -231,7 +234,10 @@ mod tests {
             packages: args(&["--workspace"]),
         };
         let err = substitute(&args(&["test", "--package", "{name}"]), &ph).expect_err("misuse");
-        assert!(err.to_string().contains("{name}"));
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{name}` cannot be used here: per-package token is not valid in --once mode"
+        );
     }
 
     #[test]

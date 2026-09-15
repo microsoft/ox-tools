@@ -36,6 +36,11 @@ async fn cli_uses_the_platform_cache_directory_and_installs_a_logger() {
     unsafe {
         std::env::set_var("HOME", home.path());
     }
+    // SAFETY: this binary contains exactly one test, so nothing else in the process can be
+    // reading the environment concurrently.
+    unsafe {
+        std::env::set_var("RUST_LOG", "trace");
+    }
     #[cfg(target_os = "linux")]
     // SAFETY: this binary contains exactly one test, so nothing else in the process can be
     // reading the environment concurrently.
@@ -84,10 +89,10 @@ async fn cli_uses_the_platform_cache_directory_and_installs_a_logger() {
 
     assert!(host.exit_code.is_none(), "the command should succeed: {}", host.error_str());
     assert!(host.output_str().contains("serde"), "console output should mention the crate");
-    assert_ne!(
+    assert_eq!(
         log::max_level(),
-        log::LevelFilter::Off,
-        "--log-level error must install a logger, which raises the global maximum level"
+        log::LevelFilter::Trace,
+        "the logger must honor the RUST_LOG override rather than the --log-level fallback"
     );
     assert!(
         app_cache.join("crates").exists(),

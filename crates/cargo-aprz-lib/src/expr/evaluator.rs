@@ -43,20 +43,13 @@ pub fn evaluate(
     let context = build_cel_context(metrics, now);
 
     // Evaluate all high-risk expressions, capturing outcomes for each
-    let mut high_risk_triggered = false;
     let mut high_risk_outcomes = Vec::with_capacity(high_risk.len());
 
     for expr in high_risk {
         let disposition = match evaluate_expression(expr.program(), expr.name(), &context) {
             Ok(true) => ExpressionDisposition::True,
-            Ok(false) => {
-                high_risk_triggered = true;
-                ExpressionDisposition::False
-            }
-            Err(e) => {
-                high_risk_triggered = true;
-                ExpressionDisposition::Failed(e)
-            }
+            Ok(false) => ExpressionDisposition::False,
+            Err(e) => ExpressionDisposition::Failed(e),
         };
         high_risk_outcomes.push(ExpressionOutcome::new(
             expr.name_arc(),
@@ -65,12 +58,11 @@ pub fn evaluate(
         ));
     }
 
-    if high_risk_triggered {
+    if high_risk_outcomes
+        .iter()
+        .any(|outcome| !matches!(outcome.disposition, ExpressionDisposition::True))
+    {
         return Appraisal::required_check_failure(high_risk_outcomes);
-    }
-
-    if eval.is_empty() {
-        return Appraisal::new(Risk::Low, high_risk_outcomes, 0, 0, 100.0);
     }
 
     let mut available_points: u32 = 0;
@@ -78,6 +70,7 @@ pub fn evaluate(
     let has_weighted_points = eval.iter().any(|expr| expr.points().unwrap_or(1) > 0);
     let mut evaluated_positive_weight = false;
     let mut outcomes = high_risk_outcomes;
+    // #[gamma::skip(stmt.delete_call, reason = "reservation changes allocation behavior only", tag = "resource")]
     outcomes.reserve(eval.len());
 
     for expr in eval {
@@ -845,6 +838,24 @@ mod tests {
         assert_eq!(outcome.weighted_score(), None);
         assert!(outcome.is_weighted_evaluation_failure());
         assert_eq!(outcome.risk, Risk::High);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn default_weight_expressions_fail_closed_without_a_score() {
+        let expression = Expression::new("failed", None, "undefined > 0", None).unwrap();
+
+        let outcome = evaluate(
+            &[],
+            &[expression],
+            Vec::<Metric>::new(),
+            test_timestamp(),
+            MEDIUM_THRESHOLD,
+            LOW_THRESHOLD,
+        );
+
+        assert!(outcome.is_weighted_evaluation_failure());
+        assert_eq!(outcome.weighted_score(), None);
     }
 
     #[test]

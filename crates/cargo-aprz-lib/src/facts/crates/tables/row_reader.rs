@@ -118,6 +118,12 @@ impl<'a> RowReader<'a> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_reader_starts_at_the_first_byte() {
+        let reader = RowReader::new(&[9]);
+        assert_eq!(reader.position(), 0);
+    }
     use crate::facts::crates::tables::RowWriter;
 
     fn round_trip(version: &str) -> Version {

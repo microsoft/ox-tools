@@ -31,10 +31,7 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
         .collect();
 
     // Column widths: header vs widest row, whichever is wider.
-    let mut widths = [0_usize; 6];
-    for (i, h) in HEADERS.iter().enumerate() {
-        widths[i] = h.chars().count();
-    }
+    let mut widths = HEADERS.map(|header| header.chars().count());
     for row in &rows {
         for (i, cell) in row.iter().enumerate() {
             widths[i] = widths[i].max(cell.chars().count());
@@ -78,6 +75,7 @@ fn write_failure_details(out: &mut dyn io::Write, report: &Report) -> io::Result
         writeln!(out, "  {}: {}", outcome.name, detail)?;
         let mut remaining = MAX_DIAGNOSTIC_LINES;
         for diagnostic in &outcome.diagnostics {
+            // #[gamma::skip(loop.break_to_continue, reason = "once remaining is zero, continuing only visits the finite remainder of the diagnostics without writing; output and termination are unchanged")]
             if remaining == 0 {
                 break;
             }
@@ -168,6 +166,33 @@ mod tests {
         assert!(s.contains("OK"));
         assert!(s.contains("package"));
         assert!(s.contains("all packages meet their threshold"));
+        assert!(!s.contains("Failure details:"), "passing reports have no failure section:\n{s}");
+    }
+
+    #[test]
+    fn table_widths_follow_the_widest_header_or_cell() {
+        let report = Report {
+            outcomes: vec![outcome(
+                "a-package-wider-than-its-header",
+                100,
+                95,
+                80.0,
+                ThresholdSource::Package,
+                Status::Ok,
+            )],
+            unattributed: 0,
+        };
+        let rendered = render_to_string(&report);
+        let lines: Vec<_> = rendered.lines().collect();
+
+        assert_eq!(
+            lines[2],
+            "  Package                          Lines  Threshold  Δ vs threshold  Status  Source "
+        );
+        assert_eq!(
+            lines[3],
+            "  ───────────────────────────────  ─────  ─────────  ──────────────  ──────  ───────"
+        );
     }
 
     #[test]
@@ -265,6 +290,21 @@ mod tests {
     }
 
     #[test]
+    fn one_omitted_failure_location_is_reported() {
+        let mut failed = outcome("alpha", 101, 0, 80.0, ThresholdSource::Package, Status::Fail);
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/lib.rs".into(),
+            lines: (1..=101).collect(),
+        });
+        let report = Report {
+            outcomes: vec![failed],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("... 1 more line locations omitted"), "got:\n{s}");
+    }
+
+    #[test]
     fn renders_no_data_row_and_summary() {
         let report = Report {
             outcomes: vec![outcome("gamma", 0, 0, 100.0, ThresholdSource::Default, Status::NoData)],
@@ -341,11 +381,11 @@ mod tests {
     fn renders_unattributed_warning_when_present() {
         let report = Report {
             outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
-            unattributed: 3,
+            unattributed: 1,
         };
         let s = render_to_string(&report);
         assert!(s.contains("Note:"), "expected aggregated unattributed warning, got:\n{s}");
-        assert!(s.contains("3 files"), "expected warning to include count, got:\n{s}");
+        assert!(s.contains("1 file"), "expected warning to include count, got:\n{s}");
     }
 
     #[test]

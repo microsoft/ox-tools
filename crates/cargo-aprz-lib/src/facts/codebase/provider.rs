@@ -80,6 +80,7 @@ impl Provider {
     pub fn new(cache: Cache) -> Self {
         Self {
             cache,
+            // #[gamma::skip(expr.increment, expr.decrement, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
             timeouts: Timeouts::default(),
         }

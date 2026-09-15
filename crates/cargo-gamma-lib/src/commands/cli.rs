@@ -1073,6 +1073,17 @@ mod tests {
     }
 
     #[test]
+    fn error_values_are_kept_when_an_explicit_selection_includes_the_error_mutator() {
+        let args = SelectArgs {
+            mutators: Some("fn_value.err_with".to_owned()),
+            errors: vec!["MyError::Io".to_owned()],
+            ..SelectArgs::default()
+        };
+
+        assert_eq!(args.selection().unwrap().errors(), ["MyError::Io"]);
+    }
+
+    #[test]
     fn feature_arguments_render_as_cargo_spells_them() {
         let features = FeatureArgs {
             features: vec!["a,b".to_owned()],

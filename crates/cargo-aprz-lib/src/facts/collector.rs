@@ -86,6 +86,7 @@ impl Collector {
                 Arc::clone(&progress),
                 Utc::now(),
                 ignore_cached,
+                // #[gamma::skip(option.some_to_none, reason = "dropping the injected dump endpoint falls back to the live crates.io dump and stalls the hermetic collector test")]
                 Some(endpoints.dump_url()),
             )
             .await?,
@@ -95,7 +96,9 @@ impl Collector {
 
             hosting_provider: super::hosting::Provider::new(github_token, codeberg_token, hosting_cache, bug_labels, endpoints)?,
             codebase_provider: super::codebase::Provider::new(codebase_cache),
+            // #[gamma::skip(option.some_to_none, reason = "dropping the injected endpoint sends the hermetic collector test to the live coverage service")]
             coverage_provider: super::coverage::Provider::new(coverage_cache, Some(endpoints.coverage_url())),
+            // #[gamma::skip(option.some_to_none, reason = "dropping the injected endpoint sends the hermetic collector test to the live docs service")]
             docs_provider: super::docs::Provider::new(docs_cache, Some(endpoints.docs_url())),
             progress,
             _cache_lock: cache_lock,
@@ -207,11 +210,13 @@ fn create_cache_dir(base_path: impl AsRef<Path>, name: impl AsRef<str>) -> Resul
     let cache_path = base_path.as_ref().join(name_str);
 
     #[cfg(windows)]
+    // #[gamma::skip(unary.remove_not, reason = "this value only avoids repeating a best-effort NTFS performance optimization for an existing cache")]
     let needs_creation = !cache_path.exists();
 
     fs::create_dir_all(&cache_path).into_app_err_with(|| format!("creating `{name_str}` cache directory"))?;
 
     #[cfg(windows)]
+    // #[gamma::skip(stmt.delete_call, reason = "disabling NTFS compression is a best-effort performance optimization and cannot change cache contents")]
     configure_windows_cache_directory(&cache_path, name_str, needs_creation);
 
     Ok(cache_path)
@@ -220,8 +225,11 @@ fn create_cache_dir(base_path: impl AsRef<Path>, name: impl AsRef<str>) -> Resul
 /// Disable NTFS compression for a newly created crates cache.
 #[cfg(windows)]
 #[mutants::skip] // Windows-only optimization; Linux mutation runners cannot compile or observe this code.
+// #[gamma::skip(fn_value.unit, reason = "NTFS compression is a best-effort cache optimization and cannot change collected facts")]
 fn configure_windows_cache_directory(cache_path: &Path, name: &str, needs_creation: bool) {
+    // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, logical.and_to_or, relational.eq_to_ne, literal.str_to_empty, literal.str_to_xyzzy, reason = "this condition only selects a best-effort NTFS performance optimization and cannot change cache contents")]
     if needs_creation && name == "crates" {
+        // #[gamma::skip(stmt.delete_call, reason = "disabling NTFS compression is a best-effort performance optimization and cannot change collected facts")]
         disable_directory_compression(cache_path);
     }
 }
@@ -234,6 +242,7 @@ fn configure_windows_cache_directory(cache_path: &Path, name: &str, needs_creati
 /// This function is completely opportunistic - if it fails for any reason, it fails silently.
 #[cfg(windows)]
 #[mutants::skip] // Windows-only optimization; Linux mutation runners cannot compile or observe this code.
+// #[gamma::skip(fn_value.unit, reason = "NTFS compression is a best-effort cache optimization and cannot change collected facts")]
 fn disable_directory_compression(path: impl AsRef<Path>) {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -251,6 +260,7 @@ fn disable_directory_compression(path: impl AsRef<Path>) {
     struct HandleGuard(HANDLE);
 
     impl Drop for HandleGuard {
+        // #[gamma::skip(fn_value.unit, reason = "this branch only closes the temporary handle after the best-effort compression ioctl")]
         fn drop(&mut self) {
             // SAFETY: handle is valid and we're done using it
             unsafe {
@@ -267,6 +277,7 @@ fn disable_directory_compression(path: impl AsRef<Path>) {
 
     // Open the directory with FILE_WRITE_DATA access and FILE_FLAG_BACKUP_SEMANTICS
     // SAFETY: Calling Windows API with valid path
+    // #[gamma::skip(bitwise.or_to_and, option.none_to_some, reason = "these Windows ABI arguments are fixed protocol values for a best-effort cache optimization")]
     let handle = unsafe {
         CreateFileW(
             &path_wide,
@@ -286,18 +297,24 @@ fn disable_directory_compression(path: impl AsRef<Path>) {
     let _guard = HandleGuard(handle); // Auto-closes handle on drop
 
     let compression_format = COMPRESSION_FORMAT_NONE;
+    // #[gamma::skip(literal.int_increment, reason = "DeviceIoControl overwrites this out parameter before it can be observed")]
     let mut bytes_returned: u32 = 0;
 
     #[expect(clippy::cast_possible_truncation, reason = "size_of::<u16>() is always 2, which fits in u32")]
     // SAFETY: Calling DeviceIoControl with valid handle and compression format
+    // #[gamma::skip(option.none_to_some, option.some_to_none, reason = "these Windows ABI pointer arguments are fixed protocol values for a best-effort cache optimization")]
     let _ = unsafe {
         DeviceIoControl(
             handle,
+            // #[gamma::skip(expr.increment, expr.decrement, reason = "this Windows control code is a fixed ABI protocol value for a best-effort optimization")]
             FSCTL_SET_COMPRESSION,
             Some(addr_of!(compression_format).cast()),
+            // #[gamma::skip(expr.increment, expr.decrement, reason = "the Windows ABI requires the exact size of the u16 compression-format input")]
             size_of::<u16>() as u32,
             None,
+            // #[gamma::skip(literal.int_increment, reason = "the null output buffer requires a zero output-buffer length by Windows ABI contract")]
             0,
+            // #[gamma::skip(option.some_to_none, reason = "the Windows ABI requires a valid bytes-returned pointer for this synchronous ioctl")]
             Some(addr_of_mut!(bytes_returned)),
             None,
         )
@@ -337,7 +354,7 @@ mod tests {
 #[cfg(test)]
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod portable_tests {
+pub(crate) mod portable_tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -354,15 +371,22 @@ mod portable_tests {
     use crate::facts::progress::Progress;
     use crate::facts::{BugLabelMatcher, CrateSpec, CratesData, Endpoints, ProviderResult};
 
-    #[derive(Debug)]
-    struct NoOpProgress;
+    #[derive(Debug, Clone, Default)]
+    struct NoOpProgress {
+        phases: Arc<std::sync::Mutex<Vec<String>>>,
+        done: Arc<std::sync::atomic::AtomicBool>,
+    }
 
     impl Progress for NoOpProgress {
-        fn set_phase(&self, _phase: &str) {}
+        fn set_phase(&self, phase: &str) {
+            self.phases.lock().unwrap().push(phase.to_owned());
+        }
         fn set_determinate(&self, _callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {}
         fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
         fn println(&self, _msg: &str) {}
-        fn done(&self) {}
+        fn done(&self) {
+            self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     #[test]
@@ -424,7 +448,7 @@ mod portable_tests {
             .expect("finishing an in-memory gzip stream must not fail")
     }
 
-    fn minimal_dump() -> Vec<u8> {
+    pub(crate) fn minimal_dump() -> Vec<u8> {
         tar_gz(&[
             (
                 "crates.csv",
@@ -608,6 +632,8 @@ mod portable_tests {
         assert_eq!(endpoints.host_url("github.com"), Some(server_uri.as_str()));
         assert_eq!(endpoints.host_url("codeberg.org"), Some(server_uri.as_str()));
         assert_eq!(endpoints.advisory_url(), "https://example.invalid/advisories.git");
+        let progress = NoOpProgress::default();
+        let observed_progress = progress.clone();
         let collector = Collector::new(
             None,
             None,
@@ -619,11 +645,15 @@ mod portable_tests {
             core::time::Duration::from_hours(1),
             false,
             Arc::new(BugLabelMatcher::default()),
-            NoOpProgress,
+            progress,
             &endpoints,
         )
         .await
         .expect("collector should initialize from local fixtures");
+        assert_eq!(*observed_progress.phases.lock().unwrap(), ["Preparing"]);
+        for name in ["crates", "hosting", "codebase", "coverage", "advisories", "docs"] {
+            assert!(cache_dir.path().join(name).is_dir(), "missing {name} cache directory");
+        }
 
         let spec = CrateSpec::from_arcs(Arc::from("queried-crate"), Arc::new(Version::new(1, 0, 0)));
         let facts = collector
@@ -646,5 +676,166 @@ mod portable_tests {
             is_not_queried(&facts.coverage_data),
             "without a repository, coverage has no result to update"
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
+    async fn empty_collect_returns_without_changing_progress() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/db-dump.tar.gz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(minimal_dump()))
+            .mount(&server)
+            .await;
+
+        let cache_dir = tempfile::tempdir().expect("creating collector cache directory");
+        let advisories_dir = cache_dir.path().join("advisories");
+        std::fs::create_dir_all(advisories_dir.join("repo").join("crates")).expect("creating empty advisory fixture directory");
+        Cache::new(&advisories_dir, core::time::Duration::from_hours(1), false)
+            .save("last_synced.bin", &())
+            .expect("writing advisory sync marker");
+        let server_uri = server.uri();
+        let dump_url = format!("{server_uri}/db-dump.tar.gz");
+        let endpoints = Endpoints::default()
+            .with_dump_url(&dump_url)
+            .with_docs_url(&server_uri)
+            .with_coverage_url(&server_uri)
+            .with_github_url(&server_uri)
+            .with_codeberg_url(&server_uri)
+            .with_advisory_url("https://example.invalid/advisories.git");
+        let progress = NoOpProgress::default();
+        let observed_progress = progress.clone();
+        let collector = Collector::new(
+            None,
+            None,
+            cache_dir.path(),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            false,
+            Arc::new(BugLabelMatcher::default()),
+            progress,
+            &endpoints,
+        )
+        .await
+        .expect("collector should initialize from local fixtures");
+
+        assert_eq!(collector.collect(&[], false).await.expect("empty collection succeeds").count(), 0);
+        assert_eq!(*observed_progress.phases.lock().unwrap(), ["Preparing"]);
+        assert!(!observed_progress.done.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
+    async fn unavailable_crates_do_not_query_secondary_providers() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/db-dump.tar.gz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(minimal_dump()))
+            .mount(&server)
+            .await;
+
+        let cache_dir = tempfile::tempdir().expect("creating collector cache directory");
+        let advisories_dir = cache_dir.path().join("advisories");
+        std::fs::create_dir_all(advisories_dir.join("repo").join("crates")).expect("creating empty advisory fixture directory");
+        Cache::new(&advisories_dir, core::time::Duration::from_hours(1), false)
+            .save("last_synced.bin", &())
+            .expect("writing advisory sync marker");
+        let server_uri = server.uri();
+        let dump_url = format!("{server_uri}/db-dump.tar.gz");
+        let endpoints = Endpoints::default()
+            .with_dump_url(&dump_url)
+            .with_docs_url(&server_uri)
+            .with_coverage_url(&server_uri)
+            .with_github_url(&server_uri)
+            .with_codeberg_url(&server_uri)
+            .with_advisory_url("https://example.invalid/advisories.git");
+        let collector = Collector::new(
+            None,
+            None,
+            cache_dir.path(),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            false,
+            Arc::new(BugLabelMatcher::default()),
+            NoOpProgress::default(),
+            &endpoints,
+        )
+        .await
+        .expect("collector should initialize from local fixtures");
+        let spec = CrateSpec::from_arcs(Arc::from("missing-crate"), Arc::new(Version::new(1, 0, 0)));
+
+        let facts = collector
+            .query_providers(vec![(spec, ProviderResult::Unavailable("missing from crates.io".into()))])
+            .await
+            .pop()
+            .expect("one fact is retained");
+
+        assert!(is_not_queried(&facts.hosting_data));
+        assert!(is_not_queried(&facts.advisory_data));
+        assert!(is_not_queried(&facts.codebase_data));
+        assert!(is_not_queried(&facts.coverage_data));
+        assert!(is_not_queried(&facts.docs_data));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run a Tokio reactor")]
+    async fn collect_deduplicates_requests_and_completes_progress() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/db-dump.tar.gz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(minimal_dump()))
+            .mount(&server)
+            .await;
+
+        let cache_dir = tempfile::tempdir().expect("creating collector cache directory");
+        let advisories_dir = cache_dir.path().join("advisories");
+        std::fs::create_dir_all(advisories_dir.join("repo").join("crates")).expect("creating empty advisory fixture directory");
+        Cache::new(&advisories_dir, core::time::Duration::from_hours(1), false)
+            .save("last_synced.bin", &())
+            .expect("writing advisory sync marker");
+        let server_uri = server.uri();
+        let dump_url = format!("{server_uri}/db-dump.tar.gz");
+        let endpoints = Endpoints::default()
+            .with_dump_url(&dump_url)
+            .with_docs_url(&server_uri)
+            .with_coverage_url(&server_uri)
+            .with_github_url(&server_uri)
+            .with_codeberg_url(&server_uri)
+            .with_advisory_url("https://example.invalid/advisories.git");
+        let progress = NoOpProgress::default();
+        let observed_progress = progress.clone();
+        let collector = Collector::new(
+            None,
+            None,
+            cache_dir.path(),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            core::time::Duration::from_hours(1),
+            false,
+            Arc::new(BugLabelMatcher::default()),
+            progress,
+            &endpoints,
+        )
+        .await
+        .expect("collector should initialize from local fixtures");
+        let requested = crate::facts::CrateRef::new("missing-crate", Some(Version::new(1, 0, 0)));
+
+        let fact_count = collector
+            .collect(&[requested.clone(), requested], false)
+            .await
+            .expect("missing crates produce unavailable facts")
+            .count();
+
+        assert_eq!(fact_count, 1);
+        assert_eq!(*observed_progress.phases.lock().unwrap(), ["Preparing", "Identifying", "Querying"]);
+        assert!(observed_progress.done.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

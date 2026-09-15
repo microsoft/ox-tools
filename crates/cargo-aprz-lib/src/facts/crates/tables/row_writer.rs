@@ -20,6 +20,7 @@ pub struct RowWriter<'a, W: Write> {
 impl<'a, W: Write> RowWriter<'a, W> {
     pub fn new(writer: &'a mut W) -> Self {
         Self {
+            // #[gamma::skip(literal.int_to_zero, literal.int_to_one, literal.int_increment, literal.int_decrement, reason = "buffer capacity is an allocation hint and does not change serialized bytes")]
             buffer: Vec::with_capacity(256),
             writer,
             row_count: 0,
@@ -45,6 +46,7 @@ impl<'a, W: Write> RowWriter<'a, W> {
 
     #[inline]
     pub fn write_u64(&mut self, value: u64) {
+        // #[gamma::skip(literal.int_increment, reason = "the encoder initializes every byte it reports as written, so the scratch byte value is unobservable")]
         let mut buf = [0u8; 9];
         let bytes_written = vu128::encode_u64(&mut buf, value);
         self.buffer.extend_from_slice(&buf[..bytes_written]);
@@ -210,5 +212,31 @@ mod tests {
         let mut writer = RowWriter::new(&mut buffer);
         let error = writer.write_str_as_bool("maybe").expect_err("'maybe' is not a boolean");
         assert!(format!("{error:#}").contains("maybe"));
+    }
+
+    #[test]
+    fn writes_optional_and_url_discriminants_exactly() {
+        let mut buffer = Vec::new();
+        {
+            let mut writer = RowWriter::new(&mut buffer);
+            writer.write_optional_u64(Some(7));
+            writer.write_str_as_url("").unwrap();
+            writer.write_str_as_url("example.com").unwrap();
+            writer.row_done().unwrap();
+            assert_eq!(writer.row_count(), 1);
+        }
+        assert_eq!(
+            buffer,
+            [
+                1, 7, 0, 19, b'h', b't', b't', b'p', b's', b':', b'/', b'/', b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o',
+                b'm'
+            ]
+        );
+    }
+
+    #[test]
+    fn pre_epoch_dates_and_timestamps_clamp_to_zero() {
+        assert_eq!(parse_pg_timestamp("1969-12-31T23:59:59Z").unwrap(), 0);
+        assert_eq!(parse_pg_date("1969-12-31").unwrap(), 0);
     }
 }

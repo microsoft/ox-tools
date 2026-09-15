@@ -35,6 +35,7 @@ pub struct CfgSet {
 
 impl CfgSet {
     /// Returns a set under which every predicate holds, so nothing is ever stripped.
+    // #[gamma::skip(fn_value.default, reason = "`Self` is inferred as the `Default::default` return type, so the replacement calls the same implementation as this body")]
     #[must_use]
     pub fn unconditional() -> Self {
         Self::default()
@@ -423,10 +424,11 @@ fn cfg_attr(attribute: &Meta) -> Option<(Meta, Vec<Meta>)> {
     }
 
     let parser = Punctuated::<Meta, Token![,]>::parse_terminated;
-    let arguments = list.parse_args_with(parser).ok()?;
-    let condition = arguments.first()?.clone();
+    let mut arguments = list.parse_args_with(parser).ok()?.into_iter();
+    let condition = arguments.next()?;
+    let nested: Vec<_> = arguments.collect();
 
-    (arguments.len() > 1).then(|| (condition, arguments.into_iter().skip(1).collect()))
+    (!nested.is_empty()).then_some((condition, nested))
 }
 
 /// Returns whether an effective attribute is a test function attribute.
@@ -544,6 +546,13 @@ mod tests {
         assert!(set().holds_str("unix"));
         assert!(!set().holds_str("windows"));
         assert!(!set().holds_str("loom"), "a custom cfg nobody passed is off");
+    }
+
+    #[test]
+    fn parsed_meta_uses_the_same_public_decision_path() {
+        let predicate: Meta = syn::parse_str("target_os = \"linux\"").expect("the predicate parses");
+
+        assert_eq!(set().decide_meta(&predicate), Verdict::Yes);
     }
 
     #[test]
@@ -702,6 +711,19 @@ mod tests {
         assert_eq!(set().decide_str(&predicate), Verdict::Unknown);
     }
 
+    /// The guard itself, rather than `syn` rejecting an extreme fixture for its own reason, must
+    /// determine the answer just beyond the supported nesting limit.
+    #[test]
+    fn the_nesting_guard_keeps_a_parseable_false_predicate() {
+        let depth = crate::parse::nesting::NESTING_LIMIT + 1;
+        let predicate = format!("{}unix{}", "not(".repeat(depth), ")".repeat(depth));
+        let parsed = syn::parse_str::<Meta>(&predicate).expect("the just-over-limit fixture remains safe for this direct parse");
+
+        assert_eq!(depth % 2, 1, "the fixture must parse to a false predicate");
+        assert!(!set().holds(&parsed), "without the guard the predicate would remove code");
+        assert!(set().holds_str(&predicate));
+    }
+
     #[test]
     fn printed_lines_that_are_not_settings_are_skipped() {
         let set = CfgSet::parse("unix\n\n   \ntarget_os=\"linux\"\nnonsense=\n=orphan\n");
@@ -718,6 +740,7 @@ mod tests {
         assert!(set().holds_for(&attribute("#[inline]")));
         assert!(set().holds_for(&attribute("#[doc = \"windows\"]")));
         assert!(set().holds_for(&attribute("#[allow(windows)]")));
+        assert!(set().holds_for(&attribute("#[allow(unix, cfg(windows))]")));
 
         // An inactive `cfg_attr` adds nothing.
         assert!(set().holds_for(&attribute("#[cfg_attr(windows, inline)]")));
@@ -817,11 +840,21 @@ mod tests {
         let gated = attribute("#[cfg_attr(unix, cfg(test))]");
         let test_attribute = attribute("#[cfg_attr(unix, test)]");
         let inactive = attribute("#[cfg_attr(windows, cfg(test))]");
+        let one_test_attribute = attribute("#[cfg_attr(test, inline, test)]");
+        let no_test_attribute = attribute("#[cfg_attr(test, inline)]");
 
         assert!(!cfg.holds_for(&gated), "the effective cfg(test) excludes test scaffolding");
         assert!(cfg.test_gated(&gated));
         assert!(cfg.test_gated(&test_attribute), "an effective #[test] is test code too");
         assert!(!cfg.test_gated(&inactive), "an inactive cfg_attr adds no test gate");
+        assert!(
+            cfg.test_gated(&one_test_attribute),
+            "one test attribute among several nested attributes is enough"
+        );
+        assert!(
+            !cfg.test_gated(&no_test_attribute),
+            "the cfg_attr condition is not one of its nested attributes"
+        );
     }
 
     /// `skip_gate` shares one `cfg_attr` expansion between the two questions callers otherwise ask

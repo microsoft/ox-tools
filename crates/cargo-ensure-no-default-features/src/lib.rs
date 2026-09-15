@@ -135,7 +135,7 @@ pub fn run() -> Result<ExitCode> {
     }
 
     // Warn if any exception was not found in the dependencies
-    let sections_label = checked_sections.join(" or ");
+    let sections_label = sections_label(&checked_sections);
     for exception in &exceptions {
         if !found_deps.contains(exception) {
             eprintln!("⚠️ Warning: exception '{exception}' was not found in {sections_label}");
@@ -145,4 +145,21 @@ pub fn run() -> Result<ExitCode> {
     println!("✅ All required dependencies have default-features = false");
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn sections_label(sections: &[&str]) -> String {
+    sections.join(" or ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sections_label;
+
+    #[test]
+    fn section_labels_name_both_supported_dependency_tables() {
+        assert_eq!(
+            sections_label(&["[workspace.dependencies]", "[dependencies]"]),
+            "[workspace.dependencies] or [dependencies]"
+        );
+    }
 }

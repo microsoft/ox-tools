@@ -94,7 +94,7 @@ fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Res
         let Some((kind, content)) = read_and_classify(path, config)? else {
             continue;
         };
-        let mut output: Vec<u8> = Vec::with_capacity(content.len() + 128);
+        let mut output: Vec<u8> = Vec::new();
         let result = cargo_heather::fix(content.as_bytes(), &mut output, &config.header_text, kind)
             .expect("`content` is a String (valid UTF-8) read into memory and `output` is a Vec, so fix's fallible paths -- reader IO/UTF-8 decoding and writer IO -- cannot fail here");
         let relative = make_relative(path, project_dir);
@@ -243,6 +243,20 @@ mod tests {
         let dir = tmp.path().join("looks_like.rs");
         std::fs::create_dir(&dir).unwrap();
         assert!(matches!(read_and_classify(&dir, &config()), Err(HeatherError::FileRead { .. })));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_check_reports_the_exact_number_of_failures() {
+        let tmp = TempDir::new().unwrap();
+        let first = tmp.path().join("first.rs");
+        let second = tmp.path().join("second.rs");
+        std::fs::write(&first, "fn first() {}\n").unwrap();
+        std::fs::write(&second, "fn second() {}\n").unwrap();
+
+        let err = run_check(&[first, second], &config(), tmp.path()).expect_err("both headers are missing");
+
+        assert!(err.to_string().contains("2 file(s)"), "{err}");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

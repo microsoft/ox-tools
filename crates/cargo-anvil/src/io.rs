@@ -64,14 +64,22 @@ pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> Str
 /// exact-case match and falling back to an ASCII-case-insensitive one. Returns
 /// the entry's real on-disk name.
 fn find_entry_case_insensitive(dir: &Path, name: &str) -> Option<String> {
+    let entries = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned());
+    select_case_insensitive(entries, name)
+}
+
+fn select_case_insensitive(entries: impl IntoIterator<Item = String>, name: &str) -> Option<String> {
     let mut case_insensitive: Option<String> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let entry_name = entry.file_name().to_string_lossy().into_owned();
-        if entry_name == name {
-            return Some(entry_name);
-        }
-        if case_insensitive.is_none() && entry_name.eq_ignore_ascii_case(name) {
-            case_insensitive = Some(entry_name);
+    for entry_name in entries {
+        match entry_name.as_str().cmp(name) {
+            std::cmp::Ordering::Equal => return Some(entry_name),
+            _ if case_insensitive.is_none() && entry_name.eq_ignore_ascii_case(name) => {
+                case_insensitive = Some(entry_name);
+            }
+            _ => {}
         }
     }
     case_insensitive
@@ -118,6 +126,12 @@ mod tests {
         touch(tmp.path(), "justfile");
         // Catalog asks for `Justfile`; the real on-disk name is `justfile`.
         assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile"), "justfile");
+    }
+
+    #[test]
+    fn exact_case_wins_over_an_earlier_case_insensitive_candidate() {
+        let entries = ["justfile", "unrelated", "Justfile"].map(str::to_owned);
+        assert_eq!(select_case_insensitive(entries, "Justfile").as_deref(), Some("Justfile"));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

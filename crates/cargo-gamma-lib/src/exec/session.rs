@@ -192,4 +192,18 @@ pub struct SweepCost {
 
     /// How many of those launches were hint-directed probes rather than ordinary binary runs.
     pub probes: usize,
+
+    /// Exact mutant-id probes attempted and confirmed.
+    pub exact_probes: usize,
+    pub exact_hits: usize,
+
+    /// Generalized item, binary, census and reach-cluster probes attempted and confirmed.
+    pub generalized_probes: usize,
+    pub generalized_hits: usize,
+
+    /// Canonical binary launches avoided by in-run reach and killer learning.
+    pub launches_saved: usize,
+
+    /// Launches avoided specifically by reach observations harvested during this sweep.
+    pub reach_launches_saved: usize,
 }

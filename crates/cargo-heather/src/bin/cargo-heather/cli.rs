@@ -41,3 +41,19 @@ impl HeatherArgs {
         self.project_dir.clone().unwrap_or_else(|| PathBuf::from("."))
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_dir_defaults_to_current_directory() {
+        let args = HeatherArgs {
+            project_dir: None,
+            config: None,
+            fix: false,
+        };
+        assert_eq!(args.project_dir(), PathBuf::from("."));
+    }
+}

@@ -240,12 +240,16 @@ fn glob_inner(p: &[char], mut pi: usize, n: &[char], mut ni: usize) -> bool {
                 // Collapse runs of `*` and try every possible match
                 // length for the next literal segment.
                 while pi < p.len() && p[pi] == '*' {
+                    // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "either mutation prevents the star-run cursor from advancing and makes wildcard matching loop forever")]
                     pi += 1;
                 }
                 if pi == p.len() {
                     return true;
                 }
-                for k in ni..=n.len() {
+                // The endpoint cannot match: after collapsing `*`, at least
+                // one non-star pattern character remains.
+                // #[gamma::skip(range.exclusive_to_inclusive, expr.increment, reason = "the collapsed star is followed by a non-star token, so trying the end position can only fail the remaining-token guard and cannot change the answer")]
+                for k in ni..n.len() {
                     if glob_inner(p, pi, n, k) {
                         return true;
                     }
@@ -253,6 +257,7 @@ fn glob_inner(p: &[char], mut pi: usize, n: &[char], mut ni: usize) -> bool {
                 return false;
             }
             '?' => {
+                // #[gamma::skip(cond.always_false, relational.ge_to_gt, reason = "at equality this arm increments the name cursor once and the final exact-length check still returns false; greater positions are unreachable")]
                 if ni >= n.len() {
                     return false;
                 }
@@ -419,6 +424,19 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_are_sorted_by_path() {
+        let z = make_file("/repo/crates/alpha/src/z.rs", 2, 0);
+        let a = make_file("/repo/crates/alpha/src/a.rs", 2, 0);
+        let member = make_member("alpha", "/repo/crates/alpha", Some(80.0));
+
+        let paths: Vec<_> = diagnostics(&[&z, &a], &member, Status::Fail)
+            .into_iter()
+            .map(|diagnostic| diagnostic.path)
+            .collect();
+        assert_eq!(paths, [PathBuf::from("src/a.rs"), PathBuf::from("src/z.rs")]);
+    }
+
+    #[test]
     fn no_data_dominates_fail() {
         let report = make_report(vec![make_file("/repo/crates/alpha/src/lib.rs", 100, 60)]);
         let ws = make_workspace(
@@ -453,6 +471,25 @@ mod tests {
         assert_eq!(r.verdict(), Verdict::Pass);
         assert_eq!(r.outcomes.len(), 1);
         assert_eq!(r.outcomes[0].name, "alpha");
+    }
+
+    #[test]
+    fn outcomes_are_sorted_independently_of_selector_order() {
+        let report = make_report(vec![
+            make_file("/repo/crates/alpha/src/lib.rs", 10, 10),
+            make_file("/repo/crates/beta/src/lib.rs", 10, 10),
+        ]);
+        let ws = make_workspace(
+            vec![
+                make_member("alpha", "/repo/crates/alpha", Some(80.0)),
+                make_member("beta", "/repo/crates/beta", Some(80.0)),
+            ],
+            None,
+        );
+
+        let evaluated = evaluate(&report, &ws, &["beta".to_owned(), "alpha".to_owned()]).expect("evaluate");
+        let names: Vec<_> = evaluated.outcomes.iter().map(|outcome| outcome.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "beta"]);
     }
 
     #[test]
@@ -512,13 +549,17 @@ mod tests {
 
     #[test]
     fn glob_matcher_handles_wildcards() {
+        assert!(super::glob_matches("*", ""));
+        assert!(super::glob_matches("*", "alpha"));
         assert!(super::glob_matches("alpha*", "alpha"));
         assert!(super::glob_matches("alpha*", "alpha_macros"));
         assert!(super::glob_matches("*macros", "alpha_macros"));
         assert!(super::glob_matches("*alpha*", "my_alpha_lib"));
         assert!(super::glob_matches("a?pha", "alpha"));
         assert!(!super::glob_matches("alpha", "alphax"));
+        assert!(!super::glob_matches("alpha", "alph"));
         assert!(!super::glob_matches("alpha*", "beta"));
+        assert!(!super::glob_matches("*a", ""));
         assert!(!super::glob_matches("a?pha", "axxpha"));
         // Multiple consecutive `*` collapse.
         assert!(super::glob_matches("a**b", "ab"));
@@ -532,6 +573,7 @@ mod tests {
         // `ni >= n.len()` early-return in the `?` arm).
         assert!(!super::glob_matches("a?", "a"));
         assert!(!super::glob_matches("alpha?", "alpha"));
+        assert!(!super::glob_matches("?", ""));
     }
 
     #[test]

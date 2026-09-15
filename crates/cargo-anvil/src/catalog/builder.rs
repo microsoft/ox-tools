@@ -267,9 +267,17 @@ mod tests {
 
     #[test]
     fn subcommand_derives_bin_name() {
-        let catalog = Catalog::anvil().into_builder().subcommand("myforge").build().unwrap();
+        let catalog = Catalog::anvil()
+            .into_builder()
+            .subcommand("myforge")
+            .about("custom help")
+            .version("1.2.3")
+            .build()
+            .unwrap();
         assert_eq!(catalog.cli().subcommand, "myforge");
         assert_eq!(catalog.cli().bin_name, "cargo-myforge");
+        assert_eq!(catalog.cli().about, "custom help");
+        assert_eq!(catalog.cli().version, "1.2.3");
     }
 
     #[test]
@@ -408,6 +416,33 @@ mod tests {
         assert!(one.checksum().starts_with("sha256:"));
     }
 
+    #[test]
+    fn checksum_delimits_adjacent_canonical_artifacts_with_a_newline() {
+        let catalog = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(Artifact::owned_file("a", "1"))
+            .with_artifact(Artifact::owned_file("b", "2"))
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            catalog.checksum(),
+            "sha256:6edb93e9f95756f0ee2f6ff9430f0eab2beb642d58234622ae6acee34fd9eb68"
+        );
+    }
+
+    #[test]
+    fn replace_artifact_uses_the_matched_index() {
+        let catalog = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(Artifact::owned_file("first", "keep"))
+            .with_artifact(Artifact::owned_file("second", "old"))
+            .replace_artifact(Artifact::owned_file("second", "new"))
+            .build()
+            .unwrap();
+
+        assert_eq!(catalog.artifacts()[0].body(), "keep");
+        assert_eq!(catalog.artifacts()[1].body(), "new");
+    }
+
     #[cfg_attr(
         miri,
         ignore = "hashes the full embedded anvil catalog; pure safe Rust with no leak/UB to exercise, covered by the native run"
@@ -479,10 +514,18 @@ mod tests {
         let file_repr = canonical_repr(&file);
         let region_repr = canonical_repr(&region);
 
-        assert!(file_repr.contains("gate=github"));
-        assert!(file_repr.contains("file"));
-        assert!(region_repr.contains("path:Cargo.toml"));
-        assert!(!region_repr.contains("single_crate_cargo_toml"));
-        assert!(region_repr.contains("slashslash"));
+        assert_eq!(file_repr, "file\u{1f}x.txt\u{1f}gate=github\u{1f}body");
+        assert_eq!(
+            region_repr,
+            "region\u{1f}path:Cargo.toml\u{1f}anvil\u{1f}slashslash\u{1f}region-body"
+        );
+        assert_eq!(gate_repr(None), "none");
+        assert_eq!(host_repr(&crate::catalog::HostSelector::EachMemberManifest), "each_member_manifest");
+        assert_eq!(host_repr(&crate::catalog::HostSelector::WorkspaceCargoToml), "workspace_cargo_toml");
+        assert_eq!(
+            host_repr(&crate::catalog::HostSelector::SingleCrateCargoToml),
+            "single_crate_cargo_toml"
+        );
+        assert_eq!(syntax_repr(crate::region::CommentSyntax::Hash), "hash");
     }
 }

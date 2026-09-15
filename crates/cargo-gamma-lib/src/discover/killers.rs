@@ -325,4 +325,66 @@ mod tests {
         assert_eq!(killers.verdict_file_for("only"), None);
         assert!(killers.verdict_file_for("nested::only").is_some());
     }
+
+    #[test]
+    fn incomplete_inputs_make_recorded_kills_ineligible_for_reuse() {
+        let directory = crate::testing::workdir("killers-invalid-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 test path");
+        let missing = root.join("missing.rs");
+        let invalid_utf8 = root.join("invalid-utf8.rs");
+        let invalid_rust = root.join("invalid-rust.rs");
+
+        std::fs::write(&invalid_utf8, [0xff]).expect("invalid UTF-8 fixture");
+        std::fs::write(&invalid_rust, "fn {").expect("invalid Rust fixture");
+
+        let missing_scan = Killers::scan(&[missing]);
+        assert!(!missing_scan.is_complete());
+
+        for file in [&invalid_utf8, &invalid_rust] {
+            let scan = Killers::scan(core::slice::from_ref(file));
+
+            assert!(!scan.is_complete(), "{file} should make the index incomplete");
+            assert!(
+                scan.file_digest(file).is_some(),
+                "{file} was read before decoding or parsing failed"
+            );
+        }
+    }
+
+    #[test]
+    fn declaring_file_lookup_accepts_harness_prefixes_and_rejects_ambiguity() {
+        let killers = indexed(
+            "mod left { #[test] fn unique() {} #[test] fn same() {} }\n\
+             mod right { #[test] fn same() {} }\n",
+        );
+
+        let exact = killers
+            .file_for("crate::lib$left::unique")
+            .expect("exact path has a declaring file");
+        assert_eq!(killers.file_for("unique"), Some(exact), "a unique leaf identifies the same file");
+        assert_eq!(killers.file_for("same"), None, "a repeated leaf is ambiguous");
+        assert_eq!(killers.file_for(""), None);
+        assert_eq!(killers.file_for("   "), None);
+    }
+
+    #[test]
+    fn verdict_lookup_requires_a_complete_scan_and_a_nonempty_exact_path() {
+        let incomplete = Killers::scan_complete(&[], false);
+
+        assert_eq!(incomplete.verdict_file_for("test"), None);
+
+        let killers = indexed("#[test]\nfn root_test() {}\n");
+
+        assert_eq!(killers.verdict_file_for(""), None);
+        assert_eq!(killers.verdict_file_for("crate::lib$   "), None);
+        assert!(killers.verdict_file_for("crate::lib$root_test").is_some());
+    }
+
+    #[test]
+    fn an_out_of_line_module_is_left_for_its_own_file_scan() {
+        let killers = indexed("mod external;\n#[test]\nfn local() {}\n");
+
+        assert!(killers.still_there("local"));
+        assert_eq!(killers.verdict_file_for("external::local"), None);
+    }
 }

@@ -60,6 +60,7 @@ pub const EXIT_INTERNAL: i32 = 70;
 /// and the exit codes themselves, is reachable from an ordinary integration test.
 pub fn run<H: Host>(host: &mut H, args: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> i32 {
     #[cfg(windows)]
+    // #[gamma::skip(stmt.delete_call, reason = "Windows error-dialog suppression changes process-global OS policy and cannot be observed safely from an in-process test")]
     cargo_gamma_unsafe::job::suppress_error_dialogs();
 
     let notes = crate::notes::Run::new();
@@ -139,6 +140,7 @@ fn dispatched<H: Host>(host: &mut H, args: impl IntoIterator<Item = impl Into<Os
 fn say_notes<H: Host>(host: &mut H, styler: Styler) {
     let notes = crate::notes::drain();
 
+    // #[gamma::skip(cond.always_false, reason = "falling through with an empty vector executes a zero-iteration loop and writes exactly the same empty output")]
     if notes.is_empty() {
         return;
     }
@@ -189,12 +191,15 @@ fn implies_run(args: &[OsString]) -> bool {
             .iter()
             .any(|option| first.strip_prefix(option).is_some_and(|rest| rest.starts_with('=')))
         {
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not consuming a `--option=value` argument retries the same argument forever")]
             rest = &rest[1..];
         } else if GLOBAL_OPTIONS.contains(&first) {
             // The value is skipped along with the option, or a `--color never merge` would look
             // like it begins with the word `never`.
+            // #[gamma::skip(stmt.delete_assign, literal.int_to_zero, reason = "not consuming a global option and its value retries the same arguments forever")]
             rest = rest.get(2..).unwrap_or_default();
         } else {
+            // #[gamma::skip(loop.break_to_continue, loop.delete_break, reason = "continuing without consuming an unrecognized leading argument retries the same slice forever")]
             break;
         }
     }
@@ -409,6 +414,49 @@ mod tests {
         assert_eq!(code, EXIT_INTERNAL, "a panic reached the caller as something other than a tool bug");
     }
 
+    struct NotingHost {
+        out: Vec<u8>,
+        err: Vec<u8>,
+    }
+
+    impl Host for NotingHost {
+        fn output(&mut self) -> impl Write {
+            &mut self.out
+        }
+
+        fn error(&mut self) -> impl Write {
+            &mut self.err
+        }
+
+        fn is_terminal(&self) -> bool {
+            crate::notes::note("raised while dispatching");
+            false
+        }
+
+        fn terminal_width(&self) -> Option<u16> {
+            None
+        }
+    }
+
+    #[test]
+    fn run_scopes_and_flushes_notes_raised_while_dispatching() {
+        let dir = crate_dir("dispatch-notes-", None);
+        let root = dir.path().to_string_lossy().into_owned();
+        let mut host = NotingHost {
+            out: Vec::new(),
+            err: Vec::new(),
+        };
+
+        let code = run(&mut host, ["cargo-gamma", "gamma", "list", "files", "--dir", &root]);
+
+        assert_eq!(code, EXIT_OK, "{}", String::from_utf8_lossy(&host.err));
+        assert!(
+            String::from_utf8_lossy(&host.err).contains("raised while dispatching"),
+            "{}",
+            String::from_utf8_lossy(&host.err)
+        );
+    }
+
     /// A host that panics the moment the CLI asks it anything.
     ///
     /// Stands in for any bug below [`run`]: what is being pinned is that the boundary catches, not
@@ -477,6 +525,19 @@ mod tests {
             assert!(host.err().contains("--shard-index"), "{}", host.err());
             assert!(host.out().is_empty(), "a rejected shard listed mutants anyway: {}", host.out());
         });
+    }
+
+    #[test]
+    fn shard_validation_itself_rejects_an_incomplete_pair() {
+        let select = SelectArgs {
+            shard_count: Some(3),
+            ..SelectArgs::default()
+        };
+
+        let error = check_shard(&select).expect_err("a shard count alone is incomplete");
+
+        assert!(error.is_usage(), "{error}");
+        assert!(error.to_string().contains("--shard-index"), "{error}");
     }
 
     /// The same, typed on the command line: parsing accepts it now, and the effective-value check

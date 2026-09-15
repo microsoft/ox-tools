@@ -168,7 +168,7 @@ fn packages_flags(members: &[&Member], packages: PackagesExpansion) -> Vec<Strin
     if packages == PackagesExpansion::Workspace {
         return vec!["--workspace".to_owned()];
     }
-    let mut flags = Vec::with_capacity(members.len() * 2);
+    let mut flags = Vec::new();
     for m in members {
         flags.push("--package".to_owned());
         flags.push(m.spec());

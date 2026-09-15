@@ -10,6 +10,7 @@
 //! workspace default → built-in `100.0`) lives in [`crate::threshold`]
 //! and consumes the values surfaced here.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -59,14 +60,11 @@ pub(crate) struct Member {
 
 impl Member {
     fn apply_policy_override(&mut self, policy: PolicyOverride) {
+        self.expect_no_coverable_lines = matches!(policy, PolicyOverride::ExpectNoCoverableLines);
         match policy {
-            PolicyOverride::Threshold(value) => {
-                self.min_lines_percent = Some(value);
-                self.expect_no_coverable_lines = false;
-            }
+            PolicyOverride::Threshold(value) => self.min_lines_percent = Some(value),
             PolicyOverride::ExpectNoCoverableLines => {
-                self.min_lines_percent = None;
-                self.expect_no_coverable_lines = true;
+                let _ = self.min_lines_percent.take();
             }
         }
     }
@@ -88,11 +86,7 @@ impl Workspace {
         manifest_path: Option<&Path>,
         resolve_target: impl FnOnce() -> Result<TargetContext, CoverageGateError>,
     ) -> Result<Self, CoverageGateError> {
-        let mut cmd = MetadataCommand::new();
-        cmd.no_deps();
-        if let Some(path) = manifest_path {
-            cmd.manifest_path(path);
-        }
+        let cmd = metadata_command(manifest_path);
         let metadata = cmd.exec().map_err(LoadMetadataError::caused_by)?;
 
         // The workspace scope may carry a `min-lines-percent` default but
@@ -139,13 +133,27 @@ impl Workspace {
                 }
             }
         }
-        members.sort_by(|a, b| a.name.cmp(&b.name));
+        let members = members
+            .into_iter()
+            .map(|member| (member.name.clone(), member))
+            .collect::<BTreeMap<_, _>>()
+            .into_values()
+            .collect();
 
         Ok(Self {
             members,
             default_min_lines_percent: workspace_default,
         })
     }
+}
+
+fn metadata_command(manifest_path: Option<&Path>) -> MetadataCommand {
+    let mut command = MetadataCommand::new();
+    command.no_deps();
+    if let Some(path) = manifest_path {
+        command.manifest_path(path);
+    }
+    command
 }
 
 /// Whether a `[*.metadata.coverage-gate]` block is being read from a
@@ -333,7 +341,7 @@ fn select_target_policy(
             .join(", ");
         return Err(AmbiguousTargetPolicyError::new(source.to_owned(), target.triple.clone(), selectors).into());
     }
-    Ok(matching_cfg.first().map(|policy| policy.policy))
+    Ok(matching_cfg.into_iter().next().map(|policy| policy.policy))
 }
 
 /// Pull `min-lines-percent` out of a `coverage-gate` block and validate
@@ -375,6 +383,7 @@ fn extract_expect_no_coverable_lines(gate: &Value, source: &str, scope: Scope) -
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::ffi::OsStr;
     use std::fs;
 
     use serde_json::json;
@@ -391,6 +400,13 @@ mod tests {
 
     fn load(manifest_path: &Path) -> Result<Workspace, CoverageGateError> {
         Workspace::load_with_target_resolver(Some(manifest_path), || Ok(test_target()))
+    }
+
+    #[test]
+    fn metadata_command_excludes_dependencies() {
+        let command = metadata_command(None).cargo_command();
+        let no_deps_count = command.get_args().filter(|arg| *arg == OsStr::new("--no-deps")).count();
+        assert_eq!(no_deps_count, 1);
     }
 
     /// Write a minimal workspace with the given root `Cargo.toml` body
@@ -717,6 +733,27 @@ expect-no-coverable-lines = false
         assert_eq!(alpha.min_lines_percent, Some(90.0));
     }
 
+    #[test]
+    fn target_policy_selection_skips_non_matching_candidates() {
+        let policies = vec![
+            TargetPolicy {
+                selector_text: "cfg(windows)".to_owned(),
+                selector: Platform::from_str("cfg(windows)").expect("selector parses"),
+                policy: PolicyOverride::Threshold(10.0),
+            },
+            TargetPolicy {
+                selector_text: "x86_64-unknown-linux-gnu".to_owned(),
+                selector: Platform::from_str("x86_64-unknown-linux-gnu").expect("selector parses"),
+                policy: PolicyOverride::Threshold(90.0),
+            },
+        ];
+
+        assert_eq!(
+            select_target_policy(policies, &test_target(), "alpha").expect("policy selection succeeds"),
+            Some(PolicyOverride::Threshold(90.0))
+        );
+    }
+
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
     fn target_policy_replaces_base_threshold() {
@@ -790,7 +827,10 @@ expect-no-coverable-lines = false
         let error = load(&tmp.path().join("Cargo.toml")).expect_err("ambiguous cfg policies must fail");
         let rendered = error.to_string();
         assert!(rendered.contains("multiple coverage-gate target policies"), "rendered: {rendered}");
-        assert!(rendered.contains("cfg(unix)"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("cfg(target_os = \"linux\"), cfg(unix)"),
+            "selectors must use the documented comma-space separator: {rendered}"
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
@@ -902,6 +942,30 @@ min-lines-percent = 0
                 "{selector}: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn unsupported_build_context_options_are_sorted_and_deduplicated() {
+        let platform =
+            Platform::from_str("cfg(all(test, feature = \"simd\", debug_assertions, feature = \"avx\", test))").expect("selector parses");
+
+        assert_eq!(
+            unsupported_build_context_options(&platform),
+            ["debug_assertions", "feature", "test"]
+        );
+
+        let gate = json!({
+            "target": {
+                "cfg(all(test, feature = \"simd\", debug_assertions))": {
+                    "min-lines-percent": 0
+                }
+            }
+        });
+        let error = extract_target_policies(&gate, "alpha", Scope::Package).expect_err("unsupported options must fail");
+        assert!(
+            error.to_string().contains("debug_assertions, feature, test"),
+            "diagnostic must delimit every unsupported option: {error}"
+        );
     }
 
     #[test]

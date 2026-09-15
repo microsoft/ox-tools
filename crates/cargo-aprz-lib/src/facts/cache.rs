@@ -106,7 +106,7 @@ impl Cache {
 
         // Handle future timestamps (clock skew) — treat as fresh data
         let age = Utc::now().signed_duration_since(envelope.timestamp);
-        if age.num_seconds() < 0 {
+        if age < chrono::Duration::zero() {
             log::debug!(target: LOG_TARGET, "Cache timestamp is in the future for {filename} (clock skew detected), treating as fresh");
         } else {
             let age_duration = age.to_std().unwrap_or(Duration::MAX);

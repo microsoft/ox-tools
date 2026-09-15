@@ -74,6 +74,7 @@ pub(super) fn stated_range(attrs: &[Attribute]) -> Option<Range<usize>> {
     let first = tokens.next()?.span().byte_range();
     let last = tokens.last().map_or_else(|| first.clone(), |tree| tree.span().byte_range());
 
+    // #[gamma::skip(relational.lt_to_le, reason = "a parsed expression's final token has positive width, so its end is strictly after the first token's start")]
     (first.start < last.end).then_some(first.start..last.end)
 }
 
@@ -113,9 +114,7 @@ pub(super) fn fault(file: &SourceFile, mut audit: Audit) -> Result<()> {
 
     // By position rather than by the order the walk happened to reach them, so a file with two
     // mistakes always reports the same one first.
-    audit.faults.sort_by_key(|(at, _message)| at.start);
-
-    let Some((at, message)) = audit.faults.first() else {
+    let Some((at, message)) = audit.faults.iter().min_by_key(|(at, _message)| at.start) else {
         return Ok(());
     };
 
@@ -523,5 +522,13 @@ mod tests {
         let rejected = rejection("#[gamma::value(0, 1)]\nfn f() -> u32 { 2 }\n#[gamma::value()]\nfn g() -> u32 { 3 }");
 
         assert!(rejected.contains("test.rs:1: "), "{rejected}");
+    }
+
+    #[test]
+    fn recursive_visits_find_nested_function_kinds() {
+        check(&file(
+            "fn outer() { #[gamma::value(0)] fn nested()->u32{1} struct S; impl S { #[gamma::value(0)] fn m(&self)->u32{1} } trait T { #[gamma::value(0)] fn m(&self)->u32{1} } }",
+        ))
+        .expect("every stated value belongs to its own nested function");
     }
 }

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use cargo_metadata::{CargoOpt, Dependency, DependencyKind, Node, Package, PackageId};
+use cargo_metadata::{CargoOpt, Dependency, DependencyKind, MetadataCommand, Node, Package, PackageId};
 use clap::{Parser, ValueEnum};
 use ohno::{IntoAppError, bail};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,16 @@ pub enum DependencyType {
     /// Build-only dependencies
     Build,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageSelection {
+    Named,
+    Workspace,
+    Root,
+    VirtualWorkspace,
+}
+
+const REQUEST_SUGGESTIONS: bool = false;
 
 #[derive(Parser, Debug)]
 pub struct DepsArgs {
@@ -64,75 +74,109 @@ pub struct DepsArgs {
 pub async fn process_dependencies<H: Host>(host: &mut H, args: &DepsArgs) -> Result<()> {
     let mut common = Common::new(host, &args.common).await?;
 
-    // Configure features on the metadata command based on command-line options
-    if args.all_features {
-        _ = common.metadata_cmd.features(CargoOpt::AllFeatures);
-    } else {
-        if args.no_default_features {
-            _ = common.metadata_cmd.features(CargoOpt::NoDefaultFeatures);
-        }
+    configure_metadata_features(&mut common.metadata_cmd, args);
 
-        if !args.features.is_empty() {
-            _ = common.metadata_cmd.features(CargoOpt::SomeFeatures(args.features.clone()));
-        }
-    }
-
-    let metadata = common.metadata_cmd.exec().into_app_err("retrieving workspace metadata")?;
+    let metadata = execute_metadata(&common.metadata_cmd)?;
     let all_packages: HashMap<_, _> = metadata.packages.iter().map(|p| (&p.id, p)).collect();
     let resolve_index: HashMap<&PackageId, &Node> = metadata
         .resolve
         .as_ref()
         .map_or_else(HashMap::default, |r| r.nodes.iter().map(|n| (&n.id, n)).collect());
 
+    let requested_packages = requested_package_names(&args.package);
+
     // Validate package names if specified
-    if !args.package.is_empty() {
-        for pkg_name in &args.package {
-            let found = metadata
+    if let Some(package_names) = requested_packages {
+        for pkg_name in package_names {
+            let workspace_package_names = metadata
                 .workspace_members
                 .iter()
-                .filter_map(|id| all_packages.get(id).map(|p| &p.name))
-                .any(|name| name == pkg_name);
-            if !found {
-                bail!("package '{pkg_name}' not found in workspace");
-            }
+                .filter_map(|id| all_packages.get(id).map(|p| p.name.as_str()));
+            validate_package_name(workspace_package_names, pkg_name)?;
         }
     }
 
-    if !args.package.is_empty() {
-        process_packages(
-            args,
-            &mut common,
-            &all_packages,
-            &resolve_index,
-            metadata
-                .workspace_members
-                .iter()
-                .filter_map(|id| all_packages.get(id).copied())
-                .filter(|p| args.package.contains(&p.name)),
-        )
-        .await
-    } else if args.workspace {
-        process_packages(
-            args,
-            &mut common,
-            &all_packages,
-            &resolve_index,
-            metadata.workspace_members.iter().filter_map(|id| all_packages.get(id).copied()),
-        )
-        .await
-    } else if let Some(root) = metadata.root_package() {
-        process_packages(args, &mut common, &all_packages, &resolve_index, core::iter::once(root)).await
-    } else {
-        // Virtual workspace, default to all members
-        process_packages(
-            args,
-            &mut common,
-            &all_packages,
-            &resolve_index,
-            metadata.workspace_members.iter().filter_map(|id| all_packages.get(id).copied()),
-        )
-        .await
+    match package_selection(requested_packages.is_some(), args.workspace, metadata.root_package().is_some()) {
+        PackageSelection::Named => {
+            let package_names = requested_packages.expect("PackageSelection::Named requires explicitly requested package names");
+            process_packages(
+                args,
+                &mut common,
+                &all_packages,
+                &resolve_index,
+                metadata
+                    .workspace_members
+                    .iter()
+                    .filter_map(|id| all_packages.get(id).copied())
+                    .filter(|p| package_names.contains(&p.name)),
+            )
+            .await
+        }
+        PackageSelection::Workspace | PackageSelection::VirtualWorkspace => {
+            process_packages(
+                args,
+                &mut common,
+                &all_packages,
+                &resolve_index,
+                metadata.workspace_members.iter().filter_map(|id| all_packages.get(id).copied()),
+            )
+            .await
+        }
+        PackageSelection::Root => {
+            let root = metadata.root_package().expect("PackageSelection::Root requires a root package");
+            process_packages(args, &mut common, &all_packages, &resolve_index, core::iter::once(root)).await
+        }
     }
+}
+
+const fn package_selection(has_named_packages: bool, workspace: bool, has_root_package: bool) -> PackageSelection {
+    if has_named_packages {
+        PackageSelection::Named
+    } else if workspace {
+        PackageSelection::Workspace
+    } else if has_root_package {
+        PackageSelection::Root
+    } else {
+        PackageSelection::VirtualWorkspace
+    }
+}
+
+fn execute_metadata(metadata_cmd: &MetadataCommand) -> Result<cargo_metadata::Metadata> {
+    metadata_cmd.exec().into_app_err("retrieving workspace metadata")
+}
+
+fn requested_package_names(package_names: &[String]) -> Option<&[String]> {
+    (!package_names.is_empty()).then_some(package_names)
+}
+
+fn package_name_is_present<'a>(mut package_names: impl Iterator<Item = &'a str>, requested: &str) -> bool {
+    package_names.any(|name| name == requested)
+}
+
+fn validate_package_name<'a>(package_names: impl Iterator<Item = &'a str>, requested: &str) -> Result<()> {
+    let found = package_name_is_present(package_names, requested);
+    if !found {
+        bail!("package '{requested}' not found in workspace");
+    }
+    Ok(())
+}
+
+fn configure_metadata_features(metadata_cmd: &mut MetadataCommand, args: &DepsArgs) {
+    if args.all_features {
+        _ = metadata_cmd.features(CargoOpt::AllFeatures);
+    } else {
+        if args.no_default_features {
+            _ = metadata_cmd.features(CargoOpt::NoDefaultFeatures);
+        }
+
+        if let Some(features) = selected_features(&args.features) {
+            _ = metadata_cmd.features(CargoOpt::SomeFeatures(features));
+        }
+    }
+}
+
+fn selected_features(features: &[String]) -> Option<Vec<String>> {
+    (!features.is_empty()).then(|| features.to_vec())
 }
 
 async fn process_packages<'a, H: Host>(
@@ -160,7 +204,7 @@ async fn process_packages<'a, H: Host>(
 
     // Fetch facts for each crate (no suggestions for deps command)
     let crate_refs: Vec<CrateRef> = crate_dep_pairs.into_iter().map(|(crate_ref, _)| crate_ref).collect();
-    let facts = common.process_crates(&crate_refs, false).await?;
+    let facts = common.process_crates(&crate_refs, REQUEST_SUGGESTIONS).await?;
 
     // Report the facts
     common.report(facts)
@@ -357,6 +401,9 @@ fn build_transitive_deps<'a>(
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+    use camino::Utf8Path;
+    use semver::Version;
+
     use super::*;
 
     fn make_package(json: &str) -> Package {
@@ -381,6 +428,132 @@ mod tests {
         "edition": "2021",
         "metadata": null
     }"#;
+
+    fn fixture_args(feature_args: &[&str]) -> DepsArgs {
+        let manifest = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny-crate/Cargo.toml");
+        let mut args = vec!["deps", "--manifest-path", manifest.as_str()];
+        args.extend_from_slice(feature_args);
+        DepsArgs::parse_from(args)
+    }
+
+    #[test]
+    fn package_selection_obeys_cli_precedence() {
+        assert_eq!(package_selection(true, false, true), PackageSelection::Named);
+        assert_eq!(package_selection(true, true, true), PackageSelection::Named);
+        assert_eq!(package_selection(false, true, true), PackageSelection::Workspace);
+        assert_eq!(package_selection(false, true, false), PackageSelection::Workspace);
+        assert_eq!(package_selection(false, false, true), PackageSelection::Root);
+        assert_eq!(package_selection(false, false, false), PackageSelection::VirtualWorkspace);
+        const {
+            assert!(
+                !REQUEST_SUGGESTIONS,
+                "dependency collection must not request crate-name suggestions"
+            );
+        }
+    }
+
+    fn resolved_root_features(feature_args: &[&str]) -> Vec<String> {
+        let args = fixture_args(feature_args);
+        let mut command = MetadataCommand::new();
+        _ = command.manifest_path(&args.common.manifest_path);
+        configure_metadata_features(&mut command, &args);
+
+        let metadata = command.exec().expect("fixture metadata must resolve");
+        let root = metadata.root_package().expect("the fixture has a root package");
+        let resolve = metadata.resolve.as_ref().expect("fixture metadata includes a resolve graph");
+        let mut features: Vec<_> = resolve
+            .nodes
+            .iter()
+            .find(|node| node.id == root.id)
+            .expect("the root package has a resolve node")
+            .features
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        features.sort();
+        features
+    }
+
+    #[test]
+    fn metadata_feature_flags_are_applied_exactly() {
+        assert_eq!(selected_features(&[]), None);
+        assert_eq!(selected_features(&["extra".into()]), Some(vec!["extra".into()]));
+
+        assert_eq!(resolved_root_features(&[]), ["default", "extra"]);
+        assert_eq!(resolved_root_features(&["--all-features"]), ["default", "extra", "nondefault"]);
+        assert!(resolved_root_features(&["--no-default-features"]).is_empty());
+    }
+
+    #[test]
+    fn explicit_metadata_features_are_applied() {
+        assert_eq!(resolved_root_features(&["--no-default-features", "--features", "extra"]), ["extra"]);
+    }
+
+    #[test]
+    fn metadata_failure_has_exact_operation_context() {
+        let args = fixture_args(&["--features", "no-such-feature"]);
+        let mut command = MetadataCommand::new();
+        _ = command.manifest_path(&args.common.manifest_path);
+        configure_metadata_features(&mut command, &args);
+
+        let error = execute_metadata(&command).expect_err("an unknown feature must fail metadata resolution");
+        let message = error.to_string();
+
+        assert!(message.contains("\n> retrieving workspace metadata (at "), "{message}");
+    }
+
+    #[test]
+    fn package_filter_distinguishes_empty_and_nonempty_requests() {
+        assert_eq!(requested_package_names(&[]), None);
+
+        let requested = vec!["tiny-crate".to_string()];
+        let selected = requested_package_names(&requested).expect("a nonempty package filter is active");
+        assert_eq!(selected, ["tiny-crate"]);
+
+        let manifest = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny-virtual-workspace/Cargo.toml");
+        let mut command = MetadataCommand::new();
+        _ = command.manifest_path(manifest);
+        let metadata = command.exec().expect("the multi-member fixture metadata must resolve");
+        let all_packages: HashMap<_, _> = metadata.packages.iter().map(|package| (&package.id, package)).collect();
+        let workspace_names: Vec<_> = metadata
+            .workspace_members
+            .iter()
+            .filter_map(|id| all_packages.get(id).map(|package| package.name.as_str()))
+            .collect();
+
+        assert!(workspace_names.len() > 1, "the fixture must distinguish any from all");
+        assert_eq!(
+            workspace_names
+                .iter()
+                .copied()
+                .filter(|name| *name == "tiny-member")
+                .collect::<Vec<_>>(),
+            ["tiny-member"],
+            "the requested package is exactly one non-universal workspace member"
+        );
+
+        validate_package_name(workspace_names.iter().copied(), "tiny-member")
+            .expect("a present non-universal package must pass validation");
+        let error =
+            validate_package_name(workspace_names.iter().copied(), "no-such-package").expect_err("an absent package must fail validation");
+        assert_eq!(
+            error.to_string().lines().next(),
+            Some("package 'no-such-package' not found in workspace")
+        );
+    }
+
+    #[tokio::test]
+    async fn deps_propagates_initialization_failures() {
+        let missing_manifest = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("target/deps-command-tests/missing/Cargo.toml");
+        let args = DepsArgs::parse_from(["deps", "--manifest-path", missing_manifest.as_str()]);
+        let mut host = crate::commands::host::TestHost::new();
+
+        let error = process_dependencies(&mut host, &args)
+            .await
+            .expect_err("a missing manifest must not be reported as success");
+
+        assert!(error.to_string().contains("retrieving workspace metadata"), "{error}");
+    }
 
     #[test]
     fn expand_features_empty() {
@@ -863,5 +1036,9 @@ mod tests {
         names.sort();
 
         assert_eq!(names, vec!["activated", "feature_path", "plain_path", "shared"]);
+        for (crate_ref, kind) in &result {
+            assert_eq!(*kind, DependencyType::Standard);
+            assert_eq!(crate_ref.version(), Some(&Version::new(1, 0, 0)), "{}", crate_ref.name());
+        }
     }
 }

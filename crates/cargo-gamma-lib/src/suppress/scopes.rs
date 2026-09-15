@@ -50,6 +50,7 @@ impl Scopes {
 
         let mut scopes = collector.scopes;
 
+        // #[gamma::skip(stmt.delete_call, reason = "syn's visitor reaches parsed nodes in lexical preorder, which already satisfies this ordering; sorting defensively documents and preserves the invariant")]
         scopes.sort_spans();
 
         for span in &scopes.spans {
@@ -141,8 +142,10 @@ struct ScopeCollector {
 impl ScopeCollector {
     /// Records a span if it lies inside the file text.
     fn record(&mut self, span: Span) -> Option<Range<usize>> {
-        let range = span.byte_range();
+        self.record_range(span.byte_range())
+    }
 
+    fn record_range(&mut self, range: Range<usize>) -> Option<Range<usize>> {
         if !admissible(&range, self.text_len) {
             return None;
         }
@@ -177,11 +180,7 @@ impl ScopeCollector {
 
         let start = function.byte_range().start;
         let end = item.byte_range().end;
-        let range = start..end;
-
-        if admissible(&range, self.text_len) {
-            self.scopes.spans.push(range);
-        }
+        let _recorded = self.record_range(start..end);
     }
 }
 
@@ -352,6 +351,15 @@ impl S {
     }
 
     #[test]
+    fn a_comment_between_attributes_and_a_free_function_suppresses_its_whole_body() {
+        let source = "#[inline]\n// #[gamma::skip(arith)]\nfn f(a: i32, b: i32) -> i32 {\n    let sum = a + b;\n    sum - b\n}";
+        let (count, total) = suppressed(source, "arith");
+
+        assert!(total > 0);
+        assert_eq!(count, total);
+    }
+
+    #[test]
     fn an_attribute_directive_covers_the_whole_function() {
         let source = "#[gamma::skip(arith)]\nfn f(a: i32, b: i32) -> i32 { a + b }";
         let (count, total) = suppressed(source, "arith");
@@ -465,6 +473,16 @@ impl S {
         assert_eq!(governing.end, source.trim_end().len());
     }
 
+    #[test]
+    fn equal_ending_nested_spans_do_not_displace_the_outer_span() {
+        let source = "fn f() -> i32 { 1 + 1 }";
+        let parsed = file(source);
+        let scopes = Scopes::of(&parsed);
+        let governing = scopes.enclosing_on_line(1).expect("a span on the only line");
+
+        assert_eq!(parsed.slice(&governing), source);
+    }
+
     /// The widest span at a shared start wins whichever order the spans arrive in.
     #[test]
     fn the_outermost_span_at_a_shared_start_wins_in_either_order() {
@@ -494,6 +512,65 @@ impl S {
         let scopes = Scopes::from_spans(vec![5..8, 5..20, 5..12]);
 
         assert_eq!(scopes.following(0), Some(5..20));
+    }
+
+    #[test]
+    fn spans_outside_the_source_are_never_recorded() {
+        let mut collector = ScopeCollector {
+            scopes: Scopes::default(),
+            text_len: 10,
+        };
+
+        assert_eq!(collector.record_range(2..10), Some(2..10));
+        assert_eq!(collector.record_range(2..11), None);
+        assert_eq!(collector.record_range(4..4), None);
+        assert_eq!(collector.scopes.spans.len(), 1);
+        assert_eq!(collector.scopes.spans[0], 2..10);
+    }
+
+    #[test]
+    fn an_unattributed_function_gets_no_synthetic_function_head() {
+        let source = "fn f() {}";
+        let item: ItemFn = syn::parse_str(source).expect("the fixture parses");
+        let mut collector = ScopeCollector {
+            scopes: Scopes::default(),
+            text_len: source.len(),
+        };
+
+        collector.record_attributed_function_head(&item.attrs, item.sig.fn_token.span, item.span());
+
+        assert!(collector.scopes.spans.is_empty());
+    }
+
+    #[test]
+    fn directives_inside_nested_expressions_reach_the_inner_expression() {
+        let source =
+            "fn f(a: i32, b: i32) -> i32 {\n    choose(\n        // #[gamma::skip(arith)]\n        a + b,\n        a - b,\n    )\n}";
+        let (count, total) = suppressed(source, "arith");
+
+        assert!(total > count);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn attributes_on_modules_and_use_items_are_collected() {
+        let parsed = file("#[gamma::skip(arith)]\nmod nested { pub fn f() -> i32 { 1 + 1 } }\n#[gamma::skip(arith)]\nuse nested::f;");
+        let scopes = Scopes::of(&parsed);
+        let paths: Vec<String> = scopes
+            .attributes
+            .iter()
+            .map(|(attribute, _)| {
+                attribute
+                    .path()
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::")
+            })
+            .collect();
+
+        assert_eq!(paths.iter().filter(|path| path.as_str() == "gamma::skip").count(), 2);
     }
 
     /// An offset landing exactly on a span start selects that span, not the one after it.

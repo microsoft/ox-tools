@@ -30,7 +30,8 @@ id = "anvil-deny-advisories"
 checksum = "sha256:..."
 ```
 
-Paths are repository-relative, slash-separated, and must stay inside the repository.
+Paths are repository-relative, slash-separated with no empty segments, and must
+stay inside the repository.
 Entries are deterministic: files sorted by path, regions by `(host, id)`.
 The lock is read at startup and refreshed after applying the plan; `--dry-run`
 does not write it. Missing tracking means an item has not previously been rendered.

@@ -9,7 +9,7 @@
 //! compares this against the current on-disk content and the current
 //! template content.
 //!
-//! Schema is documented in [`updates.md §1`](../../docs/design/updates.md).
+//! Schema is documented in [`updates.md`](../../docs/design/updates.md).
 //! The schema version is `1`. Newer schemas cause the tool to refuse
 //! running; older schemas are migrated automatically (no older schemas
 //! exist today).
@@ -77,7 +77,8 @@ pub struct RegionKey {
 ///
 /// Returns an error naming `context` and the offending path when it is
 /// absolute, carries a drive or network-share prefix or a backslash, contains
-/// a `..` component, or names no file at all.
+/// a `..` component or an empty slash-separated segment, or names no file at
+/// all.
 fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
     // The format is `/`-separated, and the platforms disagree about `\`:
     // Windows treats it as a separator, Unix as an ordinary filename character.
@@ -97,10 +98,9 @@ fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
     if path.contains('\\') || drive_qualified {
         bail!("{context} '{path}' must be a relative path inside the repository");
     }
-    let mut names = 0_usize;
     for component in Path::new(path).components() {
         match component {
-            Component::Normal(_) => names += 1,
+            Component::Normal(_) => {}
             // `.` is not a directory entry, so `resolve_existing_case_insensitive`
             // cannot fold it away: `./Justfile` stays a second spelling of a live
             // path, and a liveness check that compares resolved strings misses it.
@@ -115,8 +115,14 @@ fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
     // Paths are stored `/`-separated, so the raw final segment is what decides
     // whether a file is named at all.
     let last = path.rsplit('/').next().unwrap_or_default();
-    if names == 0 || last.is_empty() || last == "." {
+    if last.is_empty() || last == "." {
         bail!("{context} '{path}' must name a file inside the repository");
+    }
+    // `Path::components` coalesces repeated separators, so validate the stored
+    // slash-separated spelling as well. Otherwise `foo//bar` and `foo/bar`
+    // become distinct manifest keys for the same file.
+    if path.split('/').any(str::is_empty) {
+        bail!("{context} '{path}' must not contain empty path segments");
     }
     Ok(())
 }
@@ -247,26 +253,11 @@ impl Manifest {
             doc.insert("catalog_checksum", value(catalog_checksum.as_str()));
         }
 
-        if !self.files.is_empty() {
-            let mut tables = ArrayOfTables::new();
-            for (path, checksum) in &self.files {
-                let mut t = Table::new();
-                t.insert("path", value(path.as_str()));
-                t.insert("checksum", value(checksum.as_str()));
-                tables.push(t);
-            }
+        if let Some(tables) = file_tables(&self.files) {
             doc.insert("file", Item::ArrayOfTables(tables));
         }
 
-        if !self.regions.is_empty() {
-            let mut tables = ArrayOfTables::new();
-            for (key, checksum) in &self.regions {
-                let mut t = Table::new();
-                t.insert("host", value(key.host.as_str()));
-                t.insert("id", value(key.id.as_str()));
-                t.insert("checksum", value(checksum.as_str()));
-                tables.push(t);
-            }
+        if let Some(tables) = region_tables(&self.regions) {
             doc.insert("region", Item::ArrayOfTables(tables));
         }
 
@@ -276,7 +267,7 @@ impl Manifest {
         // to leave uncovered.
         let body = doc.to_string();
         let trimmed = body.trim_end_matches('\n');
-        let mut out = String::with_capacity(trimmed.len() + 1);
+        let mut out = String::new();
         out.push_str(trimmed);
         out.push('\n');
         out
@@ -377,6 +368,35 @@ impl Manifest {
     }
 }
 
+fn file_tables(files: &BTreeMap<String, String>) -> Option<ArrayOfTables> {
+    if files.is_empty() {
+        return None;
+    }
+    let mut tables = ArrayOfTables::new();
+    for (path, checksum) in files {
+        let mut table = Table::new();
+        table.insert("path", value(path.as_str()));
+        table.insert("checksum", value(checksum.as_str()));
+        tables.push(table);
+    }
+    Some(tables)
+}
+
+fn region_tables(regions: &BTreeMap<RegionKey, String>) -> Option<ArrayOfTables> {
+    if regions.is_empty() {
+        return None;
+    }
+    let mut tables = ArrayOfTables::new();
+    for (key, checksum) in regions {
+        let mut table = Table::new();
+        table.insert("host", value(key.host.as_str()));
+        table.insert("id", value(key.id.as_str()));
+        table.insert("checksum", value(checksum.as_str()));
+        tables.push(table);
+    }
+    Some(tables)
+}
+
 // Suppress an unused-import lint when no callers reference `Array`/`Value`
 // yet (they will once writers gain inline-table support in later commits).
 
@@ -413,6 +433,9 @@ mod tests {
     fn empty_manifest_round_trip() {
         let m1 = Manifest::default();
         let text = m1.to_toml();
+        assert_eq!(text, "version = 1\n");
+        assert!(file_tables(&m1.files).is_none());
+        assert!(region_tables(&m1.regions).is_none());
         let m2 = Manifest::parse(&text).unwrap();
         assert_eq!(m1, m2);
     }
@@ -451,7 +474,10 @@ mod tests {
     fn rejects_newer_schema() {
         let text = "version = 999\n";
         let err = Manifest::parse(text).unwrap_err();
-        assert!(err.to_string().contains("newer than supported"));
+        assert_eq!(
+            err.to_string(),
+            "manifest schema version 999 is newer than supported (1); upgrade cargo-anvil"
+        );
     }
 
     #[test]
@@ -499,6 +525,21 @@ mod tests {
         let text = "version = 1\n[[file]]\npath = \"foo\"\n";
         let err = Manifest::parse(text).unwrap_err();
         assert!(err.to_string().contains("`checksum`"));
+    }
+
+    #[test]
+    fn malformed_toml_reports_the_parser_context() {
+        let err = Manifest::parse("not = [valid").unwrap_err();
+        assert!(err.to_string().contains("manifest is not valid TOML"), "{err}");
+    }
+
+    #[test]
+    fn containment_errors_name_the_manifest_entry_kind() {
+        let file = Manifest::parse("version = 1\n[[file]]\npath = \"../x\"\nchecksum = \"sha256:x\"\n").unwrap_err();
+        assert!(file.to_string().contains("[[file]] entry '../x'"), "{file}");
+
+        let region = Manifest::parse("version = 1\n[[region]]\nhost = \"../x\"\nid = \"r\"\nchecksum = \"sha256:x\"\n").unwrap_err();
+        assert!(region.to_string().contains("[[region]] host '../x'"), "{region}");
     }
 
     #[test]
@@ -701,6 +742,25 @@ mod tests {
             assert!(
                 format!("{err}").contains("must name a file inside the repository"),
                 "unexpected error for '{empty}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_slash_separated_segments() {
+        for path in ["foo//bar", "foo///bar"] {
+            let file = format!("version = 1\n\n[[file]]\npath = \"{path}\"\nchecksum = \"sha256:x\"\n");
+            let err = Manifest::parse(&file).unwrap_err();
+            assert!(
+                err.to_string().contains("[[file]] entry") && err.to_string().contains("must not contain empty path segments"),
+                "unexpected error for file path '{path}': {err}"
+            );
+
+            let region = format!("version = 1\n\n[[region]]\nhost = \"{path}\"\nid = \"anvil-x\"\nchecksum = \"sha256:x\"\n");
+            let err = Manifest::parse(&region).unwrap_err();
+            assert!(
+                err.to_string().contains("[[region]] host") && err.to_string().contains("must not contain empty path segments"),
+                "unexpected error for region host '{path}': {err}"
             );
         }
     }

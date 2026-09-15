@@ -5,62 +5,112 @@ deleted; this file is not a changelog or a record of rejected work.
 
 ## Contents
 
+### Correctness
+- [C1](#c1) — Investigate a missing guard for a whole-function boolean mutant
+- [C2](#c2) — Remove the editorial baseline-failure explanation
+- [C3](#c3) — Report every baseline failure before stopping
+
 ### Performance
-- [P1](#p1) — Publish killers found after a file-learning fallback
-- [P2](#p2) — Compare equal files correctly across short reads
 - [P3](#p3) — Amortize per-mutant process launch with a fork server
+- [P9](#p9) — Make the guard census an explicit opt-in
 
 ### Features
 - [F2](#f2) — Checkpoint and resume long-running campaigns
 - [F3](#f3) — Native fork-server test harness as a `cargo test`/nextest replacement
-
-### Documentation
-- [D1](#d1) — Correct the cgroup watch-state documentation
+- [F4](#f4) — Bound cache growth and reclaim abandoned workspaces
+- [F5](#f5) — Incrementally update the workspace hints artifact
+- [F6](#f6) — Schedule unhinted mutants to maximize in-run learning
 
 ### Testing
 - [T1](#t1) — Isolate tests from the production interrupt registry
 
+## Correctness
+
+<a id="c1"></a>
+### C1 — Investigate a missing guard for a whole-function boolean mutant
+
+**Area:** mutant discovery, source instrumentation, and build convergence · **Priority:** High ·
+**Effort:** Unknown
+
+A large campaign discovered a `fn_value.bool_false` mutant but failed during the final test-binary
+build because instrumentation emitted no corresponding guard:
+
+```rust
+pub fn is_azure_egress_clear_request(input: &[pb::AzureEgressTarget]) -> bool {
+    input.len() == 1 && input[0].host.trim().is_empty()
+}
+```
+
+The reported mutant replaced the whole function body block with `false`:
+
+```text
+replace { input.len() == 1...trim().is_empty() } with false [fn_value.bool_false]
+```
+
+Cargo-gamma then stopped with `internal error: no guard was emitted for the mutant`. Discovery and
+instrumentation therefore disagreed about whether this selected mutant existed in the rewritten
+schema. Investigate span normalization and replacement matching for a whole-function boolean
+mutation around a block whose tail expression combines short-circuit boolean logic, indexed field
+access, and a method chain. Also determine whether overlapping inner-expression mutants or source
+rewrites can cause the function-value replacement to be skipped while its plan entry remains live.
+
+**Done when:** a minimal deterministic fixture reproduces the reported function shape; every live
+discovered mutant either emits exactly one guard or receives an explicit non-internal outcome
+before the final build; the whole-function `bool_false` mutant reaches baseline and sweep; and
+regression tests cover coexistence with the nested boolean-expression mutants generated from the
+same body.
+
+---
+
+<a id="c2"></a>
+### C2 — Remove the editorial baseline-failure explanation
+
+**Area:** baseline error rendering · **Priority:** High · **Effort:** Trivial
+
+The baseline failure currently follows `the baseline could not be measured` with:
+
+> Every verdict in a run is a comparison against the baseline, so there is nothing to measure
+> until this failure is resolved.
+
+This does not help diagnose or resolve the failing target and reads as an unnecessary lecture after
+a long campaign setup. Remove it. Lead directly with the package, target, runner, executable,
+working directory, failure, elapsed time, and diagnostic artifact paths.
+
+**Done when:** baseline failures contain no editorial explanation of why a baseline is required,
+retain all actionable target and failure details, and rendering tests pin the concise form.
+
+---
+
+<a id="c3"></a>
+### C3 — Report every baseline failure before stopping
+
+**Area:** baseline coordination and diagnostic publication · **Priority:** High · **Effort:** Medium
+
+One failed or timed-out test binary currently ends baseline measurement and reports only that
+target. In a large workspace this forces repeated full build/baseline attempts to discover
+independent failures one at a time.
+
+Continue baselining every retained test binary after one fails. Preserve the bounded retry policy
+for ordinary test failures, but do not let a terminal failure cancel or suppress measurements of
+other binaries. After all binaries settle, return one aggregate baseline error that lists every
+failed target and its actionable details.
+
+Publish collision-free diagnostics for each failed test-binary identity. Use a stable,
+filesystem-safe directory derived from at least package and target identity, with that target's
+`baseline-failure.json` and relevant `gamma-diagnostics.json` beneath it, rather than allowing
+multiple failures to compete for the same top-level filenames. The aggregate error should link
+each target to its own artifacts. Publication must preserve complete diagnostics when targets
+share a target name across packages or finish concurrently.
+
+**Done when:** deterministic tests run several baseline binaries with a mixture of passes,
+failures, and timeouts; every binary is attempted; the final error reports all failures; each
+failure has distinct readable diagnostic artifacts under its target directory; no concurrent
+writer overwrites another target's files; and a single failure retains the same actionable detail
+without forcing callers to understand an aggregate-only format.
+
+---
+
 ## Performance
-
-<a id="p1"></a>
-### P1 — Publish killers found after a file-learning fallback
-
-**Area:** `cargo-gamma-lib::exec::sweep` · **Priority:** Low · **Effort:** Small
-
-When a worker times out waiting for another file learner, or sees `Learning::Exhausted`, it runs
-the full ordered judgement itself. Unlike the hinted and designated-learner paths, these fallback
-paths return without publishing a killer they discover. Later mutants in the same file therefore
-repeat the full binary order even though this run already found a reusable probe.
-
-- `crates/cargo-gamma-lib/src/exec/sweep.rs:746-749` and
-  `crates/cargo-gamma-lib/src/exec/sweep.rs:788-790` — the two normal paths publish or complete
-  learning
-- `crates/cargo-gamma-lib/src/exec/sweep.rs:762-784` — timeout and exhausted-state fallbacks return
-  their judgement without either operation
-
-**Done when:** every fallback judgement publishes a newly found killer without overwriting an
-already learned one, and a regression test starts from `InProgress`, forces the bounded wait to
-expire, returns a killing judgement, and observes `Learning::Learned`.
-
----
-
-<a id="p2"></a>
-### P2 — Compare equal files correctly across short reads
-
-**Area:** `cargo-gamma-lib::exec::sync` · **Priority:** Low · **Effort:** Small
-
-`same_contents` reads two files independently and treats unequal read lengths as unequal file
-contents. `Read::read` may legally return a short non-EOF result, so identical files on a
-filesystem that gives different chunk sizes can be needlessly recopied, changing timestamps and
-invalidating Cargo fingerprints.
-
-- `crates/cargo-gamma-lib/src/exec/sync.rs:308-330` — independent reads are compared as though both
-  must fill equally sized chunks
-
-**Done when:** comparison handles independent short reads without misaligning bytes, and a unit
-test uses two readers with different chunk schedules over identical content.
-
----
 
 <a id="p3"></a>
 ### P3 — Amortize per-mutant process launch with a fork server
@@ -93,11 +143,49 @@ std's argv-capturing constructor so each child's argv can be patched before libt
 - `crates/cargo-gamma/docs/DESIGN.md:835` — the documented limitation this would relax
 
 **Done when:** census and sweep launches on Linux reuse a warm forked process instead of a fresh
-`execve` per launch, with measured wall-clock improvement on a many-small-tests workspace, and a
+`execve` per launch, a test proves the forked child observes no repeated dynamic-link or
+static-init work (e.g. a constructor-run counter stays at one across many forked launches), and a
 documented, tested fallback to today's spawn-per-launch behavior on platforms without `fork()`
 (Windows) or without a dynamic loader step (statically linked binaries).
 
-**See also:** F3 (shares the same fork-server engine)
+**See also:** F3 (shares the same fork-server engine). Landing this changes the per-launch cost
+used by adaptive learning waits and grouped-census subdivision; revisit those heuristics'
+thresholds once this ships.
+
+---
+
+<a id="p9"></a>
+### P9 — Make the guard census an explicit opt-in
+
+**Area:** `cargo-gamma-lib::exec` census admission, CLI, and configuration · **Priority:** High ·
+**Effort:** Small
+
+The guard census is currently enabled by default and disabled only indirectly through
+`--whole-test-binaries`. It can launch each retained test binary repeatedly to refine grouped test
+scopes before the mutant sweep begins. Its admission model uses test-listing time as a proxy for
+that work and does not account for exact or generalized proximity knowledge beyond excluding a
+mutant with an eligible exact hint from justifying its own census. The added process launches and
+policy complexity are therefore not yet supported by evidence that census selection reliably
+saves more campaign time than it consumes.
+
+Make census collection conditional and disabled by default:
+
+- add an explicit CLI and configuration opt-in, such as `--census`;
+- keep exact killer hints, persisted reach hints, and in-run same-item/file learning active when
+  census is disabled;
+- conservatively fall back to whole-binary execution whenever those probes do not kill, rather
+  than treating absent census data as evidence that a site is uncovered;
+- keep `--whole-test-binaries` as the stronger request to suppress all test-case selection, or
+  replace it only through an explicit compatibility and migration decision;
+- report whether census was disabled, declined by its economic gate, attempted incompletely, or
+  completed, so campaign records can compare its cost and benefit; and
+- document census as an experimental optimization whose opt-in does not change verdict semantics.
+
+**Done when:** a default run performs no census listing or sampling launches; an explicit opt-in
+retains the current conservative census behavior; deterministic tests prove that disabling census
+still uses exact and generalized probes before whole-binary fallback and cannot create an
+`Uncovered` verdict from missing reach data; CLI/configuration compatibility is covered; and
+equivalent runs with census on and off produce the same verdicts.
 
 ---
 
@@ -169,22 +257,154 @@ their primary test runner.
 
 ---
 
-## Documentation
+<a id="f4"></a>
+### F4 — Bound cache growth and reclaim abandoned workspaces
 
-<a id="d1"></a>
-### D1 — Correct the cgroup watch-state documentation
+**Area:** cache identity, workspace lifecycle, and cache administration · **Priority:** High ·
+**Effort:** Large
 
-**Area:** `cargo-gamma-unsafe::cgroup` · **Priority:** Low · **Effort:** Trivial
+The stable per-workspace cache makes repeated campaigns incremental, but its lifetime is currently
+unbounded. Every distinct physical workspace path receives a new cache identity, successful runs
+retain both the synchronized source tree and Cargo target directory indefinitely, and
+`cargo gamma clean` can remove only the cache belonging to one workspace that still resolves.
+Temporary workspaces are especially damaging: after their source directories disappear, their
+owner-marked cache roots become unreachable through the CLI and remain forever. There is no
+global size quota, age policy, orphan reclamation, or inventory that can answer what is consuming
+disk.
 
-The documentation on `Cgroup::is_watched` says the method records a published kill descriptor,
-but the method only queries whether a watch exists. That description belongs to `watched_at`,
-whose current one-line documentation omits the descriptor-lifetime invariant.
+Add a global cache-administration surface (for example `cargo gamma cache status` and
+`cargo gamma cache gc`) that reports each cache's owner, owner existence, last use, approximate
+size, and lock state. Garbage collection must:
 
-- `crates/cargo-gamma-unsafe/src/cgroup.rs:794-805` — the two adjacent methods carry each other's
-  intended descriptions
+- remove owner-marked, unlocked caches whose workspace no longer exists;
+- enforce configurable age and total-size limits by evicting least-recently-used inactive caches;
+- keep active caches by acquiring their existing locks rather than racing live commands;
+- bound opportunistic cleanup work on ordinary command startup, leaving a full scan to the
+  explicit command;
+- distinguish default caches from user-selected `--cache-dir` locations, reporting redirected
+  caches without silently deleting an arbitrary path the user named;
+- retain only the generations needed for incremental reuse and remove incomplete or superseded
+  state;
+- refuse to claim the cache namespace directory itself as one workspace's cache; and
+- provide a dry-run legacy recovery pass for owner-marked caches created by older versions,
+  including malformed 16-hex cache roots written directly beneath the platform cache home.
 
-**Done when:** `is_watched` documents its boolean query and `watched_at` documents publication and
-lifetime ownership.
+A small atomically updated cache index should make inventory and LRU selection proportional to the
+number of known caches without requiring an unbounded directory traversal on every command. The
+index is an optimization, not authority: deletion must revalidate the owner marker, path shape,
+and lock immediately before removing anything, and a missing or corrupt index must be safely
+rebuildable. Cache data remains disposable performance state; durable hints, suppressions, and
+published reports remain outside garbage collection.
+
+- `crates/cargo-gamma-lib/src/exec/workspace.rs:717-735` — derives the stable external cache path
+- `crates/cargo-gamma-lib/src/exec/workspace.rs:133-175` — settled runs deliberately retain source
+  and build trees
+- `crates/cargo-gamma-lib/src/exec/workspace.rs:775-829` — cleanup is limited to one resolved
+  workspace's default cache
+- `crates/cargo-gamma-lib/src/commands/clean.rs` — current one-workspace cleanup command
+- `crates/cargo-gamma/docs/DESIGN.md:379-431` — current identity, retention, and cleanup contract
+
+**Done when:** repeated runs of one workspace reuse one bounded cache; deleting a temporary
+workspace makes its unlocked cache eligible for automatic reclamation; a configured global quota
+is enforced without touching active or redirected caches; status and dry-run GC explain every
+candidate before deletion; malformed legacy roots can be recovered safely; and stress tests with
+hundreds of thousands of synthetic index entries do not require traversing hundreds of thousands
+of cache directories during normal startup.
+
+**See also:** T2 (prevents the test suite from manufacturing abandoned user caches)
+
+---
+
+<a id="f5"></a>
+### F5 — Incrementally update the workspace hints artifact
+
+**Area:** hint promotion, selection scope, and durable scheduling knowledge · **Priority:** High ·
+**Effort:** Medium
+
+`gamma-hints.json` is workspace-wide, but `cargo gamma hints` currently replaces it with entries
+from the command's selected population. Running and promoting hints from one crate can therefore
+delete valid hints for every other crate, even though the existing artifact was read and used by
+the crate-local run. File, package, diff, and feature selections make the same replacement behavior
+unsafe as a routine update workflow.
+
+Make hint promotion an incremental, selection-aware update:
+
+- load and validate the existing hints artifact before constructing its replacement;
+- add or update exact mutant killers and generalized item, file-binary, and reach-cluster knowledge
+  produced by the selected run;
+- preserve entries outside the command's selected population;
+- remove stale entries only where complete discovery proves that the selected scope owns the entry
+  and the corresponding mutant, item, file, or site no longer exists;
+- rebuild interned reach-test sets deterministically and remove sets no entry references;
+- represent provenance honestly when one artifact contains knowledge promoted under different
+  feature, target, test, or policy contexts;
+- retain an explicit whole-artifact replacement mode for callers that intentionally want a clean
+  regeneration;
+- report added, updated, removed, and preserved counts so a surprising scope is visible before
+  publication; and
+- keep the existing atomic publication and concurrent-change detection guarantees.
+
+Merging must remain score-neutral. Exact and generalized hints are still revalidated by execution;
+incremental update must not promote cached verdicts or turn absence from a partial run into evidence
+that a hint is stale.
+
+- `crates/cargo-gamma-lib/src/commands/hints.rs` — currently promotes one selected population
+- `crates/cargo-gamma-lib/src/discover/hints.rs` — currently renders and replaces the complete
+  artifact
+- `crates/cargo-gamma-lib/src/discover/record.rs` — source of exact and generalized scheduling
+  knowledge
+- `crates/cargo-gamma/docs/SCHEDULING.md` — documents persistence and the scopes that consume hints
+
+**Done when:** a workspace-wide artifact followed by a crate-local run and `cargo gamma hints`
+updates that crate's entries without changing entries for other crates; selected stale entries are
+removed while unselected entries remain; generalized reach-set interning remains deterministic and
+minimal; a deliberate replacement mode can rebuild the whole artifact; interrupted and concurrent
+updates preserve the last complete generation; and tests cover package, file, diff, feature, and
+whole-workspace selections.
+
+---
+
+<a id="f6"></a>
+### F6 — Schedule unhinted mutants to maximize in-run learning
+
+**Area:** `cargo-gamma-lib::exec::sweep` scheduling and file learning · **Priority:** High ·
+**Effort:** Medium
+
+The global mutant queue is fixed before the sweep. Workers can therefore claim nearby unhinted
+mutants concurrently, then wait 5–200 ms for the same-item scout even though useful unrelated work
+remains. Tests commonly outlast that wait, so the siblings proceed independently and repeat broad
+test-binary work before the scout can publish a reusable killer.
+
+Replace fixed scout pauses with dynamic, distance-aware work selection:
+
+- choose a mutant only when a worker is ready to execute it, considering the files and items
+  currently in flight;
+- prefer an unhinted mutant from a source file with no active mutant;
+- when every remaining file is active, prefer an inactive item in the least-contended file;
+- treat file separation as a soft preference and same-item exclusion as the stronger constraint,
+  because an exact test learned for an item is more reusable than file-level binary evidence;
+- within an equally distant tier, preserve package fairness, useful longest-work-first behavior,
+  stable tie-breaking, and any established canonical ordering guarantees;
+- prefer scouts with high learning leverage, such as an item with many pending siblings, while
+  accounting for estimated evaluation cost;
+- publish all learning before releasing a mutant's file/item reservation and assigning follow-on
+  work;
+- when no independent work remains, make an explicit policy choice between allowing the
+  least-contended duplicate and leaving capacity idle until a completion event; and
+- if capacity waits, wait on scheduler state changes rather than sleeping for an arbitrary
+  duration, and never let a worker reserve a mutant while waiting.
+
+Hinted mutants do not require cold-scout spacing, but a checked hinted result may still publish
+knowledge before the scheduler chooses subsequent work. Reordering must remain score-neutral:
+for a deterministic, isolated suite, changing mutant order may change cost and which killing test
+is recorded, but not the final verdict for any mutant.
+
+**Done when:** no worker uses a fixed-duration scout wait; deterministic scheduler tests prove that
+idle files are selected before active files, inactive items before active items, learning is
+visible before the next related assignment, stable secondary ordering is preserved, and the
+configured tail policy behaves as specified when only conflicting work remains; an execution test
+with long-running scouts proves that unrelated mutants proceed while same-item siblings do not
+race unnecessarily; and equivalent schedules produce the same final verdicts.
 
 ---
 

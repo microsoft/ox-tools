@@ -174,6 +174,30 @@ mod tests {
     }
 
     #[test]
+    fn leaving_a_nested_scope_restores_the_previous_run() {
+        alone(|| {
+            note("before");
+
+            {
+                let _without_a_run = enter(None);
+                note("hidden");
+                assert!(drain().is_empty());
+            }
+
+            note("after");
+            assert_eq!(drain(), ["before", "after"]);
+        });
+    }
+
+    #[test]
+    fn a_fresh_run_has_no_dropped_notes() {
+        let run = Run::new();
+        let _scope = enter(Some(&run));
+
+        assert!(drain().is_empty());
+    }
+
+    #[test]
     fn notes_past_the_cap_are_counted_rather_than_kept() {
         alone(|| {
             for index in 0..LIMIT + 5 {
@@ -186,6 +210,20 @@ mod tests {
             assert_eq!(drained[0], "note 0");
             assert_eq!(drained[LIMIT - 1], format!("note {}", LIMIT - 1));
             assert_eq!(drained[LIMIT], "and 5 diagnostics more like these");
+        });
+    }
+
+    #[test]
+    fn exactly_one_note_past_the_cap_is_reported() {
+        alone(|| {
+            for index in 0..=LIMIT {
+                note(format!("note {index}"));
+            }
+
+            let drained = drain();
+
+            assert_eq!(drained.len(), LIMIT + 1);
+            assert_eq!(drained[LIMIT], "and 1 diagnostic more like these");
         });
     }
 

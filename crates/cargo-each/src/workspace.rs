@@ -98,8 +98,8 @@ impl Workspace {
     /// example a missing or invalid manifest.
     #[ohno::enrich_err("failed to load cargo workspace metadata")]
     pub(crate) fn load(manifest_path: Option<&Path>) -> Result<Self, EachError> {
-        let mut cmd = MetadataCommand::new();
-        cmd.no_deps();
+        let mut command = MetadataCommand::new();
+        let cmd = command.no_deps();
         if let Some(path) = manifest_path {
             cmd.manifest_path(path);
         }

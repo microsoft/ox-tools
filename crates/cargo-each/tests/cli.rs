@@ -506,7 +506,11 @@ fn chdir_with_once_is_a_usage_error() {
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("--chdir").and(predicate::str::contains("--once")));
+        .stderr(
+            predicate::str::contains("failed to build command plan")
+                .and(predicate::str::contains("--chdir"))
+                .and(predicate::str::contains("--once")),
+        );
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -603,7 +607,7 @@ fn unknown_selector_is_a_usage_error() {
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("did not match"));
+        .stderr(predicate::str::contains("failed to resolve package selection").and(predicate::str::contains("did not match")));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]

@@ -129,6 +129,12 @@ impl RequestTracker {
         self.counters[topic.index()].status.store(status as u8, Ordering::Release);
     }
 
+    #[cfg(test)]
+    pub(crate) fn request_counts(&self, topic: TrackedTopic) -> (u64, u64) {
+        let counter = &self.counters[topic.index()];
+        (counter.issued.load(Ordering::Acquire), counter.completed.load(Ordering::Acquire))
+    }
+
     /// Compute current progress state from counters.
     ///
     /// Returns (`total_length`, `current_position`, `message_string`).
@@ -190,6 +196,8 @@ const fn blink_is_on(elapsed_ms: u128) -> bool {
 // Not covered: the test doubles below implement trait methods that some tests never call.
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::sync::atomic::AtomicBool;
+
     use super::*;
 
     #[derive(Debug)]
@@ -205,6 +213,32 @@ mod tests {
 
     fn test_tracker() -> RequestTracker {
         RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>))
+    }
+
+    #[derive(Debug, Default)]
+    struct RegistrationProgress {
+        registered: AtomicBool,
+    }
+
+    impl Progress for RegistrationProgress {
+        fn set_phase(&self, _phase: &str) {}
+        fn set_determinate(&self, callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {
+            let (total, current, message) = callback();
+            assert_eq!((total, current), (0, 0));
+            assert_eq!(message, "No requests");
+            self.registered.store(true, Ordering::Release);
+        }
+        fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
+        fn println(&self, _msg: &str) {}
+        fn done(&self) {}
+    }
+
+    #[test]
+    fn constructing_tracker_registers_its_progress_callback() {
+        let progress = Arc::new(RegistrationProgress::default());
+        let trait_progress: Arc<dyn Progress> = Arc::<RegistrationProgress>::clone(&progress);
+        let _tracker = RequestTracker::new(&trait_progress);
+        assert!(progress.registered.load(Ordering::Acquire));
     }
 
     /// Strip ANSI escape sequences from a string for assertion comparisons.

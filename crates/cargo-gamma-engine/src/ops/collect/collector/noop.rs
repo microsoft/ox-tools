@@ -192,6 +192,7 @@ fn strip_parentheses<'slice, 'text>(mut expression: &'slice [Lexeme<'text>]) -> 
         if !closes_at_end {
             return expression;
         }
+        // #[gamma::skip(stmt.delete_assign, reason = "not removing the enclosing pair leaves the loop on the same expression forever")]
         expression = &expression[1..expression.len() - 1];
     }
 }
@@ -422,6 +423,30 @@ mod tests {
         let empty = "Box::new()";
         let empty_tokens = lexemes(empty).expect("the empty call tokenizes");
         assert_eq!(call_argument(empty, &empty_tokens, "Box", "new"), None);
+
+        let wrong_callee = "Vec::new(value)";
+        let wrong_tokens = lexemes(wrong_callee).expect("the wrong callee tokenizes");
+        assert_eq!(call_argument(wrong_callee, &wrong_tokens, "Box", "new"), None);
+
+        let malformed_path = "Box.new(value)";
+        let malformed_tokens = lexemes(malformed_path).expect("the malformed path tokenizes");
+        assert!(!path_ends_with(&malformed_tokens[..2], "Box", "new"));
+
+        let partly_parenthesized = "(value) + other";
+        let partly_parenthesized_tokens = lexemes(partly_parenthesized).expect("the expression tokenizes");
+        assert_eq!(
+            strip_parentheses(&partly_parenthesized_tokens).len(),
+            partly_parenthesized_tokens.len()
+        );
+
+        let two_parenthesized_terms = "(left) + (right)";
+        let two_parenthesized_tokens = lexemes(two_parenthesized_terms).expect("the expression tokenizes");
+        assert_eq!(strip_parentheses(&two_parenthesized_tokens).len(), two_parenthesized_tokens.len());
+    }
+
+    #[test]
+    fn leak_comparison_rejects_text_that_only_mentions_leak() {
+        assert!(!is_same_leak("leak + 1", "leak + 1", &defaults(), &[]));
     }
 
     #[test]

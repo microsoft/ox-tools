@@ -411,6 +411,59 @@ mod tests {
         String::from_utf8(host.out).expect("utf-8")
     }
 
+    #[test]
+    fn every_skipped_file_is_written_to_the_diagnostic_stream() {
+        let mut host = Sink::default();
+        let mut plan = plan();
+        plan.skipped = vec!["src/a.rs: parse failed".to_owned(), "src/b.rs: unreadable".to_owned()];
+
+        skipped(&mut host, &plan, Styler::new(false)).expect("diagnostics are written");
+
+        let text = String::from_utf8(host.err).expect("utf-8");
+        assert!(text.contains("2 files could not be analyzed:"), "{text}");
+        assert!(text.contains("src/a.rs: parse failed"), "{text}");
+        assert!(text.contains("src/b.rs: unreadable"), "{text}");
+    }
+
+    #[test]
+    fn exclusions_are_absent_at_zero_and_exact_when_present() {
+        let mut population = plan();
+        population.sharded_out = 0;
+        population.settled_out = 0;
+        assert_eq!(excluded(&population), "");
+
+        population.sharded_out = 2;
+        assert_eq!(excluded(&population), ", 2 outside this shard");
+
+        population.settled_out = 3;
+        assert_eq!(excluded(&population), ", 2 outside this shard, 3 already settled");
+    }
+
+    #[test]
+    fn summary_block_boundaries_and_heading_are_exact() {
+        let mut population = plan();
+        population.mutants = vec![mutant(2, Outcome::Survived)];
+
+        let text = rendered_with(
+            &population,
+            Listings {
+                killed: false,
+                unviable: false,
+                announced: false,
+            },
+        );
+
+        assert_eq!(
+            text,
+            concat!(
+                "\n",
+                "    SURVIVED src/a.rs:2:5: replace a > b with a >= b [relational.gt_to_ge]\n",
+                "\n",
+                "     Summary 1 mutant (0 killed, 1 survived, 0 timed out, 0 out of memory, 0 uncovered => 0.0%)\n",
+            )
+        );
+    }
+
     fn session(widened: bool) -> Session {
         Session {
             ordering: OrderingHints::default(),

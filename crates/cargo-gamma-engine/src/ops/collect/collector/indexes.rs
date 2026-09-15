@@ -369,63 +369,25 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
 
     fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {
-        if self.numeric {
-            match node.op {
-                // Nothing else in wide use subtracts, multiplies, divides or takes a remainder.
-                BinOp::Sub(_)
-                | BinOp::Mul(_)
-                | BinOp::Div(_)
-                | BinOp::Rem(_)
-                | BinOp::SubAssign(_)
-                | BinOp::MulAssign(_)
-                | BinOp::DivAssign(_)
-                | BinOp::RemAssign(_) => {
-                    self.note(&node.left);
-                    self.note(&node.right);
-                }
-
-                // `String + &str` and `Ordering` comparisons make these two ambiguous on their
-                // own, so they count only against an integer literal, which fixes both sides.
-                BinOp::Add(_) | BinOp::AddAssign(_) | BinOp::Lt(_) | BinOp::Gt(_) | BinOp::Le(_) | BinOp::Ge(_) => {
-                    if is_int_literal(&node.right) {
-                        self.note(&node.left);
-                    }
-
-                    if is_int_literal(&node.left) {
-                        self.note(&node.right);
-                    }
-                }
-
-                _ => {}
-            }
-        }
+        self.on_expr_binary(node);
 
         visit::visit_expr_binary(self, node);
     }
 
     fn visit_expr_index(&mut self, node: &'ast ExprIndex) {
-        if self.numeric {
-            self.note(&node.index);
-        }
+        self.on_expr_index(node);
 
         visit::visit_expr_index(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if self.numeric && is_numeric_receiver(&node.method.to_string()) {
-            self.note(&node.receiver);
-        }
+        self.on_expr_method_call(node);
 
         visit::visit_expr_method_call(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast ExprForLoop) {
-        if self.numeric
-            && matches!(&*node.expr, Expr::Range(_))
-            && let Pat::Ident(ident) = &*node.pat
-        {
-            let _added = self.indexes.numeric_uses.names.insert(ident.ident.to_string());
-        }
+        self.on_expr_for_loop(node);
 
         visit::visit_expr_for_loop(self, node);
     }
@@ -488,6 +450,8 @@ impl<'cfg> Walk<'cfg> {
 
 #[cfg(test)]
 mod tests {
+    use syn::parse_quote;
+
     use super::*;
 
     fn walk(numeric: bool, imports: bool, cfg: &CfgSet) -> Walk<'_> {
@@ -513,6 +477,23 @@ mod tests {
         walk.note(&expression);
 
         assert!(walk.indexes.numeric_uses.fields.contains("count"));
+    }
+
+    #[test]
+    fn numeric_index_and_receiver_uses_are_recorded() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(true, false, &cfg);
+        let index: syn::ExprIndex = parse_quote!(values[offset]);
+        let method: syn::ExprMethodCall = parse_quote!(capacity.saturating_add(1));
+        let left_literal: syn::ExprBinary = parse_quote!(1 + width);
+
+        walk.on_expr_index(&index);
+        walk.on_expr_method_call(&method);
+        walk.on_expr_binary(&left_literal);
+
+        assert!(walk.indexes.numeric_uses.names.contains("offset"));
+        assert!(walk.indexes.numeric_uses.names.contains("capacity"));
+        assert!(walk.indexes.numeric_uses.names.contains("width"));
     }
 
     #[test]

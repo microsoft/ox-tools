@@ -41,3 +41,23 @@ impl CliMeta {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_derives_only_the_binary_name_and_documented_defaults() {
+        let meta = CliMeta::new("forge");
+        assert_eq!(
+            meta,
+            CliMeta {
+                subcommand: "forge".into(),
+                bin_name: "cargo-forge".into(),
+                about: String::new(),
+                version: "0.0.0".into(),
+            }
+        );
+    }
+}

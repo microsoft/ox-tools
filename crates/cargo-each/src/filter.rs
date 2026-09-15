@@ -612,7 +612,10 @@ mod tests {
     fn rejects_metadata_keys_with_empty_segments() {
         // Keys with empty path segments parse but can never match, so they are
         // a loud usage error rather than a silent empty result.
-        Predicate::parse("metadata:a..b").expect_err("double dot must error");
+        assert_eq!(
+            Predicate::parse("metadata:a..b").expect_err("double dot must error").to_string(),
+            "invalid filter expression `metadata:a..b`: metadata key must be a dotted path with non-empty segments"
+        );
         Predicate::parse("metadata:.role").expect_err("leading dot must error");
         Predicate::parse("metadata:role.").expect_err("trailing dot must error");
         Predicate::parse("metadata:a..b=1").expect_err("double dot with value must error");

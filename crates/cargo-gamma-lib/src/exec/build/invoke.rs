@@ -23,6 +23,8 @@ use crate::discover::Plan;
 use crate::error::{Error, error};
 use crate::report::encode_controls;
 
+const CARGO_PROGRESS_WHEN: &str = "always";
+
 /// Explains a failed cargo spawn.
 ///
 /// Platforms do not agree on which error a missing working directory produces, so the directory
@@ -58,7 +60,7 @@ pub(super) fn compile(work: &Workspace, args: &[String], budget: Option<Duration
     let mut command = work.cargo();
 
     let _command = command
-        .env("CARGO_TERM_PROGRESS_WHEN", "always")
+        .env("CARGO_TERM_PROGRESS_WHEN", CARGO_PROGRESS_WHEN)
         .env("CARGO_TERM_PROGRESS_WIDTH", PROGRESS_WIDTH.to_string())
         .args(args)
         .stderr(Stdio::piped())
@@ -116,14 +118,15 @@ pub(super) fn supervise_with_limits(
     let mut subtree = match ProcessTree::adopt(spawned) {
         Ok(subtree) => subtree,
         Err(reason) => {
-            events.build_finished();
+            finish_build(events);
             let raw_reason = reason.to_string();
             let reason = encode_controls(&raw_reason);
 
-            return Err(error!("the cargo build in `{root}` could not be contained: {reason}"));
+            return Err(containment_error(&root, &reason));
         }
     };
 
+    // #[gamma::skip(expr.decrement, expr.increment, reason = "changing the bounded queue by one slot changes reader backpressure timing only; retained bytes and narrated lines are unchanged")]
     let (sender, lines) = mpsc::sync_channel(limits.backlog);
 
     let stdout = subtree
@@ -135,7 +138,7 @@ pub(super) fn supervise_with_limits(
 
     // The senders the reader threads hold are the only ones that matter; this one would keep the
     // channel open forever after they finish.
-    drop(sender);
+    close_narration_channel(sender);
 
     let deadline = budget.map(|budget| Instant::now() + budget);
 
@@ -148,12 +151,14 @@ pub(super) fn supervise_with_limits(
             }
 
             Ok(None) => {
+                // #[gamma::skip(relational.ge_to_gt, reason = "Instant equality cannot be held across clock reads; expiration occurs on this poll or the immediately following poll")]
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     break collect(&mut subtree).map(|()| None).map_err(|cause| {
                         error!("cargo in `{root}` could not be terminated after its build budget expired").caused_by(cause)
                     });
                 }
 
+                // #[gamma::skip(stmt.delete_call, reason = "the sleep only yields CPU between identical observe calls and cannot change the build result or deadline")]
                 thread::sleep(BUILD_POLL_INTERVAL);
             }
 
@@ -161,10 +166,8 @@ pub(super) fn supervise_with_limits(
                 // Nothing more can be asked of this child, and dropping it would leave the whole
                 // build tree running with no handle on it at all.
                 break match collect(&mut subtree) {
-                    Ok(()) => Err(error!("could not wait for cargo in `{root}`").caused_by(cause)),
-                    Err(cleanup) => {
-                        Err(error!("cargo in `{root}` could not be terminated after it stopped being observable").caused_by(cleanup))
-                    }
+                    Ok(()) => Err(wait_error(&root, cause)),
+                    Err(cleanup) => Err(cleanup_error(&root, cleanup)),
                 };
             }
         }
@@ -182,7 +185,7 @@ pub(super) fn supervise_with_limits(
     let grace = Instant::now() + DRAIN_GRACE;
     let (said, printed) = finish_readers(stdout, stderr, &lines, events, grace);
 
-    events.build_finished();
+    finish_build(events);
 
     let Some(status) = outcome? else {
         return Ok(None);
@@ -193,23 +196,10 @@ pub(super) fn supervise_with_limits(
     // artifacts of a build reports the tests it could not find as ones that do not exist. Both ways
     // of losing it are refused here — a reader still blocked on a pipe something else holds open,
     // and one that stopped on a read that failed — because the difference is invisible in the bytes.
-    let (Some(stdout), Some(stderr)) = (said, printed) else {
-        return Err(error!(
-            "cargo in `{root}` finished, but its output could not be read to the end, so what it built could not be read"
-        ));
-    };
-
-    if !stdout.complete || !stderr.complete {
-        return Err(error!(
-            "cargo in `{root}` finished, but its output could not be read to the end, so what it built could not be read"
-        ));
-    }
+    let (stdout, stderr) = complete_pipes(&root, said, printed)?;
 
     if !stdout.within_limits || !stderr.within_limits {
-        return Err(error!(
-            "cargo in `{root}` exceeded the configured {}-byte retained or {}-byte per-line build-output limit, so its truncated output could not be trusted",
-            limits.retained, limits.line
-        ));
+        return Err(output_limit_error(&root, limits));
     }
 
     Ok(Some(Output {
@@ -405,8 +395,12 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
         return Err(io::Error::other("the reader thread a test asked to fail"));
     }
 
-    thread::Builder::new().name("cargo-gamma-build-output".to_owned()).spawn(move || {
+    thread::Builder::new()
+        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the private reader thread name is never read and cannot affect scheduling or output")]
+        .name("cargo-gamma-build-output".to_owned())
+        .spawn(move || {
         let mut text = Vec::new();
+        // #[gamma::skip(literal.int_increment, reason = "read buffer capacity changes chunk boundaries only; retained bytes and line splitting are explicitly chunk-independent")]
         let mut buffer = [0_u8; 8192];
         let mut line = Vec::new();
         let mut complete = true;
@@ -424,6 +418,7 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
                         continue;
                     }
 
+                    // #[gamma::skip(assign_value.default, reason = "`complete` is bool, whose `Default::default()` is exactly false")]
                     complete = false;
 
                     break;
@@ -436,6 +431,7 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
             text.extend_from_slice(&buffer[..kept]);
 
             if kept < read {
+                // #[gamma::skip(assign_value.default, reason = "`within_limits` is bool, whose `Default::default()` is exactly false")]
                 within_limits = false;
             }
 
@@ -451,6 +447,7 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
                     }
 
                     line.clear();
+                    // #[gamma::skip(assign_value.default, reason = "`line_limited` is bool, whose `Default::default()` is exactly false")]
                     line_limited = false;
 
                     continue;
@@ -462,6 +459,7 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
                     // A line's owned copy is part of the queue bound. Refuse a result built from
                     // output that cannot be held within that bound, while continuing to drain.
                     line_limited = true;
+                    // #[gamma::skip(assign_value.default, reason = "`within_limits` is bool, whose `Default::default()` is exactly false")]
                     within_limits = false;
                 }
             }
@@ -510,10 +508,12 @@ pub(super) fn drained(handle: Option<JoinHandle<Pipe>>, deadline: Instant) -> Op
     };
 
     while !handle.is_finished() {
+        // #[gamma::skip(relational.ge_to_gt, reason = "Instant equality cannot be held across clock reads; expiration occurs on this poll or the immediately following poll")]
         if Instant::now() >= deadline {
             return None;
         }
 
+        // #[gamma::skip(stmt.delete_call, reason = "the sleep only yields CPU while waiting for the same completion state and deadline")]
         thread::sleep(BUILD_POLL_INTERVAL);
     }
 
@@ -631,7 +631,7 @@ pub(super) fn run_cargo(
         None => args.push("--workspace".to_owned()),
     }
 
-    work.cargo.extend_build_args(&mut args);
+    extend_build_arguments(work, &mut args);
 
     let Some(output) = compile(work, &args, limits.budget(first_round), events)? else {
         return Ok(Compiled {
@@ -655,4 +655,317 @@ pub(super) fn run_cargo(
         stdout: Some(stdout),
         stderr,
     })
+}
+
+fn finish_build(events: &mut dyn Events) {
+    events.build_finished();
+}
+
+fn close_narration_channel(sender: SyncSender<(Stream, String)>) {
+    drop(sender);
+}
+
+fn containment_error(root: &str, reason: &str) -> Error {
+    error!("the cargo build in `{root}` could not be contained: {reason}")
+}
+
+fn wait_error(root: &str, cause: io::Error) -> Error {
+    error!("could not wait for cargo in `{root}`").caused_by(cause)
+}
+
+fn cleanup_error(root: &str, cause: io::Error) -> Error {
+    error!("cargo in `{root}` could not be terminated after it stopped being observable").caused_by(cause)
+}
+
+fn incomplete_output_error(root: &str) -> Error {
+    error!("cargo in `{root}` finished, but its output could not be read to the end, so what it built could not be read")
+}
+
+fn output_limit_error(root: &str, limits: OutputLimits) -> Error {
+    error!(
+        "cargo in `{root}` exceeded the configured {}-byte retained or {}-byte per-line build-output limit, so its truncated output could not be trusted",
+        limits.retained, limits.line
+    )
+}
+
+fn complete_pipes(root: &str, stdout: Option<Pipe>, stderr: Option<Pipe>) -> Result<(Pipe, Pipe)> {
+    let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
+        return Err(incomplete_output_error(root));
+    };
+    if !(stdout.complete && stderr.complete) {
+        return Err(incomplete_output_error(root));
+    }
+    Ok((stdout, stderr))
+}
+
+fn extend_build_arguments(work: &Workspace, args: &mut Vec<String>) {
+    work.cargo.extend_build_args(args);
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use std::collections::VecDeque;
+    use std::io::Cursor;
+
+    use super::*;
+    use crate::model::Mutant;
+
+    #[derive(Default)]
+    struct Recorded {
+        wanted: bool,
+        progress: Vec<String>,
+        output: Vec<String>,
+        finished: usize,
+    }
+
+    impl Events for Recorded {
+        fn phase(&mut self, _verb: &str, _detail: &str) {}
+        fn build_progress(&mut self, line: &str) {
+            self.progress.push(line.to_owned());
+        }
+        fn build_output(&mut self, line: &str) {
+            self.output.push(line.to_owned());
+        }
+        fn wants_build_output(&self) -> bool {
+            self.wanted
+        }
+        fn build_finished(&mut self) {
+            self.finished += 1;
+        }
+        fn mutant(&mut self, _mutant: &Mutant) {}
+    }
+
+    #[test]
+    fn narration_counts_routes_trims_and_honors_the_output_switch() {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        for item in [
+            (Stream::Prose, " Compiling [=> ] 1/2\r\n".to_owned()),
+            (Stream::Prose, "ordinary prose  \n".to_owned()),
+            (
+                Stream::Json,
+                r#"{"reason":"compiler-message","message":{"rendered":"diagnostic  \n"}}"#.to_owned(),
+            ),
+            (Stream::Json, r#"{"reason":"compiler-artifact"}"#.to_owned()),
+        ] {
+            sender.send(item).unwrap();
+        }
+        let mut events = Recorded {
+            wanted: true,
+            ..Recorded::default()
+        };
+
+        assert_eq!(narrate(&receiver, &mut events), 4);
+        assert_eq!(events.progress, [" Compiling [=> ] 1/2"]);
+        assert_eq!(events.output, ["ordinary prose", "diagnostic"]);
+        assert_eq!(narrate(&receiver, &mut events), 0);
+
+        sender
+            .send((
+                Stream::Json,
+                r#"{"reason":"compiler-message","message":{"rendered":"hidden"}}"#.to_owned(),
+            ))
+            .unwrap();
+        events.wanted = false;
+        assert_eq!(narrate(&receiver, &mut events), 1);
+        assert_eq!(events.output, ["ordinary prose", "diagnostic"]);
+    }
+
+    struct Scheduled {
+        chunks: VecDeque<io::Result<Vec<u8>>>,
+    }
+
+    impl Read for Scheduled {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let Some(chunk) = self.chunks.pop_front() else {
+                return Ok(0);
+            };
+            let chunk = chunk?;
+            buf[..chunk.len()].copy_from_slice(&chunk);
+            Ok(chunk.len())
+        }
+    }
+
+    #[test]
+    fn pipe_reading_retries_interruptions_stops_on_errors_and_enforces_both_limits() {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let input = Scheduled {
+            chunks: VecDeque::from([Err(io::Error::from(io::ErrorKind::Interrupted)), Ok(b"12345\nok\n".to_vec())]),
+        };
+        let pipe = read_pipe_with_limits(
+            input,
+            Stream::Prose,
+            &sender,
+            OutputLimits {
+                retained: 7,
+                line: 4,
+                backlog: 8,
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(pipe.text, b"12345\no");
+        assert!(pipe.complete);
+        assert!(!pipe.within_limits);
+        assert_eq!(receiver.recv().unwrap().1, "ok");
+
+        let failed = Scheduled {
+            chunks: VecDeque::from([Ok(b"prefix".to_vec()), Err(io::Error::other("stop")), Ok(b"unreachable".to_vec())]),
+        };
+        let failed = read_pipe_with_limits(
+            failed,
+            Stream::Json,
+            &sender,
+            OutputLimits {
+                retained: 64,
+                line: 64,
+                backlog: 8,
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert_eq!(failed.text, b"prefix");
+        assert!(!failed.complete);
+        assert!(failed.within_limits);
+
+        let exact = read_pipe_with_limits(
+            Cursor::new(b"1234\n".as_slice()),
+            Stream::Prose,
+            &sender,
+            OutputLimits {
+                retained: 5,
+                line: 4,
+                backlog: 8,
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert!(exact.complete);
+        assert!(exact.within_limits);
+    }
+
+    #[test]
+    fn absent_readers_are_complete_empty_streams_and_artifacts_are_not_diagnostics() {
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let mut events = Recorded::default();
+        let (stdout, stderr) = finish_readers(None, None, &receiver, &mut events, Instant::now() + Duration::from_secs(1));
+
+        for pipe in <[_; 2]>::from((stdout, stderr)) {
+            let pipe = pipe.expect("an absent OS pipe is a complete empty stream");
+            assert!(pipe.text.is_empty());
+            assert!(pipe.complete);
+            assert!(pipe.within_limits);
+        }
+
+        assert!(
+            rendered_diagnostic(r#"{"reason":"compiler-artifact","message":{"rendered":"must stay hidden","level":"error"}}"#).is_none()
+        );
+    }
+
+    #[test]
+    fn successful_and_budgeted_supervision_each_finish_the_build_exactly_once() {
+        let directory = crate::testing::workdir("invoke-finished-event-");
+        let root = camino::Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 test path");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+
+        let mut success = Command::new(crate::testing::helper_binary_path().as_std_path());
+        let _ = success
+            .arg(crate::testing::directive("print:done"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut events = Recorded::default();
+        let output = supervise(success, &work, Some(Duration::from_secs(30)), &mut events)
+            .expect("supervision succeeds")
+            .expect("the command finishes");
+        assert!(output.status.success());
+        assert_eq!(events.finished, 1);
+
+        let mut slow = Command::new(crate::testing::helper_binary_path().as_std_path());
+        let _ = slow
+            .arg(crate::testing::directive("sleep:30000"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut events = Recorded::default();
+        assert!(
+            supervise(slow, &work, Some(Duration::from_millis(20)), &mut events)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(events.finished, 1);
+    }
+
+    #[test]
+    fn supervision_helpers_preserve_every_error_and_completion_contract() {
+        assert_eq!(CARGO_PROGRESS_WHEN, "always");
+
+        let mut events = Recorded::default();
+        finish_build(&mut events);
+        assert_eq!(events.finished, 1);
+
+        let complete = || Pipe {
+            text: b"complete".to_vec(),
+            complete: true,
+            within_limits: true,
+        };
+        let (stdout, stderr) = complete_pipes("root", Some(complete()), Some(complete())).expect("both complete");
+        assert_eq!(stdout.text, b"complete");
+        assert_eq!(stderr.text, b"complete");
+
+        for result in [
+            complete_pipes("root", None, Some(complete())),
+            complete_pipes("root", Some(complete()), None),
+            complete_pipes(
+                "root",
+                Some(Pipe {
+                    complete: false,
+                    ..complete()
+                }),
+                Some(complete()),
+            ),
+            complete_pipes(
+                "root",
+                Some(complete()),
+                Some(Pipe {
+                    complete: false,
+                    ..complete()
+                }),
+            ),
+        ] {
+            assert!(result.unwrap_err().to_string().contains("output could not be read to the end"));
+        }
+
+        assert!(
+            containment_error("root", "reason")
+                .to_string()
+                .contains("could not be contained: reason")
+        );
+        assert!(
+            wait_error("root", io::Error::other("wait"))
+                .to_string()
+                .contains("could not wait for cargo")
+        );
+        assert!(
+            cleanup_error("root", io::Error::other("cleanup"))
+                .to_string()
+                .contains("could not be terminated after it stopped being observable")
+        );
+        assert!(
+            output_limit_error(
+                "root",
+                OutputLimits {
+                    retained: 12,
+                    line: 34,
+                    backlog: 1,
+                }
+            )
+            .to_string()
+            .contains("configured 12-byte retained or 34-byte per-line")
+        );
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        close_narration_channel(sender);
+        receiver.recv().unwrap_err();
+    }
 }

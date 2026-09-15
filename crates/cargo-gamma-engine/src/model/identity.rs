@@ -292,10 +292,13 @@ pub fn site_key(item_path: &str, mutator: &str, normalized_site_text: &str) -> u
         let _ = hasher.update(field.as_bytes());
     }
 
-    let mut key = [0_u8; 16];
+    let digest = hasher.finalize();
+    let key = digest
+        .as_bytes()
+        .first_chunk::<16>()
+        .expect("a BLAKE3 digest is always 32 bytes, so its first 16 bytes always exist");
 
-    key.copy_from_slice(hasher.finalize().as_bytes().get(..16).unwrap_or(&[0; 16]));
-    u128::from_le_bytes(key)
+    u128::from_le_bytes(*key)
 }
 
 /// Normalizes the source text of a site for hashing.
@@ -326,10 +329,14 @@ pub fn normalize_site_text(text: &str) -> CompactString {
         if let Some(end) = crate::parse::literal_end(text, offset) {
             if pending_space {
                 out.push(' ');
+                // #[gamma::skip(assign_value.default, reason = "`pending_space` is bool, whose `Default::default()` is exactly false")]
                 pending_space = false;
             }
 
-            out.push_str(text.get(offset..end).unwrap_or(""));
+            let literal = text
+                .get(offset..end)
+                .expect("literal_end returns an in-bounds UTF-8 boundary in this same text");
+            out.push_str(literal);
             offset = end;
             continue;
         }
@@ -431,11 +438,20 @@ mod tests {
         assert_eq!(SiteIndex::default(), SiteIndex::new(0, 0));
     }
 
+    #[test]
+    fn a_site_key_keeps_the_first_digest_bytes_in_little_endian_order() {
+        assert_eq!(
+            site_key("subject::f", "arith.add_to_sub", "1 + 1"),
+            0x13ab_1481_a7bb_abfa_59fb_46dd_e659_e8a3
+        );
+    }
+
     /// An identity reads, compares and serializes as the text it wraps, so the newtype costs
     /// nothing at a call site and nothing on the wire.
     #[test]
     fn an_identity_behaves_as_the_text_it_wraps() {
         let id = MutantId::new("deadbeefcafe");
+        let other = "feedfacebabe";
 
         assert!(<MutantId as PartialEq<str>>::eq(&id, "deadbeefcafe"));
         assert!(<MutantId as PartialEq<&str>>::eq(&id, &"deadbeefcafe"));
@@ -443,18 +459,31 @@ mod tests {
         assert!(<str as PartialEq<MutantId>>::eq("deadbeefcafe", &id));
         assert!(<&str as PartialEq<MutantId>>::eq(&"deadbeefcafe", &id));
         assert!(<String as PartialEq<MutantId>>::eq(&String::from("deadbeefcafe"), &id));
+        assert!(!<MutantId as PartialEq<str>>::eq(&id, other));
+        assert!(!<MutantId as PartialEq<&str>>::eq(&id, &other));
+        assert!(!<MutantId as PartialEq<String>>::eq(&id, &String::from(other)));
+        assert!(!<str as PartialEq<MutantId>>::eq(other, &id));
+        assert!(!<&str as PartialEq<MutantId>>::eq(&other, &id));
+        assert!(!<String as PartialEq<MutantId>>::eq(&String::from(other), &id));
         assert_eq!(id.as_str(), "deadbeefcafe");
+        assert_eq!(<MutantId as Borrow<str>>::borrow(&id), "deadbeefcafe");
+        assert_eq!(<MutantId as AsRef<str>>::as_ref(&id), "deadbeefcafe");
         assert_eq!(id.to_string(), "deadbeefcafe");
         assert_eq!(id.len(), MUTANT_ID_HEX_LEN);
         assert!(!id.is_heap_allocated());
         assert_eq!(MutantId::from("deadbeefcafe"), id);
         assert_eq!(MutantId::from(String::from("deadbeefcafe")), id);
+        assert_eq!(MutantId::from(CompactString::new("deadbeefcafe")), id);
         assert_eq!(CompactString::from(id.clone()), CompactString::new("deadbeefcafe"));
 
         // Borrowed as `str`, so a map keyed on identities can still be probed with plain text.
         let borrowed: &str = &id;
 
         assert_eq!(borrowed, "deadbeefcafe");
+
+        let long = MutantId::new("x".repeat(128));
+
+        assert!(long.is_heap_allocated());
     }
 
     /// Whitespace runs collapse to one space, and a run entirely at the start of the text
@@ -480,6 +509,15 @@ mod tests {
     fn block_comments_are_dropped_and_replaced_by_a_single_space() {
         assert_eq!(normalize_site_text("let x = /* the answer */ 42;"), "let x = 42;");
         assert_eq!(normalize_site_text("let s = /* comment */ \"value\";"), "let s = \"value\";");
+    }
+
+    /// With no surrounding whitespace to mask the comment branch, an interior comment introduces
+    /// exactly one separator while a leading comment introduces none.
+    #[test]
+    fn adjacent_block_comments_preserve_exact_token_spacing() {
+        assert_eq!(normalize_site_text("left/* interior */right"), "left right");
+        assert_eq!(normalize_site_text("left/* interior */\"right\""), "left \"right\"");
+        assert_eq!(normalize_site_text("/* leading */right"), "right");
     }
 
     /// String, raw-string and char literals are copied verbatim, including whitespace and

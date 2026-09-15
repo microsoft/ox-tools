@@ -47,10 +47,7 @@ pub(super) fn visible_vcs_metadata(path: &Utf8Path) -> Vec<Utf8PathBuf> {
             break;
         };
 
-        if parent == directory {
-            break;
-        }
-
+        // #[gamma::skip(stmt.delete_assign, reason = "without advancing to the parent this ancestor walk is intrinsically nonterminating and is observed only as a mutation timeout")]
         directory = parent.to_path_buf();
     }
 
@@ -335,6 +332,7 @@ fn record(failure: &Mutex<Option<Error>>, cause: Error) {
 
 /// Returns whether an entry and everything under it should be left out of the copy.
 pub(super) fn is_pruned(source: &Utf8Path, relative: &Utf8Path, excluded: &Utf8Path) -> bool {
+    // #[gamma::skip(cond.always_false, literal.bool_flip, reason = "failing to prune the copy destination recursively copies that destination into itself until the mutation run times out")]
     if source == excluded {
         return true;
     }
@@ -1058,5 +1056,26 @@ mod tests {
             reflink_supported(),
             "a later operation must probe its current filesystem independently"
         );
+    }
+
+    #[test]
+    fn visible_vcs_metadata_walks_every_ancestor_once_and_returns_sorted_markers() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = Utf8PathBuf::from_path_buf(temporary.path().to_path_buf()).expect("UTF-8 temporary path");
+        let nested = root.join("workspace").join("crate").join("src");
+        let git = root.join(".git");
+        let hg = root.join("workspace").join(".hg");
+        fs::create_dir_all(nested.as_std_path()).expect("nested source");
+        fs::create_dir_all(git.as_std_path()).expect("git marker");
+        fs::create_dir_all(hg.as_std_path()).expect("hg marker");
+
+        let found = visible_vcs_metadata(&nested);
+        let mut expected = vec![
+            crate::paths::physical(&git).expect("physical git marker"),
+            crate::paths::physical(&hg).expect("physical hg marker"),
+        ];
+        expected.sort();
+
+        assert_eq!(found, expected);
     }
 }

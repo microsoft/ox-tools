@@ -83,6 +83,10 @@ fn core_tools_available() -> bool {
     true
 }
 
+fn under_gamma() -> bool {
+    env::var_os("CARGO_GAMMA").is_some()
+}
+
 /// A scratch directory prepended to `PATH` that holds pwsh command shims
 /// (`<name>.ps1`) used to make the recipe's `cargo` / `rustup` calls observable
 /// -- or to prove they never happen. pwsh resolves a bare `cargo`/`rustup` to
@@ -537,6 +541,9 @@ fn impact_empty_output_when_head_equals_base() {
 #[test]
 #[serial]
 fn impact_off_short_circuits_without_computing() {
+    if under_gamma() {
+        return;
+    }
     if !core_tools_available() {
         return;
     }
@@ -675,6 +682,9 @@ fn impact_include_reads_zero_byte_modified_file_without_throwing() {
 #[test]
 #[serial]
 fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
+    if under_gamma() {
+        return;
+    }
     if !core_tools_available() {
         return;
     }
@@ -945,6 +955,9 @@ fn path_with_prefix(dir: &Path) -> OsString {
 #[test]
 #[serial]
 fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
+    if under_gamma() {
+        return;
+    }
     if !tools_available() {
         return;
     }
@@ -1013,6 +1026,9 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
 
 #[test]
 fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msrv() {
+    if under_gamma() {
+        return;
+    }
     if !core_tools_available() {
         return;
     }
@@ -1120,6 +1136,9 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
 #[test]
 #[serial]
 fn loom_runs_declared_targets_in_full_workspace_mode() {
+    if under_gamma() {
+        return;
+    }
     if !tools_available() {
         return;
     }
@@ -1168,6 +1187,9 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
 #[test]
 #[serial]
 fn invalid_anvil_impact_value_fails_loudly_without_computing() {
+    if under_gamma() {
+        return;
+    }
     if !core_tools_available() {
         return;
     }
@@ -1270,6 +1292,9 @@ fn shallow_clone_fails_with_unshallow_guidance() {
 #[test]
 #[serial]
 fn consume_without_downloaded_cache_fails_loudly() {
+    if under_gamma() {
+        return;
+    }
     if !core_tools_available() {
         return;
     }

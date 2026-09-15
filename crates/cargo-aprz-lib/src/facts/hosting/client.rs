@@ -91,7 +91,7 @@ impl Client {
     pub fn new(token: Option<&str>, base_url: impl Into<String>) -> crate::Result<Self> {
         use reqwest::header::{AUTHORIZATION, HeaderValue};
 
-        let mut client_builder = reqwest::Client::builder().user_agent("cargo-aprz");
+        let mut client_builder = reqwest::Client::builder().user_agent(crate::HTTP_USER_AGENT);
 
         if let Some(t) = token {
             let mut auth_val = HeaderValue::from_str(&format!("token {t}"))?;

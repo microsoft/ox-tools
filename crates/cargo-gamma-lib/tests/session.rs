@@ -14,9 +14,7 @@ use std::sync::Arc;
 use std::{fs, thread};
 
 use camino::Utf8PathBuf;
-use cargo_gamma_lib::internals::exec::gamma_base;
-use cargo_gamma_lib::run;
-use cargo_gamma_lib::testing::Sink;
+use cargo_gamma_lib::testing::{Sink, gamma_base, run};
 use tempfile::TempDir;
 
 /// Exit code for a run in which every gate passed.
@@ -28,7 +26,7 @@ const EXIT_USAGE: i32 = 1;
 fn scratch_base(dir: &TempDir) -> Utf8PathBuf {
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
 
-    gamma_base(&root, None)
+    gamma_base(&root)
 }
 
 /// A subject whose comparison is asserted exactly and whose side effect is not.

@@ -24,13 +24,12 @@ where
         out.push(style.strip_prefix(trimmed));
     }
 
+    // #[gamma::skip(cond.negate, reason = "negating the trailing-empty check loops after the last empty line has been removed")]
     while out.last().is_some_and(String::is_empty) {
+        // #[gamma::skip(stmt.delete_call, reason = "leaving the same empty line at the end makes this trimming loop infinite")]
         out.pop();
     }
 
-    if out.is_empty() {
-        return None;
-    }
     let block = out.join("\n");
     looks_like_license_header(&block).then_some(block)
 }
@@ -100,5 +99,25 @@ mod tests {
             script_header("#!/usr/bin/env cargo\nnot-dashes\n// c\n", CommentStyle::DoubleSlash),
             None
         );
+    }
+
+    #[test]
+    fn comment_collection_stops_at_first_non_comment() {
+        let content = "// Copyright one\nfn main() {}\n// Copyright two\n";
+        assert_eq!(header_comment(content, CommentStyle::DoubleSlash), Some("Copyright one".to_owned()));
+    }
+
+    #[test]
+    fn comment_collection_trims_only_trailing_blank_comments() {
+        let content = "// Copyright\n//\n// Licensed\n//\n";
+        assert_eq!(
+            header_comment(content, CommentStyle::DoubleSlash),
+            Some("Copyright\n\nLicensed".to_owned())
+        );
+    }
+
+    #[test]
+    fn content_without_a_header_comment_returns_none() {
+        assert_eq!(header_comment("fn main() {}\n", CommentStyle::DoubleSlash), None);
     }
 }

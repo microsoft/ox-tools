@@ -48,6 +48,9 @@ pub(crate) enum NativeCall {
     /// The completion port cannot be checked for a memory-limit notification.
     CompletionStatus,
 
+    /// The completion port reports a job-memory-limit notification.
+    MemoryLimitMessage,
+
     /// The job refuses the child it was created for.
     AssignProcess,
 

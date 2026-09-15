@@ -27,6 +27,14 @@ fn gamma(arguments: &[&str]) -> Output {
         .expect("the built cargo-gamma binary runs")
 }
 
+fn wrapper(arguments: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_cargo-gamma"))
+        .env("CARGO_GAMMA_RUSTC_CAPTURE_DIR", env!("CARGO_MANIFEST_DIR"))
+        .args(arguments)
+        .output()
+        .expect("the built cargo-gamma binary runs as a rustc wrapper")
+}
+
 /// The exit status as a code, insisting the process exited rather than dying to a signal.
 #[track_caller]
 fn code(output: &Output) -> i32 {
@@ -91,4 +99,15 @@ fn an_unknown_command_exits_with_the_usage_code_and_explains_itself_on_standard_
         String::from_utf8_lossy(&output.stdout).trim().is_empty(),
         "a diagnostic reached standard output, where it would corrupt piped report output"
     );
+}
+
+#[test]
+fn the_installed_binary_maps_rustc_wrapper_status_to_shell_status() {
+    #[cfg(windows)]
+    let (success, failure) = (wrapper(&["cmd", "/c", "exit 0"]), wrapper(&["cmd", "/c", "exit 7"]));
+    #[cfg(not(windows))]
+    let (success, failure) = (wrapper(&["sh", "-c", "exit 0"]), wrapper(&["sh", "-c", "exit 7"]));
+
+    assert_eq!(code(&success), 0);
+    assert_eq!(code(&failure), 1);
 }

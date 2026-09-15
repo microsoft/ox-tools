@@ -13,6 +13,8 @@ use cargo_platform::{Cfg, Platform};
 use crate::CoverageGateError;
 use crate::error::{ExecuteRustcError, InvalidRustcCfgError, MissingRustcHostTargetError, ResolveTargetError, RustcCommandFailedError};
 
+const RUSTC_ENV: &str = "RUSTC";
+
 /// One completed `rustc` invocation, reduced to the parts target resolution reads.
 ///
 /// Decoupling this from [`std::process::Output`] is what lets the tests supply an
@@ -35,7 +37,7 @@ pub(crate) struct TargetContext {
 impl TargetContext {
     /// Resolve an explicit Rust target, or the rustc host target when omitted.
     pub(crate) fn resolve(target: Option<&str>) -> Result<Self, CoverageGateError> {
-        let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+        let rustc = env::var_os(RUSTC_ENV).unwrap_or_else(|| OsString::from("rustc"));
         Self::resolve_with_rustc(target, &rustc).map_err(Into::into)
     }
 
@@ -167,6 +169,11 @@ mod tests {
         assert!(target.matches(&Platform::from_str("cfg(windows)").expect("windows cfg")));
         assert!(target.matches(&Platform::from_str("cfg(target_os = \"windows\")").expect("target_os cfg")));
         assert!(!target.matches(&Platform::from_str("cfg(unix)").expect("unix cfg")));
+    }
+
+    #[test]
+    fn rustc_override_uses_cargo_environment_name() {
+        assert_eq!(RUSTC_ENV, "RUSTC");
     }
 
     /// Covers the real spawn path end to end against the toolchain running the tests,

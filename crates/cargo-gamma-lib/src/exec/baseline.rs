@@ -75,6 +75,7 @@ pub(super) fn measure_baseline(
     jobs: usize,
     completed: impl FnMut(),
 ) -> Result<Baseline> {
+    // #[gamma::skip(expr.decrement, expr.increment, reason = "worker width changes only which independent binary finishes first; results are restored to binary order before folding")]
     measure_within_reporting(work, binaries, BASELINE_BUDGET, request, jobs, completed)
 }
 
@@ -101,8 +102,26 @@ fn measure_within_reporting(
     jobs: usize,
     completed: impl FnMut(),
 ) -> Result<Baseline> {
+    // #[gamma::skip(expr.decrement, expr.increment, reason = "worker width changes only scheduling of independent observations; the positional result and every reported aggregate are unchanged")]
+    measure_within_reporting_with(work, binaries, budget, request, jobs, observe_baseline, completed)
+}
+
+fn measure_within_reporting_with<O>(
+    work: &Workspace,
+    binaries: &mut [TestBinary],
+    budget: Duration,
+    request: MemoryRequest,
+    jobs: usize,
+    observer: O,
+    completed: impl FnMut(),
+) -> Result<Baseline>
+where
+    O: Fn(&Workspace, &TestBinary, Attempt<'_>) -> Observation + Sync,
+{
     let started = Instant::now();
-    let measured = sweep_binaries(work, binaries, budget, request, jobs, completed);
+    // #[gamma::skip(expr.decrement, expr.increment, reason = "worker width affects wall-clock scheduling only; each binary is observed once and results are folded positionally")]
+    let mut measured = sweep_binaries_with(work, binaries, budget, request, jobs, &observer, completed);
+    retry_failed_binaries(work, binaries, budget, request, &observer, &mut measured);
     let wall = started.elapsed();
     let mut elapsed = Duration::ZERO;
     let mut quiet = Duration::ZERO;
@@ -112,29 +131,29 @@ fn measure_within_reporting(
     // Folded in the binaries' own order rather than in the order the workers happened to finish, so
     // that which failure a red suite reports does not depend on the scheduler.
     for (entry, taken) in binaries.iter_mut().zip(measured) {
-        let Some((took, observed)) = taken else {
+        let Some((took, observation)) = taken else {
             continue;
         };
 
         entry.baseline = took;
-        entry.peak = observed.peak;
-        entry.tests = observed.tests;
+        entry.peak = observation.peak;
+        entry.tests = observation.tests;
         elapsed = elapsed.saturating_add(took);
-        quiet = quiet.max(observed.quiet);
+        quiet = quiet.max(observation.quiet);
 
-        if let Some(measured) = observed.peak {
+        if let Some(measured) = observation.peak {
             peak = Some(peak.unwrap_or(0).max(measured));
         }
 
         // A binary with no harness contributes nothing rather than turning the total into a
         // guess, but one binary reporting is enough for the total to be worth stating.
-        if let Some(counted) = observed.tests {
+        if let Some(counted) = observation.tests {
             tests = Some(tests.unwrap_or(0).saturating_add(counted));
         }
 
-        let failure = observed.failure.as_ref();
+        let failure = observation.failure.as_ref();
 
-        match observed.verdict {
+        match observation.verdict {
             Verdict::Passed => {}
             // Every non-passing observation is fatal here where some are not during the sweep:
             // there is no mutant to record it against, and a baseline binary that went unmeasured
@@ -154,19 +173,49 @@ fn measure_within_reporting(
     })
 }
 
-/// Runs every binary once with no mutant active, `jobs` of them at a time.
-///
-/// Returns what each one produced, positionally, so the caller can fold the results in the order
-/// the binaries were given rather than the order they finished.
-fn sweep_binaries(
+/// Gives each test-failing binary one clean retry before rejecting the baseline.
+fn retry_failed_binaries<O>(
     work: &Workspace,
     binaries: &[TestBinary],
     budget: Duration,
     request: MemoryRequest,
-    jobs: usize,
-    completed: impl FnMut(),
-) -> Vec<Option<(Duration, Observation)>> {
-    sweep_binaries_with(work, binaries, budget, request, jobs, observe_baseline, completed)
+    observer: &O,
+    measured: &mut [Option<(Duration, Observation)>],
+) where
+    O: Fn(&Workspace, &TestBinary, Attempt<'_>) -> Observation + Sync,
+{
+    for (binary, slot) in binaries.iter().zip(measured) {
+        let retry = slot
+            .as_ref()
+            .is_some_and(|(_elapsed, observed)| matches!(&observed.verdict, Verdict::Failed(_) | Verdict::Flaky(_)));
+
+        if !retry {
+            continue;
+        }
+
+        let began = Instant::now();
+        let observation = observer(
+            work,
+            binary,
+            Attempt {
+                active: None,
+                timeout: Some(budget),
+                stall: Stall::NONE,
+                request,
+                only: Only::All,
+                census: None,
+            },
+        );
+
+        if matches!(&observation.verdict, Verdict::Passed) {
+            crate::notes::note(format!(
+                "baseline target `{}` in package `{}` failed once and passed on retry",
+                binary.target, binary.package
+            ));
+        }
+
+        *slot = Some((began.elapsed(), observation));
+    }
 }
 
 fn sweep_binaries_with<O>(
@@ -187,6 +236,7 @@ where
     let notes = crate::notes::current();
 
     thread::scope(|scope| {
+        // #[gamma::skip(range.exclusive_to_inclusive, expr.increment, iter.max_to_min, literal.int_decrement, literal.int_increment, reason = "the worker count changes parallelism only; atomic indexing assigns every binary exactly once and positional collection makes the returned observations identical")]
         for _worker in 0..jobs.max(1) {
             let sender = sender.clone();
             let next = &next;
@@ -247,7 +297,7 @@ fn baseline_failure_error(
     verdict: &Verdict,
     evidence: Option<&FailureEvidence>,
 ) -> Error {
-    let runner = if work.runner().is_some() { "nextest" } else { "libtest" };
+    let runner = runner_name(work.runner().is_some());
     let directory = working_directory(work, binary);
     let (kind, test, last_test, reason, limit) = match verdict {
         Verdict::Failed(test) | Verdict::Flaky(test) => ("testFailure", test.as_deref(), None, None, None),
@@ -379,6 +429,10 @@ fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+const fn runner_name(nextest: bool) -> &'static str {
+    if nextest { "nextest" } else { "libtest" }
+}
+
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
@@ -401,6 +455,7 @@ mod tests {
 
                     Observation {
                         verdict: Verdict::Passed,
+                        reach: crate::exec::verdict::ReachObservation::Unknown,
                         failure: None,
                         quiet: Duration::ZERO,
                         tests: Some(1),
@@ -582,6 +637,83 @@ mod tests {
         .expect("the baseline passes");
 
         assert_eq!(completed, binaries.len());
+    }
+
+    #[test]
+    fn a_transient_baseline_test_failure_gets_one_clean_retry() {
+        let (_directory, work) = crate::testing::helper_workspace("baseline-retry", &["exit:0"]);
+        let mut binaries = vec![TestBinary {
+            package: "subject".to_owned(),
+            target: "integration".to_owned(),
+            ..crate::testing::helper()
+        }];
+        let attempts = AtomicUsize::new(0);
+
+        let baseline = measure_within_reporting_with(
+            &work,
+            &mut binaries,
+            Duration::from_secs(30),
+            MemoryRequest::default(),
+            1,
+            |_work, _binary, _attempt| {
+                let verdict = if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                    Verdict::Failed(Some("sometimes_red".to_owned()))
+                } else {
+                    Verdict::Passed
+                };
+
+                Observation {
+                    verdict,
+                    reach: crate::exec::verdict::ReachObservation::Unknown,
+                    failure: None,
+                    quiet: Duration::ZERO,
+                    tests: Some(1),
+                    peak: None,
+                }
+            },
+            || {},
+        )
+        .expect("a passing retry establishes a green baseline");
+
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(baseline.tests, Some(1));
+        assert_eq!(binaries[0].tests, Some(1));
+    }
+
+    #[test]
+    fn a_repeated_baseline_test_failure_still_stops_the_run() {
+        let (_directory, work) = crate::testing::helper_workspace("baseline-repeated-failure", &["exit:0"]);
+        let mut binaries = vec![TestBinary {
+            package: "subject".to_owned(),
+            target: "integration".to_owned(),
+            ..crate::testing::helper()
+        }];
+        let attempts = AtomicUsize::new(0);
+
+        let failure = measure_within_reporting_with(
+            &work,
+            &mut binaries,
+            Duration::from_secs(30),
+            MemoryRequest::default(),
+            1,
+            |_work, _binary, _attempt| {
+                attempts.fetch_add(1, Ordering::Relaxed);
+
+                Observation {
+                    verdict: Verdict::Failed(Some("always_red".to_owned())),
+                    reach: crate::exec::verdict::ReachObservation::Unknown,
+                    failure: None,
+                    quiet: Duration::ZERO,
+                    tests: Some(1),
+                    peak: None,
+                }
+            },
+            || {},
+        )
+        .expect_err("a repeated failure cannot establish a baseline");
+
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert!(failure.to_string().contains("test `always_red` failed"), "{failure}");
     }
 
     /// A red binary is reported whichever worker happened to reach it first.
@@ -774,6 +906,261 @@ mod tests {
         assert_eq!(
             failure.artifact().expect("a baseline timeout carries a durable record").value["stdoutTail"],
             "\\e[31mred\\e[0m"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the table keeps every baseline failure variant's durable contract visibly exhaustive"
+    )]
+    fn every_baseline_failure_variant_has_a_complete_distinct_durable_contract() {
+        let (_directory, work, binaries) = diagnostic_harness();
+        let cases = [
+            (
+                Verdict::Failed(Some("case::failed".to_owned())),
+                "testFailure",
+                Some("case::failed"),
+                None,
+                None,
+                "test `case::failed` failed",
+            ),
+            (
+                Verdict::Flaky(Some("case::flaky".to_owned())),
+                "testFailure",
+                Some("case::flaky"),
+                None,
+                None,
+                "test `case::flaky` failed",
+            ),
+            (
+                Verdict::TestEnumerationFailed("enumerator refused".to_owned()),
+                "enumerationFailure",
+                None,
+                Some("enumerator refused"),
+                None,
+                "nextest could not enumerate",
+            ),
+            (
+                Verdict::TimedOut,
+                "timeout",
+                None,
+                Some("the test binary exceeded its baseline time budget"),
+                None,
+                "did not finish within",
+            ),
+            (
+                Verdict::Stalled(Some("case::last".to_owned())),
+                "stall",
+                None,
+                Some("the test binary stopped reporting progress"),
+                None,
+                "after `case::last`",
+            ),
+            (
+                Verdict::MemoryLimit {
+                    peak: Some(300),
+                    limit: 200,
+                },
+                "memoryLimit",
+                None,
+                Some("the test workload exceeded its configured baseline memory ceiling"),
+                Some(200),
+                "memory ceiling",
+            ),
+            (
+                Verdict::Unmetered("meter unavailable".to_owned()),
+                "infrastructureFailure",
+                None,
+                Some("meter unavailable"),
+                None,
+                "configured",
+            ),
+            (
+                Verdict::Unjudged("host refused".to_owned()),
+                "infrastructureFailure",
+                None,
+                Some("host refused"),
+                None,
+                "machine would not run",
+            ),
+        ];
+
+        for (verdict, kind, test, reason, limit, message) in cases {
+            let failure = baseline_failure_error(
+                &work,
+                &binaries[0],
+                Duration::from_millis(1_234),
+                Duration::from_millis(5_678),
+                &verdict,
+                None,
+            );
+            let artifact = &failure.artifact().expect("every baseline failure is durable").value;
+
+            assert_eq!(artifact["schemaVersion"], 1);
+            assert_eq!(artifact["kind"], kind);
+            assert_eq!(artifact["package"], binaries[0].package);
+            assert_eq!(artifact["target"], binaries[0].target);
+            assert_eq!(artifact["runner"], "libtest");
+            assert_eq!(artifact["test"].as_str(), test);
+            assert_eq!(artifact["reason"].as_str(), reason);
+            assert_eq!(artifact["memoryLimitBytes"].as_u64(), limit);
+            assert_eq!(artifact["elapsedMs"], 1_234);
+            assert_eq!(artifact["budgetMs"], 5_678);
+            assert_eq!(artifact["stdoutTail"], "");
+            assert_eq!(artifact["stderrTail"], "");
+            assert_eq!(artifact["outputTruncated"], false);
+            assert!(failure.to_string().contains(message), "{failure}");
+
+            match verdict {
+                Verdict::Stalled(_) => assert_eq!(artifact["lastObservedTest"], "case::last"),
+                Verdict::MemoryLimit { .. } => assert_eq!(artifact["peakBytes"], 300),
+                _ => {
+                    assert!(artifact["lastObservedTest"].is_null());
+                    assert!(artifact["peakBytes"].is_null());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runner_names_are_distinct_and_complete() {
+        assert_eq!(runner_name(false), "libtest");
+        assert_eq!(runner_name(true), "nextest");
+    }
+
+    #[test]
+    fn baseline_folding_preserves_every_observation_field_and_attempt_contract() {
+        let (_directory, work) = crate::testing::helper_workspace("baseline-fold-contract", &["exit:0"]);
+        let mut binaries = vec![
+            TestBinary {
+                package: "subject".to_owned(),
+                target: "first".to_owned(),
+                ..crate::testing::helper()
+            },
+            TestBinary {
+                package: "subject".to_owned(),
+                target: "second".to_owned(),
+                ..crate::testing::helper()
+            },
+        ];
+        let completed = AtomicUsize::new(0);
+
+        let baseline = measure_within_reporting_with(
+            &work,
+            &mut binaries,
+            Duration::from_secs(17),
+            MemoryRequest {
+                meter: true,
+                limit: Some(999),
+            },
+            2,
+            |_work, binary, attempt| {
+                assert!(attempt.active.is_none());
+                assert_eq!(attempt.timeout, Some(Duration::from_secs(17)));
+                assert_eq!(attempt.stall, Stall::NONE);
+                assert_eq!(attempt.request.limit, Some(999));
+                assert!(matches!(attempt.only, Only::All));
+                assert!(attempt.census.is_none());
+
+                if binary.target == "first" {
+                    Observation {
+                        verdict: Verdict::Passed,
+                        reach: crate::exec::verdict::ReachObservation::Unknown,
+                        failure: None,
+                        quiet: Duration::from_secs(3),
+                        tests: Some(4),
+                        peak: Some(100),
+                    }
+                } else {
+                    Observation {
+                        verdict: Verdict::Passed,
+                        reach: crate::exec::verdict::ReachObservation::Unknown,
+                        failure: None,
+                        quiet: Duration::from_secs(7),
+                        tests: Some(6),
+                        peak: Some(300),
+                    }
+                }
+            },
+            || {
+                completed.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .expect("both observations pass");
+
+        assert_eq!(completed.load(Ordering::Relaxed), 2);
+        assert_eq!(baseline.tests, Some(10));
+        assert_eq!(baseline.peak, Some(300));
+        assert_eq!(baseline.quiet, Duration::from_secs(7));
+        assert_eq!(baseline.elapsed, binaries.iter().map(|binary| binary.baseline).sum());
+        assert_eq!(binaries[0].tests, Some(4));
+        assert_eq!(binaries[1].tests, Some(6));
+        assert_eq!(binaries[0].peak, Some(100));
+        assert_eq!(binaries[1].peak, Some(300));
+        assert!(binaries.iter().all(|binary| binary.baseline > Duration::ZERO));
+    }
+
+    #[test]
+    fn retry_visits_only_failed_slots_and_replaces_their_observation() {
+        crate::notes::alone(retry_visits_only_failed_slots_and_replaces_their_observation_inner);
+    }
+
+    fn retry_visits_only_failed_slots_and_replaces_their_observation_inner() {
+        let (_directory, work) = crate::testing::helper_workspace("baseline-retry-selection", &["exit:0"]);
+        let binaries = vec![
+            TestBinary {
+                target: "green".to_owned(),
+                ..crate::testing::helper()
+            },
+            TestBinary {
+                target: "red".to_owned(),
+                ..crate::testing::helper()
+            },
+        ];
+        let calls = AtomicUsize::new(0);
+        let passed = || Observation {
+            verdict: Verdict::Passed,
+            reach: crate::exec::verdict::ReachObservation::Unknown,
+            failure: None,
+            quiet: Duration::from_secs(9),
+            tests: Some(8),
+            peak: Some(7),
+        };
+        let mut measured = vec![
+            Some((Duration::from_secs(1), passed())),
+            Some((
+                Duration::from_secs(2),
+                Observation {
+                    verdict: Verdict::Failed(Some("red::case".to_owned())),
+                    ..passed()
+                },
+            )),
+        ];
+
+        retry_failed_binaries(
+            &work,
+            &binaries,
+            Duration::from_secs(6),
+            MemoryRequest::default(),
+            &|_work, binary, attempt| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(binary.target, "red");
+                assert_eq!(attempt.timeout, Some(Duration::from_secs(6)));
+                assert!(attempt.active.is_none());
+                passed()
+            },
+            &mut measured,
+        );
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(measured[0].as_ref().unwrap().0, Duration::from_secs(1));
+        assert!(matches!(measured[0].as_ref().unwrap().1.verdict, Verdict::Passed));
+        assert!(matches!(measured[1].as_ref().unwrap().1.verdict, Verdict::Passed));
+        assert_eq!(measured[1].as_ref().unwrap().1.tests, Some(8));
+        assert_eq!(
+            crate::notes::drain(),
+            ["baseline target `red` in package `` failed once and passed on retry"]
         );
     }
 }

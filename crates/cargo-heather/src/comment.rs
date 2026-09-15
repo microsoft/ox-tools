@@ -35,7 +35,8 @@ impl FileKind {
     /// regular Rust files. If `content` is `None`, assumes regular Rust.
     #[must_use]
     pub fn detect(path: &Path, content: Option<&str>) -> Option<Self> {
-        let file_name = path.file_name()?.to_str()?;
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        let file_name = file_name?;
         if file_name.eq_ignore_ascii_case("justfile") {
             return Some(Self::Just);
         }
@@ -101,6 +102,7 @@ impl CommentStyle {
     /// Returns `None` for unsupported file types.
     #[must_use]
     pub fn from_path(path: &Path) -> Option<Self> {
+        // #[gamma::skip(option.none_to_some, reason = "empty content and absent content both classify every supported extension identically here")]
         FileKind::detect(path, None).map(FileKind::comment_style)
     }
 
@@ -185,6 +187,11 @@ mod tests {
     #[test]
     fn shebang_without_frontmatter_is_not_cargo_script() {
         assert!(!is_cargo_script("#!/usr/bin/env cargo\nfn main() {}\n"));
+    }
+
+    #[test]
+    fn ordinary_rust_with_dash_second_line_is_not_cargo_script() {
+        assert!(!is_cargo_script("fn main() {}\n---\n"));
     }
 
     #[test]

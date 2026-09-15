@@ -88,22 +88,19 @@ impl CoverageReport {
     /// lcov tracefile.
     #[ohno::enrich_err("failed to parse lcov tracefile")]
     pub(crate) fn from_strs(inputs: &[&str]) -> Result<Self, CoverageGateError> {
-        let mut merged: Option<lcov::Report> = None;
+        let mut merged = lcov::Report::default();
         for input in inputs {
             let reader = lcov::Reader::new(input.as_bytes());
             let report = lcov::Report::from_reader(reader).map_err(ParseLcovError::from)?;
-            match &mut merged {
-                None => merged = Some(report),
-                // `merge_lossy` sums per-line counts and unions the line
-                // sets, ignoring checksum conflicts. The inputs are
-                // different feature configs of the *same* sources, so a
-                // strict `merge` would only differ by erroring on a
-                // checksum mismatch that cannot meaningfully occur here;
-                // the lossy variant is the robust choice.
-                Some(acc) => acc.merge_lossy(report),
-            }
+            // `merge_lossy` sums per-line counts and unions the line
+            // sets, ignoring checksum conflicts. The inputs are
+            // different feature configs of the *same* sources, so a
+            // strict `merge` would only differ by erroring on a
+            // checksum mismatch that cannot meaningfully occur here;
+            // the lossy variant is the robust choice.
+            merged.merge_lossy(report);
         }
-        Ok(Self::from_lcov_report(merged.unwrap_or_default()))
+        Ok(Self::from_lcov_report(merged))
     }
 
     /// Parse an lcov tracefile from a file on disk.
@@ -135,8 +132,6 @@ impl CoverageReport {
                     uncovered_lines.push(key.line);
                 }
             }
-            sort_line_numbers(&mut coverable_lines);
-            sort_line_numbers(&mut uncovered_lines);
             files.push(FileReport {
                 filename: key.source_file,
                 lines_total: total,
@@ -145,13 +140,8 @@ impl CoverageReport {
                 uncovered_lines,
             });
         }
-        files.sort_by(|a, b| a.filename.cmp(&b.filename));
         Self { files }
     }
-}
-
-fn sort_line_numbers(lines: &mut [u32]) {
-    lines.sort_unstable();
 }
 
 #[cfg(test)]
@@ -181,13 +171,6 @@ mod tests {
         assert_eq!(f.lines_covered, 3);
         assert_eq!(f.coverable_lines, vec![1, 2, 3, 4]);
         assert_eq!(f.uncovered_lines, vec![3]);
-    }
-
-    #[test]
-    fn line_numbers_are_sorted_explicitly() {
-        let mut lines = [8, 2, 5, 3];
-        sort_line_numbers(&mut lines);
-        assert_eq!(lines, [2, 3, 5, 8]);
     }
 
     #[test]
@@ -281,6 +264,36 @@ end_of_record
         let report = CoverageReport::from_strs(&[file_x, file_y]).expect("merge parses");
         // Two inputs naming distinct files merge into two entries.
         assert_eq!(report.files.len(), 2);
+    }
+
+    #[test]
+    fn parsed_files_and_line_numbers_are_sorted() {
+        let input = "\
+TN:
+SF:/repo/z.rs
+DA:8,0
+DA:2,1
+end_of_record
+TN:
+SF:/repo/a.rs
+DA:9,0
+DA:1,1
+end_of_record
+";
+        let report = CoverageReport::from_str(input).expect("parses");
+
+        assert_eq!(
+            report
+                .files
+                .iter()
+                .map(|file| file.filename.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            ["/repo/a.rs", "/repo/z.rs"]
+        );
+        assert_eq!(report.files[0].coverable_lines, [1, 9]);
+        assert_eq!(report.files[0].uncovered_lines, [9]);
+        assert_eq!(report.files[1].coverable_lines, [2, 8]);
+        assert_eq!(report.files[1].uncovered_lines, [8]);
     }
 
     #[test]

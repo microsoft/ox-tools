@@ -138,19 +138,18 @@ fn execute(plan: &Plan, keep_going: bool) -> Result<ExitCode, AppError> {
         if let Some(dir) = &inv.work_dir {
             command.current_dir(dir);
         }
-        let status = match command.status() {
-            Ok(status) => status,
-            // A spawn failure under --keep-going is a failed invocation, not an
-            // abort: log it, mark the run failed, and move on so the remaining
-            // members still run (contract: exit 1 when any invocation failed).
-            Err(err) if keep_going => {
-                eprintln!("cargo each: failed to spawn `{program}`: {err}");
-                any_failed = true;
-                continue;
-            }
-            // Fail-fast: a spawn failure is a hard error (exit 2 via main.rs).
-            other => other.into_app_err(format!("failed to spawn `{program}`"))?,
-        };
+        let status = command.status();
+        // A spawn failure under --keep-going is a failed invocation, not an
+        // abort: log it, mark the run failed, and move on so the remaining
+        // members still run (contract: exit 1 when any invocation failed).
+        if keep_going && status.is_err() {
+            let err = status.expect_err("guarded by Result::is_err above");
+            eprintln!("cargo each: failed to spawn `{program}`: {err}");
+            any_failed = true;
+            continue;
+        }
+        // Fail-fast: a spawn failure is a hard error (exit 2 via main.rs).
+        let status = status.into_app_err(format!("failed to spawn `{program}`"))?;
         if !status.success() {
             if !keep_going {
                 // Fail-fast: propagate the failing child's own exit code,
