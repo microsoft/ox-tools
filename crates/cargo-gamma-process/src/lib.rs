@@ -71,13 +71,16 @@
 //! normally preserves that guarantee through a dedicated job that dies with its last handle. Unix
 //! installs explicit interruption handling through `cargo-gamma-unsafe`.
 
+pub use cargo_gamma_unsafe::pipe::InterruptiblePipe;
 pub use cargo_gamma_unsafe::{PlatformError, Situation, support};
 #[doc(inline)]
 pub use memory_request::MemoryRequest;
 #[doc(inline)]
 pub use memory_usage::MemoryUsage;
 #[doc(inline)]
-pub use process_tree::{OutputError, PreparedCommand, ProcessTree, SpawnFailure, SpawnedCommand, capacity, containment, output, prepare};
+pub use process_tree::{
+    OutputError, PreparedCommand, ProcessTree, SpawnFailure, SpawnedCommand, capacity, containment, output, prepare, reap_later,
+};
 
 mod memory_request;
 mod memory_usage;

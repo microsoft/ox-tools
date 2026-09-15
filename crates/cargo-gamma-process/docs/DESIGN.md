@@ -68,6 +68,13 @@ therefore covers the complete descendant tree.
   nested assignment, the spawn is rejected: an inherited job does not provide a
   handle through which this process can later terminate the child's descendants.
   Failure to create a job is likewise a refusal rather than a degraded launch.
+- Callers with an external deadline use bounded termination. It signals the
+  same process-tree boundary as ordinary termination but polls the leader only
+  for the caller-provided grace. A leader that remains running after a failed
+  kill is transferred to a shared detached reaper rather than handed to an
+  indefinite `wait` or Drop path. The reaper polls all retained leaders so one
+  survivor cannot block collection of the others; the containment handles
+  remain owned until the `ProcessTree` itself is dropped.
 - Sealed containment uses a boundary that descendants cannot leave. A host that
   offers no sealed boundary at all silently uses best-effort process-group
   containment for an unmetered launch; absence of a warning does not establish

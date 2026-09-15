@@ -3,7 +3,9 @@
 
 //! Command-line interface definitions for `cargo-each`.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Args, Parser};
 
@@ -35,6 +37,11 @@ pub(crate) struct EachArgs {
     /// `name@version` spec, or a Unix glob (`tokio-*`).
     #[arg(short = 'p', long = "package", value_name = "SPEC")]
     pub(crate) packages: Vec<String>,
+
+    /// Read package specs from a UTF-8 file, one per nonempty line.
+    /// Repeatable; specs are unioned with --package.
+    #[arg(long = "package-file", value_name = "PATH")]
+    pub(crate) package_files: Vec<PathBuf>,
 
     /// Select every workspace member.
     #[arg(long, visible_alias = "all")]
@@ -87,6 +94,18 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) keep_going: bool,
 
+    /// Run at most N per-package or per-target commands concurrently. Buffered
+    /// output spills to unique system-temporary files beyond 1 MiB per stream.
+    #[arg(long, default_value_t = NonZeroUsize::MIN, value_name = "N")]
+    pub(crate) jobs: NonZeroUsize,
+
+    /// Terminate each invocation and its process tree after this duration.
+    /// Requires sealed process-tree containment; unsupported hosts fail before
+    /// starting the child. Accepts a positive integer followed by `ms`, `s`,
+    /// or `m`.
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
+    pub(crate) timeout: Option<Duration>,
+
     /// Print the fully-substituted commands without executing them.
     #[arg(long)]
     pub(crate) dry_run: bool,
@@ -101,6 +120,42 @@ pub(crate) struct EachArgs {
     pub(crate) command: Vec<String>,
 }
 
+fn parse_duration(value: &str) -> Result<Duration, String> {
+    enum Unit {
+        Milliseconds,
+        Seconds,
+        Minutes,
+    }
+
+    let (digits, unit) = if let Some(digits) = value.strip_suffix("ms") {
+        (digits, Unit::Milliseconds)
+    } else if let Some(digits) = value.strip_suffix('s') {
+        (digits, Unit::Seconds)
+    } else if let Some(digits) = value.strip_suffix('m') {
+        (digits, Unit::Minutes)
+    } else {
+        return Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
+    };
+    if digits.is_empty() {
+        return Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
+    }
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
+    }
+    let amount = digits.parse::<u64>().map_err(|error| format!("duration is too large: {error}"))?;
+    if amount == 0 {
+        return Err("duration must be greater than zero".to_owned());
+    }
+    match unit {
+        Unit::Milliseconds => Ok(Duration::from_millis(amount)),
+        Unit::Seconds => Ok(Duration::from_secs(amount)),
+        Unit::Minutes => amount
+            .checked_mul(60)
+            .map(Duration::from_secs)
+            .ok_or_else(|| "duration is too large".to_owned()),
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -111,5 +166,26 @@ mod tests {
     #[test]
     fn cli_definition_is_well_formed() {
         CargoCli::command().debug_assert();
+    }
+
+    #[test]
+    fn parses_documented_durations() {
+        assert_eq!(parse_duration("250ms"), Ok(Duration::from_millis(250)));
+        assert_eq!(parse_duration("30s"), Ok(Duration::from_secs(30)));
+        assert_eq!(parse_duration("2m"), Ok(Duration::from_mins(2)));
+    }
+
+    #[test]
+    fn rejects_zero_malformed_and_overflowing_durations() {
+        for value in ["0s", "1", "1h", "-1s", "1.5s", "ms", "18446744073709551615m"] {
+            assert!(parse_duration(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn malformed_duration_uses_the_grammar_diagnostic() {
+        let expected = Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
+        assert_eq!(parse_duration("ms"), expected);
+        assert_eq!(parse_duration("1.5s"), expected);
     }
 }

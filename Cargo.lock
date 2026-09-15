@@ -525,6 +525,7 @@ name = "cargo-each"
 version = "0.2.0"
 dependencies = [
  "assert_cmd",
+ "cargo-gamma-process",
  "cargo_metadata",
  "clap",
  "mutants",
@@ -532,6 +533,7 @@ dependencies = [
  "predicates",
  "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

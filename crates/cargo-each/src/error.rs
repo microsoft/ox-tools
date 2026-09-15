@@ -32,7 +32,14 @@
     InvalidFilterExpressionError,
     InvalidTargetKindError,
     PlaceholderMisuseError,
-    ChdirConflictsWithOnceError
+    ChdirConflictsWithOnceError,
+    JobsConflictWithOnceError,
+    PackageFileReadError,
+    PackageFileUtf8Error,
+    InvalidPackageFileLineError,
+    WorkspaceManifestReadError,
+    WorkspaceManifestParseError,
+    WorkspaceRustVersionError
 )]
 pub(crate) struct EachError;
 
@@ -81,6 +88,62 @@ pub(crate) struct PlaceholderMisuseError {
 #[ohno::error]
 #[display("`--chdir` cannot be combined with `--once`")]
 pub(crate) struct ChdirConflictsWithOnceError;
+
+/// `--jobs` greater than one was combined with `--once`.
+#[ohno::error]
+#[display("`--jobs` must be 1 when combined with `--once`")]
+pub(crate) struct JobsConflictWithOnceError;
+
+/// A `--package-file` could not be read.
+#[ohno::error]
+#[display("could not read package file `{path}`")]
+#[from(std::io::Error)]
+pub(crate) struct PackageFileReadError {
+    pub(crate) path: String,
+}
+
+/// A `--package-file` was not valid UTF-8.
+#[ohno::error]
+#[display("package file `{path}` is not valid UTF-8")]
+#[from(std::string::FromUtf8Error)]
+pub(crate) struct PackageFileUtf8Error {
+    pub(crate) path: String,
+}
+
+/// A nonempty line in a `--package-file` was not a package spec.
+#[ohno::error]
+#[display("invalid package spec in `{path}` at line {line}: `{spec}` ({reason})")]
+pub(crate) struct InvalidPackageFileLineError {
+    pub(crate) path: String,
+    pub(crate) line: usize,
+    pub(crate) spec: String,
+    pub(crate) reason: String,
+}
+
+/// The root manifest could not be read while resolving
+/// `{workspace-rust-version}`.
+#[ohno::error]
+#[display("could not read workspace manifest `{path}`")]
+#[from(std::io::Error)]
+pub(crate) struct WorkspaceManifestReadError {
+    pub(crate) path: String,
+}
+
+/// The root manifest could not be parsed while resolving
+/// `{workspace-rust-version}`.
+#[ohno::error]
+#[display("could not parse workspace manifest `{path}`")]
+#[from(toml::de::Error)]
+pub(crate) struct WorkspaceManifestParseError {
+    pub(crate) path: String,
+}
+
+/// The workspace Rust-version contract is incomplete or inconsistent.
+#[ohno::error]
+#[display("cannot resolve `{{workspace-rust-version}}`: {reason}")]
+pub(crate) struct WorkspaceRustVersionError {
+    pub(crate) reason: String,
+}
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -134,5 +197,27 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("--chdir"));
         assert!(rendered.contains("--once"));
+    }
+
+    #[test]
+    fn package_file_line_error_names_source() {
+        let err = InvalidPackageFileLineError::new(
+            "affected.packages".to_owned(),
+            3_usize,
+            "--workspace".to_owned(),
+            "command-line tokens are not package specs".to_owned(),
+        );
+        let rendered = err.to_string();
+        assert!(rendered.contains("affected.packages"));
+        assert!(rendered.contains("line 3"));
+        assert!(rendered.contains("--workspace"));
+    }
+
+    #[test]
+    fn workspace_rust_version_error_renders_reason() {
+        let err = WorkspaceRustVersionError::new("member `alpha` does not declare `rust-version`".to_owned());
+        let rendered = err.to_string();
+        assert!(rendered.contains("{workspace-rust-version}"));
+        assert!(rendered.contains("alpha"));
     }
 }
