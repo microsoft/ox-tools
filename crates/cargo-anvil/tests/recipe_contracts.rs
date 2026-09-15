@@ -24,6 +24,7 @@ const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
 const BUILD: &str = include_str!("../templates/justfiles/anvil/dev/build.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const DOC_BUILD: &str = include_str!("../templates/justfiles/anvil/checks/doc-build.just");
+const DOC_TEST: &str = include_str!("../templates/justfiles/anvil/checks/doc-test.just");
 const EXAMPLES: &str = include_str!("../templates/justfiles/anvil/checks/examples.just");
 const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
@@ -118,6 +119,10 @@ if ($env:FAKE_CARGO_TOOLCHAIN_LOG) {
 if ($env:FAKE_CARGO_AUTO_INSTALL_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_AUTO_INSTALL_LOG -Value $env:RUSTUP_AUTO_INSTALL
 }
+if ($env:FAKE_CARGO_TOKEN_LOG) {
+    $seen = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { '<none>' }
+    Add-Content -LiteralPath $env:FAKE_CARGO_TOKEN_LOG -Value "$joined|$seen"
+}
 if ($args -contains 'each') {
     exit [int]$env:FAKE_EACH_EXIT
 }
@@ -150,7 +155,10 @@ if ($args -contains 'metadata') {
             version = '0.1.0'
             id = $packageId
             manifest_path = $manifestPath
-            targets = @([pscustomobject]@{ name = $libName; kind = @('lib') })
+            targets = @([pscustomobject]@{
+                name = $libName
+                kind = @($(if ($env:FAKE_TARGET_KIND) { $env:FAKE_TARGET_KIND } else { 'lib' }))
+            })
             publish = if ($env:FAKE_PUBLISH_FALSE) {
                 # Preserve the empty array through expression output so JSON emits [] rather than null.
                 Write-Output -NoEnumerate @()
@@ -492,6 +500,11 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
     command.env_remove("ANVIL_MIRI_JOBS");
     command.env_remove("GITHUB_ACTIONS");
     command.env_remove("TF_BUILD");
+    // The tool installer branches on GITHUB_TOKEN, and CI exports one for the
+    // whole Anvil group, so inheriting it here would silently flip fixtures onto
+    // the token path and make their assertions depend on where the suite runs.
+    // Tests that exercise the token contract set it explicitly.
+    command.env_remove("GITHUB_TOKEN");
     for key in std::env::vars_os().map(|(key, _)| key) {
         if key.to_string_lossy().starts_with("ANVIL_INCLUDE_") {
             command.env_remove(key);
@@ -1653,11 +1666,10 @@ fn semver_exit_code_contract_is_executed() {
     }
 }
 
-#[test]
-fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
-    if !tools_available() {
-        return;
-    }
+/// Fixture for the `_install-tool` contracts: the tools catalog plus a
+/// `source-prereq` recipe that records both that it ran and whether it could see
+/// a release token.
+fn install_tool_fixture() -> TempDir {
     let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
     let justfile_path = tmp.path().join("Justfile");
     let mut justfile = fs::read_to_string(&justfile_path).unwrap();
@@ -1666,10 +1678,23 @@ fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
 [script("pwsh", "-NoProfile")]
 source-prereq:
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value 'source-prereq'
+    if ($env:FAKE_CARGO_TOKEN_LOG) {
+        $seen = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { '<none>' }
+        Add-Content -LiteralPath $env:FAKE_CARGO_TOKEN_LOG -Value "source-prereq|$seen"
+    }
     exit [int]$env:FAKE_PREREQ_EXIT
 "#,
     );
     write(&justfile_path, &justfile);
+    tmp
+}
+
+#[test]
+fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = install_tool_fixture();
     let log = tmp.path().join("cargo.log");
 
     let fallback = run_just(
@@ -1739,8 +1764,235 @@ source-prereq:
         .expect("ordinary tool must attempt binstall");
     assert!(
         !ordinary_binstall.contains("--disable-strategies compile"),
-        "tools without source prerequisites retain binstall's compile strategy"
+        "without a release token, tools without source prerequisites retain binstall's compile strategy"
     );
+}
+
+/// A release token changes both branches: binstall must stop compiling, and
+/// nothing downstream of it may still see the credential. Without this a
+/// regression could quietly hand the workflow token to a third-party build while
+/// every assertion in the test above stayed green.
+#[test]
+fn install_tool_keeps_the_release_token_out_of_source_builds() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = install_tool_fixture();
+    let log = tmp.path().join("cargo.log");
+    let token_log = tmp.path().join("token.log");
+
+    // Deliberately the tool with NO source prerequisite: for one that declares a
+    // prerequisite the prerequisite alone already disables compilation, so the
+    // case could not tell the token branch from the prerequisite branch and
+    // would pin nothing. Here the token is the only thing that can disable it.
+    let tokened = run_just(
+        tmp.path(),
+        &["_install-tool", "cargo-other", "1.2.3", "binstall", ""],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_CARGO_TOKEN_LOG", token_log.as_os_str()),
+            ("GITHUB_TOKEN", OsStr::new("sentinel-release-token")),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
+            ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+        ],
+    );
+    assert!(
+        tokened.status.success(),
+        "tokened install should still fall back and succeed:\n{}",
+        String::from_utf8_lossy(&tokened.stderr)
+    );
+    let token_contents = fs::read_to_string(&token_log).unwrap();
+    let observed = token_contents.lines().collect::<Vec<_>>();
+    let binstall_call = observed
+        .iter()
+        .find(|line| line.contains("binstall --no-confirm --locked"))
+        .expect("tokened run must still attempt binstall");
+    assert!(
+        binstall_call.contains("--disable-strategies compile"),
+        "a release token must disable binstall's compile strategy even without a source prerequisite:\n{binstall_call}"
+    );
+    assert!(
+        binstall_call.ends_with("|sentinel-release-token"),
+        "release discovery is the one step that should see the token:\n{binstall_call}"
+    );
+    let source_install_call = observed
+        .iter()
+        .find(|line| line.contains("install --locked cargo-other"))
+        .expect("tokened run must still reach the source install");
+    assert!(
+        source_install_call.ends_with("|<none>"),
+        "the source install must run without the token:\n{source_install_call}"
+    );
+
+    // And with a source prerequisite, the prerequisite recipe is tokenless too.
+    fs::remove_file(&log).unwrap();
+    fs::remove_file(&token_log).unwrap();
+    let tokened_prereq = run_just(
+        tmp.path(),
+        &["_install-tool", "cargo-spellcheck", "0.15.7", "binstall", "source-prereq"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_CARGO_TOKEN_LOG", token_log.as_os_str()),
+            ("GITHUB_TOKEN", OsStr::new("sentinel-release-token")),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
+            ("FAKE_PREREQ_EXIT", OsStr::new("0")),
+            ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+        ],
+    );
+    assert!(tokened_prereq.status.success());
+    let prereq_contents = fs::read_to_string(&token_log).unwrap();
+    let prereq_line = prereq_contents
+        .lines()
+        .find(|line| line.starts_with("source-prereq|"))
+        .expect("the tokened run must still exercise the source prerequisite");
+    assert!(
+        prereq_line.ends_with("|<none>"),
+        "the source prerequisite must run without the token:\n{prereq_line}"
+    );
+}
+
+#[test]
+fn doc_test_filters_binary_only_packages_and_preserves_feature_runs() {
+    if !tools_available() {
+        return;
+    }
+    for kind in ["bin", "lib", "proc-macro", "rlib", "dylib", "cdylib", "staticlib"] {
+        for selection in [
+            "--package fixture@0.1.0",
+            "--package fixture@0.1.0 --package library@0.1.0",
+            "--workspace",
+            "--skip",
+        ] {
+            let tmp = fixture(
+                &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+                &["anvil-doc-test-validate-prereqs", "anvil-doc-test-setup installer", "anvil-impact"],
+            );
+            seed_include(tmp.path(), "affected", selection);
+            let log = tmp.path().join("cargo.log");
+            let output = run_just(
+                tmp.path(),
+                &["anvil-doc-test"],
+                &[
+                    ("FAKE_CARGO_LOG", log.as_os_str()),
+                    ("FAKE_TARGET_KIND", OsStr::new(kind)),
+                    ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("library")),
+                    ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("library")),
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "kind={kind}, selection={selection}:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if selection == "--skip" {
+                assert!(!log.exists());
+                continue;
+            }
+            let calls = fs::read_to_string(&log).unwrap();
+            let tests = calls.lines().filter(|line| line.starts_with("test --doc ")).collect::<Vec<_>>();
+            if kind == "bin" && selection == "--package fixture@0.1.0" {
+                assert!(tests.is_empty());
+                assert!(String::from_utf8_lossy(&output.stdout).contains("no affected library packages"));
+            } else {
+                let expected = if kind == "bin" && selection != "--workspace" {
+                    "--package library@0.1.0"
+                } else {
+                    selection
+                };
+                assert_eq!(
+                    tests,
+                    [
+                        format!("test --doc {expected} --all-features --locked"),
+                        format!("test --doc {expected} --locked"),
+                    ]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn doc_test_runs_real_cargo_for_a_mixed_workspace() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+        &["anvil-doc-test-validate-prereqs", "anvil-doc-test-setup installer", "anvil-impact"],
+    );
+    write(
+        &tmp.path().join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\nmembers = [\"app\", \"library\", \"macros\"]\n",
+    );
+    for (name, target) in [("app", ""), ("library", ""), ("macros", "\n[lib]\nproc-macro = true\n")] {
+        write(
+            &tmp.path().join(name).join("Cargo.toml"),
+            &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n{target}"),
+        );
+        write(
+            &tmp.path().join(name).join(if name == "app" { "src/main.rs" } else { "src/lib.rs" }),
+            if name == "app" {
+                "fn main() {}\n"
+            } else {
+                "//! ```\n//! assert_eq!(2 + 2, 4);\n//! ```\n"
+            },
+        );
+    }
+    write(
+        &tmp.path().join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [[package]]\nname = \"library\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"macros\"\nversion = \"0.1.0\"\n",
+    );
+    for selection in [
+        "--package app@0.1.0",
+        "--package app@0.1.0 --package library@0.1.0 --package macros@0.1.0",
+    ] {
+        seed_include(tmp.path(), "affected", selection);
+        let output = run_just_with_real_cargo(tmp.path(), &["anvil-doc-test"]);
+        assert!(
+            output.status.success(),
+            "selection={selection}:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if selection == "--package app@0.1.0" {
+            assert!(stdout.contains("no affected library packages"));
+        } else {
+            assert_eq!(stdout.matches("1 passed").count(), 4, "{stdout}");
+        }
+    }
+}
+
+#[test]
+fn doc_test_rejects_invalid_selections_and_propagates_cargo_failure() {
+    if !tools_available() {
+        return;
+    }
+    for selection in [
+        "--package absent@0.1.0",
+        "--package",
+        "--exclude fixture",
+        "--package fixture@0.1.0",
+    ] {
+        let tmp = fixture(
+            &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+            &["anvil-doc-test-validate-prereqs", "anvil-doc-test-setup installer", "anvil-impact"],
+        );
+        seed_include(tmp.path(), "affected", selection);
+        let log = tmp.path().join("cargo.log");
+        let output = run_just(
+            tmp.path(),
+            &["anvil-doc-test"],
+            &[
+                ("FAKE_CARGO_LOG", log.as_os_str()),
+                ("FAKE_CARGO_DEFAULT_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT)),
+            ],
+        );
+        assert_failed(&output, selection);
+        let calls = fs::read_to_string(&log).unwrap();
+        let tests = calls.lines().filter(|line| line.starts_with("test --doc ")).count();
+        assert_eq!(tests, usize::from(selection == "--package fixture@0.1.0"));
+    }
 }
 
 #[test]
@@ -1749,6 +2001,12 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
         return;
     }
     for (recipe_file, contents, recipe, dependencies) in [
+        (
+            "doc-test.just",
+            DOC_TEST,
+            "anvil-doc-test",
+            &["anvil-doc-test-validate-prereqs", "anvil-doc-test-setup installer", "anvil-impact"][..],
+        ),
         (
             "semver.just",
             SEMVER,
@@ -1779,6 +2037,14 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
 
         let malformed = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_INVALID", OsStr::new("1"))]);
         assert_failed(&malformed, &format!("{recipe} malformed cargo metadata"));
+        // Failing is not enough: with `$ErrorActionPreference = 'Stop'` a bare
+        // ConvertFrom-Json surfaces PowerShell's own error, which never names the
+        // recipe that could not read Cargo's output.
+        assert!(
+            String::from_utf8_lossy(&malformed.stderr).contains(&format!("{recipe}: could not parse cargo metadata output")),
+            "{recipe} must diagnose malformed metadata itself:\n{}",
+            String::from_utf8_lossy(&malformed.stderr)
+        );
     }
 }
 

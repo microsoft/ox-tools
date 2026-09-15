@@ -301,12 +301,17 @@ The `installer` argument:
 - `binstall` -- `cargo binstall --no-confirm --locked <tool> --version '=<pin>'`.
   This selects an ordered strategy, not a binary-only backend. Anvil first asks
   cargo-binstall to install the exact pin. Tools without a source prerequisite retain
-  cargo-binstall's compile strategy. For tools that declare a source prerequisite,
-  Anvil disables that compile strategy so compilation cannot bypass the check. Any
+  cargo-binstall's compile strategy, unless a `GITHUB_TOKEN` is present: Anvil then
+  disables it for every tool so no compilation runs while the credential is in
+  scope (it also clears the token before the fallback below). For tools that
+  declare a source prerequisite, Anvil disables that compile strategy regardless,
+  so compilation cannot bypass the check. Any
   nonzero binstall result then falls back to Anvil's exact-pin `cargo install`; the
   declared prerequisite, when present, runs immediately before that fallback.
   A successful binary path cuts the cold-runner install phase from ~30 min to ~1 min.
   `cargo-binstall` itself needs to be on PATH; the GH setup composite arranges this.
+  A local run normally has no `GITHUB_TOKEN`, so it sees the retain-compile
+  behavior; a GitHub runner, where the token is exported, does not.
 
 The GitHub composite setup action calls `just anvil-<group>-setup binstall`
 (or just `anvil-setup binstall` when no group is scoped). The ADO setup step

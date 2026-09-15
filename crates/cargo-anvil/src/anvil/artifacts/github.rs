@@ -208,6 +208,47 @@ mod tests {
         assert!(SETUP_ACTION.contains("$minimum = [version]'1.46.0'"));
         assert!(SETUP_ACTION.contains("cargo-anvil requires just >= $minimum"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
+        for name in ["Install just", "Install anvil toolchains + tools"] {
+            let step = SETUP_ACTION
+                .split_once(&format!("    - name: {name}\n"))
+                .expect("setup contains the installation step")
+                .1
+                .split("\n    - name:")
+                .next()
+                .expect("split always produces a first element");
+            assert!(
+                step.contains("GITHUB_TOKEN: ${{ github.token }}"),
+                "{name} must authenticate release discovery to avoid anonymous API rate limits"
+            );
+        }
+        // The Just bootstrap is a shell step, not a `just` recipe, so the
+        // installer contract tests in tests/recipe_contracts.rs never reach it.
+        // Pin its two token guards here, or a regression could drop them while
+        // every behavioral test stayed green.
+        let just_bootstrap_step = SETUP_ACTION
+            .split_once("    - name: Install just\n")
+            .expect("setup contains the Just bootstrap")
+            .1
+            .split("\n    - name:")
+            .next()
+            .expect("split always produces a first element");
+        assert!(
+            just_bootstrap_step.contains("cargo binstall --no-confirm --locked --disable-strategies compile"),
+            "the Just bootstrap must not let binstall compile while the token is set"
+        );
+        let binstall_call = just_bootstrap_step
+            .find("cargo binstall")
+            .expect("the Just bootstrap attempts binstall before falling back");
+        let token_cleanup = just_bootstrap_step
+            .find("Remove-Item Env:GITHUB_TOKEN")
+            .expect("the Just bootstrap must drop the token before its source fallback");
+        let source_fallback = just_bootstrap_step
+            .find("cargo install --locked --version")
+            .expect("the Just bootstrap falls back to a source install");
+        assert!(
+            binstall_call < token_cleanup && token_cleanup < source_fallback,
+            "the token must be removed after release discovery and before the source install"
+        );
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
         assert!(SETUP_ACTION.contains("::error::Invalid Anvil group;"));

@@ -451,6 +451,13 @@ _install-tool-core name version installer source_prereq="":
         }
     }
 
+    # The step-scoped GITHUB_TOKEN exists only so cargo-binstall can query
+    # GitHub Releases as an authenticated caller instead of being rate-limited
+    # anonymously. Keep it out of every source install: those compile
+    # third-party crates and run their build scripts.
+    $releaseToken = $env:GITHUB_TOKEN
+    Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+
     Write-Host "Installing $name =$version (installer: $installer)"
     if ($installer -eq 'binstall') {
         if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
@@ -462,14 +469,22 @@ _install-tool-core name version installer source_prereq="":
             }
         }
         # Keep source builds behind Anvil's prerequisite check instead of
-        # allowing binstall to compile before that check can run. Tools with
-        # no source prerequisite may still use binstall's compile strategy.
+        # allowing binstall to compile before that check can run. Also disable
+        # the compile strategy whenever the release token is set: compiling
+        # under binstall would hand the workflow credential to third-party build
+        # scripts. Either way the tokenless `cargo install` below still covers a
+        # release miss.
         $binstallArgs = @('binstall', '--no-confirm', '--locked')
-        if ($sourcePrereq) {
+        if ($sourcePrereq -or $releaseToken) {
             $binstallArgs += @('--disable-strategies', 'compile')
         }
         $binstallArgs += @($name, '--version', "=$version")
-        & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
+        if ($releaseToken) { $env:GITHUB_TOKEN = $releaseToken }
+        try {
+            & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
+        } finally {
+            Remove-Item Env:GITHUB_TOKEN -ErrorAction SilentlyContinue
+        }
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }

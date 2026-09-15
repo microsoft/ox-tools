@@ -378,13 +378,17 @@ mod tests {
 
     #[test]
     fn spellcheck_checks_source_prerequisites_before_source_builds() {
+        // Pin the guard together with the body it controls. Matching the
+        // condition alone would also be satisfied by the unrelated
+        // `if ($sourcePrereq)` block that runs the prerequisite recipe later in
+        // the same file, so the assertion would survive an edit to this one.
         assert!(
-            TOOLS_JUST.contains("if ($sourcePrereq)"),
-            "binstall compile strategy must only be disabled for tools with source prerequisites"
-        );
-        assert!(
-            TOOLS_JUST.contains("$binstallArgs += @('--disable-strategies', 'compile')"),
-            "binstall must not compile before Anvil checks source prerequisites"
+            TOOLS_JUST.contains(concat!(
+                "if ($sourcePrereq -or $releaseToken) {\n",
+                "            $binstallArgs += @('--disable-strategies', 'compile')\n",
+                "        }"
+            )),
+            "binstall must not compile before Anvil checks source prerequisites, nor while the release token is set"
         );
         assert!(
             TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-source-deps-check"),

@@ -33,6 +33,10 @@ runs:
         group: none
     - name: Install cargo-delta
       shell: bash
+      env:
+        # Same authenticated release discovery as the setup action: without it
+        # this lookup stays anonymous and can be rate-limited into a source build.
+        GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-tool-cargo-delta-install binstall
     - name: Compute impact
       shell: bash
