@@ -851,6 +851,7 @@ fn capture_fault(invocation: &Invocation) -> Option<CaptureFault> {
 }
 
 #[cfg(unix)]
+#[mutants::skip] // Platform adapter; InterruptiblePipe and the shared reader implementation are tested independently.
 fn spawn_child_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
 where
     R: io::Read + std::os::fd::AsRawFd + Send + 'static,
@@ -864,6 +865,7 @@ where
 }
 
 #[cfg(windows)]
+#[mutants::skip] // Platform adapter; InterruptiblePipe and the shared reader implementation are tested independently.
 fn spawn_child_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
 where
     R: io::Read + std::os::windows::io::AsRawHandle + Send + 'static,
@@ -877,6 +879,7 @@ where
 }
 
 #[cfg(not(any(unix, windows)))]
+#[mutants::skip] // Inactive on mutation runners; the adapter only forwards the platform's explicit unsupported result.
 fn spawn_child_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
 where
     R: io::Read + Send + 'static,
@@ -1359,7 +1362,7 @@ mod tests {
         combine_captured_output, display_duration, emit_buffered, emit_buffered_to, execute_parallel, exit_byte, failure_stops_launching,
         finish_ordinary_termination_with, finish_ordinary_wait_with, finish_output_reader, finish_wait_with_cleanup, panic_description,
         run_captured, run_captured_with_spawner, run_streamed, run_streamed_with_timeout, spawn_if_sealed, spawn_output_reader,
-        spawn_output_reader_with, spawn_tree, terminate_ordinary_child, terminate_ordinary_with, wait_for_captured_process,
+        spawn_output_reader_with, spawn_tree, spawn_worker, terminate_ordinary_child, terminate_ordinary_with, wait_for_captured_process,
         wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
     };
 
@@ -2249,6 +2252,20 @@ mod tests {
         let code = execute_parallel(&keep_going, true, NonZeroUsize::new(1).expect("literal one is nonzero"), None)
             .expect("keep-going continues after a worker launch outcome");
         assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn worker_spawn_injection_only_rejects_the_named_program() {
+        let worker = spawn_worker(0, invocation(&["rustc", "--version"]), None).expect("ordinary worker launch must succeed");
+        let outcome = wait_for_worker(&mut vec![worker]).expect("ordinary worker reports its outcome");
+        let InvocationResult::Exited(status) = outcome.outcome.result else {
+            panic!("the ordinary worker must execute rustc");
+        };
+        assert!(status.success());
+
+        let error = spawn_worker(1, invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), None)
+            .expect_err("the named test program injects worker spawn failure");
+        assert!(error.to_string().contains("injected worker spawn failure"));
     }
 
     #[test]
