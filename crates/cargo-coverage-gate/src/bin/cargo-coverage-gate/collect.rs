@@ -1564,6 +1564,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
+    fn drop_removes_the_temporary_file() {
+        let tmp = tempdir().expect("tempdir");
+        let path = {
+            let temporary = TemporaryPath::new(tmp.path(), "removed-on-drop");
+            let path = temporary.path().to_path_buf();
+            fs::write(&path, b"temporary").expect("write temporary file");
+            path
+        };
+
+        assert!(!path.exists());
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
     fn cleanup_reports_an_unremovable_temporary_path() {
         let tmp = tempdir().expect("tempdir");
