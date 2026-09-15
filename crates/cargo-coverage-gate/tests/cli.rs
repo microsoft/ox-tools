@@ -1139,6 +1139,7 @@ fn run_reports_rustup_toolchain_resolution_failures() {
     for (variable, expected) in [
         ("FAKE_FAIL_RUSTUP", "exited with"),
         ("FAKE_EMPTY_RUSTUP_OUTPUT", "did not report a program path"),
+        ("FAKE_RELATIVE_RUSTUP_OUTPUT", "reported non-absolute program path"),
     ] {
         let tmp = TempDir::new().expect("tempdir");
         let tools = FakeCoverageTools::compile();

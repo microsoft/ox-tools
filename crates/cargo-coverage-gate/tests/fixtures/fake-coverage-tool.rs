@@ -44,6 +44,10 @@ fn run_rustup(args: &[std::ffi::OsString]) -> Result<(), String> {
         println!();
         return Ok(());
     }
+    if env::var_os("FAKE_RELATIVE_RUSTUP_OUTPUT").is_some() {
+        println!("relative-tool");
+        return Ok(());
+    }
     if args.len() != 4 || args[0] != "which" || args[1] != "--toolchain" {
         return Err(format!("unexpected rustup arguments: {args:?}"));
     }

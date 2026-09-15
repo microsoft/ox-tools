@@ -347,7 +347,14 @@ fn rustup_which(rustup: &Path, toolchain: &OsStr, program: &str) -> Result<OsStr
     if path.is_empty() {
         return Err(AppError::new(format!("`{display}` did not report a program path")));
     }
-    Ok(OsString::from(path))
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return Err(AppError::new(format!(
+            "`{display}` reported non-absolute program path `{}`",
+            path.display()
+        )));
+    }
+    Ok(path.as_os_str().to_owned())
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, AppError> {
@@ -965,7 +972,9 @@ fn command_display(command: &Command) -> String {
         .join(" ")
 }
 
-#[derive(Debug)]
+// Default keeps cargo-mutants' whole-function replacement for write_atomic
+// viable; the direct publication test must then reject the inert guard.
+#[derive(Debug, Default)]
 struct TemporaryPath {
     path: PathBuf,
     armed: bool,
@@ -1038,7 +1047,10 @@ impl TemporaryPath {
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
+    // Linux builds include this helper only so its atomic publication behavior
+    // can be unit-tested; production use is the Windows response-file fallback.
+    #[cfg_attr(all(coverage_nightly, not(windows)), coverage(off))]
     fn write_atomic(directory: &Path, label: &str, contents: &[u8]) -> Result<Self, AppError> {
         let published = Self::new(directory, label);
         let staging = Self::new(directory, &format!("{label}.staging"));
@@ -1615,6 +1627,24 @@ mod tests {
         temporary.cleanup().expect("clean temporary file");
 
         assert!(!path.exists());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
+    fn write_atomic_publishes_complete_bytes_and_drop_removes_the_artifact() {
+        let tmp = tempdir().expect("tempdir");
+        let temporary = TemporaryPath::write_atomic(tmp.path(), "response", b"complete bytes").expect("atomically write temporary file");
+        let path = temporary.path().to_path_buf();
+
+        assert_eq!(fs::read(&path).expect("read published temporary file"), b"complete bytes");
+        assert_eq!(
+            fs::read_dir(tmp.path()).expect("read temporary directory").count(),
+            1,
+            "the staging file must not remain after publication"
+        );
+
+        drop(temporary);
+        assert!(!path.exists(), "the published temporary file must remain armed for cleanup");
     }
 
     #[test]
