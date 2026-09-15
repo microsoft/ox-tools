@@ -197,7 +197,7 @@ fn execute_parallel(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: 
     let mut outcomes = Vec::with_capacity(invocations.len());
     let mut stop_launching = false;
 
-    while !workers.is_empty() || (!stop_launching && !pending.is_empty()) {
+    loop {
         while !stop_launching && workers.len() < worker_count {
             let Some((index, invocation)) = pending.pop_front() else {
                 break;
@@ -217,10 +217,7 @@ fn execute_parallel(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: 
         }
 
         let Some(outcome) = wait_for_worker(&mut workers) else {
-            if pending.is_empty() || stop_launching {
-                break;
-            }
-            continue;
+            break;
         };
         if failure_stops_launching(keep_going, outcome.outcome.result.failed()) {
             stop_launching = true;
