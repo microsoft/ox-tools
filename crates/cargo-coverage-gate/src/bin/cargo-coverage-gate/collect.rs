@@ -781,6 +781,9 @@ fn command_too_long_response_arguments(stderr: &str) -> Option<&str> {
 }
 
 #[cfg(windows)]
+// The spawned-binary integration test covers this fallback, but the outer
+// coverage report cannot include that child binary's coverage object.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn run_windows_report_fallback(
     execution: &CollectionExecution<'_>,
     configuration: FeatureConfiguration,
@@ -813,6 +816,8 @@ fn run_windows_report_fallback(
 }
 
 #[cfg(windows)]
+// Exercised through the spawned-binary fallback integration test.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn discover_llvm_cov(toolchain: &ToolchainSelection) -> Result<PathBuf, AppError> {
     if let Some(cov) = env::var_os("LLVM_COV") {
         return Ok(PathBuf::from(cov));
@@ -829,6 +834,16 @@ fn discover_llvm_cov(toolchain: &ToolchainSelection) -> Result<PathBuf, AppError
 }
 
 fn publish_lcov(private_lcov: &Path, final_lcov: &Path, coverage_dir: &Path, configuration: FeatureConfiguration) -> Result<(), AppError> {
+    publish_lcov_with(private_lcov, final_lcov, coverage_dir, configuration, io::copy)
+}
+
+fn publish_lcov_with(
+    private_lcov: &Path,
+    final_lcov: &Path,
+    coverage_dir: &Path,
+    configuration: FeatureConfiguration,
+    copy: impl FnOnce(&mut File, &mut File) -> io::Result<u64>,
+) -> Result<(), AppError> {
     let temporary_lcov = TemporaryPath::new(coverage_dir, &format!("{}.lcov", configuration.artifact_name()));
     let mut source = File::open(private_lcov).into_app_err(format!("failed to open private LCOV file `{}`", private_lcov.display()))?;
     let mut output = OpenOptions::new()
@@ -839,7 +854,7 @@ fn publish_lcov(private_lcov: &Path, final_lcov: &Path, coverage_dir: &Path, con
             "failed to create temporary LCOV file `{}`",
             temporary_lcov.path().display()
         ))?;
-    io::copy(&mut source, &mut output).into_app_err(format!(
+    copy(&mut source, &mut output).into_app_err(format!(
         "failed to stage private LCOV file `{}` for publication",
         private_lcov.display()
     ))?;
@@ -881,8 +896,16 @@ fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> 
             let replaced = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), windows_replace_flags()) };
             if replaced != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
         },
-        || std::thread::sleep(std::time::Duration::from_millis(10)),
+        wait_before_windows_replace_retry,
     )
+}
+
+#[cfg(windows)]
+// A real sharing violation is nondeterministic; retry scheduling is covered
+// through the injected wait callback in retry_windows_replace.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn wait_before_windows_replace_retry() {
+    std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
 #[cfg(any(windows, test))]
@@ -1481,6 +1504,23 @@ mod tests {
 
         assert_eq!(fs::read(&private).expect("read private LCOV"), b"private LCOV");
         assert_eq!(fs::read(&published).expect("read published LCOV"), b"private LCOV");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
+    fn publishing_reports_copy_failures() {
+        let tmp = tempdir().expect("tempdir");
+        let private = tmp.path().join("private.info");
+        let published = tmp.path().join("published.info");
+        fs::write(&private, b"private LCOV").expect("write private LCOV");
+
+        let error = publish_lcov_with(&private, &published, tmp.path(), FeatureConfiguration::AllFeatures, |_, _| {
+            Err(io::Error::other("injected copy failure"))
+        })
+        .expect_err("copy failure must prevent publication");
+
+        assert!(error.to_string().contains("failed to stage private LCOV file"));
+        assert!(!published.exists());
     }
 
     #[test]
