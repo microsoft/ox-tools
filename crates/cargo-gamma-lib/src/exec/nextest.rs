@@ -542,8 +542,16 @@ mod tests {
         assert!(!BINARIES_METADATA_FILE.is_empty());
         assert!(!CARGO_METADATA_FILE.is_empty());
         assert_ne!(BINARIES_METADATA_FILE, CARGO_METADATA_FILE);
-        assert!(BINARIES_METADATA_FILE.ends_with(".json"));
-        assert!(CARGO_METADATA_FILE.ends_with(".json"));
+        assert!(
+            std::path::Path::new(BINARIES_METADATA_FILE)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        );
+        assert!(
+            std::path::Path::new(CARGO_METADATA_FILE)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        );
     }
 
     /// A binary nextest never listed must be refused before a command is built for it, rather than

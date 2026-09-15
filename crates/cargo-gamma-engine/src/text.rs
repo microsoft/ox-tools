@@ -86,7 +86,8 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
         if byte >= 0x80 {
             if byte == C1_LEAD && bytes.get(cursor + 1).is_some_and(|&low| (0x80..=0x9F).contains(&low)) {
                 let control = char::from(bytes[cursor + 1]);
-                let out = encoded.get_or_insert_with(String::new);
+                // #[gamma::skip(all, reason = "capacity affects allocation behavior only; escaped text is unchanged")]
+                let out = encoded.get_or_insert_with(|| String::with_capacity(text.len() + ESCAPE_HEADROOM));
 
                 out.push_str(&text[copied..cursor]);
                 push_escape(out, control);
@@ -122,7 +123,8 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
             continue;
         }
 
-        let out = encoded.get_or_insert_with(String::new);
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; escaped text is unchanged")]
+        let out = encoded.get_or_insert_with(|| String::with_capacity(text.len() + ESCAPE_HEADROOM));
 
         out.push_str(&text[copied..cursor]);
         push_escape(out, char::from(byte));
@@ -146,6 +148,10 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
         None => Cow::Borrowed(text),
     }
 }
+
+/// Extra capacity reserved once a value is known to need encoding, so the common case of one or two
+/// control characters does not grow the buffer again.
+const ESCAPE_HEADROOM: usize = 16;
 
 /// Writes one control character as text a terminal will show rather than obey.
 ///

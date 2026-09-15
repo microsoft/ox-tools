@@ -8,7 +8,7 @@
 //! features, dependencies, targets, and the freeform `package.metadata`
 //! block.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use cargo_metadata::{MetadataCommand, TargetKind};
@@ -105,7 +105,7 @@ impl Workspace {
         }
         let metadata = cmd.exec().map_err(LoadMetadataError::caused_by)?;
 
-        let members: Vec<Member> = metadata
+        let mut members: Vec<Member> = metadata
             .workspace_packages()
             .iter()
             .map(|pkg| {
@@ -131,9 +131,8 @@ impl Workspace {
                     metadata: pkg.metadata.clone(),
                 }
             })
-            .collect::<BTreeMap<_, _>>()
-            .into_values()
             .collect();
+        members.sort_by(|a, b| a.name.cmp(&b.name));
 
         let default_member_names = metadata
             .workspace_default_packages()
@@ -160,6 +159,10 @@ pub(crate) fn parse_target_kind(kind: &str) -> Option<TargetKind> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
     use super::*;
 
     #[test]
@@ -184,5 +187,47 @@ mod tests {
     #[test]
     fn rejects_unknown_target_kind() {
         assert_eq!(parse_target_kind("future-kind"), None);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn workspace_and_target_order_is_deterministic() {
+        let tmp = TempDir::new().expect("temp directory");
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"zeta\", \"alpha\"]\n",
+        )
+        .expect("workspace manifest");
+        for name in ["zeta", "alpha"] {
+            let root = tmp.path().join(name);
+            fs::create_dir_all(root.join("src")).expect("member source directory");
+            fs::create_dir_all(root.join("examples")).expect("member examples directory");
+            fs::write(
+                root.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                     [[example]]\nname = \"z-last\"\npath = \"examples/z.rs\"\n\
+                     [[example]]\nname = \"a-first\"\npath = \"examples/a.rs\"\n"
+                ),
+            )
+            .expect("member manifest");
+            fs::write(root.join("src").join("lib.rs"), "").expect("member library");
+            fs::write(root.join("examples").join("z.rs"), "fn main() {}\n").expect("z example");
+            fs::write(root.join("examples").join("a.rs"), "fn main() {}\n").expect("a example");
+        }
+
+        let workspace = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect("load fixture workspace");
+        assert_eq!(
+            workspace.members.iter().map(|member| member.name.as_str()).collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert_eq!(
+            workspace.members[0]
+                .targets
+                .iter()
+                .map(|target| target.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a-first", "alpha", "z-last"]
+        );
     }
 }

@@ -53,11 +53,13 @@ pub fn validate_config<H: Host>(host: &mut H, args: &ValidateArgs) -> Result<()>
 /// Returns an error if the config file cannot be loaded, parsed, or if expressions fail to evaluate
 fn validate_config_inner(config_path: &Utf8Path) -> Result<()> {
     let config = Config::load(
+        // #[gamma::skip(all, reason = "for a parentless relative path, an empty base path and dot both denote the current directory")]
         config_path.parent().unwrap_or_else(|| Utf8Path::new(".")),
         Some(&config_path.to_path_buf()),
     )?;
 
     // Validate that all expressions can be evaluated against default metrics (only if any are defined)
+    // #[gamma::skip(cond.always_true, reason = "evaluating an empty policy produces the same successful result and only consumes resources")]
     if !config.high_risk.is_empty() || !config.eval.is_empty() {
         let appraisal = evaluate(
             &config.high_risk,
@@ -86,6 +88,17 @@ mod tests {
     use super::*;
     use crate::commands::host::TestHost;
     use crate::commands::init::{InitArgs, init_config};
+
+    #[test]
+    fn metadata_errors_keep_the_operation_context() {
+        let mut host = TestHost::new();
+        let args = ValidateArgs {
+            config: None,
+            manifest_path: Utf8PathBuf::from("definitely-missing-Cargo.toml"),
+        };
+        let error = validate_config(&mut host, &args).expect_err("metadata lookup must fail");
+        assert!(error.to_string().contains("retrieving workspace metadata"), "{error:#}");
+    }
 
     #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]

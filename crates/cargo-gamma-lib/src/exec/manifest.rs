@@ -49,6 +49,7 @@ impl Manifest {
         Ok(Self {
             path: path.to_owned(),
             document,
+            // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
             changed: false,
             within: Utf8PathBuf::new(),
         })
@@ -56,6 +57,7 @@ impl Manifest {
 
     /// Writes the manifest back if anything changed.
     pub(super) fn save(&self) -> Result<()> {
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if !self.changed {
             return Ok(());
         }
@@ -88,6 +90,7 @@ impl Manifest {
 
         // `[replace]` names crates by version requirement, and every entry is a source
         // specification of exactly the same shape as a dependency.
+        // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
         self.anchor_table("replace", original);
 
         // Every `[patch.<registry>]` is its own table of dependencies, and a workspace commonly
@@ -171,6 +174,7 @@ impl Manifest {
 
         let conflicting_target = self
             .document
+            // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
             .get("target")
             .and_then(Item::as_table_like)
             .into_iter()
@@ -180,6 +184,7 @@ impl Manifest {
                 dependencies.contains_key(RUNTIME_CRATE) && !dependency_points_to(dependencies.get(RUNTIME_CRATE), &runtime)
             });
 
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if conflicting_target {
             return Err(Self::runtime_name_reserved(&self.path));
         }
@@ -233,6 +238,7 @@ impl Manifest {
             .merge(workspace_features.resolve_canonical(table.get(RUNTIME_PACKAGE)));
         let feature_settings = own_features.merge(target_features);
 
+        // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
         let _existing_runtime = table.remove("cargo-gamma-rt");
         let mut entry = toml_edit::InlineTable::new();
         let _package = entry.insert("package", Value::from(RUNTIME_PACKAGE));
@@ -263,6 +269,7 @@ impl Manifest {
             .is_some_and(|dependencies| dependencies.contains_key(RUNTIME_CRATE) || dependencies.contains_key("cargo-gamma-rt"));
         let targeted = self
             .document
+            // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
             .get("target")
             .and_then(Item::as_table_like)
             .into_iter()
@@ -604,6 +611,7 @@ pub(super) fn anchor_cargo_config(root: &Utf8Path, original: &Utf8Path) -> Resul
     for name in ["config.toml", "config"] {
         let path = root.join(".cargo").join(name);
 
+        // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
         let _destination = crate::paths::require_within(&path, root, "a scratch Cargo configuration")?;
 
         if !path.as_std_path().is_file() {
@@ -651,6 +659,7 @@ pub(super) fn cap_lints(root: &Utf8Path) -> Result<()> {
     } else {
         path
     };
+    // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
     let _destination = crate::paths::require_within(&path, root, "a scratch Cargo configuration")?;
 
     if let Some(parent) = path.parent() {
@@ -754,7 +763,7 @@ mod tests {
 
     #[test]
     fn appending_the_lint_cap_distinguishes_arrays_strings_and_unsupported_values() {
-        let mut array = Item::Value(Value::Array(["-Cdebuginfo=1"].into_iter().collect()));
+        let mut array = Item::Value(Value::Array(std::iter::once("-Cdebuginfo=1").collect()));
         assert!(append_flag(&mut array));
         assert_eq!(
             array

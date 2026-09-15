@@ -24,7 +24,8 @@ use sha2::{Digest as _, Sha256};
 pub fn checksum_bytes(data: &[u8]) -> String {
     let normalized = normalize_line_endings(data);
     let digest = Sha256::digest(&normalized);
-    let mut s = String::new();
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; checksum text is unchanged")]
+    let mut s = String::with_capacity(7 + digest.len() * 2);
     s.push_str("sha256:");
     for byte in digest {
         // 0..=15 always fits in the lookup; no panic possible.

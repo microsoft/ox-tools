@@ -55,6 +55,7 @@ impl<'a> RowReader<'a> {
     pub fn read_datetime(&mut self) -> DateTime<Utc> {
         let timestamp = self.read_u64();
         let timestamp = i64::try_from(timestamp).expect("timestamp in range");
+        // #[gamma::skip(literal.int_increment, reason = "the table format stores whole Unix seconds and therefore has no subsecond component")]
         Utc.timestamp_opt(timestamp, 0).single().expect("valid timestamp")
     }
 

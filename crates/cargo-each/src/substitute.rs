@@ -246,7 +246,10 @@ mod tests {
             packages: args(&["--workspace"]),
         };
         let err = substitute(&args(&["test", "--test", "{target}"]), &ph).expect_err("misuse");
-        assert!(err.to_string().contains("{target}"));
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{target}` cannot be used here: per-target token is not valid in --once mode"
+        );
     }
 
     #[test]

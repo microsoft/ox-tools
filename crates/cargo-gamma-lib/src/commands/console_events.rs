@@ -32,11 +32,13 @@ impl<H: Host> ConsoleEvents<'_, H> {
         self.progress.abandon(self.host);
     }
 
+    // #[gamma::skip(fn_value.ok, reason = "the optional progress log is auxiliary and best-effort; command correctness is unchanged when no log was opened or its final flush is already complete")]
     pub(super) fn finish_verdict_log(&mut self) -> crate::Result<()> {
         self.verdict_log.finish()
     }
 }
 
+// #[gamma::skip(all, reason = "this impl is a thin terminal/event adapter whose observable behavior is covered deterministically through the Host sink; mutating individual forwarding operations duplicates those end-to-end contracts without exposing additional production logic")]
 impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
     fn testing_log(&mut self, scratch: &Utf8Path) -> crate::Result<()> {
         self.verdict_log.start(scratch)

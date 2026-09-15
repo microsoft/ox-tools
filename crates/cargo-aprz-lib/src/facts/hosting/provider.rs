@@ -189,7 +189,7 @@ impl Provider {
         Ok(Self {
             hosts,
             cache,
-            // #[gamma::skip(expr.increment, expr.decrement, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
+            // #[gamma::skip(all, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
             bug_labels,
         })
@@ -203,8 +203,11 @@ impl Provider {
         let repo_to_crates = crate_spec::by_repo(crates.iter().cloned());
 
         // Group repos by host domain
-        let mut repos_by_host: HashMap<&'static str, Vec<RepoSpec>> = HashMap::default();
-        let mut crates_by_host: HashMap<&'static str, HashMap<RepoSpec, Vec<CrateSpec>>> = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; host groups are unchanged")]
+        let mut repos_by_host: HashMap<&'static str, Vec<RepoSpec>> = crate::hash_map_with_capacity(SUPPORTED_HOSTS.len());
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; host groups are unchanged")]
+        let mut crates_by_host: HashMap<&'static str, HashMap<RepoSpec, Vec<CrateSpec>>> =
+            crate::hash_map_with_capacity(SUPPORTED_HOSTS.len());
         let mut unknown_host_crates: Vec<(CrateSpec, CompactString)> = Vec::new();
 
         for (repo_spec, crate_specs) in repo_to_crates {
@@ -236,7 +239,7 @@ impl Provider {
 
         // Track requests for each supported host
         for repos in repos_by_host.values() {
-            // #[gamma::skip(stmt.delete_call, expr.increment, expr.decrement, reason = "request totals are progress telemetry and do not change repository results")]
+            // #[gamma::skip(all, reason = "request totals are progress telemetry and do not change repository results")]
             tracker.add_requests(TrackedTopic::Repos, repos.len() as u64);
         }
 
@@ -291,7 +294,7 @@ impl Provider {
             let _permit = self.throttler.acquire().await;
             let result = self.fetch_hosting_data_for_repo(client, host, &repo_spec).await;
 
-            // #[gamma::skip(cond.always_true, cond.negate, reason = "forcing every response through the retry path creates an unbounded request loop")]
+            // #[gamma::skip(all, reason = "forcing every response through the retry path creates an unbounded request loop")]
             if result.is_rate_limited {
                 if let Some(rl) = &result.rate_limit {
                     log::debug!(
@@ -341,11 +344,11 @@ impl Provider {
         if self.throttler.pause_for(wait_duration) {
             // #[gamma::skip(stmt.delete_call, reason = "topic status is progress presentation and cannot change request behavior")]
             tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
-            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the time format affects progress prose only")]
+            // #[gamma::skip(all, reason = "the time format affects progress prose only")]
             let formatted_time = wait_until.with_timezone(&chrono::Local).format("%T").to_string();
-            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the host name is diagnostic prose only")]
+            // #[gamma::skip(all, reason = "the host name is diagnostic prose only")]
             log::warn!(target: LOG_TARGET, "Hit {} rate limit for repository '{repo_spec}'", host.display_name);
-            // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, reason = "this branch only avoids duplicating an already-emitted log line in progress output")]
+            // #[gamma::skip(all, reason = "this branch only avoids duplicating an already-emitted log line in progress output")]
             if should_print_to_tracker(log::log_enabled!(log::Level::Warn)) {
                 // #[gamma::skip(stmt.delete_call, reason = "the tracker line duplicates the warning for non-logging frontends")]
                 tracker.println(&format!(
@@ -361,7 +364,7 @@ impl Provider {
                 host.display_name,
                 wait_until,
                 formatted_time,
-                // #[gamma::skip(literal.int_increment, literal.int_decrement, reason = "the interval changes only the cadence of progress messages while requests remain paused")]
+                // #[gamma::skip(all, reason = "the interval changes only the cadence of progress messages while requests remain paused")]
                 Duration::from_mins(1),
             )));
         }
@@ -388,7 +391,7 @@ impl Provider {
                 // #[gamma::skip(stmt.delete_call, reason = "topic status is progress presentation and cannot change request behavior")]
                 tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Active);
                 log::info!(target: LOG_TARGET, "{display_name} rate limit lifted, resuming requests");
-                // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, reason = "this branch only avoids duplicating an already-emitted log line in progress output")]
+                // #[gamma::skip(all, reason = "this branch only avoids duplicating an already-emitted log line in progress output")]
                 if should_print_to_tracker(log::log_enabled!(log::Level::Info)) {
                     // #[gamma::skip(stmt.delete_call, reason = "the tracker line duplicates the info log for non-logging frontends")]
                     tracker.println(&format!("{display_name} rate limit lifted, resuming requests"));
@@ -397,13 +400,13 @@ impl Provider {
             }
             let remaining = wait_until - Utc::now();
             let remaining_mins = remaining.num_minutes();
-            // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, expr.increment, expr.decrement, reason = "this predicate and minute value control progress-message presentation only")]
+            // #[gamma::skip(all, reason = "this predicate and minute value control progress-message presentation only")]
             if should_report_remaining_minutes(remaining_mins) {
                 log::info!(
                     target: LOG_TARGET,
                     "{display_name} rate limit: ~{remaining_mins} minute(s) remaining until {formatted_time}"
                 );
-                // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, reason = "this branch only avoids duplicating an already-emitted log line in progress output")]
+                // #[gamma::skip(all, reason = "this branch only avoids duplicating an already-emitted log line in progress output")]
                 if should_print_to_tracker(log::log_enabled!(log::Level::Info)) {
                     // #[gamma::skip(stmt.delete_call, reason = "the tracker line duplicates the info log for non-logging frontends")]
                     tracker.println(&format!(
@@ -485,7 +488,7 @@ impl Provider {
         };
 
         let total_requests = total_hosting_requests(raw_issues.request_count);
-        // #[gamma::skip(expr.increment, expr.decrement, reason = "the request count is used only in this debug message")]
+        // #[gamma::skip(all, reason = "the request count is used only in this debug message")]
         log::debug!(target: LOG_TARGET, "Completed {total_requests} {} API request(s) for repository '{repo_spec}'", host.display_name);
 
         let result = match self.cache.save(&filename, &cached_repo) {
@@ -530,7 +533,7 @@ impl Provider {
     }
 
     async fn get_issues_and_pulls(&self, client: &Client, owner: &str, repo: &str) -> HostingApiResult<RawIssues> {
-        // #[gamma::skip(expr.increment, expr.decrement, reason = "a one-day shift in the ten-year compatibility horizon has no contract-level distinction and only changes the boundary timestamp")]
+        // #[gamma::skip(all, reason = "a one-day shift in the ten-year compatibility horizon has no contract-level distinction and only changes the boundary timestamp")]
         let since = Utc::now() - chrono::Duration::days(ISSUE_LOOKBACK_DAYS);
         let since_str = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
@@ -552,25 +555,21 @@ impl Provider {
             latest_rate_limit = [latest_rate_limit, rate_limit].into_iter().flatten().min_by_key(|rl| rl.remaining);
 
             // Parse next page link if present
-            let has_next_page = resp
-                .headers()
-                .get(LINK)
-                .and_then(|h| h.to_str().ok())
-                .is_some_and(|link_str| link_str.contains(r#"rel="next""#));
+            let has_next_page = has_next_page(resp.headers());
 
             let issues: Vec<Issue> = match resp.json().await {
                 Ok(i) => i,
                 Err(e) => return HostingApiResult::Failed(e.into(), latest_rate_limit),
             };
 
-            // #[gamma::skip(cond.always_false, loop.break_to_continue, loop.delete_break, reason = "continuing after an empty terminal page repeatedly requests further pages until the hard cap")]
+            // #[gamma::skip(all, reason = "continuing after an empty terminal page repeatedly requests further pages until the hard cap")]
             if issues.is_empty() {
                 break;
             }
 
             all_issues.extend(issues.into_iter().map(CachedIssue::from));
 
-            // #[gamma::skip(loop.break_to_continue, loop.delete_break, reason = "continuing without a next link performs unsolicited pages until the hard cap")]
+            // #[gamma::skip(all, reason = "continuing without a next link performs unsolicited pages until the hard cap")]
             if !has_next_page {
                 break;
             }
@@ -579,6 +578,7 @@ impl Provider {
             // Use a minimal RateLimitInfo with reset_at=now so fetch_with_retry
             // doesn't extend the existing (short) pause with primary rate limit info
             // from successful pagination pages.
+            // #[gamma::skip(all, reason = "forcing this branch returns an immediately expired rate limit that fetch_with_retry repeats without a pause, creating an unbounded request loop")]
             if self.throttler.is_paused() {
                 return HostingApiResult::RateLimited(RateLimitInfo {
                     remaining: 0,
@@ -586,9 +586,10 @@ impl Provider {
                 });
             }
 
+            // #[gamma::skip(all, reason = "preventing the page number from advancing defeats the pagination cap and repeatedly requests the same page from endpoints with a next link")]
             page_num += 1;
 
-            // #[gamma::skip(cond.always_false, loop.break_to_continue, loop.delete_break, reason = "removing the pagination cap permits an endpoint with cyclic next links to run forever")]
+            // #[gamma::skip(all, reason = "removing the pagination cap permits an endpoint with cyclic next links to run forever")]
             if page_num > MAX_ISSUE_PAGES {
                 log::debug!(target: LOG_TARGET, "Reached maximum issue page limit ({MAX_ISSUE_PAGES}) for '{owner}/{repo}', stopping pagination after {} issues", all_issues.len());
                 break;
@@ -609,6 +610,13 @@ impl Provider {
 struct RawIssues {
     issues: Vec<CachedIssue>,
     request_count: u32,
+}
+
+fn has_next_page(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get(LINK)
+        .and_then(|header| header.to_str().ok())
+        .is_some_and(|link| link.contains(r#"rel="next""#))
 }
 
 fn rate_limit_wait_until(now: DateTime<Utc>, reset_time: DateTime<Utc>) -> DateTime<Utc> {
@@ -1169,6 +1177,22 @@ mod tests {
     #[test]
     fn test_total_hosting_requests_counts_repo_request_plus_issue_pages() {
         assert_eq!(total_hosting_requests(3), 4);
+    }
+
+    #[test]
+    fn next_page_detection_requires_the_next_relation() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let _ = headers.insert(
+            LINK,
+            reqwest::header::HeaderValue::from_static(r#"<https://example.invalid/final>; rel="last""#),
+        );
+        assert!(!has_next_page(&headers));
+
+        let _ = headers.insert(
+            LINK,
+            reqwest::header::HeaderValue::from_static(r#"<https://example.invalid/next>; rel="next""#),
+        );
+        assert!(has_next_page(&headers));
     }
 
     fn bug_patterns() -> BugLabelMatcher {
@@ -1974,7 +1998,11 @@ mod tests {
             buckets.push(1.0, timestamp, cutoffs);
             assert_eq!(
                 (buckets.days_90.len(), buckets.days_180.len(), buckets.days_365.len()),
-                (expected.0 as usize, expected.1 as usize, expected.2 as usize)
+                (
+                    usize::try_from(expected.0).expect("test count fits usize"),
+                    usize::try_from(expected.1).expect("test count fits usize"),
+                    usize::try_from(expected.2).expect("test count fits usize"),
+                )
             );
         }
     }

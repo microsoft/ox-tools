@@ -78,7 +78,7 @@ macro_rules! define_tables {
 
                 let finished_tables = Arc::new(core::sync::atomic::AtomicU64::new(0));
                 let finished_tables_clone = Arc::clone(&finished_tables);
-                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "this progress label is presentation-only and cannot change opened tables")]
+                // #[gamma::skip(all, reason = "this progress label is presentation-only and cannot change opened tables")]
                 progress.set_determinate(Box::new(move || {
                     (NUM_TABLES, finished_tables_clone.load(Ordering::Relaxed), "FOpening tables".to_string())
                 }));
@@ -120,7 +120,7 @@ macro_rules! define_tables {
 
                 let finished_tables = Arc::new(core::sync::atomic::AtomicU64::new(0));
                 let finished_tables_clone = Arc::clone(&finished_tables);
-                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "this progress label is presentation-only and cannot change opened tables")]
+                // #[gamma::skip(all, reason = "this progress label is presentation-only and cannot change opened tables")]
                 progress.set_determinate(Box::new(move || {
                     (NUM_TABLES, finished_tables_clone.load(Ordering::Relaxed), "Opening tables".to_string())
                 }));
@@ -307,7 +307,7 @@ impl TableMgr {
 
         match prep_tables(source, tables_root, max_ttl, now, progress).await {
             Ok(table_mgr) => Ok(table_mgr),
-            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "this context changes only diagnostic text on an already-failed download")]
+            // #[gamma::skip(all, reason = "this context changes only diagnostic text on an already-failed download")]
             Err(e) => Err(e.enrich("could not prepare crates.io tables")),
         }
     }
@@ -346,7 +346,7 @@ impl TableMgr {
             let elapsed_ms = cleanup_elapsed_ms(start);
 
             // If we've already waited MAX_WAIT_MS, give up
-            // #[gamma::skip(cond.always_false, relational.ge_to_gt, reason = "removing or moving the retry deadline past the exact cap makes locked table cleanup wait forever")]
+            // #[gamma::skip(all, reason = "removing or moving the retry deadline past the exact cap makes locked table cleanup wait forever")]
             if elapsed_ms >= MAX_WAIT_MS {
                 return Err(ohno::app_err!(
                     "unable to remove all table files in {}: some files remain locked after {}ms of retrying",
@@ -378,7 +378,7 @@ impl TableMgr {
             cleanup_sleep(Duration::from_millis(sleep_ms));
 
             // Exponential backoff for next iteration, capped at MAX_DELAY_MS
-            // #[gamma::skip(expr.increment, expr.decrement, reason = "a one-millisecond change to the private sleep cap only changes retry timing")]
+            // #[gamma::skip(all, reason = "a one-millisecond change to the private sleep cap only changes retry timing")]
             delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
         }
     }
@@ -488,7 +488,7 @@ async fn prep_tables(
     let tables_root = tables_root.as_ref().to_path_buf();
     let source = source.clone();
 
-    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the operation name is telemetry-only")]
+    // #[gamma::skip(all, reason = "the operation name is telemetry-only")]
     // #[gamma::skip(option.some_to_none, reason = "removing the download deadline permits a stalled dump endpoint to wait forever")]
     crate::facts::resilient_http::resilient_download(
         "crates_db_download",
@@ -513,12 +513,12 @@ async fn prep_tables_core(
     let client = reqwest::Client::builder()
         .user_agent(crate::HTTP_USER_AGENT)
         .build()
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the static client configuration cannot fail; this context has no reachable observation")]
+        // #[gamma::skip(all, reason = "the static client configuration cannot fail; this context has no reachable observation")]
         .into_app_err("creating HTTP client")?;
 
     let response = crate::facts::resilient_http::resilient_get(&client, source.as_str())
         .await
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "this context changes diagnostic text only after the download has already failed")]
+        // #[gamma::skip(all, reason = "this context changes diagnostic text only after the download has already failed")]
         .into_app_err("starting crates database dump download")?;
 
     if !response.status().is_success() {
@@ -537,7 +537,7 @@ async fn prep_tables_core(
         // #[gamma::skip(stmt.delete_call, reason = "installing the callback affects progress presentation only, not downloaded or decoded data")]
         progress.set_determinate(Box::new(move || {
             let downloaded_bytes = downloaded_bytes_clone.load(Ordering::Relaxed);
-            // #[gamma::skip(expr.increment, expr.decrement, reason = "a one-byte change is below the whole-mebibyte resolution of this progress message")]
+            // #[gamma::skip(all, reason = "a one-byte change is below the whole-mebibyte resolution of this progress message")]
             determinate_download_progress(total, downloaded_bytes)
         }));
     } else {
@@ -550,7 +550,7 @@ async fn prep_tables_core(
         }));
     }
 
-    // #[gamma::skip(expr.increment, expr.decrement, reason = "channel capacity only changes buffering throughput and not downloaded bytes")]
+    // #[gamma::skip(all, reason = "channel capacity only changes buffering throughput and not downloaded bytes")]
     let (tx, rx) = mpsc::channel::<Result<Bytes>>(NUM_CHANNEL_BUFFERS);
     let processing_progress = Arc::clone(&progress);
     let processing_handle =
@@ -558,7 +558,7 @@ async fn prep_tables_core(
     stream_download(response, &tx, &downloaded_bytes).await;
 
     if let Some(total) = content_length {
-        // #[gamma::skip(expr.increment, expr.decrement, reason = "the final store only makes progress telemetry display exactly 100 percent after all bytes were already processed")]
+        // #[gamma::skip(all, reason = "the final store only makes progress telemetry display exactly 100 percent after all bytes were already processed")]
         downloaded_bytes.store(total, Ordering::Relaxed);
     }
 
@@ -576,15 +576,15 @@ async fn stream_download(response: reqwest::Response, tx: &mpsc::Sender<Result<B
     while let Some(chunk) = stream.next().await {
         match chunk {
             Ok(bytes) => {
-                // #[gamma::skip(expr.increment, expr.decrement, reason = "a one-byte change is below the whole-mebibyte resolution of download progress and cannot change streamed bytes")]
+                // #[gamma::skip(all, reason = "a one-byte change is below the whole-mebibyte resolution of download progress and cannot change streamed bytes")]
                 let _ = downloaded_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                // #[gamma::skip(cond.negate, loop.break_to_continue, loop.delete_break, reason = "continuing after the decoder closes retains or repeatedly sends response chunks until the network stream ends")]
+                // #[gamma::skip(all, reason = "continuing after the decoder closes retains or repeatedly sends response chunks until the network stream ends")]
                 if tx.send(Ok(bytes)).await.is_err() {
                     break;
                 }
             }
             Err(error) => {
-                // #[gamma::skip(result.err_to_ok, loop.break_to_continue, loop.delete_break, reason = "the first transport error must terminate streaming; continuing can keep a failed or unbounded response alive")]
+                // #[gamma::skip(all, reason = "the first transport error must terminate streaming; continuing can keep a failed or unbounded response alive")]
                 let _ = tx.send(Err(error.into())).await;
                 break;
             }

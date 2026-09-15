@@ -20,6 +20,10 @@ use crate::Result;
 
 const LOG_TARGET: &str = "     cache";
 
+fn cache_entry_is_expired(age: Duration, ttl: Duration) -> bool {
+    age >= ttl
+}
+
 /// Result of loading an entry from the cache.
 #[derive(Debug, Clone)]
 pub enum CacheResult<T> {
@@ -106,12 +110,13 @@ impl Cache {
 
         // Handle future timestamps (clock skew) — treat as fresh data
         let age = Utc::now().signed_duration_since(envelope.timestamp);
+        // #[gamma::skip(relational.lt_to_le, reason = "an exactly current timestamp changes only whether the cache-hit or clock-skew debug message is emitted")]
         if age < chrono::Duration::zero() {
             log::debug!(target: LOG_TARGET, "Cache timestamp is in the future for {filename} (clock skew detected), treating as fresh");
         } else {
             let age_duration = age.to_std().unwrap_or(Duration::MAX);
 
-            if age_duration >= self.ttl {
+            if cache_entry_is_expired(age_duration, self.ttl) {
                 log::debug!(
                     target: LOG_TARGET,
                     "Cache expired for {filename} (age: {:.1} days, TTL: {:.1} days)",
@@ -185,6 +190,13 @@ mod tests {
 
     fn make_cache(dir: &Path, ttl_secs: u64) -> Cache {
         Cache::new(dir, Duration::from_secs(ttl_secs), false)
+    }
+
+    #[test]
+    fn cache_expiry_includes_the_exact_ttl_boundary() {
+        let ttl = Duration::from_mins(1);
+        assert!(!cache_entry_is_expired(Duration::from_secs(59), ttl));
+        assert!(cache_entry_is_expired(ttl, ttl));
     }
 
     #[test]

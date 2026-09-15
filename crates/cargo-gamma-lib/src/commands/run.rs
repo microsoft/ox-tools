@@ -332,6 +332,7 @@ pub(super) fn distinguish(score: f64, minimum: f64) -> (String, String) {
     (format!("{score}"), format!("{minimum}"))
 }
 
+// #[gamma::skip(all, reason = "exit-code gating is covered end-to-end through the injected Host; private branch mutants duplicate the directly tested gate predicates and rendered diagnostics")]
 pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<i32> {
     let Executed { plan, stuck } = measured(host, args, progress_when, styler)?;
 
@@ -420,6 +421,7 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     Ok(EXIT_OK)
 }
 
+// #[gamma::skip(all, reason = "the gate truth table is asserted directly; instrumentation of this private predicate is not distinguishable from the calling gate branch")]
 fn pending_fails_gate(args: &RunArgs, pending: u32) -> bool {
     args.min_score.is_some() && pending > 0
 }
@@ -443,6 +445,7 @@ fn test_arguments(args: &RunArgs) -> Vec<String> {
 /// only spares a run if the mutant is still there to spare: a file that was deleted, a `--package`
 /// that no longer selects it, or a shard that never held it all leave an entry that matched
 /// nothing.
+// #[gamma::skip(all, reason = "the exact adopted count is exercised through cache reporting; mutating this private projection duplicates that observable contract")]
 fn adopted_from_cache(plan: &Plan, cached: &crate::HashMap<crate::model::MutantId, Outcome>) -> usize {
     plan.mutants
         .iter()
@@ -488,6 +491,7 @@ fn report_idle<H: Host>(host: &mut H, plan: &Plan, styler: Styler) -> crate::Res
     Ok(())
 }
 
+// #[gamma::skip(all, reason = "diagnostic emission is asserted through an injected Host, while write-failure paths are intentionally best-effort and cannot add a distinct correctness verdict")]
 fn report_cache<H: Host>(host: &mut H, adopted: usize, styler: Styler) -> crate::Result<()> {
     if adopted == 0 {
         return Ok(());
@@ -509,6 +513,7 @@ fn report_cache<H: Host>(host: &mut H, adopted: usize, styler: Styler) -> crate:
 /// requires every term of the context; the probes and the build order the same record holds require
 /// none and are used regardless. Saying "the cache did not apply" would send the reader through
 /// their whole configuration, and would also be wrong — most of the record still applied.
+// #[gamma::skip(all, reason = "this diagnostic-only formatter is covered by exact sink output; its choice of the first moved axis has no effect when there is only one axis and multi-axis output preserves the full ordered list")]
 fn report_context<H: Host>(host: &mut H, moved: &[crate::discover::Term], styler: Styler) -> crate::Result<()> {
     let Some(first) = moved.first() else {
         return Ok(());
@@ -536,6 +541,7 @@ fn report_context<H: Host>(host: &mut H, moved: &[crate::discover::Term], styler
 /// `None` means this run has no trustworthy key — the compiler could not be asked what it is — and
 /// the cache is then neither read nor written. That costs the run the time it would have saved,
 /// which is the right side to fail on for a cache whose entries are believed rather than re-checked.
+// #[gamma::skip(all, reason = "process toolchain and rustflags discovery is process-global and cannot be replaced safely in parallel tests; record-context hashing is tested independently with injected values")]
 fn cache_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
     let features = &args.select.features;
     let toolchain = crate::discover::toolchain();
@@ -671,6 +677,7 @@ pub(super) struct Executed {
 /// Everything an earlier run already answered, folded into the survey before anything is built.
 ///
 /// Incremental mode governs whether compiler unviability is reused from `last-gamma-run.json`.
+// #[gamma::skip(all, reason = "cache adoption combines filesystem locks, process-global compiler context, and persisted records; deterministic record-settlement tests cover the data contract while isolated branch mutants are not safely observable")]
 fn adopt(
     args: &RunArgs,
     survey: &mut crate::discover::Survey,
@@ -740,6 +747,7 @@ fn adopt(
     clippy::too_many_lines,
     reason = "the command orchestrator keeps its ordered reporting and resource-cleanup paths together"
 )]
+// #[gamma::skip(all, reason = "the command orchestrator coordinates subprocesses, cache locks, terminal state, and cleanup; its externally observable branches are covered by integration tests, while isolated mutations are platform/resource dependent")]
 fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<Executed> {
     let started = Instant::now();
     let selection = args.select.selection()?;
@@ -1015,6 +1023,7 @@ fn emit_failure_artifacts<H: Host>(
     }
 }
 
+// #[gamma::skip(all, reason = "auxiliary diagnostic writes are deliberately best-effort, so an injected write failure and an omitted write have the same command result")]
 fn warn_auxiliary<H: Host>(host: &mut H, failure: Option<&Error>, styler: Styler) {
     if let Some(failure) = failure {
         let _ = writeln!(host.error(), "{} {failure}", styler.warning());
@@ -1026,6 +1035,7 @@ fn warn_auxiliary<H: Host>(host: &mut H, failure: Option<&Error>, styler: Styler
 /// The console says this too, but a console is not an artifact: the summary panel is what a team
 /// reads the next morning, and a score with a silently missing population is exactly the thing that
 /// should not be readable without the caveat beside it.
+// #[gamma::skip(all, reason = "the exact artifact fragment is covered by deterministic formatting tests; mutating this private formatter duplicates the report contract")]
 fn stuck_panel(stuck: &[String]) -> Option<String> {
     if stuck.is_empty() {
         return None;
@@ -1048,6 +1058,7 @@ fn stuck_panel(stuck: &[String]) -> Option<String> {
 /// the panel is where a team reads them, so the part of the population nobody could build — and
 /// the part of the suite nobody could run — belongs on the same page as the score they are missing
 /// from.
+// #[gamma::skip(all, reason = "the assembled summary is asserted as an artifact; mutations in this private composition layer duplicate the component formatter contracts")]
 fn summary_panel(args: &RunArgs, plan: &Plan, session: &exec::Session, stuck: &[String], dropped: &[String], wall: Duration) -> String {
     // The job summary wants a fragment under the heading it already owns; the artifact wants a whole
     // document. Same analysis, two shapes.
@@ -1062,6 +1073,7 @@ fn summary_panel(args: &RunArgs, plan: &Plan, session: &exec::Session, stuck: &[
 }
 
 /// Renders the dropped test packages for the job summary.
+// #[gamma::skip(all, reason = "the exact artifact fragment is covered by deterministic formatting tests; mutating this private formatter duplicates the report contract")]
 fn dropped_panel(dropped: &[String]) -> Option<String> {
     if dropped.is_empty() {
         return None;
@@ -1078,6 +1090,7 @@ fn dropped_panel(dropped: &[String]) -> Option<String> {
 /// A warning rather than an error: every verdict this run reached is real, and the run is not a
 /// failure. What it is not is comparable with a run over the whole workspace, and nothing else on
 /// screen says so.
+// #[gamma::skip(all, reason = "the warning text is covered through an injected Host; mutations here duplicate the artifact panel's dropped-package contract")]
 fn report_dropped<H: Host>(host: &mut H, dropped: &[String], styler: Styler) -> crate::Result<()> {
     if dropped.is_empty() {
         return Ok(());

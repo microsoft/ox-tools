@@ -6,7 +6,7 @@ use core::num::NonZeroUsize;
 #[cfg(any(test, feature = "internals"))]
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicBool, Ordering};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, TryLockError};
 use std::io::{Read as _, Write as _};
 #[cfg(unix)]
@@ -83,6 +83,12 @@ pub struct Workspace {
     /// Where the vendored guard runtime lives, so that a package can be linked to it at the moment
     /// its own mutants are known rather than all of them up front.
     runtime: Utf8PathBuf,
+
+    /// Compiler invocations retained across every Cargo command in one build sequence.
+    rustc_captures: Option<Utf8PathBuf>,
+
+    /// Whether the current build sequence started with an empty capture generation.
+    rustc_captures_ready: AtomicBool,
 
     /// Whether the tree survives the run for inspection.
     pub(super) leak: bool,
@@ -283,12 +289,15 @@ impl Workspace {
 
         let libraries = toolchain_libraries(&root, &target);
 
+        let rustc_captures = rustc_capture_directory(&root, &target);
         let workspace = Self {
             root,
             target,
             libraries,
             cargo: config.cargo.clone(),
             runtime,
+            rustc_captures,
+            rustc_captures_ready: AtomicBool::new(false),
             leak: config.leak_dirs,
             settled: AtomicBool::new(false),
             nextest: None,
@@ -407,6 +416,8 @@ impl Workspace {
             runtime: root.join("gamma-rt"),
             root,
             target,
+            rustc_captures: None,
+            rustc_captures_ready: AtomicBool::new(false),
             libraries: Vec::new(),
             cargo: CargoOptions::default(),
             nextest: None,
@@ -448,14 +459,14 @@ impl Workspace {
         // user debugging a mutant by hand may export it.
         let _ = command.env_remove(gamma_rt::ACTIVE_VAR);
 
-        if let Some(wrapper) = wrapper_path()
-            && let Some(original) = cfg::rustc_wrapper_chain(&self.root)
+        if self.rustc_captures_ready.load(Ordering::Acquire)
+            && let Some(captures) = &self.rustc_captures
+            && let Some(wrapper) = wrapper_path()
+            && let cfg::RustcWrapperChain::Interpose(original) = cfg::rustc_wrapper_chain(&self.root)
         {
-            let captures = self.target.join(".cargo-gamma-rustc");
-            reset_capture_directory(&captures);
             let _ = command.env(CAPTURE_DIR_VAR, captures.as_std_path());
 
-            if let Some(original) = original {
+            if let Some(original) = original.filter(|candidate| !wrapper_is_self(candidate, &wrapper, &self.root)) {
                 let _ = command.env(ORIGINAL_WRAPPER_VAR, original);
             } else {
                 let _ = command.env_remove(ORIGINAL_WRAPPER_VAR);
@@ -469,10 +480,16 @@ impl Workspace {
 
     /// The persistent compiler-capture directory, only when this process can populate it.
     pub(super) fn rustc_captures(&self) -> Option<Utf8PathBuf> {
-        wrapper_path()?;
-        cfg::rustc_wrapper_chain(&self.root)?;
+        self.rustc_captures_ready
+            .load(Ordering::Acquire)
+            .then(|| self.rustc_captures.clone())
+            .flatten()
+    }
 
-        Some(self.target.join(".cargo-gamma-rustc"))
+    /// Starts one build sequence without captures left by an earlier run.
+    pub(super) fn begin_build_sequence(&self) {
+        let ready = self.rustc_captures.as_deref().is_some_and(reset_capture_directory);
+        self.rustc_captures_ready.store(ready, Ordering::Release);
     }
 
     /// Propagates the self-test cache boundary to Cargo, test binaries, and nested Gamma commands.
@@ -660,6 +677,47 @@ impl Workspace {
     }
 }
 
+fn rustc_capture_directory(root: &Utf8Path, target: &Utf8Path) -> Option<Utf8PathBuf> {
+    wrapper_path()?;
+    let cfg::RustcWrapperChain::Interpose(_) = cfg::rustc_wrapper_chain(root) else {
+        return None;
+    };
+
+    Some(target.join(".cargo-gamma-rustc"))
+}
+
+fn wrapper_is_self(candidate: &OsStr, wrapper: &Utf8Path, root: &Utf8Path) -> bool {
+    let candidate = std::path::Path::new(candidate);
+
+    if candidate.components().count() == 1
+        && candidate
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .zip(wrapper.file_stem())
+            .is_some_and(|(candidate, wrapper)| executable_names_equal(candidate, wrapper))
+    {
+        return true;
+    }
+
+    let candidate = if candidate.is_absolute() {
+        candidate.to_owned()
+    } else {
+        root.as_std_path().join(candidate)
+    };
+    fs::canonicalize(candidate)
+        .ok()
+        .zip(fs::canonicalize(wrapper.as_std_path()).ok())
+        .is_some_and(|(candidate, wrapper)| candidate == wrapper)
+}
+
+fn executable_names_equal(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
 /// What running a command produced, reduced to the three things [`interpret`] judges it on.
 ///
 /// A [`std::process::Output`] carries an `ExitStatus`, which a test cannot construct without
@@ -824,6 +882,7 @@ fn absolute_cache_home(path: OsString) -> Option<Utf8PathBuf> {
 /// Shortened because this is a directory name a user reads and occasionally types. A collision is
 /// caught rather than trusted: the owner marker records the root that owns the directory, and a
 /// second root landing on the same name is refused instead of quietly sharing the tree.
+// #[gamma::skip(all, reason = "the value comes from host identity or topology and cannot be replaced safely or deterministically in parallel tests")]
 fn workspace_identity(root: &Utf8Path) -> String {
     let root = physical(root);
     digest_workspace_path(&root)
@@ -903,6 +962,7 @@ fn remove_cached(entry: &fs::DirEntry) -> Result<()> {
 /// Purely textual, so it never touches the filesystem and never fails: the paths it is given are
 /// scratch directories that do not exist yet, which is exactly when canonicalising cannot answer.
 pub(crate) fn absolute(path: &Utf8Path) -> Utf8PathBuf {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     let rooted = if path.is_absolute() {
         path.to_owned()
     } else {
@@ -1741,7 +1801,6 @@ fn vendor_runtime(at: &Utf8Path) -> Result<()> {
 #[cfg(not(miri))]
 mod tests {
     use std::collections::BTreeMap;
-    use std::ffi::OsStr;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt as _, symlink};
     #[cfg(windows)]
@@ -1908,6 +1967,65 @@ mod tests {
             .find(|(name, _value)| *name == "CARGO_TERM_COLOR")
             .and_then(|(_name, value)| value);
         assert_eq!(color, Some(OsStr::new("never")));
+    }
+
+    #[test]
+    fn build_sequence_retains_rustc_captures_across_cargo_commands() {
+        let directory = crate::testing::workdir("workspace-captures-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("root")).expect("UTF-8 root");
+        let target = Utf8PathBuf::from_path_buf(directory.path().join("target")).expect("UTF-8 target");
+        fs::create_dir_all(&root).expect("root");
+        let mut work = Workspace::adopt(root, target.clone());
+        let captures = target.join(".cargo-gamma-rustc");
+        work.rustc_captures = Some(captures.clone());
+
+        fs::create_dir_all(&captures).expect("capture directory");
+        fs::write(captures.join("stale.json"), b"stale").expect("stale capture");
+        work.begin_build_sequence();
+        assert!(!captures.join("stale.json").exists(), "a new sequence clears old captures");
+
+        fs::write(captures.join("preflight.json"), b"preflight").expect("preflight capture");
+        drop(work.cargo());
+        fs::write(captures.join("stage.json"), b"stage").expect("stage capture");
+        drop(work.cargo());
+
+        assert!(
+            captures.join("preflight.json").exists(),
+            "later cargo commands retain preflight captures"
+        );
+        assert!(captures.join("stage.json").exists(), "later cargo commands retain staged captures");
+    }
+
+    #[test]
+    fn a_self_referential_outer_rustc_wrapper_is_not_chained() {
+        let directory = crate::testing::workdir("workspace-wrapper-self-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("root")).expect("UTF-8 root");
+        let wrapper = root.join(format!("cargo-gamma{}", std::env::consts::EXE_SUFFIX));
+        let other = root.join(format!("sccache{}", std::env::consts::EXE_SUFFIX));
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&wrapper, b"wrapper").expect("wrapper");
+        fs::write(&other, b"other wrapper").expect("other wrapper");
+
+        assert!(wrapper_is_self(OsStr::new("cargo-gamma"), &wrapper, &root));
+        assert!(wrapper_is_self(wrapper.as_os_str(), &wrapper, &root));
+        assert!(!wrapper_is_self(other.as_os_str(), &wrapper, &root));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_alias_to_this_rustc_wrapper_is_not_chained() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let directory = crate::testing::workdir("workspace-wrapper-non-utf8-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("root")).expect("UTF-8 root");
+        let wrapper = root.join("cargo-gamma");
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&wrapper, b"wrapper").expect("wrapper");
+
+        let alias = OsString::from_vec(b"wrapper-\xff".to_vec());
+        std::os::unix::fs::symlink(wrapper.as_std_path(), root.as_std_path().join(&alias)).expect("non-UTF-8 wrapper alias");
+
+        assert!(wrapper_is_self(&alias, &wrapper, &root));
     }
 
     #[test]
@@ -2799,6 +2917,8 @@ mod tests {
             root: root.to_owned(),
             runtime: base.join("rt"),
             target: target.to_owned(),
+            rustc_captures: None,
+            rustc_captures_ready: AtomicBool::new(false),
             libraries: Vec::new(),
             cargo: CargoOptions::default(),
             nextest: None,
@@ -3094,6 +3214,8 @@ mod tests {
             root,
             runtime,
             target: Utf8PathBuf::from("/scratch/build"),
+            rustc_captures: None,
+            rustc_captures_ready: AtomicBool::new(false),
             libraries: Vec::new(),
             cargo: CargoOptions::default(),
             nextest: None,
@@ -3116,6 +3238,8 @@ mod tests {
             root: Utf8PathBuf::from("/tmp/gamma-root"),
             runtime: Utf8PathBuf::from("/tmp/gamma-rt"),
             target: Utf8PathBuf::from("/tmp/gamma-target"),
+            rustc_captures: None,
+            rustc_captures_ready: AtomicBool::new(false),
             libraries: Vec::new(),
             cargo: CargoOptions::default(),
             nextest: None,

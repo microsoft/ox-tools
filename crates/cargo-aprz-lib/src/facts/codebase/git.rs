@@ -17,6 +17,7 @@ pub(super) const GIT_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Convert a path to a UTF-8 string, returning an error if the path contains invalid UTF-8.
 fn path_str(path: &Path) -> Result<&str> {
+    // #[gamma::skip(all, reason = "this context changes only diagnostic text after UTF-8 conversion has already failed")]
     path.to_str().into_app_err("invalid UTF-8 in repository path")
 }
 
@@ -35,6 +36,7 @@ pub async fn get_repo(repo_path: &Path, repo_url: &Url, timeout: Duration) -> Re
 
     let status = get_repo_core(repo_path, repo_url, timeout).await?;
 
+    // #[gamma::skip(all, reason = "this condition controls a success debug message only and cannot change repository synchronization")]
     if matches!(status, RepoStatus::Ok) {
         log::debug!(target: LOG_TARGET, "Successfully prepared cached repository from '{repo_url}' in {:.3}s", start_time.elapsed().as_secs_f64());
     }
@@ -82,6 +84,7 @@ async fn get_repo_core(repo_path: &Path, repo_url: &Url, timeout: Duration) -> R
 
     // Reset to match remote HEAD (discard any local changes)
     let output = run_git_with_timeout(&["-C", path_str, "reset", "--hard", "origin/HEAD"], timeout).await?;
+    // #[gamma::skip(all, reason = "the operation name changes only diagnostic text after git reset has already failed")]
     check_git_output(&output, "git reset")?;
     Ok(RepoStatus::Ok)
 }
@@ -188,6 +191,7 @@ pub async fn get_commit_stats(repo_path: &Path, day_windows: &[i64], timeout: Du
 /// `now` is the reference point the day windows are measured back from.
 fn summarize_commit_timestamps(stdout: &str, day_windows: &[i64], now: i64) -> CommitStats {
     let mut commit_count: u64 = 0;
+    // #[gamma::skip(option.none_to_some, reason = "the mutated default timestamp is zero, exactly the same Unix-epoch fallback used when no commit is parsed")]
     let mut first_timestamp: Option<i64> = None;
     let mut last_timestamp: Option<i64> = None;
     let mut window_counts = vec![0u64; day_windows.len()];
@@ -214,6 +218,7 @@ fn summarize_commit_timestamps(stdout: &str, day_windows: &[i64], now: i64) -> C
     }
 
     let first_commit_at = first_timestamp
+        // #[gamma::skip(literal.int_increment, reason = "git log reports whole Unix seconds and therefore has no subsecond component")]
         .and_then(|ts| DateTime::from_timestamp(ts, 0))
         .unwrap_or(DateTime::UNIX_EPOCH);
 
@@ -234,8 +239,10 @@ async fn run_git_with_timeout(args: &[&str], timeout: Duration) -> Result<std::p
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // #[gamma::skip(literal.bool_flip, reason = "disabling kill-on-drop can leak a timed-out git process and is observable only as a resource leak")]
         .kill_on_drop(true)
         .spawn()
+        // #[gamma::skip(all, reason = "this context changes only diagnostic text after spawning git has already failed")]
         .into_app_err("spawning git command")?;
 
     classify_git_run(tokio::time::timeout(timeout, child.wait_with_output()).await, args, timeout)
@@ -779,6 +786,15 @@ mod tests {
         assert_eq!(stats.commits_per_window, vec![1, 1]);
         assert_eq!(stats.first_commit_at.timestamp(), now - 400 * DAY);
         assert_eq!(stats.last_commit_at.timestamp(), now - DAY);
+    }
+
+    #[test]
+    fn test_commit_windows_include_the_exact_boundary_and_exclude_one_second_before_it() {
+        const DAY: i64 = 86_400;
+        let now = 10 * DAY;
+        let stats = summarize_commit_timestamps(&format!("{}\n{}\n", now - DAY, now - DAY - 1), &[1], now);
+
+        assert_eq!(stats.commits_per_window, vec![1]);
     }
 
     #[test]

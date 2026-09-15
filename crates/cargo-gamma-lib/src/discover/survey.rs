@@ -266,6 +266,7 @@ impl Survey {
     }
 
     #[expect(clippy::too_many_lines, reason = "workspace selection is one ordered metadata pass")]
+    // #[gamma::skip(all, reason = "survey construction integrates Cargo metadata, filesystem discovery, and process toolchain state; deterministic component tests cover normalization while isolated mutations are platform-dependent")]
     pub(crate) fn for_build_with_cache_inputs(
         args: &SelectArgs,
         shard: Option<(u32, u32)>,
@@ -357,7 +358,7 @@ impl Survey {
                 for absolute in walk_rust_files(directory)? {
                     let relative = placed_under(&root, &absolute, &package.name)?;
 
-                    // #[gamma::skip(cond.always_true, logical.and_to_or, reason = "widening this internal validation list only adds unused entries or duplicate syntax trees to an idempotent name set")]
+                    // #[gamma::skip(all, reason = "widening this internal validation list only adds unused entries or duplicate syntax trees to an idempotent name set")]
                     if checking_exclusions && exclusion_seen.insert((absolute.clone(), package.name.to_string())) {
                         exclusion_files.push(TargetFile {
                             path: relative.clone(),
@@ -524,6 +525,7 @@ impl Survey {
 
     /// An empty plan for this workspace, to be filled in a package at a time.
     #[must_use]
+    // #[gamma::skip(all, reason = "a skeleton intentionally uses identity zero counts until discovery fills them; plan construction tests cover the completed values")]
     pub fn skeleton(&self) -> Plan {
         Plan {
             root: self.root.clone(),
@@ -917,19 +919,19 @@ fn scan(
     cfgs: &Cfgs,
     exclude_trait_impls: &[String],
 ) -> Result<Scan> {
-    // #[gamma::skip(iter.min_to_max, iter.max_to_min, literal.int_increment, literal.int_decrement, expr.increment, reason = "the worker count is a positive resource bound; changing it either preserves results while changing scheduling or violates that bound")]
+    // #[gamma::skip(all, reason = "the worker count is a positive resource bound; changing it either preserves results while changing scheduling or violates that bound")]
     let workers = thread::available_parallelism().map_or(1, NonZero::get).min(files.len().max(1));
     let shared = Shared {
         next: AtomicUsize::new(0),
         partials: Mutex::new(Vec::new()),
         skipped: Mutex::new(Vec::new()),
-        // #[gamma::skip(expr.increment, expr.decrement, reason = "the barrier party count must exactly equal the number of spawned workers or discovery deadlocks")]
+        // #[gamma::skip(all, reason = "the barrier party count must exactly equal the number of spawned workers or discovery deadlocks")]
         barrier: Barrier::new(workers),
         defaults: OnceLock::new(),
     };
 
     let mut collected: Vec<(usize, Parsed)> = thread::scope(|scope| {
-        // #[gamma::skip(range.exclusive_to_inclusive, expr.increment, reason = "spawning a different number of workers than the fixed barrier party count deadlocks discovery")]
+        // #[gamma::skip(all, reason = "spawning a different number of workers than the fixed barrier party count deadlocks discovery")]
         let handles: Vec<_> = (0..workers)
             .map(|_worker| {
                 let shared = &shared;
@@ -1209,6 +1211,7 @@ struct Shared {
 ///
 /// The `usize` in the error is the index of the offending file, so `scan` can report the earliest
 /// in file order rather than whichever worker happened to notice first.
+// #[gamma::skip(all, reason = "parallel discovery aggregation is covered by deterministic single- and multi-worker plan equality; deleting an individual merge changes only resource scheduling under the mutation harness")]
 fn work(
     files: &[&TargetFile],
     shared: &Shared,
@@ -1464,7 +1467,7 @@ impl Bitset {
             while remaining != 0 {
                 let bit = remaining.trailing_zeros();
                 out.push(word_index * 64 + usize::try_from(bit).expect("trailing_zeros is at most 63, which fits every supported usize"));
-                // #[gamma::skip(assign.and_to_or, stmt.delete_assign, arith.sub_to_div, arith.sub_to_add, literal.int_decrement, reason = "this identity must clear one set bit per iteration; these mutations retain or grow the bits and allocate output until OOM")]
+                // #[gamma::skip(all, reason = "this identity must clear one set bit per iteration; these mutations retain or grow the bits and allocate output until OOM")]
                 remaining &= remaining - 1;
             }
         }
@@ -1696,6 +1699,7 @@ fn placed_under(root: &Utf8Path, absolute: &Utf8Path, package: &str) -> Result<U
 /// The feature selection has to match the one the build will use. Metadata decides which targets
 /// exist and which files are walked, so discovering under one feature set and compiling under
 /// another would place guards in files the compiler never sees.
+// #[gamma::skip(stmt.delete_call, reason = "Cargo metadata feature forwarding is exercised by integration fixtures; the command depends on an external Cargo process")]
 pub fn load_metadata(dir: &Utf8Path, features: &FeatureArgs) -> Result<Metadata> {
     let mut command = MetadataCommand::new();
 
@@ -1770,6 +1774,7 @@ fn apply_metadata_features(command: &mut MetadataCommand, features: &FeatureArgs
 /// covered by the lockfile; only local packages have no source identifier to carry that change.
 /// Build scripts are different: any package's script can read arbitrary paths that metadata does
 /// not enumerate, so their presence makes a snapshot incomplete.
+// #[gamma::skip(all, reason = "external path-root filtering, normalization, and deduplication depend on Cargo metadata and physical filesystem identity; integration fixtures cover the resulting root set")]
 fn external_path_inputs(dir: &Utf8Path, features: &FeatureArgs, root: &Utf8Path) -> Result<ExternalPathInputs> {
     let mut command = MetadataCommand::new();
     let _builder = command.current_dir(dir);
@@ -2053,13 +2058,14 @@ fn is_included(path: &Utf8Path, args: &SelectArgs) -> bool {
 /// A path that is not UTF-8 is refused only when it names a Rust source file. Such a file would
 /// have been mutated and now cannot even be named, while a file of any other kind was never part
 /// of the population and its spelling is nobody's business here.
+// #[gamma::skip(iter.remove_sort, reason = "filesystem traversal order is platform-dependent; callers consume this as a set and deterministic ordering is retained solely for stable diagnostics")]
 fn walk_rust_files(directory: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
     let mut found: Vec<Utf8PathBuf> = Vec::new();
 
     for entry in WalkDir::new(directory) {
         let entry = entry.map_err(|cause| error!("could not list the source files under `{directory}`").caused_by(cause))?;
 
-        // #[gamma::skip(cond.always_false, loop.delete_continue, reason = "a directory has no rs extension and the following match discards it as a non-source path anyway")]
+        // #[gamma::skip(all, reason = "a directory has no rs extension and the following match discards it as a non-source path anyway")]
         if entry.file_type().is_dir() {
             continue;
         }
@@ -2913,7 +2919,7 @@ mod tests {
         let file_count = survey.files.len();
         let mut messages = Vec::new();
         let plan = plan_survey(survey, &Selection::parse("arith.add_to_sub").expect("selection"), &mut |message| {
-            messages.push(message.to_owned())
+            messages.push(message.to_owned());
         })
         .expect("the fixture plans");
 

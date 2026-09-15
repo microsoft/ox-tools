@@ -93,6 +93,7 @@ struct PhaseOne<'cfg> {
 impl<'ast> Visit<'ast> for PhaseOne<'_> {
     fn visit_attribute(&mut self, node: &'ast Attribute) {
         self.audit.on_attribute(node);
+        // #[gamma::skip(stmt.delete_call, reason = "syn attributes contain an opaque token stream and no recursively visitable Rust nodes, so this continuation has no observable work")]
         visit::visit_attribute(self, node);
     }
 
@@ -186,6 +187,7 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
 
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
         self.walk.on_item_use(node);
+        // #[gamma::skip(stmt.delete_call, reason = "a use tree contains no expressions, attributes, function items, or declarations consumed by either fused visitor")]
         visit::visit_item_use(self, node);
     }
 
@@ -290,7 +292,7 @@ mod tests {
 
     #[test]
     fn every_gate_excludes_invalid_stated_values_in_inactive_code() {
-        let source = r#"
+        let source = r"
             #[cfg(any())]
             #[gamma::value(0, 1)]
             fn item() {}
@@ -325,7 +327,7 @@ mod tests {
                     _ => 0,
                 };
             }
-        "#;
+        ";
 
         run_source(source, "all", &CfgSet::parse("unix")).expect("attributes on every inactive syntax level are ignored");
     }
@@ -369,6 +371,40 @@ mod tests {
                 run_source(source, "all", &CfgSet::unconditional()).is_err(),
                 "the active nested attribute must be audited: {source}"
             );
+        }
+    }
+
+    #[test]
+    fn recursive_visits_reach_expressions_inside_every_declaration_kind() {
+        let indexes = run_source(
+            r"
+            struct Buffer([u8; width - 1]);
+            const LIMIT: usize = left - right;
+            static FLOOR: usize = low - high;
+            trait T {
+                const STEP: usize = trait_left - trait_right;
+            }
+            impl T for Buffer {
+                const STEP: usize = impl_left - impl_right;
+            }
+            ",
+            "expr.increment",
+            &CfgSet::unconditional(),
+        )
+        .expect("the fixture has no stated-value fault");
+
+        for expected in [
+            "width",
+            "left",
+            "right",
+            "low",
+            "high",
+            "trait_left",
+            "trait_right",
+            "impl_left",
+            "impl_right",
+        ] {
+            assert!(indexes.numeric_uses.names.contains(expected), "{expected}");
         }
     }
 }

@@ -231,3 +231,30 @@ pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>) -> (V
 
     (unused, stale)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn inherited_preserves_every_manifest_input() {
+        let tmp = TempDir::new().expect("temp directory");
+        let first = tmp.path().join("first.toml");
+        let second = tmp.path().join("second.toml");
+        fs::write(&first, "[dependencies]\nserde = { workspace = true }\n").expect("first manifest");
+        fs::write(&second, "[dev-dependencies]\ntempfile.workspace = true\n").expect("second manifest");
+
+        let inheritance = inherited(&[first.clone(), second.clone()]).expect("collect inheritance");
+
+        assert_eq!(inheritance.keys, BTreeSet::from(["serde".to_owned(), "tempfile".to_owned()]));
+        assert_eq!(inheritance.inputs.len(), 2);
+        assert_eq!(inheritance.inputs[0].path, first);
+        assert!(inheritance.inputs[0].contents.contains("serde"));
+        assert_eq!(inheritance.inputs[1].path, second);
+        assert!(inheritance.inputs[1].contents.contains("tempfile"));
+    }
+}

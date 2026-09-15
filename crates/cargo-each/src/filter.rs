@@ -601,11 +601,30 @@ mod tests {
 
     #[test]
     fn rejects_unknown_and_empty() {
-        Predicate::parse("nonsense").expect_err("unknown predicate must error");
-        Predicate::parse("dep:").expect_err("empty dependency name must error");
-        Predicate::parse("feature:").expect_err("empty feature name must error");
-        Predicate::parse("target-kind:no-such-kind").expect_err("unknown target kind must error");
-        Predicate::parse("metadata:").expect_err("empty metadata key must error");
+        assert_eq!(
+            Predicate::parse("nonsense").expect_err("unknown predicate must error").to_string(),
+            "invalid filter expression `nonsense`: expected one of: lib, bin, target-kind:<kind>, publishable, feature:<name>, dep:<name>, metadata:<key>[=<value>]"
+        );
+        assert_eq!(
+            Predicate::parse("dep:").expect_err("empty dependency name must error").to_string(),
+            "invalid filter expression `dep:`: empty dependency name"
+        );
+        assert_eq!(
+            Predicate::parse("feature:").expect_err("empty feature name must error").to_string(),
+            "invalid filter expression `feature:`: empty feature name"
+        );
+        assert_eq!(
+            Predicate::parse("target-kind:no-such-kind")
+                .expect_err("unknown target kind must error")
+                .to_string(),
+            "invalid filter expression `target-kind:no-such-kind`: unknown target kind; expected one of: lib, rlib, dylib, cdylib, staticlib, proc-macro, bin, example, test, bench, custom-build"
+        );
+        assert_eq!(
+            Predicate::parse("metadata:")
+                .expect_err("empty metadata key must error")
+                .to_string(),
+            "invalid filter expression `metadata:`: empty metadata key"
+        );
     }
 
     #[test]
@@ -614,7 +633,7 @@ mod tests {
         // a loud usage error rather than a silent empty result.
         assert_eq!(
             Predicate::parse("metadata:a..b").expect_err("double dot must error").to_string(),
-            "invalid filter predicate `metadata:a..b`: metadata key must be a dotted path with non-empty segments"
+            "invalid filter expression `metadata:a..b`: metadata key must be a dotted path with non-empty segments"
         );
         Predicate::parse("metadata:.role").expect_err("leading dot must error");
         Predicate::parse("metadata:role.").expect_err("trailing dot must error");
@@ -728,5 +747,65 @@ mod tests {
     #[test]
     fn rejects_empty_metadata_key_before_equals() {
         Predicate::parse("metadata:=value").expect_err("empty key with value must error");
+    }
+
+    #[test]
+    fn malformed_metadata_values_report_the_precise_fault() {
+        assert_eq!(
+            Predicate::parse(r#"metadata:role=value"quoted""#)
+                .expect_err("quotes around only a suffix must error")
+                .to_string(),
+            r#"invalid filter expression `metadata:role=value"quoted"`: double quotes must surround the complete metadata value"#
+        );
+        assert_eq!(
+            Predicate::parse(r#"metadata:role="value"#)
+                .expect_err("an unclosed quoted value must error")
+                .to_string(),
+            r#"invalid filter expression `metadata:role="value`: unclosed double quote"#
+        );
+        assert_eq!(
+            parse_metadata_value("metadata:role", "\"value")
+                .expect_err("a directly parsed quoted value still needs a closer")
+                .to_string(),
+            "invalid filter expression `metadata:role`: unclosed double-quoted metadata value"
+        );
+        assert_eq!(
+            parse_metadata_value("metadata:role", r#""trailing\""#)
+                .expect_err("a trailing escape must error")
+                .to_string(),
+            "invalid filter expression `metadata:role`: trailing `\\` in metadata value"
+        );
+    }
+
+    #[test]
+    fn parser_end_conditions_report_the_precise_fault() {
+        assert_eq!(
+            Predicate::parse("").expect_err("empty expression must error").to_string(),
+            "invalid filter expression ``: empty expression"
+        );
+        assert_eq!(
+            Predicate::parse("(lib").expect_err("unclosed group must error").to_string(),
+            "invalid filter expression `(lib`: unclosed `(`"
+        );
+        assert_eq!(
+            Predicate::parse("lib and")
+                .expect_err("missing right operand must error")
+                .to_string(),
+            "invalid filter expression `lib and`: unexpected end of expression; expected a predicate, `not`, or `(`"
+        );
+    }
+
+    #[test]
+    fn tokenizer_tracks_quotes_escapes_and_atom_boundaries() {
+        assert_eq!(tokenize("lib").expect("plain atom"), vec![Token::Atom("lib")]);
+        assert_eq!(
+            tokenize(r#"metadata:role="quoted \"value\"" and lib"#).expect("quoted atom"),
+            vec![Token::Atom(r#"metadata:role="quoted \"value\"""#), Token::And, Token::Atom("lib"),]
+        );
+        assert_eq!(tokenize(r#""lib""#).expect("standalone quoted atom"), vec![Token::Atom(r#""lib""#)]);
+        assert_eq!(
+            tokenize(r#""lib"#).expect_err("an unclosed quote must error").to_string(),
+            "invalid filter expression `\"lib`: unclosed double quote"
+        );
     }
 }

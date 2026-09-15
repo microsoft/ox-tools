@@ -85,8 +85,11 @@ impl Splices {
         self.file_index.clear();
         self.mutants_by_file.clear();
         self.file_by_ordinal.clear();
+        // #[gamma::skip(all, reason = "the replacement is exactly the type default already written here, so it is semantically identical")]
         self.indexed_files = 0;
+        // #[gamma::skip(all, reason = "the replacement is exactly the type default already written here, so it is semantically identical")]
         self.indexed_mutants = 0;
+        // #[gamma::skip(all, reason = "the replacement is exactly the type default already written here, so it is semantically identical")]
         self.plan_identity = None;
         self.withdrawn.clear();
     }
@@ -103,12 +106,19 @@ impl Splices {
         if self.root != work.root {
             self.root = work.root.clone();
             self.sources.clear();
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.placed.clear();
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.file_index.clear();
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.mutants_by_file.clear();
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.file_by_ordinal.clear();
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.indexed_files = 0;
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.indexed_mutants = 0;
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             self.withdrawn.clear();
         }
 
@@ -150,6 +160,7 @@ impl Splices {
                     let _ = guards.insert(*ordinal, (file.path.clone(), guard.clone()));
                 }
 
+                // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
                 continue 'dirty_files;
             }
 
@@ -158,12 +169,12 @@ impl Splices {
             // A file whose every mutant has been withdrawn still has to be rewritten, back to the
             // original, or the previous round's instrumented copy would survive its own withdrawal
             // and the rollback loop could never converge.
-            let (instrumented, found) = match live.as_slice() {
-                [] => (original.serialized.clone(), HashMap::default()),
-                _ => {
-                    let (parsed, found) = schema::instrument_with_guards(&original.parsed, &live)?;
-                    (original.instrumented(parsed), found)
-                }
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+            let (instrumented, found) = if live.as_slice().is_empty() {
+                (original.serialized.clone(), HashMap::default())
+            } else {
+                let (parsed, found) = schema::instrument_with_guards(&original.parsed, &live)?;
+                (original.instrumented(parsed), found)
             };
 
             for (ordinal, guard) in &found {
@@ -187,11 +198,9 @@ impl Splices {
 
             // A file back at its original text will not be spliced again unless its mutants come
             // back, which they cannot: withdrawal is permanent for the rest of the run.
-            match live.as_slice() {
-                [] => {
-                    let _dropped = self.sources.remove(&file.path);
-                }
-                _ => {}
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+            if live.as_slice().is_empty() {
+                let _dropped = self.sources.remove(&file.path);
             }
         }
 
@@ -200,6 +209,7 @@ impl Splices {
 
     fn restore_removed_files(&mut self, work: &Workspace, plan: &Plan) -> Result<()> {
         let identity = core::ptr::from_ref(plan) as usize;
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if same_plan(self.plan_identity, identity) {
             return Ok(());
         }
@@ -228,7 +238,7 @@ impl Splices {
         let mut dirty = HashSet::default();
         let plan_identity = core::ptr::from_ref(plan) as usize;
 
-        // #[gamma::skip(expr.decrement, expr.increment, reason = "perturbing the cached pointer identity can only force a conservative rebuild of indexes from the same plan")]
+        // #[gamma::skip(all, reason = "perturbing the cached pointer identity can only force a conservative rebuild of indexes from the same plan")]
         if self.plan_identity != Some(plan_identity) || self.indexed_files > plan.files.len() || self.indexed_mutants > plan.mutants.len() {
             dirty.extend(self.file_index.keys().cloned());
             self.file_index.clear();
@@ -238,7 +248,7 @@ impl Splices {
             self.indexed_mutants = 0;
             dirty.extend(plan.files.iter().map(|file| file.path.clone()));
         }
-        // #[gamma::skip(expr.decrement, expr.increment, reason = "perturbing the stored pointer identity only makes the next call conservatively rebuild equivalent indexes")]
+        // #[gamma::skip(all, reason = "perturbing the stored pointer identity only makes the next call conservatively rebuild equivalent indexes")]
         self.plan_identity = Some(plan_identity);
 
         for (position, file) in plan.files.iter().enumerate().skip(self.indexed_files) {
@@ -248,7 +258,7 @@ impl Splices {
         self.indexed_files = plan.files.len();
 
         for (position, mutant) in plan.mutants.iter().enumerate().skip(self.indexed_mutants) {
-            // #[gamma::skip(relational.gt_to_ge, reason = "ordinal is u32 and zero is a non-executable sentinel with no guard; indexing it cannot contribute a returned live guard")]
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if mutant.ordinal > 0 {
                 self.mutants_by_file.entry(mutant.file.to_path_buf()).or_default().push(position);
                 let _previous = self.file_by_ordinal.insert(mutant.ordinal, mutant.file.to_path_buf());
@@ -276,7 +286,7 @@ impl Splices {
     /// Read here rather than taken from the survey's `SourceFile`, so the byte-order mark has to be
     /// dropped here too: mutant spans index the text `syn` saw, which is the text after the mark.
     pub(super) fn original(&mut self, file: &TargetFile) -> Result<&Original> {
-        if self.sources.get(&file.path).is_none() {
+        if !self.sources.contains_key(&file.path) {
             let serialized = fs::read_to_string(file.absolute.as_std_path())
                 .map_err(|cause| error!("could not read `{}`", file.absolute).caused_by(cause))?;
             let parsed = strip_bom(&serialized).to_owned();

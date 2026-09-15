@@ -411,6 +411,10 @@ mod tests {
         let leaked = "&*(Box::leak(Box::new((value))))";
 
         assert_eq!(leaked_value(leaked), Some("(value)"));
+        assert_eq!(leaked_value("Box::leak(Box::new(value))"), Some("value"));
+        assert_eq!(leaked_value("&Box::leak(Box::new(value))"), None);
+        assert_eq!(leaked_value("*Box::leak(Box::new(value))"), None);
+        assert_eq!(leaked_value("Box::leak(Box::new((left, right)))"), Some("(left, right)"));
 
         let extra = "Box::new(value)()";
         let extra_tokens = lexemes(extra).expect("the extra call tokenizes");
@@ -431,6 +435,16 @@ mod tests {
         let malformed_path = "Box.new(value)";
         let malformed_tokens = lexemes(malformed_path).expect("the malformed path tokenizes");
         assert!(!path_ends_with(&malformed_tokens[..2], "Box", "new"));
+
+        let absolute = "::alloc::boxed::Box::new";
+        let absolute_tokens = lexemes(absolute).expect("the absolute path tokenizes");
+        assert!(path_ends_with(&absolute_tokens, "Box", "new"));
+        assert!(!path_ends_with(&absolute_tokens, "Vec", "new"));
+
+        for malformed in ["::", "Box:", "Box:::new", "Box::new::", "Box::0"] {
+            let tokens = lexemes(malformed).expect("the malformed path still tokenizes");
+            assert!(path_segments(&tokens).is_none(), "{malformed}");
+        }
 
         let partly_parenthesized = "(value) + other";
         let partly_parenthesized_tokens = lexemes(partly_parenthesized).expect("the expression tokenizes");
@@ -457,6 +471,18 @@ mod tests {
         assert!(!is_default_call("Default::default", &defaults, &[]));
         assert!(!is_default_call("Default::default(value)", &defaults, &[]));
         assert!(!is_default_call("1()", &defaults, &[]));
+        assert!(!is_default_call("Default::default() + 1", &defaults, &[]));
+        assert!(is_default_call("(Default::default())", &defaults, &[]));
+    }
+
+    #[test]
+    fn noop_block_stripping_applies_only_to_block_shapes() {
+        let defaults = defaults();
+
+        assert!(is_noop("true", "{ true }", Shape::Block, &defaults, &[]));
+        assert!(is_noop("true", "{ true }", Shape::IterBlock, &defaults, &[]));
+        assert!(!is_noop("true", "{ true }", Shape::Expr, &defaults, &[]));
+        assert!(!is_noop("true", "{ true }", Shape::Continue, &defaults, &[]));
     }
 
     #[test]

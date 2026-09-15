@@ -217,12 +217,14 @@ struct Slots {
 /// every guard in one ascending sweep instead makes the total character-counting work proportional
 /// to the text once, with the sweep never re-reading a byte it has already counted.
 fn positions(text: &str, spans: &HashMap<u32, (Range<usize>, Range<usize>)>) -> HashMap<u32, Guard> {
-    let mut starts: Vec<usize> = Vec::new();
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; line starts are unchanged")]
+    let mut starts: Vec<usize> = Vec::with_capacity(text.len() / 32);
 
     starts.push(0);
     starts.extend(text.match_indices('\n').map(|(at, _matched)| at + 1));
 
-    let mut requests: Vec<(usize, u32, Slot)> = Vec::new();
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; slot requests are unchanged")]
+    let mut requests: Vec<(usize, u32, Slot)> = Vec::with_capacity(spans.len() * 4);
 
     for (ordinal, (site, mutated)) in spans {
         requests.push((site.start, *ordinal, Slot::SiteStart));
@@ -340,7 +342,8 @@ pub fn instrument_with_guards(text: &str, mutants: &[AssignedMutant<'_>]) -> Res
     });
 
     let roots = build_tree(&sites)?;
-    let mut out = String::new();
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; instrumented text is unchanged")]
+    let mut out = String::with_capacity(text.len() + text.len() / 4);
     let mut spans = HashMap::default();
     let mut cursor = 0;
 

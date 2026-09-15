@@ -107,6 +107,7 @@ fn is_textual_metric_value(value: &MetricValue) -> bool {
 /// OWASP's CSV Injection guidance.
 fn escape_csv_untrusted(s: &str) -> Cow<'_, str> {
     if s.trim_start().starts_with(['=', '+', '-', '@']) {
+        // #[gamma::skip(all, reason = "string capacity is an allocation hint and cannot change CSV neutralization output", tag = "resource")]
         let mut neutralized = String::with_capacity(s.len() + 1);
         neutralized.push('\'');
         neutralized.push_str(s);
@@ -254,6 +255,27 @@ mod tests {
     fn test_numeric_metric_values_remain_numeric() {
         assert!(!is_textual_metric_value(&MetricValue::Float(-1.0)));
         assert!(is_textual_metric_value(&MetricValue::String("-1".into())));
+    }
+
+    #[test]
+    fn test_generate_keeps_formula_like_numeric_values_numeric() {
+        static NEGATIVE_DEF: MetricDef = MetricDef {
+            name: "negative",
+            description: "Negative numeric metric",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+        let crate_info = ReportableCrate::new(
+            "test".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            vec![Metric::with_value(&NEGATIVE_DEF, MetricValue::Float(-1.0))],
+            None,
+        );
+        let mut output = String::new();
+        generate(&[crate_info], &mut output).unwrap();
+        assert!(output.contains("negative,-1.00"), "{output}");
+        assert!(!output.contains("negative,'-1.00"), "{output}");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use core::fmt::Write as _;
 use core::time::Duration;
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write, stderr, stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -177,32 +177,26 @@ pub struct CommonArgs {
 impl CommonArgs {
     /// Build the set of service addresses, applying any overrides supplied on the command line.
     #[must_use]
-    // #[gamma::skip(fn_value.default, reason = "discarding every endpoint override sends hermetic command tests to live services until their resource budget expires")]
+    // #[gamma::skip(all, reason = "mutating endpoint construction can send hermetic command tests to live services until their resource budget expires")]
     pub fn endpoints(&self) -> Endpoints {
         let mut endpoints = Endpoints::default();
 
         if let Some(url) = &self.dump_url {
-            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "discarding the dump override sends hermetic command tests to the live crates.io dump until their resource budget expires")]
             endpoints = endpoints.with_dump_url(url);
         }
         if let Some(url) = &self.docs_url {
-            // #[gamma::skip(assign_value.default, reason = "discarding the docs override sends hermetic command tests to live docs.rs until their resource budget expires")]
             endpoints = endpoints.with_docs_url(url);
         }
         if let Some(url) = &self.coverage_url {
-            // #[gamma::skip(assign_value.default, reason = "discarding the coverage override sends hermetic command tests to live Codecov until their resource budget expires")]
             endpoints = endpoints.with_coverage_url(url);
         }
         if let Some(url) = &self.github_url {
-            // #[gamma::skip(assign_value.default, reason = "discarding the GitHub override sends hermetic command tests to the live GitHub API until their resource budget expires")]
             endpoints = endpoints.with_github_url(url);
         }
         if let Some(url) = &self.codeberg_url {
-            // #[gamma::skip(assign_value.default, reason = "discarding the Codeberg override sends hermetic command tests to the live Codeberg API until their resource budget expires")]
             endpoints = endpoints.with_codeberg_url(url);
         }
         if let Some(url) = &self.advisory_url {
-            // #[gamma::skip(assign_value.default, reason = "discarding the advisory override sends hermetic command tests to the live advisory repository until their resource budget expires")]
             endpoints = endpoints.with_advisory_url(url);
         }
 
@@ -252,7 +246,6 @@ impl<'a, H: super::Host> Common<'a, H> {
 
         let delay = progress_delay(args.log_level);
 
-        use std::io::{IsTerminal, stderr};
         let use_colors_for_progress = use_colors(args.color, stderr().is_terminal());
 
         let progress_reporter = ProgressReporter::new(delay, use_colors_for_progress);
@@ -448,7 +441,6 @@ fn report_processed_crates<H: super::Host>(
         && !reportable_crates.is_empty()
     {
         let mut console_output = String::new();
-        use std::io::{IsTerminal, stdout};
         let use_colors = use_colors(options.color, stdout().is_terminal());
         _ = generate_console(&reportable_crates, use_colors, mode, &mut console_output);
         let _ = write!(host.output(), "{console_output}");
@@ -932,9 +924,8 @@ mod tests {
         parsed.common.manifest_path = "target/common-report-tests/missing/Cargo.toml".into();
         let mut host = crate::commands::host::TestHost::new();
 
-        let error = match Common::new(&mut host, &parsed.common).await {
-            Ok(_) => panic!("a missing manifest must fail"),
-            Err(error) => error,
+        let Err(error) = Common::new(&mut host, &parsed.common).await else {
+            panic!("a missing manifest must fail");
         };
 
         assert!(
@@ -1365,6 +1356,18 @@ mod tests {
     }
 
     #[test]
+    fn test_check_risk_errors_uses_singular_scored_outcome_tail() {
+        let error = reject(Appraisal::new(
+            Risk::High,
+            failing_outcomes(MAX_OUTCOMES_PER_CRATE + 1),
+            11,
+            0,
+            20.0,
+        ));
+        assert!(error.to_string().contains("... and 1 more non-passing outcome"), "{error:#}");
+    }
+
+    #[test]
     fn test_check_risk_errors_hints_when_unscored_outcomes_are_capped() {
         let error = reject(Appraisal::weighted_evaluation_failure(inconclusive_outcomes(
             MAX_OUTCOMES_PER_CRATE + 2,
@@ -1374,6 +1377,14 @@ mod tests {
         assert!(message.contains("(weighted score not calculated)"), "{message}");
         assert!(message.contains("... and 2 more weighted checks"), "{message}");
         assert!(message.contains(TRUNCATION_HINT), "{message}");
+    }
+
+    #[test]
+    fn test_check_risk_errors_uses_singular_weighted_check_tail() {
+        let error = reject(Appraisal::weighted_evaluation_failure(inconclusive_outcomes(
+            MAX_OUTCOMES_PER_CRATE + 1,
+        )));
+        assert!(error.to_string().contains("... and 1 more weighted check"), "{error:#}");
     }
 
     #[test]

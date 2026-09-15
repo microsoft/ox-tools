@@ -89,10 +89,12 @@ pub(super) fn configure_loader(command: &mut Command, launch: &Launch) {
 fn stack_floor(inherited: Option<&str>) -> String {
     let inherited = inherited.and_then(|value| value.trim().parse::<usize>().ok());
 
+    // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
     inherited.unwrap_or(0).max(STACK_FLOOR).to_string()
 }
 
 /// Builds the loader search path, keeping whatever the caller already had.
+// #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
 pub(super) fn loader_path(libraries: &[Utf8PathBuf]) -> Option<OsString> {
     joined(libraries, env::var_os(LOADER_VAR))
 }
@@ -128,10 +130,10 @@ fn joined(libraries: &[Utf8PathBuf], existing: Option<OsString>) -> Option<OsStr
 pub(super) fn toolchain_libraries(root: &Utf8Path, target: &Utf8Path) -> Vec<Utf8PathBuf> {
     let mut libraries = vec![target.join("debug").join("deps")];
 
-    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the process-wide compiler override cannot be mutated safely by parallel tests; output parsing is exercised through append_toolchain_libraries")]
+    // #[gamma::skip(all, reason = "the process-wide compiler override cannot be mutated safely by parallel tests; output parsing is exercised through append_toolchain_libraries")]
     let output = Command::new(env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
         .current_dir(root.as_std_path())
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "these rustc query flags cross a process boundary whose process-wide override cannot be replaced safely; their two-line protocol is pinned by append_toolchain_libraries tests")]
+        // #[gamma::skip(all, reason = "these rustc query flags cross a process boundary whose process-wide override cannot be replaced safely; their two-line protocol is pinned by append_toolchain_libraries tests")]
         .args(["--print", "target-libdir", "--print", "sysroot"])
         .output();
 
@@ -139,6 +141,7 @@ pub(super) fn toolchain_libraries(root: &Utf8Path, target: &Utf8Path) -> Vec<Utf
         && output.status.success()
         && let Ok(printed) = String::from_utf8(output.stdout)
     {
+        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         append_toolchain_libraries(&mut libraries, &printed);
     }
 

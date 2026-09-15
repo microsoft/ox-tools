@@ -76,7 +76,7 @@ pub async fn process_dependencies<H: Host>(host: &mut H, args: &DepsArgs) -> Res
 
     configure_metadata_features(&mut common.metadata_cmd, args);
 
-    let metadata = execute_metadata(&mut common.metadata_cmd)?;
+    let metadata = execute_metadata(&common.metadata_cmd)?;
     let all_packages: HashMap<_, _> = metadata.packages.iter().map(|p| (&p.id, p)).collect();
     let resolve_index: HashMap<&PackageId, &Node> = metadata
         .resolve
@@ -141,12 +141,12 @@ const fn package_selection(has_named_packages: bool, workspace: bool, has_root_p
     }
 }
 
-fn execute_metadata(metadata_cmd: &mut MetadataCommand) -> Result<cargo_metadata::Metadata> {
+fn execute_metadata(metadata_cmd: &MetadataCommand) -> Result<cargo_metadata::Metadata> {
     metadata_cmd.exec().into_app_err("retrieving workspace metadata")
 }
 
 fn requested_package_names(package_names: &[String]) -> Option<&[String]> {
-    if !package_names.is_empty() { Some(package_names) } else { None }
+    (!package_names.is_empty()).then_some(package_names)
 }
 
 fn package_name_is_present<'a>(mut package_names: impl Iterator<Item = &'a str>, requested: &str) -> bool {
@@ -176,7 +176,7 @@ fn configure_metadata_features(metadata_cmd: &mut MetadataCommand, args: &DepsAr
 }
 
 fn selected_features(features: &[String]) -> Option<Vec<String>> {
-    if !features.is_empty() { Some(features.to_vec()) } else { None }
+    (!features.is_empty()).then(|| features.to_vec())
 }
 
 async fn process_packages<'a, H: Host>(
@@ -444,10 +444,12 @@ mod tests {
         assert_eq!(package_selection(false, true, false), PackageSelection::Workspace);
         assert_eq!(package_selection(false, false, true), PackageSelection::Root);
         assert_eq!(package_selection(false, false, false), PackageSelection::VirtualWorkspace);
-        assert!(
-            !REQUEST_SUGGESTIONS,
-            "dependency collection must not request crate-name suggestions"
-        );
+        const {
+            assert!(
+                !REQUEST_SUGGESTIONS,
+                "dependency collection must not request crate-name suggestions"
+            );
+        }
     }
 
     fn resolved_root_features(feature_args: &[&str]) -> Vec<String> {
@@ -494,7 +496,7 @@ mod tests {
         _ = command.manifest_path(&args.common.manifest_path);
         configure_metadata_features(&mut command, &args);
 
-        let error = execute_metadata(&mut command).expect_err("an unknown feature must fail metadata resolution");
+        let error = execute_metadata(&command).expect_err("an unknown feature must fail metadata resolution");
         let message = error.to_string();
 
         assert!(message.contains("\n> retrieving workspace metadata (at "), "{message}");

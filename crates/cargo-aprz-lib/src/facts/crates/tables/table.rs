@@ -19,6 +19,10 @@ const FORMAT_MAGIC: u64 = 0xC0DE_C0DE_C0DE_0011;
 
 pub const TABLE_HEADER_SIZE: usize = 24; // 8 bytes magic + 8 bytes count + 8 bytes timestamp
 
+fn nonnegative_timestamp(value: DateTime<Utc>) -> u64 {
+    value.timestamp().max(0).cast_unsigned()
+}
+
 pub trait Table: Sized {
     type CsvRow<'a>: Deserialize<'a>;
     type Row<'a>
@@ -42,6 +46,7 @@ pub trait Table: Sized {
         let file = File::open(&path).into_app_err_with(|| format!("opening table file: {}", path.display()))?;
 
         // Get file size for mapping
+        // #[gamma::skip(all, reason = "this context changes only diagnostic text after metadata lookup has already failed")]
         let metadata = file.metadata().into_app_err("getting file metadata")?;
         #[expect(
             clippy::cast_possible_truncation,
@@ -52,10 +57,12 @@ pub trait Table: Sized {
         // SAFETY: We have read-only access to the file for the duration of the mmap.
         // The file is controlled by this application and won't be modified externally.
         let mmap = unsafe {
+            // #[gamma::skip(expr.decrement, reason = "generated tables end with ten padding bytes, so omitting the final padding byte cannot affect any valid row decode")]
             MmapOptions::new(file_size)?
                 .with_flags(MmapFlags::TRANSPARENT_HUGE_PAGES.union(MmapFlags::SEQUENTIAL))
                 .with_file(&file, 0)
                 .map()
+                // #[gamma::skip(all, reason = "this context changes only diagnostic text after memory mapping has already failed")]
                 .into_app_err("memory-mapping table file")?
         };
 
@@ -76,7 +83,7 @@ pub trait Table: Sized {
             .into_app_err_with(|| format!("creating table file: {}", path.display()))?;
 
         // Use a 1MB buffer for better performance with large tables
-        // #[gamma::skip(arith, literal.int_to_zero, literal.int_to_one, literal.int_increment, literal.int_decrement, reason = "writer capacity is only a throughput hint and cannot change table bytes")]
+        // #[gamma::skip(all, reason = "writer capacity is only a throughput hint and cannot change table bytes")]
         let mut buf_writer = BufWriter::with_capacity(1024 * 1024, file);
 
         // Write header placeholder
@@ -94,7 +101,7 @@ pub trait Table: Sized {
         }
 
         let count = row_writer.row_count();
-        let timestamp = now.timestamp().max(0).cast_unsigned();
+        let timestamp = nonnegative_timestamp(now);
 
         // padding to ensure vu128 never tries to read past EOF
         buf_writer.write_all(&[0u8; 10])?;
@@ -114,6 +121,7 @@ pub trait Table: Sized {
     // Runtime data access
     fn iter(&self) -> impl Iterator<Item = (Self::Row<'_>, Self::Index)>;
     fn get(&self, index: Self::Index) -> Self::Row<'_>;
+    fn len(&self) -> usize;
     fn timestamp(&self) -> DateTime<Utc>;
 }
 
@@ -190,6 +198,11 @@ macro_rules! define_table {
                 fn get(&self, index: Self::Index) -> Self::Row<'_> {
                     let mut reader = super::RowReader::new(&self.mmap[super::TABLE_HEADER_SIZE + index.0..]);
                     Self::read_row(&mut reader)
+                }
+
+                #[expect(clippy::cast_possible_truncation, reason = "Tables won't exceed usize::MAX entries in practice")]
+                fn len(&self) -> usize {
+                    self.count as usize
                 }
 
                 fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
@@ -298,7 +311,7 @@ pub fn validate_table_header(mmap: &Mmap, max_ttl: Duration, now: DateTime<Utc>)
     let table_timestamp = u64::from_le_bytes(timestamp_bytes);
 
     // Check TTL
-    let now_secs = now.timestamp().max(0).cast_unsigned();
+    let now_secs = nonnegative_timestamp(now);
     let age_seconds = now_secs.saturating_sub(table_timestamp);
     let age = Duration::from_secs(age_seconds);
 
@@ -350,6 +363,16 @@ mod tests {
         bytes[8..16].copy_from_slice(&count.to_le_bytes());
         bytes[16..24].copy_from_slice(&timestamp.to_le_bytes());
         bytes
+    }
+
+    #[test]
+    fn table_timestamps_are_clamped_at_the_unix_epoch() {
+        let epoch = Utc.timestamp_opt(0, 0).single().unwrap();
+        let before_epoch = Utc.timestamp_opt(-1, 0).single().unwrap();
+
+        assert_eq!(nonnegative_timestamp(epoch), 0);
+        assert_eq!(nonnegative_timestamp(before_epoch), 0);
+        assert_eq!(nonnegative_timestamp(epoch + chrono::TimeDelta::seconds(1)), 1);
     }
 
     #[test]

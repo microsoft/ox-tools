@@ -10,7 +10,9 @@ fn agreement_support_exposes_the_parser_contract() {
     let stream = "value.field".parse().expect("the fixture tokenizes");
 
     assert!(!test_support::exceeds_nesting_limit(&stream, test_support::NESTING_LIMIT));
-    assert!(test_support::CHAIN_FACTOR > 0);
+    const {
+        assert!(test_support::CHAIN_FACTOR > 0);
+    }
     assert!(test_support::MOST_FACTOR.is_finite());
 
     let at_limit = format!(

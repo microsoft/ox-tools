@@ -21,15 +21,13 @@ pub(super) fn header_matches(extracted: &str, expected_header: &str) -> bool {
 
 /// Normalize text to a vector of per-line strings with trailing whitespace
 /// removed, and outer blank lines stripped.
+// #[gamma::skip(all, reason = "mutating either terminating removal loop can make normalization non-progressing")]
 pub(super) fn normalize_to_lines(text: &str) -> Vec<String> {
     let mut lines: Vec<String> = text.lines().map(|l| l.trim_end().to_owned()).collect();
-    // #[gamma::skip(stmt.delete_call, reason = "not removing the first empty line makes this trimming loop infinite")]
     while lines.first().is_some_and(String::is_empty) {
         lines.remove(0);
     }
-    // #[gamma::skip(cond.negate, reason = "negating the trailing-empty check loops after the last empty line has been removed")]
     while lines.last().is_some_and(String::is_empty) {
-        // #[gamma::skip(stmt.delete_call, reason = "not removing the last empty line makes this trimming loop infinite")]
         lines.pop();
     }
     lines

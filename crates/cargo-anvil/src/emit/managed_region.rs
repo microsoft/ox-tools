@@ -166,7 +166,7 @@ pub fn plan_managed_region(
     let needs_reposition = placement == RegionPlacement::Start
         && disk_region
             .as_ref()
-            .is_some_and(|region| region.start_line.start != start_region_offset(host_text.unwrap_or(""), syntax));
+            .is_some_and(|region| region.start_line.start != start_region_offset(host_text.unwrap_or_default(), syntax));
 
     let target = Target::Region {
         host: host_relpath.to_owned(),
@@ -240,7 +240,7 @@ pub fn toml_introduction_refusal(
     if !is_toml_host(host_relpath) {
         return None;
     }
-    let base = host_text.unwrap_or("");
+    let base = host_text.unwrap_or_default();
     // A malformed region is a separate diagnosis, raised by the planner.
     if find_region(base, region_id, syntax).is_err() {
         return None;

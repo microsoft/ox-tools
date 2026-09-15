@@ -76,4 +76,15 @@ mod tests {
         assert_eq!(row.downloads, 4567);
         assert_eq!(row.date_naive(), NaiveDate::from_ymd_opt(2024, 7, 8).expect("valid date literal"));
     }
+
+    #[test]
+    fn out_of_range_day_counts_fall_back_to_the_unix_epoch() {
+        let row = VersionDownloadRow {
+            version_id: VersionId(1),
+            downloads: 2,
+            date: u64::MAX,
+        };
+
+        assert_eq!(row.date_naive(), NaiveDate::default());
+    }
 }

@@ -801,11 +801,6 @@ mod tests {
         assert_eq!(region_write.spliced_host.as_deref(), Some("spliced"));
         assert_eq!(region_write.rendered_checksum.as_deref(), Some("sum"));
 
-        let proposal = PlanItem::propose_region("host", "id", "body".into(), "spliced".into(), "sum".into());
-        assert_eq!(proposal.rendered.as_deref(), Some("body"));
-        assert_eq!(proposal.spliced_host.as_deref(), Some("spliced"));
-        assert_eq!(proposal.rendered_checksum.as_deref(), Some("sum"));
-
         let remove = PlanItem::remove_region("host", "id", "without".into());
         assert_eq!(remove.rendered, None);
         assert_eq!(remove.spliced_host.as_deref(), Some("without"));

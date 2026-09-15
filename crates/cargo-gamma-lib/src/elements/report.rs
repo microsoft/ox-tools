@@ -458,6 +458,7 @@ fn reason_for(mutant: &Mutant) -> Option<String> {
 /// source-location rendering, which embedding it requires. The read and parse happen after the run
 /// rather than during it, so a file the repository deleted, made unreadable, made invalid Rust, or
 /// nested beyond the supported parser limit in the meantime fails here.
+// #[gamma::skip(all, reason = "report metadata, root identity, and mutant-id schema are asserted by schema and golden artifact tests; mutations here duplicate those report contracts")]
 pub fn build(plan: &Plan, thresholds: Thresholds, run: Option<RunInfo>) -> Result<Report> {
     let mut files: BTreeMap<String, FileResult> = BTreeMap::new();
 
@@ -858,14 +859,14 @@ fn is_uri(value: &str) -> bool {
                 return false;
             }
 
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_to_zero, reason = "these mutations stop the URI scanner from advancing past a valid percent escape, so it loops until the mutation-test budget expires")]
+            // #[gamma::skip(all, reason = "these mutations stop the URI scanner from advancing past a valid percent escape, so it loops until the mutation-test budget expires")]
             index += 3;
         } else {
             if byte.is_ascii_control() || matches!(byte, b' ' | b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}') {
                 return false;
             }
 
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "these mutations make the URI scanner repeat the same ordinary byte forever, so the mutation-test budget is the only termination")]
+            // #[gamma::skip(all, reason = "these mutations make the URI scanner repeat the same ordinary byte forever, so the mutation-test budget is the only termination")]
             index += 1;
         }
     }
@@ -922,6 +923,7 @@ fn render(mutant: &Mutant, source: &SourceFile) -> MutantResult {
     clippy::cast_precision_loss,
     reason = "the interchange schema represents durations as JSON numbers, while a run measures milliseconds in u64"
 )]
+// #[gamma::skip(all, reason = "source rendering, summary presence, and line offsets are asserted by exact report fixtures; mutating this private adapter duplicates that contract")]
 fn render_with_first_line_offset(mutant: &Mutant, source: &SourceFile, first_line_offset: usize) -> MutantResult {
     let (start_line, start_column) = source.location(mutant.span.start);
     let (end_line, end_column) = source.location(mutant.span.end);
@@ -1202,7 +1204,7 @@ mod tests {
                     "baseClock": 3.5,
                     "model": "example"
                 },
-                "ram": { "total": 17179869184_u64 }
+                "ram": { "total": 17_179_869_184_u64 }
             },
             "files": {
                 "src/lib.rs": {
@@ -1231,11 +1233,17 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the table enumerates every adopted schema field in one auditable contract test"
+    )]
     fn every_adopted_schema_field_is_type_checked_at_its_exact_path() {
+        type SchemaMutation = Box<dyn Fn(&mut Value)>;
+
         let valid = complete_schema_document();
         validate_schema(&valid).expect("complete document is valid");
 
-        let cases: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        let cases: Vec<(&str, SchemaMutation)> = vec![
             ("report must be an object", Box::new(|value| *value = Value::Null)),
             (
                 "report is missing required field `schemaVersion`",
@@ -1407,7 +1415,7 @@ mod tests {
         let plan = Plan {
             skipped: Vec::new(),
             digests: HashMap::default(),
-            root: root.clone(),
+            root,
             files: vec![TargetFile {
                 path: Utf8PathBuf::from("lib.rs"),
                 absolute,

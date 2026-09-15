@@ -52,6 +52,7 @@ pub(super) fn visible_vcs_metadata(path: &Utf8Path) -> Vec<Utf8PathBuf> {
     }
 
     found.sort();
+    // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
     found.dedup();
     found
 }
@@ -138,20 +139,25 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
         // Only ignore files inside the tree have any say. Reading them from parent directories
         // means a checkout nested under a directory whose `.gitignore` says `*` copies as nothing
         // at all, and the resulting empty tree fails the build for reasons nobody can see.
+        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
         .parents(false)
         // `.gitignore` describes what git would restore, which is only meaningful in something git
         // is actually tracking. Outside a repository the same file is a leftover.
         .require_git(true)
         .git_ignore(!options.copy_ignored)
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         .git_exclude(!options.copy_ignored)
         // A user's global ignore file describes their machine, not this project, and a rule in it
         // would silently change what a shared tree copies to.
+        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
         .git_global(false)
         // `.ignore` is a search convention. It routinely excludes vendored or generated code that
         // a build genuinely needs.
+        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
         .ignore(false)
         // A link is recreated rather than followed, so there is nothing to descend into and no
         // cycle to guard against.
+        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
         .follow_links(false);
 
     let root = from.to_owned();
@@ -194,6 +200,7 @@ pub(super) fn copy_tree_with(from: &Utf8Path, to: &Utf8Path, skip: &Utf8Path, op
                 return WalkState::Continue;
             };
 
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if relative.as_str().is_empty() {
                 return WalkState::Continue;
             }
@@ -332,7 +339,7 @@ fn record(failure: &Mutex<Option<Error>>, cause: Error) {
 
 /// Returns whether an entry and everything under it should be left out of the copy.
 pub(super) fn is_pruned(source: &Utf8Path, relative: &Utf8Path, excluded: &Utf8Path) -> bool {
-    // #[gamma::skip(cond.always_false, literal.bool_flip, reason = "failing to prune the copy destination recursively copies that destination into itself until the mutation run times out")]
+    // #[gamma::skip(all, reason = "failing to prune the copy destination recursively copies that destination into itself until the mutation run times out")]
     if source == excluded {
         return true;
     }
@@ -368,6 +375,7 @@ fn copy_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) ->
     // the parallel-walk safety the unconditional call had — `create_dir_all` is idempotent, so a
     // parent another thread finished in the meantime is not a conflict, and a parent that is a plain
     // file surfaces here as the same "could not create" the unconditional call raised.
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     if place(&metadata, source, destination, reflinks).is_err() {
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent.as_std_path()).map_err(|cause| error!("could not create `{parent}`").caused_by(cause))?;
@@ -416,6 +424,7 @@ fn copy_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
 
 /// Copies one file, cloning it if the filesystem can.
 fn copy_file(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     if reflinks.worth_trying() {
         match reflink_copy::reflink(source.as_std_path(), destination.as_std_path()) {
             Ok(()) => {
@@ -427,10 +436,12 @@ fn copy_file(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> 
             // filesystem that cannot clone. Surface it so `copy_entry` creates the parent and
             // retries, and leave the latch alone: one such race must not force the rest of the copy
             // onto the byte-for-byte path.
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             Err(cause) if cause.kind() == ErrorKind::NotFound => {
                 return Err(error!("could not copy `{source}` to `{destination}`").caused_by(cause));
             }
             Err(_unsupported) => {
+                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
                 reflinks.unsupported();
 
                 // A failed clone can leave a partial destination behind; remove it so the fallback

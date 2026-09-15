@@ -101,7 +101,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             && comment.span.start <= at
         {
             at = at.max(comment.span.end);
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing the comment index repeatedly revisits it until timeout")]
+            // #[gamma::skip(all, reason = "not advancing the comment index repeatedly revisits it until timeout")]
             next += 1;
             continue;
         }
@@ -111,7 +111,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 let inherited = base.get(depth).copied().unwrap_or_default();
                 set(&mut path, depth, inherited);
             }
-            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not advancing past a literal retries it forever")]
+            // #[gamma::skip(all, reason = "not advancing past a literal retries it forever")]
             at = end;
             previous = Previous::Expression;
             continue;
@@ -150,7 +150,7 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
                 previous = Previous::Expression;
             }
 
-            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not advancing past an identifier retries it forever")]
+            // #[gamma::skip(all, reason = "not advancing past an identifier retries it forever")]
             at = end;
             continue;
         }
@@ -256,13 +256,13 @@ pub(super) fn beyond(text: &str, comments: &[Comment], limit: usize) -> Option<u
             }
 
             _ => {
-                // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing over a non-ASCII character leaves the scan on it forever")]
+                // #[gamma::skip(all, reason = "not advancing over a non-ASCII character leaves the scan on it forever")]
                 at += text.get(at..).and_then(|rest| rest.chars().next()).map_or(1, char::len_utf8);
                 continue;
             }
         }
 
-        // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, reason = "moving backward or not advancing makes the byte scan non-progressing")]
+        // #[gamma::skip(all, reason = "moving backward or not advancing makes the byte scan non-progressing")]
         at += 1;
     }
 
@@ -296,7 +296,7 @@ fn raise(path: &mut Vec<usize>, depth: usize, value: usize) {
 
 /// Makes `depth` a valid index, which an unbalanced closer can otherwise leave it short of.
 fn grow(chain: &mut Vec<usize>, depth: usize) {
-    // #[gamma::skip(cond.negate, relational.le_to_ge, reason = "reversing the growth condition appends without approaching termination and exhausts memory")]
+    // #[gamma::skip(all, reason = "reversing the growth condition appends without approaching termination and exhausts memory")]
     while chain.len() <= depth {
         // #[gamma::skip(stmt.delete_call, reason = "removing the only growth operation makes this loop infinite")]
         chain.push(0);
@@ -338,7 +338,7 @@ fn identifier_end(text: &str, at: usize) -> Option<usize> {
         characters
             .take_while(|(_, character)| rustc_lexer::is_id_continue(*character))
             .last()
-            // #[gamma::skip(arith.add_to_mul, arith.add_to_sub, reason = "corrupting the endpoint can move the outer scanner backward or leave it non-progressing")]
+            // #[gamma::skip(all, reason = "corrupting the endpoint can move the outer scanner backward or leave it non-progressing")]
             .map_or_else(|| at + first.len_utf8(), |(offset, character)| at + offset + character.len_utf8()),
     )
 }

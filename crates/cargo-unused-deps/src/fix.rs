@@ -241,3 +241,17 @@ fn comments_of(prefix: &str) -> Option<CommentBlock> {
         lines,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indented_comments_are_counted_but_trailing_hashes_are_not() {
+        let block = comments_of("  # group\n\t# detail\nvalue # not a comment line\n").expect("comment block");
+
+        assert_eq!(block.lines.get(), 2);
+        assert_eq!(block.text, "  # group\n\t# detail\nvalue # not a comment line\n");
+        assert!(comments_of("value # trailing only\n").is_none());
+    }
+}

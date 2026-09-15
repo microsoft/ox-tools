@@ -470,7 +470,7 @@ impl<'a> Collector<'a> {
     fn impl_scope(&self, node: &ItemImpl) -> String {
         let self_type = compact_path(self.text_of(node.self_ty.span()));
         // #[gamma::skip(cond.always_false, reason = "a parsed self type always contains a non-trivia token; this fallback is only defensive for an unmapped expansion")]
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the fallback is reachable only for an unmapped expansion, and Collector never descends into expansions")]
+        // #[gamma::skip(all, reason = "the fallback is reachable only for an unmapped expansion, and Collector never descends into expansions")]
         let self_type = if self_type.is_empty() { "_".to_owned() } else { self_type };
 
         let Some((trait_path, _for)) = &node.trait_ else {

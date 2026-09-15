@@ -200,7 +200,9 @@ fn exit_byte(raw: Option<i32>) -> u8 {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::exit_byte;
+    use std::path::PathBuf;
+
+    use super::*;
 
     #[test]
     fn signal_terminated_child_maps_to_one() {
@@ -226,5 +228,46 @@ mod tests {
         // 256 = 0x100 -> low byte 0, which would look like success; map to 1.
         assert_eq!(exit_byte(Some(256)), 1);
         assert_eq!(exit_byte(Some(512)), 1);
+    }
+
+    #[test]
+    fn parser_errors_keep_their_operation_context() {
+        let filter = parse_predicates(&["nonsense".to_owned()]).expect_err("invalid filter");
+        assert!(
+            filter.to_string().contains("invalid filter expression"),
+            "filter context must survive enrichment: {filter}"
+        );
+
+        let target = parse_target_kinds(&["future-kind".to_owned()]).expect_err("invalid target kind");
+        assert!(
+            target.to_string().contains("invalid per-target configuration"),
+            "target context must survive enrichment: {target}"
+        );
+    }
+
+    #[test]
+    fn workspace_load_errors_keep_their_operation_context() {
+        let args = EachArgs {
+            packages: Vec::new(),
+            workspace: false,
+            exclude: Vec::new(),
+            none: false,
+            filters: Vec::new(),
+            exclude_filters: Vec::new(),
+            once: false,
+            each_targets: Vec::new(),
+            target_required_feature: Vec::new(),
+            chdir: false,
+            keep_going: false,
+            dry_run: true,
+            manifest_path: Some(PathBuf::from("a-manifest-that-does-not-exist")),
+            command: vec!["echo".to_owned()],
+        };
+
+        let error = run(&args).expect_err("missing workspace manifest must fail");
+        assert!(
+            error.to_string().contains("failed to load workspace"),
+            "workspace context must survive enrichment: {error}"
+        );
     }
 }

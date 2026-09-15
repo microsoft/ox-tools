@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_error_list_does_not_enable_the_error_mutator() {
+    fn clearing_error_payloads_does_not_disable_an_enabled_error_mutator() {
         let mut selection = Selection::empty();
 
         selection.set_errors(vec!["Error::Old".to_owned()]);

@@ -1235,7 +1235,7 @@ run or shard whose scores will be compared or merged.
 
 Every cold run — such as a fresh CI container where `target/` is not preserved — starts with an
 empty killer map and an unguided build, on exactly the runs that cost the most.
-`cargo gamma hints` promotes the two pieces of information that cannot move a score into a file you
+`cargo gamma hints` promotes scheduling information that cannot move a score into a file you
 can commit:
 
 ```bash
@@ -1244,13 +1244,16 @@ cargo gamma hints --dry-run           # see what would be promoted
 cargo gamma hints                     # write gamma-hints.json
 ```
 
-Later runs read `gamma-hints.json` automatically without any command-line flags. Only two
-kinds of information are promoted into the hints file, and neither can change an answer:
+Later runs read `gamma-hints.json` automatically without any command-line flags. Three
+kinds of information are promoted into the hints file, and none can change an answer:
 
 * **Killer hints** — which test caught each mutant. Canonical binary order is preserved, and the
   named test narrows its own binary only when filtering cannot replace another outcome. It is run
   rather than believed, so a stale hint costs one filtered process before falling back to the
   standard whole-binary sweep.
+* **Generalized scheduling hints** — ranked candidate tests for an item, candidate binaries for
+  a source file, and test sets observed reaching a stable source site. Every candidate is run
+  again and falls back conservatively when stale; no prior verdict is carried forward.
 * **Build order** — which mutants failed to compile for whoever promoted the file. These are *not*
   carried as verdicts. They are spliced in and offered to the compiler first, on their own, so a
   mutant that really is unviable is blamed in a single probe round without another mutant’s error

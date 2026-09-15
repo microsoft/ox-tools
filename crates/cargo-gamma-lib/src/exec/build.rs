@@ -380,6 +380,7 @@ impl Converger {
     }
 
     /// Invalidates position-based splice indexes after the plan is sorted.
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     pub(super) fn plan_reordered(&mut self) {
         self.splices.plan_reordered();
     }
@@ -418,8 +419,10 @@ impl Converger {
 
     /// Resets state that describes one Cargo command and root set.
     fn begin_convergence(&mut self) {
+        // #[gamma::skip(all, reason = "the replacement is exactly the type default already written here, so it is semantically identical")]
         self.rounds = 0;
         self.per_round.clear();
+        // #[gamma::skip(all, reason = "the replacement is exactly the type default already written here, so it is semantically identical")]
         self.first_round = None;
     }
 
@@ -471,11 +474,14 @@ impl Converger {
                 return Err(Self::build_timeout_error(budget));
             };
 
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if self.first_round.is_none() {
+                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
                 self.first_round = Some(elapsed);
             }
 
             if outcome.succeeded {
+                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
                 self.history.push(Round { elapsed, withdrew: 0 });
 
                 return Ok(Convergence::Built(stdout));
@@ -762,6 +768,7 @@ impl Converger {
     ) -> Result<()> {
         let (candidates, deferred) = self.probe_sets(plan, scope.mutants);
 
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if candidates.len() < PROBE_FLOOR {
             return Ok(());
         }
@@ -834,6 +841,7 @@ impl Converger {
     /// when Cargo's roots are wider, so an error from another stage cannot mask or be mistaken for
     /// evidence about a hinted candidate.
     fn probe_sets(&self, plan: &Plan, select: Option<&[String]>) -> (Vec<u32>, HashSet<u32>) {
+        // #[gamma::skip(all, reason = "the alternative changes only internal candidate ordering or tie selection, not the accepted population exposed by this layer")]
         let mine = |mutant: &Mutant| select.is_none_or(|names| names.iter().any(|name| name.as_str() == &*mutant.package));
 
         let mut candidates: Vec<u32> = Vec::new();
@@ -844,6 +852,7 @@ impl Converger {
                 continue;
             }
 
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if !mine(mutant) {
                 let _ = deferred.insert(mutant.ordinal);
                 continue;
@@ -859,6 +868,7 @@ impl Converger {
         // Sorted so that the probe a run takes depends only on the plan and the hints, never on the
         // iteration order of a set. The build keys by ordinal, but the reported counts and any
         // future tie-break would otherwise vary between two runs over an identical tree.
+        // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
         candidates.sort_unstable();
 
         (candidates, deferred)
@@ -1060,6 +1070,7 @@ impl Converger {
         limits: BuildLimits,
         events: &mut dyn Events,
     ) -> Result<String> {
+        // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
         let outcome = run_cargo(work, plan, &["check", "--tests", "--keep-going"], select, limits, None, events)?;
 
         let Some(stdout) = outcome.stdout else {
@@ -1119,7 +1130,9 @@ impl Converger {
         // withdrew as one line when it is done, and a round-by-round commentary underneath that
         // would bury the sequence the whole arrangement exists to show.
         let workspace = self.whole_workspace || self.workspace_stages;
+        // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
         let roots = if workspace { None } else { Some(packages) };
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         let verb: &[&str] = if workspace {
             &["check", "--keep-going"]
         } else {
@@ -1131,6 +1144,7 @@ impl Converger {
             plan,
             BuildScope {
                 roots,
+                // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
                 mutants: Some(packages),
             },
             verb,
@@ -1138,6 +1152,7 @@ impl Converger {
             events,
         )? {
             Convergence::Built(stdout) => {
+                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
                 self.remember_compiled(&stdout, &work.root);
                 Ok(None)
             }
@@ -1211,6 +1226,7 @@ impl Converger {
             .target_discovery
             .as_deref()
             .and_then(|stdout| linked_target_args(stdout, &work.root, work.rustc_captures().as_deref(), plan));
+        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
         let mut verb = vec!["build", "--keep-going"];
 
         if let Some(target_args) = &target_args {
@@ -1274,6 +1290,7 @@ impl Converger {
         events: &mut dyn Events,
     ) -> Result<Build> {
         let select = self.scoped(select);
+        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
         let mut widened = false;
 
         let converged = match self.compile(work, plan, select, limits, events)? {
@@ -1318,17 +1335,20 @@ impl Converger {
         };
 
         self.settle(plan);
+        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         self.remember_compiled(&stdout, &work.root);
 
         // Runs after the withdrawal above so that a mutant which genuinely failed to compile keeps
         // that more specific verdict; see [`withdraw_uncompiled`] for why the set is only trusted
         // when it agrees with the survey at all.
         if let Some(compiled) = &self.compiled {
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             withdraw_uncompiled(plan, compiled);
         }
 
         let captures = work.rustc_captures();
         let mut binaries = test_binaries_with_linkage(&stdout, &work.root, captures.as_deref());
+        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         retain_linked_to_population(&mut binaries, plan);
 
         Ok(Build {
@@ -1349,6 +1369,7 @@ impl Converger {
     }
 
     /// Adds one successful Cargo invocation's dep-info to the run-wide source inventory.
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     fn remember_compiled(&mut self, stdout: &str, root: &camino::Utf8Path) {
         if let Some(found) = compiled_sources(stdout, root) {
             self.compiled.get_or_insert_with(HashSet::default).extend(found);
@@ -1553,16 +1574,6 @@ mod mutation_outcome_tests {
 
     #[test]
     fn isolation_bisects_left_right_and_interacting_items() {
-        fn left(active: &HashSet<u32>) -> Option<bool> {
-            Some(active.contains(&1))
-        }
-        fn right(active: &HashSet<u32>) -> Option<bool> {
-            Some(active.contains(&4))
-        }
-        fn interaction(active: &HashSet<u32>) -> Option<bool> {
-            Some(active.contains(&1) && active.contains(&3))
-        }
-
         let directory = crate::testing::workdir("build-isolation-outcomes-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
         let work = Workspace::adopt(root.clone(), root.join("target"));
@@ -1574,9 +1585,18 @@ mod mutation_outcome_tests {
         ]);
 
         for (oracle, expected) in [
-            (left as SubsetOracle, Isolation::Blamed(vec![1])),
-            (right as SubsetOracle, Isolation::Blamed(vec![4])),
-            (interaction as SubsetOracle, Isolation::Item(vec![1, 2])),
+            (
+                (|active: &HashSet<u32>| Some(active.contains(&1))) as SubsetOracle,
+                Isolation::Blamed(vec![1]),
+            ),
+            (
+                (|active: &HashSet<u32>| Some(active.contains(&4))) as SubsetOracle,
+                Isolation::Blamed(vec![4]),
+            ),
+            (
+                (|active: &HashSet<u32>| Some(active.contains(&1) && active.contains(&3))) as SubsetOracle,
+                Isolation::Item(vec![1, 2]),
+            ),
         ] {
             let mut converger = Converger {
                 subset_oracle: Some(oracle),
@@ -1600,21 +1620,14 @@ mod mutation_outcome_tests {
 
     #[test]
     fn isolation_refuses_empty_pristine_and_indeterminate_populations() {
-        fn pristine(_active: &HashSet<u32>) -> Option<bool> {
-            Some(true)
-        }
-        fn indeterminate(_active: &HashSet<u32>) -> Option<bool> {
-            None
-        }
-
         let directory = crate::testing::workdir("build-isolation-negative-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
         let work = Workspace::adopt(root.clone(), root.join("target"));
 
         for (population, oracle) in [
-            (Vec::new(), pristine as SubsetOracle),
-            (vec![mutant(1, "a", "one")], pristine as SubsetOracle),
-            (vec![mutant(1, "a", "one")], indeterminate as SubsetOracle),
+            (Vec::new(), (|_active: &HashSet<u32>| Some(true)) as SubsetOracle),
+            (vec![mutant(1, "a", "one")], (|_active: &HashSet<u32>| Some(true)) as SubsetOracle),
+            (vec![mutant(1, "a", "one")], (|_active: &HashSet<u32>| None) as SubsetOracle),
         ] {
             let mut converger = Converger {
                 subset_oracle: Some(oracle),

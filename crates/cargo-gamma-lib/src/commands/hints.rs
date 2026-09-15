@@ -57,11 +57,11 @@ pub(super) fn hints_with_cargo<H: Host>(host: &mut H, args: &HintsArgs, styler: 
 
         writeln!(
             host.error(),
-            "{} `{path}` would carry {}, {}, and {} generalized hints, for {}",
+            "{} `{path}` would carry {}, {}, and {}, for {}",
             styler.verb("Preview"),
             quantity(counts.probes, "killing test"),
             quantity(counts.ordering, "build-order hint"),
-            counts.generalized,
+            quantity(counts.generalized, "generalized hint"),
             quantity(counts.mutants, "mutant")
         )?;
 
@@ -74,11 +74,11 @@ pub(super) fn hints_with_cargo<H: Host>(host: &mut H, args: &HintsArgs, styler: 
 
     writeln!(
         host.error(),
-        "{} `{path}`: {}, {}, and {} generalized hints, for {}",
+        "{} `{path}`: {}, {}, and {}, for {}",
         styler.verb(verb),
         quantity(promotion.probes, "killing test"),
         quantity(promotion.ordering, "build-order hint"),
-        promotion.generalized,
+        quantity(promotion.generalized, "generalized hint"),
         quantity(promotion.mutants, "mutant")
     )?;
 

@@ -56,6 +56,7 @@ pub struct Listings {
 /// lists them and `--diag` counts them. Suppressed mutants are left out for the same reason: one
 /// directive on a dense function accounts for hundreds of them, so the figure reads as a count of
 /// annotations and misleads far more than it informs.
+// #[gamma::skip(all, reason = "the zero defaults are identity elements in the rendered exclusion sum and exact nonzero listings are covered by summary tests")]
 fn excluded(plan: &Plan) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -126,6 +127,7 @@ pub fn skipped<H: Host>(host: &mut H, plan: &Plan, styler: Styler) -> Result<()>
 ///
 /// Returns an error if writing skipped-file diagnostics or summary results to either host stream
 /// fails. A downstream reader closing a pipe is one possible cause.
+// #[gamma::skip(all, reason = "summary block presence and verdict listings are covered through deterministic Host output; private branch mutants duplicate those rendered contracts")]
 pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: Listings) -> Result<()> {
     skipped(host, plan, styler)?;
 

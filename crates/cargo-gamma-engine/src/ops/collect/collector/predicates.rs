@@ -701,6 +701,13 @@ mod tests {
         });
 
         assert!(loop_produces_value(&node));
+
+        let through_while: ExprLoop = parse_quote!('outer: loop {
+            while ready {
+                break 'outer 11;
+            }
+        });
+        assert!(loop_produces_value(&through_while));
     }
 
     /// Textuality is decided only from syntax, so every syntax form that states "this is text"
@@ -798,12 +805,18 @@ mod tests {
         ] {
             assert!(is_promotable(&expression), "{expression:?}");
         }
-        for expression in [parse_quote!([1, call()]), parse_quote!(!true), parse_quote!(call())] {
+        for expression in [
+            parse_quote!([1, call()]),
+            parse_quote!((1, call())),
+            parse_quote!(!true),
+            parse_quote!(call()),
+        ] {
             assert!(!is_promotable(&expression), "{expression:?}");
         }
 
         assert!(binds_a_pattern(&parse_quote!(let Some(value) = option)));
         assert!(binds_a_pattern(&parse_quote!(ready && (let Some(value) = option))));
+        assert!(!binds_a_pattern(&parse_quote!(ready + (let Some(value) = option))));
         assert!(!binds_a_pattern(&parse_quote!(ready || matches!(option, Some(_)))));
         assert_eq!(boolean_literal(&parse_quote!((true))), Some(true));
         assert_eq!(boolean_literal(&parse_quote!(value)), None);
@@ -858,14 +871,27 @@ mod tests {
         for (node, expected) in cases {
             assert_eq!(loop_produces_value(&node), expected, "{node:?}");
         }
+
+        let state_restored_between_siblings: ExprLoop = parse_quote!('outer: loop {
+            'outer: while false {
+                break;
+            }
+            while false {}
+            break 'outer 9;
+        });
+        assert!(loop_produces_value(&state_restored_between_siblings));
     }
 
     #[test]
     fn textual_numeric_and_pattern_classifiers_use_the_written_shape() {
         assert!(is_textual(&parse_quote!(std::format!("x"))));
         assert!(is_textual(&parse_quote!(String::from("a") + "b")));
+        assert!(is_textual(&parse_quote!("a" + suffix)));
+        assert!(is_textual(&parse_quote!(prefix + "b")));
+        assert!(is_textual(&parse_quote!((String::from("a")))));
         assert!(!is_textual(&parse_quote!(module::format)));
         assert!(!is_textual(&parse_quote!(1 + 2)));
+        assert!(!is_textual(&parse_quote!(1.max(2))));
 
         assert!(is_constant_case("HTTP_2"));
         assert!(!is_constant_case("Http2"));
@@ -922,6 +948,8 @@ mod tests {
                 return 1;
                 0
             }),
+            parse_quote!(if ready { return 1 } else { 0 }),
+            parse_quote!(if ready { 0 } else { return 1 }),
         ] {
             assert!(!diverges(&expression), "{expression:?}");
         }
@@ -935,5 +963,21 @@ mod tests {
         assert_eq!(declared_name(&typed.pat), Some("value".to_owned()));
         assert_eq!(declared_name(&parse_quote!(value @ Some(_))), None);
         assert_eq!(declared_name(&parse_quote!(_)), None);
+    }
+
+    #[test]
+    fn default_and_return_classification_require_exact_call_and_type_shapes() {
+        let defaults = default_paths("");
+        let defaulted = vec!["T".to_owned()];
+
+        assert!(is_default_call(&parse_quote!(T::default()), &defaults, &defaulted));
+        assert!(!is_default_call(&parse_quote!(T::default(value)), &defaults, &defaulted));
+        assert!(!is_default_call(&parse_quote!(module::T::default()), &defaults, &defaulted));
+        assert!(!is_default_call(&parse_quote!(T::Assoc::default()), &defaults, &defaulted));
+        assert!(!is_default_call(&parse_quote!(default()), &defaults, &defaulted));
+
+        assert!(is_numeric_return(&parse_quote!(-> usize)));
+        assert!(!is_numeric_return(&parse_quote!(-> String)));
+        assert!(!is_numeric_return(&ReturnType::Default));
     }
 }

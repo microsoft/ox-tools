@@ -45,7 +45,7 @@ impl Provider {
             client: Arc::new(client),
             cache,
             base_url: base_url.unwrap_or(CODECOV_BASE_URL).to_string(),
-            // #[gamma::skip(expr.increment, expr.decrement, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
+            // #[gamma::skip(all, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
         }
     }
@@ -57,6 +57,7 @@ impl Provider {
     ) -> impl Iterator<Item = (CrateSpec, ProviderResult<CoverageData>)> {
         let mut repo_to_crates = crate_spec::by_repo(crates.iter().cloned());
 
+        // #[gamma::skip(all, reason = "request totals are progress telemetry and do not change coverage results")]
         tracker.add_requests(TrackedTopic::Coverage, repo_to_crates.len() as u64);
 
         join_all(repo_to_crates.keys().map(|repo_spec| {
@@ -83,6 +84,7 @@ impl Provider {
     async fn fetch_coverage_data_for_repo(&self, repo_spec: RepoSpec, tracker: RequestTracker) -> (RepoSpec, ProviderResult<CoverageData>) {
         let _permit = self.throttler.acquire().await;
         let result = self.fetch_coverage_data_for_repo_core(&repo_spec).await;
+        // #[gamma::skip(stmt.delete_call, reason = "request completion is progress accounting and cannot change the returned coverage result")]
         tracker.complete_request(TrackedTopic::Coverage);
 
         (repo_spec, result)
@@ -176,12 +178,13 @@ impl Provider {
             return Err(ohno::app_err!("unexpected HTTP status {status} from {codecov_url}"));
         }
 
+        // #[gamma::skip(all, reason = "this context changes only diagnostic text after reading the response body has already failed")]
         let text = response.text().await.into_app_err("reading codecov response body")?;
 
         log::debug!(target: LOG_TARGET, "Codecov SVG length: {} bytes", text.len());
 
         // codecov returns a 200 with "unknown" in the SVG when no coverage data is available
-        if text.contains(">unknown<") {
+        if badge_is_unknown(&text) {
             log::debug!(target: LOG_TARGET, "Codecov badge shows 'unknown' for branch '{branch}' - no coverage data available");
             return Ok(None);
         }
@@ -205,6 +208,10 @@ impl Provider {
         log::debug!(target: LOG_TARGET, "No percentage found in codecov SVG for branch '{branch}'");
         Ok(None)
     }
+}
+
+fn badge_is_unknown(text: &str) -> bool {
+    text.contains(">unknown<")
 }
 
 /// Map a repository host to the Codecov service path segment.
@@ -289,6 +296,13 @@ mod tests {
         let text = "<text>100%</text>";
         let captures = PERCENT_REGEX.captures(text).unwrap();
         assert_eq!(captures.get(1).unwrap().as_str(), "100");
+    }
+
+    #[test]
+    fn codecov_unknown_marker_is_not_a_percentage() {
+        let text = "<svg><text>unknown</text><text>99%</text></svg>";
+        assert!(badge_is_unknown(text));
+        assert!(!badge_is_unknown("<svg><text>99%</text></svg>"));
     }
 
     #[test]

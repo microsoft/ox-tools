@@ -139,7 +139,6 @@ fn evaluate_expression(program: &Program, name: &str, context: &Context) -> Resu
 /// scale with the size of the dependency graph.
 #[expect(clippy::rc_buffer, reason = "cel's map keys are Arc<String>")]
 static METRIC_KEYS: LazyLock<crate::HashMap<&'static str, Arc<String>>> = LazyLock::new(|| {
-    // #[gamma::skip(literal.int, reason = "hash-map capacity changes allocation behavior only", tag = "resource")]
     let mut keys = crate::hash_map_with_capacity(METRIC_DEFINITIONS.len());
     for def in METRIC_DEFINITIONS {
         if let Some((_, suffix)) = def.name.split_once('.') {
@@ -162,9 +161,9 @@ fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metri
     let mut context = Context::default();
 
     // Build nested map structure for dotted metric names
-    // #[gamma::skip(literal.int, reason = "collection capacities change allocation behavior only", tag = "resource")]
+    // #[gamma::skip(all, reason = "hash-map capacity is an allocation hint and cannot change the CEL context contents", tag = "resource")]
     let mut root_map: crate::HashMap<&str, std::collections::HashMap<Arc<String>, Value>> = crate::hash_map_with_capacity(16);
-    // #[gamma::skip(literal.int, reason = "collection capacities change allocation behavior only", tag = "resource")]
+    // #[gamma::skip(all, reason = "vector capacity is an allocation hint and cannot change the CEL variables collected", tag = "resource")]
     let mut flat_vars: Vec<(&str, Value)> = Vec::with_capacity(16);
 
     for metric in metrics {

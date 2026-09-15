@@ -168,7 +168,8 @@ fn packages_flags(members: &[&Member], packages: PackagesExpansion) -> Vec<Strin
     if packages == PackagesExpansion::Workspace {
         return vec!["--workspace".to_owned()];
     }
-    let mut flags = Vec::new();
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; package flags are unchanged")]
+    let mut flags = Vec::with_capacity(members.len() * 2);
     for m in members {
         flags.push("--package".to_owned());
         flags.push(m.spec());
@@ -366,5 +367,30 @@ mod tests {
         )
         .expect("build target plan");
         assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(PathBuf::from("/ws/alpha").as_path()));
+    }
+
+    #[test]
+    fn per_target_accepts_a_multi_kind_target_when_any_kind_is_requested() {
+        let mut a = member("alpha");
+        a.targets.push(MemberTarget {
+            name: "hybrid".to_owned(),
+            kinds: [TargetKind::Lib, TargetKind::Bin].into_iter().collect(),
+            required_features: BTreeSet::new(),
+        });
+        let kinds = std::iter::once(TargetKind::Lib).collect();
+
+        let plan = Plan::build(
+            &[&a],
+            Mode::PerTarget,
+            false,
+            PackagesExpansion::Explicit,
+            &kinds,
+            &BTreeSet::new(),
+            &cmd(&["echo", "{target}"]),
+        )
+        .expect("one matching kind is sufficient");
+
+        assert_eq!(plan.invocations.len(), 1);
+        assert_eq!(plan.invocations[0].argv, ["echo", "hybrid"]);
     }
 }

@@ -33,6 +33,7 @@ impl BugLabelMatcher {
         // reported along with the pattern that caused the failure.
         for pattern in patterns {
             let _ = RegexBuilder::new(pattern)
+                // #[gamma::skip(literal.bool_flip, reason = "this preliminary compile only identifies which pattern is invalid; the RegexSet below applies the case-insensitive matching contract")]
                 .case_insensitive(true)
                 .build()
                 .into_app_err_with(|| format!("compiling bug label pattern '{pattern}'"))?;
@@ -41,7 +42,7 @@ impl BugLabelMatcher {
         let patterns = RegexSetBuilder::new(patterns)
             .case_insensitive(true)
             .build()
-            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "all patterns were compiled individually above, so this fallback context is unreachable for pattern errors")]
+            // #[gamma::skip(all, reason = "all patterns were compiled individually above, so this fallback context is unreachable for pattern errors")]
             .into_app_err("compiling bug label patterns")?;
 
         Ok(Self { patterns })

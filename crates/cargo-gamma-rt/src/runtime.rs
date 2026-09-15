@@ -1256,11 +1256,9 @@ unsafe extern "C" {
 // Cost: this deliberately makes no empirical throughput promise. The structural trade-off is
 // sufficient here: census-only first and unique hits pay one relaxed load, while repeated hits
 // avoid the recorder lease and compare-exchange protocol entirely.
-// Cold: reached only under a census, never in a scoring run, and even then only off the inlined
-// per-site guard `a`. Keeping it out of line stops its bitmap machinery being inlined into every
-// guard site and bloating the instrumented build, which is the dominant fixed cost of a run.
-// `#[inline(never)]` turns the `#[cold]` hint into a guarantee at no cost: a census can afford one
-// call per site.
+// Cold: reached on a site's first hit during a census or an active-mutant reach sample. The
+// inlined guard performs the cheap bitmap precheck so repeated hot-loop hits do not pay an
+// out-of-line call; keeping the recorder protocol here avoids bloating every instrumented site.
 #[cold]
 #[inline(never)]
 #[cfg(any(unix, windows))]
@@ -1301,6 +1299,21 @@ fn note(id: u32) {
 
     let _previous = REACHED[index / WORD_BITS].fetch_or(bit, Ordering::Relaxed);
     end_recording();
+}
+
+#[inline]
+#[cfg(any(unix, windows))]
+fn already_noted(id: u32) -> bool {
+    let Ok(index) = usize::try_from(id) else {
+        return false;
+    };
+
+    if index >= SITES {
+        OVERFLOWED.load(Ordering::Relaxed)
+    } else {
+        let bit = 1_u32 << (index % WORD_BITS);
+        REACHED[index / WORD_BITS].load(Ordering::Relaxed) & bit != 0
+    }
 }
 
 /// The high bit closes census recording; the remaining bits count bitmap updates in progress.
@@ -2009,7 +2022,7 @@ pub fn a(id: u32) -> bool {
     }
 
     #[cfg(any(unix, windows))]
-    if active == id && CENSUS_PATH_LENGTH.load(Ordering::Relaxed) != 0 {
+    if active == id && CENSUS_PATH_LENGTH.load(Ordering::Relaxed) != 0 && !already_noted(id) {
         note(id);
     }
 
@@ -2992,7 +3005,7 @@ mod tests {
                 .expect("the pre-main environment helper runs");
             let stderr = String::from_utf8_lossy(&output.stderr);
 
-            assert!(output.status.success(), "pre-main environment helper failed: {}", stderr);
+            assert!(output.status.success(), "pre-main environment helper failed: {stderr}");
         }
 
         #[test]

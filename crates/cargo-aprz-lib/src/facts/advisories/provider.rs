@@ -43,6 +43,7 @@ struct GitFetcher;
 
 impl DbFetcher for GitFetcher {
     fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
+        // #[gamma::skip(literal.bool_flip, reason = "this rustsec transport option can only be observed through a live remote fetch, which is not deterministic or hermetic")]
         Repository::fetch(database_url, repo_path, true, DATABASE_FETCH_TIMEOUT)
             .map(|_| ())
             .map_err(Into::into)
@@ -146,7 +147,7 @@ where
 async fn open_db(cache_dir: impl AsRef<Path>, progress: &dyn Progress) -> Result<Database> {
     let cache_path = cache_dir.as_ref().to_path_buf();
 
-    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "success verb is progress prose only and cannot change advisory database results")]
+    // #[gamma::skip(all, reason = "success verb is progress prose only and cannot change advisory database results")]
     run_blocking_with_progress(progress, "Opening the advisory database", "opening", move || {
         Database::open(&cache_path).map_err(Into::into)
     })
@@ -157,6 +158,7 @@ async fn download_db(cache_dir: impl AsRef<Path>, database_url: &str, progress: 
     let cache_path = cache_dir.as_ref().to_path_buf();
     let database_url = database_url.to_owned();
 
+    // #[gamma::skip(all, reason = "the success verb is progress prose only and cannot change the downloaded advisory database")]
     run_blocking_with_progress(progress, "Downloading the advisory database", "downloading", move || {
         fetcher.fetch(&cache_path, &database_url)
     })
@@ -424,12 +426,14 @@ mod tests {
 
         write_advisory(root, "active-crate", "RUSTSEC-2020-0001", None);
         write_advisory(root, "cleared-crate", "RUSTSEC-2020-0002", Some("2021-01-01"));
+        write_advisory(root, "active-after-withdrawn", "RUSTSEC-2020-0003", None);
 
         let database = Database::open(root).unwrap();
 
         let crates = vec![
             CrateSpec::from_arcs("active-crate".into(), Arc::new("1.0.0".parse().unwrap())),
             CrateSpec::from_arcs("cleared-crate".into(), Arc::new("1.0.0".parse().unwrap())),
+            CrateSpec::from_arcs("active-after-withdrawn".into(), Arc::new("1.0.0".parse().unwrap())),
         ];
 
         let results: HashMap<String, AdvisoryData> = scan_advisories(&database, crates)
@@ -445,6 +449,8 @@ mod tests {
         assert_eq!(results["active-crate"].total.unmaintained_warning_count, 1);
         assert_eq!(results["cleared-crate"].per_version.unmaintained_warning_count, 0);
         assert_eq!(results["cleared-crate"].total.unmaintained_warning_count, 0);
+        assert_eq!(results["active-after-withdrawn"].per_version.unmaintained_warning_count, 1);
+        assert_eq!(results["active-after-withdrawn"].total.unmaintained_warning_count, 1);
     }
 
     #[test]

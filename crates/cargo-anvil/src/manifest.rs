@@ -9,7 +9,7 @@
 //! compares this against the current on-disk content and the current
 //! template content.
 //!
-//! Schema is documented in [`updates.md §1`](../../docs/design/updates.md).
+//! Schema is documented in [`updates.md`](../../docs/design/updates.md).
 //! The schema version is `1`. Newer schemas cause the tool to refuse
 //! running; older schemas are migrated automatically (no older schemas
 //! exist today).
@@ -77,7 +77,8 @@ pub struct RegionKey {
 ///
 /// Returns an error naming `context` and the offending path when it is
 /// absolute, carries a drive or network-share prefix or a backslash, contains
-/// a `..` component, or names no file at all.
+/// a `..` component or an empty slash-separated segment, or names no file at
+/// all.
 fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
     // The format is `/`-separated, and the platforms disagree about `\`:
     // Windows treats it as a separator, Unix as an ordinary filename character.
@@ -116,6 +117,12 @@ fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
     let last = path.rsplit('/').next().unwrap_or_default();
     if last.is_empty() || last == "." {
         bail!("{context} '{path}' must name a file inside the repository");
+    }
+    // `Path::components` coalesces repeated separators, so validate the stored
+    // slash-separated spelling as well. Otherwise `foo//bar` and `foo/bar`
+    // become distinct manifest keys for the same file.
+    if path.split('/').any(str::is_empty) {
+        bail!("{context} '{path}' must not contain empty path segments");
     }
     Ok(())
 }
@@ -260,7 +267,8 @@ impl Manifest {
         // to leave uncovered.
         let body = doc.to_string();
         let trimmed = body.trim_end_matches('\n');
-        let mut out = String::new();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; manifest bytes are unchanged")]
+        let mut out = String::with_capacity(trimmed.len() + 1);
         out.push_str(trimmed);
         out.push('\n');
         out
@@ -735,6 +743,25 @@ mod tests {
             assert!(
                 format!("{err}").contains("must name a file inside the repository"),
                 "unexpected error for '{empty}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_slash_separated_segments() {
+        for path in ["foo//bar", "foo///bar"] {
+            let file = format!("version = 1\n\n[[file]]\npath = \"{path}\"\nchecksum = \"sha256:x\"\n");
+            let err = Manifest::parse(&file).unwrap_err();
+            assert!(
+                err.to_string().contains("[[file]] entry") && err.to_string().contains("must not contain empty path segments"),
+                "unexpected error for file path '{path}': {err}"
+            );
+
+            let region = format!("version = 1\n\n[[region]]\nhost = \"{path}\"\nid = \"anvil-x\"\nchecksum = \"sha256:x\"\n");
+            let err = Manifest::parse(&region).unwrap_err();
+            assert!(
+                err.to_string().contains("[[region]] host") && err.to_string().contains("must not contain empty path segments"),
+                "unexpected error for region host '{path}': {err}"
             );
         }
     }

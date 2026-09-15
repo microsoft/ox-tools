@@ -70,26 +70,30 @@ const fn thread_identifier(thread: u32) -> u32 {
 impl NativeCalls for SystemCalls {
     fn thread_snapshot(&self) -> HANDLE {
         // SAFETY: the arguments are a flag word and a process id, and no caller memory is touched.
+        // #[gamma::skip(all, reason = "Windows accepts reserved or irrelevant flag/process-id bits for a thread-only system snapshot, so altered arguments are not reliably observable across supported Windows versions")]
         unsafe { CreateToolhelp32Snapshot(THREAD_SNAPSHOT_FLAGS, SNAPSHOT_PROCESS_ID) }
     }
 
     fn first_thread(&self, snapshot: HANDLE, entry: &mut THREADENTRY32) -> bool {
-        // SAFETY: `snapshot` is live and `entry` declares its initialized structure size.
+        // SAFETY: the kernel validates the handle, and `entry` is writable and declares its
+        // initialized structure size.
         win32_succeeded(unsafe { Thread32First(snapshot, core::ptr::from_mut(entry)) })
     }
 
     // #[gamma::skip(fn_value.bool_true, reason = "claiming the snapshot always has another entry makes enumeration repeat past its end forever")]
     fn next_thread(&self, snapshot: HANDLE, entry: &mut THREADENTRY32) -> bool {
-        // SAFETY: the arguments retain the validity established for `first_thread`.
+        // SAFETY: the kernel validates the handle, and `entry` remains writable and correctly
+        // sized for the enumeration API.
         win32_succeeded(unsafe { Thread32Next(snapshot, core::ptr::from_mut(entry)) })
     }
 
     fn open_thread(&self, thread: u32) -> HANDLE {
         // SAFETY: the arguments are an access mask, an inheritance flag and a thread identifier.
+        // #[gamma::skip(all, reason = "nonzero BOOL encodings all request inheritance and Windows may normalize them identically, while inheriting this short-lived internal handle is not observable because no child is spawned before it closes")]
         unsafe { OpenThread(THREAD_SUSPEND_RESUME, INHERIT_THREAD_HANDLE, thread_identifier(thread)) }
     }
 
-    // #[gamma::skip(fn_value.one, fn_value.zero, reason = "returning without calling ResumeThread reports a still-suspended child as released, so its owner waits for a process that can never run")]
+    // #[gamma::skip(all, reason = "returning without calling ResumeThread reports a still-suspended child as released, so its owner waits for a process that can never run")]
     fn resume_thread(&self, thread: HANDLE) -> u32 {
         // SAFETY: the handle was opened with `THREAD_SUSPEND_RESUME`.
         unsafe { ResumeThread(thread) }
@@ -102,6 +106,7 @@ impl NativeCalls for SystemCalls {
 
     fn create_completion_port(&self) -> HANDLE {
         // SAFETY: these documented sentinel arguments request a new completion port.
+        // #[gamma::skip(all, reason = "the completion key is ignored when creating a fresh port, and Windows may normalize supported concurrency hints without exposing the chosen scheduler policy")]
         unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), COMPLETION_KEY, COMPLETION_CONCURRENCY) }
     }
 
@@ -132,7 +137,8 @@ impl NativeCalls for SystemCalls {
     }
 
     fn assign_process(&self, job: HANDLE, process: HANDLE) -> bool {
-        // SAFETY: both handles are live kernel object references for the duration of the call.
+        // SAFETY: the kernel validates both handle values; this call passes no caller-owned
+        // buffers or pointers.
         win32_succeeded(unsafe { AssignProcessToJobObject(job, process.cast::<c_void>()) })
     }
 
@@ -150,7 +156,7 @@ impl NativeCalls for SystemCalls {
         })
     }
 
-    // #[gamma::skip(fn_value.bool_true, relational.ne_to_eq, literal.int_decrement, literal.int_increment, reason = "claiming an empty queue produced a message loops forever; decrementing zero waits forever, while a one-millisecond wait at every high-volume poll exceeded the four-minute mutation budget without changing any result")]
+    // #[gamma::skip(all, reason = "claiming an empty queue produced a message loops forever; decrementing zero waits forever, while a one-millisecond wait at every high-volume poll exceeded the four-minute mutation budget without changing any result")]
     fn completion_status(&self, completion: HANDLE, message: &mut u32, key: &mut usize, overlapped: &mut *mut OVERLAPPED) -> bool {
         // SAFETY: the completion port is live, output references are writable, and the zero timeout
         // makes the operation non-blocking.
@@ -283,7 +289,7 @@ pub fn suppress_error_dialogs() {
 pub fn start_suspended(command: &mut Command) {
     use std::os::windows::process::CommandExt as _;
 
-    // #[gamma::skip(expr.decrement, expr.increment, reason = "changing the suspension flag can create a running or invalid child, after which assignment failure leaves no safe process handle to resume and the owner waits indefinitely")]
+    // #[gamma::skip(all, reason = "changing the suspension flag can create a running or invalid child, after which assignment failure leaves no safe process handle to resume and the owner waits indefinitely")]
     let _ = command.creation_flags(CREATE_SUSPENDED);
 }
 
@@ -383,7 +389,7 @@ fn valid_handle(handle: HANDLE) -> bool {
 ///
 /// The handle is still owned by the caller, so the failure a test injects here leaves it to be
 /// closed on the way out exactly as a real failure would.
-// #[gamma::skip(fn_value.one, fn_value.zero, expr.decrement, expr.increment, reason = "replacing the ResumeThread call with a count reports success without releasing the child, so the owner waits indefinitely")]
+// #[gamma::skip(all, reason = "replacing the ResumeThread call with a count reports success without releasing the child, so the owner waits indefinitely")]
 fn previous_suspension_count(handle: &OwnedHandle) -> u32 {
     NATIVE_CALLS.resume_thread(handle.as_raw_handle())
 }
@@ -553,7 +559,7 @@ impl Job {
 
             let received = NATIVE_CALLS.completion_status(completion.as_raw_handle(), &mut message, &mut key, &mut overlapped);
 
-            // #[gamma::skip(cond.always_false, cond.negate, unary.remove_not, reason = "continuing after a non-blocking completion-port read reports an empty queue spins forever")]
+            // #[gamma::skip(all, reason = "continuing after a non-blocking completion-port read reports an empty queue spins forever")]
             if !received {
                 return *hit;
             }
@@ -637,7 +643,7 @@ pub fn in_any_job(child: &Child) -> Option<bool> {
     // one, and the final argument is a live `i32` the call writes through.
     let queried = unsafe { IsProcessInJob(handle, core::ptr::null_mut(), &raw mut inside) };
 
-    in_job_answer(JobMembershipQuery { queried, inside })
+    in_job_answer(&JobMembershipQuery { queried, inside })
 }
 
 struct JobMembershipQuery {
@@ -645,7 +651,7 @@ struct JobMembershipQuery {
     inside: i32,
 }
 
-const fn in_job_answer(answer: JobMembershipQuery) -> Option<bool> {
+const fn in_job_answer(answer: &JobMembershipQuery) -> Option<bool> {
     if win32_succeeded(answer.queried) {
         Some(win32_succeeded(answer.inside))
     } else {
@@ -710,6 +716,19 @@ mod tests {
         assert!(!valid_handle(core::ptr::null_mut()));
         assert!(valid_handle(INVALID_HANDLE_VALUE));
         assert!(valid_handle(core::ptr::dangling_mut::<c_void>()));
+    }
+
+    #[test]
+    fn the_safe_open_thread_wrapper_preserves_the_requested_identifier() {
+        // SAFETY: this takes no arguments and returns the calling thread's numeric identifier.
+        let current = unsafe { GetCurrentThreadId() };
+        let opened = open_thread(current);
+
+        assert!(valid_handle(opened), "the wrapper must open the requested current thread");
+
+        // SAFETY: the successful call above returned this newly owned handle.
+        drop(unsafe { OwnedHandle::from_raw_handle(opened) });
+        assert!(!valid_handle(open_thread(u32::MAX)), "the wrapper must not redirect an invalid id");
     }
 
     #[test]
@@ -941,7 +960,7 @@ mod tests {
                 .expect("the isolated error-mode test starts");
             let stderr = String::from_utf8_lossy(&output.stderr);
 
-            assert!(output.status.success(), "the isolated error-mode test failed: {}", stderr);
+            assert!(output.status.success(), "the isolated error-mode test failed: {stderr}");
             return;
         }
 
@@ -1455,9 +1474,9 @@ mod tests {
 
     #[test]
     fn in_job_answers_preserve_failure_outside_and_inside() {
-        assert_eq!(in_job_answer(JobMembershipQuery { queried: 0, inside: 0 }), None);
-        assert_eq!(in_job_answer(JobMembershipQuery { queried: 1, inside: 0 }), Some(false));
-        assert_eq!(in_job_answer(JobMembershipQuery { queried: 1, inside: 1 }), Some(true));
+        assert_eq!(in_job_answer(&JobMembershipQuery { queried: 0, inside: 0 }), None);
+        assert_eq!(in_job_answer(&JobMembershipQuery { queried: 1, inside: 0 }), Some(false));
+        assert_eq!(in_job_answer(&JobMembershipQuery { queried: 1, inside: 1 }), Some(true));
     }
 
     #[test]

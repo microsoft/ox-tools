@@ -308,8 +308,10 @@ fn count_broken_links<Id>(docs: &str, resolved_links: &std::collections::HashMap
             || link_references
                 .get(text_without_parens)
                 .is_some_and(|target| resolved_links.contains_key(*target))
+            // #[gamma::skip(literal.str_to_empty, reason = "for an unqualified name this branch repeats the direct and reference-definition lookups already performed above")]
             || (text_without_parens.contains("::") && {
                 // Try just the last component (e.g., "Error" from "std::error::Error", or "chain" from "Error::chain")
+                // #[gamma::skip(literal.str_to_xyzzy, reason = "rsplit always yields at least the original string, so this fallback is unreachable")]
                 let last_component = text_without_parens.rsplit("::").next().unwrap_or("");
                 resolved_links.contains_key(last_component)
                     || link_references
@@ -587,6 +589,16 @@ mod tests {
     }
 
     #[test]
+    fn counts_indented_code_fences_as_examples() {
+        let docs = "Text\n    ```rust\n    let x = 1;\n    ```\n";
+        let json = make_rustdoc_json("my_crate", Some(docs), &[]);
+        let bytes = serde_json::to_vec(&json).unwrap();
+
+        let data = calculate_docs_metrics(&bytes, &crate_spec("my_crate")).unwrap();
+        assert_eq!(data.metrics.examples_in_docs, 1);
+    }
+
+    #[test]
     fn full_coverage_when_all_items_documented() {
         let json = make_rustdoc_json("my_crate", Some("Crate docs"), &[make_public_struct(1, "Foo", Some("Foo docs"))]);
         let reader = serde_json::to_vec(&json).unwrap();
@@ -645,6 +657,17 @@ mod tests {
         let data = calculate_docs_metrics(bytes.as_slice(), &crate_spec("my_crate")).unwrap();
         assert_eq!(data.metrics.public_api_elements, 0);
         assert!((data.metrics.doc_coverage_percentage - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn one_undocumented_public_item_has_zero_coverage() {
+        let mut json = make_rustdoc_json("my_crate", None, &[make_public_struct(1, "Undocumented", None)]);
+        json["index"]["0"]["visibility"] = json!("crate");
+        let bytes = serde_json::to_vec(&json).unwrap();
+
+        let data = calculate_docs_metrics(&bytes, &crate_spec("my_crate")).unwrap();
+        assert_eq!(data.metrics.public_api_elements, 1);
+        assert!(data.metrics.doc_coverage_percentage.abs() < f64::EPSILON);
     }
 
     #[test]
@@ -920,6 +943,17 @@ mod tests {
         let docs = "```rust\nlet x = [`NotALink`];\n```\n";
         let broken = count_broken_links::<u32>(docs, &links(&[]), None);
         assert_eq!(broken, 0);
+    }
+
+    #[test]
+    fn removing_a_code_block_preserves_link_text_on_either_side() {
+        let docs = "[`Mis```rust\nignored\n```sing`]";
+        assert_eq!(count_broken_links::<u32>(docs, &links(&[]), None), 1);
+    }
+
+    #[test]
+    fn three_character_unresolved_links_are_not_too_short() {
+        assert_eq!(count_broken_links::<u32>("See [`abc`].", &links(&[]), None), 1);
     }
 
     #[test]

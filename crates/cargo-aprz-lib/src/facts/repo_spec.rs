@@ -36,6 +36,7 @@ impl RepoSpec {
         let scheme = url.scheme();
 
         // Reconstruct a clean URL with only scheme://host/owner/repo
+        // #[gamma::skip(all, reason = "this context changes only diagnostic text after URL reconstruction has already failed")]
         let clean_url = Url::parse(&format!("{scheme}://{host}/{owner}/{repo}")).into_app_err("reconstructing repository URL")?;
 
         Ok(Self {

@@ -115,9 +115,11 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], timestamp: DateTime<Local>
             .first()
             .or_else(|| medium_risk_crates.first())
             .or_else(|| low_risk_crates.first())
+            // #[gamma::skip(all, reason = "has_appraisals guarantees at least one high, medium, or low entry, so the not-evaluated fallback is unreachable")]
             .or_else(|| not_evaluated_crates.first())
             .map(|(name, version, _, _)| crate_anchor_id(name, version))
     } else {
+        // #[gamma::skip(all, reason = "when risk lists are disabled the default anchor is never consulted, so every Option value has identical output")]
         None
     };
 
@@ -158,6 +160,7 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], timestamp: DateTime<Local>
                 writer,
                 "          <button class=\"tab-btn active\" data-tab=\"{card_id}-appraisal\" onclick=\"switchTab(this)\">Appraisal</button>"
             )?;
+            // #[gamma::skip(all, reason = "tab_index is used only as a zero/nonzero sentinel, so any positive increment is equivalent")]
             tab_index += 1;
         }
         for cat in &crate_categories {
@@ -166,6 +169,7 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], timestamp: DateTime<Local>
                 writer,
                 "          <button class=\"tab-btn{active}\" data-tab=\"{card_id}-{cat}\" onclick=\"switchTab(this)\">{cat}</button>"
             )?;
+            // #[gamma::skip(all, reason = "tab_index is used only as a zero/nonzero sentinel, so any positive increment is equivalent")]
             tab_index += 1;
         }
         writeln!(writer, "        </div>")?;
@@ -1013,6 +1017,7 @@ fn write_metrics_category<W: Write>(
 }
 
 fn crate_anchor_id(name: &str, version: &str) -> String {
+    // #[gamma::skip(all, reason = "string capacity is an allocation hint and cannot change the generated anchor", tag = "resource")]
     let mut id = String::with_capacity(name.len() + version.len() + 7);
     id.push_str("crate-");
     for c in name.chars() {
@@ -1170,6 +1175,7 @@ fn write_tab_scripts<W: Write>(writer: &mut W) -> Result<()> {
 fn html_escape(s: &str) -> Cow<'_, str> {
     // Escaping runs for every metric of every crate, and the overwhelming majority of values
     // contain nothing to escape, so the input is borrowed unless it actually needs rewriting.
+    // #[gamma::skip(all, reason = "this condition preserves the allocation-free fast path only; the owned escaping path produces identical text", tag = "resource")]
     if !s.bytes().any(|b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\'')) {
         return Cow::Borrowed(s);
     }
@@ -1425,6 +1431,13 @@ mod tests {
         let result = format_keywords_or_categories("", "keywords", &mut output);
         result.unwrap();
         assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_format_keywords_or_categories_preserves_separator_only_text() {
+        let mut output = String::new();
+        format_keywords_or_categories(" , ", "keywords", &mut output).unwrap();
+        assert_eq!(output, " , ");
     }
 
     #[test]
@@ -2249,5 +2262,125 @@ mod tests {
         .unwrap();
 
         assert!(output.is_empty(), "a category with no metrics has no table: {output}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn risk_lists_are_sorted_and_show_the_first_sorted_crate() {
+        for risk in [Risk::High, Risk::Medium, Risk::Low] {
+            let crates = vec![
+                create_test_crate("higher-score", "1.0.0", Some(Appraisal::new(risk, vec![], 10, 8, 80.0))),
+                create_test_crate("lower-score", "1.0.0", Some(Appraisal::new(risk, vec![], 10, 2, 20.0))),
+            ];
+            let mut output = String::new();
+            generate(&crates, test_timestamp(), &mut output).unwrap();
+            let lower = output.find("data-name=\"lower-score\"").expect("lower score pill");
+            let higher = output.find("data-name=\"higher-score\"").expect("higher score pill");
+            assert!(lower < higher, "risk pills must be sorted by score: {output}");
+            assert!(
+                output.contains("<div class=\"crate-card\" id=\"crate-lower-score-1.0.0\">"),
+                "the first sorted crate must be visible: {output}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn unevaluated_risk_list_is_sorted_alphabetically() {
+        let crates = vec![
+            create_test_crate("zebra", "1.0.0", None),
+            create_test_crate("alpha", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+            create_test_crate("beta", "1.0.0", None),
+        ];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+        assert!(
+            output.find("data-name=\"beta\"").expect("beta pill") < output.find("data-name=\"zebra\"").expect("zebra pill"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn a_crate_missing_an_earlier_union_metric_still_renders_later_metrics() {
+        static FIRST_DEF: MetricDef = MetricDef {
+            name: "first",
+            description: "First metric",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+        static LATER_DEF: MetricDef = MetricDef {
+            name: "later",
+            description: "Later metric",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+        let crates = vec![
+            ReportableCrate::new(
+                "first".into(),
+                Arc::new("1.0.0".parse().unwrap()),
+                vec![Metric::with_value(&FIRST_DEF, MetricValue::UInt(1))],
+                None,
+            ),
+            ReportableCrate::new(
+                "later".into(),
+                Arc::new("1.0.0".parse().unwrap()),
+                vec![Metric::with_value(&LATER_DEF, MetricValue::UInt(2))],
+                None,
+            ),
+        ];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+        assert!(output.contains("<td title=\"Later metric\">later</td>"), "{output}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn summary_tooltip_uses_the_crate_description_metric() {
+        static DESCRIPTION_DEF: MetricDef = MetricDef {
+            name: "crate.description",
+            description: "Description",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+        let described = ReportableCrate::new(
+            "described".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            vec![Metric::with_value(&DESCRIPTION_DEF, MetricValue::String("Useful crate".into()))],
+            Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0)),
+        );
+        let crates = vec![
+            described,
+            create_test_crate("other", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+        ];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+        assert!(output.contains("title=\"described v1.0.0\nUseful crate\""), "{output}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn only_the_first_nonempty_risk_panel_starts_open() {
+        let crates = vec![
+            create_test_crate("high", "1.0.0", Some(Appraisal::new(Risk::High, vec![], 1, 0, 0.0))),
+            create_test_crate("medium", "1.0.0", Some(Appraisal::new(Risk::Medium, vec![], 1, 0, 50.0))),
+            create_test_crate("low", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+        ];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(
+            output.contains("<details id=\"risk-high\" class=\"risk-list high\" open>"),
+            "{output}"
+        );
+        assert!(
+            output.contains("<details id=\"risk-medium\" class=\"risk-list medium\">"),
+            "{output}"
+        );
+        assert!(output.contains("<details id=\"risk-low\" class=\"risk-list low\">"), "{output}");
+        assert_eq!(output.matches("\" open>").count(), 1, "{output}");
     }
 }

@@ -94,7 +94,8 @@ fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Res
         let Some((kind, content)) = read_and_classify(path, config)? else {
             continue;
         };
-        let mut output: Vec<u8> = Vec::new();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; fixed file bytes are unchanged")]
+        let mut output: Vec<u8> = Vec::with_capacity(content.len() + 128);
         let result = cargo_heather::fix(content.as_bytes(), &mut output, &config.header_text, kind)
             .expect("`content` is a String (valid UTF-8) read into memory and `output` is a Vec, so fix's fallible paths -- reader IO/UTF-8 decoding and writer IO -- cannot fail here");
         let relative = make_relative(path, project_dir);

@@ -3,9 +3,8 @@
 
 //! Integration test for the process-global setup the CLI performs before any work happens.
 //!
-//! This binary deliberately holds a *single* test: it installs a process-wide logger (which can
-//! only ever be done once) and redirects the platform cache directory through the environment,
-//! neither of which is safe to do alongside another test in the same process.
+//! This binary deliberately holds a *single* test. The test relaunches itself with its environment
+//! configured before the child test harness starts, then installs the process-wide logger there.
 //!
 //! Linux also verifies platform cache-directory discovery. Windows known-folder discovery cannot
 //! be redirected through process environment, so it uses an explicit temporary cache directory.
@@ -18,31 +17,44 @@ mod support;
 use support::dump::Dump;
 use support::{TestHost, dump_server, dump_url, failing_server, seed_advisory_db};
 
+const CHILD: &str = "CARGO_APRZ_PROCESS_GLOBALS_CHILD";
+const CACHE_ROOT: &str = "CARGO_APRZ_PROCESS_GLOBALS_CACHE_ROOT";
+
 /// Exercises the defaults that every other test bypasses: the platform cache directory, an
 /// enabled log level (which installs the logger and disables the progress delay), forced colors
 /// and an overridden advisory database address.
-#[tokio::test]
+#[test]
 #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
-async fn cli_uses_the_platform_cache_directory_and_installs_a_logger() {
+fn cli_uses_the_platform_cache_directory_and_installs_a_logger() {
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir().expect("creating a temp dir");
+        let cache_root = home.path().join("cache");
+        let status = std::process::Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "cli_uses_the_platform_cache_directory_and_installs_a_logger",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env(CACHE_ROOT, &cache_root)
+            .env("HOME", home.path())
+            .env("RUST_LOG", "trace")
+            .env("XDG_CACHE_HOME", &cache_root)
+            .status()
+            .expect("launching isolated process-global test");
+
+        assert!(status.success(), "isolated process-global test failed with {status}");
+        return;
+    }
+
+    let runtime = tokio::runtime::Runtime::new().expect("creating test runtime");
+    runtime.block_on(cli_uses_process_globals());
+}
+
+async fn cli_uses_process_globals() {
     let dump = dump_server(Dump::sample(chrono::Utc::now()).to_tar_gz(), None).await;
     let services = failing_server(404).await;
-    let home = tempfile::tempdir().expect("creating a temp dir");
-    let cache_root = home.path().join("cache");
-
-    // `directories::BaseDirs` reads these, so the tool's default cache directory lands
-    // inside the temporary home instead of the real one.
-    // SAFETY: this binary contains exactly one test, so nothing else in the process can be
-    // reading the environment concurrently.
-    unsafe {
-        std::env::set_var("HOME", home.path());
-        std::env::set_var("RUST_LOG", "trace");
-    }
-    #[cfg(target_os = "linux")]
-    // SAFETY: this binary contains exactly one test, so nothing else in the process can be
-    // reading the environment concurrently.
-    unsafe {
-        std::env::set_var("XDG_CACHE_HOME", &cache_root);
-    }
+    let cache_root = std::path::PathBuf::from(std::env::var_os(CACHE_ROOT).expect("parent-provided cache root"));
     let app_cache = cache_root.join("cargo-aprz");
     seed_advisory_db(&app_cache);
 

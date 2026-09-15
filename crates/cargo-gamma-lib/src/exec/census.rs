@@ -121,7 +121,7 @@ struct Reach {
     /// Reverse lookup from sorted reach set to its index in `intern`.
     intern_index: HashMap<Arc<[u32]>, u32>,
 
-    /// Sample cost assigned to the first test of each retained scope, parallel to `names`.
+    /// Sample cost assigned to every test run by each retained scope, parallel to `names`.
     times: Vec<Duration>,
 
     /// Whether every listed test completed and therefore absence proves a site is uncovered.
@@ -291,6 +291,11 @@ impl Census {
         self.binaries.len()
     }
 
+    /// Whether at least one binary produced a usable census result.
+    pub(super) fn has_evidence(&self) -> bool {
+        !self.binaries.is_empty()
+    }
+
     /// How many sample subprocesses the census actually launched.
     ///
     /// The count of sample runs that were really spawned, which excludes the tests of a binary that
@@ -306,17 +311,16 @@ impl Census {
     pub(super) fn persist_clusters(&self, mutants: &[Mutant], binaries: &[TestBinary], hints: &mut GeneralizedHints) {
         hints.version = GENERALIZED_HINTS_VERSION;
         let by_ordinal: HashMap<u32, &Mutant> = mutants.iter().map(|mutant| (mutant.ordinal, mutant)).collect();
-        let touched: HashSet<SiteIdentity> = mutants.iter().map(SiteIdentity::from_mutant).collect();
         let mut sites: HashMap<SiteIdentity, Vec<Killer>> = hints
             .reach
             .iter()
-            .filter(|cluster| !touched.contains(&cluster.site))
             .filter_map(|cluster| {
                 let tests = hints.test_sets.get(cluster.test_set as usize)?.clone();
 
                 Some((cluster.site.clone(), tests))
             })
             .collect();
+        let mut replaced = HashSet::default();
 
         for binary in binaries {
             let Some(reach) = self.binaries.get(&binary.path) else {
@@ -339,7 +343,11 @@ impl Census {
                 if !can_repay(measured, binary.baseline) {
                     continue;
                 }
-                let tests = sites.entry(SiteIdentity::from_mutant(mutant)).or_default();
+                let site = SiteIdentity::from_mutant(mutant);
+                if replaced.insert(site.clone()) {
+                    sites.remove(&site);
+                }
+                let tests = sites.entry(site).or_default();
                 tests.extend(
                     indices
                         .iter()
@@ -632,7 +640,7 @@ fn read_listing(pipe: &mut impl io::Read) -> (Vec<u8>, bool) {
                 // #[gamma::skip(assign_value.default, reason = "false is the default bool value, so the replacement is identical")]
                 whole = false;
 
-                // #[gamma::skip(loop.break_to_continue, loop.delete_break, reason = "retrying a terminal pipe error spins forever because the same broken reader cannot recover")]
+                // #[gamma::skip(all, reason = "retrying a terminal pipe error spins forever because the same broken reader cannot recover")]
                 break;
             }
         }
@@ -658,6 +666,11 @@ fn read_listing(pipe: &mut impl io::Read) -> (Vec<u8>, bool) {
 /// believes some tests do not exist, and a test believed not to exist is one no mutant is ever run
 /// against.
 fn listed(mut command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
+    enum ListingStatus {
+        Observed(std::process::ExitStatus),
+        Missing,
+    }
+
     // Nothing is metered — the question is what the binary is, not what it costs — so the request
     // asks for no measurement and no ceiling. Containment does not follow that request: `prepare`
     // seals every launch it can, and the listing of a `harness = false` target is exactly the kind
@@ -697,10 +710,10 @@ fn listed(mut command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
         let refused = false;
 
         let spawned = if refused {
-            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the synthetic reader-thread error is deliberately discarded and all variants produce the same conservative missing-census result")]
+            // #[gamma::skip(all, reason = "the synthetic reader-thread error is deliberately discarded and all variants produce the same conservative missing-census result")]
             Err(io::Error::other("the reader thread a test asked to fail"))
         } else {
-            // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the detached thread name is diagnostic metadata and does not affect listing bytes or admission")]
+            // #[gamma::skip(all, reason = "the detached thread name is diagnostic metadata and does not affect listing bytes or admission")]
             thread::Builder::new().name("cargo-gamma-census-output".to_owned()).spawn(move || {
                 let (text, whole) = read_listing(&mut pipe);
                 let _sent = sender.send((text, whole));
@@ -715,11 +728,6 @@ fn listed(mut command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
     drop(sender);
 
     let deadline = Instant::now() + budget;
-
-    enum ListingStatus {
-        Observed(std::process::ExitStatus),
-        Missing,
-    }
 
     let status = loop {
         match subtree.observe() {
@@ -804,7 +812,7 @@ fn walk(
         work,
         listed,
         targets,
-        // #[gamma::skip(expr.decrement, expr.increment, reason = "walk_with currently executes the deterministic planner serially and intentionally ignores this compatibility parameter")]
+        // #[gamma::skip(all, reason = "walk_with currently executes the deterministic planner serially and intentionally ignores this compatibility parameter")]
         jobs,
         stall,
         sample,
@@ -987,7 +995,7 @@ fn contiguous_children(scope: &Scope, initial: bool) -> Vec<Scope> {
 fn ceil_sqrt(value: usize) -> usize {
     let mut root = 0_usize;
     while root.saturating_mul(root) < value {
-        // #[gamma::skip(stmt.delete_assign, assign_value.default, literal.int_decrement, reason = "not advancing the integer square-root candidate makes this loop non-terminating")]
+        // #[gamma::skip(all, reason = "not advancing the integer square-root candidate makes this loop non-terminating")]
         root = root.saturating_add(1);
     }
     root
@@ -1084,10 +1092,20 @@ where
         let mut times = vec![Duration::ZERO; names.len()];
 
         for observed in evidence {
-            if let Some(first) = observed.scope.tests.first().and_then(|index| usize::try_from(*index).ok())
-                && let Some(time) = times.get_mut(first)
-            {
-                *time = time.saturating_add(observed.elapsed);
+            let divisor = u32::try_from(observed.scope.tests.len()).unwrap_or(u32::MAX).max(1);
+            let per_test = observed.elapsed / divisor;
+            let remainder = observed.elapsed.saturating_sub(per_test * divisor);
+            for (position, index) in observed.scope.tests.iter().enumerate() {
+                if let Ok(index) = usize::try_from(*index)
+                    && let Some(time) = times.get_mut(index)
+                {
+                    let share = if position == 0 {
+                        per_test.saturating_add(remainder)
+                    } else {
+                        per_test
+                    };
+                    *time = time.saturating_add(share);
+                }
             }
             for site in observed.sites {
                 raw_reached.entry(site).or_default().extend(observed.scope.tests.iter().copied());
@@ -1260,7 +1278,7 @@ fn decode(bytes: &BoundedCensus) -> Option<Vec<u32>> {
         return None;
     }
 
-    // #[gamma::skip(arith.div_to_mul, arith.div_to_rem, literal.int_decrement, literal.int_increment, literal.int_to_one, reason = "this expression is only an allocation-capacity hint; decoding pushes the same records and exposes the same result for every capacity")]
+    // #[gamma::skip(all, reason = "this expression is only an allocation-capacity hint; decoding pushes the same records and exposes the same result for every capacity")]
     let mut sites = Vec::with_capacity(bytes.len() / 4);
     let mut sealed = false;
 
@@ -1295,13 +1313,13 @@ mod tests {
     }
 
     impl Read for InterruptedThenData {
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if !self.interrupted {
                 self.interrupted = true;
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
             }
 
-            self.data.read(buffer)
+            self.data.read(buf)
         }
     }
 
@@ -1310,9 +1328,9 @@ mod tests {
     }
 
     impl Read for DataThenError {
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if let Some(data) = self.data.take() {
-                buffer[..data.len()].copy_from_slice(&data);
+                buf[..data.len()].copy_from_slice(&data);
                 return Ok(data.len());
             }
 
@@ -1334,9 +1352,9 @@ mod tests {
         assert_eq!(read_listing(&mut truncated), (b"prefix".to_vec(), false));
 
         let mut exact = std::io::Cursor::new(vec![b'x'; LIST_CAP]);
-        assert_eq!(read_listing(&mut exact).1, true);
+        assert!(read_listing(&mut exact).1);
         let mut excessive = std::io::Cursor::new(vec![b'x'; LIST_CAP + 1]);
-        assert_eq!(read_listing(&mut excessive).1, false);
+        assert!(!read_listing(&mut excessive).1);
     }
 
     #[test]
@@ -1937,7 +1955,12 @@ mod tests {
         let reach = &census.binaries[&binary.path];
         assert_eq!(
             reach.times,
-            vec![Duration::from_millis(7), Duration::ZERO, Duration::ZERO, Duration::ZERO]
+            vec![
+                Duration::from_micros(3500),
+                Duration::from_micros(3500),
+                Duration::ZERO,
+                Duration::ZERO
+            ]
         );
         assert!(reach.intern_index.is_empty());
     }
@@ -2235,7 +2258,9 @@ mod tests {
         let scratch = crate::testing::workdir("sec2-sparse");
         let path = Utf8PathBuf::from_path_buf(scratch.path().join("census.bin")).expect("a temp path is valid UTF-8");
 
-        assert!(SPARSE_LOGICAL_LENGTH > MAX_CENSUS_BYTES);
+        const {
+            assert!(SPARSE_LOGICAL_LENGTH > MAX_CENSUS_BYTES);
+        }
         let file = fs::File::create(path.as_std_path()).expect("the sparse fixture file is creatable");
         file.set_len(SPARSE_LOGICAL_LENGTH)
             .expect("the filesystem under the test work directory supports sparse files");
@@ -2325,6 +2350,47 @@ mod tests {
         assert_eq!(sampled.load(Ordering::Relaxed), 2);
         assert_eq!(walked, 2);
         assert_eq!(census.selection(&binary, 7), CensusSelection::Whole);
+    }
+
+    #[test]
+    fn grouped_scope_cost_is_distributed_across_tests_without_multiplying_it() {
+        let _serial = WALK_TEST.lock().expect("the census walk test lock is not poisoned");
+        let (_directory, work) = crate::testing::helper_workspace("census-group-cost-", &[]);
+        let mut binary = TestBinary {
+            package: "subject".to_owned(),
+            ..crate::testing::helper()
+        };
+        binary.baseline = Duration::from_secs(10);
+        let names: Vec<Box<str>> = (0..4).map(|index| format!("tests::t{index}").into()).collect();
+        let targets = HashMap::from_iter([(binary.path.clone(), HashSet::from_iter([7]))]);
+
+        let (mapped, walked) = walk_with(
+            &work,
+            vec![(&binary, names, MIN_SCOUT_WAIT)],
+            &targets,
+            1,
+            Stall::NONE,
+            |_work, _binary, selected, _path, _stall| {
+                let sites = selected
+                    .first()
+                    .is_some_and(|name| *name == "tests::t0")
+                    .then_some(7)
+                    .into_iter()
+                    .collect();
+                Some((sites, Duration::from_millis(10)))
+            },
+            || false,
+            || {},
+        );
+        let census = Census {
+            binaries: HashMap::from_iter(mapped),
+            walked,
+        };
+
+        assert!(matches!(
+            census.work(&binary, 7),
+            CensusWork::Selected(duration) if duration == Duration::from_millis(10)
+        ));
     }
 
     /// A sampler that reports the same site several times for one test must count as a single
@@ -2779,9 +2845,14 @@ mod tests {
                 test: "tests::a".to_owned(),
             },
         ];
+        let previous_expensive = vec![Killer {
+            package: "old-package".to_owned(),
+            target: "old-tests".to_owned(),
+            test: "tests::old".to_owned(),
+        }];
         let mut hints = GeneralizedHints {
             version: GENERALIZED_HINTS_VERSION,
-            test_sets: vec![untouched],
+            test_sets: vec![untouched, previous_expensive],
             reach: vec![
                 ReachCluster {
                     site: untouched_site.clone(),
@@ -2793,6 +2864,10 @@ mod tests {
                         ..untouched_site.clone()
                     },
                     test_set: 99,
+                },
+                ReachCluster {
+                    site: SiteIdentity::from_mutant(&expensive),
+                    test_set: 1,
                 },
             ],
             ..GeneralizedHints::empty_supported()
@@ -2809,10 +2884,13 @@ mod tests {
             .expect("the untouched set remains interned");
         assert_eq!(untouched_set[0].package, "a-package");
         assert!(hints.reach.iter().any(|cluster| cluster.site == SiteIdentity::from_mutant(&useful)));
-        assert!(
-            !hints.reach.iter().any(|cluster| cluster.site.item == "subject::expensive"),
-            "over-half or full-baseline reach sets must not become exact probes: {hints:?}"
-        );
+        let previous = hints
+            .reach
+            .iter()
+            .find(|cluster| cluster.site.item == "subject::expensive")
+            .and_then(|cluster| hints.test_sets.get(cluster.test_set as usize))
+            .expect("a site without usable replacement evidence keeps its prior hint");
+        assert_eq!(previous[0].test, "tests::old");
     }
 
     #[test]
@@ -2848,7 +2926,7 @@ mod tests {
             path: root.join("missing-test-binary"),
             ..binary("missing")
         };
-        let targets = [(missing.path.clone(), HashSet::from_iter([1]))].into_iter().collect();
+        let targets = std::iter::once((missing.path.clone(), HashSet::from_iter([1]))).collect();
         let mut events = crate::testing::Recorder::default();
 
         let census = take(&work, &[missing], &targets, Duration::ZERO, 1, Stall::NONE, &mut events);
@@ -2859,7 +2937,7 @@ mod tests {
             events.phases,
             vec![
                 ("Optimizing".to_owned(), "1 test binary".to_owned()),
-                ("".to_owned(), String::new()),
+                (String::new(), String::new()),
             ]
         );
     }
@@ -2919,7 +2997,7 @@ mod tests {
             events.phases,
             vec![
                 ("Optimizing".to_owned(), "2 test binaries".to_owned()),
-                ("".to_owned(), ", 0 of 2 binaries mapped, over 0 samples".to_owned()),
+                (String::new(), ", 0 of 2 binaries mapped, over 0 samples".to_owned()),
             ]
         );
     }
@@ -2983,7 +3061,7 @@ mod tests {
         assert_eq!(events.phases[0], ("Optimizing".to_owned(), "1 test binary".to_owned()));
         assert_eq!(
             events.phases[1],
-            ("".to_owned(), ", 1 of 1 binary mapped, over 2 samples".to_owned())
+            (String::new(), ", 1 of 1 binary mapped, over 2 samples".to_owned())
         );
     }
 

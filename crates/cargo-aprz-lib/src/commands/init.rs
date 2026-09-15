@@ -77,4 +77,15 @@ mod tests {
             let _ = std::fs::remove_file(generated.as_std_path());
         }
     }
+
+    #[test]
+    fn metadata_errors_keep_the_operation_context() {
+        let mut host = TestHost::new();
+        let args = InitArgs {
+            output: None,
+            manifest_path: Utf8PathBuf::from("definitely-missing-Cargo.toml"),
+        };
+        let error = init_config(&mut host, &args).expect_err("metadata lookup must fail");
+        assert!(error.to_string().contains("retrieving workspace metadata"), "{error:#}");
+    }
 }

@@ -52,7 +52,7 @@ pub async fn acquire_cache_lock(cache_dir: &Path) -> Result<CacheLockGuard> {
         Ok::<_, ohno::AppError>(file)
     })
     .await
-    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "this context is reachable only if Tokio itself loses the non-panicking lock closure")]
+    // #[gamma::skip(all, reason = "this context is reachable only if Tokio itself loses the non-panicking lock closure")]
     .into_app_err("lock task panicked")??;
 
     Ok(CacheLockGuard(file))

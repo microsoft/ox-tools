@@ -34,7 +34,9 @@ pub fn sniff_github_workflows(repo_path: impl AsRef<Path>) -> Result<GitHubWorkf
 
     let mut file_count = 0;
 
+    // #[gamma::skip(literal.bool_flip, reason = "following attacker-controlled directory links can create an unbounded resource loop without changing valid workflow results")]
     for entry_result in walkdir::WalkDir::new(&workflows_dir).follow_links(false) {
+        // #[gamma::skip(all, reason = "this context changes only diagnostic text after the workflow walk has already failed")]
         let entry = entry_result.into_app_err("walking workflows directory")?;
 
         // Skip directories
@@ -66,7 +68,9 @@ pub fn sniff_github_workflows(repo_path: impl AsRef<Path>) -> Result<GitHubWorkf
         // workflow file allocates nothing per line.
         let mut line = String::new();
         loop {
+            // #[gamma::skip(stmt.delete_call, reason = "retaining prior lines changes memory use only because embedded newlines prevent a tool name from being assembled across line boundaries")]
             line.clear();
+            // #[gamma::skip(loop.break_to_continue, reason = "continuing after EOF repeatedly reads EOF forever")]
             match reader.read_line(&mut line) {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
@@ -307,6 +311,33 @@ steps:
         // README.md should be ignored
         assert!(!result.clippy_detected);
         assert!(!result.miri_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn non_yaml_files_do_not_stop_later_workflow_scanning() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+        fs::write(workflows_dir.join("00-readme.txt"), "not a workflow").unwrap();
+        fs::write(workflows_dir.join("01-ci.yml"), "run: cargo clippy").unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.clippy_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn yaml_named_directories_are_skipped_as_directories() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nested = temp_dir.path().join(".github").join("workflows").join("shared.yml");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("ci.yml"), "run: cargo miri test").unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.miri_detected);
     }
 
     #[test]

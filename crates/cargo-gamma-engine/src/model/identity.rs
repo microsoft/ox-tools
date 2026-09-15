@@ -354,6 +354,7 @@ pub fn normalize_site_text(text: &str) -> CompactString {
 
         if pending_space {
             out.push(' ');
+            // #[gamma::skip(assign_value.default, reason = "`pending_space` is bool, whose `Default::default()` is exactly false")]
             pending_space = false;
         }
 

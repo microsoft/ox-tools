@@ -60,6 +60,7 @@ impl Endpoints {
 
     /// Address of the docs.rs API.
     #[must_use]
+    // #[gamma::skip(all, reason = "mutating the injected docs endpoint redirects hermetic provider tests to an invalid or live network address until their request budget expires")]
     pub fn docs_url(&self) -> &str {
         &self.docs_url
     }
@@ -88,6 +89,7 @@ impl Endpoints {
 
     /// Redirect the crates.io database dump.
     #[must_use]
+    // #[gamma::skip(all, reason = "discarding the injected dump endpoint sends hermetic download tests to the live crates.io database dump until their network timeout")]
     pub fn with_dump_url(mut self, url: impl Into<String>) -> Self {
         self.dump_url = url.into();
         self
@@ -95,6 +97,7 @@ impl Endpoints {
 
     /// Redirect the docs.rs API.
     #[must_use]
+    // #[gamma::skip(all, reason = "discarding the injected docs endpoint sends hermetic provider tests to the live docs.rs service until their network timeout")]
     pub fn with_docs_url(mut self, url: impl Into<String>) -> Self {
         self.docs_url = url.into();
         self
@@ -102,6 +105,7 @@ impl Endpoints {
 
     /// Redirect the coverage badge API.
     #[must_use]
+    // #[gamma::skip(all, reason = "discarding the injected coverage endpoint sends hermetic provider tests to the live Codecov service until their network timeout")]
     pub fn with_coverage_url(mut self, url: impl Into<String>) -> Self {
         self.coverage_url = url.into();
         self
@@ -125,6 +129,7 @@ impl Endpoints {
 
     /// Redirect the `RustSec` advisory database repository.
     #[must_use]
+    // #[gamma::skip(all, reason = "discarding the injected advisory repository makes hermetic tests clone the live RustSec database until their network timeout")]
     pub fn with_advisory_url(mut self, url: impl Into<String>) -> Self {
         self.advisory_url = url.into();
         self

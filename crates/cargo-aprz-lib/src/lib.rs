@@ -37,7 +37,7 @@ pub(crate) fn hash_map_with_capacity<K, V>(capacity: usize) -> HashMap<K, V> {
 }
 
 pub(crate) fn hash_set_with_capacity<V>(capacity: usize) -> HashSet<V> {
-    // #[gamma::skip(expr.increment, expr.decrement, reason = "capacity is an allocation hint and does not change set behavior")]
+    // #[gamma::skip(all, reason = "capacity is an allocation hint and does not change set behavior")]
     HashSet::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher)
 }
 

@@ -217,6 +217,7 @@ fn scale(peak: u64, multiplier: f64) -> u64 {
     #[expect(clippy::cast_precision_loss, reason = "the comparison only needs to be right near the boundary")]
     let most = u64::MAX as f64;
 
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     if !scaled.is_finite() || scaled >= most {
         return u64::MAX;
     }

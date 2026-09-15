@@ -140,6 +140,7 @@ impl RequestTracker {
     /// Returns (`total_length`, `current_position`, `message_string`).
     fn progress_reporter_callback(counters: &[RequestCounter; 4], use_colors: bool) -> (u64, u64, String) {
         // Toggle every 500ms for the blink effect on blocked topics
+        // #[gamma::skip(all, reason = "shifting the wall-clock sample by one millisecond only moves the presentation-only blink boundary")]
         let blink_on = use_colors && {
             let ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -150,6 +151,7 @@ impl RequestTracker {
 
         let mut total_issued = 0u64;
         let mut total_completed = 0u64;
+        // #[gamma::skip(all, reason = "string capacity affects allocation behavior only; the progress message is unchanged")]
         let mut message = String::with_capacity(64);
 
         for topic in TrackedTopic::all() {
@@ -236,7 +238,7 @@ mod tests {
     #[test]
     fn constructing_tracker_registers_its_progress_callback() {
         let progress = Arc::new(RegistrationProgress::default());
-        let trait_progress: Arc<dyn Progress> = progress.clone();
+        let trait_progress: Arc<dyn Progress> = Arc::<RegistrationProgress>::clone(&progress);
         let _tracker = RequestTracker::new(&trait_progress);
         assert!(progress.registered.load(Ordering::Acquire));
     }
@@ -323,6 +325,18 @@ mod tests {
         assert_eq!(total, 3);
         assert_eq!(completed, 1);
         assert_eq!(message, "1/3 coverage");
+    }
+
+    #[test]
+    fn completing_a_single_issued_request_marks_the_topic_done() {
+        let tracker = test_tracker();
+        tracker.add_requests(TrackedTopic::Coverage, 1);
+        tracker.complete_request(TrackedTopic::Coverage);
+
+        assert_eq!(
+            tracker.counters[TrackedTopic::Coverage.index()].status.load(Ordering::Acquire),
+            TopicStatus::Done as u8
+        );
     }
 
     #[test]

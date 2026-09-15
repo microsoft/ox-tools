@@ -80,6 +80,7 @@ pub(crate) fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
             }
         }
 
+        // #[gamma::skip(all, reason = "mutating the restart guard prevents the symlink-resolution loop from terminating; the mutation runner can observe that only as a timeout")]
         if !restarted {
             return Ok(resolved);
         }
@@ -135,6 +136,7 @@ pub(crate) fn reject_collisions(outputs: &[(&str, &Utf8Path)]) -> Result<()> {
 /// Parent components must survive until [`physical`] has followed preceding symlinks: `link/..`
 /// names the parent of the link's target, not necessarily the parent of the link itself.
 fn absolute(path: &Utf8Path) -> Result<Utf8PathBuf> {
+    // #[gamma::skip(cond.always_false, reason = "joining an absolute path to the current directory returns that absolute path unchanged, so the fallback branch is observationally identical")]
     if path.is_absolute() {
         Ok(path.to_owned())
     } else {

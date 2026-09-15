@@ -191,15 +191,15 @@ fn implies_run(args: &[OsString]) -> bool {
             .iter()
             .any(|option| first.strip_prefix(option).is_some_and(|rest| rest.starts_with('=')))
         {
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not consuming a `--option=value` argument retries the same argument forever")]
+            // #[gamma::skip(all, reason = "not consuming a `--option=value` argument retries the same argument forever")]
             rest = &rest[1..];
         } else if GLOBAL_OPTIONS.contains(&first) {
             // The value is skipped along with the option, or a `--color never merge` would look
             // like it begins with the word `never`.
-            // #[gamma::skip(stmt.delete_assign, literal.int_to_zero, reason = "not consuming a global option and its value retries the same arguments forever")]
+            // #[gamma::skip(all, reason = "not consuming a global option and its value retries the same arguments forever")]
             rest = rest.get(2..).unwrap_or_default();
         } else {
-            // #[gamma::skip(loop.break_to_continue, loop.delete_break, reason = "continuing without consuming an unrecognized leading argument retries the same slice forever")]
+            // #[gamma::skip(all, reason = "continuing without consuming an unrecognized leading argument retries the same slice forever")]
             break;
         }
     }

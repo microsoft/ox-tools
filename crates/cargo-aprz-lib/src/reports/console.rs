@@ -95,6 +95,7 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], use_colors: bool, mode: &C
                 }
 
                 // Compute max metric name length for alignment
+                // #[gamma::skip(all, reason = "grouped category entries are created only when a metric is pushed, so this fallback is unreachable")]
                 let max_name_len = metric_names.iter().map(|name| name.len()).max().unwrap_or(0);
 
                 // Get terminal width and calculate available space for values
@@ -133,6 +134,7 @@ pub fn generate<W: Write>(crates: &[ReportableCrate], use_colors: bool, mode: &C
 }
 
 /// Get the terminal width, defaulting to 80 if not detectable
+// #[gamma::skip(all, reason = "terminal dimensions are environment-owned presentation inputs; the deterministic wrapping algorithm is tested directly")]
 fn get_terminal_width() -> usize {
     terminal_size().map_or(80, |(Width(w), _)| w as usize)
 }
@@ -163,6 +165,7 @@ fn wrap_text(text: &str, width: usize, indent: usize) -> Vec<String> {
             // Start a new line
             if is_first_line {
                 lines.push(current_line);
+                // #[gamma::skip(assign_value.default, reason = "bool::default() is exactly false")]
                 is_first_line = false;
             } else {
                 lines.push(format!("{:indent$}{}", "", current_line, indent = indent));

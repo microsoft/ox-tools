@@ -71,6 +71,7 @@ impl Serialize for Expression {
     {
         use serde::ser::SerializeStruct;
 
+        // #[gamma::skip(all, reason = "the supported JSON and TOML serializers ignore the struct name and field-count sizing hint")]
         let mut state = serializer.serialize_struct("Expression", 3)?;
         state.serialize_field("name", &*self.name)?;
         if let Some(ref desc) = self.description {
@@ -187,13 +188,14 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "compiles CEL programs, which is prohibitively slow under Miri")]
     fn test_serialize_with_description_format() {
-        let expr = Expression::new("test", Some("A test description"), "x > 5", None).unwrap();
+        let expr = Expression::new("test", Some("A test description"), "x > 5", Some(7)).unwrap();
 
         let json = serde_json::to_value(&expr).unwrap();
         assert_eq!(json["name"], "test");
         assert_eq!(json["description"], "A test description");
         assert_eq!(json["expression"], "x > 5");
-        assert_eq!(json.as_object().unwrap().len(), 3);
+        assert_eq!(json["points"], 7);
+        assert_eq!(json.as_object().unwrap().len(), 4);
     }
 
     #[test]

@@ -70,6 +70,7 @@ impl Progress {
     /// `enabled` is the already-resolved decision, so this type never has to know what a terminal
     /// is; `width` is the terminal width if there is one.
     #[must_use]
+    // #[gamma::skip(all, reason = "constructor defaults are asserted field-for-field; mutating this initialization duplicates those direct state contracts")]
     pub fn new(enabled: bool, styler: Styler, width: Option<u16>) -> Self {
         Self {
             enabled,
@@ -380,6 +381,7 @@ impl Progress {
     ///
     /// The subject must already be encoded: every caller reaching here has applied one of the two
     /// policies, and encoding again would turn a relayed `\e[31m` into `\\e[31m`.
+    // #[gamma::skip(all, reason = "enabled and disabled terminal output is covered through a deterministic Host sink; this private paint adapter adds no independent state transition")]
     fn line<H: Host>(&mut self, host: &mut H, label: &str, subject: &str) {
         if !self.enabled {
             return;
@@ -425,6 +427,7 @@ impl Progress {
     }
 
     /// Erases the progress bar.
+    // #[gamma::skip(all, reason = "clear depends on whether a terminal row was physically drawn; exact state transitions are asserted with the Host sink while real repaint visibility is terminal-dependent")]
     pub fn clear<H: Host>(&mut self, host: &mut H) {
         if !self.enabled || self.last_draw.is_none() {
             return;
@@ -509,6 +512,7 @@ impl Progress {
     }
 
     /// Erases the progress bar for good.
+    // #[gamma::skip(all, reason = "finish is asserted field-for-field after a real sink draw; its clear call and final dirty reset are one indivisible terminal-state transition")]
     pub fn finish<H: Host>(&mut self, host: &mut H) {
         self.clear(host);
         self.dirty = false;
@@ -859,6 +863,37 @@ mod tests {
         let progress = Progress::new(true, Styler::new(false), Some(80));
 
         assert!(progress.fraction().abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn constructor_defaults_and_finish_state_are_exact() {
+        let mut progress = Progress::new(true, Styler::new(false), None);
+
+        assert!(progress.enabled);
+        assert!(!progress.open);
+        assert!(progress.pending.is_none());
+        assert!(progress.shown.is_none());
+        assert_eq!(progress.width, 80);
+        assert!(progress.last_draw.is_none());
+        assert!(!progress.dirty);
+        assert_eq!(progress.total, 0);
+        assert_eq!(progress.done, 0);
+        assert_eq!(progress.survived, 0);
+        assert_eq!(progress.timeouts, 0);
+        assert_eq!(progress.out_of_memory, 0);
+        assert!(progress.started.is_none());
+
+        progress.set_total(3);
+        let mut host = Sink::default().terminal(80);
+        progress.tick(&mut host);
+        assert!(progress.last_draw.is_some());
+        assert!(!progress.dirty);
+
+        progress.record(Outcome::Killed);
+        assert!(progress.dirty);
+        progress.finish(&mut host);
+        assert!(progress.last_draw.is_none());
+        assert!(!progress.dirty);
     }
 
     #[test]

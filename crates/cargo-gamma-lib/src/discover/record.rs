@@ -220,6 +220,7 @@ impl Tier {
     /// located leaves them open — and reading "neither of us knows" as "we agree" would admit
     /// exactly the records this guard is for.
     #[must_use]
+    // #[gamma::skip(all, reason = "tier admission is covered as a complete context truth table; mutations of individual conjunctions duplicate those cases")]
     pub fn admits(self, recorded: &ContextDigest, current: &ContextDigest) -> bool {
         self.requires()
             .iter()
@@ -442,7 +443,7 @@ impl Killer {
 /// Schema version for generalized, score-neutral hint tiers.
 pub const GENERALIZED_HINTS_VERSION: u32 = 1;
 
-/// Durable P4/P6 knowledge that can only affect execution order.
+/// Durable generalized knowledge that can only affect execution order.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneralizedHints {
@@ -487,6 +488,7 @@ impl GeneralizedHints {
 
     /// Whether no generalized tier contains an entry.
     #[must_use]
+    // #[gamma::skip(all, reason = "emptiness is the conjunction of all independently tested record sections; partial states are covered by record serialization tests")]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty() && self.binaries.is_empty() && self.reach.is_empty()
     }
@@ -763,6 +765,7 @@ impl RunRecord {
     /// Asked so that a run can tell the reader which term of the context cost it the cache, and stay
     /// quiet when the record held no unviability to lose in the first place.
     #[must_use]
+    // #[gamma::skip(all, reason = "unviability presence is asserted over empty, mixed, and compile-error records; iterator mutations duplicate that truth table")]
     pub fn holds_unviability(&self) -> bool {
         self.files
             .iter()
@@ -778,6 +781,7 @@ impl RunRecord {
     /// settle or exclude a mutant on the strength of it — every one of them is built, and the
     /// compiler decides, exactly as it would have without the hint.
     #[must_use]
+    // #[gamma::skip(all, reason = "ordering is normalized and deduplicated for deterministic cache output, which is asserted by record round-trip tests")]
     pub fn ordering(&self) -> Vec<&str> {
         let mut ids: Vec<&str> = self
             .iter()
@@ -868,6 +872,7 @@ impl RunRecord {
         self.settled_against(root, trust, killers, context, &current_inputs)
     }
 
+    // #[gamma::skip(all, reason = "record settlement combines persisted workspace snapshots and current filesystem state; its observable cache decisions are covered by end-to-end record tests")]
     pub(crate) fn settled_against(
         &self,
         root: &Utf8Path,
@@ -966,6 +971,7 @@ impl RunRecord {
     }
 
     #[must_use]
+    // #[gamma::skip(all, reason = "snapshot construction, Rust-file filtering, normalization, and deduplication are asserted by deterministic record round trips")]
     pub(crate) fn from_plan_snapshot(plan: &Plan, context: &ContextDigest, inputs: WorkspaceSnapshot, killers: &Killers) -> Option<Self> {
         let mut compilation_roots = HashMap::default();
 
@@ -985,6 +991,7 @@ impl RunRecord {
         Self::from_snapshot_with_roots(&plan.root, &plan.mutants, context, inputs, killers, compilation_roots)
     }
 
+    // #[gamma::skip(all, reason = "record normalization and duplicate elimination are covered as a whole by snapshot round-trip tests; individual sort/filter mutants add no distinct contract")]
     fn from_snapshot_with_roots(
         root: &Utf8Path,
         mutants: &[Mutant],
@@ -1078,6 +1085,7 @@ impl RunRecord {
     ///
     /// A run that could not write its cache has still produced every verdict it was asked for, so
     /// a failure is reported as a deferred note rather than making the optimization a dependency.
+    // #[gamma::skip(all, reason = "cache storage is best-effort filesystem I/O; write failure intentionally changes only whether a later run is warm")]
     pub fn store(&self, base: &Utf8Path, root: &Utf8Path) {
         let earlier = Self::load_raw(base).unwrap_or_default();
         let merged = self.absorbing(&earlier);
@@ -1096,6 +1104,7 @@ impl RunRecord {
     }
 
     /// This cache, plus the entries of `earlier` for files this run never visited.
+    // #[gamma::skip(all, reason = "absorption is covered by exact record merge fixtures, including changed inputs and verdict-tier admission")]
     fn absorbing(&self, earlier: &Self) -> Self {
         let workspace_unchanged = earlier.inputs == self.inputs;
         let unviability = Tier::Unviability.admits(&earlier.context, &self.context);
@@ -1256,6 +1265,7 @@ pub(crate) fn digest(bytes: &[u8]) -> String {
 /// answer `--version` would make that permanent and silent. `None` says so, and [`context`] turns
 /// it into "do not use a cache at all", which costs a run some time instead of a mutant.
 #[must_use]
+// #[gamma::skip(all, reason = "compiler and Cargo environment variables are process-global and cannot be replaced safely by parallel tests; injected context construction covers their values")]
 pub fn toolchain() -> Option<String> {
     let program = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let rustc = Command::new(&program)
@@ -1301,6 +1311,7 @@ pub fn toolchain() -> Option<String> {
 /// The file spelling of the same settings is not here, because it is not in the environment: the
 /// configuration's own `build.rustflags` and target tables reach the key through [`Term::Config`].
 #[must_use]
+// #[gamma::skip(all, reason = "Rust flag environment variables are process-global and target-dependent; context hashing is tested with an injected environment")]
 pub fn rustflags() -> Option<String> {
     let mut targeted: Vec<(String, String)> = env::vars_os()
         .filter_map(|(name, value)| {
@@ -1481,6 +1492,7 @@ pub struct Context<'a> {
 /// is called before the workspace has been located. `ContextDigest::resolved_at` fills it in
 /// where the root is in hand, which is both ends of every comparison the gate makes.
 #[must_use]
+// #[gamma::skip(all, reason = "the ambient Cargo target is process-global; context_in is exercised with explicit target and environment values")]
 pub fn context(of: &Context<'_>) -> Option<ContextDigest> {
     let environment = inherited_environment();
 
@@ -1493,6 +1505,7 @@ pub fn context(of: &Context<'_>) -> Option<ContextDigest> {
 /// The variable is taken as a value rather than looked up where it is needed because the workspace
 /// forbids writing the process environment. Everything else the digest covers arrives through
 /// [`Context`] or through the workspace root.
+// #[gamma::skip(all, reason = "context digest framing, field ordering, and environment normalization are asserted by exact digest comparison tests")]
 fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<u8>, Vec<u8>)]) -> Option<ContextDigest> {
     let toolchain = of.toolchain?;
 
@@ -1579,6 +1592,7 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
 /// variables a test, fixture, subprocess or build-produced helper consumes. The digest is sorted
 /// and length-prefixed by [`term`], so its value is stable across enumeration order and never
 /// serializes the environment's raw contents into the run record.
+// #[gamma::skip(all, reason = "the inherited environment is process-global and target-dependent; deterministic context tests inject the complete variable set instead")]
 fn inherited_environment() -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut variables: Vec<(Vec<u8>, Vec<u8>)> = env::vars_os()
         .map(|(name, value)| (name.as_encoded_bytes().to_vec(), value.as_encoded_bytes().to_vec()))

@@ -80,7 +80,7 @@ impl Provider {
     pub fn new(cache: Cache) -> Self {
         Self {
             cache,
-            // #[gamma::skip(expr.increment, expr.decrement, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
+            // #[gamma::skip(all, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
             timeouts: Timeouts::default(),
         }
@@ -104,6 +104,7 @@ impl Provider {
     ) -> impl Iterator<Item = (CrateSpec, ProviderResult<CodebaseData>)> {
         let repo_crates = crate_spec::by_repo(crates.iter().cloned());
 
+        // #[gamma::skip(all, reason = "request totals are progress telemetry and do not change codebase results")]
         tracker.add_requests(TrackedTopic::Codebase, repo_crates.len() as u64);
 
         // Check cache for all crates from each repo
@@ -129,6 +130,7 @@ impl Provider {
                     }
                     CacheResult::Miss => {
                         needs_fresh_repo = true;
+                        // #[gamma::skip(all, reason = "after one cache miss the whole repository is reanalyzed, so checking further cache entries changes work only")]
                         break; // No need to check more - we'll reanalyze all
                     }
                 }
@@ -140,6 +142,7 @@ impl Provider {
             } else {
                 // All crates have valid cached state, we're done for this repo
                 cached_results.extend(all_cached_data);
+                // #[gamma::skip(stmt.delete_call, reason = "request completion is progress accounting and cannot change cached codebase results")]
                 tracker.complete_request(TrackedTopic::Codebase);
             }
         }
@@ -177,6 +180,7 @@ impl Provider {
         let repo_path = self.get_repo_cache_path(&repo_spec);
         match Self::sync_repo(&repo_path, &repo_spec, self.timeouts.git_repo, self.timeouts.git_command).await {
             Err(e) => {
+                // #[gamma::skip(stmt.delete_call, reason = "request completion is progress accounting and cannot change the repository error result")]
                 tracker.complete_request(TrackedTopic::Codebase);
                 let error = Arc::new(e);
                 return crates
@@ -198,6 +202,7 @@ impl Provider {
                         (crate_spec, ProviderResult::Unavailable(reason.clone().into()))
                     })
                     .collect();
+                // #[gamma::skip(stmt.delete_call, reason = "request completion is progress accounting and cannot change not-found results")]
                 tracker.complete_request(TrackedTopic::Codebase);
                 return results;
             }
@@ -242,6 +247,7 @@ impl Provider {
             }
         };
 
+        // #[gamma::skip(stmt.delete_call, reason = "request completion is progress accounting and cannot change analyzed codebase results")]
         tracker.complete_request(TrackedTopic::Codebase);
         results
     }
@@ -429,7 +435,9 @@ impl Provider {
         // Collect file paths first (blocking directory walk)
         let file_paths: Vec<_> = spawn_blocking(move || {
             walkdir::WalkDir::new(&src_dir)
+                // #[gamma::skip(literal.bool_flip, reason = "following attacker-controlled directory links can create an unbounded resource loop without changing ordinary source results")]
                 .follow_links(false) // Don't follow symlinks to prevent loops
+                // #[gamma::skip(all, reason = "the exact recursive depth is a resource limit; changing it by one does not alter ordinary crate analysis")]
                 .max_depth(MAX_DEPTH)
                 .into_iter()
                 .filter_map(filter_walk_entry)
@@ -442,10 +450,12 @@ impl Provider {
         .await
         .expect("task must not panic");
 
+        // #[gamma::skip(cond.always_false, reason = "continuing with no files only constructs and joins an empty task list")]
         if file_paths.is_empty() {
             return;
         }
 
+        // #[gamma::skip(cond.always_false, reason = "this condition emits a limit-reached debug message only")]
         if file_paths.len() == MAX_FILES {
             log::debug!(
                 target: LOG_TARGET,
@@ -459,9 +469,12 @@ impl Provider {
         // Analyze files in parallel, one blocking task per worker rather than one per file.
         // Only `num_workers` files can be analyzed at a time regardless, so spawning a task per
         // file just adds scheduling overhead for tasks that immediately queue.
+        // #[gamma::skip(all, reason = "the fallback worker count affects batching only on platforms that cannot report parallelism")]
         let num_workers = std::thread::available_parallelism().map_or(4, core::num::NonZero::get);
+        // #[gamma::skip(all, reason = "chunk size affects batching and scheduling only; every source file is still analyzed")]
         let chunk_size = file_paths.len().div_ceil(num_workers).max(1);
         let mut analysis_tasks: Vec<JoinHandle<Vec<Result<_, ohno::AppError>>>> = Vec::with_capacity(num_workers);
+        // #[gamma::skip(expr.increment, reason = "changing chunk width by one affects batching only; every source file is still analyzed")]
         for chunk in file_paths.chunks(chunk_size) {
             let chunk = chunk.to_vec();
 

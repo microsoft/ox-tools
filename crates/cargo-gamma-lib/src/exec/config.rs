@@ -164,6 +164,7 @@ pub(crate) fn resolve_jobs(jobs: Option<usize>) -> usize {
 ///
 /// This is deliberately separate from [`resolve_jobs`]: the latter adds a worker by default and
 /// honours an explicit `--jobs`, neither of which changes the machine's available cores.
+// #[gamma::skip(all, reason = "the value comes from host identity or topology and cannot be replaced safely or deterministically in parallel tests")]
 pub(crate) fn available_parallelism() -> usize {
     thread::available_parallelism().map_or(1, NonZero::get)
 }
@@ -200,6 +201,22 @@ mod tests {
         assert_eq!(scaled.max(config.timeout_floor), config.timeout_floor);
     }
 
+    #[test]
+    fn command_policy_defaults_are_explicit() {
+        let config = Config::default();
+
+        assert_eq!(config.timeout_floor, Duration::from_secs(20));
+        assert!(config.baseline);
+        assert!(config.confirm);
+        assert!(config.stall);
+        assert!(!config.leak_dirs);
+        assert!(config.cache_dir.is_none());
+        assert!(!config.copy_ignored);
+        assert!(!config.test_workspace);
+        assert!(!config.whole_test_binaries);
+        assert!(!config.nextest);
+    }
+
     /// The programmatic default is the 50% margin the command default and the documentation promise.
     #[test]
     fn the_default_timeout_multiplier_is_one_and_a_half() {
@@ -221,6 +238,11 @@ mod tests {
     #[test]
     fn one_processor_defaults_to_two_jobs() {
         assert_eq!(default_jobs(1), 2);
+    }
+
+    #[test]
+    fn an_unspecified_job_count_uses_host_parallelism() {
+        assert!(resolve_jobs(None) >= 1);
     }
 
     #[test]

@@ -25,7 +25,7 @@ use super::tables::{
 use crate::facts::crate_spec::CrateSpec;
 use crate::facts::progress::Progress;
 use crate::facts::{CrateRef, ProviderResult};
-use crate::{HashMap, HashSet, Result};
+use crate::{HashMap, HashSet, Result, hash_map_with_capacity, hash_set_with_capacity};
 
 const LOG_TARGET: &str = "    crates";
 const LOG_TARGET_DB_CONTENT: &str = "db_content";
@@ -121,12 +121,14 @@ impl Provider {
     ) -> impl Iterator<Item = (CrateSpec, ProviderResult<CratesData>)> {
         let provider = self.clone();
 
+        // #[gamma::skip(all, reason = "singular versus plural wording affects progress presentation only")]
         let message = if crates.len() == 1 {
             format!("Looking for crate '{}'", crates[0].name())
         } else {
             format!("Looking for {} crates", crates.len())
         };
         let message = Arc::new(message);
+        // #[gamma::skip(stmt.delete_call, reason = "installing the callback affects progress presentation only, not crate lookup results")]
         progress.set_indeterminate(Box::new(move || (*message).clone()));
 
         let crates = crates.to_vec();
@@ -257,8 +259,10 @@ impl Provider {
         HashMap<CrateId, PerCrateData>,
         HashMap<CompactString, Vec<CompactString>>,
     ) {
-        let mut crate_name_to_id = HashMap::default();
-        let mut crate_data = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; crate lookup data is unchanged")]
+        let mut crate_name_to_id = hash_map_with_capacity(requested_names.len());
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; crate lookup data is unchanged")]
+        let mut crate_data = hash_map_with_capacity(requested_names.len());
 
         // Pre-compute normalized versions of requested names for efficient similarity matching (only if suggestions enabled)
         let normalized_requested: HashMap<CompactString, CompactString> = if suggestions {
@@ -281,10 +285,12 @@ impl Provider {
         };
 
         // Reusable buffer for normalizing crate table names (avoids allocations, only needed if suggestions enabled)
+        // #[gamma::skip(literal.str_to_xyzzy, reason = "normalize_name_into clears the reusable buffer before its first read")]
         let mut normalized_buffer = CompactString::new("");
 
         let mut remaining = requested_names.len();
 
+        // #[gamma::skip(cond.always_true, reason = "scanning the crates table for an empty request changes work only and produces the same empty maps")]
         if remaining != 0 {
             for (row, index) in self.table_mgr.crates_table().iter() {
                 if requested_names.contains(row.name) {
@@ -388,8 +394,10 @@ impl Provider {
         requested: &[CrateRef],
         crate_name_to_id: &HashMap<CompactString, CrateId>,
     ) -> (HashMap<CrateId, HashMap<SemverVersion, CrateRef>>, HashMap<CrateId, CrateRef>) {
-        let mut needed_versions = HashMap::default();
-        let mut need_latest_version = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; version requirements are unchanged")]
+        let mut needed_versions = hash_map_with_capacity(requested.len());
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; version requirements are unchanged")]
+        let mut need_latest_version = hash_map_with_capacity(requested.len());
 
         for crate_ref in requested {
             if let Some(&crate_id) = crate_name_to_id.get(crate_ref.name()) {
@@ -423,7 +431,12 @@ impl Provider {
         crate_data: &HashMap<CrateId, PerCrateData>,
     ) -> (HashSet<VersionId>, HashMap<CrateId, HashSet<VersionId>>) {
         let mut needed_version_ids = HashSet::default();
-        let mut crate_to_dependent_versions = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; dependency mappings are unchanged")]
+        let mut crate_to_dependent_versions = hash_map_with_capacity(crate_data.len());
+
+        if crate_data.is_empty() {
+            return (needed_version_ids, crate_to_dependent_versions);
+        }
 
         for (row, _) in self.table_mgr.dependencies_table().iter() {
             if let Some((&crate_id, _)) = crate_data.get_key_value(&row.crate_id) {
@@ -466,13 +479,20 @@ impl Provider {
     ) -> VersionScanResult {
         let total_needed_versions: usize = needed_versions.values().map(HashMap::len).sum();
 
-        let mut version_data_map = HashMap::default();
-        let mut resolved_versions = HashMap::default();
+        let initial_version_capacity = total_needed_versions.saturating_add(need_latest_version.len());
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; version data is unchanged")]
+        let mut version_data_map = hash_map_with_capacity(initial_version_capacity);
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; resolved versions are unchanged")]
+        let mut resolved_versions = hash_map_with_capacity(need_latest_version.len());
         // The third tuple element records whether the candidate is a release users would
         // normally get: not yanked and not a pre-release.
-        let mut latest_version_indices: HashMap<CrateId, (VersionsTableIndex, SemverVersion, bool)> = HashMap::default();
-        let mut version_ids = HashSet::default();
-        let mut version_id_to_crate_id = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; latest-version selection is unchanged")]
+        let mut latest_version_indices: HashMap<CrateId, (VersionsTableIndex, SemverVersion, bool)> =
+            hash_map_with_capacity(need_latest_version.len());
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; selected version IDs are unchanged")]
+        let mut version_ids = hash_set_with_capacity(initial_version_capacity);
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; version-to-crate mappings are unchanged")]
+        let mut version_id_to_crate_id = hash_map_with_capacity(needed_version_ids.len());
         let mut all_version_to_crate = HashMap::default();
 
         let mut remaining_versions = total_needed_versions;
@@ -592,6 +612,10 @@ impl Provider {
     /// Each table is scanned once in full (no early-exit possible since crates can have
     /// multiple owners/categories/keywords).
     fn phase6_populate_join_table_data(&self, crate_data: &mut HashMap<CrateId, PerCrateData>) {
+        if crate_data.is_empty() {
+            return;
+        }
+
         // Each scan reads an independent table and only needs to know which crates are wanted, so
         // they run on separate threads and collect into their own maps. Merging afterwards is
         // bounded by the number of requested crates rather than by the table sizes.
@@ -642,7 +666,7 @@ impl Provider {
         all_version_to_crate: &HashMap<VersionId, CrateId>,
     ) -> (HashMap<VersionId, Vec<(NaiveDate, u64)>>, HashMap<CrateId, Vec<(NaiveDate, u64)>>) {
         self.collect_crate_downloads(crate_data);
-        self.aggregate_all_monthly_downloads(version_ids, all_version_to_crate)
+        self.aggregate_all_monthly_downloads(version_ids, all_version_to_crate, crate_data)
     }
 
     /// Assemble a single query result from collected data.
@@ -730,7 +754,8 @@ impl Provider {
     }
 
     fn load_categories(&self) -> HashMap<CategoryId, CategoriesTableIndex> {
-        let mut map = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; category lookup data is unchanged")]
+        let mut map = hash_map_with_capacity(self.table_mgr.categories_table().len());
         for (row, index) in self.table_mgr.categories_table().iter() {
             let _ = map.insert(row.id, index);
         }
@@ -738,7 +763,8 @@ impl Provider {
     }
 
     fn load_keywords(&self) -> HashMap<KeywordId, KeywordsTableIndex> {
-        let mut map = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; keyword lookup data is unchanged")]
+        let mut map = hash_map_with_capacity(self.table_mgr.keywords_table().len());
         for (row, index) in self.table_mgr.keywords_table().iter() {
             let _ = map.insert(row.id, index);
         }
@@ -746,7 +772,8 @@ impl Provider {
     }
 
     fn load_users(&self) -> HashMap<UserId, UsersTableIndex> {
-        let mut map = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; user lookup data is unchanged")]
+        let mut map = hash_map_with_capacity(self.table_mgr.users_table().len());
         for (row, index) in self.table_mgr.users_table().iter() {
             let _ = map.insert(row.id, index);
         }
@@ -754,7 +781,8 @@ impl Provider {
     }
 
     fn load_teams(&self) -> HashMap<TeamId, TeamsTableIndex> {
-        let mut map = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; team lookup data is unchanged")]
+        let mut map = hash_map_with_capacity(self.table_mgr.teams_table().len());
         for (row, index) in self.table_mgr.teams_table().iter() {
             let _ = map.insert(row.id, index);
         }
@@ -762,7 +790,8 @@ impl Provider {
     }
 
     fn collect_crate_owners(&self, crate_data: &HashMap<CrateId, PerCrateData>) -> HashMap<CrateId, Vec<TableOwnerKind>> {
-        let mut collected = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; owner associations are unchanged")]
+        let mut collected = hash_map_with_capacity(crate_data.len());
         for (row, _) in self.table_mgr.crate_owners_table().iter() {
             if let Some((&crate_id, _)) = crate_data.get_key_value(&row.crate_id) {
                 collected.entry(crate_id).or_insert_with(Vec::new).push(row.owner());
@@ -772,7 +801,8 @@ impl Provider {
     }
 
     fn collect_crate_categories(&self, crate_data: &HashMap<CrateId, PerCrateData>) -> HashMap<CrateId, Vec<CategoryId>> {
-        let mut collected = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; category associations are unchanged")]
+        let mut collected = hash_map_with_capacity(crate_data.len());
         for (row, _) in self.table_mgr.crates_categories_table().iter() {
             if let Some((&crate_id, _)) = crate_data.get_key_value(&row.crate_id) {
                 collected.entry(crate_id).or_insert_with(Vec::new).push(row.category_id);
@@ -782,7 +812,8 @@ impl Provider {
     }
 
     fn collect_crate_keywords(&self, crate_data: &HashMap<CrateId, PerCrateData>) -> HashMap<CrateId, Vec<KeywordId>> {
-        let mut collected = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; keyword associations are unchanged")]
+        let mut collected = hash_map_with_capacity(crate_data.len());
         for (row, _) in self.table_mgr.crates_keywords_table().iter() {
             if let Some((&crate_id, _)) = crate_data.get_key_value(&row.crate_id) {
                 collected.entry(crate_id).or_insert_with(Vec::new).push(row.keyword_id);
@@ -793,6 +824,7 @@ impl Provider {
 
     fn collect_crate_downloads(&self, crate_data: &mut HashMap<CrateId, PerCrateData>) {
         let mut needed = crate_data.len();
+        // #[gamma::skip(cond.always_true, reason = "scanning downloads for an empty crate map changes work only and produces the same empty result")]
         if needed != 0 {
             for (row, _) in self.table_mgr.crate_downloads_table().iter() {
                 if let Some(data) = crate_data.get_mut(&row.crate_id) {
@@ -817,9 +849,16 @@ impl Provider {
         &self,
         version_ids: &HashSet<VersionId>,
         all_version_to_crate: &HashMap<VersionId, CrateId>,
+        crate_data: &HashMap<CrateId, PerCrateData>,
     ) -> (HashMap<VersionId, Vec<(NaiveDate, u64)>>, HashMap<CrateId, Vec<(NaiveDate, u64)>>) {
-        let mut version_monthly: HashMap<VersionId, BTreeMap<(i32, u32), u64>> = HashMap::default();
-        let mut crate_monthly: HashMap<CrateId, BTreeMap<(i32, u32), u64>> = HashMap::default();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; monthly version data is unchanged")]
+        let mut version_monthly: HashMap<VersionId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(version_ids.len());
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; monthly crate data is unchanged")]
+        let mut crate_monthly: HashMap<CrateId, BTreeMap<(i32, u32), u64>> = hash_map_with_capacity(crate_data.len());
+
+        if all_version_to_crate.is_empty() {
+            return (HashMap::default(), HashMap::default());
+        }
 
         // Only the recent window is aggregated. The daily rows can extend arbitrarily far
         // back, and consumers of this series report downloads over the last 90 days: taking
@@ -1001,6 +1040,7 @@ fn version_age_buckets(created_at: DateTime<Utc>, now: DateTime<Utc>) -> (bool, 
 /// Normalize a crate name for similarity matching by converting to lowercase and removing separators.
 fn normalize_name_into(name: &str, buffer: &mut CompactString) {
     buffer.clear();
+    // #[gamma::skip(stmt.delete_call, reason = "reserving capacity affects allocation behavior only; normalized bytes are unchanged")]
     buffer.reserve(name.len());
     for byte in name.bytes() {
         if byte == b'-' || byte == b'_' || byte == b' ' {
@@ -1024,7 +1064,8 @@ fn count_dependents(
     version_id_to_crate_id: &HashMap<VersionId, CrateId>,
 ) {
     // Map version_ids to crate_ids using prebuilt HashMap (no table scan!)
-    let mut dependents: HashMap<CrateId, HashSet<CrateId>> = HashMap::default();
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; dependent counts are unchanged")]
+    let mut dependents: HashMap<CrateId, HashSet<CrateId>> = hash_map_with_capacity(crate_data.len());
     for (depended_upon, version_set) in crate_to_dependent_versions {
         for &version_id in version_set {
             if let Some(&crate_id) = version_id_to_crate_id.get(&version_id) {
@@ -1050,7 +1091,7 @@ mod tests {
     use core::time::Duration as StdDuration;
     use std::sync::Arc;
 
-    use chrono::{DateTime, Duration, Utc};
+    use chrono::{DateTime, Datelike, Duration, Utc};
     use compact_str::CompactString;
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -1167,7 +1208,12 @@ mod tests {
     }
 
     fn crates_table_csv(now: DateTime<Utc>) -> (&'static str, String) {
-        let mut rows = vec![crate_row(10, "offset-target", now), crate_row(20, "latest-target", now)];
+        let mut rows = vec![
+            crate_row(10, "offset-target", now),
+            crate_row(20, "latest-target", now),
+            crate_row(21, "abcdf", now),
+            crate_row(22, "no-version-target", now),
+        ];
         rows.extend([
             crate_row(1000, "abcdefghik", now),
             crate_row(1001, "abcdefxhij", now),
@@ -1261,6 +1307,7 @@ mod tests {
                     version_row(version_fields(202, 20, "1.0.0", "older stable row", 777, 18, false), now),
                     version_row(version_fields(203, 20, "2.0.0", "preferred stable row", 888, 17, false), now),
                     version_row(version_fields(204, 20, "2.0.0", "duplicate stable row", 999, 16, false), now),
+                    version_row(version_fields(210, 21, "1.0.0", "no downloads row", 123, 10, false), now),
                     version_row(version_fields(1103, 11, "1.2.3", "duplicate crate id target", 123, 15, false), now),
                 ],
             ),
@@ -1276,6 +1323,7 @@ mod tests {
                     vec![103.to_string(), 12.to_string(), (now.date_naive() - Duration::days(1)).to_string()],
                     vec![103.to_string(), 90.to_string(), (now.date_naive() - Duration::days(90)).to_string()],
                     vec![203.to_string(), 34.to_string(), (now.date_naive() - Duration::days(1)).to_string()],
+                    vec![202.to_string(), 500.to_string(), (now.date_naive() - Duration::days(1)).to_string()],
                 ],
             ),
         )
@@ -1492,6 +1540,8 @@ mod tests {
         assert_eq!(data.version_data.description, "preferred stable row");
         assert!(!data.version_data.yanked);
         assert_eq!(data.version_data.downloads, 888);
+        assert_eq!(data.overall_data.downloads, 2000);
+        assert_eq!(data.overall_data.dependents, 0);
         assert_eq!(
             data.version_data
                 .monthly_downloads
@@ -1499,6 +1549,10 @@ mod tests {
                 .map(|(_, downloads)| downloads)
                 .sum::<u64>(),
             34
+        );
+        assert!(
+            data.version_data.monthly_downloads.iter().all(|(date, _)| date.day() == 1),
+            "monthly buckets must use the first day of the month"
         );
     }
 
@@ -1520,6 +1574,7 @@ mod tests {
         };
         assert_eq!(data.version_data.description, "fourth-row exact target");
         assert_eq!(data.version_data.downloads, 444);
+
         assert_eq!(data.overall_data.downloads, 1000);
         assert_eq!(data.overall_data.dependents, 1);
         assert_eq!(data.overall_data.versions_last_365_days, 3);
@@ -1557,6 +1612,15 @@ mod tests {
         };
         assert_eq!(data.version_data.description, "fourth-row exact target");
         assert_eq!(data.version_data.downloads, 444);
+
+        let latest = results
+            .iter()
+            .find_map(|(spec, result)| (spec.name() == "latest-target").then_some(result))
+            .expect("the mixed query includes latest-target");
+        let ProviderResult::Found(latest) = latest else {
+            panic!("expected the latest version to be found");
+        };
+        assert_eq!(latest.overall_data.downloads, 2000);
     }
 
     #[tokio::test]
@@ -1582,6 +1646,64 @@ mod tests {
                 CompactString::from("abcxefghij")
             ]
         );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
+    async fn five_character_names_are_eligible_for_suggestions() {
+        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let provider = provider_from_dump(now).await;
+        let requested = [crate_ref("abcde", None)];
+        let mut results: Vec<_> = provider.get_crates_data(&requested, &NoOpProgress, true).await.collect();
+
+        let (spec, result) = results.pop().expect("one result");
+        assert_eq!(spec.version(), &Version::new(0, 0, 0));
+        let ProviderResult::CrateNotFound(suggestions) = result else {
+            panic!("expected the crate to be absent");
+        };
+        assert_eq!(suggestions.as_ref(), [CompactString::from("abcdf")]);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
+    async fn missing_explicit_version_preserves_the_requested_version() {
+        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let provider = provider_from_dump(now).await;
+        let requested = [crate_ref("offset-target", Some("9.9.9"))];
+        let mut results: Vec<_> = provider.get_crates_data(&requested, &NoOpProgress, false).await.collect();
+
+        let (spec, result) = results.pop().expect("one result");
+        assert_eq!(spec.version(), &Version::new(9, 9, 9));
+        assert!(matches!(result, ProviderResult::VersionNotFound));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
+    async fn missing_latest_version_uses_the_zero_version_placeholder() {
+        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let provider = provider_from_dump(now).await;
+        let requested = [crate_ref("no-version-target", None)];
+        let mut results: Vec<_> = provider.get_crates_data(&requested, &NoOpProgress, false).await.collect();
+
+        let (spec, result) = results.pop().expect("one result");
+        assert_eq!(spec.version(), &Version::new(0, 0, 0));
+        assert!(matches!(result, ProviderResult::VersionNotFound));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot memory-map files or run a mock HTTP server")]
+    async fn missing_download_and_dependency_rows_leave_zero_counts() {
+        let now = "2026-08-11T04:13:36Z".parse::<DateTime<Utc>>().unwrap();
+        let provider = provider_from_dump(now).await;
+        let requested = [crate_ref("abcdf", None)];
+        let mut results: Vec<_> = provider.get_crates_data(&requested, &NoOpProgress, false).await.collect();
+
+        let (_spec, result) = results.pop().expect("one result");
+        let ProviderResult::Found(data) = result else {
+            panic!("expected the crate to be found");
+        };
+        assert_eq!(data.overall_data.downloads, 0);
+        assert_eq!(data.overall_data.dependents, 0);
     }
 
     #[tokio::test]

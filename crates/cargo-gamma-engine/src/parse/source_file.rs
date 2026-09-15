@@ -318,7 +318,7 @@ mod tests {
         assert!(!exceeds_nesting_limit(&at_limit));
         assert!(exceeds_nesting_limit(&over_limit));
         SourceFile::parse("at.rs", at_limit).unwrap();
-        assert!(SourceFile::parse("over.rs", over_limit).is_err());
+        SourceFile::parse("over.rs", over_limit).unwrap_err();
     }
 
     #[test]

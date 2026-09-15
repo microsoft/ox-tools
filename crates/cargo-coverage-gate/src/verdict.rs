@@ -240,7 +240,7 @@ fn glob_inner(p: &[char], mut pi: usize, n: &[char], mut ni: usize) -> bool {
                 // Collapse runs of `*` and try every possible match
                 // length for the next literal segment.
                 while pi < p.len() && p[pi] == '*' {
-                    // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "either mutation prevents the star-run cursor from advancing and makes wildcard matching loop forever")]
+                    // #[gamma::skip(all, reason = "either mutation prevents the star-run cursor from advancing and makes wildcard matching loop forever")]
                     pi += 1;
                 }
                 if pi == p.len() {
@@ -248,7 +248,7 @@ fn glob_inner(p: &[char], mut pi: usize, n: &[char], mut ni: usize) -> bool {
                 }
                 // The endpoint cannot match: after collapsing `*`, at least
                 // one non-star pattern character remains.
-                // #[gamma::skip(range.exclusive_to_inclusive, expr.increment, reason = "the collapsed star is followed by a non-star token, so trying the end position can only fail the remaining-token guard and cannot change the answer")]
+                // #[gamma::skip(all, reason = "the collapsed star is followed by a non-star token, so trying the end position can only fail the remaining-token guard and cannot change the answer")]
                 for k in ni..n.len() {
                     if glob_inner(p, pi, n, k) {
                         return true;
@@ -257,7 +257,7 @@ fn glob_inner(p: &[char], mut pi: usize, n: &[char], mut ni: usize) -> bool {
                 return false;
             }
             '?' => {
-                // #[gamma::skip(cond.always_false, relational.ge_to_gt, reason = "at equality this arm increments the name cursor once and the final exact-length check still returns false; greater positions are unreachable")]
+                // #[gamma::skip(all, reason = "at equality this arm increments the name cursor once and the final exact-length check still returns false; greater positions are unreachable")]
                 if ni >= n.len() {
                     return false;
                 }

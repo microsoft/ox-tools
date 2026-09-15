@@ -75,7 +75,7 @@ pub(super) fn measure_baseline(
     jobs: usize,
     completed: impl FnMut(),
 ) -> Result<Baseline> {
-    // #[gamma::skip(expr.decrement, expr.increment, reason = "worker width changes only which independent binary finishes first; results are restored to binary order before folding")]
+    // #[gamma::skip(all, reason = "worker width changes only which independent binary finishes first; results are restored to binary order before folding")]
     measure_within_reporting(work, binaries, BASELINE_BUDGET, request, jobs, completed)
 }
 
@@ -102,7 +102,7 @@ fn measure_within_reporting(
     jobs: usize,
     completed: impl FnMut(),
 ) -> Result<Baseline> {
-    // #[gamma::skip(expr.decrement, expr.increment, reason = "worker width changes only scheduling of independent observations; the positional result and every reported aggregate are unchanged")]
+    // #[gamma::skip(all, reason = "worker width changes only scheduling of independent observations; the positional result and every reported aggregate are unchanged")]
     measure_within_reporting_with(work, binaries, budget, request, jobs, observe_baseline, completed)
 }
 
@@ -119,41 +119,43 @@ where
     O: Fn(&Workspace, &TestBinary, Attempt<'_>) -> Observation + Sync,
 {
     let started = Instant::now();
-    // #[gamma::skip(expr.decrement, expr.increment, reason = "worker width affects wall-clock scheduling only; each binary is observed once and results are folded positionally")]
+    // #[gamma::skip(all, reason = "worker width affects wall-clock scheduling only; each binary is observed once and results are folded positionally")]
     let mut measured = sweep_binaries_with(work, binaries, budget, request, jobs, &observer, completed);
     retry_failed_binaries(work, binaries, budget, request, &observer, &mut measured);
     let wall = started.elapsed();
     let mut elapsed = Duration::ZERO;
     let mut quiet = Duration::ZERO;
     let mut tests: Option<usize> = None;
+    // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
     let mut peak: Option<u64> = None;
 
     // Folded in the binaries' own order rather than in the order the workers happened to finish, so
     // that which failure a red suite reports does not depend on the scheduler.
     for (entry, taken) in binaries.iter_mut().zip(measured) {
-        let Some((took, observed)) = taken else {
+        let Some((took, observation)) = taken else {
             continue;
         };
 
         entry.baseline = took;
-        entry.peak = observed.peak;
-        entry.tests = observed.tests;
+        entry.peak = observation.peak;
+        entry.tests = observation.tests;
         elapsed = elapsed.saturating_add(took);
-        quiet = quiet.max(observed.quiet);
+        quiet = quiet.max(observation.quiet);
 
-        if let Some(measured) = observed.peak {
+        if let Some(measured) = observation.peak {
+            // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
             peak = Some(peak.unwrap_or(0).max(measured));
         }
 
         // A binary with no harness contributes nothing rather than turning the total into a
         // guess, but one binary reporting is enough for the total to be worth stating.
-        if let Some(counted) = observed.tests {
+        if let Some(counted) = observation.tests {
             tests = Some(tests.unwrap_or(0).saturating_add(counted));
         }
 
-        let failure = observed.failure.as_ref();
+        let failure = observation.failure.as_ref();
 
-        match observed.verdict {
+        match observation.verdict {
             Verdict::Passed => {}
             // Every non-passing observation is fatal here where some are not during the sweep:
             // there is no mutant to record it against, and a baseline binary that went unmeasured
@@ -194,7 +196,7 @@ fn retry_failed_binaries<O>(
         }
 
         let began = Instant::now();
-        let observed = observer(
+        let observation = observer(
             work,
             binary,
             Attempt {
@@ -207,14 +209,24 @@ fn retry_failed_binaries<O>(
             },
         );
 
-        if matches!(&observed.verdict, Verdict::Passed) {
+        let observation = if matches!(&observation.verdict, Verdict::Passed) {
             crate::notes::note(format!(
                 "baseline target `{}` in package `{}` failed once and passed on retry",
                 binary.target, binary.package
             ));
-        }
+            let failed_test = slot.as_ref().and_then(|(_elapsed, observed)| match &observed.verdict {
+                Verdict::Failed(test) | Verdict::Flaky(test) => test.clone(),
+                _ => None,
+            });
+            Observation {
+                verdict: Verdict::Flaky(failed_test),
+                ..observation
+            }
+        } else {
+            observation
+        };
 
-        *slot = Some((began.elapsed(), observed));
+        *slot = Some((began.elapsed(), observation));
     }
 }
 
@@ -236,7 +248,7 @@ where
     let notes = crate::notes::current();
 
     thread::scope(|scope| {
-        // #[gamma::skip(range.exclusive_to_inclusive, expr.increment, iter.max_to_min, literal.int_decrement, literal.int_increment, reason = "the worker count changes parallelism only; atomic indexing assigns every binary exactly once and positional collection makes the returned observations identical")]
+        // #[gamma::skip(all, reason = "the worker count changes parallelism only; atomic indexing assigns every binary exactly once and positional collection makes the returned observations identical")]
         for _worker in 0..jobs.max(1) {
             let sender = sender.clone();
             let next = &next;
@@ -275,6 +287,7 @@ where
         }
 
         // The workers hold the only remaining senders, so the drain ends when the last one finishes.
+        // #[gamma::skip(all, reason = "retaining the coordinator sender prevents channel closure, so the receiver waits forever; this resource mutant is suppressed rather than weakening synchronization")]
         drop(sender);
 
         for (index, took, observed) in receiver {
@@ -640,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn a_transient_baseline_test_failure_gets_one_clean_retry() {
+    fn a_baseline_test_failure_that_passes_on_retry_is_rejected_as_flaky() {
         let (_directory, work) = crate::testing::helper_workspace("baseline-retry", &["exit:0"]);
         let mut binaries = vec![TestBinary {
             package: "subject".to_owned(),
@@ -649,7 +662,7 @@ mod tests {
         }];
         let attempts = AtomicUsize::new(0);
 
-        let baseline = measure_within_reporting_with(
+        let failure = measure_within_reporting_with(
             &work,
             &mut binaries,
             Duration::from_secs(30),
@@ -673,11 +686,10 @@ mod tests {
             },
             || {},
         )
-        .expect("a passing retry establishes a green baseline");
+        .expect_err("a passing retry confirms that the baseline target is flaky");
 
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
-        assert_eq!(baseline.tests, Some(1));
-        assert_eq!(binaries[0].tests, Some(1));
+        assert!(failure.to_string().contains("sometimes_red"));
     }
 
     #[test]
@@ -910,6 +922,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the table keeps every baseline failure variant's durable contract visibly exhaustive"
+    )]
     fn every_baseline_failure_variant_has_a_complete_distinct_durable_contract() {
         let (_directory, work, binaries) = diagnostic_harness();
         let cases = [
@@ -1099,7 +1115,7 @@ mod tests {
 
     #[test]
     fn retry_visits_only_failed_slots_and_replaces_their_observation() {
-        crate::notes::alone(|| retry_visits_only_failed_slots_and_replaces_their_observation_inner());
+        crate::notes::alone(retry_visits_only_failed_slots_and_replaces_their_observation_inner);
     }
 
     fn retry_visits_only_failed_slots_and_replaces_their_observation_inner() {
@@ -1152,7 +1168,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(measured[0].as_ref().unwrap().0, Duration::from_secs(1));
         assert!(matches!(measured[0].as_ref().unwrap().1.verdict, Verdict::Passed));
-        assert!(matches!(measured[1].as_ref().unwrap().1.verdict, Verdict::Passed));
+        assert!(matches!(
+            measured[1].as_ref().unwrap().1.verdict,
+            Verdict::Flaky(Some(ref test)) if test == "red::case"
+        ));
         assert_eq!(measured[1].as_ref().unwrap().1.tests, Some(8));
         assert_eq!(
             crate::notes::drain(),

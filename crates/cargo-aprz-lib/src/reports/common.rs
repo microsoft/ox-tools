@@ -224,6 +224,7 @@ impl fmt::Display for IconName<'_> {
 ///
 /// Returns a `HashMap` mapping each category to a vector of metric names.
 pub fn group_metrics_by_category<'a>(metrics: &'a [Metric]) -> HashMap<MetricCategory, Vec<&'a str>> {
+    // #[gamma::skip(all, reason = "hash-map capacity is an allocation hint and cannot change metric grouping", tag = "resource")]
     let mut metrics_by_category: HashMap<MetricCategory, Vec<&'a str>> = crate::hash_map_with_capacity(metrics.len().min(16));
 
     for metric in metrics {
@@ -261,7 +262,9 @@ impl<'a> ReportContext<'a> {
 pub fn group_all_metrics_by_category<'a>(
     crate_metrics: impl IntoIterator<Item = &'a [Metric]>,
 ) -> HashMap<MetricCategory, Vec<&'static str>> {
+    // #[gamma::skip(all, reason = "set capacity is an allocation hint and cannot change metric deduplication", tag = "resource")]
     let mut seen: HashSet<&'static str> = crate::hash_set_with_capacity(128);
+    // #[gamma::skip(all, reason = "hash-map capacity is an allocation hint and cannot change metric grouping", tag = "resource")]
     let mut metrics_by_category: HashMap<MetricCategory, Vec<&'static str>> = crate::hash_map_with_capacity(16);
 
     for metrics in crate_metrics {

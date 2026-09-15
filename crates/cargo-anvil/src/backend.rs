@@ -57,6 +57,7 @@ impl Backend {
 #[must_use]
 pub fn detect_from_url(url: &str) -> Vec<Backend> {
     if let Some(host) = extract_host(url) {
+        let host = host.to_ascii_lowercase();
         if host == "github.com" || host.ends_with(".github.com") {
             return vec![Backend::GitHub];
         }
@@ -262,6 +263,8 @@ mod tests {
         assert_eq!(detect_from_url("https://github.com/foo/bar.git"), vec![Backend::GitHub]);
         assert_eq!(detect_from_url("git@github.com:foo/bar.git"), vec![Backend::GitHub]);
         assert_eq!(detect_from_url("https://enterprise.github.com/foo/bar.git"), vec![Backend::GitHub]);
+        assert_eq!(detect_from_url("https://GitHub.COM/foo/bar.git"), vec![Backend::GitHub]);
+        assert_eq!(detect_from_url("git@Enterprise.GitHub.com:foo/bar.git"), vec![Backend::GitHub]);
         assert!(detect_from_url("https://github.com.evil.example/foo/bar.git").is_empty());
     }
 
@@ -270,6 +273,9 @@ mod tests {
         assert_eq!(detect_from_url("https://dev.azure.com/org/proj/_git/repo"), vec![Backend::Ado]);
         assert_eq!(detect_from_url("https://acme.visualstudio.com/proj/_git/repo"), vec![Backend::Ado]);
         assert_eq!(detect_from_url("ssh://git@ssh.dev.azure.com/v3/org/proj/repo"), vec![Backend::Ado]);
+        assert_eq!(detect_from_url("https://Dev.Azure.COM/org/proj/_git/repo"), vec![Backend::Ado]);
+        assert_eq!(detect_from_url("git@SSH.Dev.Azure.com:v3/org/proj/repo"), vec![Backend::Ado]);
+        assert_eq!(detect_from_url("https://Acme.VisualStudio.COM/proj/_git/repo"), vec![Backend::Ado]);
     }
 
     #[test]

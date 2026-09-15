@@ -48,7 +48,7 @@ impl Provider {
             client: Arc::new(client),
             cache,
             base_url: base_url.unwrap_or(DOCS_BASE_URL).to_string(),
-            // #[gamma::skip(expr.increment, expr.decrement, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
+            // #[gamma::skip(all, reason = "private concurrency width changes throughput only; request results and accounting are unchanged")]
             throttler: Throttler::new(MAX_CONCURRENT_REQUESTS),
         }
     }
@@ -102,6 +102,7 @@ impl Provider {
         let spec = crate_spec.clone();
 
         // resilient_download retries on Err, passes through Ok(None) for 404.
+        // #[gamma::skip(all, reason = "the operation name is telemetry-only and cannot change download behavior")]
         let result = crate::facts::resilient_http::resilient_download("docs_download", spec, None, move |spec| {
             let provider = provider.clone();
             async move { provider.download_zst_core(&spec).await }
@@ -140,17 +141,13 @@ impl Provider {
                     log::debug!(target: LOG_TARGET, "Could not save cache for {crate_spec}: {e:#}");
                 }
 
-                tokio::fs::remove_file(&temp_file)
-                    .await
-                    .unwrap_or_else(|e| log::debug!(target: LOG_TARGET, "Could not remove temp file '{}': {e:#}", temp_file.display()));
+                remove_temp_file(&temp_file).await;
 
                 return ProviderResult::Unavailable(reason.into());
             }
         };
 
-        tokio::fs::remove_file(&temp_file)
-            .await
-            .unwrap_or_else(|e| log::debug!(target: LOG_TARGET, "Could not remove temp file '{}': {e:#}", temp_file.display()));
+        remove_temp_file(&temp_file).await;
 
         match self.cache.save(&filename, &docs_data) {
             Ok(()) => ProviderResult::Found(docs_data),
@@ -180,6 +177,7 @@ impl Provider {
             if status == reqwest::StatusCode::NOT_FOUND {
                 return Ok(None);
             }
+            // #[gamma::skip(all, reason = "the fallback body is diagnostic prose only and cannot change the HTTP error verdict")]
             let body = response.text().await.unwrap_or_else(|_| String::from("<unable to read body>"));
             log::debug!(target: LOG_TARGET, "Response body (first 500 chars): {}", body.chars().take(500).collect::<String>());
             return Err(app_err!("could not download docs for {crate_spec}: HTTP {status}"));
@@ -195,6 +193,7 @@ impl Provider {
         let mut stream = response.bytes_stream();
         let mut total_bytes = 0;
 
+        // #[gamma::skip(all, reason = "this context changes only diagnostic text after reading the response stream has already failed")]
         while let Some(chunk) = stream.try_next().await.into_app_err("reading response chunk")? {
             total_bytes += chunk.len();
             file.write_all(&chunk)
@@ -236,9 +235,16 @@ fn temp_zst_path(crate_name: &str, version: &str) -> PathBuf {
     let safe_name = sanitize_path_component(crate_name);
     let safe_version = sanitize_path_component(version);
     let pid = std::process::id();
+    // #[gamma::skip(literal.int_increment, reason = "the counter stride does not affect path uniqueness or downloaded contents")]
     let id = NEXT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed);
 
     std::env::temp_dir().join(format!("{safe_name}@{safe_version}-{pid}-{id}.zst"))
+}
+
+async fn remove_temp_file(path: &Path) {
+    tokio::fs::remove_file(path)
+        .await
+        .unwrap_or_else(|e| log::debug!(target: LOG_TARGET, "Could not remove temp file '{}': {e:#}", path.display()));
 }
 
 #[cfg(test)]
@@ -281,10 +287,36 @@ mod tests {
         let tracker = RequestTracker::new(&progress);
         let crates: Arc<[CrateSpec]> = Arc::from([test_crate_spec("missing", "1.0.0")]);
 
-        let results: Vec<_> = provider.get_docs_data(crates, &tracker).await.collect();
+        let result_count = provider.get_docs_data(crates, &tracker).await.count();
 
-        assert_eq!(results.len(), 1);
+        assert_eq!(result_count, 1);
         assert_eq!(tracker.request_counts(TrackedTopic::Docs), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_missing_document_is_reported_as_not_found() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let provider = Provider::new(Cache::new(temp_dir.path(), core::time::Duration::MAX, false), Some(&server.uri()));
+
+        let result = provider.fetch_docs_for_crate_core(&test_crate_spec("missing", "1.0.0")).await;
+
+        assert!(matches!(result, ProviderResult::Unavailable(reason) if reason.contains("could not find documentation")));
+    }
+
+    #[tokio::test]
+    async fn temporary_file_removal_deletes_the_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("download.zst");
+        tokio::fs::write(&path, b"fixture").await.unwrap();
+
+        remove_temp_file(&path).await;
+
+        assert!(!path.exists());
     }
 
     #[derive(Debug)]

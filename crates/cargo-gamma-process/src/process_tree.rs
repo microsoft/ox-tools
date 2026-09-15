@@ -1371,11 +1371,11 @@ where
             loop {
                 let read = match pipe.read(&mut chunk) {
                     Ok(read) => read,
-                    // #[gamma::skip(match_guard.always_true, match_guard.negate, reason = "retrying every read error spins forever instead of terminating the output reader")]
+                    // #[gamma::skip(all, reason = "retrying every read error spins forever instead of terminating the output reader")]
                     Err(cause) if cause.kind() == io::ErrorKind::Interrupted => continue,
                     Err(cause) => return Err(cause),
                 };
-                // #[gamma::skip(cond.always_false, cond.negate, relational.eq_to_ne, literal.int_increment, reason = "failing to recognize EOF leaves the output reader blocked or spinning after the child exits")]
+                // #[gamma::skip(all, reason = "failing to recognize EOF leaves the output reader blocked or spinning after the child exits")]
                 if read == 0 {
                     return Ok(());
                 }
@@ -1396,8 +1396,9 @@ fn discard_output_reader(reader: Option<&OutputReader>) {
     if let Some(reader) = reader {
         reader.retaining.store(false, Ordering::Release);
         let mut bytes = reader.bytes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // #[gamma::skip(assign_value.default, reason = "Vec::with_capacity(0) and Vec::default() are both empty, allocation-free vectors with the same observable state")]
-        *bytes = Vec::with_capacity(0);
+        bytes.clear();
+        // #[gamma::skip(stmt.delete_call, reason = "releasing a potentially large capture allocation is a performance and memory-retention requirement")]
+        bytes.shrink_to_fit();
     }
 }
 
@@ -1423,7 +1424,7 @@ fn wait_for_output(subtree: &mut ProcessTree) -> io::Result<ExitStatus> {
             return Ok(status);
         }
 
-        // #[gamma::skip(stmt.delete_call, literal.int_decrement, literal.int_increment, reason = "this positive delay only throttles polling; zero or deletion busy-spins, while one or two milliseconds has the same result")]
+        // #[gamma::skip(all, reason = "this positive delay only throttles polling; zero or deletion busy-spins, while one or two milliseconds has the same result")]
         thread::sleep(Duration::from_millis(1));
     }
 }
@@ -2127,7 +2128,7 @@ mod tests {
         let work = testing::workdir(prefix);
         let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
         let (started, finished) = (base.join("started"), base.join("finished"));
-        let child = Command::new(testing::helper_binary_path().as_std_path())
+        let mut child = Command::new(testing::helper_binary_path().as_std_path())
             .args([
                 testing::directive(format_args!("touch:{started}")),
                 testing::directive("sleep:500"),
@@ -2144,6 +2145,8 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
+        let _killed = child.kill();
+        let _reaped = child.wait();
         panic!("the delayed-marker child never started");
     }
 

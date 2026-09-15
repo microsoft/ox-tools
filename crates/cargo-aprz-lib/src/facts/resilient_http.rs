@@ -72,7 +72,7 @@ fn should_retry_response(result: &crate::Result<reqwest::Response>) -> RecoveryI
         Ok(resp) if resp.status().is_server_error() => RecoveryInfo::retry(),
 
         // Rate-limited (429) – honor Retry-After if present, otherwise default to 5s.
-        // #[gamma::skip(match_guard.negate, match_guard.always_true, reason = "either mutation retries every ordinary response with a real backoff until the network test times out")]
+        // #[gamma::skip(all, reason = "condition mutations retry ordinary responses until the network test times out, while fallback-delay mutations require real multi-second waits to observe")]
         Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
             let delay = parse_retry_after(resp.headers()).unwrap_or(5);
             RecoveryInfo::retry().delay(Duration::from_secs(delay))
@@ -92,12 +92,12 @@ fn should_retry_response(result: &crate::Result<reqwest::Response>) -> RecoveryI
 /// Retries on network errors, `5xx`, and 429 responses with exponential backoff.
 pub async fn resilient_get(client: &reqwest::Client, url: &str) -> crate::Result<reqwest::Response> {
     let clock = Clock::new_tokio();
-    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "resilience context name is telemetry-only and does not affect request behavior")]
+    // #[gamma::skip(all, reason = "resilience context name is telemetry-only and does not affect request behavior")]
     let context = ResilienceContext::new(&clock).name("http_get");
 
     let client = client.clone();
     let service = (
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "middleware layer name is telemetry-only and does not affect retry behavior")]
+        // #[gamma::skip(all, reason = "middleware layer name is telemetry-only and does not affect retry behavior")]
         Retry::layer("retry", &context)
             .clone_input()
             .recovery_with(|result: &crate::Result<reqwest::Response>, _| should_retry_response(result))
@@ -111,7 +111,7 @@ pub async fn resilient_get(client: &reqwest::Client, url: &str) -> crate::Result
                     args.retry_delay().as_millis(),
                 );
             }),
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "middleware layer name is telemetry-only and does not affect timeout behavior")]
+        // #[gamma::skip(all, reason = "middleware layer name is telemetry-only and does not affect timeout behavior")]
         Timeout::layer("timeout", &context)
             .timeout_error(|_| app_err!("HTTP request timed out"))
             .timeout(DEFAULT_REQUEST_TIMEOUT),
@@ -150,7 +150,7 @@ where
     let timeout_duration = timeout.unwrap_or(DEFAULT_DOWNLOAD_TIMEOUT);
 
     let service = (
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "middleware layer name is telemetry-only and does not affect retry behavior")]
+        // #[gamma::skip(all, reason = "middleware layer name is telemetry-only and does not affect retry behavior")]
         Retry::layer("retry", &context)
             .clone_input()
             .recovery_with(|result: &crate::Result<Out>, _| match result {
@@ -167,7 +167,7 @@ where
                     args.retry_delay().as_millis(),
                 );
             }),
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "middleware layer name is telemetry-only and does not affect timeout behavior")]
+        // #[gamma::skip(all, reason = "middleware layer name is telemetry-only and does not affect timeout behavior")]
         Timeout::layer("timeout", &context)
             .timeout_error(|_| app_err!("download timed out"))
             .timeout(timeout_duration),

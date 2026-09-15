@@ -36,10 +36,7 @@ impl FileKind {
     #[must_use]
     pub fn detect(path: &Path, content: Option<&str>) -> Option<Self> {
         let file_name = path.file_name().and_then(|name| name.to_str());
-        let file_name = match file_name {
-            Some(file_name) => file_name,
-            None => return None,
-        };
+        let file_name = file_name?;
         if file_name.eq_ignore_ascii_case("justfile") {
             return Some(Self::Just);
         }

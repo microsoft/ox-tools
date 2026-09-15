@@ -20,6 +20,7 @@ deleted; this file is not a changelog or a record of rejected work.
 - [F4](#f4) — Bound cache growth and reclaim abandoned workspaces
 - [F5](#f5) — Incrementally update the workspace hints artifact
 - [F6](#f6) — Schedule unhinted mutants to maximize in-run learning
+- [F7](#f7) — Restructure the workspace hints artifact to remove repetition
 
 ### Testing
 - [T1](#t1) — Isolate tests from the production interrupt registry
@@ -405,6 +406,39 @@ visible before the next related assignment, stable secondary ordering is preserv
 configured tail policy behaves as specified when only conflicting work remains; an execution test
 with long-running scouts proves that unrelated mutants proceed while same-item siblings do not
 race unnecessarily; and equivalent schedules produce the same final verdicts.
+
+---
+
+<a id="f7"></a>
+### F7 — Restructure the workspace hints artifact to remove repetition
+
+**Area:** durable hint schema, serialization, and promotion · **Priority:** Medium · **Effort:**
+Medium
+
+The workspace hints artifact repeats source paths and killer identities for every mutant. Large
+workspaces can therefore produce a nearly 20 MB `gamma-hints.json` even though many adjacent
+mutants belong to the same file and share the same package, target, and killing test. Changing the
+surface syntax to YAML or TOML would retain most of that repetition and would not address the
+underlying growth.
+
+Introduce a new JSON schema that groups mutants by source file and interns repeated killer
+identities or otherwise represents them once per shared group. Preserve deterministic ordering,
+stable human-reviewable diffs, score-neutral hint semantics, provenance, atomic publication, and
+the ability to reject unsupported or foreign artifacts safely. Treat the schema change as a
+versioned format transition: either read the previous version long enough to rewrite it on the
+next promotion or document that it is deliberately ignored and regenerated.
+
+Do not optimize for a fixed byte threshold or elapsed serialization time. Instead, use structural
+tests to prove that repeated paths and killer identities are emitted once per group, round trips
+preserve every exact, generalized, and unviable hint, equivalent input orders produce identical
+bytes, and loading the restructured artifact yields the same scheduling knowledge as the current
+schema.
+
+**Done when:** a representative many-mutant fixture serializes without repeating its shared file
+and killer strings per mutant; deterministic round-trip and compatibility tests cover absent,
+malformed, foreign, old-version, and new-version artifacts; promotion reports remain accurate;
+and the configuration and scheduling documentation describe the new layout and transition
+behavior.
 
 ---
 

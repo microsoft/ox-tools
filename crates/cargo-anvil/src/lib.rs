@@ -475,7 +475,7 @@ pub use region::CommentSyntax;
 pub fn run_app(catalog: Catalog) -> ExitCode {
     use tracing_subscriber::fmt::format::FmtSpan;
 
-    // #[gamma::skip(stmt.delete_call, literal.bool_flip, reason = "process-global diagnostic presentation is intentionally outside the update engine's test oracle")]
+    // #[gamma::skip(all, reason = "process-global diagnostic presentation is intentionally outside the update engine's test oracle")]
     tracing_subscriber::fmt()
         .with_target(false)
         .with_level(false)

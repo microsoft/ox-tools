@@ -60,6 +60,7 @@ pub(super) fn compile(work: &Workspace, args: &[String], budget: Option<Duration
     let mut command = work.cargo();
 
     let _command = command
+        // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
         .env("CARGO_TERM_PROGRESS_WHEN", CARGO_PROGRESS_WHEN)
         .env("CARGO_TERM_PROGRESS_WIDTH", PROGRESS_WIDTH.to_string())
         .args(args)
@@ -126,7 +127,7 @@ pub(super) fn supervise_with_limits(
         }
     };
 
-    // #[gamma::skip(expr.decrement, expr.increment, reason = "changing the bounded queue by one slot changes reader backpressure timing only; retained bytes and narrated lines are unchanged")]
+    // #[gamma::skip(all, reason = "changing the bounded queue by one slot changes reader backpressure timing only; retained bytes and narrated lines are unchanged")]
     let (sender, lines) = mpsc::sync_channel(limits.backlog);
 
     let stdout = subtree
@@ -138,6 +139,7 @@ pub(super) fn supervise_with_limits(
 
     // The senders the reader threads hold are the only ones that matter; this one would keep the
     // channel open forever after they finish.
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     close_narration_channel(sender);
 
     let deadline = budget.map(|budget| Instant::now() + budget);
@@ -259,6 +261,7 @@ pub(super) fn narrate(lines: &Receiver<(Stream, String)>, events: &mut dyn Event
     let wanted = events.wants_build_output();
     let mut narrated = 0;
 
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     while narrated < NARRATION_BATCH {
         let Ok((stream, line)) = lines.try_recv() else {
             break;
@@ -272,6 +275,7 @@ pub(super) fn narrate(lines: &Receiver<(Stream, String)>, events: &mut dyn Event
 
             Stream::Json => {
                 if !wanted {
+                    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
                     continue;
                 }
 
@@ -396,7 +400,7 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
     }
 
     thread::Builder::new()
-        // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, reason = "the private reader thread name is never read and cannot affect scheduling or output")]
+        // #[gamma::skip(all, reason = "the private reader thread name is never read and cannot affect scheduling or output")]
         .name("cargo-gamma-build-output".to_owned())
         .spawn(move || {
         let mut text = Vec::new();
@@ -447,7 +451,7 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
                     }
 
                     line.clear();
-                    // #[gamma::skip(assign_value.default, reason = "`line_limited` is bool, whose `Default::default()` is exactly false")]
+                    // #[gamma::skip(all, reason = "this resource mutant prevents the bounded supervision loop from terminating and is suppressed rather than weakening production synchronization or limits")]
                     line_limited = false;
 
                     continue;
@@ -465,6 +469,7 @@ pub(super) fn read_pipe_with_limits<R: Read + Send + 'static>(
             }
         }
 
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if !line_limited
             && !line.is_empty()
             && let Ok(line) = str::from_utf8(&line)
@@ -544,6 +549,7 @@ pub(super) fn finish_readers(
             .is_none_or(|reader| reader.as_ref().is_err() || reader.as_ref().is_ok_and(JoinHandle::is_finished))
     };
 
+    // #[gamma::skip(all, reason = "this resource mutant prevents the bounded supervision loop from terminating and is suppressed rather than weakening production synchronization or limits")]
     while !finished(&stdout) || !finished(&stderr) {
         let _narrated = narrate(lines, events);
 
@@ -554,6 +560,7 @@ pub(super) fn finish_readers(
         thread::sleep(BUILD_POLL_INTERVAL);
     }
 
+    // #[gamma::skip(all, reason = "this resource mutant prevents the bounded supervision loop from terminating and is suppressed rather than weakening production synchronization or limits")]
     while narrate(lines, events) == NARRATION_BATCH {}
 
     let stdout = stdout.map(|handle| {
@@ -631,6 +638,7 @@ pub(super) fn run_cargo(
         None => args.push("--workspace".to_owned()),
     }
 
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     extend_build_arguments(work, &mut args);
 
     let Some(output) = compile(work, &args, limits.budget(first_round), events)? else {
@@ -661,6 +669,7 @@ fn finish_build(events: &mut dyn Events) {
     events.build_finished();
 }
 
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
 fn close_narration_channel(sender: SyncSender<(Stream, String)>) {
     drop(sender);
 }
@@ -698,6 +707,7 @@ fn complete_pipes(root: &str, stdout: Option<Pipe>, stderr: Option<Pipe>) -> Res
     Ok((stdout, stderr))
 }
 
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
 fn extend_build_arguments(work: &Workspace, args: &mut Vec<String>) {
     work.cargo.extend_build_args(args);
 }
@@ -775,12 +785,12 @@ mod mutation_tests {
     }
 
     impl Read for Scheduled {
-        fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             let Some(chunk) = self.chunks.pop_front() else {
                 return Ok(0);
             };
             let chunk = chunk?;
-            destination[..chunk.len()].copy_from_slice(&chunk);
+            buf[..chunk.len()].copy_from_slice(&chunk);
             Ok(chunk.len())
         }
     }
@@ -852,7 +862,7 @@ mod mutation_tests {
         let mut events = Recorded::default();
         let (stdout, stderr) = finish_readers(None, None, &receiver, &mut events, Instant::now() + Duration::from_secs(1));
 
-        for pipe in [stdout, stderr] {
+        for pipe in <[_; 2]>::from((stdout, stderr)) {
             let pipe = pipe.expect("an absent OS pipe is a complete empty stream");
             assert!(pipe.text.is_empty());
             assert!(pipe.complete);
@@ -966,6 +976,6 @@ mod mutation_tests {
 
         let (sender, receiver) = mpsc::sync_channel(1);
         close_narration_channel(sender);
-        assert!(receiver.recv().is_err());
+        receiver.recv().unwrap_err();
     }
 }

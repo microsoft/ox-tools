@@ -81,19 +81,19 @@ pub(crate) fn comment_spans(text: &str) -> Vec<Range<usize>> {
             let end = line_comment_end(bytes, i);
 
             comments.push(i..end);
-            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not advancing to the comment end rediscovers it forever")]
+            // #[gamma::skip(all, reason = "not advancing to the comment end rediscovers it forever")]
             i = end;
         } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
             let end = block_comment_end(bytes, i);
 
             comments.push(i..end);
-            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not advancing to the comment end rediscovers it forever")]
+            // #[gamma::skip(all, reason = "not advancing to the comment end rediscovers it forever")]
             i = end;
         } else if let Some(end) = literal_end(text, i) {
-            // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not advancing to the literal end retries it forever")]
+            // #[gamma::skip(all, reason = "not advancing to the literal end retries it forever")]
             i = end;
         } else {
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing the fallback cursor leaves the scanner on one byte forever")]
+            // #[gamma::skip(all, reason = "not advancing the fallback cursor leaves the scanner on one byte forever")]
             i += 1;
         }
     }
@@ -180,7 +180,7 @@ fn line_comment_end(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 2;
 
     while i < bytes.len() && bytes[i] != b'\n' {
-        // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through comment text leaves the scan on one byte forever")]
+        // #[gamma::skip(all, reason = "not advancing through comment text leaves the scan on one byte forever")]
         i += 1;
     }
 
@@ -188,7 +188,7 @@ fn line_comment_end(bytes: &[u8], start: usize) -> usize {
 }
 
 /// Returns the offset just past the end of a `/* */` comment, which may nest.
-// #[gamma::skip(fn_value.zero, fn_value.one, reason = "a fixed endpoint prevents the outer scanner from advancing and exhausts its resource budget")]
+// #[gamma::skip(all, reason = "a fixed endpoint prevents the outer scanner from advancing and exhausts its resource budget")]
 fn block_comment_end(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 2;
     let mut depth = 1_usize;
@@ -196,18 +196,18 @@ fn block_comment_end(bytes: &[u8], start: usize) -> usize {
     while i < bytes.len() {
         if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
             depth += 1;
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_to_zero, reason = "not advancing past an opener repeatedly counts it until overflow or timeout")]
+            // #[gamma::skip(all, reason = "not advancing past an opener repeatedly counts it until overflow or timeout")]
             i += 2;
         } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
             depth -= 1;
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, reason = "not advancing past a closer repeatedly consumes it until overflow or timeout")]
+            // #[gamma::skip(all, reason = "not advancing past a closer repeatedly consumes it until overflow or timeout")]
             i += 2;
 
             if depth == 0 {
                 return i;
             }
         } else {
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through block-comment text leaves the scan on one byte forever")]
+            // #[gamma::skip(all, reason = "not advancing through block-comment text leaves the scan on one byte forever")]
             i += 1;
         }
     }
@@ -216,17 +216,17 @@ fn block_comment_end(bytes: &[u8], start: usize) -> usize {
 }
 
 /// Returns the offset just past the end of a `"..."` literal.
-// #[gamma::skip(fn_value.zero, fn_value.one, reason = "a fixed endpoint prevents the outer scanner from advancing and exhausts its resource budget")]
+// #[gamma::skip(all, reason = "a fixed endpoint prevents the outer scanner from advancing and exhausts its resource budget")]
 fn string_end(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 1;
 
     while i < bytes.len() {
         match bytes[i] {
-            // #[gamma::skip(assign.add_to_sub, literal.int_to_zero, reason = "moving backward or not moving over an escape makes the scan non-progressing")]
+            // #[gamma::skip(all, reason = "moving backward or not moving over an escape makes the scan non-progressing")]
             b'\\' => i += 2,
             b'"' => return i + 1,
             _ => {
-                // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through string text leaves the scan on one byte forever")]
+                // #[gamma::skip(all, reason = "not advancing through string text leaves the scan on one byte forever")]
                 i += 1;
             }
         }
@@ -242,7 +242,7 @@ fn raw_string_end(bytes: &[u8], start: usize) -> usize {
 
     while bytes.get(i) == Some(&b'#') {
         hashes += 1;
-        // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through raw-string hashes leaves the scan on one byte forever")]
+        // #[gamma::skip(all, reason = "not advancing through raw-string hashes leaves the scan on one byte forever")]
         i += 1;
     }
 
@@ -251,11 +251,11 @@ fn raw_string_end(bytes: &[u8], start: usize) -> usize {
         return start + 1;
     }
 
-    // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing past the raw-string quote leaves the scan on one byte forever")]
+    // #[gamma::skip(all, reason = "not advancing past the raw-string quote leaves the scan on one byte forever")]
     i += 1;
 
     while i < bytes.len() {
-        // #[gamma::skip(cond.negate, relational.eq_to_ne, reason = "treating non-quotes as closing candidates makes this scan exceed its test budget")]
+        // #[gamma::skip(all, reason = "treating non-quotes as closing candidates makes this scan exceed its test budget")]
         if bytes[i] == b'"' {
             let closing = i + 1;
             let found = bytes[closing..].iter().take_while(|b| **b == b'#').count();
@@ -265,7 +265,7 @@ fn raw_string_end(bytes: &[u8], start: usize) -> usize {
             }
         }
 
-        // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through raw-string text leaves the scan on one byte forever")]
+        // #[gamma::skip(all, reason = "not advancing through raw-string text leaves the scan on one byte forever")]
         i += 1;
     }
 
@@ -285,7 +285,7 @@ fn quote_end(bytes: &[u8], start: usize) -> usize {
 
         // #[gamma::skip(cond.negate, reason = "negating the bounded quote search can index past the slice or exhaust the test budget")]
         while i < bytes.len() && bytes[i] != b'\'' {
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing through an escaped character leaves the scan on one byte forever")]
+            // #[gamma::skip(all, reason = "not advancing through an escaped character leaves the scan on one byte forever")]
             i += 1;
         }
 

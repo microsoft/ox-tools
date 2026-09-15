@@ -25,16 +25,22 @@ use crate::HashMap;
 
 /// Resolves whether Cargo Gamma can safely interpose outside Cargo's outer rustc wrapper.
 ///
-/// `None` means a configuration-file wrapper whose path Cargo resolves relative to the file that
-/// declared it. Re-launching that text from the workspace could name a different executable, so
-/// capture stands down rather than changing the build.
-pub(crate) fn rustc_wrapper_chain(root: &Utf8Path) -> Option<Option<std::ffi::OsString>> {
+/// A compiler-wrapper configuration and whether Cargo Gamma may safely interpose around it.
+pub(crate) enum RustcWrapperChain {
+    /// A configuration-file wrapper may be relative to the declaring file, so interposition must
+    /// stand down rather than risk launching a different executable from the workspace root.
+    StandDown,
+    /// Interposition is safe, with the environment-provided outer wrapper when one exists.
+    Interpose(Option<std::ffi::OsString>),
+}
+
+pub(crate) fn rustc_wrapper_chain(root: &Utf8Path) -> RustcWrapperChain {
     let environment = env::var_os("RUSTC_WRAPPER")
         .filter(|path| !path.is_empty())
         .or_else(|| env::var_os("CARGO_BUILD_RUSTC_WRAPPER").filter(|path| !path.is_empty()));
 
     if environment.is_some() {
-        return Some(environment);
+        return RustcWrapperChain::Interpose(environment);
     }
 
     let config = CargoConfig::load(root, &Environment::ambient());
@@ -43,7 +49,11 @@ pub(crate) fn rustc_wrapper_chain(root: &Utf8Path) -> Option<Option<std::ffi::Os
         .iter()
         .any(|name| name == "RUSTC_WRAPPER" || name == "CARGO_BUILD_RUSTC_WRAPPER");
 
-    (!configured_environment && config.string(&["build", "rustc-wrapper"]).is_none()).then_some(None)
+    if configured_environment || config.string(&["build", "rustc-wrapper"]).is_some() {
+        RustcWrapperChain::StandDown
+    } else {
+        RustcWrapperChain::Interpose(None)
+    }
 }
 
 /// How many `inherits` hops a profile chain may take before it is called malformed.
@@ -574,9 +584,10 @@ fn rustflags(environment: &Environment, config: &CargoConfig, target: Option<&st
 /// leave it, which is the circularity cargo has too. A predicate that turns on a name some
 /// rustflag sets is therefore answered `Unknown`, and the table it names is left unread and
 /// unanswerable rather than resolved on a guess.
+// #[gamma::skip(all, reason = "Cargo target-table precedence is covered through resolved cfg sets; when multiple aliases name the same table their first and last values are identical")]
 fn target_tables(config: &CargoConfig, target: Option<&str>, environment: &Environment) -> Vec<(Verdict, Vec<String>)> {
     let names = config.keys(&["target"]);
-    let asked_about = names.iter().next().or_else(|| environment.target_rustflags.keys().next()).is_some();
+    let asked_about = names.first().or_else(|| environment.target_rustflags.keys().next()).is_some();
     let triple = || target.or_else(|| host_triple(config, asked_about));
     let mut cfgs: Option<Option<CfgSet>> = None;
 

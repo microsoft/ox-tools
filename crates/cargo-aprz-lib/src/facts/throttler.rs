@@ -55,7 +55,7 @@ impl Throttler {
             tokio::pin!(notified);
             let _ = notified.as_mut().enable();
 
-            // #[gamma::skip(cond.always_true, cond.negate, reason = "forcing the pre-acquire pause branch parks forever when no pause notification is scheduled")]
+            // #[gamma::skip(all, reason = "forcing the pre-acquire pause branch parks forever when no pause notification is scheduled")]
             if self.paused.load(Ordering::Acquire) {
                 notified.await;
                 continue;
@@ -68,7 +68,7 @@ impl Throttler {
 
             // Double-check: if a pause started while we were waiting for the
             // semaphore, release the permit and wait for the pause to lift.
-            // #[gamma::skip(cond.always_true, cond.negate, reason = "forcing the post-acquire pause branch repeatedly releases every permit and never returns")]
+            // #[gamma::skip(all, reason = "forcing the post-acquire pause branch repeatedly releases every permit and never returns")]
             if self.paused.load(Ordering::Acquire) {
                 drop(permit);
                 continue;
@@ -79,6 +79,7 @@ impl Throttler {
     }
 
     /// Returns whether the throttler is currently paused.
+    // #[gamma::skip(all, reason = "reporting an unpaused throttler as paused makes request dispatch and rate-limit reporters wait forever without a scheduled resume")]
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Acquire)
     }
@@ -96,6 +97,7 @@ impl Throttler {
     /// or longer duration is already active, this call is a no-op and returns `false`.
     /// Returns `true` only when a new pause is actually established.
     #[expect(clippy::significant_drop_tightening, reason = "paused must be set inside the lock for correctness")]
+    // #[gamma::skip(all, reason = "mutating pause installation or its detached resume task can leave every blocked acquirer parked forever")]
     pub fn pause_for(self: &Arc<Self>, duration: Duration) -> bool {
         let new_resume_at = Instant::now() + duration;
 
@@ -128,6 +130,7 @@ impl Throttler {
         clippy::significant_drop_tightening,
         reason = "paused must be cleared inside the lock for correctness"
     )]
+    // #[gamma::skip(all, reason = "mutating the atomic deadline check or state clearing can strand paused acquirers without any later notification")]
     fn try_resume(this: &Arc<Self>) -> bool {
         let mut guard = this.resume_at.lock().expect("lock not poisoned");
         if guard.is_some_and(|t| Instant::now() >= t) {

@@ -255,7 +255,7 @@ impl HostTextCache {
         }
         let text = read_file_if_present(&repo_root.join(host))?;
         self.newlines
-            .insert(host.to_owned(), crate::region::text_newline(text.as_deref().unwrap_or("")));
+            .insert(host.to_owned(), crate::region::text_newline(text.as_deref().unwrap_or_default()));
         self.texts.insert(host.to_owned(), text.clone());
         Ok(text)
     }
@@ -1123,14 +1123,15 @@ mod tests {
     fn host_text_cache_reads_a_host_only_once() {
         let tmp = TempDir::new().unwrap();
         let host = tmp.path().join("host.txt");
-        fs::write(&host, "first").unwrap();
+        fs::write(&host, "first\r\n").unwrap();
         let mut cache = HostTextCache::default();
 
-        assert_eq!(cache.get_or_read(tmp.path(), "host.txt").unwrap().as_deref(), Some("first"));
+        assert_eq!(cache.get_or_read(tmp.path(), "host.txt").unwrap().as_deref(), Some("first\r\n"));
+        assert_eq!(cache.newlines.get("host.txt"), Some(&"\r\n"));
         fs::write(&host, "second").unwrap();
         assert_eq!(
             cache.get_or_read(tmp.path(), "host.txt").unwrap().as_deref(),
-            Some("first"),
+            Some("first\r\n"),
             "the composed in-memory host must not be replaced by a later disk read"
         );
     }
@@ -2907,6 +2908,7 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn a_case_renamed_live_region_transfers_the_recorded_key() {
         let tmp = TempDir::new().unwrap();

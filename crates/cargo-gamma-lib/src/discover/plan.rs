@@ -229,7 +229,7 @@ mod tests {
             sharded_out: 3,
             settled_out: 4,
             skipped: vec!["src/broken.rs: could not parse".to_owned()],
-            digests: [(Utf8PathBuf::from("z.rs"), "digest".to_owned())].into_iter().collect(),
+            digests: std::iter::once((Utf8PathBuf::from("z.rs"), "digest".to_owned())).collect(),
         };
 
         plan.absorb(scanned);

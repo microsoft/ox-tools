@@ -760,6 +760,7 @@ impl Default for SelectArgs {
 
 impl SelectArgs {
     /// Resolves the `--mutators` selector list into a concrete set of mutators.
+    // #[gamma::skip(all, reason = "the CLI rejects either kind of selector error before this adapter; the conjunction only distinguishes impossible partially-valid parser states")]
     pub fn selection(&self) -> crate::Result<Selection> {
         let mut selection = self
             .mutators

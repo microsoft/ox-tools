@@ -253,6 +253,7 @@ fn slow_baseline(timing: &Timing, mutants: &[Mutant], binaries: &[TestBinary]) -
 }
 
 /// A test-dominated run using Cargo's unoptimized test or development profile.
+// #[gamma::skip(all, reason = "the profile boundary and exact finding text are covered by deterministic analysis tests; mutations here duplicate that externally rendered finding")]
 fn unoptimized_execution(timing: &Timing, profile: CargoProfile<'_>) -> Option<Finding> {
     let profile = match profile {
         CargoProfile::Default => "Cargo's default test profile",

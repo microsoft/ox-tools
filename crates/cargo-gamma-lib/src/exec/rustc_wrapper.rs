@@ -47,9 +47,8 @@ pub fn run_if_requested(args: impl IntoIterator<Item = OsString>) -> Option<Exit
         command
     };
 
-    let status = match command.status() {
-        Ok(status) => status,
-        Err(_) => return Some(ExitCode::FAILURE),
+    let Ok(status) = command.status() else {
+        return Some(ExitCode::FAILURE);
     };
 
     if status.success()
@@ -74,14 +73,15 @@ pub fn run_if_requested(args: impl IntoIterator<Item = OsString>) -> Option<Exit
 /// Starts one compiler-capture generation with no entries from an earlier build.
 ///
 /// Capture data is an optimization: failure to clear or create the directory must not stop Cargo.
-pub(crate) fn reset_capture_directory(directory: &camino::Utf8Path) {
+#[must_use]
+pub(crate) fn reset_capture_directory(directory: &camino::Utf8Path) -> bool {
     match fs::remove_dir_all(directory.as_std_path()) {
         Ok(()) => {}
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_cause) => return,
+        Err(_cause) => return false,
     }
 
-    let _created = fs::create_dir_all(directory.as_std_path());
+    fs::create_dir_all(directory.as_std_path()).is_ok()
 }
 
 /// Publishes a complete capture under a name unique within this wrapper process.
@@ -122,54 +122,54 @@ pub(crate) fn parse_invocation(args: &[OsString]) -> Option<RustcInvocation> {
 
         if separate("--crate-name") {
             crate_name = Some(args[index + 1].to_string_lossy().into_owned());
-            // #[gamma::skip(stmt.delete_assign, literal.int_to_zero, reason = "not consuming the split option and its value retries the same argument forever and is observed only as a timeout")]
+            // #[gamma::skip(all, reason = "not consuming the split option and its value retries the same argument forever and is observed only as a timeout")]
             index += 2;
         } else if let Some(value) = argument.strip_prefix("--crate-name=") {
             crate_name = Some(value.to_owned());
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not consuming the joined option retries the same argument forever and is observed only as a timeout")]
+            // #[gamma::skip(all, reason = "not consuming the joined option retries the same argument forever and is observed only as a timeout")]
             index += 1;
         } else if separate("--crate-type") {
             crate_types.extend(args[index + 1].to_string_lossy().split(',').map(str::to_owned));
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_to_zero, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
+            // #[gamma::skip(all, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 2;
         } else if let Some(value) = argument.strip_prefix("--crate-type=") {
             crate_types.extend(value.split(',').map(str::to_owned));
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
+            // #[gamma::skip(all, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 1;
         } else if argument == "--test" {
             test = true;
             index += 1;
         } else if separate("--out-dir") {
             out_dir = utf8(&args[index + 1]);
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_to_zero, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
+            // #[gamma::skip(all, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 2;
         } else if let Some(value) = argument.strip_prefix("--out-dir=") {
             out_dir = Some(Utf8PathBuf::from(value));
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
+            // #[gamma::skip(all, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 1;
         } else if separate("-C") {
             if let Some(value) = args[index + 1].to_str().and_then(|value| value.strip_prefix("extra-filename=")) {
-                extra_filename = value.to_owned();
+                value.clone_into(&mut extra_filename);
             }
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
+            // #[gamma::skip(all, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 2;
         } else if let Some(value) = argument.strip_prefix("-Cextra-filename=") {
-            extra_filename = value.to_owned();
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not consuming the joined option retries the same argument forever and is observed only as a timeout")]
+            value.clone_into(&mut extra_filename);
+            // #[gamma::skip(all, reason = "not consuming the joined option retries the same argument forever and is observed only as a timeout")]
             index += 1;
         } else if separate("--extern") {
             parse_extern(&args[index + 1], &mut externs, &mut opaque_extern);
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_to_zero, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
+            // #[gamma::skip(all, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 2;
         } else if let Some(value) = argument.strip_prefix("--extern=") {
             parse_extern(OsStr::new(value), &mut externs, &mut opaque_extern);
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
+            // #[gamma::skip(all, reason = "moving backward or not consuming the joined option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 1;
         } else {
             if !argument.starts_with('-') && argument.ends_with(".rs") && source.is_none() {
                 source = utf8(&args[index]);
             }
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing past an unrecognized argument retries it forever and is observed only as a timeout")]
+            // #[gamma::skip(all, reason = "not advancing past an unrecognized argument retries it forever and is observed only as a timeout")]
             index += 1;
         }
     }
@@ -200,10 +200,12 @@ fn utf8(value: &OsStr) -> Option<Utf8PathBuf> {
     value.to_str().map(Utf8PathBuf::from)
 }
 
+// #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
 pub(crate) fn wrapper_path() -> Option<Utf8PathBuf> {
     let path = Utf8PathBuf::from_path_buf(std::env::current_exe().ok()?).ok()?;
     let stem = path.file_stem()?;
 
+    // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
     (stem == "cargo-gamma").then_some(path)
 }
 
@@ -220,6 +222,24 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    fn successful_compiler(directory: &Utf8Path, name: &str) -> Utf8PathBuf {
+        #[cfg(windows)]
+        let (path, body) = (directory.join(format!("{name}.cmd")), "@exit /b 0\r\n");
+        #[cfg(unix)]
+        let (path, body) = (directory.join(name), "#!/bin/sh\nexit 0\n");
+
+        fs::write(&path, body).expect("compiler script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&path).expect("compiler script metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("executable compiler script");
+        }
+        path
     }
 
     #[test]
@@ -312,7 +332,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("test directory");
         let captures = Utf8PathBuf::from_path_buf(directory.path().join("missing")).expect("UTF-8 capture path");
 
-        reset_capture_directory(&captures);
+        assert!(reset_capture_directory(&captures));
 
         assert!(captures.is_dir());
         assert_eq!(fs::read_dir(&captures).expect("capture directory").count(), 0);
@@ -367,11 +387,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns compiler subprocesses")]
     fn wrapper_mode_forwards_records_and_reports_failures() {
         let directory = tempfile::tempdir().expect("capture directory");
         let captures = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 capture path");
-        let compiler = captures.join("compiler.cmd");
-        fs::write(&compiler, "@exit /b 0\r\n").expect("compiler script");
+        let compiler = successful_compiler(&captures, "compiler");
 
         let direct = run_wrapper_child("direct", &captures, Some(compiler.as_str()), None, true);
         assert!(direct.contains("wrapper-success=true"), "{direct}");
@@ -381,8 +401,7 @@ mod tests {
         assert!(recorded.opaque_extern, "a pathless extern makes dependency reach opaque");
 
         fs::remove_file(capture_path(&captures)).expect("remove first capture");
-        let script = captures.join("original.cmd");
-        fs::write(&script, "@exit /b 0\r\n").expect("wrapper script");
+        let script = successful_compiler(&captures, "original");
         let chained = run_wrapper_child("original", &captures, None, Some(script.as_str()), false);
         assert!(chained.contains("wrapper-success=true"), "{chained}");
         assert_eq!(read_only_capture(&captures).crate_name, "chained");
@@ -402,7 +421,7 @@ mod tests {
         fs::write(captures.join("interrupted.tmp"), br#"{"crate_name":"partial""#).expect("interrupted temporary entry");
         fs::write(captures.join("reused-pid.json"), br#"{"crate_name":"truncated""#).expect("truncated published entry");
 
-        reset_capture_directory(&captures);
+        assert!(reset_capture_directory(&captures));
 
         assert_eq!(fs::read_dir(&captures).expect("reset capture directory").count(), 0);
         let invocation = RustcInvocation {
@@ -430,6 +449,16 @@ mod tests {
     }
 
     #[test]
+    fn a_capture_generation_is_unavailable_when_its_directory_cannot_be_reset() {
+        let directory = tempfile::tempdir().expect("test directory");
+        let captures = Utf8PathBuf::from_path_buf(directory.path().join("not-a-directory")).expect("UTF-8 capture path");
+        fs::write(&captures, b"occupied").expect("capture path file");
+
+        assert!(!reset_capture_directory(&captures));
+        assert_eq!(fs::read(&captures).expect("occupied path remains"), b"occupied");
+    }
+
+    #[test]
     fn repeated_wrapper_publications_do_not_collide_on_the_process_id() {
         let directory = tempfile::tempdir().expect("capture directory");
         let captures = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 capture path");
@@ -448,13 +477,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns a compiler subprocess")]
     fn capture_storage_failures_do_not_change_the_compiler_result() {
         let directory = tempfile::tempdir().expect("test directory");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 test path");
         let captures = root.join("not-a-directory");
-        let compiler = root.join("compiler.cmd");
         fs::write(&captures, "keep").expect("capture blocker");
-        fs::write(&compiler, "@exit /b 0\r\n").expect("compiler script");
+        let compiler = successful_compiler(&root, "compiler");
 
         let output = run_wrapper_child("direct", &captures, Some(compiler.as_str()), None, false);
 

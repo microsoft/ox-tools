@@ -726,6 +726,7 @@ fn phases_of(session: &Session) -> Phases {
 }
 
 /// The test binaries, most expensive baseline first.
+// #[gamma::skip(all, reason = "diagnostic ranking and truncation are covered by exact serialized-bundle tests; mutations here duplicate that artifact contract")]
 fn binaries_of(session: &Session, redaction: Redaction) -> Vec<Binary> {
     let mut binaries: Vec<&crate::exec::TestBinary> = session.binaries.iter().collect();
 
@@ -746,6 +747,7 @@ fn binaries_of(session: &Session, redaction: Redaction) -> Vec<Binary> {
 }
 
 /// The duration distribution, or `None` when nothing ran.
+// #[gamma::skip(all, reason = "duration distribution fields and empty-input behavior are asserted exactly in serialized diagnostic tests")]
 fn durations_of(mutants: &[Mutant]) -> Option<Durations> {
     let mut spent: Vec<u64> = mutants
         .iter()
@@ -770,6 +772,7 @@ fn durations_of(mutants: &[Mutant]) -> Option<Durations> {
 }
 
 /// One ranked breakdown of the population, most expensive first.
+// #[gamma::skip(all, reason = "breakdown counts, ranking, and redaction are asserted as one deterministic artifact contract")]
 fn breakdown(mutants: &[Mutant], redaction: Redaction, key: impl Fn(&Mutant) -> String) -> Vec<Breakdown> {
     let mut buckets: crate::HashMap<String, Breakdown> = crate::HashMap::default();
 
@@ -832,6 +835,7 @@ fn percentile(ascending: &[u64], fraction: f64) -> u64 {
 }
 
 /// A duration in whole milliseconds, which is the resolution everything else here is measured at.
+// #[gamma::skip(expr.decrement, reason = "conversion failure requires a duration beyond u64 milliseconds; either saturated value is outside every supported platform's observable duration range")]
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }

@@ -314,6 +314,7 @@ mod tests {
     #[test]
     fn a_short_construct_is_left_alone() {
         assert_eq!(one_line("a + b", 48), "a + b");
+        assert_eq!(one_line("exact", 5), "exact");
     }
 
     #[test]

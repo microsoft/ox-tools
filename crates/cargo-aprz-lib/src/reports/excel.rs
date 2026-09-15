@@ -209,6 +209,7 @@ mod tests {
     use std::io::Read as _;
     use std::sync::Arc;
 
+    use chrono::{TimeZone, Utc};
     use flate2::read::DeflateDecoder;
 
     use super::*;
@@ -594,5 +595,90 @@ mod tests {
         generate(&crates, &mut output).unwrap();
 
         assert_eq!(sheet_cell_text(&output, "B4").as_deref(), Some("#serialization, #parsing"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
+    fn workbook_preserves_document_style_and_layout_contract() {
+        let crates = vec![
+            create_test_crate("unevaluated", "1.0.0", None),
+            create_test_crate("low", "2.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+            create_test_crate("medium", "3.0.0", Some(Appraisal::new(Risk::Medium, vec![], 1, 0, 50.0))),
+            create_test_crate("high", "4.0.0", Some(Appraisal::new(Risk::High, vec![], 1, 0, 0.0))),
+        ];
+        let mut output = Vec::new();
+        generate(&crates, &mut output).unwrap();
+
+        let core = xlsx_entry(&output, "docProps/core.xml");
+        assert!(core.contains(">cargo-aprz<"), "author metadata changed: {core}");
+        let workbook = xlsx_entry(&output, "xl/workbook.xml");
+        assert!(workbook.contains("name=\"Crate Metrics\""), "worksheet name changed: {workbook}");
+        let styles = xlsx_entry(&output, "xl/styles.xml");
+        for color in ["FED7AA", "C8E6C9", "2E7D32", "FFF9C4", "F57F17", "FFCDD2", "C62828"] {
+            assert!(styles.contains(color), "missing exact report color {color}: {styles}");
+        }
+        let sheet = xlsx_entry(&output, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("xSplit=\"1\" ySplit=\"1\""), "freeze panes changed: {sheet}");
+        assert!(sheet.contains("<cols>"), "autofit must emit column widths: {sheet}");
+        assert!(sheet.contains("r=\"B5\""), "category fill must cover B5: {sheet}");
+        assert!(sheet.contains("r=\"E5\""), "category fill must cover E5: {sheet}");
+        assert!(!sheet.contains("r=\"F5\""), "category fill must stop before F5: {sheet}");
+        assert_eq!(sheet_cell_text(&output, "A2").as_deref(), Some("Appraisals"));
+        assert_eq!(
+            sheet_cell_text(&output, "D2").as_deref(),
+            Some("MEDIUM RISK (score = 50, awarded points = 0, available points = 1)")
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetSystemTimePreciseAsFileTime (rust_xlsxwriter)")]
+    fn write_metric_value_preserves_cell_coordinates_and_value_kinds() {
+        let mut workbook = Workbook::new();
+        let worksheet = workbook.add_worksheet();
+        let format = Format::new();
+        let values = [
+            MetricValue::UInt(7),
+            MetricValue::Float(12.5),
+            MetricValue::Boolean(true),
+            MetricValue::String("https://example.com/repo".into()),
+            MetricValue::DateTime(Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).single().expect("valid timestamp")),
+            MetricValue::List(vec![MetricValue::String("alice".into()), MetricValue::String("bob".into())]),
+        ];
+        for (row, value) in values.iter().enumerate() {
+            let row = u32::try_from(row).expect("the six test values fit in worksheet row indices");
+            write_metric_value(worksheet, row, 1, "owners", value, &format).unwrap();
+        }
+        let output = workbook.save_to_buffer().unwrap();
+
+        assert_eq!(sheet_cell_text(&output, "B1").as_deref(), Some("7"));
+        assert_eq!(sheet_cell_text(&output, "B2").as_deref(), Some("12.5"));
+        assert_eq!(sheet_cell_text(&output, "B3").as_deref(), Some("1"));
+        assert_eq!(sheet_cell_text(&output, "B4").as_deref(), Some("https://example.com/repo"));
+        assert_eq!(sheet_cell_text(&output, "B5").as_deref(), Some("2024-01-02"));
+        assert_eq!(sheet_cell_text(&output, "B6").as_deref(), Some("alice, bob"));
+        for cell in ["A1", "A2", "A3", "A4", "A5", "A6", "C1", "C2", "C3", "C4", "C5", "C6"] {
+            assert_eq!(sheet_cell_text(&output, cell), None, "unexpected value in {cell}");
+        }
+        let sheet = xlsx_entry(&output, "xl/worksheets/sheet1.xml");
+        assert!(
+            sheet.contains("<hyperlink ref=\"B4\""),
+            "URL metrics must remain hyperlinks: {sheet}"
+        );
+    }
+
+    #[test]
+    fn appraisal_reasons_keep_the_semicolon_separator() {
+        let appraisal = Appraisal::new(
+            Risk::Low,
+            vec![
+                ExpressionOutcome::new("first".into(), "First".into(), ExpressionDisposition::True),
+                ExpressionOutcome::new("second".into(), "Second".into(), ExpressionDisposition::True),
+            ],
+            2,
+            2,
+            100.0,
+        );
+
+        assert_eq!(appraisal_cell_values(&appraisal).1, "✔️ first; ✔️ second");
     }
 }

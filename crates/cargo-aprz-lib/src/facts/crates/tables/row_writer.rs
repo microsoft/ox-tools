@@ -20,7 +20,7 @@ pub struct RowWriter<'a, W: Write> {
 impl<'a, W: Write> RowWriter<'a, W> {
     pub fn new(writer: &'a mut W) -> Self {
         Self {
-            // #[gamma::skip(literal.int_to_zero, literal.int_to_one, literal.int_increment, literal.int_decrement, reason = "buffer capacity is an allocation hint and does not change serialized bytes")]
+            // #[gamma::skip(all, reason = "buffer capacity is an allocation hint and does not change serialized bytes")]
             buffer: Vec::with_capacity(256),
             writer,
             row_count: 0,

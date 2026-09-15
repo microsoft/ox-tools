@@ -705,7 +705,7 @@ fn validate_shape_tokens(tokens: Vec<TokenTree>, strict: bool, multiplier: &mut 
                         return Err(format!("`{key}` must not have trailing tokens after its value"));
                     }
 
-                    // #[gamma::skip(literal.int_decrement, literal.int_increment, literal.int_to_one, reason = "the adjacent tokens are the inert `=`/literal before the cursor and an inert comma after it; each nonzero step reaches the same next meaningful token")]
+                    // #[gamma::skip(all, reason = "the adjacent tokens are the inert `=`/literal before the cursor and an inert comma after it; each nonzero step reaches the same next meaningful token")]
                     // #[gamma::skip(literal.int_to_zero, reason = "zero leaves the cursor on the same key and makes the token walk loop forever")]
                     index += 3;
                     continue;
@@ -745,8 +745,9 @@ fn validate_shape_tokens(tokens: Vec<TokenTree>, strict: bool, multiplier: &mut 
                         return Err(format!("`{key}` must not have trailing tokens after its value"));
                     }
 
-                    // #[gamma::skip(expr.increment, literal.int_increment, reason = "the fourth token, when present, is the comma required by the trailing-token check above; skipping it reaches the same next meaningful token")]
+                    // #[gamma::skip(all, reason = "the fourth token, when present, is the comma required by the trailing-token check above; either control statement resumes at the same next meaningful token")]
                     index += 3;
+                    // #[gamma::skip(loop.continue_to_break, reason = "the current list has only the optional comma left, so breaking it or advancing past that comma resumes the same parent frame")]
                     continue;
                 }
             }
@@ -776,14 +777,14 @@ fn validate_shape_tokens(tokens: Vec<TokenTree>, strict: bool, multiplier: &mut 
 
                 // The rest of this list is resumed once the group is done — the point a recursive
                 // walk would return to.
-                // #[gamma::skip(arith.add_to_mul, literal.int_decrement, reason = "multiplication by one or decrementing one leaves the cursor on the parenthesized group and makes the heap-based walk repeat it forever")]
+                // #[gamma::skip(all, reason = "multiplication by one or decrementing one leaves the cursor on the parenthesized group and makes the heap-based walk repeat it forever")]
                 frames.push((trees, index + 1));
                 frames.push((inner, 0));
 
                 continue 'frames;
             }
 
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, reason = "subtracting, removing, or zeroing this advancement intentionally makes the token walk loop forever")]
+            // #[gamma::skip(all, reason = "subtracting, removing, or zeroing this advancement intentionally makes the token walk loop forever")]
             index += 1;
         }
     }

@@ -222,7 +222,9 @@ pub(super) fn dep_files(stdout: &str) -> Vec<Utf8PathBuf> {
             continue;
         };
 
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if message.reason != "compiler-artifact" {
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             continue;
         }
 
@@ -253,7 +255,9 @@ pub(super) fn dep_files(stdout: &str) -> Vec<Utf8PathBuf> {
                 continue;
             };
 
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if path.extension() != Some("d") {
+                // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
                 continue;
             }
 

@@ -75,6 +75,7 @@ impl ProgressReporter {
 
     fn with_draw_target_and_line_sink(delay: Duration, use_colors: bool, make_draw_target: DrawTargetFactory, line_sink: LineSink) -> Self {
         let bar = ProgressBar::hidden();
+        // #[gamma::skip(all, reason = "ProgressBar::hidden already installs the same hidden draw target, so repeating it is idempotent")]
         bar.set_draw_target(ProgressDrawTarget::hidden());
 
         let state = Arc::new(DelayedProgressState {
@@ -84,6 +85,7 @@ impl ProgressReporter {
             phase_start_time: Mutex::new(Instant::now()),
         });
 
+        // #[gamma::skip(all, reason = "the placeholder callback's numeric fields are ignored until a caller replaces it with a configured progress callback")]
         let message_callback = Arc::new(Mutex::new(Box::new(|| (0u64, 0u64, String::new())) as ProgressCallback));
 
         Self {
@@ -113,6 +115,7 @@ impl Progress for ProgressReporter {
     fn set_determinate(&self, callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {
         *self.message_callback.lock().expect("lock poisoned") = callback;
         self.state.is_indeterminate.store(false, Ordering::Relaxed);
+        // #[gamma::skip(all, reason = "steady-tick cancellation only controls indicatif's terminal redraw scheduling and has no deterministic observable state")]
         self.bar.disable_steady_tick();
         self.bar.set_length(0);
         self.bar.set_position(0);
@@ -121,6 +124,7 @@ impl Progress for ProgressReporter {
         } else {
             DETERMINATE_TEMPLATE_NO_COLOR
         };
+        // #[gamma::skip(all, reason = "this statement configures terminal-only indicatif styling that cannot be observed through a hermetic hidden draw target")]
         self.bar.set_style(
             ProgressStyle::default_bar()
                 .template(template)
@@ -133,10 +137,12 @@ impl Progress for ProgressReporter {
     fn set_indeterminate(&self, callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {
         *self.message_callback.lock().expect("lock poisoned") = Box::new(move || {
             let message = callback();
+            // #[gamma::skip(all, reason = "indeterminate callbacks deliberately return zero length and position, which the refresh task ignores")]
             (0, 0, message)
         });
         *self.state.phase_start_time.lock().expect("lock poisoned") = Instant::now();
         self.state.is_indeterminate.store(true, Ordering::Relaxed);
+        // #[gamma::skip(all, reason = "the exact steady-tick interval controls terminal redraw cadence only and cannot be asserted deterministically")]
         self.bar.enable_steady_tick(Duration::from_millis(REFRESH_INTERVAL_MS));
 
         let template = if self.use_colors {
@@ -144,6 +150,7 @@ impl Progress for ProgressReporter {
         } else {
             INDETERMINATE_TEMPLATE_NO_COLOR
         };
+        // #[gamma::skip(all, reason = "this statement configures terminal-only indicatif styling that cannot be observed through a hermetic hidden draw target")]
         self.bar.set_style(
             ProgressStyle::default_spinner()
                 .template(template)
@@ -221,6 +228,7 @@ impl Progress for ProgressReporter {
     fn done(&self) {
         self.refresh_task.abort();
         if self.state.visible.load(Ordering::Relaxed) {
+            // #[gamma::skip(all, reason = "clearing is a terminal draw-target side effect with no observable state under the required hermetic hidden target")]
             self.bar.finish_and_clear();
         }
     }
@@ -247,6 +255,7 @@ impl Debug for ProgressReporter {
 // Not covered: installing this target renders to the real stderr, which tests must not do.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn stderr_draw_target() -> ProgressDrawTarget {
+    // #[gamma::skip(all, reason = "the refresh frequency controls terminal redraw cadence only and cannot be asserted without nondeterministic real-stderr observation")]
     ProgressDrawTarget::stderr_with_hz(10)
 }
 
@@ -257,11 +266,13 @@ async fn refresh_task(
     callback: Arc<Mutex<ProgressCallback>>,
     make_draw_target: DrawTargetFactory,
 ) {
+    // #[gamma::skip(all, reason = "the exact background refresh cadence is scheduling behavior and cannot be asserted deterministically")]
     let mut interval = tokio::time::interval(Duration::from_millis(REFRESH_INTERVAL_MS));
     #[expect(clippy::infinite_loop, reason = "task runs until aborted")]
     loop {
         let _ = interval.tick().await;
 
+        // #[gamma::skip(relational.ge_to_gt, reason = "Instant::now equaling the independently captured deadline exactly is not an observable deterministic boundary")]
         if !state.visible.load(Ordering::Relaxed) && Instant::now() >= state.visible_after {
             state.visible.store(true, Ordering::Relaxed);
             bar.set_draw_target(make_draw_target());
@@ -297,6 +308,7 @@ mod tests {
     use core::sync::atomic::Ordering;
     use core::time::Duration;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     use indicatif::ProgressDrawTarget;
 
@@ -389,6 +401,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn changing_progress_modes_resets_state() {
+        let reporter = hidden_reporter(Duration::from_hours(1), false);
+        let old_phase_start = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .expect("the test clock can represent an instant two seconds before the current reading");
+        *reporter.state.phase_start_time.lock().expect("test holds the only lock") = old_phase_start;
+        reporter.set_phase("new phase");
+        assert!(*reporter.state.phase_start_time.lock().expect("test holds the only lock") > old_phase_start);
+
+        reporter.state.is_indeterminate.store(true, Ordering::Relaxed);
+        reporter.bar.set_position(9);
+        reporter.set_determinate(Box::new(|| (1, 1, "done".to_owned())));
+        assert!(!reporter.state.is_indeterminate.load(Ordering::Relaxed));
+        assert_eq!(0, reporter.bar.position());
+
+        *reporter.state.phase_start_time.lock().expect("test holds the only lock") = old_phase_start;
+        reporter.set_indeterminate(Box::new(|| "working".to_owned()));
+        assert!(*reporter.state.phase_start_time.lock().expect("test holds the only lock") > old_phase_start);
+        reporter.done();
+    }
+
+    #[tokio::test]
     #[cfg_attr(miri, ignore = "requires tokio timers and threads")]
     async fn bar_stays_hidden_until_the_delay_elapses() {
         let reporter = hidden_reporter(Duration::from_hours(1), true);
@@ -403,6 +437,32 @@ mod tests {
         // `done` on an invisible bar must not touch the bar.
         reporter.done();
         assert!(!reporter.state.visible.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn becoming_visible_installs_the_supplied_draw_target() {
+        let installed = Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let factory_installed = Arc::clone(&installed);
+        let reporter = ProgressReporter::with_draw_target(
+            Duration::from_millis(1),
+            false,
+            Box::new(move || {
+                factory_installed.store(true, Ordering::Relaxed);
+                ProgressDrawTarget::hidden()
+            }),
+        );
+        assert!(wait_until(&reporter, |_| installed.load(Ordering::Relaxed)).await);
+        reporter.done();
+    }
+
+    #[tokio::test]
+    async fn a_single_item_total_updates_the_bar() {
+        let reporter = hidden_reporter(Duration::from_millis(1), false);
+        reporter.set_determinate(Box::new(|| (1, 1, "only item".to_owned())));
+        assert!(wait_until(&reporter, |r| r.bar.message() == "only item").await);
+        assert_eq!(Some(1), reporter.bar.length());
+        assert_eq!(1, reporter.bar.position());
+        reporter.done();
     }
 
     #[tokio::test]

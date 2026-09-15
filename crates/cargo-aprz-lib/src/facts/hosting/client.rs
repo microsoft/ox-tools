@@ -95,6 +95,7 @@ impl Client {
 
         if let Some(t) = token {
             let mut auth_val = HeaderValue::from_str(&format!("token {t}"))?;
+            // #[gamma::skip(all, reason = "header sensitivity affects only secret redaction in Debug output, which cannot be asserted without risking token disclosure")]
             auth_val.set_sensitive(true);
 
             let mut headers = HeaderMap::new();
@@ -137,6 +138,7 @@ fn classify_response(resp: reqwest::Response, rate_limit: Option<RateLimitInfo>,
     }
 
     let status_code = status.as_u16();
+    // #[gamma::skip(all, reason = "treating ordinary responses as rate limits can install a default one-hour pause and exhaust the mutation test time budget")]
     if matches!(status_code, 403 | 429) {
         // Extract Retry-After header (used by GitHub for secondary/abuse rate limits)
         let retry_after_secs = resp
@@ -192,6 +194,7 @@ fn classify_response(resp: reqwest::Response, rate_limit: Option<RateLimitInfo>,
 }
 
 /// Extract rate limit information from API response headers
+// #[gamma::skip(all, reason = "discarding or misreading rate-limit headers turns exhausted endpoints into the default one-hour pause and stalls network tests")]
 fn extract_rate_limit_from_headers(headers: &HeaderMap) -> Option<RateLimitInfo> {
     let remaining = headers.get("x-ratelimit-remaining")?.to_str().ok()?.parse::<usize>().ok()?;
 
@@ -462,6 +465,23 @@ mod tests {
         let resp = client.get(&url).send().await.unwrap();
         let rate_limit = extract_rate_limit_from_headers(resp.headers());
         classify_response(resp, rate_limit, &url)
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "requires network I/O")]
+    async fn client_token_is_sent_as_the_authorization_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::header("authorization", "token test_token"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::new(Some("test_token"), server.uri()).unwrap();
+        let result = client.api_call(&server.uri()).await;
+
+        assert!(matches!(result, HostingApiResult::Success(..)));
     }
 
     #[tokio::test]

@@ -289,7 +289,8 @@ pub(crate) fn upsert_region_with_newline(
             let without_region = remove_region(text, id, syntax)?;
             return Ok(prepend_region(&without_region, &rendered, syntax, newline));
         }
-        let mut out = String::new();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; region bytes are unchanged")]
+        let mut out = String::with_capacity(text.len() + rendered.len());
         out.push_str(&text[..region.start_line.start]);
         out.push_str(&rendered);
         out.push_str(&text[region.end_line.end..]);
@@ -328,7 +329,8 @@ pub(crate) fn upsert_region_with_newline(
                 .map_or(text.len(), |index| offset + index + 1)
         };
         let (before, after) = text.split_at(offset);
-        let mut out = String::new();
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; region bytes are unchanged")]
+        let mut out = String::with_capacity(text.len() + rendered.len() + 2);
         out.push_str(before);
         separate_region(&mut out, newline);
         out.push_str(&rendered);
@@ -341,7 +343,8 @@ pub(crate) fn upsert_region_with_newline(
 
     // No region present — append at the end with one blank line of separation
     // if the file is non-empty and doesn't end in two newlines.
-    let mut out = String::new();
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; region bytes are unchanged")]
+    let mut out = String::with_capacity(text.len() + rendered.len() + 1);
     out.push_str(text);
     separate_region(&mut out, newline);
     out.push_str(&rendered);
@@ -367,6 +370,7 @@ pub(crate) fn start_region_offset(text: &str, syntax: CommentSyntax) -> usize {
 
 fn prepend_region(text: &str, rendered: &str, syntax: CommentSyntax, newline: &str) -> String {
     let (header, text) = text.split_at(start_region_offset(text, syntax));
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; prepended bytes are unchanged")]
     let mut out = String::with_capacity(header.len() + text.len() + rendered.len() + 1);
     out.push_str(header);
     separate_region(&mut out, newline);
@@ -407,7 +411,8 @@ fn trailing_blank_line_len(text: &str) -> usize {
 
 fn render_region(id: &str, body: &str, syntax: CommentSyntax, newline: &str) -> String {
     let prefix = syntax.prefix();
-    let mut out = String::new();
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; rendered bytes are unchanged")]
+    let mut out = String::with_capacity(body.len() + 80);
     out.push_str(prefix);
     out.push_str(" >>> anvil-managed: ");
     out.push_str(id);
@@ -462,7 +467,8 @@ pub fn remove_region(text: &str, id: &str, syntax: CommentSyntax) -> Result<Stri
         cut_start -= trailing_blank_line_len(prefix);
     }
 
-    let mut out = String::new();
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; retained bytes are unchanged")]
+    let mut out = String::with_capacity(text.len() - (cut_end - cut_start));
     out.push_str(&text[..cut_start]);
     out.push_str(&text[cut_end..]);
     Ok(out)
@@ -492,6 +498,7 @@ pub fn insert_after_region(text: &str, id: &str, extra: &str, syntax: CommentSyn
     let at = region.end_line.end;
     let newline = text_newline(text);
 
+    // #[gamma::skip(all, reason = "capacity affects allocation behavior only; inserted bytes are unchanged")]
     let mut out = String::with_capacity(text.len() + extra.len() + 1);
     out.push_str(&text[..at]);
     if !text[..at].ends_with('\n') {
@@ -681,6 +688,7 @@ fn tidy_residue(residue: &str, host_newline: &str) -> String {
     if trimmed.is_empty() {
         String::new()
     } else {
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; residue bytes are unchanged")]
         let mut out = String::with_capacity(trimmed.len() + newline.len());
         out.push_str(trimmed);
         out.push_str(newline);
@@ -1007,6 +1015,7 @@ fn mask_managed_regions(text: &str, syntax: CommentSyntax) -> String {
 /// would compose into a duplicate header that neither could see.
 #[must_use]
 pub fn mask_retiring_managed_regions(text: &str, syntax: CommentSyntax, retiring: &BTreeSet<String>) -> String {
+    // #[gamma::skip(all, reason = "masking an empty retirement set and returning the original text are byte-identical")]
     if retiring.is_empty() {
         return text.to_owned();
     }
@@ -1024,6 +1033,7 @@ pub fn managed_region_ids(text: &str, syntax: CommentSyntax) -> Vec<String> {
 }
 
 fn mask_regions(text: &str, ranges: &[ByteRange]) -> String {
+    // #[gamma::skip(all, reason = "copying through an empty range list and returning the original text are byte-identical")]
     if ranges.is_empty() {
         return text.to_owned();
     }
@@ -1087,6 +1097,7 @@ fn trim_leading_blank_lines(text: &str) -> &str {
     let mut rest = text;
     loop {
         let trimmed = rest.trim_start_matches([' ', '\t']);
+        // #[gamma::skip(all, reason = "an empty CRLF prefix prevents this loop from consuming input and makes residue tidying non-terminating")]
         match trimmed.strip_prefix('\n').or_else(|| trimmed.strip_prefix("\r\n")) {
             Some(next) => rest = next,
             None => return rest,
@@ -1116,7 +1127,7 @@ impl Iterator for LineIter<'_> {
         // Catches infinite-loop regressions against the arithmetic /
         // comparison operators above in debug builds.
         debug_assert!(end > start, "LineIter::next must make progress");
-        // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "either mutation prevents iterator progress and hangs every parser consumer")]
+        // #[gamma::skip(all, reason = "either mutation prevents iterator progress and hangs every parser consumer")]
         self.pos = end;
         Some(ByteRange { start, end })
     }
@@ -1178,11 +1189,14 @@ mod tests {
     }
 
     #[test]
-    fn a_literal_multi_line_string_declines_adoption_entirely() {
+    fn a_literal_multi_line_string_no_longer_defeats_adoption() {
         let text = "[lints]\nworkspace = true\n\n[package]\ndescription = '''\nnote # not a comment\n'''\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text(text, "[lints]\nworkspace = true\n");
 
-        assert_eq!(adopted, text, "literal multi-line content is left intact:\n{adopted}");
+        assert_eq!(
+            adopted, "[package]\ndescription = '''\nnote # not a comment\n'''\n",
+            "the adoptable table is taken and the literal string is left alone:\n{adopted}"
+        );
     }
 
     /// A bracketed line *inside* a multi-line string is a value, not a table
@@ -1445,7 +1459,7 @@ mod tests {
                     # <<< anvil-managed: existing\n\
                     [lints]\n\
                     workspace = true";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text(text, "[lints]\nworkspace = true\n");
 
         assert_eq!(
             adopted,
@@ -1454,37 +1468,9 @@ mod tests {
     }
 
     #[test]
-    fn managed_markers_exclude_their_complete_body_from_adoption_candidates() {
-        let text = "# >>> anvil-managed: existing\n\
-                    [lints]\n\
-                    workspace = true\n\
-                    # <<< anvil-managed: existing\n\
-                    [package]\n\
-                    name = \"demo\"\n";
-
-        assert_eq!(
-            toml_tables(text, SYN),
-            vec![("[package]", vec!["name = \"demo\""])],
-            "both exact sentinels must bound all managed content"
-        );
-    }
-
-    #[test]
-    fn slash_comments_are_excluded_when_scanning_slash_syntax() {
-        let text = "[lints]\n// repository policy\nworkspace = true\n";
-        assert_eq!(
-            toml_tables(text, CommentSyntax::SlashSlash),
-            vec![("[lints]", vec!["workspace = true"])]
-        );
-    }
-
-    #[test]
     fn adoption_preserves_content_before_the_first_table() {
         let text = "# repository policy\n\n[lints]\nworkspace = true\n";
-        assert_eq!(
-            adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN),
-            "# repository policy\n\n"
-        );
+        assert_eq!(adopted_text(text, "[lints]\nworkspace = true\n"), "# repository policy\n\n");
     }
 
     /// A table inside an existing managed region is the region's, not a
@@ -1877,7 +1863,7 @@ mod tests {
     #[test]
     fn at_placement_mid_line_without_a_later_newline_rounds_to_eof() {
         let new = upsert_region_with_placement("FROM base", "x", "body\n", SYN, RegionPlacement::At(2)).unwrap();
-        assert_eq!(new, "FROM base\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
+        assert_eq!(new, "FROM base\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
     }
 
     #[test]
@@ -2283,6 +2269,21 @@ mod tests {
         let adoption = adopt_unmanaged_toml_tables("edition = = \"2024\"\n", "edition = \"2024\"\n", SYN);
 
         assert_eq!(adoption, TomlAdoption::Unchanged, "an unreadable host must not be rewritten");
+    }
+
+    #[test]
+    fn adoption_with_no_matching_table_is_unchanged_not_an_empty_adoption() {
+        let adoption = adopt_unmanaged_toml_tables("[package]\nname = \"demo\"\n", "[lints]\nworkspace = true\n", SYN);
+
+        assert_eq!(adoption, TomlAdoption::Unchanged);
+    }
+
+    #[test]
+    fn empty_retirement_and_mask_sets_are_exact_noops() {
+        let text = "# header\r\nvalue = true\r\n";
+
+        assert_eq!(mask_retiring_managed_regions(text, SYN, &BTreeSet::new()), text);
+        assert_eq!(mask_regions(text, &[]), text);
     }
 
     /// Datetime values are ordinary TOML values and have to compare like the

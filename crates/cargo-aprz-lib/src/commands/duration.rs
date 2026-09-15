@@ -93,6 +93,7 @@ pub(super) fn parse(text: &str) -> Result<Duration, ParseError> {
     loop {
         rest = rest.trim_start();
         if rest.is_empty() {
+            // #[gamma::skip(all, reason = "replacing this terminating break with continue creates an input-independent infinite loop")]
             break;
         }
 
@@ -118,6 +119,7 @@ pub(super) fn parse(text: &str) -> Result<Duration, ParseError> {
             .and_then(|scaled| total.checked_add(scaled))
             .ok_or(ParseError::Overflow)?;
         saw_pair = true;
+        // #[gamma::skip(all, reason = "deleting parser cursor advancement creates an input-independent infinite loop for every valid pair")]
         rest = remainder;
     }
 
@@ -294,16 +296,20 @@ mod tests {
 
     #[test]
     fn every_parse_error_has_a_message() {
-        for error in [
-            ParseError::Empty,
-            ParseError::ExpectedAmount,
-            ParseError::MissingUnit,
-            ParseError::UnknownUnit("blink".to_owned()),
-            ParseError::Overflow,
-        ] {
-            assert!(!error.to_string().is_empty(), "{error:?} has no message");
-        }
-        assert!(ParseError::UnknownUnit("blink".to_owned()).to_string().contains("blink"));
+        assert_eq!(
+            ParseError::Empty.to_string(),
+            "expected a duration such as \"1 week\", \"12h\" or \"250ms\", found nothing"
+        );
+        assert_eq!(ParseError::ExpectedAmount.to_string(), "expected a number before the unit");
+        assert_eq!(
+            ParseError::MissingUnit.to_string(),
+            "expected a unit after the number, such as \"s\", \"h\" or \"days\""
+        );
+        assert_eq!(
+            ParseError::UnknownUnit("blink".to_owned()).to_string(),
+            "unknown time unit \"blink\""
+        );
+        assert_eq!(ParseError::Overflow.to_string(), "duration is too large to represent");
     }
 
     #[test]
@@ -312,6 +318,7 @@ mod tests {
         assert_eq!(format(Duration::from_secs(7 * SECS_PER_DAY)), "7days");
         assert_eq!(format(Duration::from_secs(SECS_PER_DAY)), "1day");
         assert_eq!(format(Duration::from_mins(90)), "1h 30m");
+        assert_eq!(format(Duration::from_hours(2)), "2h");
         assert_eq!(format(Duration::from_millis(1_500)), "1s 500ms");
         assert_eq!(format(Duration::from_nanos(1_001_001)), "1ms 1us 1ns");
         assert_eq!(format(Duration::from_secs(SECS_PER_YEAR + SECS_PER_MONTH)), "1year 1month");

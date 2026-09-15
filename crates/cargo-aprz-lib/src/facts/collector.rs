@@ -227,7 +227,7 @@ fn create_cache_dir(base_path: impl AsRef<Path>, name: impl AsRef<str>) -> Resul
 #[mutants::skip] // Windows-only optimization; Linux mutation runners cannot compile or observe this code.
 // #[gamma::skip(fn_value.unit, reason = "NTFS compression is a best-effort cache optimization and cannot change collected facts")]
 fn configure_windows_cache_directory(cache_path: &Path, name: &str, needs_creation: bool) {
-    // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, logical.and_to_or, relational.eq_to_ne, literal.str_to_empty, literal.str_to_xyzzy, reason = "this condition only selects a best-effort NTFS performance optimization and cannot change cache contents")]
+    // #[gamma::skip(all, reason = "this condition only selects a best-effort NTFS performance optimization and cannot change cache contents")]
     if needs_creation && name == "crates" {
         // #[gamma::skip(stmt.delete_call, reason = "disabling NTFS compression is a best-effort performance optimization and cannot change collected facts")]
         disable_directory_compression(cache_path);
@@ -277,7 +277,7 @@ fn disable_directory_compression(path: impl AsRef<Path>) {
 
     // Open the directory with FILE_WRITE_DATA access and FILE_FLAG_BACKUP_SEMANTICS
     // SAFETY: Calling Windows API with valid path
-    // #[gamma::skip(bitwise.or_to_and, option.none_to_some, reason = "these Windows ABI arguments are fixed protocol values for a best-effort cache optimization")]
+    // #[gamma::skip(all, reason = "these Windows ABI arguments are fixed protocol values for a best-effort cache optimization")]
     let handle = unsafe {
         CreateFileW(
             &path_wide,
@@ -302,14 +302,14 @@ fn disable_directory_compression(path: impl AsRef<Path>) {
 
     #[expect(clippy::cast_possible_truncation, reason = "size_of::<u16>() is always 2, which fits in u32")]
     // SAFETY: Calling DeviceIoControl with valid handle and compression format
-    // #[gamma::skip(option.none_to_some, option.some_to_none, reason = "these Windows ABI pointer arguments are fixed protocol values for a best-effort cache optimization")]
+    // #[gamma::skip(all, reason = "these Windows ABI pointer arguments are fixed protocol values for a best-effort cache optimization")]
     let _ = unsafe {
         DeviceIoControl(
             handle,
-            // #[gamma::skip(expr.increment, expr.decrement, reason = "this Windows control code is a fixed ABI protocol value for a best-effort optimization")]
+            // #[gamma::skip(all, reason = "this Windows control code is a fixed ABI protocol value for a best-effort optimization")]
             FSCTL_SET_COMPRESSION,
             Some(addr_of!(compression_format).cast()),
-            // #[gamma::skip(expr.increment, expr.decrement, reason = "the Windows ABI requires the exact size of the u16 compression-format input")]
+            // #[gamma::skip(all, reason = "the Windows ABI requires the exact size of the u16 compression-format input")]
             size_of::<u16>() as u32,
             None,
             // #[gamma::skip(literal.int_increment, reason = "the null output buffer requires a zero output-buffer length by Windows ABI contract")]
@@ -828,13 +828,13 @@ pub(crate) mod portable_tests {
         .expect("collector should initialize from local fixtures");
         let requested = crate::facts::CrateRef::new("missing-crate", Some(Version::new(1, 0, 0)));
 
-        let facts: Vec<_> = collector
+        let fact_count = collector
             .collect(&[requested.clone(), requested], false)
             .await
             .expect("missing crates produce unavailable facts")
-            .collect();
+            .count();
 
-        assert_eq!(facts.len(), 1);
+        assert_eq!(fact_count, 1);
         assert_eq!(*observed_progress.phases.lock().unwrap(), ["Preparing", "Identifying", "Querying"]);
         assert!(observed_progress.done.load(std::sync::atomic::Ordering::Relaxed));
     }
