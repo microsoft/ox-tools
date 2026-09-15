@@ -66,12 +66,10 @@ fn format_delta(outcome: &PackageOutcome) -> String {
     let delta = pct - outcome.threshold.min_lines_percent;
     // A non-zero sub-precision margin retains its direction so the rendered row
     // cannot obscure why the unrounded comparison passed or failed.
-    let measured_tenths = f64::from(outcome.totals.covered).mul_add(1_000.0, 0.0) / f64::from(outcome.totals.count);
-    let threshold_tenths = outcome.threshold.min_lines_percent * 10.0;
-    if delta > 0.0 && measured_tenths < threshold_tenths + 1.0 {
+    if delta > 0.0 && pct < outcome.threshold.min_lines_percent + 0.1 {
         return "+<0.1pp".to_owned();
     }
-    if delta < 0.0 && measured_tenths > threshold_tenths - 1.0 {
+    if delta < 0.0 && pct > outcome.threshold.min_lines_percent - 0.1 {
         return "-<0.1pp".to_owned();
     }
 
@@ -228,6 +226,8 @@ mod tests {
     fn format_delta_renders_exact_tenth_boundaries_normally() {
         assert_eq!(format_delta(&outcome(1_000, 821, 82.0)), "+0.1pp");
         assert_eq!(format_delta(&outcome(1_000, 820, 82.1)), "-0.1pp");
+        assert_eq!(format_delta(&outcome(5_000, 4_107, 82.04)), "+0.1pp");
+        assert_eq!(format_delta(&outcome(5_000, 4_102, 82.14)), "-0.1pp");
     }
 
     #[test]
