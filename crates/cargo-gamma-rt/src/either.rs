@@ -103,14 +103,14 @@ mod tests {
 
     #[test]
     fn either_preserves_exact_and_fused_iterator_contracts() {
-        fn require_exact_and_fused<I: ExactSizeIterator + FusedIterator>(iterator: I) -> usize {
+        fn require_exact_and_fused<I: ExactSizeIterator + FusedIterator>(iterator: &I) -> usize {
             iterator.len()
         }
 
         let left: Either<_, core::ops::Range<u8>> = Either::L([1_u8, 2].into_iter());
         let right: Either<core::array::IntoIter<u8, 2>, _> = Either::R(3_u8..5);
 
-        assert_eq!(require_exact_and_fused(left), 2);
-        assert_eq!(require_exact_and_fused(right), 2);
+        assert_eq!(require_exact_and_fused(&left), 2);
+        assert_eq!(require_exact_and_fused(&right), 2);
     }
 }

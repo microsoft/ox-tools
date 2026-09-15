@@ -1202,7 +1202,7 @@ mod tests {
                     "baseClock": 3.5,
                     "model": "example"
                 },
-                "ram": { "total": 17179869184_u64 }
+                "ram": { "total": 17_179_869_184_u64 }
             },
             "files": {
                 "src/lib.rs": {
@@ -1231,11 +1231,17 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the table enumerates every adopted schema field in one auditable contract test"
+    )]
     fn every_adopted_schema_field_is_type_checked_at_its_exact_path() {
+        type SchemaMutation = Box<dyn Fn(&mut Value)>;
+
         let valid = complete_schema_document();
         validate_schema(&valid).expect("complete document is valid");
 
-        let cases: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        let cases: Vec<(&str, SchemaMutation)> = vec![
             ("report must be an object", Box::new(|value| *value = Value::Null)),
             (
                 "report is missing required field `schemaVersion`",
@@ -1407,7 +1413,7 @@ mod tests {
         let plan = Plan {
             skipped: Vec::new(),
             digests: HashMap::default(),
-            root: root.clone(),
+            root,
             files: vec![TargetFile {
                 path: Utf8PathBuf::from("lib.rs"),
                 absolute,

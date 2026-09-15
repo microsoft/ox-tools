@@ -8,7 +8,7 @@
 //! features, dependencies, targets, and the freeform `package.metadata`
 //! block.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use cargo_metadata::{MetadataCommand, TargetKind};
@@ -105,7 +105,7 @@ impl Workspace {
         }
         let metadata = cmd.exec().map_err(LoadMetadataError::caused_by)?;
 
-        let members: Vec<Member> = metadata
+        let mut members: Vec<Member> = metadata
             .workspace_packages()
             .iter()
             .map(|pkg| {
@@ -131,9 +131,8 @@ impl Workspace {
                     metadata: pkg.metadata.clone(),
                 }
             })
-            .collect::<BTreeMap<_, _>>()
-            .into_values()
             .collect();
+        members.sort_by(|a, b| a.name.cmp(&b.name));
 
         let default_member_names = metadata
             .workspace_default_packages()

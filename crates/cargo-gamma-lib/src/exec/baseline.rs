@@ -131,29 +131,29 @@ where
     // Folded in the binaries' own order rather than in the order the workers happened to finish, so
     // that which failure a red suite reports does not depend on the scheduler.
     for (entry, taken) in binaries.iter_mut().zip(measured) {
-        let Some((took, observed)) = taken else {
+        let Some((took, observation)) = taken else {
             continue;
         };
 
         entry.baseline = took;
-        entry.peak = observed.peak;
-        entry.tests = observed.tests;
+        entry.peak = observation.peak;
+        entry.tests = observation.tests;
         elapsed = elapsed.saturating_add(took);
-        quiet = quiet.max(observed.quiet);
+        quiet = quiet.max(observation.quiet);
 
-        if let Some(measured) = observed.peak {
+        if let Some(measured) = observation.peak {
             peak = Some(peak.unwrap_or(0).max(measured));
         }
 
         // A binary with no harness contributes nothing rather than turning the total into a
         // guess, but one binary reporting is enough for the total to be worth stating.
-        if let Some(counted) = observed.tests {
+        if let Some(counted) = observation.tests {
             tests = Some(tests.unwrap_or(0).saturating_add(counted));
         }
 
-        let failure = observed.failure.as_ref();
+        let failure = observation.failure.as_ref();
 
-        match observed.verdict {
+        match observation.verdict {
             Verdict::Passed => {}
             // Every non-passing observation is fatal here where some are not during the sweep:
             // there is no mutant to record it against, and a baseline binary that went unmeasured
@@ -194,7 +194,7 @@ fn retry_failed_binaries<O>(
         }
 
         let began = Instant::now();
-        let observed = observer(
+        let observation = observer(
             work,
             binary,
             Attempt {
@@ -207,14 +207,14 @@ fn retry_failed_binaries<O>(
             },
         );
 
-        if matches!(&observed.verdict, Verdict::Passed) {
+        if matches!(&observation.verdict, Verdict::Passed) {
             crate::notes::note(format!(
                 "baseline target `{}` in package `{}` failed once and passed on retry",
                 binary.target, binary.package
             ));
         }
 
-        *slot = Some((began.elapsed(), observed));
+        *slot = Some((began.elapsed(), observation));
     }
 }
 
@@ -910,6 +910,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the table keeps every baseline failure variant's durable contract visibly exhaustive"
+    )]
     fn every_baseline_failure_variant_has_a_complete_distinct_durable_contract() {
         let (_directory, work, binaries) = diagnostic_harness();
         let cases = [
@@ -1099,7 +1103,7 @@ mod tests {
 
     #[test]
     fn retry_visits_only_failed_slots_and_replaces_their_observation() {
-        crate::notes::alone(|| retry_visits_only_failed_slots_and_replaces_their_observation_inner());
+        crate::notes::alone(retry_visits_only_failed_slots_and_replaces_their_observation_inner);
     }
 
     fn retry_visits_only_failed_slots_and_replaces_their_observation_inner() {

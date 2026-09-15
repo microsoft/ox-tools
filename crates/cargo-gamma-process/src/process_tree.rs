@@ -2127,7 +2127,7 @@ mod tests {
         let work = testing::workdir(prefix);
         let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
         let (started, finished) = (base.join("started"), base.join("finished"));
-        let child = Command::new(testing::helper_binary_path().as_std_path())
+        let mut child = Command::new(testing::helper_binary_path().as_std_path())
             .args([
                 testing::directive(format_args!("touch:{started}")),
                 testing::directive("sleep:500"),
@@ -2144,6 +2144,8 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
+        let _killed = child.kill();
+        let _reaped = child.wait();
         panic!("the delayed-marker child never started");
     }
 

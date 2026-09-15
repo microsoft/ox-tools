@@ -415,10 +415,7 @@ fn dep_sources(invocation: &RustcInvocation, root: &Utf8Path) -> Option<Vec<Utf8
 }
 
 fn absolute_source(path: &Utf8Path, root: &Utf8Path) -> Utf8PathBuf {
-    match path.is_absolute() {
-        true => path.to_owned(),
-        false => root.join(path),
-    }
+    if path.is_absolute() { path.to_owned() } else { root.join(path) }
 }
 
 fn is_compiler_artifact(message: &Value) -> bool {
@@ -596,22 +593,19 @@ pub(super) fn linked_target_args(stdout: &str, root: &Utf8Path, capture_dir: Opt
             continue 'messages;
         }
 
-        let kinds: Vec<&str> = target
+        let is_integration_test = target
             .get("kind")
             .and_then(Value::as_array)?
             .iter()
             .filter_map(Value::as_str)
-            .collect();
-        let selector = if kinds.contains(&"test") {
+            .any(|kind| kind == "test");
+        let selector = if is_integration_test {
             ["--test".to_owned(), name.to_owned()]
-        } else if kinds.contains(&"lib") {
-            ["--lib".to_owned(), String::new()]
-        } else if kinds.contains(&"bin") {
-            ["--bin".to_owned(), name.to_owned()]
-        } else if kinds.contains(&"example") {
-            ["--example".to_owned(), name.to_owned()]
         } else {
-            return None;
+            // `cargo build --lib`, `--bin`, and `--example` build ordinary targets, not their
+            // unit-test harnesses. Cargo cannot select those harnesses exactly under `build`, so
+            // retain the package-scoped `--tests` fallback instead.
+            return no_target_selection();
         };
 
         selectors.push(selector);
@@ -625,13 +619,7 @@ pub(super) fn linked_target_args(stdout: &str, root: &Utf8Path, capture_dir: Opt
     // #[gamma::skip(iter.remove_dedup, reason = "duplicate Cargo target selectors select the same target population and Cargo accepts repeated identical selector flags")]
     selectors.dedup();
 
-    Some(
-        selectors
-            .into_iter()
-            .flat_map(|[flag, name]| [flag, name])
-            .filter(|value| !value.is_empty())
-            .collect(),
-    )
+    Some(selectors.into_iter().flatten().filter(|value| !value.is_empty()).collect())
 }
 
 fn populations_intersect(pending: &crate::HashSet<&Utf8Path>, sources: &crate::HashSet<Utf8PathBuf>) -> bool {
@@ -642,8 +630,16 @@ fn all_associations_equal(associations: &[crate::HashSet<Utf8PathBuf>], sources:
     associations.iter().all(|candidate| candidate == sources)
 }
 
+fn census_duration(census: Option<&Census>, binary: &TestBinary, ordinal: u32) -> Option<Duration> {
+    match census.map_or(CensusWork::Whole, |census| census.work(binary, ordinal)) {
+        CensusWork::Whole | CensusWork::Hinted(_) => Some(binary.baseline),
+        CensusWork::Uncovered => None,
+        CensusWork::Selected(duration) => Some(duration),
+    }
+}
+
 fn target_selection_failed(saw_test_target: bool, selectors: &[[String; 2]]) -> bool {
-    !(saw_test_target && !selectors.is_empty())
+    !saw_test_target || selectors.is_empty()
 }
 
 const fn no_target_selection<T>() -> Option<T> {
@@ -977,14 +973,6 @@ pub(super) fn workload(mutants: &[Mutant], reach: &Reachability<'_>, census: Opt
             running = running.saturating_add(1);
         }
 
-        fn census_duration(census: Option<&Census>, binary: &TestBinary, ordinal: u32) -> Option<Duration> {
-            match census.map_or(CensusWork::Whole, |census| census.work(binary, ordinal)) {
-                CensusWork::Whole | CensusWork::Hinted(_) => Some(binary.baseline),
-                CensusWork::Uncovered => None,
-                CensusWork::Selected(duration) => Some(duration),
-            }
-        }
-
         // A mutant that hangs hangs in one binary and is judged there, so what one costs is a
         // single binary's budget rather than every binary's. Which one it will be is unknown,
         // so the average stands in for it.
@@ -1202,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_linkage_selects_every_supported_cargo_test_target_kind() {
+    fn unit_test_target_kinds_disable_exact_cargo_build_selection() {
         let directory = tempfile::tempdir().expect("capture directory");
         let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("utf-8 root");
         let out = Utf8PathBuf::from_path_buf(directory.path().join("target").join("deps")).expect("utf-8 target");
@@ -1258,15 +1246,9 @@ mod tests {
         let mut plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
         plan.mutants[0].file = Utf8PathBuf::from("src/lib.rs").into();
 
-        assert_eq!(
-            linked_target_args(&messages.join("\n"), &root, Some(&captures), &plan),
-            Some(vec![
-                "--bin".to_owned(),
-                "binary".to_owned(),
-                "--example".to_owned(),
-                "example".to_owned(),
-                "--lib".to_owned(),
-            ])
+        assert!(
+            linked_target_args(&messages.join("\n"), &root, Some(&captures), &plan).is_none(),
+            "cargo build cannot name lib, bin, or example unit-test harnesses exactly"
         );
     }
 
@@ -1291,7 +1273,7 @@ mod tests {
             crate_types: vec!["bin".to_owned()],
             test: true,
             source: root.join("tests/opaque.rs"),
-            out_dir: out.clone(),
+            out_dir: out,
             extra_filename: "-hash".to_owned(),
             externs: Vec::new(),
             opaque_extern: true,
@@ -1436,15 +1418,15 @@ mod tests {
             source: root.join("tests/subject.rs"),
             out_dir: out.clone(),
             extra_filename: "-hash".to_owned(),
-            externs: vec![own_artifact.clone(), registry.clone()],
+            externs: vec![own_artifact, registry.clone()],
             opaque_extern: false,
         };
         write_dep(&capture, &[capture.source.clone()]);
-        let origins = [(registry, ArtifactOrigin::Registry)].into_iter().collect();
+        let origins = std::iter::once((registry, ArtifactOrigin::Registry)).collect();
 
         assert_eq!(
             linked_sources(executable.as_str(), &capture.source, &[capture.clone()], &origins, &root),
-            Some([Utf8PathBuf::from("tests/subject.rs")].into_iter().collect()),
+            Some(std::iter::once(Utf8PathBuf::from("tests/subject.rs")).collect()),
             "a cycle is visited once and a registry dependency needs no workspace capture"
         );
 
@@ -1455,18 +1437,18 @@ mod tests {
                 executable.as_str(),
                 &capture.source,
                 &[capture.clone()],
-                &[(opaque, ArtifactOrigin::Opaque)].into_iter().collect(),
+                &std::iter::once((opaque, ArtifactOrigin::Opaque)).collect(),
                 &root,
             )
             .is_none()
         );
 
         let dependency = out.join("libdependency.rlib");
-        capture.externs = vec![dependency.clone()];
+        capture.externs = vec![dependency];
         let duplicate = RustcInvocation {
             crate_name: "dependency".to_owned(),
             source: root.join("src/dependency.rs"),
-            out_dir: out.clone(),
+            out_dir: out,
             extra_filename: String::new(),
             ..capture.clone()
         };

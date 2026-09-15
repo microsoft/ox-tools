@@ -524,7 +524,8 @@ impl S {
         assert_eq!(collector.record_range(2..10), Some(2..10));
         assert_eq!(collector.record_range(2..11), None);
         assert_eq!(collector.record_range(4..4), None);
-        assert_eq!(collector.scopes.spans, [2..10]);
+        assert_eq!(collector.scopes.spans.len(), 1);
+        assert_eq!(collector.scopes.spans[0], 2..10);
     }
 
     #[test]

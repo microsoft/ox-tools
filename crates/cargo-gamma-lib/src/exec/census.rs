@@ -121,7 +121,7 @@ struct Reach {
     /// Reverse lookup from sorted reach set to its index in `intern`.
     intern_index: HashMap<Arc<[u32]>, u32>,
 
-    /// Sample cost assigned to the first test of each retained scope, parallel to `names`.
+    /// Sample cost assigned to every test run by each retained scope, parallel to `names`.
     times: Vec<Duration>,
 
     /// Whether every listed test completed and therefore absence proves a site is uncovered.
@@ -289,6 +289,11 @@ impl Census {
     /// How many binaries were censused, for the line the run prints.
     pub(super) fn len(&self) -> usize {
         self.binaries.len()
+    }
+
+    /// Whether at least one binary produced a usable census result.
+    pub(super) fn has_evidence(&self) -> bool {
+        !self.binaries.is_empty()
     }
 
     /// How many sample subprocesses the census actually launched.
@@ -658,6 +663,11 @@ fn read_listing(pipe: &mut impl io::Read) -> (Vec<u8>, bool) {
 /// believes some tests do not exist, and a test believed not to exist is one no mutant is ever run
 /// against.
 fn listed(mut command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
+    enum ListingStatus {
+        Observed(std::process::ExitStatus),
+        Missing,
+    }
+
     // Nothing is metered — the question is what the binary is, not what it costs — so the request
     // asks for no measurement and no ceiling. Containment does not follow that request: `prepare`
     // seals every launch it can, and the listing of a `harness = false` target is exactly the kind
@@ -715,11 +725,6 @@ fn listed(mut command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
     drop(sender);
 
     let deadline = Instant::now() + budget;
-
-    enum ListingStatus {
-        Observed(std::process::ExitStatus),
-        Missing,
-    }
 
     let status = loop {
         match subtree.observe() {
@@ -1084,10 +1089,20 @@ where
         let mut times = vec![Duration::ZERO; names.len()];
 
         for observed in evidence {
-            if let Some(first) = observed.scope.tests.first().and_then(|index| usize::try_from(*index).ok())
-                && let Some(time) = times.get_mut(first)
-            {
-                *time = time.saturating_add(observed.elapsed);
+            let divisor = u32::try_from(observed.scope.tests.len()).unwrap_or(u32::MAX).max(1);
+            let per_test = observed.elapsed / divisor;
+            let remainder = observed.elapsed.saturating_sub(per_test * divisor);
+            for (position, index) in observed.scope.tests.iter().enumerate() {
+                if let Ok(index) = usize::try_from(*index)
+                    && let Some(time) = times.get_mut(index)
+                {
+                    let share = if position == 0 {
+                        per_test.saturating_add(remainder)
+                    } else {
+                        per_test
+                    };
+                    *time = time.saturating_add(share);
+                }
             }
             for site in observed.sites {
                 raw_reached.entry(site).or_default().extend(observed.scope.tests.iter().copied());
@@ -1295,13 +1310,13 @@ mod tests {
     }
 
     impl Read for InterruptedThenData {
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if !self.interrupted {
                 self.interrupted = true;
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
             }
 
-            self.data.read(buffer)
+            self.data.read(buf)
         }
     }
 
@@ -1310,9 +1325,9 @@ mod tests {
     }
 
     impl Read for DataThenError {
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if let Some(data) = self.data.take() {
-                buffer[..data.len()].copy_from_slice(&data);
+                buf[..data.len()].copy_from_slice(&data);
                 return Ok(data.len());
             }
 
@@ -1334,9 +1349,9 @@ mod tests {
         assert_eq!(read_listing(&mut truncated), (b"prefix".to_vec(), false));
 
         let mut exact = std::io::Cursor::new(vec![b'x'; LIST_CAP]);
-        assert_eq!(read_listing(&mut exact).1, true);
+        assert!(read_listing(&mut exact).1);
         let mut excessive = std::io::Cursor::new(vec![b'x'; LIST_CAP + 1]);
-        assert_eq!(read_listing(&mut excessive).1, false);
+        assert!(!read_listing(&mut excessive).1);
     }
 
     #[test]
@@ -1937,7 +1952,12 @@ mod tests {
         let reach = &census.binaries[&binary.path];
         assert_eq!(
             reach.times,
-            vec![Duration::from_millis(7), Duration::ZERO, Duration::ZERO, Duration::ZERO]
+            vec![
+                Duration::from_micros(3500),
+                Duration::from_micros(3500),
+                Duration::ZERO,
+                Duration::ZERO
+            ]
         );
         assert!(reach.intern_index.is_empty());
     }
@@ -2235,7 +2255,9 @@ mod tests {
         let scratch = crate::testing::workdir("sec2-sparse");
         let path = Utf8PathBuf::from_path_buf(scratch.path().join("census.bin")).expect("a temp path is valid UTF-8");
 
-        assert!(SPARSE_LOGICAL_LENGTH > MAX_CENSUS_BYTES);
+        const {
+            assert!(SPARSE_LOGICAL_LENGTH > MAX_CENSUS_BYTES);
+        }
         let file = fs::File::create(path.as_std_path()).expect("the sparse fixture file is creatable");
         file.set_len(SPARSE_LOGICAL_LENGTH)
             .expect("the filesystem under the test work directory supports sparse files");
@@ -2325,6 +2347,47 @@ mod tests {
         assert_eq!(sampled.load(Ordering::Relaxed), 2);
         assert_eq!(walked, 2);
         assert_eq!(census.selection(&binary, 7), CensusSelection::Whole);
+    }
+
+    #[test]
+    fn grouped_scope_cost_is_distributed_across_tests_without_multiplying_it() {
+        let _serial = WALK_TEST.lock().expect("the census walk test lock is not poisoned");
+        let (_directory, work) = crate::testing::helper_workspace("census-group-cost-", &[]);
+        let mut binary = TestBinary {
+            package: "subject".to_owned(),
+            ..crate::testing::helper()
+        };
+        binary.baseline = Duration::from_secs(10);
+        let names: Vec<Box<str>> = (0..4).map(|index| format!("tests::t{index}").into()).collect();
+        let targets = HashMap::from_iter([(binary.path.clone(), HashSet::from_iter([7]))]);
+
+        let (mapped, walked) = walk_with(
+            &work,
+            vec![(&binary, names, MIN_SCOUT_WAIT)],
+            &targets,
+            1,
+            Stall::NONE,
+            |_work, _binary, selected, _path, _stall| {
+                let sites = selected
+                    .first()
+                    .is_some_and(|name| *name == "tests::t0")
+                    .then_some(7)
+                    .into_iter()
+                    .collect();
+                Some((sites, Duration::from_millis(10)))
+            },
+            || false,
+            || {},
+        );
+        let census = Census {
+            binaries: HashMap::from_iter(mapped),
+            walked,
+        };
+
+        assert!(matches!(
+            census.work(&binary, 7),
+            CensusWork::Selected(duration) if duration == Duration::from_millis(10)
+        ));
     }
 
     /// A sampler that reports the same site several times for one test must count as a single
@@ -2848,7 +2911,7 @@ mod tests {
             path: root.join("missing-test-binary"),
             ..binary("missing")
         };
-        let targets = [(missing.path.clone(), HashSet::from_iter([1]))].into_iter().collect();
+        let targets = std::iter::once((missing.path.clone(), HashSet::from_iter([1]))).collect();
         let mut events = crate::testing::Recorder::default();
 
         let census = take(&work, &[missing], &targets, Duration::ZERO, 1, Stall::NONE, &mut events);
@@ -2859,7 +2922,7 @@ mod tests {
             events.phases,
             vec![
                 ("Optimizing".to_owned(), "1 test binary".to_owned()),
-                ("".to_owned(), String::new()),
+                (String::new(), String::new()),
             ]
         );
     }
@@ -2919,7 +2982,7 @@ mod tests {
             events.phases,
             vec![
                 ("Optimizing".to_owned(), "2 test binaries".to_owned()),
-                ("".to_owned(), ", 0 of 2 binaries mapped, over 0 samples".to_owned()),
+                (String::new(), ", 0 of 2 binaries mapped, over 0 samples".to_owned()),
             ]
         );
     }
@@ -2983,7 +3046,7 @@ mod tests {
         assert_eq!(events.phases[0], ("Optimizing".to_owned(), "1 test binary".to_owned()));
         assert_eq!(
             events.phases[1],
-            ("".to_owned(), ", 1 of 1 binary mapped, over 2 samples".to_owned())
+            (String::new(), ", 1 of 1 binary mapped, over 2 samples".to_owned())
         );
     }
 

@@ -614,7 +614,7 @@ mod tests {
         // a loud usage error rather than a silent empty result.
         assert_eq!(
             Predicate::parse("metadata:a..b").expect_err("double dot must error").to_string(),
-            "invalid filter predicate `metadata:a..b`: metadata key must be a dotted path with non-empty segments"
+            "invalid filter expression `metadata:a..b`: metadata key must be a dotted path with non-empty segments"
         );
         Predicate::parse("metadata:.role").expect_err("leading dot must error");
         Predicate::parse("metadata:role.").expect_err("trailing dot must error");

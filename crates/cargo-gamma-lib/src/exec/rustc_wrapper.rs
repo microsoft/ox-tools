@@ -47,9 +47,8 @@ pub fn run_if_requested(args: impl IntoIterator<Item = OsString>) -> Option<Exit
         command
     };
 
-    let status = match command.status() {
-        Ok(status) => status,
-        Err(_) => return Some(ExitCode::FAILURE),
+    let Ok(status) = command.status() else {
+        return Some(ExitCode::FAILURE);
     };
 
     if status.success()
@@ -149,12 +148,12 @@ pub(crate) fn parse_invocation(args: &[OsString]) -> Option<RustcInvocation> {
             index += 1;
         } else if separate("-C") {
             if let Some(value) = args[index + 1].to_str().and_then(|value| value.strip_prefix("extra-filename=")) {
-                extra_filename = value.to_owned();
+                value.clone_into(&mut extra_filename);
             }
             // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, reason = "moving backward or not consuming the split option makes the parser intrinsically nonterminating and is observed only as a timeout")]
             index += 2;
         } else if let Some(value) = argument.strip_prefix("-Cextra-filename=") {
-            extra_filename = value.to_owned();
+            value.clone_into(&mut extra_filename);
             // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not consuming the joined option retries the same argument forever and is observed only as a timeout")]
             index += 1;
         } else if separate("--extern") {
@@ -220,6 +219,24 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    fn successful_compiler(directory: &Utf8Path, name: &str) -> Utf8PathBuf {
+        #[cfg(windows)]
+        let (path, body) = (directory.join(format!("{name}.cmd")), "@exit /b 0\r\n");
+        #[cfg(unix)]
+        let (path, body) = (directory.join(name), "#!/bin/sh\nexit 0\n");
+
+        fs::write(&path, body).expect("compiler script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&path).expect("compiler script metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("executable compiler script");
+        }
+        path
     }
 
     #[test]
@@ -367,11 +384,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns compiler subprocesses")]
     fn wrapper_mode_forwards_records_and_reports_failures() {
         let directory = tempfile::tempdir().expect("capture directory");
         let captures = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 capture path");
-        let compiler = captures.join("compiler.cmd");
-        fs::write(&compiler, "@exit /b 0\r\n").expect("compiler script");
+        let compiler = successful_compiler(&captures, "compiler");
 
         let direct = run_wrapper_child("direct", &captures, Some(compiler.as_str()), None, true);
         assert!(direct.contains("wrapper-success=true"), "{direct}");
@@ -381,8 +398,7 @@ mod tests {
         assert!(recorded.opaque_extern, "a pathless extern makes dependency reach opaque");
 
         fs::remove_file(capture_path(&captures)).expect("remove first capture");
-        let script = captures.join("original.cmd");
-        fs::write(&script, "@exit /b 0\r\n").expect("wrapper script");
+        let script = successful_compiler(&captures, "original");
         let chained = run_wrapper_child("original", &captures, None, Some(script.as_str()), false);
         assert!(chained.contains("wrapper-success=true"), "{chained}");
         assert_eq!(read_only_capture(&captures).crate_name, "chained");
@@ -448,13 +464,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns a compiler subprocess")]
     fn capture_storage_failures_do_not_change_the_compiler_result() {
         let directory = tempfile::tempdir().expect("test directory");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 test path");
         let captures = root.join("not-a-directory");
-        let compiler = root.join("compiler.cmd");
         fs::write(&captures, "keep").expect("capture blocker");
-        fs::write(&compiler, "@exit /b 0\r\n").expect("compiler script");
+        let compiler = successful_compiler(&root, "compiler");
 
         let output = run_wrapper_child("direct", &captures, Some(compiler.as_str()), None, false);
 

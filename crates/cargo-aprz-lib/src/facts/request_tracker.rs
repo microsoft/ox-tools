@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn constructing_tracker_registers_its_progress_callback() {
         let progress = Arc::new(RegistrationProgress::default());
-        let trait_progress: Arc<dyn Progress> = progress.clone();
+        let trait_progress: Arc<dyn Progress> = Arc::<RegistrationProgress>::clone(&progress);
         let _tracker = RequestTracker::new(&trait_progress);
         assert!(progress.registered.load(Ordering::Acquire));
     }

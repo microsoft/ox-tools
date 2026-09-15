@@ -6,7 +6,7 @@
 use core::fmt::Write as _;
 use core::time::Duration;
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write, stderr, stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -252,7 +252,6 @@ impl<'a, H: super::Host> Common<'a, H> {
 
         let delay = progress_delay(args.log_level);
 
-        use std::io::{IsTerminal, stderr};
         let use_colors_for_progress = use_colors(args.color, stderr().is_terminal());
 
         let progress_reporter = ProgressReporter::new(delay, use_colors_for_progress);
@@ -448,7 +447,6 @@ fn report_processed_crates<H: super::Host>(
         && !reportable_crates.is_empty()
     {
         let mut console_output = String::new();
-        use std::io::{IsTerminal, stdout};
         let use_colors = use_colors(options.color, stdout().is_terminal());
         _ = generate_console(&reportable_crates, use_colors, mode, &mut console_output);
         let _ = write!(host.output(), "{console_output}");
@@ -932,9 +930,8 @@ mod tests {
         parsed.common.manifest_path = "target/common-report-tests/missing/Cargo.toml".into();
         let mut host = crate::commands::host::TestHost::new();
 
-        let error = match Common::new(&mut host, &parsed.common).await {
-            Ok(_) => panic!("a missing manifest must fail"),
-            Err(error) => error,
+        let Err(error) = Common::new(&mut host, &parsed.common).await else {
+            panic!("a missing manifest must fail");
         };
 
         assert!(

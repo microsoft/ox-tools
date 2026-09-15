@@ -637,7 +637,7 @@ pub fn in_any_job(child: &Child) -> Option<bool> {
     // one, and the final argument is a live `i32` the call writes through.
     let queried = unsafe { IsProcessInJob(handle, core::ptr::null_mut(), &raw mut inside) };
 
-    in_job_answer(JobMembershipQuery { queried, inside })
+    in_job_answer(&JobMembershipQuery { queried, inside })
 }
 
 struct JobMembershipQuery {
@@ -645,7 +645,7 @@ struct JobMembershipQuery {
     inside: i32,
 }
 
-const fn in_job_answer(answer: JobMembershipQuery) -> Option<bool> {
+const fn in_job_answer(answer: &JobMembershipQuery) -> Option<bool> {
     if win32_succeeded(answer.queried) {
         Some(win32_succeeded(answer.inside))
     } else {
@@ -941,7 +941,7 @@ mod tests {
                 .expect("the isolated error-mode test starts");
             let stderr = String::from_utf8_lossy(&output.stderr);
 
-            assert!(output.status.success(), "the isolated error-mode test failed: {}", stderr);
+            assert!(output.status.success(), "the isolated error-mode test failed: {stderr}");
             return;
         }
 
@@ -1455,9 +1455,9 @@ mod tests {
 
     #[test]
     fn in_job_answers_preserve_failure_outside_and_inside() {
-        assert_eq!(in_job_answer(JobMembershipQuery { queried: 0, inside: 0 }), None);
-        assert_eq!(in_job_answer(JobMembershipQuery { queried: 1, inside: 0 }), Some(false));
-        assert_eq!(in_job_answer(JobMembershipQuery { queried: 1, inside: 1 }), Some(true));
+        assert_eq!(in_job_answer(&JobMembershipQuery { queried: 0, inside: 0 }), None);
+        assert_eq!(in_job_answer(&JobMembershipQuery { queried: 1, inside: 0 }), Some(false));
+        assert_eq!(in_job_answer(&JobMembershipQuery { queried: 1, inside: 1 }), Some(true));
     }
 
     #[test]

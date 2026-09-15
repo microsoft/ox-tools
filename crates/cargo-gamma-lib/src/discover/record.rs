@@ -442,7 +442,7 @@ impl Killer {
 /// Schema version for generalized, score-neutral hint tiers.
 pub const GENERALIZED_HINTS_VERSION: u32 = 1;
 
-/// Durable P4/P6 knowledge that can only affect execution order.
+/// Durable generalized knowledge that can only affect execution order.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneralizedHints {

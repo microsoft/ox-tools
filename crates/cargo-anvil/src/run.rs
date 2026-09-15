@@ -2907,6 +2907,7 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn a_case_renamed_live_region_transfers_the_recorded_key() {
         let tmp = TempDir::new().unwrap();

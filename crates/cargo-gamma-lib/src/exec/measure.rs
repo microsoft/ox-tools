@@ -110,8 +110,8 @@ pub(crate) fn run_with_locks(
     let (census_targets, maximum_census_savings) = census_targets(&plan, &reach, &killers);
     let census_requested = census_is_worthwhile(narrowed, &census_targets, maximum_census_savings);
     let census_started = Instant::now();
-    let census = match census_requested {
-        true => census::take(
+    let census = if census_requested {
+        census::take(
             &built.work,
             &built.session.binaries,
             &census_targets,
@@ -119,8 +119,9 @@ pub(crate) fn run_with_locks(
             config.jobs,
             stall,
             events,
-        ),
-        false => Census::default(),
+        )
+    } else {
+        Census::default()
     };
 
     // Only recorded when a census actually ran: an absent census is not a census that took no time,
@@ -129,8 +130,9 @@ pub(crate) fn run_with_locks(
 
     if incremental {
         let mut generalized = killers.generalized().clone();
-        persist_census_learning(&census, &plan, &built.session.binaries, &mut generalized);
-        install_census_learning(&mut killers, generalized);
+        if persist_census_learning(census_requested, &census, &plan, &built.session.binaries, &mut generalized) {
+            install_census_learning(&mut killers, generalized);
+        }
     }
 
     let work = workload(&plan.mutants, &reach, narrowed.then_some(&census));
@@ -215,12 +217,9 @@ fn census_targets(plan: &Plan, reach: &Reachability<'_>, killers: &Killers) -> (
     // such a mutant is treated as unhinted below rather than silently going uncensused.
     let eligibly_hinted = |mutant: &crate::model::Mutant| {
         killers.hint(&mutant.id).is_some_and(|hint| {
-            reach.reachable(mutant).is_some_and(|reachable| {
-                reachable
-                    .iter()
-                    .find(|binary| hint.names(&binary.package, &binary.target))
-                    .is_some()
-            })
+            reach
+                .reachable(mutant)
+                .is_some_and(|reachable| reachable.iter().any(|binary| hint.names(&binary.package, &binary.target)))
         })
     };
 
@@ -265,7 +264,9 @@ fn census_cost(requested: bool, elapsed: Duration, walked: usize, binaries: usiz
 }
 
 fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) -> Option<SweepCost> {
-    spent.map(|spent| SweepCost {
+    let spent = spent?;
+
+    Some(SweepCost {
         elapsed,
         launches: spent.launches,
         probes: spent.probes,
@@ -278,8 +279,19 @@ fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) -> Option<S
     })
 }
 
-fn persist_census_learning(census: &Census, plan: &Plan, binaries: &[TestBinary], generalized: &mut crate::discover::GeneralizedHints) {
+fn persist_census_learning(
+    requested: bool,
+    census: &Census,
+    plan: &Plan,
+    binaries: &[TestBinary],
+    generalized: &mut crate::discover::GeneralizedHints,
+) -> bool {
+    if !requested || !census.has_evidence() {
+        return false;
+    }
+
     census.persist_clusters(&plan.mutants, binaries, generalized);
+    true
 }
 
 fn install_census_learning(killers: &mut Killers, generalized: crate::discover::GeneralizedHints) {
@@ -605,9 +617,11 @@ fn measure_with_locks(
     let mut work = Workspace::prepare_with_locks(&plan.root, config, events, locks)?;
     let copy = copy_started.elapsed();
 
+    work.begin_build_sequence();
+
     // Settled once, before anything is spawned, so the baseline and the sweep cannot disagree about
     // how wide the workload they measure and judge is.
-    calibrate_harness(&mut work, config.jobs);
+    calibrate_harness(&work, config.jobs);
 
     let preflight_started = Instant::now();
     let Cleared {
@@ -626,7 +640,7 @@ fn measure_with_locks(
     // Nothing was live anywhere, or everything live was in a build that could not be made to
     // compile. Either way there is nothing left to build, measure or run, and the verdicts the
     // abandoned population carries are already written onto the plan.
-    if anything_live == false {
+    if !anything_live {
         converger.settle(&mut plan);
 
         return Ok(Measured {
@@ -741,12 +755,13 @@ fn announce_compile_fail_costs(survey: &Survey, config: &Config, events: &mut dy
     warn_about_compile_fail_targets(targets, &survey.selected, config, events);
 }
 
-fn calibrate_harness(work: &mut Workspace, jobs: usize) {
+fn calibrate_harness(work: &Workspace, jobs: usize) {
     work.calibrate_harness(jobs);
 }
 
 fn reorder_plan(plan: &mut Plan, converger: &mut Converger) {
-    (plan.sort(), converger.plan_reordered());
+    plan.sort();
+    converger.plan_reordered();
 }
 
 fn begin_baseline(events: &mut impl Events) {
@@ -897,9 +912,8 @@ struct Staged {
 /// tool is remembering something it should not, so it turns off remembering — including the tiers
 /// that could not have affected the answer.
 fn load_ordering_hints(survey: &Survey, config: &Config) -> crate::HashSet<crate::model::MutantId> {
-    match config.incremental.is_enabled() {
-        false => return crate::HashSet::default(),
-        true => {}
+    if !config.incremental.is_enabled() {
+        return crate::HashSet::default();
     }
 
     let base = gamma_base(&survey.root, config.cache_dir.as_deref());
@@ -962,17 +976,16 @@ fn converge_stages(
             }
 
             let before = converger.withdrawn();
-            match converger.stage(work, plan, stage, config.build, events)? {
-                Some(abandoned) => record_stuck_stage(&mut staged, plan, stage, &abandoned, events),
-                None => {
-                    staged.anything_live = true;
+            if let Some(abandoned) = converger.stage(work, plan, stage, config.build, events)? {
+                record_stuck_stage(&mut staged, plan, stage, &abandoned, events);
+            } else {
+                staged.anything_live = true;
 
-                    // The count that closes the line is what survived compilation, which is why it
-                    // waits for the build. A mutant that could not compile is a fact about the tool
-                    // rather than about the code, and the summary accounts for all of them once.
-                    let viable = viable_mutants(live, before, converger.withdrawn());
-                    finish_viable_stage(events, viable);
-                }
+                // The count that closes the line is what survived compilation, which is why it
+                // waits for the build. A mutant that could not compile is a fact about the tool
+                // rather than about the code, and the summary accounts for all of them once.
+                let viable = viable_mutants(live, before, converger.withdrawn());
+                finish_viable_stage(events, viable);
             }
         }
     }
@@ -1091,10 +1104,7 @@ fn warn_about_an_empty_oracle(
     // A binary that announced tests it never counted is not evidence of an empty suite, so `None`
     // is read as "there may well be tests here" and stops the warning. Saying this over a suite
     // that does convict things would be worse than saying nothing.
-    let judged = mutated
-        .iter()
-        .find(|package| package_is_judged(binaries, package, plan, scope))
-        .is_some();
+    let judged = mutated.iter().any(|package| package_is_judged(binaries, package, plan, scope));
 
     if judged {
         return;
@@ -1144,8 +1154,7 @@ fn package_is_judged(binaries: &[TestBinary], package: &str, plan: &Plan, scope:
     let available = binaries;
     available
         .iter()
-        .find(|binary| binary.tests.map_or(true, |tests| tests != 0) && reaches(binary, package, plan, scope))
-        .is_some()
+        .any(|binary| (binary.tests != Some(0)) && reaches(binary, package, plan, scope))
 }
 
 /// Runs the suite once with no mutant active, or reports that nothing was measured.
@@ -1298,7 +1307,7 @@ mod tests {
     use camino::{Utf8Path, Utf8PathBuf};
 
     use super::*;
-    use crate::discover::Killer;
+    use crate::discover::{Killer, ReachCluster, SiteIdentity};
     use crate::exec::memory::{Demand, MemoryControl};
     use crate::fixtures;
     use crate::model::Mutant;
@@ -1347,7 +1356,7 @@ mod tests {
             events.phases,
             vec![
                 ("Validating".to_owned(), "workspace".to_owned()),
-                ("".to_owned(), String::new()),
+                (String::new(), String::new()),
                 (
                     "Baselining".to_owned(),
                     "building the test binaries and running the suite".to_owned()
@@ -1751,7 +1760,7 @@ mod tests {
         assert_eq!(without.quiet, Duration::ZERO);
         assert_eq!(without.tests, None);
         assert_eq!(without.peak, None);
-        assert_eq!(disabled.phases, vec![("".to_owned(), "no baseline was measured".to_owned())]);
+        assert_eq!(disabled.phases, vec![(String::new(), "no baseline was measured".to_owned())]);
         assert!(disabled.progress.is_empty());
 
         let mut empty = BaselineEvents::default();
@@ -2173,6 +2182,29 @@ mod tests {
             ),
             (Duration::from_secs(9), 1, 2, 3, 4, 5, 6, 7, 8)
         );
+    }
+
+    #[test]
+    fn absent_or_empty_census_preserves_durable_reach_clusters() {
+        let plan = oracle_plan("core");
+        let killer = Killer {
+            package: "tests".to_owned(),
+            target: "tests".to_owned(),
+            test: "tests::kills_it".to_owned(),
+        };
+        let mut generalized = crate::discover::GeneralizedHints::empty_supported();
+        generalized.test_sets.push(vec![killer]);
+        generalized.reach.push(ReachCluster {
+            site: SiteIdentity::from_mutant(&plan.mutants[0]),
+            test_set: 0,
+        });
+        let original = generalized.clone();
+        let census = Census::default();
+
+        assert!(!persist_census_learning(false, &census, &plan, &[], &mut generalized));
+        assert_eq!(generalized, original);
+        assert!(!persist_census_learning(true, &census, &plan, &[], &mut generalized));
+        assert_eq!(generalized, original);
     }
 
     /// A hinted mutant sharing a binary with an unhinted one still gets censused there — for free —

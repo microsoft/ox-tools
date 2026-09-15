@@ -1553,16 +1553,6 @@ mod mutation_outcome_tests {
 
     #[test]
     fn isolation_bisects_left_right_and_interacting_items() {
-        fn left(active: &HashSet<u32>) -> Option<bool> {
-            Some(active.contains(&1))
-        }
-        fn right(active: &HashSet<u32>) -> Option<bool> {
-            Some(active.contains(&4))
-        }
-        fn interaction(active: &HashSet<u32>) -> Option<bool> {
-            Some(active.contains(&1) && active.contains(&3))
-        }
-
         let directory = crate::testing::workdir("build-isolation-outcomes-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
         let work = Workspace::adopt(root.clone(), root.join("target"));
@@ -1574,9 +1564,18 @@ mod mutation_outcome_tests {
         ]);
 
         for (oracle, expected) in [
-            (left as SubsetOracle, Isolation::Blamed(vec![1])),
-            (right as SubsetOracle, Isolation::Blamed(vec![4])),
-            (interaction as SubsetOracle, Isolation::Item(vec![1, 2])),
+            (
+                (|active: &HashSet<u32>| Some(active.contains(&1))) as SubsetOracle,
+                Isolation::Blamed(vec![1]),
+            ),
+            (
+                (|active: &HashSet<u32>| Some(active.contains(&4))) as SubsetOracle,
+                Isolation::Blamed(vec![4]),
+            ),
+            (
+                (|active: &HashSet<u32>| Some(active.contains(&1) && active.contains(&3))) as SubsetOracle,
+                Isolation::Item(vec![1, 2]),
+            ),
         ] {
             let mut converger = Converger {
                 subset_oracle: Some(oracle),
@@ -1600,21 +1599,14 @@ mod mutation_outcome_tests {
 
     #[test]
     fn isolation_refuses_empty_pristine_and_indeterminate_populations() {
-        fn pristine(_active: &HashSet<u32>) -> Option<bool> {
-            Some(true)
-        }
-        fn indeterminate(_active: &HashSet<u32>) -> Option<bool> {
-            None
-        }
-
         let directory = crate::testing::workdir("build-isolation-negative-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
         let work = Workspace::adopt(root.clone(), root.join("target"));
 
         for (population, oracle) in [
-            (Vec::new(), pristine as SubsetOracle),
-            (vec![mutant(1, "a", "one")], pristine as SubsetOracle),
-            (vec![mutant(1, "a", "one")], indeterminate as SubsetOracle),
+            (Vec::new(), (|_active: &HashSet<u32>| Some(true)) as SubsetOracle),
+            (vec![mutant(1, "a", "one")], (|_active: &HashSet<u32>| Some(true)) as SubsetOracle),
+            (vec![mutant(1, "a", "one")], (|_active: &HashSet<u32>| None) as SubsetOracle),
         ] {
             let mut converger = Converger {
                 subset_oracle: Some(oracle),

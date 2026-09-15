@@ -2992,7 +2992,7 @@ mod tests {
                 .expect("the pre-main environment helper runs");
             let stderr = String::from_utf8_lossy(&output.stderr);
 
-            assert!(output.status.success(), "pre-main environment helper failed: {}", stderr);
+            assert!(output.status.success(), "pre-main environment helper failed: {stderr}");
         }
 
         #[test]

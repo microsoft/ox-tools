@@ -2913,7 +2913,7 @@ mod tests {
         let file_count = survey.files.len();
         let mut messages = Vec::new();
         let plan = plan_survey(survey, &Selection::parse("arith.add_to_sub").expect("selection"), &mut |message| {
-            messages.push(message.to_owned())
+            messages.push(message.to_owned());
         })
         .expect("the fixture plans");
 

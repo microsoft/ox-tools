@@ -1636,7 +1636,7 @@ fn main() -> ! {
 }
 
 fn wrapper_exit_code(code: process::ExitCode) -> i32 {
-    if code == process::ExitCode::SUCCESS { 0 } else { 1 }
+    i32::from(code != process::ExitCode::SUCCESS)
 }
 
 #[cfg(test)]

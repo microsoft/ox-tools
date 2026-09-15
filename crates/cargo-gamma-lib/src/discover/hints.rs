@@ -48,6 +48,9 @@ const FILE: &str = "gamma-hints.json";
 /// have changed meaning is a wrong hint, and there is no version of that trade worth taking.
 const VERSION: u32 = 1;
 
+/// Producer prefix written into artifacts whose schema cargo-gamma owns.
+const TOOL_PREFIX: &str = "cargo-gamma ";
+
 /// Where the artifact lives for a workspace rooted at `root`.
 #[must_use]
 pub fn path(root: &Utf8Path) -> Utf8PathBuf {
@@ -170,7 +173,7 @@ impl Hints {
         let text = input::text(File::open(path.as_std_path()).ok()?).ok()??;
         let hints = serde_json::from_str::<Self>(&text).ok()?;
 
-        (hints.version == VERSION).then_some(hints)
+        (hints.version == VERSION && Self::valid_tool(&hints.tool)).then_some(hints)
     }
 
     /// The tests to try first, keyed by mutant id.
@@ -257,11 +260,15 @@ impl Hints {
 
         Self {
             version: VERSION,
-            tool: format!("cargo-gamma {}", env!("CARGO_PKG_VERSION")),
+            tool: format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION")),
             context: record.context().clone(),
             mutants,
             generalized: Self::generalized_for(&record.generalized(), population),
         }
+    }
+
+    fn valid_tool(tool: &str) -> bool {
+        tool.strip_prefix(TOOL_PREFIX).is_some_and(|version| !version.trim().is_empty())
     }
 
     fn generalized_for(source: &GeneralizedHints, population: &[Mutant]) -> GeneralizedHints {
@@ -569,8 +576,15 @@ mod tests {
     #[test]
     fn a_foreign_artifact_is_no_hints_at_all() {
         let (_dir, root) = workspace("hints-foreign-");
+        let foreign = Hints {
+            version: VERSION,
+            tool: "other".to_owned(),
+            context: context_of(),
+            mutants: Vec::new(),
+            generalized: GeneralizedHints::empty_supported(),
+        };
 
-        fs::write(path(&root).as_std_path(), r#"{"version":99,"tool":"other","mutants":[]}"#).expect("writable");
+        fs::write(path(&root).as_std_path(), serde_json::to_vec(&foreign).expect("serializable")).expect("writable");
 
         assert!(Hints::load(&root).is_empty());
         assert!(!Hints::is_missing(&root));
@@ -636,7 +650,7 @@ mod tests {
         let clean = Hints::load(&root).generalized();
 
         assert_eq!(clean.items, generalized.items);
-        assert!(clean.items[0].candidates[0].candidate.test == "tests::likely");
+        assert_eq!(clean.items[0].candidates[0].candidate.test, "tests::likely");
     }
 
     #[test]

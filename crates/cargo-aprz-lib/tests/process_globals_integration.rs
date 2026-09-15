@@ -35,6 +35,10 @@ async fn cli_uses_the_platform_cache_directory_and_installs_a_logger() {
     // reading the environment concurrently.
     unsafe {
         std::env::set_var("HOME", home.path());
+    }
+    // SAFETY: this binary contains exactly one test, so nothing else in the process can be
+    // reading the environment concurrently.
+    unsafe {
         std::env::set_var("RUST_LOG", "trace");
     }
     #[cfg(target_os = "linux")]

@@ -109,8 +109,15 @@ fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: Copy
     // Collect the set of relative paths the source tree produces.
     let expected = collect_source_entries(source, skip, options)?;
 
-    // Synchronize: copy new/changed, leave unchanged.
-    for relative in &expected {
+    // Synchronize parents before their descendants so type mismatches cannot redirect writes.
+    let mut ordered: Vec<_> = expected.iter().collect();
+    ordered.sort_unstable_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    for relative in ordered {
         let src = source.join(relative);
         let dst = root.join(relative);
         sync_entry(&src, &dst, reflinks)?;
@@ -223,14 +230,17 @@ fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) ->
     let src_meta = fs::symlink_metadata(source.as_std_path()).map_err(|cause| error!("could not read `{source}`").caused_by(cause))?;
 
     if src_meta.is_dir() {
-        if !destination.as_std_path().exists() {
-            fs::create_dir_all(destination.as_std_path()).map_err(|cause| error!("could not create `{destination}`").caused_by(cause))?;
-        } else if !destination_is_directory(destination) {
-            // A non-directory where a directory should be — replace it.
-            fs::remove_file(destination.as_std_path())
-                .map_err(|cause| error!("could not remove stale entry at `{destination}`").caused_by(cause))?;
-            fs::create_dir_all(destination.as_std_path()).map_err(|cause| error!("could not create `{destination}`").caused_by(cause))?;
+        match fs::symlink_metadata(destination.as_std_path()) {
+            Ok(dst_meta) if dst_meta.is_dir() => return Ok(()),
+            Ok(_) => {
+                // A symlink or other non-directory where a directory should be — replace it.
+                remove_stale_entry(destination)
+                    .map_err(|cause| error!("could not remove stale entry at `{destination}`").caused_by(cause))?;
+            }
+            Err(cause) if is_not_found(&cause) => {}
+            Err(cause) => return Err(error!("could not inspect `{destination}`").caused_by(cause)),
         }
+        fs::create_dir_all(destination.as_std_path()).map_err(|cause| error!("could not create `{destination}`").caused_by(cause))?;
         return Ok(());
     }
 
@@ -514,8 +524,14 @@ fn source_entry_exists(path: &Utf8Path) -> bool {
     fs::symlink_metadata(path.as_std_path()).is_ok()
 }
 
-fn destination_is_directory(path: &Utf8Path) -> bool {
-    path.as_std_path().is_dir()
+fn remove_stale_entry(path: &Utf8Path) -> std::io::Result<()> {
+    match fs::remove_file(path.as_std_path()) {
+        Ok(()) => Ok(()),
+        #[cfg(windows)]
+        Err(_) => fs::remove_dir(path.as_std_path()),
+        #[cfg(not(windows))]
+        Err(cause) => Err(cause),
+    }
 }
 
 fn metadata_is_directory(metadata: &fs::Metadata) -> bool {
@@ -702,15 +718,7 @@ mod tests {
         assert!(!ignored.contains(Utf8Path::new("ignored.txt")));
         assert!(!ignored.iter().any(|path| path.starts_with("real")));
 
-        let included = collect_source_entries(
-            &from,
-            &skip,
-            CopyOptions {
-                copy_ignored: true,
-                ..CopyOptions::default()
-            },
-        )
-        .expect("ignored-file collection");
+        let included = collect_source_entries(&from, &skip, CopyOptions { copy_ignored: true }).expect("ignored-file collection");
         assert!(included.contains(Utf8Path::new(".hidden")));
         assert!(included.contains(Utf8Path::new("ignored.txt")));
         assert!(!included.iter().any(|path| path.starts_with("real")));
@@ -729,8 +737,6 @@ mod tests {
         assert!(!is_walk_root(Utf8Path::new("file")));
         assert!(source_entry_exists(&from.join("file")));
         assert!(!source_entry_exists(&from.join("missing")));
-        assert!(destination_is_directory(&to.join("directory")));
-        assert!(!destination_is_directory(&to.join("same")));
         assert!(missing_directory(&to.join("missing")));
         assert!(!missing_directory(&to));
 
@@ -746,7 +752,7 @@ mod tests {
         assert!(!should_recreate_link(false));
         assert!(is_not_found(&io::Error::from(ErrorKind::NotFound)));
         assert!(!is_not_found(&io::Error::other("other")));
-        assert!(ignore_not_found(io::Error::from(ErrorKind::NotFound)).is_ok());
+        ignore_not_found(io::Error::from(ErrorKind::NotFound)).unwrap();
         assert!(ignore_not_found(io::Error::other("other")).is_err());
 
         let mut paths = vec![Utf8PathBuf::from("a"), Utf8PathBuf::from("a/b/c"), Utf8PathBuf::from("a/b")];
@@ -762,15 +768,15 @@ mod tests {
     }
 
     impl Read for ScheduledReader<'_> {
-        fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if self.offset == self.bytes.len() {
                 return Ok(0);
             }
 
             let scheduled = self.schedule[self.turn % self.schedule.len()];
             self.turn += 1;
-            let count = scheduled.min(destination.len()).min(self.bytes.len() - self.offset);
-            destination[..count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
+            let count = scheduled.min(buf.len()).min(self.bytes.len() - self.offset);
+            buf[..count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
             self.offset += count;
             Ok(count)
         }
@@ -1075,6 +1081,48 @@ mod tests {
         fs::write(&destination, "stale file").expect("stale file");
         sync_entry(&source_directory, &destination, &Reflinks::new()).expect("replace stale file");
         assert!(destination.is_dir());
+    }
+
+    #[test]
+    fn directories_replace_symlinks_without_writing_through_them() {
+        let (temporary, from, to) = tree();
+        let skip = from.join("target");
+        let source_directory = from.join("nested");
+        let source_file = source_directory.join("file");
+        let destination = to.join("nested");
+        let external = Utf8PathBuf::from_path_buf(temporary.path().join("external")).expect("UTF-8 temporary path");
+
+        fs::create_dir_all(&source_directory).expect("source directory");
+        fs::write(&source_file, "source contents").expect("source file");
+        sync_or_copy(&from, &to, &skip, CopyOptions::default()).expect("initial copy");
+
+        fs::remove_dir_all(&destination).expect("old destination directory");
+        fs::create_dir_all(&external).expect("external link target");
+        fs::write(external.join("guard"), "untouched").expect("external guard");
+        create_directory_symlink(&external, &destination);
+
+        let outcome = sync_or_copy(&from, &to, &skip, CopyOptions::default()).expect("delta sync");
+
+        assert_eq!(outcome, SyncOutcome::Synchronized);
+        let metadata = fs::symlink_metadata(&destination).expect("destination metadata");
+        assert!(metadata.is_dir());
+        assert!(!metadata.is_symlink());
+        assert_eq!(
+            fs::read_to_string(destination.join("file")).expect("synchronized file"),
+            "source contents"
+        );
+        assert!(!external.join("file").exists(), "sync must not write through the stale link");
+        assert_eq!(fs::read_to_string(external.join("guard")).expect("external guard"), "untouched");
+    }
+
+    #[cfg(unix)]
+    fn create_directory_symlink(target: &Utf8Path, link: &Utf8Path) {
+        std::os::unix::fs::symlink(target, link).expect("directory symlink");
+    }
+
+    #[cfg(windows)]
+    fn create_directory_symlink(target: &Utf8Path, link: &Utf8Path) {
+        std::os::windows::fs::symlink_dir(target, link).expect("directory symlink");
     }
 
     #[test]

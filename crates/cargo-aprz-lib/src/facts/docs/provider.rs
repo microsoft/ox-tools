@@ -281,9 +281,9 @@ mod tests {
         let tracker = RequestTracker::new(&progress);
         let crates: Arc<[CrateSpec]> = Arc::from([test_crate_spec("missing", "1.0.0")]);
 
-        let results: Vec<_> = provider.get_docs_data(crates, &tracker).await.collect();
+        let result_count = provider.get_docs_data(crates, &tracker).await.count();
 
-        assert_eq!(results.len(), 1);
+        assert_eq!(result_count, 1);
         assert_eq!(tracker.request_counts(TrackedTopic::Docs), (1, 1));
     }
 

@@ -121,8 +121,9 @@ graph:
 The result is a set of workspace source files proven to feed each test binary.
 Cargo-gamma uses it twice:
 
-- derive exact Cargo selectors such as `--lib`, `--test <name>`,
-  `--bin <name>`, or `--example <name>` for the final test build;
+- derive exact `--test <name>` Cargo selectors for integration-test targets;
+- retain package-level `--tests` selection for library, binary, and example
+  unit-test harnesses, which `cargo build` cannot name exactly;
 - discard built test binaries whose proven linked-source set contains no
   pending mutated file.
 

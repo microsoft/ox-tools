@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn appending_the_lint_cap_distinguishes_arrays_strings_and_unsupported_values() {
-        let mut array = Item::Value(Value::Array(["-Cdebuginfo=1"].into_iter().collect()));
+        let mut array = Item::Value(Value::Array(std::iter::once("-Cdebuginfo=1").collect()));
         assert!(append_flag(&mut array));
         assert_eq!(
             array

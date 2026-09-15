@@ -115,6 +115,10 @@ fn flaky_note(binary: &Utf8Path, test: Option<&str>) -> String {
 /// instead. Delivery is best-effort because the command-wide note queue is bounded, but any
 /// retained diagnostic is printed locally and never written into a report.
 fn enumeration_note(binary: &Utf8Path, output: &str) -> String {
+    const fn diagnostic_tail_lines() -> usize {
+        DIAGNOSTIC_TAIL_LINES
+    }
+
     if !output.trim().is_empty() {
         let binary = encode_controls(binary.as_str());
         let tail = tail(output, diagnostic_tail_lines());
@@ -126,10 +130,6 @@ fn enumeration_note(binary: &Utf8Path, output: &str) -> String {
         ));
     }
 
-    const fn diagnostic_tail_lines() -> usize {
-        DIAGNOSTIC_TAIL_LINES
-    }
-
     format!(
         "`cargo nextest` could not enumerate tests in `{binary}` with this mutant active; the same selection succeeded with no mutant active"
     )
@@ -137,10 +137,6 @@ fn enumeration_note(binary: &Utf8Path, output: &str) -> String {
 
 /// One mutant's result: its index in the plan, what happened, how long it took and any detail.
 type Completed = (usize, Outcome, u64, Option<Killer>, Option<String>);
-
-const fn active_ordinal(ordinal: u32) -> Option<u32> {
-    Some(ordinal)
-}
 
 /// Estimates a single mutant's cost from per-site census data when available, falling back to
 /// the sum of its reachable binary baselines.
@@ -690,7 +686,7 @@ fn probe(
     };
 
     let attempt = Attempt {
-        active: active_ordinal(ordinal),
+        active: Some(ordinal),
         timeout: binary.budget_for(timeout_multiplier, sweep.timeout_floor),
         stall: sweep.stall,
         request,
@@ -735,15 +731,15 @@ fn whole_probe_attempt(binary: &TestBinary, timeout_multiplier: Option<f64>, swe
         meter: sweep.meter,
         limit: binary.memory,
     };
-    let attempt = Attempt {
-        active: active_ordinal(1),
+
+    Attempt {
+        active: Some(1),
         timeout: binary.budget_for(timeout_multiplier, sweep.timeout_floor),
         stall: sweep.stall,
         request,
         only: Only::All,
         census: None,
-    };
-    attempt
+    }
 }
 
 fn bounded_reach_hints(hints: Vec<Killer>, reachable: &[&TestBinary], ordinal: u32, census: &Census) -> Vec<Killer> {
@@ -789,7 +785,7 @@ fn probe_cases(
     tally: &Tally,
 ) -> Option<Killer> {
     let attempt = Attempt {
-        active: active_ordinal(ordinal),
+        active: Some(ordinal),
         timeout: binary.budget_for(timeout_multiplier, sweep.timeout_floor),
         stall: sweep.stall,
         request: MemoryRequest {
@@ -897,7 +893,7 @@ fn judge_ranked(
     // Learned candidates are tried in ranked order, but their verdict is held until canonical
     // iteration reaches that binary. This gets the useful launch under way first without allowing
     // a later kill to bypass an earlier timeout, resource result, flake, or lost meter.
-    if let None = hint {
+    if hint.is_none() {
         'candidate: for candidate in candidates {
             match candidate {
                 Candidate::Exact(candidate_hint) => {
@@ -974,7 +970,7 @@ fn judge_ranked(
                         limit: binary.memory,
                     };
                     let attempt = Attempt {
-                        active: active_ordinal(ordinal),
+                        active: Some(ordinal),
                         timeout: binary.budget_for(timeout_multiplier, sweep.timeout_floor),
                         stall: sweep.stall,
                         request,
@@ -986,9 +982,8 @@ fn judge_ranked(
                     ProbeKind::Generalized.attempt(tally);
                     let run = run_binary_observed(work, binary, attempt, sweep.confirm);
                     let convicted = matches!(run.verdict, Verdict::Failed(_));
-                    match convicted {
-                        true => record_generalized_hit(tally),
-                        false => {}
+                    if convicted {
+                        record_generalized_hit(tally);
                     }
 
                     if let Some((observed, item_path)) = learning {
@@ -1006,9 +1001,8 @@ fn judge_ranked(
                     let terminal = !matches!(&run.verdict, Verdict::Passed);
                     binary_runs[index] = Some((run.verdict, matches!(only, Only::All)));
 
-                    match terminal {
-                        true => break 'candidate,
-                        false => {}
+                    if terminal {
+                        break 'candidate;
                     }
                 }
             }
@@ -1067,7 +1061,7 @@ fn judge_ranked(
         };
 
         let attempt = Attempt {
-            active: active_ordinal(active),
+            active: Some(active),
             timeout: binary.budget_for(timeout_multiplier, sweep.timeout_floor),
             stall: sweep.stall,
             request,
@@ -1201,7 +1195,7 @@ fn whole_attempt(attempt: Attempt<'_>) -> Attempt<'_> {
 }
 
 fn filtered_run_needs_confirmation(already_whole: bool, selection: &CensusSelection<'_>, verdict: &Verdict) -> bool {
-    already_whole == false && matches!(selection, CensusSelection::Selected(_)) && matches!(verdict, Verdict::Passed) == false
+    !already_whole && matches!(selection, CensusSelection::Selected(_)) && !matches!(verdict, Verdict::Passed)
 }
 
 fn negative_reach_is_final(run: &BinaryRun, only: Only<'_>, deterministic: bool) -> bool {
@@ -1234,8 +1228,8 @@ fn judge_learning(
             reachable,
             Some(hint),
             &[],
-            learning_observer(observed, item_path),
-            negative_observer(negative, site, deterministic_reach),
+            Some((observed, item_path)),
+            Some((negative, site, deterministic_reach)),
             timeout_multiplier,
             sweep,
             tally,
@@ -1248,11 +1242,11 @@ fn judge_learning(
 
     let mut candidates = promoted.to_vec();
     candidates.extend(FileLearning::candidates(observed, item_path));
-    let estimated_cost = candidates.get(0).map_or_else(
+    let estimated_cost = candidates.first().map_or_else(
         || reachable.iter().map(|binary| binary.baseline).sum(),
         |candidate| candidate.estimated_cost(reachable),
     );
-    let scout = FileLearning::scout(observed, item_path, candidates.get(0), estimated_cost, sibling_benefit);
+    let scout = FileLearning::scout(observed, item_path, candidates.first(), estimated_cost, sibling_benefit);
 
     if let Scout::Wait { candidate, duration } = &scout {
         FileLearning::wait_for_scout(observed, item_path, candidate.as_ref(), *duration);
@@ -1266,8 +1260,8 @@ fn judge_learning(
         reachable,
         None,
         &candidates,
-        learning_observer(observed, item_path),
-        negative_observer(negative, site, deterministic_reach),
+        Some((observed, item_path)),
+        Some((negative, site, deterministic_reach)),
         timeout_multiplier,
         sweep,
         tally,
@@ -1284,23 +1278,8 @@ pub(super) const MIN_SCOUT_WAIT: Duration = Duration::from_millis(5);
 const MAX_SCOUT_WAIT: Duration = Duration::from_millis(200);
 fn scout_wait(cost: Duration, sibling_benefit: usize) -> Duration {
     let benefit = sibling_benefit.max(1);
-    let divisor = match u32::try_from(benefit) {
-        Ok(value) => value,
-        Err(_) => u32::MAX,
-    };
+    let divisor = u32::try_from(benefit).unwrap_or(u32::MAX);
     (cost / divisor).clamp(MIN_SCOUT_WAIT, MAX_SCOUT_WAIT)
-}
-
-fn learning_observer<'a>(observed: &'a FileLearning, item_path: &'a str) -> Option<(&'a FileLearning, &'a str)> {
-    Some((observed, item_path))
-}
-
-fn negative_observer<'a>(
-    negative: &'a NegativeLearning,
-    site: &'a SiteIdentity,
-    deterministic: bool,
-) -> Option<(&'a NegativeLearning, &'a SiteIdentity, bool)> {
-    Some((negative, site, deterministic))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1721,7 +1700,7 @@ fn wait_for_siblings(cost: Duration, sibling_benefit: usize) -> Duration {
 }
 
 fn advance_order(state: &mut LearningState) {
-    state.next_order = state.next_order.checked_add(1).unwrap_or(u64::MAX);
+    state.next_order = state.next_order.saturating_add(1);
 }
 
 fn reached_candidate(identity: BinaryIdentity, elapsed: Duration, order: u64) -> RankedCandidate<BinaryIdentity> {
@@ -2006,7 +1985,10 @@ mod tests {
             spent.launches, 5,
             "both mutants must run the earlier binary before the learned hint is checked"
         );
-        assert_eq!(spent.probes, 1, "the learned killer is checked only after the earlier binary");
+        assert_eq!(
+            spent.probes, 2,
+            "the learned killer is checked only after the earlier binary, then confirmed with the whole binary"
+        );
     }
 
     #[test]
@@ -3656,7 +3638,6 @@ mod tests {
         assert_eq!(worker_count(8), 8);
         assert_eq!(elapsed_millis(Duration::from_millis(17)), 17);
         assert_eq!(elapsed_millis(Duration::MAX), u64::MAX);
-        assert_eq!(active_ordinal(7), Some(7));
         let next = AtomicUsize::new(0);
         assert_eq!(claim_index(&next), 0);
         assert_eq!(claim_index(&next), 1);
@@ -4317,7 +4298,7 @@ mod tests {
                 },
                 true,
             ),
-            (learned_site.clone(), false),
+            (learned_site, false),
         ] {
             let tally = Tally::default();
             let judged = judge_ranked(

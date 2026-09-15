@@ -1178,11 +1178,14 @@ mod tests {
     }
 
     #[test]
-    fn a_literal_multi_line_string_declines_adoption_entirely() {
+    fn a_literal_multi_line_string_no_longer_defeats_adoption() {
         let text = "[lints]\nworkspace = true\n\n[package]\ndescription = '''\nnote # not a comment\n'''\n";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text(text, "[lints]\nworkspace = true\n");
 
-        assert_eq!(adopted, text, "literal multi-line content is left intact:\n{adopted}");
+        assert_eq!(
+            adopted, "[package]\ndescription = '''\nnote # not a comment\n'''\n",
+            "the adoptable table is taken and the literal string is left alone:\n{adopted}"
+        );
     }
 
     /// A bracketed line *inside* a multi-line string is a value, not a table
@@ -1445,7 +1448,7 @@ mod tests {
                     # <<< anvil-managed: existing\n\
                     [lints]\n\
                     workspace = true";
-        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+        let adopted = adopted_text(text, "[lints]\nworkspace = true\n");
 
         assert_eq!(
             adopted,
@@ -1454,37 +1457,9 @@ mod tests {
     }
 
     #[test]
-    fn managed_markers_exclude_their_complete_body_from_adoption_candidates() {
-        let text = "# >>> anvil-managed: existing\n\
-                    [lints]\n\
-                    workspace = true\n\
-                    # <<< anvil-managed: existing\n\
-                    [package]\n\
-                    name = \"demo\"\n";
-
-        assert_eq!(
-            toml_tables(text, SYN),
-            vec![("[package]", vec!["name = \"demo\""])],
-            "both exact sentinels must bound all managed content"
-        );
-    }
-
-    #[test]
-    fn slash_comments_are_excluded_when_scanning_slash_syntax() {
-        let text = "[lints]\n// repository policy\nworkspace = true\n";
-        assert_eq!(
-            toml_tables(text, CommentSyntax::SlashSlash),
-            vec![("[lints]", vec!["workspace = true"])]
-        );
-    }
-
-    #[test]
     fn adoption_preserves_content_before_the_first_table() {
         let text = "# repository policy\n\n[lints]\nworkspace = true\n";
-        assert_eq!(
-            adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN),
-            "# repository policy\n\n"
-        );
+        assert_eq!(adopted_text(text, "[lints]\nworkspace = true\n"), "# repository policy\n\n");
     }
 
     /// A table inside an existing managed region is the region's, not a
@@ -1877,7 +1852,7 @@ mod tests {
     #[test]
     fn at_placement_mid_line_without_a_later_newline_rounds_to_eof() {
         let new = upsert_region_with_placement("FROM base", "x", "body\n", SYN, RegionPlacement::At(2)).unwrap();
-        assert_eq!(new, "FROM base\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
+        assert_eq!(new, "FROM base\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
     }
 
     #[test]

@@ -954,7 +954,12 @@ mod tests {
         let name = scratch.file_name().expect("scratch name");
 
         assert!(name.starts_with(".report."), "{name}");
-        assert!(name.ends_with(".tmp"), "{name}");
+        assert!(
+            std::path::Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp")),
+            "{name}"
+        );
     }
 
     #[test]

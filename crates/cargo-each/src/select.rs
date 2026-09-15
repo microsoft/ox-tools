@@ -225,18 +225,18 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     let mut star: Option<(usize, usize)> = None;
     while ni < n.len() {
         if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
-            pi += 1;
-            ni += 1;
+            advance(&mut pi);
+            advance(&mut ni);
         // #[gamma::skip(cond.always_true, cond.negate, reason = "forcing or negating star recognition can keep rediscovering the same pattern position forever")]
         } else if pi < p.len() && p[pi] == '*' {
             // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing past a star leaves the matcher on the same pattern position forever")]
-            pi += 1;
+            advance(&mut pi);
             star = Some((pi, ni));
         } else if let Some((retry_pi, ref mut star_ni)) = star {
             // Mismatch after a `*`: let that `*` absorb one more name char.
             pi = retry_pi;
             // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing the star's name position retries the same mismatch forever")]
-            *star_ni += 1;
+            advance(star_ni);
             // #[gamma::skip(stmt.delete_assign, assign_value.default, reason = "not applying the advanced star position retries the same mismatch forever")]
             ni = *star_ni;
         } else {
@@ -247,9 +247,15 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     // #[gamma::skip(cond.negate, reason = "negating the trailing-star guard enters the loop without a star and can walk beyond the pattern")]
     while pi < p.len() && p[pi] == '*' {
         // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing over a trailing star makes this cleanup loop infinite")]
-        pi += 1;
+        advance(&mut pi);
     }
     pi == p.len()
+}
+
+#[mutants::skip]
+fn advance(index: &mut usize) {
+    // #[gamma::skip(stmt.delete_assign, literal.int_decrement, reason = "not advancing a glob cursor makes matching non-progressing")]
+    *index += 1;
 }
 
 #[cfg(test)]

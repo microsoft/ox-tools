@@ -1974,7 +1974,11 @@ mod tests {
             buckets.push(1.0, timestamp, cutoffs);
             assert_eq!(
                 (buckets.days_90.len(), buckets.days_180.len(), buckets.days_365.len()),
-                (expected.0 as usize, expected.1 as usize, expected.2 as usize)
+                (
+                    usize::try_from(expected.0).expect("test count fits usize"),
+                    usize::try_from(expected.1).expect("test count fits usize"),
+                    usize::try_from(expected.2).expect("test count fits usize"),
+                )
             );
         }
     }

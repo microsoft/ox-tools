@@ -158,12 +158,11 @@ impl Splices {
             // A file whose every mutant has been withdrawn still has to be rewritten, back to the
             // original, or the previous round's instrumented copy would survive its own withdrawal
             // and the rollback loop could never converge.
-            let (instrumented, found) = match live.as_slice() {
-                [] => (original.serialized.clone(), HashMap::default()),
-                _ => {
-                    let (parsed, found) = schema::instrument_with_guards(&original.parsed, &live)?;
-                    (original.instrumented(parsed), found)
-                }
+            let (instrumented, found) = if live.as_slice().is_empty() {
+                (original.serialized.clone(), HashMap::default())
+            } else {
+                let (parsed, found) = schema::instrument_with_guards(&original.parsed, &live)?;
+                (original.instrumented(parsed), found)
             };
 
             for (ordinal, guard) in &found {
@@ -187,11 +186,8 @@ impl Splices {
 
             // A file back at its original text will not be spliced again unless its mutants come
             // back, which they cannot: withdrawal is permanent for the rest of the run.
-            match live.as_slice() {
-                [] => {
-                    let _dropped = self.sources.remove(&file.path);
-                }
-                _ => {}
+            if live.as_slice().is_empty() {
+                let _dropped = self.sources.remove(&file.path);
             }
         }
 
@@ -276,7 +272,7 @@ impl Splices {
     /// Read here rather than taken from the survey's `SourceFile`, so the byte-order mark has to be
     /// dropped here too: mutant spans index the text `syn` saw, which is the text after the mark.
     pub(super) fn original(&mut self, file: &TargetFile) -> Result<&Original> {
-        if self.sources.get(&file.path).is_none() {
+        if !self.sources.contains_key(&file.path) {
             let serialized = fs::read_to_string(file.absolute.as_std_path())
                 .map_err(|cause| error!("could not read `{}`", file.absolute).caused_by(cause))?;
             let parsed = strip_bom(&serialized).to_owned();

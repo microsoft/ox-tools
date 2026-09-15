@@ -137,12 +137,8 @@ pub(super) fn prepend_after_optional_shebang(content: &str, header_text: &str, s
 /// found, the body is preserved verbatim (leading blanks included).
 pub(super) fn fix_script_content(content: &str, header_text: &str, style: CommentStyle, line_ending: &str) -> String {
     let mut iter = content.lines();
-    let shebang = iter
-        .next()
-        .expect("caller classifies content as CargoScript only when a shebang is present");
-    let dash_open = iter
-        .next()
-        .expect("caller classifies content as CargoScript only when an opening frontmatter delimiter follows the shebang");
+    let shebang = iter.next().unwrap_or("");
+    let dash_open = iter.next().unwrap_or("---");
     let body_lines: Vec<&str> = iter.collect();
 
     let body_start = find_header_end(&body_lines, style).unwrap_or(0);

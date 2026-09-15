@@ -828,13 +828,13 @@ pub(crate) mod portable_tests {
         .expect("collector should initialize from local fixtures");
         let requested = crate::facts::CrateRef::new("missing-crate", Some(Version::new(1, 0, 0)));
 
-        let facts: Vec<_> = collector
+        let fact_count = collector
             .collect(&[requested.clone(), requested], false)
             .await
             .expect("missing crates produce unavailable facts")
-            .collect();
+            .count();
 
-        assert_eq!(facts.len(), 1);
+        assert_eq!(fact_count, 1);
         assert_eq!(*observed_progress.phases.lock().unwrap(), ["Preparing", "Identifying", "Querying"]);
         assert!(observed_progress.done.load(std::sync::atomic::Ordering::Relaxed));
     }

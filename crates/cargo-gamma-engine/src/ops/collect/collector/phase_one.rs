@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn every_gate_excludes_invalid_stated_values_in_inactive_code() {
-        let source = r#"
+        let source = r"
             #[cfg(any())]
             #[gamma::value(0, 1)]
             fn item() {}
@@ -325,7 +325,7 @@ mod tests {
                     _ => 0,
                 };
             }
-        "#;
+        ";
 
         run_source(source, "all", &CfgSet::parse("unix")).expect("attributes on every inactive syntax level are ignored");
     }

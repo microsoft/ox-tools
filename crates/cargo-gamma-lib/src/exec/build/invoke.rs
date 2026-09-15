@@ -775,12 +775,12 @@ mod mutation_tests {
     }
 
     impl Read for Scheduled {
-        fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             let Some(chunk) = self.chunks.pop_front() else {
                 return Ok(0);
             };
             let chunk = chunk?;
-            destination[..chunk.len()].copy_from_slice(&chunk);
+            buf[..chunk.len()].copy_from_slice(&chunk);
             Ok(chunk.len())
         }
     }
@@ -852,7 +852,7 @@ mod mutation_tests {
         let mut events = Recorded::default();
         let (stdout, stderr) = finish_readers(None, None, &receiver, &mut events, Instant::now() + Duration::from_secs(1));
 
-        for pipe in [stdout, stderr] {
+        for pipe in <[_; 2]>::from((stdout, stderr)) {
             let pipe = pipe.expect("an absent OS pipe is a complete empty stream");
             assert!(pipe.text.is_empty());
             assert!(pipe.complete);
@@ -966,6 +966,6 @@ mod mutation_tests {
 
         let (sender, receiver) = mpsc::sync_channel(1);
         close_narration_channel(sender);
-        assert!(receiver.recv().is_err());
+        receiver.recv().unwrap_err();
     }
 }

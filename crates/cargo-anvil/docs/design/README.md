@@ -168,7 +168,8 @@ backend names today are `github` and `ado`; the flag is repeatable (`--backend g
 --backend ado`) so that adding a third backend in the future doesn't require new CLI
 syntax. If `--backend` is omitted, the tool autodetects from the `origin` git remote URL
 (`github.com` → `github`; `dev.azure.com` / `*.visualstudio.com` → `ado`). `--no-backends`
-is valid and useful for repos that want only the local `just` setup with no cloud workflows files.
+Host matching is case-insensitive. `--no-backends` is valid and useful for repos that want only
+the local `just` setup with no cloud workflows files.
 `update` never deletes files; to stop using a backend the user removes its directory by
 hand and reruns without that backend.
 
