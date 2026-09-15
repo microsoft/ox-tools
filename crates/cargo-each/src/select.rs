@@ -129,6 +129,8 @@ fn read_package_file(path: &Path) -> Result<Vec<String>, EachError> {
     let bytes = fs::read(path).map_err(|error| PackageFileReadError::caused_by(display.clone(), error))?;
     let contents = String::from_utf8(bytes).map_err(|error| PackageFileUtf8Error::caused_by(display.clone(), error))?;
     contents
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&contents)
         .lines()
         .enumerate()
         .filter_map(|(index, line)| {

@@ -174,10 +174,10 @@ beyond placeholder substitution.
 | Flag | Meaning |
 |------|---------|
 | `-p`, `--package <SPEC>` | Select a member. Repeatable. `SPEC` is a package name, a `name@version` spec, or a Unix glob (`tokio-*`), matching `cargo-coverage-gate`'s existing `-p` idiom. |
-| `--package-file <PATH>` | Read package specs from a UTF-8 file, one spec per nonempty line. Repeatable; specs are unioned with `--package`. A present empty file is an explicit empty selection. |
+| `--package-file <PATH>` | Read package specs from a UTF-8 file, one spec per nonempty line. A single leading UTF-8 byte-order mark is ignored. Repeatable; specs are unioned with `--package`. A present empty file is an explicit empty selection. |
 | `--workspace`, `--all` | Select every workspace member. |
 | `--exclude <SPEC>` | Remove a member from the selection (requires `--workspace`). Repeatable. |
-| `--none` | Explicitly select zero members. Resolves to an empty set (a no-op, exit 0). Emitted by the impact hand-off when a tier is empty; replaces the `--skip` sentinel. |
+| `--none` | Explicitly select zero members. Resolves to an empty set (a no-op, exit 0). |
 
 A package file contains only package specs, not command-line tokens, comments,
 an impact-tier name, or policy. `foo@1.2.3` has the same meaning whether it came
@@ -290,12 +290,12 @@ no-op.
 ## 5. Semantics
 
 - **Exit codes.** `0` when every executed command succeeded *or* the set was
-  empty; the failing command's code (fail-fast) or `1` (`--keep-going` with any
-  failure — including a command that could not be spawned) otherwise; `2` for a
-  `cargo-each` usage/configuration error (unknown selector, bad filter expression,
-  unknown target kind, invalid mode combination, misused placeholder,
-  `--chdir` with `--once`, or — in fail-fast mode — a command that could not
-  be spawned at all).
+  empty. In fail-fast mode, a command failure returns that command's code, a
+  timeout returns `1`, and a post-spawn infrastructure failure (including
+  output capture, drain, worker, wait, or cleanup failure) returns `2`.
+  Pre-execution usage/configuration and spawn failures also return `2`. Under
+  `--keep-going`, any command, timeout, spawn, or infrastructure failure maps
+  the aggregate result to `1`.
 - **Empty set is success.** Both an empty selection (`--none`, or an impact
   variable that resolved to nothing) and an empty *filtered* set exit 0 after a
   one-line note to stderr. This is what lets callers drop their `--skip` guards.
@@ -309,8 +309,11 @@ no-op.
   final failure is chosen by plan order, not scheduler timing. A worker panic
   is converted into an infrastructure-failure outcome; each worker has a
   dedicated completion channel, so an unexpected exit is observable as
-  disconnection rather than leaving the scheduler blocked forever. Without
-  `--timeout`, parallel commands use the ordinary direct-child lifecycle:
+  disconnection rather than leaving the scheduler blocked forever. A
+  worker-thread launch failure is represented as an infrastructure outcome at
+  that invocation's plan index, so output already collected from earlier
+  invocations is still emitted. Without `--timeout`, parallel commands use the
+  ordinary direct-child lifecycle:
   cargo-each waits for the launched leader but does not contain or kill
   background descendants. Buffering is memory-bounded per stream: after 1 MiB,
   output spills to a unique file in the system temporary directory. The
@@ -318,20 +321,25 @@ no-op.
   so every success, failure, and panic path removes it through RAII. Spill
   creation, write, seek, or read failures are infrastructure failures; output
   is never intentionally truncated on a successful path.
-- **Output drain is bounded after every completion.** Readers get one second
-  after the leader completes to observe EOF. Complete output is preserved when
-  both pipes close within that grace. If a background or escaped descendant
-  keeps a pipe open, capture stops retaining new bytes, emits the partial bytes
-  already buffered, detaches the blocked reader, and reports an explicit
-  infrastructure failure rather than hanging or silently truncating.
+- **Output capture and drain are bounded.** Reader failures are observed while
+  the leader is still running; cargo-each terminates the invocation and reports
+  the infrastructure failure instead of waiting indefinitely with an
+  unconsumed pipe. After leader completion, readers get one second to observe
+  EOF. Complete output is preserved when both pipes close within that grace.
+  If a background or escaped descendant keeps a pipe open, capture stops
+  retaining new bytes, cancels and joins the readiness-polling reader within a
+  bounded grace, emits the partial bytes already buffered, and reports an
+  explicit infrastructure failure rather than hanging, silently truncating, or
+  accumulating detached reader threads.
 - **Timeouts terminate trees.** A timed-out command is a failure. cargo-each
   terminates the child process tree rather than only the immediate process, so
   compiler or test descendants cannot continue mutating the target directory
   after cargo-each returns. Termination gets a bounded 250 ms grace to reap the
   leader. If signalling fails and the leader is still running at that deadline,
-  its handle is detached so neither termination nor Drop can defeat the
-  invocation timeout; cargo-each reports the infrastructure failure. A timeout
-  is accepted only when launch preparation reports a sealed cgroup or job
+  its handle is transferred to a shared detached reaper so neither termination
+  nor Drop can defeat the invocation timeout while the leader still has a
+  wait/reap owner; cargo-each reports the infrastructure failure. A timeout is
+  accepted only when launch preparation reports a sealed cgroup or job
   boundary. On a host with best-effort process-group containment, cargo-each
   reports that timeout is unsupported and does not spawn the command.
 - **Child executable resolution follows `PATH`.** `cargo-each` explicitly
@@ -342,12 +350,16 @@ no-op.
 
 ## 6. How it simplifies cargo-anvil
 
-The recipes stop parsing impact selections and metadata by hand. cargo-delta
-writes one `name@version` package file per tier under
-`target/anvil/impact/`. A cargo-each check supplies the appropriate file
-directly. An empty tier is an empty file and therefore a successful no-op.
-Illustrative before/after (the recipe keeps its own setup and `anvil-impact`
-dependencies; only the selection spine changes):
+A planned cargo-anvil adoption can stop parsing impact selections and metadata
+by hand, but the examples below are not usable with the current producer yet.
+Today it writes `include_<tier>.txt` values containing `--package` tokens or the
+`--workspace` / `--skip` sentinels, all of which package-file validation
+intentionally rejects. The producer must first change to write one
+`name@version` package spec per line under `target/anvil/impact/`, with an empty
+file for an empty tier. After that producer change, a cargo-each check can
+supply the appropriate file directly and get a successful no-op for an empty
+tier. Illustrative planned before/after (the recipe keeps its own setup and
+`anvil-impact` dependencies; only the selection spine changes):
 
 **clippy** (affected tier, single invocation):
 

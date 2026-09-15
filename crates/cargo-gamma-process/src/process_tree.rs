@@ -8,7 +8,7 @@ use core::time::Duration;
 use std::io;
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -25,6 +25,99 @@ use cargo_gamma_unsafe::{PlatformError, Situation};
 #[cfg(any(test, feature = "fault-injection"))]
 use crate::faults;
 use crate::{MemoryRequest, MemoryUsage};
+
+const REAPER_PAUSE: Duration = Duration::from_millis(25);
+
+#[derive(Debug, Default)]
+struct ChildReaper {
+    children: Vec<Child>,
+    starting: bool,
+    running: bool,
+}
+
+static CHILD_REAPER: Mutex<ChildReaper> = Mutex::new(ChildReaper {
+    children: Vec::new(),
+    starting: false,
+    running: false,
+});
+static CHILD_REAPER_READY: Condvar = Condvar::new();
+
+/// Transfers a live child handle to the shared detached reaper.
+///
+/// The reaper polls every retained child rather than blocking on one, so a
+/// leader that survives termination cannot prevent unrelated leaders from
+/// being collected.
+///
+/// # Errors
+///
+/// Returns the thread creation error when the shared reaper could not be
+/// started. The child handle remains retained for a later start attempt.
+pub fn reap_later(child: Child) -> io::Result<()> {
+    let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reaper.children.push(child);
+    while reaper.starting {
+        reaper = CHILD_REAPER_READY.wait(reaper).unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    if reaper.running {
+        return Ok(());
+    }
+    reaper.starting = true;
+    drop(reaper);
+
+    let spawned = thread::Builder::new()
+        .name("cargo-gamma-child-reaper".to_owned())
+        .spawn(child_reaper_loop);
+    let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reaper.starting = false;
+    match spawned {
+        Ok(thread) => {
+            reaper.running = true;
+            CHILD_REAPER_READY.notify_all();
+            drop(reaper);
+            drop(thread);
+            Ok(())
+        }
+        Err(error) => {
+            CHILD_REAPER_READY.notify_all();
+            Err(error)
+        }
+    }
+}
+
+fn child_reaper_loop() {
+    {
+        let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while reaper.starting {
+            reaper = CHILD_REAPER_READY.wait(reaper).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+    loop {
+        let empty = {
+            let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            reaper.children.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_status))));
+            if reaper.children.is_empty() {
+                reaper.running = false;
+                true
+            } else {
+                false
+            }
+        };
+        if empty {
+            return;
+        }
+        thread::sleep(REAPER_PAUSE);
+    }
+}
+
+#[cfg(test)]
+fn reaper_contains(id: u32) -> bool {
+    CHILD_REAPER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .children
+        .iter()
+        .any(|child| child.id() == id)
+}
 
 /// How many concurrent child subtrees can be watched for terminal interruption.
 #[cfg(unix)]
@@ -1299,10 +1392,10 @@ impl ProcessTree {
     ///
     /// Unlike [`Self::terminate`], this method never performs a blocking
     /// [`Child::wait`] after signalling. If the leader remains alive at the
-    /// deadline, its handle is detached and this process tree is left without
-    /// a child for [`Drop`] to wait on. The surrounding cgroup or job handle
-    /// remains owned by `self` and is released normally when the process tree
-    /// is dropped.
+    /// deadline, its handle is transferred to the shared detached reaper and
+    /// this process tree is left without a child for [`Drop`] to wait on. The
+    /// surrounding cgroup or job handle remains owned by `self` and is released
+    /// normally when the process tree is dropped.
     ///
     /// # Errors
     ///
@@ -1349,12 +1442,15 @@ impl ProcessTree {
             }
 
             let Some(remaining) = grace.checked_sub(started.elapsed()) else {
-                drop(child);
                 let deadline_error = format!("subtree leader did not exit within {} ms after termination", grace.as_millis());
-                return Err(kill_error.take().map_or_else(
-                    || io::Error::new(io::ErrorKind::TimedOut, deadline_error.clone()),
-                    |error| io::Error::new(error.kind(), format!("{error}; {deadline_error}")),
-                ));
+                let (kind, mut message) = kill_error.take().map_or_else(
+                    || (io::ErrorKind::TimedOut, deadline_error.clone()),
+                    |error| (error.kind(), format!("{error}; {deadline_error}")),
+                );
+                if let Err(error) = reap_later(child) {
+                    message = format!("{message}; the detached child reaper could not be started: {error}");
+                }
+                return Err(io::Error::new(kind, message));
             };
             thread::sleep(remaining.min(Duration::from_millis(10)));
         }
@@ -2296,6 +2392,7 @@ mod tests {
         let prepared = prepare(command, MemoryRequest::default()).expect("containment");
         let spawned = prepared.spawn().expect("spawn");
         let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+        let leader = subtree.child.as_ref().expect("the adopted subtree owns its leader").id();
         let _failed_kill = faults::arm(faults::Fault::Kill);
 
         let started = Instant::now();
@@ -2313,6 +2410,14 @@ mod tests {
 
         thread::sleep(Duration::from_millis(350));
         assert!(finished.exists(), "the deliberately un-killed leader did not finish on its own");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while reaper_contains(leader) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !reaper_contains(leader),
+            "the detached reaper retained the naturally exited leader without reaping it"
+        );
     }
 
     #[test]

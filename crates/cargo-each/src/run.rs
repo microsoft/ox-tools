@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
-use cargo_gamma_process::{MemoryRequest, PreparedCommand, ProcessTree, prepare};
+use cargo_gamma_process::{InterruptiblePipe, MemoryRequest, PreparedCommand, ProcessTree, prepare, reap_later};
 use cargo_metadata::TargetKind;
 use ohno::{AppError, IntoAppError};
 
@@ -32,6 +32,8 @@ const WORKER_PANIC_TEST_PROGRAM: &str = "__cargo_each_injected_worker_panic";
 const WORKER_SPAWN_ERROR_TEST_PROGRAM: &str = "__cargo_each_injected_worker_spawn_error";
 const TERMINATION_GRACE: Duration = Duration::from_millis(250);
 const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
+const OUTPUT_READER_CANCEL_GRACE: Duration = Duration::from_millis(100);
+const OUTPUT_READER_POLL: Duration = Duration::from_millis(5);
 const OUTPUT_MEMORY_LIMIT: usize = 1_048_576;
 
 pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
@@ -192,47 +194,40 @@ fn execute_parallel(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: 
     let worker_count = jobs.get().min(invocations.len()).min(cargo_gamma_process::capacity().max(1));
     let mut pending: VecDeque<(usize, Invocation)> = invocations.iter().cloned().enumerate().collect();
     let mut workers = Vec::with_capacity(worker_count);
+    let mut outcomes = Vec::with_capacity(invocations.len());
     let mut stop_launching = false;
-    let mut launch_error = None;
 
-    for (index, invocation) in pending.drain(..worker_count) {
-        match spawn_worker(index, invocation, timeout) {
-            Ok(worker) => {
-                workers.push(worker);
-            }
-            Err(error) => {
-                launch_error = Some(error);
-                stop_launching = true;
+    while !workers.is_empty() || (!stop_launching && !pending.is_empty()) {
+        while !stop_launching && workers.len() < worker_count {
+            let Some((index, invocation)) = pending.pop_front() else {
                 break;
+            };
+            match spawn_worker(index, invocation, timeout) {
+                Ok(worker) => workers.push(worker),
+                Err(error) => {
+                    outcomes.push(IndexedOutcome {
+                        index,
+                        outcome: BufferedOutcome::infrastructure(format!("failed to create cargo-each worker thread: {error}")),
+                    });
+                    if failure_stops_launching(keep_going, true) {
+                        stop_launching = true;
+                    }
+                }
             }
         }
-    }
 
-    let mut outcomes = Vec::with_capacity(invocations.len());
-    while let Some(outcome) = wait_for_worker(&mut workers) {
+        let Some(outcome) = wait_for_worker(&mut workers) else {
+            if pending.is_empty() || stop_launching {
+                break;
+            }
+            continue;
+        };
         if failure_stops_launching(keep_going, outcome.outcome.result.failed()) {
             stop_launching = true;
         }
         outcomes.push(outcome);
-
-        if stop_launching {
-            continue;
-        }
-        let Some((index, invocation)) = pending.pop_front() else {
-            continue;
-        };
-        match spawn_worker(index, invocation, timeout) {
-            Ok(worker) => workers.push(worker),
-            Err(error) => {
-                launch_error = Some(error);
-                stop_launching = true;
-            }
-        }
     }
 
-    if let Some(error) = launch_error {
-        return Err(error).into_app_err("failed to create cargo-each worker thread");
-    }
     outcomes.sort_by_key(|outcome| outcome.index);
 
     for indexed in &mut outcomes {
@@ -397,10 +392,10 @@ fn run_captured_with_spawner(
         let cleanup = process.terminate_bounded();
         return BufferedOutcome::infrastructure(with_cleanup_failure("failed to capture child stdout".to_owned(), &cleanup));
     };
-    let stdout_reader = match if capture_fault == Some(CaptureFault::StdoutReader) {
+    let mut stdout_reader = match if capture_fault == Some(CaptureFault::StdoutReader) {
         Err(io::Error::other("injected stdout reader failure"))
     } else {
-        spawn_output_reader(stdout, "cargo-each-stdout")
+        spawn_child_output_reader(stdout, "cargo-each-stdout")
     } {
         Ok(reader) => reader,
         Err(error) => {
@@ -417,10 +412,10 @@ fn run_captured_with_spawner(
         let cleanup = process.terminate_bounded();
         return BufferedOutcome::from_reader_failure("failed to capture child stderr".to_owned(), stdout_reader, &cleanup, drain_boundary);
     };
-    let stderr_reader = match if capture_fault == Some(CaptureFault::StderrReader) {
+    let mut stderr_reader = match if capture_fault == Some(CaptureFault::StderrReader) {
         Err(io::Error::other("injected stderr reader failure"))
     } else {
-        spawn_output_reader(stderr, "cargo-each-stderr")
+        spawn_child_output_reader(stderr, "cargo-each-stderr")
     } {
         Ok(reader) => reader,
         Err(error) => {
@@ -434,7 +429,7 @@ fn run_captured_with_spawner(
         }
     };
 
-    let process_outcome = process.wait(timeout, capture_fault);
+    let process_outcome = process.wait(timeout, capture_fault, &mut stdout_reader, &mut stderr_reader);
     drop(process);
     let (stdout, stderr) = finish_output_readers(stdout_reader, stderr_reader, OUTPUT_DRAIN_GRACE, drain_boundary);
     combine_captured_output(stdout, stderr, process_outcome.result)
@@ -546,14 +541,19 @@ impl CapturedProcess {
                     .take()
                     .ok_or_else(|| io::Error::other("ordinary child was already reaped or detached"))?;
                 let result = terminate_ordinary_child(&mut child, TERMINATION_GRACE);
-                drop(child);
-                result
+                finish_ordinary_termination(child, result)
             }
             Self::Contained(tree) => tree.terminate_bounded(TERMINATION_GRACE),
         }
     }
 
-    fn wait(&mut self, timeout: Option<Duration>, capture_fault: Option<CaptureFault>) -> TreeOutcome {
+    fn wait(
+        &mut self,
+        timeout: Option<Duration>,
+        capture_fault: Option<CaptureFault>,
+        stdout: &mut OutputReader,
+        stderr: &mut OutputReader,
+    ) -> TreeOutcome {
         match (self, timeout) {
             (Self::Ordinary(child), None) => {
                 let Some(mut child) = child.take() else {
@@ -561,14 +561,32 @@ impl CapturedProcess {
                         "ordinary child was already reaped or detached".to_owned(),
                     ));
                 };
-                let waited = if capture_fault == Some(CaptureFault::WaitFailure) {
-                    Err(io::Error::other("injected child wait failure"))
-                } else {
-                    child.wait()
-                };
-                finish_wait_with_cleanup(&mut child, waited, |child| terminate_ordinary_child(child, TERMINATION_GRACE))
+                let outcome = wait_for_captured_process(
+                    &mut child,
+                    None,
+                    stdout,
+                    stderr,
+                    "wait for child process",
+                    |child| {
+                        if capture_fault == Some(CaptureFault::WaitFailure) {
+                            Err(io::Error::other("injected child wait failure"))
+                        } else {
+                            child.try_wait()
+                        }
+                    },
+                    |child| terminate_ordinary_child(child, TERMINATION_GRACE),
+                );
+                finish_ordinary_wait(child, outcome)
             }
-            (Self::Contained(tree), Some(timeout)) => wait_for_tree(tree, timeout),
+            (Self::Contained(tree), Some(timeout)) => wait_for_captured_process(
+                tree,
+                Some(timeout),
+                stdout,
+                stderr,
+                "observe child process tree",
+                ProcessTree::observe,
+                |tree| tree.terminate_bounded(TERMINATION_GRACE),
+            ),
             (Self::Ordinary(_), Some(_)) | (Self::Contained(_), None) => TreeOutcome::new(InvocationResult::Infrastructure(
                 "internal capture mode did not match timeout configuration".to_owned(),
             )),
@@ -576,6 +594,86 @@ impl CapturedProcess {
     }
 }
 
+fn finish_ordinary_termination(mut child: Child, result: io::Result<ExitStatus>) -> io::Result<ExitStatus> {
+    match child.try_wait() {
+        Ok(Some(_status)) => result,
+        Ok(None) | Err(_) => match reap_later(child) {
+            Ok(()) => result,
+            Err(reaper) => match result {
+                Ok(_status) => Err(io::Error::other(format!(
+                    "the detached child reaper could not be started: {reaper}"
+                ))),
+                Err(error) => Err(io::Error::new(
+                    error.kind(),
+                    format!("{error}; the detached child reaper could not be started: {reaper}"),
+                )),
+            },
+        },
+    }
+}
+
+fn finish_ordinary_wait(mut child: Child, mut outcome: TreeOutcome) -> TreeOutcome {
+    if !matches!(child.try_wait(), Ok(Some(_status)))
+        && let Err(error) = reap_later(child)
+    {
+        outcome.result = add_infrastructure_failure(outcome.result, format!("the detached child reaper could not be started: {error}"));
+    }
+    outcome
+}
+
+fn wait_for_captured_process<T>(
+    control: &mut T,
+    timeout: Option<Duration>,
+    stdout: &mut OutputReader,
+    stderr: &mut OutputReader,
+    operation: &str,
+    mut observe: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    mut terminate: impl FnMut(&mut T) -> io::Result<ExitStatus>,
+) -> TreeOutcome {
+    let started = Instant::now();
+    loop {
+        let reader_failure = [stdout.take_failure("stdout"), stderr.take_failure("stderr")]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !reader_failure.is_empty() {
+            let cleanup = terminate(control);
+            return TreeOutcome::new(InvocationResult::Infrastructure(with_cleanup_failure(reader_failure, &cleanup)));
+        }
+
+        match observe(control) {
+            Ok(Some(status)) => return TreeOutcome::new(InvocationResult::Exited(status)),
+            Ok(None) => {}
+            Err(error) => {
+                let cleanup = terminate(control);
+                return TreeOutcome::new(InvocationResult::Infrastructure(with_cleanup_failure(
+                    format!("failed to {operation}: {error}"),
+                    &cleanup,
+                )));
+            }
+        }
+
+        if let Some(timeout) = timeout
+            && timeout.checked_sub(started.elapsed()).is_none()
+        {
+            return match terminate(control) {
+                Ok(_) => TreeOutcome::new(InvocationResult::TimedOut(timeout)),
+                Err(error) => TreeOutcome::new(InvocationResult::Infrastructure(format!(
+                    "invocation timed out after {}; process-tree termination failed: {error}",
+                    display_duration(timeout)
+                ))),
+            };
+        }
+
+        let pause = timeout
+            .and_then(|timeout| timeout.checked_sub(started.elapsed()))
+            .map_or(Duration::from_millis(10), |remaining| remaining.min(Duration::from_millis(10)));
+        thread::sleep(pause);
+    }
+}
+
+#[cfg(test)]
 fn finish_wait_with_cleanup<T>(
     control: &mut T,
     waited: io::Result<ExitStatus>,
@@ -734,11 +832,51 @@ fn capture_fault(invocation: &Invocation) -> Option<CaptureFault> {
     }
 }
 
+#[cfg(unix)]
+fn spawn_child_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
+where
+    R: io::Read + std::os::fd::AsRawFd + Send + 'static,
+{
+    spawn_output_reader_inner(
+        InterruptiblePipe::new(stream)?,
+        name,
+        OUTPUT_MEMORY_LIMIT,
+        Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
+    )
+}
+
+#[cfg(windows)]
+fn spawn_child_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
+where
+    R: io::Read + std::os::windows::io::AsRawHandle + Send + 'static,
+{
+    spawn_output_reader_inner(
+        InterruptiblePipe::new(stream)?,
+        name,
+        OUTPUT_MEMORY_LIMIT,
+        Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
+    )
+}
+
+#[cfg(not(any(unix, windows)))]
+fn spawn_child_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
+where
+    R: io::Read + Send + 'static,
+{
+    spawn_output_reader_inner(
+        InterruptiblePipe::new(stream)?,
+        name,
+        OUTPUT_MEMORY_LIMIT,
+        Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
+    )
+}
+
+#[cfg(test)]
 fn spawn_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
 where
     R: io::Read + Send + 'static,
 {
-    spawn_output_reader_with(
+    spawn_output_reader_inner(
         stream,
         name,
         OUTPUT_MEMORY_LIMIT,
@@ -746,7 +884,15 @@ where
     )
 }
 
-fn spawn_output_reader_with<R>(
+#[cfg(test)]
+fn spawn_output_reader_with<R>(stream: R, name: &'static str, memory_limit: usize, spill_factory: SpillFactory) -> io::Result<OutputReader>
+where
+    R: io::Read + Send + 'static,
+{
+    spawn_output_reader_inner(stream, name, memory_limit, spill_factory)
+}
+
+fn spawn_output_reader_inner<R>(
     mut stream: R,
     name: &'static str,
     memory_limit: usize,
@@ -772,6 +918,12 @@ where
                         Ok(0) => return Ok(()),
                         Ok(read) => break read,
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            if !capture_enabled.load(Ordering::Acquire) {
+                                return Ok(());
+                            }
+                            thread::sleep(OUTPUT_READER_POLL);
+                        }
                         Err(error) => return Err(error),
                     }
                 };
@@ -796,35 +948,66 @@ where
         completion,
         output,
         retaining,
+        reported: None,
+        failure_claimed: false,
     })
 }
 
-fn finish_output_reader(reader: OutputReader, stream: &str, grace: Duration, boundary: &str) -> CapturedStream {
-    let OutputReader {
-        thread,
-        completion,
-        output,
-        retaining,
-    } = reader;
-    let failure = match completion.recv_timeout(grace) {
-        Ok(ReaderCompletion::Finished(Ok(()))) => None,
-        Ok(ReaderCompletion::Finished(Err(error))) => Some(format!("failed to read child {stream}: {error}")),
-        Ok(ReaderCompletion::Panicked(message)) => Some(format!("child {stream} reader thread panicked: {message}")),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            retaining.store(false, Ordering::Release);
-            Some(format!(
-                "child {stream} remained open for more than {} ms after the {boundary} completed; partial output was retained",
-                grace.as_millis()
-            ))
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            retaining.store(false, Ordering::Release);
-            Some(format!("child {stream} reader exited without reporting completion"))
-        }
+fn finish_output_reader(mut reader: OutputReader, stream: &str, grace: Duration, boundary: &str) -> CapturedStream {
+    let mut thread_finished = false;
+    let completion = reader
+        .reported
+        .take()
+        .unwrap_or_else(|| match reader.completion.recv_timeout(grace) {
+            Ok(completion) => completion,
+            Err(mpsc::RecvTimeoutError::Disconnected) => ReaderCompletion::Disconnected,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                reader.retaining.store(false, Ordering::Release);
+                ReaderCompletion::DrainTimedOut
+            }
+        });
+    let mut failure = if reader.failure_claimed {
+        None
+    } else {
+        reader_failure(&completion, stream, grace, boundary)
     };
-    drop(thread);
 
-    match output.lock() {
+    if matches!(completion, ReaderCompletion::DrainTimedOut) {
+        match reader.completion.recv_timeout(OUTPUT_READER_CANCEL_GRACE) {
+            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                thread_finished = true;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let cancellation = format!(
+                    "child {stream} reader did not stop within {} ms after capture was cancelled",
+                    OUTPUT_READER_CANCEL_GRACE.as_millis()
+                );
+                failure = Some(match failure {
+                    Some(failure) => format!("{failure}; {cancellation}"),
+                    None => cancellation,
+                });
+            }
+        }
+    } else {
+        thread_finished = true;
+    }
+
+    if thread_finished {
+        if let Err(payload) = reader.thread.join() {
+            let panic = format!(
+                "child {stream} reader thread panicked after reporting completion: {}",
+                panic_description(payload.as_ref())
+            );
+            failure = Some(match failure {
+                Some(failure) => format!("{failure}; {panic}"),
+                None => panic,
+            });
+        }
+    } else {
+        drop(reader.thread);
+    }
+
+    match reader.output.lock() {
         Ok(mut captured) => CapturedStream {
             output: std::mem::replace(&mut *captured, CapturedOutput::empty()),
             failure,
@@ -839,6 +1022,19 @@ fn finish_output_reader(reader: OutputReader, stream: &str, grace: Duration, bou
                 }),
             }
         }
+    }
+}
+
+fn reader_failure(completion: &ReaderCompletion, stream: &str, grace: Duration, boundary: &str) -> Option<String> {
+    match completion {
+        ReaderCompletion::Finished(Ok(())) => None,
+        ReaderCompletion::Finished(Err(error)) => Some(format!("failed to read child {stream}: {error}")),
+        ReaderCompletion::Panicked(message) => Some(format!("child {stream} reader thread panicked: {message}")),
+        ReaderCompletion::Disconnected => Some(format!("child {stream} reader exited without reporting completion")),
+        ReaderCompletion::DrainTimedOut => Some(format!(
+            "child {stream} remained open for more than {} ms after the {boundary} completed; partial output was retained",
+            grace.as_millis()
+        )),
     }
 }
 
@@ -942,12 +1138,39 @@ struct OutputReader {
     completion: mpsc::Receiver<ReaderCompletion>,
     output: Arc<Mutex<CapturedOutput>>,
     retaining: Arc<AtomicBool>,
+    reported: Option<ReaderCompletion>,
+    failure_claimed: bool,
 }
 
 #[derive(Debug)]
 enum ReaderCompletion {
     Finished(io::Result<()>),
     Panicked(String),
+    Disconnected,
+    DrainTimedOut,
+}
+
+impl OutputReader {
+    fn take_failure(&mut self, stream: &str) -> Option<String> {
+        if self.reported.is_none() {
+            self.reported = match self.completion.try_recv() {
+                Ok(completion) => Some(completion),
+                Err(mpsc::TryRecvError::Disconnected) => Some(ReaderCompletion::Disconnected),
+                Err(mpsc::TryRecvError::Empty) => None,
+            };
+        }
+        if self.failure_claimed {
+            return None;
+        }
+        let failure = self
+            .reported
+            .as_ref()
+            .and_then(|completion| reader_failure(completion, stream, OUTPUT_DRAIN_GRACE, "process"));
+        if failure.is_some() {
+            self.failure_claimed = true;
+        }
+        failure
+    }
 }
 
 trait SpillFile: io::Read + io::Write + io::Seek + Send + fmt::Debug {}
@@ -1118,7 +1341,8 @@ mod tests {
         combine_captured_output, display_duration, emit_buffered, emit_buffered_to, execute_parallel, exit_byte, failure_stops_launching,
         finish_output_reader, finish_wait_with_cleanup, panic_description, run_captured, run_captured_with_spawner, run_streamed,
         run_streamed_with_timeout, spawn_if_sealed, spawn_output_reader, spawn_output_reader_with, spawn_tree, terminate_ordinary_child,
-        terminate_ordinary_with, wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
+        terminate_ordinary_with, wait_for_captured_process, wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker,
+        with_cleanup_failure,
     };
 
     const ORDINARY_BOUNDARY: &str = "ordinary process tree";
@@ -1136,6 +1360,24 @@ mod tests {
     impl io::Read for FailingReader {
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::other("injected read failure"))
+        }
+    }
+
+    struct PendingPipe {
+        dropped: Option<mpsc::Sender<()>>,
+    }
+
+    impl io::Read for PendingPipe {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        }
+    }
+
+    impl Drop for PendingPipe {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.dropped.take() {
+                let _receiver_gone = dropped.send(());
+            }
         }
     }
 
@@ -1433,6 +1675,50 @@ mod tests {
         assert!(!failure_stops_launching(false, false));
         assert!(!failure_stops_launching(true, true));
         assert!(!failure_stops_launching(true, false));
+    }
+
+    #[test]
+    fn cancellation_joins_a_reader_waiting_for_pipe_readiness() {
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let reader = spawn_output_reader(PendingPipe { dropped: Some(dropped_tx) }, "pending-test-pipe")
+            .expect("the readiness-polling reader can be created");
+
+        let captured = finish_output_reader(reader, "stdout", Duration::from_millis(25), ORDINARY_BOUNDARY);
+
+        dropped_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cancellation drops the pipe before the bounded finish returns");
+        let failure = captured
+            .failure
+            .expect("an open pipe past the drain grace is an infrastructure failure");
+        assert!(failure.contains("remained open"), "{failure}");
+        assert!(!failure.contains("did not stop"), "{failure}");
+    }
+
+    #[test]
+    fn reader_failure_terminates_an_untimed_running_process() {
+        let mut process = FakeProcess {
+            observations: VecDeque::new(),
+            termination: Some(Ok(successful_status())),
+        };
+        let mut stdout = spawn_output_reader(FailingReader, "early-failing-reader").expect("create failing stdout reader");
+        let mut stderr = spawn_output_reader(io::empty(), "empty-stderr-reader").expect("create empty stderr reader");
+
+        let outcome = wait_for_captured_process(
+            &mut process,
+            None,
+            &mut stdout,
+            &mut stderr,
+            "observe fake process",
+            FakeProcess::observe,
+            FakeProcess::terminate,
+        );
+
+        let message = result_infrastructure_message(outcome.result);
+        assert!(message.contains("injected read failure"), "{message}");
+        assert!(process.termination.is_none(), "reader failure must trigger process cleanup");
+        let _stdout = finish_output_reader(stdout, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
+        let _stderr = finish_output_reader(stderr, "stderr", Duration::from_secs(1), ORDINARY_BOUNDARY);
     }
 
     #[test]
@@ -1780,16 +2066,23 @@ mod tests {
         let initial = Plan {
             invocations: vec![invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM])],
         };
-        let error = execute_parallel(&initial, false, NonZeroUsize::new(2).expect("literal two is nonzero"), None)
-            .expect_err("an initial worker spawn failure must abort scheduling");
-        assert!(error.to_string().contains("injected worker spawn failure"));
+        let code = execute_parallel(&initial, false, NonZeroUsize::new(2).expect("literal two is nonzero"), None)
+            .expect("worker launch failure is represented as an invocation outcome");
+        assert_eq!(code, ExitCode::from(2));
 
         let replacement = Plan {
             invocations: vec![invocation(&["rustc", "--version"]), invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM])],
         };
-        let error = execute_parallel(&replacement, false, NonZeroUsize::new(1).expect("literal one is nonzero"), None)
-            .expect_err("a replacement worker spawn failure must abort scheduling");
-        assert!(error.to_string().contains("injected worker spawn failure"));
+        let code = execute_parallel(&replacement, false, NonZeroUsize::new(1).expect("literal one is nonzero"), None)
+            .expect("replacement launch failure is emitted after the completed outcome");
+        assert_eq!(code, ExitCode::from(2));
+
+        let keep_going = Plan {
+            invocations: vec![invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), invocation(&["rustc", "--version"])],
+        };
+        let code = execute_parallel(&keep_going, true, NonZeroUsize::new(1).expect("literal one is nonzero"), None)
+            .expect("keep-going continues after a worker launch outcome");
+        assert_eq!(code, ExitCode::from(1));
     }
 
     #[test]
@@ -1899,6 +2192,8 @@ mod tests {
             completion,
             output: Arc::new(Mutex::new(CapturedOutput::empty())),
             retaining: Arc::new(AtomicBool::new(true)),
+            reported: None,
+            failure_claimed: false,
         };
         let sealed_timeout = finish_output_reader(sealed_timeout, "stdout", Duration::ZERO, CONTAINED_BOUNDARY);
         drop(completion_sender);
@@ -1916,6 +2211,8 @@ mod tests {
             completion,
             output: Arc::new(Mutex::new(CapturedOutput::empty())),
             retaining: Arc::new(AtomicBool::new(true)),
+            reported: None,
+            failure_claimed: false,
         };
         let disconnected = finish_output_reader(disconnected, "stderr", Duration::from_secs(1), ORDINARY_BOUNDARY);
         assert!(
@@ -1938,6 +2235,8 @@ mod tests {
                 completion,
                 output: poisoned_buffer(),
                 retaining: Arc::new(AtomicBool::new(true)),
+                reported: None,
+                failure_claimed: false,
             };
             let mut poisoned = finish_output_reader(poisoned, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
             assert_eq!(output_bytes(&mut poisoned.output), b"poisoned bytes");
@@ -2244,23 +2543,31 @@ mod tests {
         let mut ordinary_command = Command::new("rustc");
         let _ = ordinary_command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
         let mut ordinary = CapturedProcess::Ordinary(Some(ordinary_command.spawn().expect("spawn ordinary rustc")));
+        let mut stdout = spawn_output_reader(io::empty(), "ordinary-empty-stdout").expect("spawn empty stdout reader");
+        let mut stderr = spawn_output_reader(io::empty(), "ordinary-empty-stderr").expect("spawn empty stderr reader");
         assert_eq!(ordinary.drain_boundary(), "ordinary process tree");
         assert!(
-            result_infrastructure_message(ordinary.wait(Some(Duration::from_secs(1)), None).result)
+            result_infrastructure_message(ordinary.wait(Some(Duration::from_secs(1)), None, &mut stdout, &mut stderr).result)
                 .contains("did not match timeout configuration")
         );
-        let first_wait = ordinary.wait(None, None);
+        let first_wait = ordinary.wait(None, None, &mut stdout, &mut stderr);
         let InvocationResult::Exited(status) = first_wait.result else {
             panic!("the ordinary child must be reaped by the matching wait mode");
         };
         assert!(status.success());
-        assert!(result_infrastructure_message(ordinary.wait(None, None).result).contains("already reaped or detached"));
+        assert!(
+            result_infrastructure_message(ordinary.wait(None, None, &mut stdout, &mut stderr).result)
+                .contains("already reaped or detached")
+        );
 
         let mut contained_command = Command::new("rustc");
         let _ = contained_command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
         let mut contained = CapturedProcess::Contained(spawn_tree(contained_command).expect("spawn contained rustc"));
         assert_eq!(contained.drain_boundary(), "contained process tree");
-        assert!(result_infrastructure_message(contained.wait(None, None).result).contains("did not match timeout configuration"));
+        assert!(
+            result_infrastructure_message(contained.wait(None, None, &mut stdout, &mut stderr).result)
+                .contains("did not match timeout configuration")
+        );
         let _first = contained.terminate_bounded();
         assert!(
             contained.terminate_bounded().is_err(),

@@ -21,9 +21,11 @@ ends do not keep readers open indefinitely.
 `ProcessTree::terminate_bounded` requests the same subtree and leader kills as
 ordinary termination, then polls `try_wait` until a caller-provided grace
 expires. It never follows a failed kill with blocking `wait`: at the deadline
-the leader handle is detached, the `ProcessTree` no longer owns a child that
-Drop could wait for, and the original cleanup failure is retained in the
-returned error.
+the leader handle moves to the shared detached reaper, the `ProcessTree` no
+longer owns a child that Drop could wait for, and the original cleanup failure
+is retained in the returned error. The reaper polls every retained child
+without blocking on one leader, so later handoffs remain collectable even when
+an earlier leader survives.
 
 ## Platform composition
 

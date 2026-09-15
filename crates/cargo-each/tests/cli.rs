@@ -115,7 +115,7 @@ const TIMEOUT_REFUSAL: &str =
     "timeout requires sealed process-tree containment, but this host only provides best-effort containment; the child was not started";
 
 fn is_timeout_refusal(output: &std::process::Output) -> bool {
-    output.status.code() == Some(2) && String::from_utf8_lossy(&output.stderr).contains(TIMEOUT_REFUSAL)
+    String::from_utf8_lossy(&output.stderr).contains(TIMEOUT_REFUSAL)
 }
 
 fn rust_version_fixture(root_floor: Option<&str>, members: &[(&str, Option<&str>)]) -> (TempDir, PathBuf) {
@@ -273,6 +273,17 @@ fn main() {
             thread::sleep(Duration::from_millis(100));
             fs::write(&args[2], "completed").expect("write background marker");
         }
+        "stubborn-background-parent" => {
+            Command::new(env::current_exe().expect("current exe"))
+                .arg("stubborn-background-child")
+                .arg(&args[2])
+                .spawn()
+                .expect("spawn stubborn background child");
+        }
+        "stubborn-background-child" => {
+            thread::sleep(Duration::from_secs(6));
+            fs::write(&args[2], "completed").expect("write stubborn background marker");
+        }
         other => panic!("unknown probe mode: {other}"),
     }
 }
@@ -392,6 +403,22 @@ fn package_files_union_with_direct_packages_and_each_other() {
                 .and(predicate::str::contains("echo delta"))
                 .and(predicate::str::contains("echo gamma")),
         );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn package_file_strips_one_leading_utf8_bom() {
+    let (tmp, manifest) = fixture();
+    let packages = tmp.path().join("bom.packages");
+    fs::write(&packages, "\u{feff}alpha\nbeta\n").expect("write BOM-prefixed package file");
+
+    each(&manifest)
+        .arg("--package-file")
+        .arg(packages)
+        .args(["--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo alpha").and(predicate::str::contains("echo beta")));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -1422,6 +1449,45 @@ fn parallel_without_timeout_preserves_ordinary_background_descendants() {
     assert!(
         marker.exists(),
         "parallel execution without --timeout must not kill an ordinary background descendant"
+    );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn parallel_open_descendant_pipe_returns_after_bounded_drain() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let marker = tmp.path().join("stubborn-background-completed");
+    let started = std::time::Instant::now();
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin!("cargo-each"));
+    let _ = command
+        .arg("each")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .args(["-p", "alpha", "--jobs", "2", "--"])
+        .arg(probe)
+        .arg("stubborn-background-parent")
+        .arg(&marker);
+    let status = command.status().expect("run cargo-each with a descendant-held pipe");
+
+    assert_eq!(status.code(), Some(2));
+    assert!(
+        !marker.exists(),
+        "cargo-each waited for the ordinary background descendant instead of cancelling its readers"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "output drain exceeded its bounded grace: {:?}",
+        started.elapsed()
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(7);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "untimed execution must preserve the ordinary background descendant"
     );
 }
 

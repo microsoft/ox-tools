@@ -36,7 +36,8 @@
 //!   package name, a `name@version` spec, or a Unix glob (`tokio-*`).
 //! - `--package-file <PATH>` — read package specs from a UTF-8 file, one per
 //!   nonempty line. Repeatable; specs are unioned with `--package`. An empty
-//!   file explicitly selects no members.
+//!   file explicitly selects no members. One leading UTF-8 byte-order mark is
+//!   ignored.
 //! - `--workspace` / `--all` — select every workspace member.
 //! - `--exclude <SPEC>` — drop a member (with `--workspace`). Repeatable.
 //! - `--none` — explicitly select zero members (a no-op that exits 0).
@@ -119,24 +120,28 @@
 //! the first observed failure, waits for running work, and chooses the final
 //! failure by plan order. `--keep-going` runs the complete plan. Worker panics
 //! and unexpected worker-channel disconnections become infrastructure-failure
-//! outcomes instead of blocking the scheduler. Without `--timeout`, parallel
-//! commands retain ordinary direct-child semantics and do not kill background
-//! descendants. Each output stream retains at most 1 MiB in memory before
+//! outcomes instead of blocking the scheduler. Worker launch failures retain
+//! output already collected at earlier plan indices. Without `--timeout`,
+//! parallel commands retain ordinary direct-child semantics and do not kill
+//! background descendants. Each output stream retains at most 1 MiB in memory before
 //! spilling to a unique system-temporary file owned by the invocation outcome;
 //! spill failures are infrastructure failures and spill files are removed by
 //! RAII after deterministic plan-order emission.
 //!
-//! Output drain is bounded after every completion. Readers get one second to
-//! observe EOF; grace expiry preserves partial bytes and becomes an explicit
-//! infrastructure failure. Timed-out tree termination likewise gets a bounded
-//! 250 ms leader-reap grace, after which the leader handle is detached so no
-//! wait or Drop path can defeat the timeout.
+//! Reader failures are observed while the child is running and trigger bounded
+//! termination. Output drain is bounded after every completion: readers get
+//! one second to observe EOF, then readiness-polling capture is cancelled and
+//! joined while partial bytes become an explicit infrastructure failure.
+//! Timed-out tree termination likewise gets a bounded 250 ms leader-reap grace,
+//! after which the leader handle moves to a shared detached reaper so no wait
+//! or Drop path can defeat the timeout without abandoning reap ownership.
 //! Child commands inherit `PATH` explicitly. On Windows this makes relative
 //! program lookup honor the inherited `PATH` order instead of preferring an
 //! unrelated executable beside `cargo-each`.
-//! Otherwise the exit code is the first failing command code (fail-fast),
-//! `1` under `--keep-going` if any command failed, or `2` for a `cargo-each`
-//! usage error (unknown selector, bad filter expression, misused placeholder).
+//! Exit `0` means all work succeeded or there was no work. In fail-fast mode a
+//! command failure returns its code, a timeout returns `1`, and usage,
+//! configuration, spawn, or post-spawn infrastructure failures return `2`.
+//! Under `--keep-going`, any failure maps the aggregate result to `1`.
 //!
 //! # Examples
 //!
