@@ -61,6 +61,61 @@ fn regeneration_check_runs_on_every_pull_request() {
 }
 
 #[test]
+fn resolver_hook_executes_with_legacy_and_engine_context_signatures() {
+    if !tools_available() {
+        return;
+    }
+    let start = CONTAINER
+        .find("                    $resolveArgs = @{}")
+        .expect("resolver context block");
+    let end = CONTAINER[start..]
+        .find("                    $resolved = @(Anvil-ResolveImage $image @resolveArgs")
+        .map(|offset| start + offset)
+        .expect("resolver invocation");
+    let end = CONTAINER[end..].find('\n').map_or(CONTAINER.len(), |offset| end + offset);
+    let invocation = &CONTAINER[start..end];
+
+    for (hook, expected) in [
+        (
+            "function Anvil-ResolveImage { param([string]$Image) \"$Image|legacy\" }",
+            "input:tag|legacy",
+        ),
+        (
+            "function Anvil-ResolveImage { param([string]$Image, [string]$Engine) \"$Image|$($PSBoundParameters.ContainsKey('Engine'))\" }",
+            "input:tag|False",
+        ),
+        (
+            "function Anvil-ResolveImage { param([string]$Image, [string[]]$EnginePrefix) \"$Image|$($PSBoundParameters.ContainsKey('EnginePrefix'))\" }",
+            "input:tag|False",
+        ),
+        (
+            "function Anvil-ResolveImage { param([string]$Image, [string]$Engine, [string[]]$EnginePrefix) \"$Image|$Engine|$($EnginePrefix -join ',')\" }",
+            "input:tag|wsl.exe|--exec,docker",
+        ),
+    ] {
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             $image = 'input:tag'\n\
+             $engineExe = 'wsl.exe'\n\
+             $enginePrefix = @('--exec', 'docker')\n\
+             {hook}\n\
+             {invocation}\n\
+             Write-Output $resolved\n"
+        );
+        let output = Command::new("pwsh")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .expect("pwsh was checked by tools_available");
+        assert!(
+            output.status.success(),
+            "resolver fixture failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+    }
+}
+
+#[test]
 fn loom_does_not_globally_limit_exploration() {
     assert!(
         !LOOM.contains("LOOM_MAX_PREEMPTIONS"),

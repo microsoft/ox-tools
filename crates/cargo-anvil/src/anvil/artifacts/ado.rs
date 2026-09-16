@@ -4,8 +4,17 @@
 //! Azure DevOps Pipelines backend files: step templates, stages templates,
 //! and root pipelines, each an owned file gated on [`Backend::Ado`].
 //!
-//! Holds the embedded templates, the per-group fan-out, and the registry
-//! functions. See [`ado.md`](../../../docs/design/ado.md).
+//! Holds embedded templates, per-group fan-out, and repository check hooks.
+//! Use these artifacts when specializing the ADO portion of a downstream catalog;
+//! the shared catalog engine retains ownership and update behavior.
+//!
+//! # Examples
+//!
+//! ```
+//! use cargo_anvil::artifacts::ado;
+//!
+//! let hook = ado::before_checks().with_body("steps: []\n");
+//! ```
 
 use crate::anvil::artifacts::impact_mode;
 use crate::backend::Backend;
@@ -22,6 +31,12 @@ const ADVISORY_COMMENTS_STEP: &str = include_str!("../../../templates/ado/steps/
 
 /// Embedded body of the dirty-file job wrapper.
 const JOB_WRAPPER: &str = include_str!("../../../templates/ado/steps/job.yml");
+
+/// Embedded default for repository check prerequisites.
+const BEFORE_CHECKS: &str = include_str!("../../../templates/ado/hooks/before-checks.yml");
+
+/// Embedded default for repository check finalization.
+const AFTER_CHECKS: &str = include_str!("../../../templates/ado/hooks/after-checks.yml");
 
 /// Embedded body of the PR-tier stages template.
 const PR_STAGES: &str = include_str!("../../../templates/ado/pr-stages.yml");
@@ -126,6 +141,46 @@ pub fn job_wrapper() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".pipelines/anvil/steps/job.yml", JOB_WRAPPER)
 }
 
+/// Repository check prerequisites, emitted at `.pipelines/anvil/hooks/before-checks.yml`.
+///
+/// The empty step template runs after default checkout and input-artifact
+/// downloads, before Anvil setup. Repository edits follow the owned-file flow.
+///
+/// # Examples
+///
+/// ```
+/// use cargo_anvil::Catalog;
+/// use cargo_anvil::artifacts::ado;
+///
+/// let catalog = Catalog::anvil()
+///     .into_builder()
+///     .replace_artifact(ado::before_checks().with_body("steps: []\n"))
+///     .build()
+///     .expect("before_checks replaces an existing catalog artifact");
+/// ```
+#[must_use]
+pub fn before_checks() -> Artifact {
+    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/hooks/before-checks.yml", BEFORE_CHECKS)
+}
+
+/// Repository check finalization, emitted at `.pipelines/anvil/hooks/after-checks.yml`.
+///
+/// Runs after supplied check steps and before artifact publication. Cleanup
+/// tasks can opt into `always()`; the wrapper adds no success-only condition.
+///
+/// # Examples
+///
+/// ```
+/// use cargo_anvil::artifacts::ado;
+///
+/// let hook = ado::after_checks()
+///     .with_body("steps:\n  - script: echo finalizing\n    condition: always()\n");
+/// ```
+#[must_use]
+pub fn after_checks() -> Artifact {
+    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/hooks/after-checks.yml", AFTER_CHECKS)
+}
+
 /// `.pipelines/anvil/pr.yml` — the PR-tier stages template.
 #[must_use]
 pub fn pr_stages() -> Artifact {
@@ -196,7 +251,14 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
 /// All ADO backend artifacts in emission order.
 #[must_use]
 pub(crate) fn all() -> Vec<Artifact> {
-    let mut out = vec![setup_step(), impact_step(), advisory_comments(), job_wrapper()];
+    let mut out = vec![
+        setup_step(),
+        impact_step(),
+        advisory_comments(),
+        job_wrapper(),
+        before_checks(),
+        after_checks(),
+    ];
     for (group, path) in GROUP_STEPS {
         out.push(Artifact::backend_file(Backend::Ado, path, render_group_step(group)));
     }
@@ -213,6 +275,35 @@ pub(crate) fn all() -> Vec<Artifact> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_hooks_default_to_empty_steps_and_surround_check_work() {
+        for artifact in [before_checks(), after_checks()] {
+            let Artifact::OwnedFile(spec) = artifact else {
+                panic!("check hooks must be owned files");
+            };
+            assert_eq!(spec.gate, Some(Backend::Ado));
+            let lines: Vec<_> = spec
+                .body
+                .lines()
+                .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+                .collect();
+            assert_eq!(lines, ["steps: []"]);
+        }
+        let before = "      - template: ../hooks/before-checks.yml";
+        let after = "      - template: ../hooks/after-checks.yml";
+        for include in [before, after] {
+            assert_eq!(JOB_WRAPPER.lines().filter(|line| *line == include).count(), 1);
+        }
+        let positions = [
+            JOB_WRAPPER.find("task: DownloadPipelineArtifact@2").unwrap(),
+            JOB_WRAPPER.find(before).unwrap(),
+            JOB_WRAPPER.find("${{ each step in parameters.steps }}").unwrap(),
+            JOB_WRAPPER.find(after).unwrap(),
+            JOB_WRAPPER.find("${{ each artifact in parameters.artifacts }}").unwrap(),
+        ];
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
 
     #[test]
     fn setup_and_impact_step_templates_are_non_empty() {

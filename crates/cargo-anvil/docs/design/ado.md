@@ -406,8 +406,8 @@ The contract is intentionally small and stable:
 | `inputArtifacts` | `object` | no  | List of pipeline artifacts to download *before* the steps run. Each item: `{ name: string, path: string }`. Default wrapper prepends one `DownloadPipelineArtifact@2` per entry; 1ESPT wrappers translate the same list into their own download mechanism (e.g. `templateContext.inputs`). This is how the impact set is shared — each PR group job downloads its OS's `anvil-impact-<os>` artifact into `target/anvil/impact` and its checks read the cache exactly as a local run. |
 | `artifacts` | `object`   | no       | List of pipeline artifacts to publish. Each item: `{ name: string, path: string }`. Default wrapper appends one `PublishPipelineArtifact@1` per entry; 1ESPT wrappers translate the same list into `templateContext.outputs.pipelineArtifact` blocks. The stages templates don't need to know which backend they're targeting. |
 
-The default wrapper anvil ships downloads any `inputArtifacts`, splices in the
-`steps`, then publishes any `artifacts`:
+The default wrapper downloads any `inputArtifacts`, runs the repository's before
+hook, splices in the `steps`, runs the after hook, then publishes any `artifacts`:
 
 ```yaml
 parameters:
@@ -427,8 +427,10 @@ jobs:
             inputs:
               artifact: ${{ artifact.name }}
               path: ${{ artifact.path }}
+      - template: ../hooks/before-checks.yml
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
+      - template: ../hooks/after-checks.yml
       - ${{ each artifact in parameters.artifacts }}:
           - task: PublishPipelineArtifact@1
             displayName: Publish ${{ artifact.name }}
@@ -460,8 +462,10 @@ jobs:
               artifactName: ${{ artifact.name }}
               condition: succeededOrFailed()
     steps:
+      - template: ../hooks/before-checks.yml
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
+      - template: ../hooks/after-checks.yml
 ```
 
 `pool` shape is *also* an extensibility point — `linuxPool` / `windowsPool` are
@@ -488,6 +492,45 @@ after the user actually edits the file: from then on, anvil Proposes into
 `.proposed` siblings on conflict. This is the same mechanism every other owned
 file uses; the wrapper isn't special — it just happens to be the one file most
 internal adopters will customize.
+
+### 4.2 Repository check hooks
+
+Repository-specific prerequisites and finalization belong in
+`.pipelines/anvil/hooks/before-checks.yml` and
+`.pipelines/anvil/hooks/after-checks.yml`, rather than in the generated job
+wrapper. Both are ADO-only step templates, emitted with `steps: []`. Repository
+edits survive regeneration; a later change to the catalog default produces an
+`.anvil-proposed` sibling instead of overwriting customized steps.
+
+The hooks run once per job, including impact jobs, in both PR and scheduled
+pipelines. With the default checkout behavior, the before hook follows checkout
+and input-artifact downloads and precedes Anvil setup. The after hook follows
+the supplied check steps but precedes output-artifact publication. It is not a
+pipeline-completion callback: keep files needed for publication or agent
+post-job processing intact.
+
+For example, a repository can include its own prerequisite template:
+
+```yaml
+# .pipelines/anvil/hooks/before-checks.yml
+steps:
+  - template: /ci/native-prerequisites.yml
+```
+
+The referenced template must exist and provide any necessary authentication
+and platform conditions. Steps in either hook use ADO's default success
+condition unless overridden. Set `condition: always()` on cleanup tasks that
+should also run after failures or cancellation, or `succeededOrFailed()` to skip
+cancellation. The wrapper does not impose a surrounding success-only condition.
+Agent availability and cancellation timeouts still bound cleanup execution.
+
+Existing custom job wrappers must explicitly adopt the two template includes,
+placing the before hook after their own checkout/input staging and the after
+hook before publication. Regeneration preserves customized wrappers rather
+than injecting the calls into them. Downstream catalogs can inherit or
+specialize the public `artifacts::ado::before_checks()` and `after_checks()`
+artifacts while retaining these paths. This extension does not change the
+GitHub Actions backend or add build/publish hooks.
 
 **Adding a parameter is a breaking change for already-customized wrappers.** The
 `inputArtifacts` parameter (added to share the impact cache) is the one compatibility
