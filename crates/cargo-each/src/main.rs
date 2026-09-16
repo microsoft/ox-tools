@@ -75,9 +75,12 @@
 //!   `--target-required-feature` further narrows targets.
 //!
 //! `--keep-going` runs every invocation and exits non-zero if any failed
-//! (default is fail-fast). `--jobs <N>` bounds concurrent per-package or
-//! per-target work (default `1`), while `--timeout <DURATION>` terminates each
-//! invocation and its process tree independently (`250ms`, `30s`, or `2m`).
+//! (default is fail-fast). `--jobs <N|auto>` bounds concurrent per-package or
+//! per-target work. Omitting it runs exactly one invocation at a time; `auto`
+//! resolves once to the machine's available parallelism. Detection failure is
+//! reported explicitly without falling back. `--timeout <DURATION>` terminates
+//! each invocation and its process tree independently (`250ms`, `30s`, or
+//! `2m`).
 //! Timeouts require sealed process-tree containment; on a host that only
 //! offers best-effort containment, cargo-each reports an unsupported
 //! infrastructure failure before starting the child.
@@ -115,18 +118,20 @@
 //! uses `{workspace-rust-version}`, then requires every member's resolved
 //! minimum to be present and no newer than the root floor.
 //!
-//! With `--jobs > 1`, each invocation's output is buffered and complete blocks
-//! are emitted in deterministic plan order. Fail-fast stops launching after
-//! the first observed failure, waits for running work, and chooses the final
-//! failure by plan order. `--keep-going` runs the complete plan. Worker panics
-//! and unexpected worker-channel disconnections become infrastructure-failure
+//! With `--jobs > 1`, including when `auto` resolves above one, the effective
+//! worker count is capped by the plan size and scheduler capacity. Each
+//! invocation's output is buffered and complete blocks are emitted in
+//! deterministic plan order. Fail-fast stops launching after the first
+//! observed failure, waits for running work, and chooses the final failure by
+//! plan order. `--keep-going` runs the complete plan. Worker panics and
+//! unexpected worker-channel disconnections become infrastructure-failure
 //! outcomes instead of blocking the scheduler. Worker launch failures retain
 //! output already collected at earlier plan indices. Without `--timeout`,
 //! parallel commands retain ordinary direct-child semantics and do not kill
-//! background descendants. Each output stream retains at most 1 MiB in memory before
-//! spilling to a unique system-temporary file owned by the invocation outcome;
-//! spill failures are infrastructure failures and spill files are removed by
-//! RAII after deterministic plan-order emission.
+//! background descendants. Each output stream retains at most 1 MiB in memory
+//! before spilling to a unique system-temporary file owned by the invocation
+//! outcome; spill failures are infrastructure failures and spill files are
+//! removed by RAII after deterministic plan-order emission.
 //!
 //! Reader failures are observed while the child is running and trigger bounded
 //! termination. Output drain is bounded after every completion: readers get

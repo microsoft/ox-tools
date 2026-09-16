@@ -94,9 +94,10 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) keep_going: bool,
 
-    /// Run at most N per-package or per-target commands concurrently. Buffered
+    /// Run at most N per-package or per-target commands concurrently. Use
+    /// `auto` to detect available parallelism once. Defaults to 1. Buffered
     /// output spills to unique system-temporary files beyond 1 MiB per stream.
-    #[arg(long, default_value_t = NonZeroUsize::MIN, value_name = "N")]
+    #[arg(long, default_value_t = NonZeroUsize::MIN, value_name = "N|auto", value_parser = parse_jobs)]
     pub(crate) jobs: NonZeroUsize,
 
     /// Terminate each invocation and its process tree after this duration.
@@ -118,6 +119,20 @@ pub(crate) struct EachArgs {
     /// selected mode.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub(crate) command: Vec<String>,
+}
+
+fn parse_jobs(value: &str) -> Result<NonZeroUsize, String> {
+    parse_jobs_with(value, std::thread::available_parallelism)
+}
+
+fn parse_jobs_with(value: &str, available_parallelism: impl FnOnce() -> std::io::Result<NonZeroUsize>) -> Result<NonZeroUsize, String> {
+    if value == "auto" {
+        available_parallelism().map_err(|error| format!("failed to detect available parallelism for `--jobs auto`: {error}"))
+    } else {
+        value
+            .parse()
+            .map_err(|error| format!("expected a positive integer or `auto`: {error}"))
+    }
 }
 
 fn parse_duration(value: &str) -> Result<Duration, String> {
@@ -159,13 +174,53 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser as _};
 
     use super::*;
 
     #[test]
     fn cli_definition_is_well_formed() {
         CargoCli::command().debug_assert();
+    }
+
+    #[test]
+    fn jobs_default_is_one() {
+        let CargoCli::Each(args) =
+            CargoCli::try_parse_from(["cargo", "each", "--", "echo"]).expect("documented minimal invocation must parse");
+        assert_eq!(args.jobs, NonZeroUsize::MIN);
+    }
+
+    #[test]
+    fn parses_positive_and_auto_jobs() {
+        assert_eq!(
+            parse_jobs_with("7", || panic!("numeric jobs must not detect parallelism")),
+            Ok(NonZeroUsize::new(7).expect("literal seven is nonzero"))
+        );
+
+        let mut detections = 0;
+        let jobs = parse_jobs_with("auto", || {
+            detections += 1;
+            Ok(NonZeroUsize::new(8).expect("literal eight is nonzero"))
+        });
+        assert_eq!(jobs, Ok(NonZeroUsize::new(8).expect("literal eight is nonzero")));
+        assert_eq!(detections, 1);
+    }
+
+    #[test]
+    fn rejects_invalid_jobs() {
+        for value in ["0", "-1", "bogus", "AUTO"] {
+            assert!(parse_jobs(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn reports_auto_jobs_detection_failure() {
+        let error = parse_jobs_with("auto", || Err(std::io::Error::other("parallelism unavailable")))
+            .expect_err("detection failure must not fall back");
+        assert_eq!(
+            error,
+            "failed to detect available parallelism for `--jobs auto`: parallelism unavailable"
+        );
     }
 
     #[test]

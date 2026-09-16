@@ -1328,6 +1328,51 @@ fn once_rejects_jobs_greater_than_one() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn jobs_help_documents_auto_and_default() {
+    Command::cargo_bin("cargo-each")
+        .expect("binary")
+        .args(["each", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("--jobs <N|auto>")
+                .and(predicate::str::contains("available parallelism"))
+                .and(predicate::str::contains("Defaults to 1")),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn auto_jobs_is_accepted() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["--workspace", "--jobs", "auto", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success();
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn default_jobs_runs_one_invocation_at_a_time() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let completion_log = tmp.path().join("completion.log");
+    each(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--"])
+        .arg(probe)
+        .args(["ordered", "{name}"])
+        .arg(&completion_log)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(completion_log).expect("completion log"),
+        "alpha\nbeta\n",
+        "the default must finish each invocation before launching the next"
+    );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn parallel_output_is_buffered_in_plan_order() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());

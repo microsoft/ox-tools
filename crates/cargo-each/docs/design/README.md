@@ -250,7 +250,7 @@ filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 | `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
 | `--target-required-feature <FEATURE>` | In per-target mode, retain targets whose `required-features` contains `FEATURE`. Repeatable; values are AND-combined. Requires `--each-target`. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
-| `--jobs <N>` | Run at most `N` per-package or per-target commands concurrently. Default `1`. With `--once`, values other than `1` are a usage error. |
+| `--jobs <N\|auto>` | Run at most the positive integer `N` per-package or per-target commands concurrently. When omitted, the default is exactly `1`. `auto` resolves once during CLI parsing via `std::thread::available_parallelism()`; detection failure is an explicit usage error with no fallback. The effective worker count remains capped by the plan size and scheduler capacity. With `--once`, resolved values other than `1` are a usage error. |
 | `--timeout <DURATION>` | Terminate an invocation and its child process tree when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. Requires sealed process-tree containment; unsupported hosts fail before the child starts. No timeout by default. |
 | `--chdir` | Run each per-package or per-target command from that member's crate root (the directory containing its `Cargo.toml`) instead of the caller's CWD. Combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
 | `--manifest-path <PATH>` | Workspace root `Cargo.toml`. Defaults to auto-detection from CWD. |
@@ -302,18 +302,23 @@ no-op.
 - **No shell.** The command is spawned directly (argv, not a shell string), so
   there is no quoting/dialect surface. Placeholder expansion is textual and
   happens before spawn.
-- **Bounded concurrency.** With `--jobs > 1`, output from each invocation is
-  buffered and emitted as one block in deterministic plan order. Fail-fast
-  stops launching new work after the first observed failure and waits for
-  already-running children; `--keep-going` launches the complete plan. The
-  final failure is chosen by plan order, not scheduler timing. A worker panic
-  is converted into an infrastructure-failure outcome; each worker has a
-  dedicated completion channel, so an unexpected exit is observable as
-  disconnection rather than leaving the scheduler blocked forever. A
-  worker-thread launch failure is represented as an infrastructure outcome at
-  that invocation's plan index, so output already collected from earlier
-  invocations is still emitted. Without `--timeout`, parallel commands use the
-  ordinary direct-child lifecycle:
+- **Bounded concurrency.** Omitting `--jobs` requests exactly one concurrent
+  invocation. A positive integer requests that fixed limit; `auto` resolves
+  exactly once during CLI parsing to the machine's available parallelism and
+  fails explicitly if detection is unavailable. The scheduler caps every
+  request by the plan size and its process capacity. With an effective job
+  count above one, output from each invocation is buffered and emitted as one
+  block in deterministic plan order. Fail-fast stops launching new work after
+  the first observed failure and waits for already-running children;
+  `--keep-going` launches the complete plan. The final failure is chosen by
+  plan order, not scheduler timing. A worker panic is converted into an
+  infrastructure-failure outcome; each worker has a dedicated completion
+  channel, so an unexpected exit is observable as disconnection rather than
+  leaving the scheduler blocked forever. A worker-thread launch failure is
+  represented as an infrastructure outcome at that invocation's plan index,
+  so output already collected from earlier invocations is still emitted.
+  Without `--timeout`, parallel commands use the ordinary direct-child
+  lifecycle:
   cargo-each waits for the launched leader but does not contain or kill
   background descendants. Buffering is memory-bounded per stream: after 1 MiB,
   output spills to a unique file in the system temporary directory. The
