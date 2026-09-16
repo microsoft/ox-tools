@@ -63,6 +63,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         workspace: &workspace,
         selection: &selection,
         args: &collection,
+        #[cfg(windows)]
         scratch_dir: coverage_scratch.path(),
         coverage_target_dir: &coverage_target_dir,
         target: args.target.as_deref(),
@@ -121,6 +122,7 @@ struct CollectionExecution<'a> {
     workspace: &'a WorkspaceInfo,
     selection: &'a Selection,
     args: &'a CollectionArgs,
+    #[cfg(windows)]
     scratch_dir: &'a Path,
     coverage_target_dir: &'a Path,
     target: Option<&'a str>,
@@ -691,6 +693,7 @@ impl TemporaryPath {
         &self.path
     }
 
+    #[mutants::skip] // Returning Ok drops `self`, whose Drop performs the same successful removal.
     fn cleanup(mut self) -> Result<(), AppError> {
         let cleanup = fs::remove_file(&self.path).into_app_err(format!("failed to remove temporary file `{}`", self.path.display()));
         self.armed = false;
