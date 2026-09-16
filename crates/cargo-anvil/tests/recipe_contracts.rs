@@ -81,6 +81,14 @@ fn resolver_hook_executes_with_legacy_and_engine_context_signatures() {
             "input:tag|legacy",
         ),
         (
+            "function Anvil-ResolveImage { param([string]$Image, [string]$Engine) \"$Image|$($PSBoundParameters.ContainsKey('Engine'))\" }",
+            "input:tag|False",
+        ),
+        (
+            "function Anvil-ResolveImage { param([string]$Image, [string[]]$EnginePrefix) \"$Image|$($PSBoundParameters.ContainsKey('EnginePrefix'))\" }",
+            "input:tag|False",
+        ),
+        (
             "function Anvil-ResolveImage { param([string]$Image, [string]$Engine, [string[]]$EnginePrefix) \"$Image|$Engine|$($EnginePrefix -join ',')\" }",
             "input:tag|wsl.exe|--exec,docker",
         ),
