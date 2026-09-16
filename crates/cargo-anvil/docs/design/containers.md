@@ -555,7 +555,7 @@ The script may define up to three independent functions. All are optional, and e
 | --- | --- | --- |
 | `Anvil-BuildSecrets` | before a build | `@{ Secrets = @{ <id> = <value> } }` |
 | `Anvil-RunEnv` | before a run | `@{ Env = @{ <NAME> = <value> } }` |
-| `Anvil-ResolveImage $tag` | before a build, when no local image matches | an image reference, or nothing |
+| `Anvil-ResolveImage $tag [-Engine <exe> -EnginePrefix <args>]` | before a build, when no local image matches | an image reference, or nothing |
 
 Both value-returning functions **fail closed on an empty value**, which the engine does not: BuildKit accepts
 `--secret id=t,env=UNSET`, mounts an empty secret and exits 0, so the build would install a reduced tool set, be
@@ -617,7 +617,9 @@ function Anvil-ResolveImage {
         [string[]]$EnginePrefix
     )
     $remote = "myregistry.azurecr.io/anvil:$($tag.Split(':')[-1])"
-    az acr login --name myregistry | Out-Null
+    $token = az acr login --name myregistry --expose-token --query accessToken -o tsv
+    $token | & $Engine @EnginePrefix login myregistry.azurecr.io `
+        --username 00000000-0000-0000-0000-000000000000 --password-stdin
     & $Engine @EnginePrefix pull $remote | Out-Null
     if ($LASTEXITCODE -eq 0) { $remote }
 }
@@ -626,7 +628,8 @@ function Anvil-ResolveImage {
 The image argument is the stable contract. A hook that also declares both
 `Engine` and `EnginePrefix` receives the exact executable and argument prefix
 selected by the driver. Hooks that declare neither parameter continue to
-receive only the image argument.
+receive only the image argument. Declaring only one context parameter supplies
+neither.
 
 Three properties are load-bearing:
 

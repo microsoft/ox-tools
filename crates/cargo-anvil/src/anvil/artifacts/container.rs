@@ -227,8 +227,9 @@ pub fn dockerignore() -> Artifact {
 /// - `Anvil-RunEnv` returns `@{ Env = @{ <NAME> = <value> } }`. Each entry is
 ///   forwarded into the container by name, for the same reason.
 /// - `Anvil-ResolveImage` takes the computed reference and returns one to use
-///   instead, or nothing. It is how a repository fetches a published image
-///   rather than building locally.
+///   instead, or nothing. A hook declaring both `Engine` and `EnginePrefix`
+///   also receives the exact selected engine invocation. Declaring only one
+///   supplies neither, and hooks declaring neither remain compatible.
 ///
 /// The two credential phases are fail-closed: an empty value, a return with no
 /// entries, a throw, or a script that cannot even be loaded stops the run. A
