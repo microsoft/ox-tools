@@ -94,8 +94,10 @@ jobs:
             inputs:
               artifact: ${{ artifact.name }}
               path: ${{ artifact.path }}
+      - template: ../hooks/before-checks.yml
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
+      - template: ../hooks/after-checks.yml
       - ${{ each artifact in parameters.artifacts }}:
           - task: PublishPipelineArtifact@1
             displayName: Publish ${{ artifact.name }}
