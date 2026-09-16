@@ -23,6 +23,13 @@ pub(crate) use diagnostics::{MAX_DIAGNOSTIC_LINES, diagnostic_line_count, failur
 use crate::threshold::ThresholdSource;
 use crate::verdict::{PackageOutcome, Status};
 
+const DELTA_DISPLAY_PRECISION: f64 = 0.1;
+const DELTA_BOUNDARY_TOLERANCE: f64 = 1e-12;
+
+fn is_sub_precision_delta(delta: f64) -> bool {
+    delta.abs() < DELTA_DISPLAY_PRECISION - DELTA_BOUNDARY_TOLERANCE
+}
+
 /// Human-readable text for the `Lines` column.
 fn format_lines(outcome: &PackageOutcome) -> String {
     match outcome.status {
@@ -65,11 +72,13 @@ fn format_delta(outcome: &PackageOutcome) -> String {
     };
     let delta = pct - outcome.threshold.min_lines_percent;
     // A non-zero sub-precision margin retains its direction so the rendered row
-    // cannot obscure why the unrounded comparison passed or failed.
-    if delta > 0.0 && pct < outcome.threshold.min_lines_percent + 0.1 {
+    // cannot obscure why the unrounded comparison passed or failed. Keep values
+    // within floating-point noise of the boundary in the ordinary 0.1pp bucket.
+    let is_sub_precision = is_sub_precision_delta(delta);
+    if delta > 0.0 && is_sub_precision {
         return "+<0.1pp".to_owned();
     }
-    if delta < 0.0 && pct > outcome.threshold.min_lines_percent - 0.1 {
+    if delta < 0.0 && is_sub_precision {
         return "-<0.1pp".to_owned();
     }
 
@@ -228,6 +237,16 @@ mod tests {
         assert_eq!(format_delta(&outcome(1_000, 820, 82.1)), "-0.1pp");
         assert_eq!(format_delta(&outcome(5_000, 4_107, 82.04)), "+0.1pp");
         assert_eq!(format_delta(&outcome(5_000, 4_102, 82.14)), "-0.1pp");
+        assert_eq!(format_delta(&outcome(125, 23, 18.3)), "+0.1pp");
+        assert_eq!(format_delta(&outcome(25, 1, 4.1)), "-0.1pp");
+    }
+
+    #[test]
+    fn sub_precision_delta_excludes_the_tolerance_boundary() {
+        let boundary = DELTA_DISPLAY_PRECISION - DELTA_BOUNDARY_TOLERANCE;
+        assert!(!is_sub_precision_delta(boundary));
+        assert!(!is_sub_precision_delta(-boundary));
+        assert!(is_sub_precision_delta(DELTA_DISPLAY_PRECISION - 2.0 * DELTA_BOUNDARY_TOLERANCE));
     }
 
     #[test]

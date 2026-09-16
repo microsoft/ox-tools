@@ -751,9 +751,10 @@ cannot push an exact decimal tenth downward. A near-boundary failure remains
 visibly below its threshold: `1999 / 2000 = 99.95%` displays as `99.9%` and
 fails a `100.0%` threshold. Non-zero deltas whose raw magnitude is below
 `0.1pp` retain their direction as `+<0.1pp` or `-<0.1pp`; exact `0.1pp`
-boundaries use ordinary one-decimal rendering, and only an exact match displays
-as `0.0pp`. The status and exact covered/coverable line counts remain
-authoritative.
+boundaries, including values within `1e-12pp` of that boundary to account for
+binary floating-point representation, use ordinary one-decimal rendering.
+Only an exact match displays as `0.0pp`. The status and exact
+covered/coverable line counts remain authoritative.
 
 ## 11. Out-of-Scope, Possible Extensions
 
