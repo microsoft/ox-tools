@@ -119,6 +119,11 @@ fn reaper_contains(id: u32) -> bool {
         .any(|child| child.id() == id)
 }
 
+#[cfg(test)]
+fn reaper_running() -> bool {
+    CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running
+}
+
 /// How many concurrent child subtrees can be watched for terminal interruption.
 #[cfg(unix)]
 #[must_use]
@@ -1424,7 +1429,16 @@ impl ProcessTree {
         self.release();
 
         loop {
-            match child.try_wait() {
+            #[cfg(any(test, feature = "fault-injection"))]
+            let observed = if faults::fired(faults::Fault::Observe) {
+                Err(io::Error::other("subtree observation failed as requested by a test"))
+            } else {
+                child.try_wait()
+            };
+            #[cfg(not(any(test, feature = "fault-injection")))]
+            let observed = child.try_wait();
+
+            match observed {
                 Ok(Some(status)) => {
                     if let Some(error) = kill_error.take() {
                         return Err(error);
@@ -1438,7 +1452,14 @@ impl ProcessTree {
                     return Ok(status);
                 }
                 Ok(None) => {}
-                Err(error) => return Err(error),
+                Err(error) => {
+                    let kind = error.kind();
+                    let mut message = error.to_string();
+                    if let Err(reaper) = reap_later(child) {
+                        message = format!("{message}; the detached child reaper could not be started: {reaper}");
+                    }
+                    return Err(io::Error::new(kind, message));
+                }
             }
 
             let Some(remaining) = grace.checked_sub(started.elapsed()) else {
@@ -1737,6 +1758,8 @@ mod tests {
 
     use super::*;
     use crate::testing;
+
+    static REAPER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct PausedReader {
         reads: usize,
@@ -2380,6 +2403,7 @@ mod tests {
 
     #[test]
     fn bounded_termination_does_not_wait_forever_after_a_failed_kill() {
+        let _reaper_test = REAPER_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let work = testing::workdir("gamma-bounded-termination");
         let finished = Utf8Path::from_path(work.path())
             .expect("the temporary path is UTF-8")
@@ -2474,6 +2498,7 @@ mod tests {
 
     #[test]
     fn bounded_termination_times_out_when_a_successful_signal_is_ignored() {
+        let _reaper_test = REAPER_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let work = testing::workdir("gamma-bounded-linger");
         let finished = Utf8Path::from_path(work.path())
             .expect("the temporary path is UTF-8")
@@ -2496,6 +2521,77 @@ mod tests {
         assert!(error.to_string().contains("did not exit within 25 ms"), "{error}");
         thread::sleep(Duration::from_millis(350));
         assert!(finished.exists(), "the deliberately un-signalled leader did not finish");
+    }
+
+    #[test]
+    fn bounded_termination_hands_an_observation_error_to_the_reaper() {
+        let _reaper_test = REAPER_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut command = Command::new(testing::helper_binary_path().as_std_path());
+        let _ = command.arg(testing::directive("sleep:30000"));
+        let prepared = prepare(command, MemoryRequest::default()).expect("containment");
+        let spawned = prepared.spawn().expect("spawn");
+        let mut subtree = ProcessTree::adopt(spawned).expect("adoption");
+        let leader = subtree.child.as_ref().expect("the adopted subtree owns its leader").id();
+        let _failed_observation = faults::arm(faults::Fault::Observe);
+
+        let error = subtree
+            .terminate_bounded(Duration::from_secs(1))
+            .expect_err("the injected observation failure must be reported");
+
+        assert!(error.to_string().contains("observation failed as requested"), "{error}");
+        assert!(subtree.child.is_none(), "the failed observation must transfer leader ownership");
+        wait_for_reaper_to_collect(leader, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn shared_reaper_collects_out_of_order_and_restarts_after_idle() {
+        let _reaper_test = REAPER_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        wait_for_reaper_to_stop(Duration::from_secs(2));
+
+        let long = spawn_reaper_probe(750);
+        let long_id = long.id();
+        let short = spawn_reaper_probe(50);
+        let short_id = short.id();
+        reap_later(long).expect("start the shared reaper");
+        reap_later(short).expect("add a second child without starting another reaper");
+
+        wait_for_reaper_to_collect(short_id, Duration::from_secs(2));
+        assert!(
+            reaper_contains(long_id),
+            "the shorter-lived later child must be collected before the earlier long-lived child"
+        );
+        wait_for_reaper_to_collect(long_id, Duration::from_secs(2));
+        wait_for_reaper_to_stop(Duration::from_secs(2));
+
+        let restarted = spawn_reaper_probe(50);
+        let restarted_id = restarted.id();
+        reap_later(restarted).expect("restart the shared reaper after its queue became empty");
+        assert!(reaper_running(), "the shared reaper did not restart");
+        wait_for_reaper_to_collect(restarted_id, Duration::from_secs(2));
+        wait_for_reaper_to_stop(Duration::from_secs(2));
+    }
+
+    fn spawn_reaper_probe(sleep_millis: u64) -> Child {
+        Command::new(testing::helper_binary_path().as_std_path())
+            .arg(testing::directive(format_args!("sleep:{sleep_millis}")))
+            .spawn()
+            .expect("spawn reaper probe")
+    }
+
+    fn wait_for_reaper_to_collect(id: u32, grace: Duration) {
+        let deadline = Instant::now() + grace;
+        while reaper_contains(id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!reaper_contains(id), "the shared reaper did not collect child {id}");
+    }
+
+    fn wait_for_reaper_to_stop(grace: Duration) {
+        let deadline = Instant::now() + grace;
+        while reaper_running() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!reaper_running(), "the shared reaper did not stop after its queue became empty");
     }
 
     #[test]

@@ -25,7 +25,9 @@ the leader handle moves to the shared detached reaper, the `ProcessTree` no
 longer owns a child that Drop could wait for, and the original cleanup failure
 is retained in the returned error. The reaper polls every retained child
 without blocking on one leader, so later handoffs remain collectable even when
-an earlier leader survives.
+an earlier leader survives. A `try_wait` error also transfers the still-owned
+leader handle before returning the observation error; only a successful
+`Some(status)` proves that no later reaping is required.
 
 ## Platform composition
 

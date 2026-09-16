@@ -74,7 +74,10 @@ therefore covers the complete descendant tree.
   kill is transferred to a shared detached reaper rather than handed to an
   indefinite `wait` or Drop path. The reaper polls all retained leaders so one
   survivor cannot block collection of the others; the containment handles
-  remain owned until the `ProcessTree` itself is dropped.
+  remain owned until the `ProcessTree` itself is dropped. An error while
+  polling the leader follows the same handoff before the observation error is
+  returned, because an observation failure does not prove the child was
+  reaped.
 - Sealed containment uses a boundary that descendants cannot leave. A host that
   offers no sealed boundary at all silently uses best-effort process-group
   containment for an unmetered launch; absence of a warning does not establish

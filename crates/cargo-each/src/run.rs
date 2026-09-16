@@ -154,14 +154,25 @@ fn execute(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: Option<Du
 }
 
 fn execute_sequential(plan: &Plan, keep_going: bool, timeout: Option<Duration>) -> ExitCode {
-    let mut any_failed = false;
-    for invocation in &plan.invocations {
-        emit_label(invocation);
-        let result = if let Some(timeout) = timeout {
+    execute_sequential_with(plan, keep_going, timeout, |invocation, timeout| {
+        if let Some(timeout) = timeout {
             run_streamed_with_timeout(invocation, timeout)
         } else {
             run_streamed(invocation)
-        };
+        }
+    })
+}
+
+fn execute_sequential_with(
+    plan: &Plan,
+    keep_going: bool,
+    timeout: Option<Duration>,
+    mut run_invocation: impl FnMut(&Invocation, Option<Duration>) -> InvocationResult,
+) -> ExitCode {
+    let mut any_failed = false;
+    for invocation in &plan.invocations {
+        emit_label(invocation);
+        let result = run_invocation(invocation, timeout);
         match result {
             InvocationResult::Exited(status) if status.success() => {}
             InvocationResult::Exited(status) => {
@@ -237,11 +248,15 @@ fn execute_parallel(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: 
     if keep_going {
         return Ok(ExitCode::from(1));
     }
-    Ok(match &first_failure.outcome.result {
+    Ok(parallel_failure_exit_code(&first_failure.outcome.result))
+}
+
+fn parallel_failure_exit_code(result: &InvocationResult) -> ExitCode {
+    match result {
         InvocationResult::Exited(status) => ExitCode::from(exit_byte(status.code())),
         InvocationResult::TimedOut(_) => ExitCode::from(1),
         InvocationResult::Infrastructure(_) => ExitCode::from(2),
-    })
+    }
 }
 
 fn failure_stops_launching(keep_going: bool, failed: bool) -> bool {
@@ -392,7 +407,7 @@ fn run_captured_with_spawner(
     let mut stdout_reader = match if capture_fault == Some(CaptureFault::StdoutReader) {
         Err(io::Error::other("injected stdout reader failure"))
     } else {
-        spawn_child_output_reader(stdout, "cargo-each-stdout")
+        spawn_child_stdout_reader(stdout, "cargo-each-stdout")
     } {
         Ok(reader) => reader,
         Err(error) => {
@@ -412,7 +427,7 @@ fn run_captured_with_spawner(
     let mut stderr_reader = match if capture_fault == Some(CaptureFault::StderrReader) {
         Err(io::Error::other("injected stderr reader failure"))
     } else {
-        spawn_child_output_reader(stderr, "cargo-each-stderr")
+        spawn_child_stderr_reader(stderr, "cargo-each-stderr")
     } {
         Ok(reader) => reader,
         Err(error) => {
@@ -850,42 +865,18 @@ fn capture_fault(invocation: &Invocation) -> Option<CaptureFault> {
     }
 }
 
-#[cfg(unix)]
-#[mutants::skip] // Platform adapter; InterruptiblePipe and the shared reader implementation are tested independently.
-fn spawn_child_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
-where
-    R: io::Read + std::os::fd::AsRawFd + Send + 'static,
-{
+fn spawn_child_stdout_reader(stream: ChildStdout, name: &'static str) -> io::Result<OutputReader> {
     spawn_output_reader_inner(
-        InterruptiblePipe::new(stream)?,
+        InterruptiblePipe::stdout(stream)?,
         name,
         OUTPUT_MEMORY_LIMIT,
         Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
     )
 }
 
-#[cfg(windows)]
-#[mutants::skip] // Platform adapter; InterruptiblePipe and the shared reader implementation are tested independently.
-fn spawn_child_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
-where
-    R: io::Read + std::os::windows::io::AsRawHandle + Send + 'static,
-{
+fn spawn_child_stderr_reader(stream: ChildStderr, name: &'static str) -> io::Result<OutputReader> {
     spawn_output_reader_inner(
-        InterruptiblePipe::new(stream)?,
-        name,
-        OUTPUT_MEMORY_LIMIT,
-        Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
-    )
-}
-
-#[cfg(not(any(unix, windows)))]
-#[mutants::skip] // Inactive on mutation runners; the adapter only forwards the platform's explicit unsupported result.
-fn spawn_child_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
-where
-    R: io::Read + Send + 'static,
-{
-    spawn_output_reader_inner(
-        InterruptiblePipe::new(stream)?,
+        InterruptiblePipe::stderr(stream)?,
         name,
         OUTPUT_MEMORY_LIMIT,
         Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
@@ -1353,7 +1344,7 @@ mod tests {
     use std::process::{Command, ExitCode, ExitStatus, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use std::{io, thread};
 
     use super::{
@@ -1361,9 +1352,10 @@ mod tests {
         Plan, ReaderCompletion, RunningWorker, SpillFile, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
         combine_captured_output, display_duration, emit_buffered, emit_buffered_to, execute_parallel, exit_byte, failure_stops_launching,
         finish_ordinary_termination_with, finish_ordinary_wait_with, finish_output_reader, finish_wait_with_cleanup, panic_description,
-        run_captured, run_captured_with_spawner, run_streamed, run_streamed_with_timeout, spawn_if_sealed, spawn_output_reader,
-        spawn_output_reader_with, spawn_tree, spawn_worker, terminate_ordinary_child, terminate_ordinary_with, wait_for_captured_process,
-        wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
+        parallel_failure_exit_code, run_captured, run_captured_with_spawner, run_streamed, run_streamed_with_timeout, spawn_if_sealed,
+        spawn_output_reader, spawn_output_reader_with, spawn_tree, spawn_worker, terminate_ordinary_child, terminate_ordinary_with,
+        wait_for_captured_process, wait_for_tree, wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker,
+        with_cleanup_failure,
     };
 
     const ORDINARY_BOUNDARY: &str = "ordinary process tree";
@@ -1605,6 +1597,16 @@ mod tests {
         ExitStatus::from_raw(0)
     }
 
+    #[cfg(unix)]
+    fn failed_status(code: i32) -> ExitStatus {
+        ExitStatus::from_raw(code << 8)
+    }
+
+    #[cfg(windows)]
+    fn failed_status(code: i32) -> ExitStatus {
+        ExitStatus::from_raw(u32::try_from(code).expect("test exit code is nonnegative"))
+    }
+
     fn infrastructure_message(outcome: BufferedOutcome) -> String {
         result_infrastructure_message(outcome.result)
     }
@@ -1696,6 +1698,64 @@ mod tests {
         assert!(!failure_stops_launching(false, false));
         assert!(!failure_stops_launching(true, true));
         assert!(!failure_stops_launching(true, false));
+    }
+
+    #[test]
+    fn sequential_timeout_policy_distinguishes_fail_fast_from_keep_going() {
+        let plan = Plan {
+            invocations: vec![invocation(&["first"]), invocation(&["second"])],
+        };
+        let mut fail_fast_results = VecDeque::from([
+            InvocationResult::TimedOut(Duration::from_millis(50)),
+            InvocationResult::Exited(successful_status()),
+        ]);
+        let mut fail_fast_calls = 0;
+        let fail_fast = super::execute_sequential_with(&plan, false, Some(Duration::from_millis(50)), |_, timeout| {
+            assert_eq!(timeout, Some(Duration::from_millis(50)));
+            fail_fast_calls += 1;
+            fail_fast_results.pop_front().expect("one result per launched invocation")
+        });
+        assert_eq!(fail_fast, ExitCode::from(1));
+        assert_eq!(fail_fast_calls, 1, "fail-fast must stop after the timeout");
+
+        let mut keep_going_results = VecDeque::from([
+            InvocationResult::TimedOut(Duration::from_millis(50)),
+            InvocationResult::Exited(successful_status()),
+        ]);
+        let mut keep_going_calls = 0;
+        let keep_going = super::execute_sequential_with(&plan, true, None, |_, timeout| {
+            assert_eq!(timeout, None);
+            keep_going_calls += 1;
+            keep_going_results.pop_front().expect("one result per launched invocation")
+        });
+        assert_eq!(keep_going, ExitCode::from(1));
+        assert_eq!(keep_going_calls, 2, "keep-going must launch after a timeout");
+
+        let infrastructure = super::execute_sequential_with(
+            &Plan {
+                invocations: vec![invocation(&["only"])],
+            },
+            false,
+            None,
+            |_, _| InvocationResult::Infrastructure("injected infrastructure failure".to_owned()),
+        );
+        assert_eq!(infrastructure, ExitCode::from(2));
+    }
+
+    #[test]
+    fn parallel_failure_exit_codes_preserve_failure_class() {
+        assert_eq!(
+            parallel_failure_exit_code(&InvocationResult::Exited(failed_status(7))),
+            ExitCode::from(7)
+        );
+        assert_eq!(
+            parallel_failure_exit_code(&InvocationResult::TimedOut(Duration::from_secs(1))),
+            ExitCode::from(1)
+        );
+        assert_eq!(
+            parallel_failure_exit_code(&InvocationResult::Infrastructure("capture failed".to_owned())),
+            ExitCode::from(2)
+        );
     }
 
     #[test]
@@ -2255,6 +2315,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns a child process through the worker")]
     fn worker_spawn_injection_only_rejects_the_named_program() {
         let worker = spawn_worker(0, invocation(&["rustc", "--version"]), None).expect("ordinary worker launch must succeed");
         let outcome = wait_for_worker(&mut vec![worker]).expect("ordinary worker reports its outcome");
@@ -2550,6 +2611,24 @@ mod tests {
         let error = emit_buffered_to(&invocation(&["probe"]), &mut stderr_failure, &mut Vec::new(), &mut FailingWriter)
             .expect_err("stderr destination failure must propagate");
         assert!(error.to_string().contains("injected destination write failure"));
+
+        for (result, diagnostic) in [
+            (InvocationResult::TimedOut(Duration::from_millis(250)), "timed out after 250ms"),
+            (
+                InvocationResult::Infrastructure("capture infrastructure failed".to_owned()),
+                "capture infrastructure failed",
+            ),
+        ] {
+            let mut outcome = BufferedOutcome {
+                stdout: CapturedOutput::empty(),
+                stderr: CapturedOutput::empty(),
+                result,
+            };
+            let mut stderr = Vec::new();
+            emit_buffered_to(&invocation(&["probe"]), &mut outcome, &mut Vec::new(), &mut stderr)
+                .expect("memory destinations remain writable");
+            assert!(String::from_utf8(stderr).expect("diagnostics are UTF-8").contains(diagnostic));
+        }
     }
 
     #[test]
@@ -2675,20 +2754,28 @@ mod tests {
         let mut command = Command::new("rustc");
         let _ = command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
         let mut tree = spawn_tree(command).expect("spawn contained rustc probe");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match tree.observe().expect("observe contained rustc probe") {
-                Some(status) => {
-                    assert!(status.success());
-                    break;
-                }
-                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
-                None => {
-                    let _cleanup = tree.terminate();
-                    panic!("process-control delegation did not observe the exited probe before the deadline");
-                }
-            }
-        }
+        let outcome = wait_for_tree(&mut tree, Duration::from_secs(2));
+        let InvocationResult::Exited(status) = outcome.result else {
+            panic!("the contained rustc probe must exit before its deadline");
+        };
+        assert!(status.success());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns and captures a contained child process")]
+    fn captured_contained_process_delegates_pipes_and_waiting() {
+        let mut outcome = run_captured_with_spawner(&invocation(&["rustc", "--version"]), Some(Duration::from_secs(2)), |command| {
+            spawn_tree(command).map(CapturedProcess::Contained)
+        });
+        let InvocationResult::Exited(status) = outcome.result else {
+            panic!("the captured contained rustc probe must exit");
+        };
+        assert!(status.success());
+        assert!(
+            String::from_utf8(output_bytes(&mut outcome.stdout))
+                .expect("rustc output is UTF-8")
+                .contains("rustc")
+        );
     }
 
     #[test]

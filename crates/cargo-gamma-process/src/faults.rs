@@ -31,6 +31,9 @@ pub enum Fault {
 
     /// The termination request reports success without signalling the leader.
     Linger,
+
+    /// Observing the leader after termination returns an operating-system error.
+    Observe,
 }
 
 /// Arms `fault` on this thread until the returned value is dropped.
@@ -110,6 +113,7 @@ mod tests {
         assert!(!fired(Fault::Terminate));
         assert!(!fired(Fault::Kill));
         assert!(!fired(Fault::Linger));
+        assert!(!fired(Fault::Observe));
     }
 
     #[test]
