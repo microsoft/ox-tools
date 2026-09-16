@@ -94,7 +94,10 @@ fn child_reaper_loop() {
     loop {
         let empty = {
             let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            reaper.children.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_status))));
+            reaper.children.retain_mut(|child| {
+                let id = child.id();
+                retain_reaper_child(id, child.try_wait())
+            });
             if reaper.children.is_empty() {
                 reaper.running = false;
                 true
@@ -106,6 +109,17 @@ fn child_reaper_loop() {
             return;
         }
         thread::sleep(REAPER_PAUSE);
+    }
+}
+
+fn retain_reaper_child(id: u32, observation: io::Result<Option<ExitStatus>>) -> bool {
+    match observation {
+        Ok(None) => true,
+        Ok(Some(_status)) => false,
+        Err(error) => {
+            eprintln!("warning: detached child reaper stopped tracking process {id} after observation failed: {error}");
+            false
+        }
     }
 }
 
@@ -1817,6 +1831,15 @@ mod tests {
                 .is_empty(),
             "capture resumed after detachment"
         );
+    }
+
+    #[test]
+    fn detached_reaper_drops_unobservable_children() {
+        assert!(retain_reaper_child(17, Ok(None)));
+        assert!(!retain_reaper_child(
+            17,
+            Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid child handle")),
+        ));
     }
 
     struct FailingReader;
