@@ -29,6 +29,8 @@ const CONTAINER_JUST: &str = "justfiles/anvil/container.just";
 const DOCKERFILE: &str = ".anvil/container/Dockerfile";
 const DOCKERIGNORE: &str = ".anvil/container/Dockerfile.dockerignore";
 const CONTAINER_HOOKS: &str = ".anvil/container/hooks.ps1";
+const BEFORE_CHECKS: &str = ".pipelines/anvil/hooks/before-checks.yml";
+const AFTER_CHECKS: &str = ".pipelines/anvil/hooks/after-checks.yml";
 
 /// The example downstream catalog: anvil's, customized four ways.
 fn demoforge() -> Catalog {
@@ -92,6 +94,63 @@ fn local(force: bool) -> Cli {
         no_backends: true,
         dry_run: false,
         force,
+    }
+}
+
+#[test]
+fn ado_check_hooks_preserve_customizations_across_catalog_updates() {
+    let tmp = workspace();
+    let args = Cli {
+        backends: vec!["ado".to_owned()],
+        no_backends: false,
+        ..local(false)
+    };
+    run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+    let customized = |path: &str| format!("steps:\n  - script: echo {path}\n    condition: always()\n");
+    for path in [BEFORE_CHECKS, AFTER_CHECKS] {
+        assert!(std::fs::read_to_string(tmp.path().join(path)).unwrap().contains("steps: []"));
+        write(&tmp.path().join(path), &customized(path));
+    }
+    run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+    for path in [BEFORE_CHECKS, AFTER_CHECKS] {
+        assert_eq!(std::fs::read_to_string(tmp.path().join(path)).unwrap(), customized(path));
+        assert!(!tmp.path().join(format!("{path}.anvil-proposed")).exists());
+    }
+
+    let new_before = "steps:\n  - script: echo new prerequisite default\n";
+    let new_after = "steps:\n  - script: echo new finalization default\n";
+    let updated = Catalog::anvil()
+        .into_builder()
+        .version("99.0.0")
+        .replace_artifact(artifacts::ado::before_checks().with_body(new_before))
+        .replace_artifact(artifacts::ado::after_checks().with_body(new_after))
+        .build()
+        .unwrap();
+    run_update(&updated, &args, tmp.path()).unwrap();
+    for (path, proposed) in [(BEFORE_CHECKS, new_before), (AFTER_CHECKS, new_after)] {
+        assert_eq!(std::fs::read_to_string(tmp.path().join(path)).unwrap(), customized(path));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(format!("{path}.anvil-proposed"))).unwrap(),
+            proposed
+        );
+    }
+}
+
+#[test]
+fn ado_check_hooks_are_absent_from_other_backends() {
+    for args in [
+        local(false),
+        Cli {
+            backends: vec!["github".to_owned()],
+            no_backends: false,
+            ..local(false)
+        },
+    ] {
+        let tmp = workspace();
+        run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        for path in [BEFORE_CHECKS, AFTER_CHECKS] {
+            assert!(!tmp.path().join(path).exists(), "{path} is ADO-only");
+        }
     }
 }
 
