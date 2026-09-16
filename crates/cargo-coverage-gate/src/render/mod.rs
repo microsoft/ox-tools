@@ -246,7 +246,9 @@ mod tests {
         let boundary = DELTA_DISPLAY_PRECISION - DELTA_BOUNDARY_TOLERANCE;
         assert!(!is_sub_precision_delta(boundary));
         assert!(!is_sub_precision_delta(-boundary));
-        assert!(is_sub_precision_delta(DELTA_DISPLAY_PRECISION - 2.0 * DELTA_BOUNDARY_TOLERANCE));
+        assert!(is_sub_precision_delta(
+            2.0f64.mul_add(-DELTA_BOUNDARY_TOLERANCE, DELTA_DISPLAY_PRECISION)
+        ));
     }
 
     #[test]
