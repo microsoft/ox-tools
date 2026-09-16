@@ -150,23 +150,6 @@ hand, so every change appears in a PR diff and is reviewed.
 
 `run` additionally accepts:
 
-- `--toolchain <toolchain>` — Rustup toolchain used by metadata, target-policy
-  queries, nextest, cargo-llvm-cov, and LLVM discovery. When omitted,
-  `COVERAGE_GATE_TOOLCHAIN` is used, then the active toolchain. Instrumented
-  collection validates that the selected Cargo release is nightly and that
-  cargo-llvm-cov is at least 0.9.0 before cleaning or building. Version 0.9.0
-  is the first release that accepts `--workspace` on the `report` subcommand
-  used by the collector's default workspace selection.
-  Rustup itself is resolved from an absolute, nonempty `RUSTUP` override or
-  from explicit nonempty `PATH` entries (using `PATHEXT` on Windows). The
-  repository working directory is not searched implicitly; it participates
-  only when an entry such as `.` or its absolute path appears in `PATH`.
-  Cargo and rustc paths returned by `rustup which` must also be absolute;
-  relative output is a configuration error before metadata or collection.
-- `--package-file <path>` — one `name@version` workspace package spec per
-  nonempty UTF-8 line. A present empty file is an explicit empty selection and
-  makes the command a successful no-op. It may be combined with repeatable
-  `--package`; the sets are unioned.
 - `--configuration <all-features|no-default-features>` — feature
   configuration to collect. Repeatable; when omitted, `run` collects both
   configurations and merges them through the existing multi-LCOV evaluator.
@@ -175,29 +158,23 @@ hand, so every change appears in a PR diff and is reviewed.
 - `--coverage-dir <path>` — artifact directory, default
   `target/coverage`. Each configuration gets a distinct LCOV file so CI can
   upload completed outputs even if evaluation later fails.
+- `--no-coverage-target <triple>` — explicitly run plain nextest without
+  coverage collection or gating when the effective target matches. Repeatable;
+  the default list is empty. An explicit `--target` is matched directly.
+  Otherwise the rustc host is resolved only when this list is nonempty.
 
 Both instrumented cargo-llvm-cov/nextest runs and plain-nextest no-gate runs
 always pass `--locked`. Collection therefore measures the dependency graph
 recorded by the committed `Cargo.lock` and fails rather than updating it.
 
 The package selection controls which tests run and which packages are gated.
-It does not remove zero-threshold packages from instrumentation: their tests
-may cover source owned by another selected package.
-
-Two selections deliberately run tests without producing or evaluating
-coverage:
-
-- On native or explicitly selected `aarch64-pc-windows-msvc`,
-  cargo-llvm-cov is unsupported. `run` executes plain nextest for every
-  requested feature configuration, emits an explicit stderr diagnostic, and
-  returns success only when those tests pass.
-- If every selected package has an effective `min-lines-percent = 0`, there is
-  no coverage policy to evaluate. `run` likewise executes plain nextest and
-  reports a successful no-gate result. A mixed selection remains fully
-  instrumented, including its zero-threshold packages, because their tests may
-  cover a selected gated package.
-
-Neither path creates LCOV output or claims that coverage ran.
+Every selected package is instrumented regardless of its effective policy:
+all-zero and mixed selections use the same cargo-llvm-cov path as positive
+thresholds because their tests may cover source owned by another selected
+package. Plain nextest is used only for an explicit
+`--no-coverage-target` match. That path covers every selected package and
+requested feature configuration, emits explicit no-coverage and no-gate
+diagnostics, and creates no LCOV output.
 
 ### 5.3 Policy metadata
 
@@ -415,7 +392,7 @@ Evaluation of externally produced files remains available:
 ```sh
 cargo coverage-gate \
   --lcov target/coverage/lcov-all-features.info \
-  --lcov target/coverage/lcov-no-default-features.info
+  --lcov target/coverage/lcov-no-default.info
 ```
 
 ### 5.6 Collection sequence
@@ -424,15 +401,14 @@ For each requested feature configuration, `run`:
 
 1. allocates a unique per-invocation coverage target beneath
    Cargo's target directory and cleans that isolated state;
-2. invokes cargo-llvm-cov with nextest, `--no-report`, and `--locked` for the
-   selected package set;
+2. invokes cargo-llvm-cov with nextest, `--no-report`, `--no-tests=pass`, and
+   `--locked` for the selected package set;
 3. invokes `cargo llvm-cov report --lcov` for the same package and target
    selection, delegating raw-profile merging, ordinary and nested trybuild
    object discovery, and the complete default filename exclusions to
    cargo-llvm-cov;
-4. keeps that report at an invocation-private path, atomically publishes a
-   copy to the stable consumer path under `--coverage-dir`, and passes the
-   private report to the ordinary evaluator.
+4. writes that report directly to its stable consumer path under
+   `--coverage-dir` and passes the same path to the ordinary evaluator.
 
 The selected package set is resolved to exact `name@version` specs before
 subprocess execution. With no selection options, the collector passes
@@ -440,12 +416,9 @@ subprocess execution. With no selection options, the collector passes
 
 Concurrent invocations never share instrumented build/profile state: each uses
 `target/coverage-gate/run-<pid>-<nonce>/cargo-target` (under Cargo's resolved
-target directory) and removes the whole invocation-private directory on
-success or failure. Stable LCOV files remain shared publication names under
-`--coverage-dir`; their atomic
-replacement is intentionally last-writer-wins. Evaluation reads the retained
-invocation-private reports, not those shared publication paths, so another
-publisher cannot change an in-flight invocation's verdict.
+target directory) and removes the whole private directory on success or
+failure. LCOV consumer paths under `--coverage-dir` are stable and are not
+duplicated for evaluation.
 
 Scratch cleanup has explicit result precedence. An evaluation error remains the
 primary error and carries any cleanup failure as additional context. A rendered
@@ -459,22 +432,16 @@ filename filter. If that launch exceeds the Windows command-line limit,
 `run` extracts cargo-llvm-cov's complete failed `llvm-cov export` argument
 list and retries it through an LLVM response file. This preserves upstream
 object discovery and exclusions instead of maintaining a second,
-necessarily incomplete implementation. The response file lives in the
-invocation-private target and is removed with that target.
+necessarily incomplete implementation. The response file lives in the private
+target and is removed with that target.
 
 Failure in any collection phase is operational failure, not missing coverage,
-and exits `2`. A structurally valid empty LCOV export continues to the evaluator
-so `expect-no-coverable-lines` policies retain their existing meaning. Each
-stable per-configuration LCOV is replaced atomically only after a successful
-new export. Clean, test, report, and publication failures leave any previously
-completed artifact at that path byte-for-byte unchanged.
-
-On Unix, final publication uses same-directory atomic rename replacement. On
-Windows, `std::fs::rename` already replaces an existing file, but the collector
-calls `MoveFileExW` directly to add `MOVEFILE_WRITE_THROUGH` and bounded retries
-for transient sharing violations and access-denied failures.
-`MOVEFILE_REPLACE_EXISTING` retains the replacement behavior. In both cases the
-old final path remains valid until the completed temporary copy replaces it.
+and exits `2`. A successful, structurally valid empty LCOV export continues to
+the evaluator so zero-threshold and `expect-no-coverable-lines` policies retain
+their existing meaning. When LLVM reports the complete paired no-coverage-data
+diagnostic for discovered objects with no coverage maps, `run` writes the same
+valid empty LCOV result and continues. Missing profiles, failed object
+discovery, and every other cargo-llvm-cov failure remain operational errors.
 
 ## 6. Inputs & Outputs in Detail
 
@@ -592,11 +559,14 @@ they can contribute coverage to other packages.
 An empty lcov tracefile is valid input. Each in-scope package is classified
 from its effective policy: zero-threshold and `expect-no-coverable-lines`
 packages pass, while a package with a positive threshold reports `NO DATA`
-and makes the result a configuration error. This lets an orchestrator recover
-from cargo-llvm-cov's "no coverage data found" export outcome by supplying an
-empty tracefile to the gate. It must not remove test binaries from
-instrumentation preemptively; if those tests produce coverage for another
-package, the normal export succeeds and that coverage remains visible.
+and makes the result a configuration error. When every discovered object lacks
+a coverage map, LLVM exits before cargo-llvm-cov can write that valid empty
+report, with the paired diagnostics `no coverage data found` and
+`could not load coverage information`. `run` recognizes only that complete
+case, writes an empty LCOV file, and evaluates it normally. It does not remove
+test binaries from instrumentation preemptively; if those tests produce
+coverage for another package, the normal export succeeds and that coverage
+remains visible.
 
 ### 6.4 Cross-package test attribution
 
@@ -805,7 +775,7 @@ comparison rounds to the same precision before comparing — see
 Evaluation reads `Cargo.toml` files and coverage lcov tracefiles and writes only
 the selected summary file. `run` additionally writes beneath
 `--coverage-dir`, executes cargo-llvm-cov, nextest, Cargo, rustc, and LLVM, and
-deletes only temporary report/response files and coverage state those tools
+deletes only temporary response files and isolated coverage state those tools
 created. cargo-coverage-gate itself performs no network calls or privileged
 operations. Its Cargo and nextest children follow the caller's Cargo
 configuration and may fetch locked dependencies when they are not cached;
@@ -818,18 +788,14 @@ resolve the workspace root. When any package declares target-specific policy,
 evaluation also invokes the executable selected by `RUSTC` (or `rustc` when
 unset). It runs `rustc -vV` when it must discover the host target, then runs
 `rustc --print cfg --target <triple>` for both explicit and discovered targets.
-`run` additionally reads the selected rustc host triple when `--target` is
-omitted so native Windows ARM64 reliably selects its plain-nextest path.
+`run` additionally reads the rustc host triple only when
+`--no-coverage-target` is nonempty and `--target` is omitted.
 
 Child processes receive arguments directly rather than through a shell.
-Package specs read from a file are resolved against workspace metadata before
-execution; they are never interpreted as command fragments.
-When a named Rustup toolchain is selected, rustup is resolved to an absolute
-executable before spawning, and the Cargo and rustc paths returned by
-`rustup which` are rejected unless they are also absolute. This prevents
-Windows executable lookup from searching the repository working directory
-ahead of `PATH` and prevents the metadata and collection working directories
-from resolving the same relative output to different executables.
+Package selectors are resolved against workspace metadata before execution;
+they are never interpreted as command fragments. Collection uses the
+environment's effective Cargo and rustc and inherits `RUSTUP_TOOLCHAIN`,
+`PATH`, and other caller configuration unchanged.
 
 ### 10.3 Monorepo / multi-workspace
 
@@ -872,12 +838,10 @@ Rust with `cargo-llvm-cov ≥ 0.9`**. Four reasons:
   which `run` uses when no explicit package selection is supplied.
 
 `cargo coverage-gate run` enforces these prerequisites before instrumented
-collection. Select a pinned nightly with `--toolchain`, set
-`COVERAGE_GATE_TOOLCHAIN`, or arrange for the active toolchain to be nightly.
-The selected toolchain is applied consistently to Cargo metadata, rustc
-target-policy queries, nextest, and cargo-llvm-cov. Plain-test no-gate paths
-(ARM64 Windows and all-zero-threshold selections) do not require
-cargo-llvm-cov.
+collection. Invoke the command through the intended nightly Cargo/toolchain;
+the collector honors inherited `CARGO`, `RUSTC`, `RUSTUP_TOOLCHAIN`, `PATH`,
+and related configuration. Only an explicit `--no-coverage-target` match takes
+the plain-test no-gate path and avoids the cargo-llvm-cov requirement.
 
 ### 10.5 Float comparison
 

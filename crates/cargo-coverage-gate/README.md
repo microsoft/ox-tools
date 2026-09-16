@@ -118,8 +118,8 @@ declaration order.
 A zero target-specific threshold disables gating on the matching target,
 but does not disable test execution or instrumentation. Those test binaries
 remain instrumented because they may contribute coverage to other packages.
-If cargo-llvm-cov reports that an instrumented run produced no coverage
-data, automation can supply an empty lcov tracefile: zero-threshold and
+When cargo-llvm-cov discovers only objects with no coverage maps, `run`
+writes and evaluates an empty lcov tracefile: zero-threshold and
 `expect-no-coverable-lines` packages pass, while positively gated packages
 report `NO DATA`.
 
@@ -147,24 +147,21 @@ cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [EVALUATION OPTIONS]
 The bare command evaluates existing LCOV files and remains backward
 compatible. `cargo coverage-gate run` collects `all-features` and
 `no-default-features` coverage with cargo-llvm-cov plus nextest by default,
-writes distinct LCOV files under `target/coverage`, and evaluates them
-in-process. Collection can be limited with repeatable `--package` selectors
-and a `--package-file` containing one exact `name@version` per nonempty
-UTF-8 line. Use repeatable `--configuration`, `--coverage-dir`, and
-`--jobs` options to customize collection. Instrumented collection requires
-nightly Rust and cargo-llvm-cov 0.9.0 or newer. Select a pinned nightly with
-`--toolchain`, set `COVERAGE_GATE_TOOLCHAIN`, or use an active nightly
-toolchain. An explicit `RUSTUP` override must be an absolute executable
-path; otherwise rustup is resolved from explicit nonempty `PATH` entries
-without implicitly searching the repository working directory. Cargo and
-rustc paths returned by `rustup which` must also be absolute.
+writes `lcov-all-features.info` and `lcov-no-default.info` under
+`target/coverage`, and evaluates those same files in-process. Collection can
+be limited with repeatable `--package` selectors; no selectors means the
+workspace. Use repeatable `--configuration`, `--coverage-dir`, and `--jobs`
+options to customize collection.
 
-Native `aarch64-pc-windows-msvc` runs and selections containing only
-effective zero thresholds execute plain nextest and return an explicit
-successful no-gate result without creating LCOV. Mixed selections remain
-instrumented, including zero-threshold packages whose tests may cover gated
-packages. `--quiet` suppresses all collection and verdict stdout while
-preserving stderr diagnostics and summary output.
+Instrumented collection requires the invoking Cargo and rustc to be nightly
+and cargo-llvm-cov 0.9.0 or newer. The command honors inherited `CARGO`,
+`RUSTC`, `RUSTUP_TOOLCHAIN`, and `PATH` rather than selecting a toolchain
+itself. Every selected package is instrumented regardless of its coverage
+policy. Callers may repeat `--no-coverage-target <TRIPLE>` to explicitly run
+plain nextest without LCOV or gating on listed targets. The effective target
+is resolved only when that list is nonempty. `--quiet` suppresses all
+collection and verdict stdout while preserving stderr diagnostics and
+summary output.
 
 `--lcov` may be repeated; the tracefiles are merged at the line level
 (per-line counts summed) so multiple feature-config exports
@@ -211,7 +208,7 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbdO403tbsWD4bTSQZ1_vQziwbCuviYDmDmQYbQ6YysrnfuathZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbieDIHvlrnAUb0rA0qcTUnkYbmU5sun27L-sbSFq72InwcrBhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
  [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many.html

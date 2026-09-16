@@ -4,13 +4,12 @@
 //! Portable coverage collection for `cargo coverage-gate run`.
 
 use std::collections::BTreeSet;
-use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{env, fs};
 
 use cargo_metadata::{Metadata, MetadataCommand};
 use ohno::{AppError, EnrichableExt as _, IntoAppError};
@@ -20,8 +19,6 @@ use crate::cli::{CollectionArgs, CoverageGateArgs, FeatureConfiguration};
 
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MIN_CARGO_LLVM_COV_VERSION: &str = "0.9.0";
-const ARM64_WINDOWS_TARGET: &str = "aarch64-pc-windows-msvc";
-const TOOLCHAIN_ENV: &str = "COVERAGE_GATE_TOOLCHAIN";
 
 pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Result<ExitCode, AppError> {
     if !args.lcov.is_empty() {
@@ -29,28 +26,24 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
             "`--lcov` cannot be used with `cargo coverage-gate run`; collected LCOV paths are selected by `--coverage-dir`",
         ));
     }
-    let toolchain = ToolchainSelection::resolve(collection.toolchain.as_deref())?;
-    let workspace = WorkspaceInfo::load(&toolchain)?;
-    let selection = Selection::resolve(&workspace, &args.packages, collection.package_file.as_deref())?;
-    if selection.explicit && selection.members.is_empty() {
-        eprintln!("coverage-gate: package selection is empty; nothing to do");
-        return Ok(ExitCode::SUCCESS);
-    }
+
+    let tools = ToolPrograms::from_env();
+    let workspace = WorkspaceInfo::load(&tools)?;
+    let selection = Selection::resolve(&workspace, &args.packages)?;
 
     let mut collection = collection.clone();
     collection.coverage_dir = absolute_path(&collection.coverage_dir)?;
     let configurations = normalized_configurations(&collection.configurations);
 
-    if is_unsupported_arm64_windows_target(args.target.as_deref(), &toolchain)? {
-        let result =
-            format!("`{ARM64_WINDOWS_TARGET}` does not support cargo-llvm-cov; tests passed without coverage collection or gating");
+    if let Some(target) = configured_no_coverage_target(&collection.no_coverage_targets, args.target.as_deref(), &tools)? {
+        let result = format!("target `{target}` is configured for no coverage; tests passed without coverage collection or gating");
         run_plain_configurations(
             &workspace,
             &selection,
             &collection,
             &configurations,
             args.target.as_deref(),
-            &toolchain,
+            &tools,
             args.quiet,
         )?;
         crate::run::write_no_gate_summary(args, &result)?;
@@ -58,34 +51,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         return Ok(ExitCode::SUCCESS);
     }
 
-    let gated_names = selection.gated_names();
-    let policy_probe = cargo_coverage_gate::evaluate_many_for_target_with_tools(
-        &[],
-        None,
-        &gated_names,
-        args.target.as_deref(),
-        Some(toolchain.cargo()),
-        Some(toolchain.rustc()),
-        toolchain.name.as_deref(),
-    )
-    .into_app_err("failed to resolve coverage policy before collection")?;
-    if !policy_probe.requires_coverage_collection() {
-        let result = "every selected package has `min-lines-percent = 0`; tests passed without coverage collection or gating";
-        run_plain_configurations(
-            &workspace,
-            &selection,
-            &collection,
-            &configurations,
-            args.target.as_deref(),
-            &toolchain,
-            args.quiet,
-        )?;
-        crate::run::write_no_gate_summary(args, result)?;
-        eprintln!("coverage-gate: {result}");
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    validate_instrumentation_toolchain(&workspace, &toolchain)?;
+    validate_instrumentation_tools(&workspace, &tools)?;
     fs::create_dir_all(&collection.coverage_dir).into_app_err(format!(
         "failed to create coverage directory `{}`",
         collection.coverage_dir.display()
@@ -100,23 +66,15 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         scratch_dir: coverage_scratch.path(),
         coverage_target_dir: &coverage_target_dir,
         target: args.target.as_deref(),
-        toolchain: &toolchain,
+        tools: &tools,
         quiet: args.quiet,
     };
     let mut lcov_paths = Vec::with_capacity(configurations.len());
     for configuration in configurations {
-        let lcov_path = collect_configuration(&execution, configuration)?;
-        lcov_paths.push(lcov_path);
+        lcov_paths.push(collect_configuration(&execution, configuration)?);
     }
 
-    let evaluation = crate::run::evaluate_paths_with_toolchain(
-        args,
-        &lcov_paths,
-        &gated_names,
-        Some(toolchain.cargo()),
-        Some(toolchain.rustc()),
-        toolchain.name.as_deref(),
-    );
+    let evaluation = crate::run::evaluate_paths(args, &lcov_paths, &selection.gated_names());
     combine_evaluation_and_cleanup(evaluation, coverage_scratch.cleanup()).complete()
 }
 
@@ -166,33 +124,22 @@ struct CollectionExecution<'a> {
     scratch_dir: &'a Path,
     coverage_target_dir: &'a Path,
     target: Option<&'a str>,
-    toolchain: &'a ToolchainSelection,
+    tools: &'a ToolPrograms,
     quiet: bool,
 }
 
 #[derive(Debug, Clone)]
-struct ToolchainSelection {
-    name: Option<OsString>,
+struct ToolPrograms {
     cargo: OsString,
     rustc: OsString,
 }
 
-impl ToolchainSelection {
-    fn resolve(cli: Option<&str>) -> Result<Self, AppError> {
-        let name = cli.map(OsString::from).or_else(|| env::var_os(TOOLCHAIN_ENV));
-        if name.as_deref().is_some_and(OsStr::is_empty) {
-            return Err(AppError::new(format!("`--toolchain` and `${TOOLCHAIN_ENV}` cannot be empty")));
+impl ToolPrograms {
+    fn from_env() -> Self {
+        Self {
+            cargo: env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")),
+            rustc: env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc")),
         }
-        let (cargo, rustc) = if let Some(name) = &name {
-            let rustup = resolve_rustup()?;
-            (rustup_which(&rustup, name, "cargo")?, rustup_which(&rustup, name, "rustc")?)
-        } else {
-            (
-                env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")),
-                env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc")),
-            )
-        };
-        Ok(Self { name, cargo, rustc })
     }
 
     fn cargo(&self) -> &OsStr {
@@ -202,159 +149,6 @@ impl ToolchainSelection {
     fn rustc(&self) -> &OsStr {
         &self.rustc
     }
-
-    fn apply_to_command(&self, command: &mut Command) {
-        if let Some(name) = &self.name {
-            command.env("RUSTUP_TOOLCHAIN", name).env("RUSTC", &self.rustc);
-        }
-    }
-
-    fn apply_to_metadata(&self, command: &mut MetadataCommand) {
-        if let Some(name) = &self.name {
-            command.env("RUSTUP_TOOLCHAIN", name);
-            command.env("RUSTC", &self.rustc);
-        }
-    }
-}
-
-fn resolve_rustup() -> Result<PathBuf, AppError> {
-    let current_dir = env::current_dir().into_app_err("failed to resolve the current directory while locating rustup")?;
-    resolve_executable(
-        OsStr::new("rustup"),
-        env::var_os("RUSTUP").as_deref(),
-        env::var_os("PATH").as_deref(),
-        env::var_os("PATHEXT").as_deref(),
-        &current_dir,
-        cfg!(windows),
-    )
-}
-
-fn resolve_executable(
-    program: &OsStr,
-    explicit: Option<&OsStr>,
-    path: Option<&OsStr>,
-    path_ext: Option<&OsStr>,
-    current_dir: &Path,
-    windows: bool,
-) -> Result<PathBuf, AppError> {
-    if let Some(explicit) = explicit {
-        if explicit.is_empty() {
-            return Err(AppError::new("`RUSTUP` cannot be empty"));
-        }
-        let explicit = PathBuf::from(explicit);
-        if !explicit.is_absolute() {
-            return Err(AppError::new(format!(
-                "`RUSTUP` must be an absolute executable path, got `{}`",
-                explicit.display()
-            )));
-        }
-        if !is_executable_file(&explicit, windows) {
-            return Err(AppError::new(format!(
-                "`RUSTUP` does not name an executable file: `{}`",
-                explicit.display()
-            )));
-        }
-        return Ok(explicit);
-    }
-
-    let path = path.ok_or_else(|| AppError::new("cannot locate rustup because `PATH` is not set"))?;
-    let names = executable_names(program, path_ext, windows);
-    for directory in env::split_paths(path).filter(|directory| !directory.as_os_str().is_empty()) {
-        let directory = if directory.is_absolute() {
-            directory
-        } else {
-            current_dir.join(directory)
-        };
-        for name in &names {
-            let candidate = directory.join(name);
-            if is_executable_file(&candidate, windows) {
-                return Ok(candidate);
-            }
-        }
-    }
-    Err(AppError::new(format!(
-        "could not resolve `{}` from explicit non-empty `PATH` entries",
-        program.to_string_lossy()
-    )))
-}
-
-fn is_executable_file(path: &Path, windows: bool) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    let mode = {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        Some(metadata.permissions().mode())
-    };
-    #[cfg(not(unix))]
-    let mode = None;
-    platform_permissions_allow(mode, requires_execute_bit(windows, cfg!(unix)))
-}
-
-fn platform_permissions_allow(mode: Option<u32>, require_execute_bit: bool) -> bool {
-    !require_execute_bit || mode.is_some_and(has_executable_mode)
-}
-
-fn has_executable_mode(mode: u32) -> bool {
-    mode & 0o111 != 0
-}
-
-fn requires_execute_bit(windows: bool, unix: bool) -> bool {
-    unix && !windows
-}
-
-fn executable_names(program: &OsStr, path_ext: Option<&OsStr>, windows: bool) -> Vec<OsString> {
-    if !windows || Path::new(program).extension().is_some() {
-        return vec![program.to_os_string()];
-    }
-    let extensions = path_ext
-        .and_then(OsStr::to_str)
-        .filter(|extensions| !extensions.is_empty())
-        .unwrap_or(".COM;.EXE;.BAT;.CMD");
-    extensions
-        .split(';')
-        .filter(|extension| !extension.is_empty())
-        .map(|extension| {
-            let mut name = program.to_os_string();
-            if !extension.starts_with('.') {
-                name.push(".");
-            }
-            name.push(extension);
-            name
-        })
-        .collect()
-}
-
-fn rustup_which(rustup: &Path, toolchain: &OsStr, program: &str) -> Result<OsString, AppError> {
-    let display = format!("{} which --toolchain {} {program}", rustup.display(), toolchain.to_string_lossy());
-    let output = Command::new(rustup)
-        .args(["which", "--toolchain"])
-        .arg(toolchain)
-        .arg(program)
-        .stderr(Stdio::inherit())
-        .output()
-        .into_app_err(format!("failed to execute `{display}`"))?;
-    if !output.status.success() {
-        return Err(AppError::new(format!("`{display}` exited with {}", output.status)));
-    }
-    let path = String::from_utf8(output.stdout).into_app_err(format!("`{display}` output was not UTF-8"))?;
-    let path = path.trim();
-    if path.is_empty() {
-        return Err(AppError::new(format!("`{display}` did not report a program path")));
-    }
-    let path = Path::new(path);
-    if !path.is_absolute() {
-        return Err(AppError::new(format!(
-            "`{display}` reported non-absolute program path `{}`",
-            path.display()
-        )));
-    }
-    Ok(path.as_os_str().to_owned())
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, AppError> {
@@ -377,10 +171,9 @@ struct WorkspaceInfo {
 }
 
 impl WorkspaceInfo {
-    fn load(toolchain: &ToolchainSelection) -> Result<Self, AppError> {
+    fn load(tools: &ToolPrograms) -> Result<Self, AppError> {
         let mut command = MetadataCommand::new();
-        command.no_deps().cargo_path(toolchain.cargo());
-        toolchain.apply_to_metadata(&mut command);
+        command.no_deps().cargo_path(tools.cargo());
         let metadata = command.exec().into_app_err("failed to load cargo workspace metadata")?;
         Ok(Self::from_metadata(&metadata))
     }
@@ -422,12 +215,10 @@ struct Selection {
 }
 
 impl Selection {
-    fn resolve(workspace: &WorkspaceInfo, package_selectors: &[String], package_file: Option<&Path>) -> Result<Self, AppError> {
-        let file_specs = package_file.map(read_package_file).transpose()?.unwrap_or_default();
-        let explicit = package_file.is_some() || !package_selectors.is_empty();
-        if !explicit {
+    fn resolve(workspace: &WorkspaceInfo, package_selectors: &[String]) -> Result<Self, AppError> {
+        if package_selectors.is_empty() {
             return Ok(Self {
-                explicit,
+                explicit: false,
                 members: workspace.members.clone(),
             });
         }
@@ -447,17 +238,9 @@ impl Selection {
             }
             selected.extend(matches);
         }
-        for spec in file_specs {
-            let Some(member) = workspace.members.iter().find(|member| member.spec() == spec) else {
-                return Err(AppError::new(format!(
-                    "package file entry `{spec}` did not match an exact `name@version` workspace member"
-                )));
-            };
-            selected.insert(member.clone());
-        }
 
         Ok(Self {
-            explicit,
+            explicit: true,
             members: selected.into_iter().collect(),
         })
     }
@@ -469,16 +252,6 @@ impl Selection {
             Vec::new()
         }
     }
-}
-
-fn read_package_file(path: &Path) -> Result<Vec<String>, AppError> {
-    let contents = fs::read_to_string(path).into_app_err(format!("failed to read package file `{}` as UTF-8", path.display()))?;
-    Ok(contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect())
 }
 
 fn selector_matches(selector: &str, member: &WorkspaceMember) -> bool {
@@ -529,48 +302,59 @@ impl FeatureConfiguration {
     fn artifact_name(self) -> &'static str {
         match self {
             Self::AllFeatures => "all-features",
-            Self::NoDefaultFeatures => "no-default-features",
+            Self::NoDefaultFeatures => "no-default",
         }
     }
 }
 
-fn is_unsupported_arm64_windows_target(target: Option<&str>, toolchain: &ToolchainSelection) -> Result<bool, AppError> {
-    if let Some(target) = target {
-        return Ok(target == ARM64_WINDOWS_TARGET);
-    }
-
-    let mut rustc_version = Command::new(toolchain.rustc());
-    rustc_version.arg("-vV");
-    toolchain.apply_to_command(&mut rustc_version);
-    let rustc_version = read_stdout(&mut rustc_version, "rustc host-target discovery")?;
-    let host = rustc_host(&rustc_version).ok_or_else(|| AppError::new("`rustc -vV` did not report a host target"))?;
-    Ok(host == ARM64_WINDOWS_TARGET)
+fn configured_no_coverage_target(configured: &[String], target: Option<&str>, tools: &ToolPrograms) -> Result<Option<String>, AppError> {
+    configured_no_coverage_target_with(configured, target, || resolve_rustc_host(tools))
 }
 
-fn validate_instrumentation_toolchain(workspace: &WorkspaceInfo, toolchain: &ToolchainSelection) -> Result<(), AppError> {
-    let mut cargo_version = cargo_command(workspace, toolchain);
+fn configured_no_coverage_target_with(
+    configured: &[String],
+    target: Option<&str>,
+    resolve_host: impl FnOnce() -> Result<String, AppError>,
+) -> Result<Option<String>, AppError> {
+    if configured.is_empty() {
+        return Ok(None);
+    }
+    let effective = target.map(str::to_owned).map_or_else(resolve_host, Ok)?;
+    Ok(configured.iter().any(|candidate| candidate == &effective).then_some(effective))
+}
+
+fn resolve_rustc_host(tools: &ToolPrograms) -> Result<String, AppError> {
+    let mut rustc_version = Command::new(tools.rustc());
+    rustc_version.arg("-vV");
+    let rustc_version = read_stdout(&mut rustc_version, "rustc host-target discovery")?;
+    rustc_host(&rustc_version)
+        .map(str::to_owned)
+        .ok_or_else(|| AppError::new("`rustc -vV` did not report a host target"))
+}
+
+fn validate_instrumentation_tools(workspace: &WorkspaceInfo, tools: &ToolPrograms) -> Result<(), AppError> {
+    let mut cargo_version = cargo_command(workspace, tools);
     cargo_version.args(["--version", "--verbose"]);
     let cargo_version = read_stdout(&mut cargo_version, "cargo toolchain validation")?;
     let cargo_release =
         cargo_release(&cargo_version).ok_or_else(|| AppError::new("`cargo --version --verbose` did not report a release"))?;
     if !cargo_release.contains("-nightly") {
         return Err(AppError::new(format!(
-            "`cargo coverage-gate run` requires a nightly Rust toolchain for `cfg(coverage_nightly)`, but selected Cargo release `{cargo_release}`; use `--toolchain <nightly>` or `${TOOLCHAIN_ENV}`"
+            "`cargo coverage-gate run` requires nightly Cargo for `cfg(coverage_nightly)`, but the effective Cargo release is `{cargo_release}`"
         )));
     }
 
-    let mut rustc_version = Command::new(toolchain.rustc());
-    rustc_version.arg("-vV");
-    toolchain.apply_to_command(&mut rustc_version);
+    let mut rustc_version = Command::new(tools.rustc());
+    rustc_version.arg("-vV").current_dir(&workspace.root);
     let rustc_version = read_stdout(&mut rustc_version, "rustc toolchain validation")?;
     let rustc_release = rustc_release(&rustc_version).ok_or_else(|| AppError::new("`rustc -vV` did not report a release"))?;
     if !rustc_release.contains("-nightly") {
         return Err(AppError::new(format!(
-            "`cargo coverage-gate run` requires nightly rustc for `cfg(coverage_nightly)`, but selected rustc release `{rustc_release}`; use `--toolchain <nightly>` or `${TOOLCHAIN_ENV}`"
+            "`cargo coverage-gate run` requires nightly rustc for `cfg(coverage_nightly)`, but the effective rustc release is `{rustc_release}`"
         )));
     }
 
-    let mut llvm_cov_version = cargo_command(workspace, toolchain);
+    let mut llvm_cov_version = cargo_command(workspace, tools);
     llvm_cov_version.args(["llvm-cov", "--version"]);
     let llvm_cov_version = read_stdout(&mut llvm_cov_version, "cargo-llvm-cov version validation")?;
     let version = cargo_llvm_cov_version(&llvm_cov_version)?;
@@ -578,7 +362,7 @@ fn validate_instrumentation_toolchain(workspace: &WorkspaceInfo, toolchain: &Too
         Version::parse(MIN_CARGO_LLVM_COV_VERSION).expect("MIN_CARGO_LLVM_COV_VERSION is a compile-time semantic version literal");
     if !cargo_llvm_cov_is_supported(&version, &minimum) {
         return Err(AppError::new(format!(
-            "`cargo coverage-gate run` requires cargo-llvm-cov >= {minimum}, but selected {version}"
+            "`cargo coverage-gate run` requires cargo-llvm-cov >= {minimum}, but the effective version is {version}"
         )));
     }
     Ok(())
@@ -630,11 +414,11 @@ fn run_plain_configurations(
     args: &CollectionArgs,
     configurations: &[FeatureConfiguration],
     target: Option<&str>,
-    toolchain: &ToolchainSelection,
+    tools: &ToolPrograms,
     quiet: bool,
 ) -> Result<(), AppError> {
     for &configuration in configurations {
-        let mut command = cargo_command(workspace, toolchain);
+        let mut command = cargo_command(workspace, tools);
         command.args(["nextest", "run"]);
         append_package_selection(&mut command, selection);
         append_nextest_options(&mut command, args, configuration, target);
@@ -648,41 +432,33 @@ fn run_plain_configurations(
 }
 
 fn collect_configuration(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<PathBuf, AppError> {
-    let final_lcov = execution
+    let lcov_path = execution
         .args
         .coverage_dir
         .join(format!("lcov-{}.info", configuration.artifact_name()));
-    let evaluation_lcov = execution.scratch_dir.join(format!("lcov-{}.info", configuration.artifact_name()));
 
-    run_clean(
-        execution.workspace,
-        execution.coverage_target_dir,
-        execution.toolchain,
-        execution.quiet,
-    )?;
+    run_clean(execution.workspace, execution.coverage_target_dir, execution.tools, execution.quiet)?;
     run_nextest(execution, configuration)?;
-    run_report(execution, configuration, &evaluation_lcov)?;
-    publish_lcov(&evaluation_lcov, &final_lcov, &execution.args.coverage_dir, configuration)?;
-    Ok(evaluation_lcov)
+    run_report(execution, configuration, &lcov_path)?;
+    Ok(lcov_path)
 }
 
-fn cargo_command(workspace: &WorkspaceInfo, toolchain: &ToolchainSelection) -> Command {
-    let mut command = Command::new(toolchain.cargo());
+fn cargo_command(workspace: &WorkspaceInfo, tools: &ToolPrograms) -> Command {
+    let mut command = Command::new(tools.cargo());
     command.current_dir(&workspace.root);
-    toolchain.apply_to_command(&mut command);
     command
 }
 
-fn coverage_command(workspace: &WorkspaceInfo, coverage_target_dir: &Path, toolchain: &ToolchainSelection) -> Command {
-    let mut command = cargo_command(workspace, toolchain);
+fn coverage_command(workspace: &WorkspaceInfo, coverage_target_dir: &Path, tools: &ToolPrograms) -> Command {
+    let mut command = cargo_command(workspace, tools);
     command
         .env("CARGO_LLVM_COV_TARGET_DIR", coverage_target_dir)
         .env("CARGO_LLVM_COV_BUILD_DIR", coverage_target_dir);
     command
 }
 
-fn run_clean(workspace: &WorkspaceInfo, coverage_target_dir: &Path, toolchain: &ToolchainSelection, quiet: bool) -> Result<(), AppError> {
-    let mut command = coverage_command(workspace, coverage_target_dir, toolchain);
+fn run_clean(workspace: &WorkspaceInfo, coverage_target_dir: &Path, tools: &ToolPrograms, quiet: bool) -> Result<(), AppError> {
+    let mut command = coverage_command(workspace, coverage_target_dir, tools);
     command.args(["llvm-cov", "clean", "--workspace"]);
     if quiet {
         command.stdout(Stdio::null());
@@ -691,10 +467,11 @@ fn run_clean(workspace: &WorkspaceInfo, coverage_target_dir: &Path, toolchain: &
 }
 
 fn run_nextest(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<(), AppError> {
-    let mut command = coverage_command(execution.workspace, execution.coverage_target_dir, execution.toolchain);
+    let mut command = coverage_command(execution.workspace, execution.coverage_target_dir, execution.tools);
     command.args(["llvm-cov", "nextest", "--no-report"]);
     append_package_selection(&mut command, execution.selection);
     append_nextest_options(&mut command, execution.args, configuration, execution.target);
+    command.arg("--no-tests=pass");
     if execution.quiet {
         command.stdout(Stdio::null());
     }
@@ -732,11 +509,11 @@ fn prefixed_path_argument(prefix: &str, path: &Path) -> OsString {
     argument
 }
 
-fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, evaluation_lcov: &Path) -> Result<(), AppError> {
+fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, lcov_path: &Path) -> Result<(), AppError> {
     #[cfg(not(windows))]
     let _ = configuration;
-    let mut command = coverage_command(execution.workspace, execution.coverage_target_dir, execution.toolchain);
-    command.args(["llvm-cov", "report", "--lcov", "--output-path"]).arg(evaluation_lcov);
+    let mut command = coverage_command(execution.workspace, execution.coverage_target_dir, execution.tools);
+    command.args(["llvm-cov", "report", "--lcov", "--output-path"]).arg(lcov_path);
     append_package_selection(&mut command, execution.selection);
     if let Some(target) = execution.target {
         command.arg("--target").arg(target);
@@ -748,32 +525,50 @@ fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfigu
         .stderr(Stdio::piped())
         .output()
         .into_app_err(format!("failed to execute `{display}`"))?;
-    forward_output(&output, execution.quiet)?;
     if output.status.success() {
+        forward_output(&output, execution.quiet)?;
         return Ok(());
     }
 
     #[cfg(windows)]
     if let Some(arguments) = command_too_long_response_arguments(&String::from_utf8_lossy(&output.stderr)) {
+        forward_output(&output, execution.quiet)?;
         eprintln!("coverage-gate: cargo-llvm-cov could not launch llvm-cov directly; retrying its export through an LLVM response file");
-        return run_windows_report_fallback(execution, configuration, evaluation_lcov, arguments);
+        return run_windows_report_fallback(execution, configuration, lcov_path, arguments);
     }
 
+    if is_no_coverage_data(&String::from_utf8_lossy(&output.stderr)) {
+        forward_stdout(&output, execution.quiet)?;
+        fs::write(lcov_path, []).into_app_err(format!("failed to write empty LCOV file `{}`", lcov_path.display()))?;
+        eprintln!("coverage-gate: cargo-llvm-cov found no coverable objects; evaluating an empty LCOV report");
+        return Ok(());
+    }
+
+    forward_output(&output, execution.quiet)?;
     Err(AppError::new(format!(
         "cargo llvm-cov report failed: `{display}` exited with {}",
         output.status
     )))
 }
 
-fn forward_output(output: &Output, quiet: bool) -> Result<(), AppError> {
+fn forward_stdout(output: &Output, quiet: bool) -> Result<(), AppError> {
     if !quiet {
         io::stdout()
             .write_all(&output.stdout)
             .into_app_err("failed to forward cargo-llvm-cov stdout")?;
     }
+    Ok(())
+}
+
+fn forward_output(output: &Output, quiet: bool) -> Result<(), AppError> {
+    forward_stdout(output, quiet)?;
     io::stderr()
         .write_all(&output.stderr)
         .into_app_err("failed to forward cargo-llvm-cov stderr")
+}
+
+fn is_no_coverage_data(stderr: &str) -> bool {
+    stderr.contains("no coverage data found") && stderr.contains("could not load coverage information")
 }
 
 #[cfg(any(windows, test))]
@@ -792,7 +587,7 @@ fn command_too_long_response_arguments(stderr: &str) -> Option<&str> {
 
 #[cfg(windows)]
 // Linux mutation jobs cannot execute this Windows response-file boundary. The
-// Windows integration test covers the fallback command and published LCOV.
+// Windows integration test covers the fallback command and stable LCOV output.
 #[mutants::skip]
 // The spawned-binary integration test covers this fallback, but the outer
 // coverage report cannot include that child binary's coverage object.
@@ -800,24 +595,19 @@ fn command_too_long_response_arguments(stderr: &str) -> Option<&str> {
 fn run_windows_report_fallback(
     execution: &CollectionExecution<'_>,
     configuration: FeatureConfiguration,
-    evaluation_lcov: &Path,
+    lcov_path: &Path,
     arguments: &str,
 ) -> Result<(), AppError> {
-    let response = TemporaryPath::write_atomic(
+    let response = TemporaryPath::write(
         execution.scratch_dir,
         &format!("{}-objects.rsp", configuration.artifact_name()),
         arguments.as_bytes(),
     )?;
-    remove_if_present(evaluation_lcov).into_app_err(format!(
-        "failed to remove partial LCOV file `{}` before retry",
-        evaluation_lcov.display()
+    let output = fs::File::create(lcov_path).into_app_err(format!(
+        "failed to create LCOV file `{}` for response-file retry",
+        lcov_path.display()
     ))?;
-    let output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(evaluation_lcov)
-        .into_app_err(format!("failed to create private LCOV file `{}`", evaluation_lcov.display()))?;
-    let llvm_cov = discover_llvm_cov(execution.toolchain)?;
+    let llvm_cov = discover_llvm_cov(execution.tools)?;
     let mut command = Command::new(llvm_cov);
     command
         .current_dir(&execution.workspace.root)
@@ -834,124 +624,18 @@ fn run_windows_report_fallback(
 #[mutants::skip]
 // Exercised through the spawned-binary fallback integration test.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn discover_llvm_cov(toolchain: &ToolchainSelection) -> Result<PathBuf, AppError> {
+fn discover_llvm_cov(tools: &ToolPrograms) -> Result<PathBuf, AppError> {
     if let Some(cov) = env::var_os("LLVM_COV") {
         return Ok(PathBuf::from(cov));
     }
 
-    let mut command = Command::new(toolchain.rustc());
+    let mut command = Command::new(tools.rustc());
     command.args(["--print", "target-libdir"]);
-    toolchain.apply_to_command(&mut command);
     let target_libdir = read_stdout(&mut command, "rustc LLVM-tool discovery")?;
     let rustlib = Path::new(target_libdir.trim())
         .parent()
         .ok_or_else(|| AppError::new("rustc target-libdir output had no parent directory"))?;
     Ok(rustlib.join("bin").join(format!("llvm-cov{}", env::consts::EXE_SUFFIX)))
-}
-
-fn publish_lcov(private_lcov: &Path, final_lcov: &Path, coverage_dir: &Path, configuration: FeatureConfiguration) -> Result<(), AppError> {
-    publish_lcov_with(private_lcov, final_lcov, coverage_dir, configuration, io::copy)
-}
-
-fn publish_lcov_with(
-    private_lcov: &Path,
-    final_lcov: &Path,
-    coverage_dir: &Path,
-    configuration: FeatureConfiguration,
-    copy: impl FnOnce(&mut File, &mut File) -> io::Result<u64>,
-) -> Result<(), AppError> {
-    let temporary_lcov = TemporaryPath::new(coverage_dir, &format!("{}.lcov", configuration.artifact_name()));
-    let mut source = File::open(private_lcov).into_app_err(format!("failed to open private LCOV file `{}`", private_lcov.display()))?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temporary_lcov.path())
-        .into_app_err(format!(
-            "failed to create temporary LCOV file `{}`",
-            temporary_lcov.path().display()
-        ))?;
-    copy(&mut source, &mut output).into_app_err(format!(
-        "failed to stage private LCOV file `{}` for publication",
-        private_lcov.display()
-    ))?;
-    output
-        .sync_all()
-        .into_app_err(format!("failed to flush temporary LCOV file `{}`", temporary_lcov.path().display()))?;
-    drop(output);
-
-    replace_file_atomically(temporary_lcov.path(), final_lcov)
-        .into_app_err(format!("failed to publish LCOV file `{}`", final_lcov.display()))?;
-    temporary_lcov.disarm();
-    Ok(())
-}
-
-#[cfg(not(windows))]
-// This branch is not compiled by Windows-host mutation runs. Its behavior is
-// covered by the same replacement tests on Unix CI.
-#[mutants::skip]
-fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(source, destination)
-}
-
-#[cfg(windows)]
-// Unix mutation jobs cannot execute this Windows FFI branch. Windows unit and
-// integration tests cover replacement success, failure, and byte preservation.
-#[mutants::skip]
-fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::iter;
-    use std::os::windows::ffi::OsStrExt as _;
-
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-
-    let source = source.as_os_str().encode_wide().chain(iter::once(0)).collect::<Vec<_>>();
-    let destination = destination.as_os_str().encode_wide().chain(iter::once(0)).collect::<Vec<_>>();
-    retry_windows_replace(
-        || {
-            // SAFETY: both pointers reference live, NUL-terminated UTF-16
-            // buffers for the duration of each call.
-            let replaced = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), windows_replace_flags()) };
-            if replaced != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
-        },
-        wait_before_windows_replace_retry,
-    )
-}
-
-#[cfg(windows)]
-// Sleeping is a trivial system delegation whose duration is intentionally not
-// asserted; retry count and error selection are covered through injected waits.
-#[mutants::skip]
-// A real sharing violation is nondeterministic; retry scheduling is covered
-// through the injected wait callback in retry_windows_replace.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn wait_before_windows_replace_retry() {
-    std::thread::sleep(std::time::Duration::from_millis(10));
-}
-
-#[cfg(any(windows, test))]
-fn retry_windows_replace(mut replace: impl FnMut() -> io::Result<()>, mut wait: impl FnMut()) -> io::Result<()> {
-    for _ in 0..99 {
-        match replace() {
-            Ok(()) => return Ok(()),
-            Err(error) if is_retryable_windows_replace_error(&error) => wait(),
-            Err(error) => return Err(error),
-        }
-    }
-    replace()
-}
-
-#[cfg(windows)]
-// MOVEFILE_REPLACE_EXISTING and MOVEFILE_WRITE_THROUGH are disjoint bits, so
-// cargo-mutants' `|` to `^` mutation is behaviorally equivalent.
-#[mutants::skip]
-fn windows_replace_flags() -> u32 {
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-
-    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-}
-
-#[cfg(any(windows, test))]
-fn is_retryable_windows_replace_error(error: &io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(5 | 32))
 }
 
 fn run_status(command: &mut Command, description: &str) -> Result<(), AppError> {
@@ -972,12 +656,55 @@ fn command_display(command: &Command) -> String {
         .join(" ")
 }
 
-// Default keeps cargo-mutants' whole-function replacement for write_atomic
-// viable; the direct publication test must then reject the inert guard.
-#[derive(Debug, Default)]
+#[cfg(any(windows, test))]
+#[derive(Debug)]
 struct TemporaryPath {
     path: PathBuf,
     armed: bool,
+}
+
+#[cfg(any(windows, test))]
+impl TemporaryPath {
+    fn new(directory: &Path, label: &str) -> Self {
+        let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        Self {
+            path: directory.join(format!(".coverage-gate-{}-{sequence}-{label}", std::process::id())),
+            armed: true,
+        }
+    }
+
+    fn write(directory: &Path, label: &str, contents: &[u8]) -> Result<Self, AppError> {
+        let temporary = Self::new(directory, label);
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temporary.path())
+            .into_app_err(format!("failed to create temporary file `{}`", temporary.path().display()))?;
+        file.write_all(contents)
+            .into_app_err(format!("failed to write temporary file `{}`", temporary.path().display()))?;
+        file.sync_all()
+            .into_app_err(format!("failed to flush temporary file `{}`", temporary.path().display()))?;
+        Ok(temporary)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn cleanup(mut self) -> Result<(), AppError> {
+        let cleanup = fs::remove_file(&self.path).into_app_err(format!("failed to remove temporary file `{}`", self.path.display()));
+        self.armed = false;
+        cleanup
+    }
+}
+
+#[cfg(any(windows, test))]
+impl Drop for TemporaryPath {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1038,78 +765,6 @@ impl Drop for TemporaryDirectory {
     }
 }
 
-impl TemporaryPath {
-    fn new(directory: &Path, label: &str) -> Self {
-        let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        Self {
-            path: directory.join(format!(".coverage-gate-{}-{sequence}-{label}", std::process::id())),
-            armed: true,
-        }
-    }
-
-    #[cfg(any(windows, test))]
-    // Linux builds include this helper only so its atomic publication behavior
-    // can be unit-tested; production use is the Windows response-file fallback.
-    #[cfg_attr(all(coverage_nightly, not(windows)), coverage(off))]
-    fn write_atomic(directory: &Path, label: &str, contents: &[u8]) -> Result<Self, AppError> {
-        let published = Self::new(directory, label);
-        let staging = Self::new(directory, &format!("{label}.staging"));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(staging.path())
-            .into_app_err(format!("failed to create temporary file `{}`", staging.path().display()))?;
-        file.write_all(contents)
-            .into_app_err(format!("failed to write temporary file `{}`", staging.path().display()))?;
-        file.sync_all()
-            .into_app_err(format!("failed to flush temporary file `{}`", staging.path().display()))?;
-        drop(file);
-        atomic_rename(&staging, &published)?;
-        staging.disarm();
-        Ok(published)
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn disarm(mut self) {
-        self.armed = false;
-    }
-
-    #[cfg(any(windows, test))]
-    fn cleanup(mut self) -> Result<(), AppError> {
-        remove_if_present(&self.path).into_app_err(format!("failed to remove temporary file `{}`", self.path.display()))?;
-        self.armed = false;
-        Ok(())
-    }
-}
-
-#[cfg(any(windows, test))]
-fn atomic_rename(staging: &TemporaryPath, published: &TemporaryPath) -> Result<(), AppError> {
-    fs::rename(staging.path(), published.path()).into_app_err(format!(
-        "failed to atomically publish temporary file `{}`",
-        published.path().display()
-    ))
-}
-
-impl Drop for TemporaryPath {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-#[cfg(any(windows, test))]
-fn remove_if_present(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
 fn remove_dir_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
@@ -1121,6 +776,8 @@ fn remove_dir_if_present(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::cell::Cell;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -1193,19 +850,38 @@ mod tests {
             normalized_configurations(&[]),
             [FeatureConfiguration::AllFeatures, FeatureConfiguration::NoDefaultFeatures]
         );
+        assert_eq!(FeatureConfiguration::NoDefaultFeatures.artifact_name(), "no-default");
     }
 
     #[test]
-    fn arm64_windows_detection_honors_explicit_target_without_invoking_rustc() {
-        let toolchain = ToolchainSelection {
-            name: None,
-            cargo: OsString::from("unused-cargo"),
-            rustc: OsString::from("unused-rustc"),
-        };
-        assert!(is_unsupported_arm64_windows_target(Some(ARM64_WINDOWS_TARGET), &toolchain).expect("explicit target needs no discovery"));
+    fn no_coverage_target_matching_is_lazy_and_exact() {
         assert!(
-            !is_unsupported_arm64_windows_target(Some("x86_64-pc-windows-msvc"), &toolchain,).expect("explicit target needs no discovery")
+            configured_no_coverage_target_with(&[], None, || panic!("empty configuration must not resolve a target"))
+                .expect("empty configuration")
+                .is_none()
         );
+
+        let configured = vec!["aarch64-pc-windows-msvc".to_owned()];
+        let matched = configured_no_coverage_target_with(&configured, Some("aarch64-pc-windows-msvc"), || {
+            panic!("an explicit target must not resolve the host")
+        })
+        .expect("explicit match");
+        assert_eq!(matched.as_deref(), Some("aarch64-pc-windows-msvc"));
+
+        let unmatched = configured_no_coverage_target_with(&configured, Some("x86_64-pc-windows-msvc"), || {
+            panic!("an explicit target must not resolve the host")
+        })
+        .expect("explicit mismatch");
+        assert!(unmatched.is_none());
+
+        let calls = Cell::new(0);
+        let host_match = configured_no_coverage_target_with(&configured, None, || {
+            calls.set(calls.get() + 1);
+            Ok("aarch64-pc-windows-msvc".to_owned())
+        })
+        .expect("host match");
+        assert_eq!(host_match.as_deref(), Some("aarch64-pc-windows-msvc"));
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]
@@ -1221,7 +897,7 @@ mod tests {
         );
         assert_eq!(
             rustc_host("rustc 1.97.0-nightly\nhost: aarch64-pc-windows-msvc\n"),
-            Some(ARM64_WINDOWS_TARGET)
+            Some("aarch64-pc-windows-msvc")
         );
         assert_eq!(
             cargo_llvm_cov_version("cargo-llvm-cov 0.9.0\n").expect("valid version"),
@@ -1232,194 +908,6 @@ mod tests {
         assert!(cargo_llvm_cov_is_supported(&Version::new(0, 9, 0), &minimum));
         cargo_llvm_cov_version("cargo llvm-cov 0.9.0\n").expect_err("missing package version prefix must fail");
         cargo_llvm_cov_version("cargo-llvm-cov development\n").expect_err("non-semver version must fail");
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary executable files, which Miri isolation does not support")]
-    fn executable_resolution_ignores_planted_cwd_files_unless_cwd_is_in_path() {
-        let tmp = tempdir().expect("tempdir");
-        let current_dir = tmp.path().join("project");
-        let trusted = tmp.path().join("trusted");
-        fs::create_dir_all(&current_dir).expect("create project");
-        fs::create_dir_all(&trusted).expect("create trusted directory");
-        let planted = current_dir.join("rustup.EXE");
-        let trusted_rustup = trusted.join("rustup.EXE");
-        fs::write(&planted, b"planted").expect("write planted rustup");
-        fs::write(&trusted_rustup, b"trusted").expect("write trusted rustup");
-
-        let path = env::join_paths([trusted.clone()]).expect("trusted PATH");
-        assert_eq!(
-            resolve_executable(
-                OsStr::new("rustup"),
-                None,
-                Some(&path),
-                Some(OsStr::new(".EXE")),
-                &current_dir,
-                true
-            )
-            .expect("resolve trusted rustup"),
-            trusted_rustup
-        );
-
-        let path_with_empty = env::join_paths([PathBuf::new(), trusted.clone()]).expect("PATH with an empty entry");
-        assert_eq!(
-            resolve_executable(
-                OsStr::new("rustup"),
-                None,
-                Some(&path_with_empty),
-                Some(OsStr::new(".EXE")),
-                &current_dir,
-                true,
-            )
-            .expect("empty PATH entry must be ignored"),
-            trusted_rustup
-        );
-
-        let path_with_explicit_cwd = env::join_paths([PathBuf::from("."), trusted]).expect("PATH with explicit current directory");
-        assert_eq!(
-            resolve_executable(
-                OsStr::new("rustup"),
-                None,
-                Some(&path_with_explicit_cwd),
-                Some(OsStr::new(".EXE")),
-                &current_dir,
-                true,
-            )
-            .expect("explicit current directory must be honored"),
-            planted
-        );
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary executable files, which Miri isolation does not support")]
-    fn windows_executable_resolution_honors_pathext() {
-        let tmp = tempdir().expect("tempdir");
-        let bin = tmp.path().join("bin");
-        fs::create_dir(&bin).expect("create bin");
-        let rustup = bin.join("rustup.RUSTUPTEST");
-        fs::write(&rustup, b"rustup").expect("write PATHEXT rustup");
-        let path = env::join_paths([bin]).expect("bin PATH");
-
-        assert_eq!(
-            resolve_executable(
-                OsStr::new("rustup"),
-                None,
-                Some(&path),
-                Some(OsStr::new(".RUSTUPTEST;.EXE")),
-                tmp.path(),
-                true,
-            )
-            .expect("resolve PATHEXT executable"),
-            rustup
-        );
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary executable paths, which Miri isolation does not support")]
-    fn executable_resolution_rejects_missing_and_non_file_candidates() {
-        let tmp = tempdir().expect("tempdir");
-        resolve_executable(OsStr::new("rustup"), None, None, None, tmp.path(), true).expect_err("missing PATH must fail resolution");
-        let bin = tmp.path().join("bin");
-        fs::create_dir(&bin).expect("create bin");
-        fs::create_dir(bin.join("rustup.EXE")).expect("create directory shaped like an executable");
-        let path = env::join_paths([bin]).expect("bin PATH");
-
-        resolve_executable(OsStr::new("rustup"), None, Some(&path), Some(OsStr::new(".EXE")), tmp.path(), true)
-            .expect_err("a directory must not resolve as an executable");
-    }
-
-    #[test]
-    fn executable_name_expansion_covers_platform_and_pathext_forms() {
-        assert_eq!(executable_names(OsStr::new("rustup"), None, false), [OsString::from("rustup")]);
-        assert_eq!(
-            executable_names(OsStr::new("rustup.exe"), Some(OsStr::new(".CUSTOM")), true),
-            [OsString::from("rustup.exe")]
-        );
-        assert_eq!(
-            executable_names(OsStr::new("rustup"), Some(OsStr::new("CUSTOM")), true),
-            [OsString::from("rustup.CUSTOM")]
-        );
-        let defaults = executable_names(OsStr::new("rustup"), None, true);
-        assert_eq!(
-            defaults,
-            [
-                OsString::from("rustup.COM"),
-                OsString::from("rustup.EXE"),
-                OsString::from("rustup.BAT"),
-                OsString::from("rustup.CMD"),
-            ]
-        );
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary executable files, which Miri isolation does not support")]
-    fn explicit_rustup_override_must_be_nonempty_absolute_and_executable() {
-        let tmp = tempdir().expect("tempdir");
-        let rustup = tmp.path().join("rustup.exe");
-        fs::write(&rustup, b"rustup").expect("write rustup");
-
-        resolve_executable(OsStr::new("rustup"), Some(OsStr::new("")), None, None, tmp.path(), true).expect_err("empty override must fail");
-        resolve_executable(OsStr::new("rustup"), Some(OsStr::new("rustup.exe")), None, None, tmp.path(), true)
-            .expect_err("relative override must fail");
-        let missing = tmp.path().join("missing.exe");
-        resolve_executable(OsStr::new("rustup"), Some(missing.as_os_str()), None, None, tmp.path(), true)
-            .expect_err("missing override must fail");
-        assert_eq!(
-            resolve_executable(OsStr::new("rustup"), Some(rustup.as_os_str()), None, None, tmp.path(), true,)
-                .expect("absolute executable override"),
-            rustup
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_atomic_replace_uses_replace_and_write_through_flags() {
-        use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-
-        assert_eq!(windows_replace_flags(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-    }
-
-    #[test]
-    fn windows_atomic_replace_retries_only_sharing_and_access_failures() {
-        use std::cell::Cell;
-
-        assert!(is_retryable_windows_replace_error(&io::Error::from_raw_os_error(5)));
-        assert!(is_retryable_windows_replace_error(&io::Error::from_raw_os_error(32)));
-        assert!(!is_retryable_windows_replace_error(&io::Error::from_raw_os_error(2)));
-
-        let attempts = Cell::new(0);
-        let waits = Cell::new(0);
-        retry_windows_replace(
-            || {
-                attempts.set(attempts.get() + 1);
-                if attempts.get() == 1 {
-                    Err(io::Error::from_raw_os_error(32))
-                } else {
-                    Ok(())
-                }
-            },
-            || waits.set(waits.get() + 1),
-        )
-        .expect("sharing violation is retried");
-        assert_eq!(attempts.get(), 2);
-        assert_eq!(waits.get(), 1);
-
-        retry_windows_replace(
-            || Err(io::Error::from_raw_os_error(2)),
-            || panic!("non-retryable errors must not wait"),
-        )
-        .expect_err("non-retryable error must surface");
-
-        let attempts = Cell::new(0);
-        retry_windows_replace(
-            || {
-                attempts.set(attempts.get() + 1);
-                Err(io::Error::from_raw_os_error(5))
-            },
-            || {},
-        )
-        .expect_err("the final retryable error must surface");
-        assert_eq!(attempts.get(), 100);
     }
 
     #[test]
@@ -1467,23 +955,6 @@ mod tests {
     }
 
     #[test]
-    fn executable_mode_accepts_each_execute_bit() {
-        assert!(has_executable_mode(0o100));
-        assert!(has_executable_mode(0o010));
-        assert!(has_executable_mode(0o001));
-        assert!(!has_executable_mode(0));
-        assert!(!has_executable_mode(0o600));
-        assert!(platform_permissions_allow(None, false));
-        assert!(platform_permissions_allow(Some(0o600), false));
-        assert!(!platform_permissions_allow(None, true));
-        assert!(!platform_permissions_allow(Some(0o600), true));
-        assert!(platform_permissions_allow(Some(0o700), true));
-        assert!(!requires_execute_bit(true, true));
-        assert!(!requires_execute_bit(false, false));
-        assert!(requires_execute_bit(false, true));
-    }
-
-    #[test]
     fn command_too_long_parser_preserves_upstream_export_arguments() {
         let stderr = concat!(
             "error: failed to generate report: could not execute process `",
@@ -1501,183 +972,36 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn publishing_reports_an_unusable_temporary_directory() {
-        let tmp = tempdir().expect("tempdir");
-        let not_a_directory = tmp.path().join("not-a-directory");
-        fs::write(&not_a_directory, b"file").expect("write conflicting file");
-        let private = tmp.path().join("private.info");
-        fs::write(&private, b"private").expect("write private LCOV");
-
-        publish_lcov(
-            &private,
-            &tmp.path().join("unused.info"),
-            &not_a_directory,
-            FeatureConfiguration::AllFeatures,
-        )
-        .expect_err("temporary LCOV creation must fail");
+    fn no_coverage_data_detection_requires_the_complete_llvm_diagnostic() {
+        let diagnostic = "error: failed to load coverage: 'empty': no coverage data found\n\
+                          error: could not load coverage information\n";
+        assert!(is_no_coverage_data(diagnostic));
+        assert!(!is_no_coverage_data("error: no coverage data found"));
+        assert!(!is_no_coverage_data("error: could not load coverage information"));
     }
 
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn publishing_retains_invocation_private_evaluation_data() {
+    fn temporary_response_file_writes_and_cleans_up() {
         let tmp = tempdir().expect("tempdir");
-        let private = tmp.path().join("private.info");
-        let published = tmp.path().join("published.info");
-        fs::write(&private, b"private LCOV").expect("write private LCOV");
-
-        publish_lcov(&private, &published, tmp.path(), FeatureConfiguration::AllFeatures).expect("publish LCOV");
-
-        assert_eq!(fs::read(&private).expect("read private LCOV"), b"private LCOV");
-        assert_eq!(fs::read(&published).expect("read published LCOV"), b"private LCOV");
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn publishing_reports_copy_failures() {
-        let tmp = tempdir().expect("tempdir");
-        let private = tmp.path().join("private.info");
-        let published = tmp.path().join("published.info");
-        fs::write(&private, b"private LCOV").expect("write private LCOV");
-
-        let error = publish_lcov_with(&private, &published, tmp.path(), FeatureConfiguration::AllFeatures, |_, _| {
-            Err(io::Error::other("injected copy failure"))
-        })
-        .expect_err("copy failure must prevent publication");
-
-        assert!(error.to_string().contains("failed to stage private LCOV file"));
-        assert!(!published.exists());
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn remove_if_present_reports_a_directory() {
-        let tmp = tempdir().expect("tempdir");
-        let directory = tmp.path().join("directory");
-        fs::create_dir(&directory).expect("create directory");
-
-        remove_if_present(&directory).expect_err("remove_file must reject a directory");
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary files and filesystem rename, which Miri isolation does not support")]
-    fn atomic_rename_reports_a_missing_staging_file() {
-        let tmp = tempdir().expect("tempdir");
-        let staging = TemporaryPath::new(tmp.path(), "missing");
-        let published = TemporaryPath::new(tmp.path(), "published");
-
-        atomic_rename(&staging, &published).expect_err("a missing staging file must fail publication");
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "uses temporary files and atomic replacement, which Miri isolation does not support"
-    )]
-    fn atomic_replacement_replaces_existing_bytes() {
-        let tmp = tempdir().expect("tempdir");
-        let source = tmp.path().join("new.info");
-        let destination = tmp.path().join("final.info");
-        fs::write(&source, b"new").expect("write replacement");
-        fs::write(&destination, b"old").expect("write prior artifact");
-
-        replace_file_atomically(&source, &destination).expect("replace existing file");
-
-        assert_eq!(fs::read(&destination).expect("read replacement"), b"new");
-        assert!(!source.exists());
-    }
-
-    #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "uses temporary files and atomic replacement, which Miri isolation does not support"
-    )]
-    fn failed_atomic_replacement_preserves_existing_bytes() {
-        let tmp = tempdir().expect("tempdir");
-        let source = tmp.path().join("missing.info");
-        let destination = tmp.path().join("final.info");
-        fs::write(&destination, b"old").expect("write prior artifact");
-
-        replace_file_atomically(&source, &destination).expect_err("missing replacement must fail");
-
-        assert_eq!(fs::read(destination).expect("read preserved artifact"), b"old");
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn disarm_preserves_the_temporary_file() {
-        let tmp = tempdir().expect("tempdir");
-        let temporary = TemporaryPath::new(tmp.path(), "preserved");
+        let temporary = TemporaryPath::write(tmp.path(), "response", b"complete bytes").expect("write temporary response");
         let path = temporary.path().to_path_buf();
-        fs::write(&path, b"complete").expect("write temporary file");
 
-        temporary.disarm();
-
-        assert_eq!(fs::read(path).expect("read disarmed file"), b"complete");
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn cleanup_removes_the_temporary_file() {
-        let tmp = tempdir().expect("tempdir");
-        let temporary = TemporaryPath::new(tmp.path(), "removed");
-        let path = temporary.path().to_path_buf();
-        fs::write(&path, b"temporary").expect("write temporary file");
-
-        temporary.cleanup().expect("clean temporary file");
-
+        assert_eq!(fs::read(&path).expect("read temporary response"), b"complete bytes");
+        temporary.cleanup().expect("clean temporary response");
         assert!(!path.exists());
     }
 
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn write_atomic_publishes_complete_bytes_and_drop_removes_the_artifact() {
-        let tmp = tempdir().expect("tempdir");
-        let temporary = TemporaryPath::write_atomic(tmp.path(), "response", b"complete bytes").expect("atomically write temporary file");
-        let path = temporary.path().to_path_buf();
-
-        assert_eq!(fs::read(&path).expect("read published temporary file"), b"complete bytes");
-        assert_eq!(
-            fs::read_dir(tmp.path()).expect("read temporary directory").count(),
-            1,
-            "the staging file must not remain after publication"
-        );
-
-        drop(temporary);
-        assert!(!path.exists(), "the published temporary file must remain armed for cleanup");
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn drop_removes_the_temporary_file() {
+    fn temporary_response_drop_removes_the_file() {
         let tmp = tempdir().expect("tempdir");
         let path = {
-            let temporary = TemporaryPath::new(tmp.path(), "removed-on-drop");
-            let path = temporary.path().to_path_buf();
-            fs::write(&path, b"temporary").expect("write temporary file");
-            path
+            let temporary = TemporaryPath::write(tmp.path(), "response", b"temporary").expect("write temporary response");
+            temporary.path().to_path_buf()
         };
 
         assert!(!path.exists());
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary directories, which Miri isolation does not support")]
-    fn cleanup_reports_an_unremovable_temporary_path() {
-        let tmp = tempdir().expect("tempdir");
-        let temporary = TemporaryPath::new(tmp.path(), "directory");
-        fs::create_dir(temporary.path()).expect("create directory at temporary path");
-
-        temporary
-            .cleanup()
-            .expect_err("explicit cleanup must report that a directory cannot be removed as a file");
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn remove_if_present_accepts_a_missing_file() {
-        let tmp = tempdir().expect("tempdir");
-        remove_if_present(&tmp.path().join("missing")).expect("a missing file is already removed");
     }
 
     #[test]
@@ -1723,7 +1047,7 @@ mod tests {
         allocated.armed = false;
         drop(allocated);
 
-        let create_attempts = std::cell::Cell::new(0);
+        let create_attempts = Cell::new(0);
         let error = TemporaryDirectory::allocate(
             parent,
             || 7,

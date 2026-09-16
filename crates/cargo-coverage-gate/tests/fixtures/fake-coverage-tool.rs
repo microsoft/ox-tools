@@ -28,52 +28,14 @@ fn run() -> Result<(), String> {
 
     match name {
         "cargo" => run_cargo(&args),
-        "llvm-profdata" => run_profdata(&args),
         "llvm-cov" => run_cov(&args),
         "rustc" => run_rustc(&args),
-        "rustup" => run_rustup(&args),
         other => Err(format!("unexpected fake tool name `{other}`")),
     }
 }
 
-fn run_rustup(args: &[std::ffi::OsString]) -> Result<(), String> {
-    if env::var_os("FAKE_FAIL_RUSTUP").is_some() {
-        return Err("requested rustup failure".to_owned());
-    }
-    if env::var_os("FAKE_EMPTY_RUSTUP_OUTPUT").is_some() {
-        println!();
-        return Ok(());
-    }
-    if env::var_os("FAKE_RELATIVE_RUSTUP_OUTPUT").is_some() {
-        println!("relative-tool");
-        return Ok(());
-    }
-    if args.len() != 4 || args[0] != "which" || args[1] != "--toolchain" {
-        return Err(format!("unexpected rustup arguments: {args:?}"));
-    }
-    if let Some(expected) = env::var_os("FAKE_EXPECT_TOOLCHAIN")
-        && args[2] != expected
-    {
-        return Err(format!(
-            "expected rustup toolchain {}, got {}",
-            expected.to_string_lossy(),
-            args[2].to_string_lossy()
-        ));
-    }
-    let program = args[3]
-        .to_str()
-        .ok_or_else(|| "rustup program name is not UTF-8".to_owned())?;
-    let executable = env::current_exe().map_err(|error| error.to_string())?;
-    let path = executable
-        .parent()
-        .ok_or_else(|| "fake rustup has no parent directory".to_owned())?
-        .join(format!("{program}{}", env::consts::EXE_SUFFIX));
-    println!("{}", path.display());
-    Ok(())
-}
-
 fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
-    if let Some(expected) = env::var_os("FAKE_EXPECT_TOOLCHAIN")
+    if let Some(expected) = env::var_os("FAKE_EXPECT_RUSTUP_TOOLCHAIN")
         && env::var_os("RUSTUP_TOOLCHAIN").as_ref() != Some(&expected)
     {
         return Err(format!(
@@ -88,7 +50,7 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
         if env::var_os("FAKE_FAIL_CARGO_VERSION").is_some() {
             return Err("requested cargo version failure".to_owned());
         }
-        let release = if env::var_os("FAKE_STABLE_TOOLCHAIN").is_some() {
+        let release = if env::var_os("FAKE_STABLE_CARGO").is_some() {
             "1.95.0"
         } else {
             "1.97.0-nightly"
@@ -105,6 +67,7 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
     if args.first().is_some_and(|arg| arg == "metadata") {
         let real_cargo = env::var_os("FAKE_REAL_CARGO").ok_or_else(|| "FAKE_REAL_CARGO is not set".to_owned())?;
         let status = Command::new(real_cargo)
+            .env_remove("RUSTUP_TOOLCHAIN")
             .args(args)
             .status()
             .map_err(|error| error.to_string())?;
@@ -155,7 +118,6 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
         if env::var_os("FAKE_COMPILER_MESSAGE").is_some() {
             println!("fake compiler diagnostic");
         }
-        break_directory("FAKE_BREAK_DIRECTORY_AFTER_NEXTEST")?;
     }
     if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "report") {
         if env::var_os("FAKE_REPORT_STDOUT").is_some() {
@@ -172,8 +134,10 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
             );
             return Err("requested command-too-long report failure".to_owned());
         }
-        if env::var_os("FAKE_FAIL_COV").is_some() {
-            return Err("requested llvm-cov failure".to_owned());
+        if env::var_os("FAKE_NO_COVERAGE_DATA").is_some() {
+            eprintln!("error: failed to load coverage: 'empty': no coverage data found");
+            eprintln!("error: could not load coverage information");
+            return Err("requested no-coverage-data report failure".to_owned());
         }
         let output =
             value_after(args, "--output-path").ok_or_else(|| "cargo llvm-cov report did not receive --output-path".to_owned())?;
@@ -183,13 +147,12 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
             fake_lcov()?
         };
         fs::write(output, contents).map_err(|error| error.to_string())?;
-        break_directory("FAKE_BREAK_DIRECTORY_AFTER_REPORT")?;
     }
     Ok(())
 }
 
 fn run_rustc(args: &[std::ffi::OsString]) -> Result<(), String> {
-    if let Some(expected) = env::var_os("FAKE_EXPECT_RUSTC_TOOLCHAIN")
+    if let Some(expected) = env::var_os("FAKE_EXPECT_RUSTUP_TOOLCHAIN")
         && env::var_os("RUSTUP_TOOLCHAIN").as_ref() != Some(&expected)
     {
         return Err(format!(
@@ -225,9 +188,7 @@ fn run_rustc(args: &[std::ffi::OsString]) -> Result<(), String> {
         return Ok(());
     }
     if args.iter().any(|arg| arg == "-vV") {
-        let release = if env::var_os("FAKE_STABLE_TOOLCHAIN").is_some()
-            || env::var_os("FAKE_STABLE_RUSTC").is_some()
-        {
+        let release = if env::var_os("FAKE_STABLE_RUSTC").is_some() {
             "1.95.0"
         } else {
             "1.97.0-nightly"
@@ -243,15 +204,6 @@ fn run_rustc(args: &[std::ffi::OsString]) -> Result<(), String> {
             .to_string_lossy()
     );
     Ok(())
-}
-
-fn run_profdata(args: &[std::ffi::OsString]) -> Result<(), String> {
-    if env::var_os("FAKE_PROFDATA_STDOUT").is_some() {
-        println!("profdata-stdout");
-    }
-    let output = value_after(args, "-o").ok_or_else(|| "llvm-profdata did not receive -o".to_owned())?;
-    fs::write(output, b"profdata").map_err(|error| error.to_string())?;
-    break_directory("FAKE_BREAK_DIRECTORY_AFTER_PROFDATA")
 }
 
 fn run_cov(args: &[std::ffi::OsString]) -> Result<(), String> {
@@ -311,13 +263,4 @@ fn log(name: &str, args: &[std::ffi::OsString]) -> Result<(), String> {
         line.push_str(&target_dir.to_string_lossy());
     }
     writeln!(log, "{line}").map_err(|error| error.to_string())
-}
-
-fn break_directory(variable: &str) -> Result<(), String> {
-    let Some(path) = env::var_os(variable) else {
-        return Ok(());
-    };
-    let path = PathBuf::from(path);
-    fs::remove_dir_all(&path).map_err(|error| error.to_string())?;
-    fs::write(path, b"not a directory").map_err(|error| error.to_string())
 }

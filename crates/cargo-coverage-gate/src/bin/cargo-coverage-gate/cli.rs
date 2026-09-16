@@ -80,22 +80,6 @@ pub(crate) enum CoverageGateCommand {
 /// Options specific to portable coverage collection.
 #[derive(Args, Debug, Clone)]
 pub(crate) struct CollectionArgs {
-    /// Rustup toolchain used for collection.
-    ///
-    /// Instrumented collection requires a nightly toolchain. When omitted,
-    /// `$COVERAGE_GATE_TOOLCHAIN` is used, then the active toolchain. An
-    /// explicit `$RUSTUP` must be an absolute executable path.
-    #[arg(long, value_name = "TOOLCHAIN")]
-    pub(crate) toolchain: Option<String>,
-
-    /// Read exact `name@version` workspace package specs from this file.
-    ///
-    /// Each nonempty UTF-8 line is one package. The file's packages are
-    /// unioned with repeated `--package` selectors. A present empty file with
-    /// no `--package` selectors is an explicit successful no-op.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) package_file: Option<PathBuf>,
-
     /// Feature configuration to collect.
     ///
     /// May be repeated. Defaults to both supported configurations.
@@ -105,6 +89,13 @@ pub(crate) struct CollectionArgs {
     /// Directory for generated LCOV files.
     #[arg(long, value_name = "PATH", default_value = "target/coverage")]
     pub(crate) coverage_dir: PathBuf,
+
+    /// Run tests without coverage or gating on this Rust target.
+    ///
+    /// May be repeated. The effective target is resolved only when at least
+    /// one target is configured here.
+    #[arg(long = "no-coverage-target", value_name = "TRIPLE")]
+    pub(crate) no_coverage_targets: Vec<String>,
 
     /// Concurrency forwarded to nextest for both build and test execution.
     #[arg(long, value_name = "N")]
@@ -149,12 +140,12 @@ mod tests {
             "cargo",
             "coverage-gate",
             "run",
-            "--toolchain",
-            "nightly-test",
-            "--package-file",
-            "packages.txt",
             "--configuration",
             "all-features",
+            "--no-coverage-target",
+            "aarch64-pc-windows-msvc",
+            "--no-coverage-target",
+            "wasm32-unknown-unknown",
             "--jobs",
             "4",
             "--coverage-dir",
@@ -167,9 +158,8 @@ mod tests {
         .expect("run invocation must parse");
 
         let CoverageGateCommand::Run(run) = args.command.expect("run subcommand must be selected");
-        assert_eq!(run.package_file, Some(PathBuf::from("packages.txt")));
-        assert_eq!(run.toolchain.as_deref(), Some("nightly-test"));
         assert_eq!(run.configurations, [FeatureConfiguration::AllFeatures]);
+        assert_eq!(run.no_coverage_targets, ["aarch64-pc-windows-msvc", "wasm32-unknown-unknown"]);
         assert_eq!(run.jobs.map(NonZeroUsize::get), Some(4));
         assert_eq!(run.coverage_dir, PathBuf::from("coverage"));
         assert_eq!(args.packages, ["alpha"]);

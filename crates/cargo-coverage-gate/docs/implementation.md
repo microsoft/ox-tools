@@ -8,29 +8,23 @@ failure diagnostics. The user-visible behavior is defined by the
 
 The optional `run` mode keeps collection and evaluation separated internally:
 
-1. Cargo metadata resolves every selector and package-file entry to a concrete
+1. Cargo metadata resolves every repeated `--package` selector to a concrete
    workspace member. Exact `name@version` specs are passed to collection tools,
-   while bare names are passed to the evaluator.
-2. The selected toolchain comes from `--toolchain`,
-   `COVERAGE_GATE_TOOLCHAIN`, or the active Rustup toolchain, in that order.
-   Instrumented runs validate a nightly Cargo release and cargo-llvm-cov
-   0.9.0 or newer. Version 0.9.0 is required because it introduced
-   `--workspace` support for the `report` subcommand used by the default
-   selection. The same Rustup
-   selection is applied to metadata,
-   target-policy rustc queries, and collection commands.
-   The rustup executable comes from a validated absolute `RUSTUP` override or
-   a manual search of nonempty `PATH` entries, with Windows `PATHEXT`
-   expansion. Every candidate is converted to an absolute path before
-   `Command` is created, so Windows cannot inject a project-root
-   `rustup.exe` through implicit current-directory lookup. Cargo and rustc
-   paths returned by `rustup which` are likewise rejected unless absolute,
-   before metadata or collection can resolve them from different directories.
+   while bare names are passed to the evaluator. With no selectors, both
+   collection and evaluation cover the workspace.
+2. Collection uses the invoking environment's Cargo and rustc, honoring
+   inherited `CARGO`, `RUSTC`, `RUSTUP_TOOLCHAIN`, `PATH`, and related
+   variables. Instrumented runs validate that the effective Cargo and rustc are
+   nightly and that cargo-llvm-cov is 0.9.0 or newer. Version 0.9.0 is required
+   because it introduced `--workspace` support for the `report` subcommand
+   used by the default selection.
 3. Each feature configuration gets an isolated clean, instrumented
-   `cargo llvm-cov nextest --no-report --locked` run. Plain-nextest no-gate
-   paths also pass `--locked`. Nextest and Cargo retain their ordinary output,
-   including rendered compiler diagnostics; the collector does not request or
-   filter machine-readable Cargo messages.
+   `cargo llvm-cov nextest --no-report --locked` run. Both instrumented and
+   plain-nextest no-gate paths pass `--no-tests=pass`, allowing packages with a
+   valid zero-test harness to continue to report generation, and both pass
+   `--locked`. Nextest and Cargo retain their ordinary output, including
+   rendered compiler diagnostics; the collector does not request or filter
+   machine-readable Cargo messages.
    The instrumented target is unique per invocation beneath
    `target/coverage-gate/` and is removed by an RAII guard on every return
    path. Concurrent runs therefore cannot clean or merge each other's
@@ -46,29 +40,27 @@ The optional `run` mode keeps collection and evaluation separated internally:
    default filename filter. On Windows command-line overflow only, the
    collector replays cargo-llvm-cov's complete failed export arguments through
    an LLVM response file.
-5. LCOV output remains at an invocation-private path for evaluation. A copy is
-   first written to a same-directory temporary file and renamed to its stable
-   per-configuration consumer name only after a successful report. An
-   existing stable file is never removed before collection, so clean, test,
-   report, and publication failures preserve the last completed artifact byte
-   for byte. Temporary response and LCOV files are removed on success and
-   failure. Unix uses atomic rename replacement. Windows uses `MoveFileExW` to
-   add write-through and bounded retries for sharing/access failures to the
-   replacement behavior already provided by `std::fs::rename`.
-6. The invocation-private LCOV files are passed directly to the same
-   in-process evaluation path used by the legacy bare command. Shared stable
-   publication paths therefore cannot race an in-flight verdict.
+5. Each report is written directly to its stable per-configuration path under
+   `--coverage-dir`, then that same path is passed to the ordinary in-process
+   evaluator. `no-default-features` maps to `lcov-no-default.info`.
 
-An empty package file is represented as an explicit empty selection rather
-than as the absence of selection. This distinction lets automation request a
-successful no-op without accidentally expanding back to the whole workspace.
+Coverage policy never changes collection routing: all-zero, mixed, and
+positive-threshold selections all use the same instrumented path. A successful
+empty LCOV export is valid and reaches evaluation. LLVM instead exits with its
+specific `no coverage data found` / `could not load coverage information`
+diagnostic when every discovered object lacks a coverage map; the collector
+converts only that complete diagnostic to a stable empty LCOV file and
+evaluates it normally. Zero-threshold and `expect-no-coverable-lines` packages
+then pass, while positive-threshold packages report `NO DATA`. Missing raw
+profiles, failed object discovery, malformed output, and other report failures
+remain operational errors.
 
-Before tool validation, an empty-data policy probe distinguishes all-zero
-threshold selections from packages that need instrumentation. All-zero
-selections run plain nextest and stop with an explicit successful no-gate
-diagnostic. The same plain path handles `aarch64-pc-windows-msvc`, where
-cargo-llvm-cov is unsupported. Mixed selections continue through the
-instrumented path without dropping zero-threshold test packages.
+Plain nextest is used only when a caller explicitly lists the effective target
+with repeatable `--no-coverage-target`. If the list is empty, no target is
+resolved for this routing decision. Otherwise an explicit `--target` is matched
+directly, or the rustc host is resolved with `rustc -vV`. A match applies to all
+selected packages and feature configurations, emits explicit no-coverage and
+no-gate diagnostics, and creates no LCOV files.
 
 All child stderr is inherited or captured and immediately forwarded when
 Windows overflow detection requires inspection. Normal collection stdout is
