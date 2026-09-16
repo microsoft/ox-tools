@@ -1544,6 +1544,16 @@ mod tests {
         }
     }
 
+    fn sleeping_test_command() -> Command {
+        let mut command = Command::new(std::env::current_exe().expect("the test binary knows its path"));
+        let _ = command
+            .args(["--exact", "run::tests::ordinary_child_sleep_probe", "--nocapture"])
+            .env("CARGO_EACH_ORDINARY_CHILD_PROBE", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
     fn spawn_ordinary_capture(mut command: Command) -> Result<CapturedProcess, String> {
         command
             .spawn()
@@ -2116,11 +2126,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "spawns and terminates a child process")]
     fn ordinary_termination_kills_polls_and_reaps_a_real_child() {
-        let mut child = Command::new(std::env::current_exe().expect("the test binary knows its path"))
-            .args(["--exact", "run::tests::ordinary_child_sleep_probe", "--nocapture"])
-            .env("CARGO_EACH_ORDINARY_CHILD_PROBE", "1")
-            .spawn()
-            .expect("spawn ordinary child probe");
+        let mut child = sleeping_test_command().spawn().expect("spawn ordinary child probe");
 
         let cleanup = terminate_ordinary_child(&mut child, Duration::from_secs(1));
 
@@ -2341,6 +2347,12 @@ mod tests {
         assert!(result_infrastructure_message(run_streamed(&missing)).contains("failed to spawn"));
         assert!(result_infrastructure_message(run_streamed_with_timeout(&missing, Duration::from_secs(1))).contains("failed to spawn"));
         assert!(infrastructure_message(run_captured(&missing, None)).contains("failed to spawn"));
+
+        let InvocationResult::Exited(status) = run_streamed_with_timeout(&invocation(&["rustc", "--version"]), Duration::from_secs(2))
+        else {
+            panic!("the timed streamed runner must execute rustc");
+        };
+        assert!(status.success());
     }
 
     #[test]
@@ -2740,6 +2752,13 @@ mod tests {
         };
         assert!(status.success());
 
+        let mut timed_out = FakeProcess {
+            observations: VecDeque::from([Ok(None)]),
+            termination: Some(Ok(successful_status())),
+        };
+        let outcome = wait_for_tree_with(&mut timed_out, Duration::ZERO, FakeProcess::observe, FakeProcess::terminate);
+        assert!(matches!(outcome.result, InvocationResult::TimedOut(duration) if duration.is_zero()));
+
         let mut uncleaned = FakeProcess {
             observations: VecDeque::from([Ok(None)]),
             termination: Some(Err(io::Error::other("termination failed"))),
@@ -2750,7 +2769,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "spawns a contained child process")]
-    fn process_tree_control_delegates_real_exit_observation() {
+    fn process_tree_control_delegates_real_observation_and_termination() {
         let mut command = Command::new("rustc");
         let _ = command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
         let mut tree = spawn_tree(command).expect("spawn contained rustc probe");
@@ -2759,6 +2778,10 @@ mod tests {
             panic!("the contained rustc probe must exit before its deadline");
         };
         assert!(status.success());
+
+        let mut tree = spawn_tree(sleeping_test_command()).expect("spawn contained sleep probe");
+        let outcome = wait_for_tree(&mut tree, Duration::ZERO);
+        assert!(matches!(outcome.result, InvocationResult::TimedOut(duration) if duration.is_zero()));
     }
 
     #[test]
@@ -2830,15 +2853,14 @@ mod tests {
                 .contains("already reaped or detached")
         );
 
-        let mut contained_command = Command::new("rustc");
-        let _ = contained_command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
-        let mut contained = CapturedProcess::Contained(spawn_tree(contained_command).expect("spawn contained rustc"));
+        let mut contained = CapturedProcess::Contained(spawn_tree(sleeping_test_command()).expect("spawn contained sleep probe"));
         assert_eq!(contained.drain_boundary(), "contained process tree");
         assert!(
             result_infrastructure_message(contained.wait(None, None, &mut stdout, &mut stderr).result)
                 .contains("did not match timeout configuration")
         );
-        let _first = contained.terminate_bounded();
+        let outcome = contained.wait(Some(Duration::ZERO), None, &mut stdout, &mut stderr);
+        assert!(matches!(outcome.result, InvocationResult::TimedOut(duration) if duration.is_zero()));
         assert!(
             contained.terminate_bounded().is_err(),
             "a fabricated successful second termination must not be accepted"
