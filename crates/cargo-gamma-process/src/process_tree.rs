@@ -42,19 +42,17 @@ static CHILD_REAPER: Mutex<ChildReaper> = Mutex::new(ChildReaper {
 });
 static CHILD_REAPER_READY: Condvar = Condvar::new();
 
-/// Transfers a live child handle to the shared detached reaper.
+/// Ensures the shared detached child reaper is ready before a child is spawned.
 ///
-/// The reaper polls every retained child rather than blocking on one, so a
-/// leader that survives termination cannot prevent unrelated leaders from
-/// being collected.
+/// The reaper is process-wide and remains alive after its queue becomes empty,
+/// sleeping on a condition variable until another child is handed off.
 ///
 /// # Errors
 ///
 /// Returns the thread creation error when the shared reaper could not be
-/// started. The child handle remains retained for a later start attempt.
-pub fn reap_later(child: Child) -> io::Result<()> {
+/// started. No child has been created or transferred by this operation.
+pub fn ensure_reaper() -> io::Result<()> {
     let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reaper.children.push(child);
     while reaper.starting {
         reaper = CHILD_REAPER_READY.wait(reaper).unwrap_or_else(std::sync::PoisonError::into_inner);
     }
@@ -64,9 +62,19 @@ pub fn reap_later(child: Child) -> io::Result<()> {
     reaper.starting = true;
     drop(reaper);
 
+    #[cfg(any(test, feature = "fault-injection"))]
+    let spawned = if faults::fired(faults::Fault::ReaperStart) {
+        Err(io::Error::other("detached child reaper thread start failed as requested by a test"))
+    } else {
+        thread::Builder::new()
+            .name("cargo-gamma-child-reaper".to_owned())
+            .spawn(child_reaper_loop)
+    };
+    #[cfg(not(any(test, feature = "fault-injection")))]
     let spawned = thread::Builder::new()
         .name("cargo-gamma-child-reaper".to_owned())
         .spawn(child_reaper_loop);
+
     let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     reaper.starting = false;
     match spawned {
@@ -84,31 +92,84 @@ pub fn reap_later(child: Child) -> io::Result<()> {
     }
 }
 
+/// Transfers a live child handle to the shared detached reaper.
+///
+/// The reaper polls every retained child rather than blocking on one, so a
+/// leader that survives termination cannot prevent unrelated leaders from
+/// being collected. An observation error emits a warning to stderr and
+/// permanently stops tracking that child. On Unix, the child may then remain a
+/// zombie until this process exits.
+///
+/// # Errors
+///
+/// Returns [`ReapFailure`] when the shared reaper could not be started. The
+/// failure retains the child handle so the caller can recover ownership.
+pub fn reap_later(child: Child) -> Result<(), ReapFailure> {
+    if let Err(cause) = ensure_reaper() {
+        return Err(ReapFailure { cause, child });
+    }
+
+    let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    reaper.children.push(child);
+    CHILD_REAPER_READY.notify_one();
+    Ok(())
+}
+
+/// A failed detached-reaper handoff that retains ownership of the child.
+#[derive(Debug)]
+pub struct ReapFailure {
+    cause: io::Error,
+    child: Child,
+}
+
+impl ReapFailure {
+    /// Borrows the operating-system error that prevented the reaper from starting.
+    #[must_use]
+    pub const fn cause(&self) -> &io::Error {
+        &self.cause
+    }
+
+    /// Recovers the failure and the child that was not transferred.
+    #[must_use]
+    pub fn into_parts(self) -> (io::Error, Child) {
+        (self.cause, self.child)
+    }
+}
+
+impl fmt::Display for ReapFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.cause.fmt(f)
+    }
+}
+
+impl std::error::Error for ReapFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
 fn child_reaper_loop() {
-    {
-        let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        while reaper.starting {
-            reaper = CHILD_REAPER_READY.wait(reaper).unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
+    let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    while reaper.starting {
+        reaper = CHILD_REAPER_READY.wait(reaper).unwrap_or_else(std::sync::PoisonError::into_inner);
     }
     loop {
-        let empty = {
-            let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            reaper.children.retain_mut(|child| {
-                let id = child.id();
-                retain_reaper_child(id, child.try_wait())
-            });
-            if reaper.children.is_empty() {
-                reaper.running = false;
-                true
-            } else {
-                false
-            }
-        };
-        if empty {
-            return;
+        while reaper.children.is_empty() {
+            reaper = CHILD_REAPER_READY.wait(reaper).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
-        thread::sleep(REAPER_PAUSE);
+
+        reaper.children.retain_mut(|child| {
+            let id = child.id();
+            retain_reaper_child(id, child.try_wait())
+        });
+        if reaper.children.is_empty() {
+            continue;
+        }
+
+        let (next, _timeout) = CHILD_REAPER_READY
+            .wait_timeout(reaper, REAPER_PAUSE)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reaper = next;
     }
 }
 
@@ -381,9 +442,18 @@ impl PreparedCommand {
     ///
     /// # Errors
     ///
-    /// Returns whatever [`Command::spawn`] returns: the child does not exist, so there is nothing
-    /// here to clean up and the returned preparation remains valid for another attempt.
+    /// Returns the thread creation error when the durable detached reaper could
+    /// not be prepared, or whatever [`Command::spawn`] returns. In either case,
+    /// the child does not exist, so there is nothing here to clean up and the
+    /// returned preparation remains valid for another attempt.
     pub fn spawn(mut self) -> Result<SpawnedCommand, SpawnFailure> {
+        if let Err(cause) = ensure_reaper() {
+            return Err(SpawnFailure {
+                cause,
+                prepared: Box::new(self),
+            });
+        }
+
         match self.command.spawn() {
             Ok(child) => {
                 let Self { command: _spawned, guard } = self;
@@ -1411,17 +1481,19 @@ impl ProcessTree {
     ///
     /// Unlike [`Self::terminate`], this method never performs a blocking
     /// [`Child::wait`] after signalling. If the leader remains alive at the
-    /// deadline, its handle is transferred to the shared detached reaper and
-    /// this process tree is left without a child for [`Drop`] to wait on. The
-    /// surrounding cgroup or job handle remains owned by `self` and is released
-    /// normally when the process tree is dropped.
+    /// deadline, its handle is transferred to the shared detached reaper. A
+    /// successful handoff leaves this process tree without a child for [`Drop`]
+    /// to wait on. The surrounding cgroup or job handle remains owned by `self`
+    /// and is released normally when the process tree is dropped.
     ///
     /// # Errors
     ///
     /// Returns the observation error if `try_wait` fails, the termination
     /// error if the leader exits after signalling but cleanup had failed, or a
     /// timed-out error (including an earlier termination error, when present)
-    /// if the leader is still running after `grace`.
+    /// if the leader is still running after `grace`. If the detached reaper
+    /// cannot accept the child, the returned error includes that failure and
+    /// this process tree retains the child handle.
     pub fn terminate_bounded(&mut self, grace: Duration) -> io::Result<ExitStatus> {
         let started = Instant::now();
         let mut child = self
@@ -1469,7 +1541,9 @@ impl ProcessTree {
                 Err(error) => {
                     let kind = error.kind();
                     let mut message = error.to_string();
-                    if let Err(reaper) = reap_later(child) {
+                    if let Err(failure) = reap_later(child) {
+                        let (reaper, child) = failure.into_parts();
+                        self.child = Some(child);
                         message = format!("{message}; the detached child reaper could not be started: {reaper}");
                     }
                     return Err(io::Error::new(kind, message));
@@ -1482,7 +1556,9 @@ impl ProcessTree {
                     || (io::ErrorKind::TimedOut, deadline_error.clone()),
                     |error| (error.kind(), format!("{error}; {deadline_error}")),
                 );
-                if let Err(error) = reap_later(child) {
+                if let Err(failure) = reap_later(child) {
+                    let (error, child) = failure.into_parts();
+                    self.child = Some(child);
                     message = format!("{message}; the detached child reaper could not be started: {error}");
                 }
                 return Err(io::Error::new(kind, message));
@@ -1761,12 +1837,10 @@ mod tests {
     use core::cell::RefCell;
     #[cfg(unix)]
     use core::mem;
-    #[cfg(unix)]
-    use std::env;
     use std::error::Error as _;
-    use std::fs;
     #[cfg(unix)]
     use std::io::{BufRead as _, Write as _};
+    use std::{env, fs};
 
     use camino::Utf8Path;
 
@@ -2567,9 +2641,8 @@ mod tests {
     }
 
     #[test]
-    fn shared_reaper_collects_out_of_order_and_restarts_after_idle() {
+    fn shared_reaper_collects_out_of_order_and_remains_ready_after_idle() {
         let _reaper_test = REAPER_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        wait_for_reaper_to_stop(Duration::from_secs(2));
 
         let long = spawn_reaper_probe(750);
         let long_id = long.id();
@@ -2584,14 +2657,70 @@ mod tests {
             "the shorter-lived later child must be collected before the earlier long-lived child"
         );
         wait_for_reaper_to_collect(long_id, Duration::from_secs(2));
-        wait_for_reaper_to_stop(Duration::from_secs(2));
+        assert!(reaper_running(), "the durable shared reaper stopped when its queue became empty");
 
-        let restarted = spawn_reaper_probe(50);
-        let restarted_id = restarted.id();
-        reap_later(restarted).expect("restart the shared reaper after its queue became empty");
-        assert!(reaper_running(), "the shared reaper did not restart");
-        wait_for_reaper_to_collect(restarted_id, Duration::from_secs(2));
-        wait_for_reaper_to_stop(Duration::from_secs(2));
+        let after_idle = spawn_reaper_probe(50);
+        let after_idle_id = after_idle.id();
+        reap_later(after_idle).expect("hand a child to the idle shared reaper");
+        wait_for_reaper_to_collect(after_idle_id, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn reaper_start_failure_preserves_child_and_preparation_ownership() {
+        isolated_run(
+            "a_reaper_start_failure_preserves_child_and_preparation_ownership",
+            "the failed reaper start preserved both owners",
+        );
+    }
+
+    #[test]
+    fn a_reaper_start_failure_preserves_child_and_preparation_ownership() {
+        if env::var_os(ISOLATED_CHILD).is_none() {
+            return;
+        }
+
+        let child = Command::new(testing::helper_binary_path().as_std_path())
+            .arg(testing::directive("sleep:1000"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn isolated reaper probe");
+        let child_id = child.id();
+        let _failed_start = faults::arm(faults::Fault::ReaperStart);
+        let failure = reap_later(child).expect_err("the injected thread start failure must reject the handoff");
+        assert!(!reaper_contains(child_id), "a child without a reaper must not enter the queue");
+        assert!(failure.to_string().contains("thread start failed as requested"), "{failure}");
+        assert!(
+            failure
+                .source()
+                .expect("the handoff failure retains its operating-system cause")
+                .to_string()
+                .contains("thread start failed as requested")
+        );
+        let (error, mut child) = failure.into_parts();
+        assert!(error.to_string().contains("thread start failed as requested"), "{error}");
+        assert_eq!(child.id(), child_id, "the failed handoff returned a different child");
+        child.kill().expect("terminate the recovered child");
+        let _status = child.wait().expect("reap the recovered child");
+
+        let prepared = prepare(no_op_command(), MemoryRequest::default()).expect("containment");
+        let _failed_start = faults::arm(faults::Fault::ReaperStart);
+        let failure = prepared
+            .spawn()
+            .expect_err("reaper startup must be proven before the child is spawned");
+        assert!(
+            failure.cause().to_string().contains("thread start failed as requested"),
+            "{}",
+            failure.cause()
+        );
+        let (_error, prepared) = failure.into_parts();
+        let spawned = prepared
+            .spawn()
+            .expect("the unchanged preparation can retry after the transient failure");
+        drop(spawned);
+
+        println!("the failed reaper start preserved both owners");
     }
 
     fn spawn_reaper_probe(sleep_millis: u64) -> Child {
@@ -2607,14 +2736,6 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(!reaper_contains(id), "the shared reaper did not collect child {id}");
-    }
-
-    fn wait_for_reaper_to_stop(grace: Duration) {
-        let deadline = Instant::now() + grace;
-        while reaper_running() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!reaper_running(), "the shared reaper did not stop after its queue became empty");
     }
 
     #[test]
@@ -2909,7 +3030,6 @@ mod tests {
     ///
     /// The name is on the child's environment rather than on its command line because the command
     /// line belongs to the test harness, which would reject an argument it does not know.
-    #[cfg(unix)]
     const ISOLATED_CHILD: &str = "GAMMA_ISOLATED_CHILD";
 
     /// Runs one of the inner tests below in a process of its own, and pins what it reported.
@@ -2923,7 +3043,6 @@ mod tests {
     ///
     /// The marker is required rather than the exit status alone, because a filter that matched
     /// nothing — a renamed inner test, say — is also a successful run of zero tests.
-    #[cfg(unix)]
     fn isolated_run(inner: &str, marker: &str) {
         let program = env::args().next().expect("this test binary");
         let outcome = Command::new(&program)

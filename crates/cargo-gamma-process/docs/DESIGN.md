@@ -41,9 +41,12 @@ therefore covers the complete descendant tree.
   with the operating-system error so the caller can classify a transient
   resource-related spawn failure, back off, and retry; permanent launch failures
   are propagated. Success yields a distinct bundle coupling the child to its
-  boundary. Adoption consumes that bundle, so a successful launch cannot be
-  reused to create an earlier sibling awaiting adoption; abandoning the bundle
-  before adoption terminates and reaps the child.
+  boundary. Before creating that child, spawn also ensures the process-wide
+  detached reaper thread is running. A reaper thread-start failure therefore
+  returns the unchanged preparation before a repository-controlled process
+  exists. Adoption consumes the successful bundle, so a successful launch
+  cannot be reused to create an earlier sibling awaiting adoption; abandoning
+  the bundle before adoption terminates and reaps the child.
 - The contained `output` convenience mirrors `Command::output`: it disconnects
   stdin and captures stdout and stderr. Both pipes are drained concurrently
   while the child runs, avoiding pipe-capacity deadlocks. When the leader exits,
@@ -73,11 +76,17 @@ therefore covers the complete descendant tree.
   for the caller-provided grace. A leader that remains running after a failed
   kill is transferred to a shared detached reaper rather than handed to an
   indefinite `wait` or Drop path. The reaper polls all retained leaders so one
-  survivor cannot block collection of the others; the containment handles
-  remain owned until the `ProcessTree` itself is dropped. An error while
-  polling the leader follows the same handoff before the observation error is
-  returned, because an observation failure does not prove the child was
-  reaped.
+  survivor cannot block collection of the others, remains alive while its queue
+  is empty, and accepts each handle only after its thread is known to exist.
+  Callers handing over children created outside `PreparedCommand` can preflight
+  the same durable thread; if a direct handoff must start it and startup fails,
+  the failure returns ownership of the unqueued child. The containment handles
+  remain owned until the `ProcessTree` itself is dropped. An error while polling
+  the leader follows the same handoff before the observation error is returned,
+  because an observation failure does not prove the child was reaped. If the
+  detached reaper itself later receives an observation error, it emits a warning
+  to stderr and permanently stops tracking that child. The released handle may
+  leave a zombie on Unix until this process exits.
 - Sealed containment uses a boundary that descendants cannot leave. A host that
   offers no sealed boundary at all silently uses best-effort process-group
   containment for an unmetered launch; absence of a warning does not establish

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
-use cargo_gamma_process::{InterruptiblePipe, MemoryRequest, PreparedCommand, ProcessTree, prepare, reap_later};
+use cargo_gamma_process::{InterruptiblePipe, MemoryRequest, PreparedCommand, ProcessTree, ensure_reaper, prepare, reap_later};
 use cargo_metadata::TargetKind;
 use ohno::{AppError, IntoAppError};
 
@@ -381,8 +381,8 @@ fn run_captured_with_spawner(
     let _ = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let process = match timeout {
         Some(_) => timed_spawner(command),
-        None => command
-            .spawn()
+        None => ensure_reaper()
+            .and_then(|()| command.spawn())
             .map(|child| CapturedProcess::Ordinary(Some(child)))
             .map_err(|error| error.to_string()),
     };
@@ -611,12 +611,15 @@ fn finish_ordinary_termination(child: Child, result: io::Result<ExitStatus>) -> 
     finish_ordinary_termination_with(child, result, Child::try_wait, reap_later)
 }
 
-fn finish_ordinary_termination_with<T>(
+fn finish_ordinary_termination_with<T, E>(
     mut control: T,
     result: io::Result<ExitStatus>,
     observe: impl FnOnce(&mut T) -> io::Result<Option<ExitStatus>>,
-    reap: impl FnOnce(T) -> io::Result<()>,
-) -> io::Result<ExitStatus> {
+    reap: impl FnOnce(T) -> Result<(), E>,
+) -> io::Result<ExitStatus>
+where
+    E: fmt::Display,
+{
     match observe(&mut control) {
         Ok(Some(_status)) => result,
         Ok(None) | Err(_) => match reap(control) {
@@ -639,12 +642,15 @@ fn finish_ordinary_wait(child: Child, outcome: TreeOutcome) -> TreeOutcome {
     finish_ordinary_wait_with(child, outcome, Child::try_wait, reap_later)
 }
 
-fn finish_ordinary_wait_with<T>(
+fn finish_ordinary_wait_with<T, E>(
     mut control: T,
     mut outcome: TreeOutcome,
     observe: impl FnOnce(&mut T) -> io::Result<Option<ExitStatus>>,
-    reap: impl FnOnce(T) -> io::Result<()>,
-) -> TreeOutcome {
+    reap: impl FnOnce(T) -> Result<(), E>,
+) -> TreeOutcome
+where
+    E: fmt::Display,
+{
     if !matches!(observe(&mut control), Ok(Some(_status)))
         && let Err(error) = reap(control)
     {
@@ -1820,7 +1826,7 @@ mod tests {
 
     #[test]
     fn ordinary_child_handoff_preserves_primary_and_reaper_failures() {
-        let status = finish_ordinary_termination_with((), Ok(successful_status()), |()| Ok(None), |()| Ok(()))
+        let status = finish_ordinary_termination_with((), Ok(successful_status()), |()| Ok(None), |()| Ok::<(), io::Error>(()))
             .expect("a successful handoff preserves the termination status");
         assert!(status.success());
 

@@ -34,6 +34,9 @@ pub enum Fault {
 
     /// Observing the leader after termination returns an operating-system error.
     Observe,
+
+    /// Starting the shared detached child reaper is refused.
+    ReaperStart,
 }
 
 /// Arms `fault` on this thread until the returned value is dropped.
@@ -114,6 +117,7 @@ mod tests {
         assert!(!fired(Fault::Kill));
         assert!(!fired(Fault::Linger));
         assert!(!fired(Fault::Observe));
+        assert!(!fired(Fault::ReaperStart));
     }
 
     #[test]

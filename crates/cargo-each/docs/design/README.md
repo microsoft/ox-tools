@@ -274,6 +274,10 @@ Per-target mode accepts all per-package placeholders plus `{target}`. Using a
 per-package or per-target token in `--once` mode, `{target}` in per-package
 mode, or `{packages}` outside `--once` is a usage error.
 
+Substitution scans each template argument once. Text inserted for one
+placeholder is never scanned as another placeholder, so literal token-shaped
+path components in manifest paths and other replacement values are preserved.
+
 `{workspace-rust-version}` is workspace-scoped rather than tied to one selected
 member. Resolving it requires a root declaration. cargo-each also requires every
 workspace member to expose a resolved `rust_version` no newer than the root

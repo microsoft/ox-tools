@@ -79,7 +79,8 @@ pub use memory_request::MemoryRequest;
 pub use memory_usage::MemoryUsage;
 #[doc(inline)]
 pub use process_tree::{
-    OutputError, PreparedCommand, ProcessTree, SpawnFailure, SpawnedCommand, capacity, containment, output, prepare, reap_later,
+    OutputError, PreparedCommand, ProcessTree, ReapFailure, SpawnFailure, SpawnedCommand, capacity, containment, ensure_reaper, output,
+    prepare, reap_later,
 };
 
 mod memory_request;
