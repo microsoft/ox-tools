@@ -97,6 +97,12 @@ mod tests {
         assert_eq!(relative(Utf8Path::new("/elsewhere/a.rs"), &root()), "/elsewhere/a.rs");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_findings_use_repository_style_separators() {
+        assert_eq!(relative(Utf8Path::new(r"C:\w\src\a.rs"), Utf8Path::new(r"C:\w")), "src/a.rs");
+    }
+
     /// Two files whose names differ only by a backslash stay two files.
     ///
     /// On Unix a backslash is an ordinary character in a file name, so rewriting it into a slash

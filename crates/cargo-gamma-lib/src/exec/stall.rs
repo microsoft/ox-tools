@@ -8,7 +8,7 @@ use std::time::Instant;
 use super::progress::Progress;
 
 /// How long a binary may go silent before it is presumed hung.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Stall {
     /// The budget, or `None` to wait out the full timeout.
     pub(super) budget: Option<Duration>,

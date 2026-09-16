@@ -212,3 +212,5 @@ pub mod testing;
 
 #[doc(inline)]
 pub use crate::commands::{Host, run};
+#[doc(hidden)]
+pub use crate::exec::run_rustc_wrapper_if_requested;

@@ -140,7 +140,7 @@ fn cli(args: &[&str]) -> (i32, String) {
 
     command.extend(args.iter().map(|arg| (*arg).to_owned()));
 
-    let code = cargo_gamma_lib::run(&mut host, command);
+    let code = cargo_gamma_lib::testing::run(&mut host, command);
 
     (code, format!("{}{}", host.out(), host.err()))
 }

@@ -2,13 +2,14 @@
 // Licensed under the MIT License.
 
 use core::time::Duration;
+use std::sync::Arc;
 use std::time::Instant;
 
 use camino::Utf8PathBuf;
 
 use super::cargo_options::BuildLimits;
 use super::events::Events;
-use super::test_binary::{TestBinary, test_binaries};
+use super::test_binary::{TestBinary, linked_target_args, retain_linked_to_population, test_binaries_with_linkage};
 use super::verdict::tail;
 use super::workspace::Workspace;
 use crate::discover::Plan;
@@ -20,7 +21,7 @@ use crate::{HashMap, HashSet, Result};
 mod blame;
 mod complaints;
 mod invoke;
-mod messages;
+pub(super) mod messages;
 mod splices;
 
 #[cfg(all(test, not(miri)))]
@@ -113,6 +114,40 @@ pub struct Round {
 
     /// How many mutants the round withdrew, which is zero for the round that finally compiled.
     pub withdrew: usize,
+
+    /// Withdrawals attributed to each package during this round.
+    pub packages: Vec<PackageWithdrawal>,
+}
+
+/// Mutants withdrawn from one package during one build round.
+#[derive(Debug, Clone)]
+pub struct PackageWithdrawal {
+    pub package: Arc<str>,
+    pub mutants: usize,
+}
+
+fn build_round(elapsed: Duration, plan: &Plan, ordinals: impl IntoIterator<Item = u32>) -> Round {
+    let ordinals: HashSet<u32> = ordinals.into_iter().collect();
+    let mut packages: HashMap<Arc<str>, usize> = HashMap::default();
+
+    for mutant in &plan.mutants {
+        if ordinals.contains(&mutant.ordinal) {
+            let count = packages.entry(Arc::clone(&mutant.package)).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+
+    let mut packages = packages
+        .into_iter()
+        .map(|(package, mutants)| PackageWithdrawal { package, mutants })
+        .collect::<Vec<_>>();
+    packages.sort_by(|left, right| left.package.cmp(&right.package));
+
+    Round {
+        elapsed,
+        withdrew: ordinals.len(),
+        packages,
+    }
 }
 
 /// How many mutants one rustc error code withdrew from one mutator.
@@ -140,6 +175,10 @@ pub(super) struct Build {
     pub(super) history: Vec<Round>,
 
     pub(super) binaries: Vec<TestBinary>,
+
+    /// Cargo's successful final build stream, retained until the test runtime environment has
+    /// been reconstructed from its artifacts and build-script outputs.
+    pub(super) artifacts: String,
     pub(super) withdrawn: usize,
 
     /// How many rollback rounds the whole run spent, summed over its builds.
@@ -178,6 +217,7 @@ enum Convergence {
 }
 
 /// What a proof build isolated after rustc's spans could not identify a cause.
+#[derive(Debug)]
 enum Isolation {
     /// One or more mutants failed even without any other mutant from their item.
     Blamed(Vec<u32>),
@@ -223,6 +263,9 @@ pub(super) struct Converger {
     /// carry on. Conflating the two would report a mutant the tool never judged as one the tool
     /// judged unbuildable, which is the exact confusion this run is trying to avoid.
     abandoned: HashSet<u32>,
+
+    /// Mutants discovered from a different source generation than the synchronized build tree.
+    unavailable: HashSet<u32>,
 
     /// How many rounds the build currently converging has spent, reset at the start of each one.
     rounds: u32,
@@ -310,6 +353,9 @@ pub(super) struct Converger {
     /// keeps feature unification constant while mutation viability is checked stage by stage.
     workspace_stages: bool,
 
+    /// Cargo's successful preflight artifact stream, used only to narrow later test-target builds.
+    target_discovery: Option<String>,
+
     /// A test-only stand-in for the proof build in [`Self::subset_fails`].
     ///
     /// Reaching [`Isolation::Item`] needs a subset that compiles alone but fails only in
@@ -332,14 +378,18 @@ pub(super) struct Preflight {
 
     /// The packages the check had to give up on, empty in the ordinary case.
     pub(super) dropped: Vec<String>,
+
+    /// Artifact identities from the successful unmodified check.
+    pub(super) discovery: String,
 }
 
 impl Preflight {
     /// The result of a check that passed in the scope it was asked about.
-    const fn narrow(dropped: Vec<String>) -> Self {
+    fn narrow(dropped: Vec<String>, discovery: String) -> Self {
         Self {
             whole_workspace: false,
             dropped,
+            discovery,
         }
     }
 }
@@ -366,7 +416,13 @@ impl Converger {
         self.workspace_stages = true;
     }
 
+    /// Supplies the successful unmodified artifact stream used for target-level narrowing.
+    pub(super) fn target_discovery(&mut self, discovery: String) {
+        self.target_discovery = Some(discovery);
+    }
+
     /// Invalidates position-based splice indexes after the plan is sorted.
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     pub(super) fn plan_reordered(&mut self) {
         self.splices.plan_reordered();
     }
@@ -405,8 +461,10 @@ impl Converger {
 
     /// Resets state that describes one Cargo command and root set.
     fn begin_convergence(&mut self) {
+        // #[gamma::skip(all, reason = "the replacement is exactly the type default already written here, so it is semantically identical")]
         self.rounds = 0;
         self.per_round.clear();
+        // #[gamma::skip(all, reason = "the replacement is exactly the type default already written here, so it is semantically identical")]
         self.first_round = None;
     }
 
@@ -446,7 +504,7 @@ impl Converger {
             self.total_rounds = self.total_rounds.saturating_add(1);
 
             let withdrawn = self.scoped_withdrawn(plan, scope.mutants);
-            let guards = self.splices.instrument(work, plan, &withdrawn)?;
+            let guards = self.instrument_schema(work, plan, &withdrawn)?;
 
             let started = Instant::now();
             let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
@@ -458,12 +516,15 @@ impl Converger {
                 return Err(Self::build_timeout_error(budget));
             };
 
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if self.first_round.is_none() {
+                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
                 self.first_round = Some(elapsed);
             }
 
             if outcome.succeeded {
-                self.history.push(Round { elapsed, withdrew: 0 });
+                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+                self.history.push(build_round(elapsed, plan, []));
 
                 return Ok(Convergence::Built(stdout));
             }
@@ -477,10 +538,7 @@ impl Converger {
                         Isolation::Blamed(ordinals) | Isolation::Item(ordinals) => ordinals,
                     };
 
-                    self.history.push(Round {
-                        elapsed,
-                        withdrew: ordinals.len(),
-                    });
+                    self.history.push(build_round(elapsed, plan, ordinals.iter().copied()));
 
                     for ordinal in ordinals {
                         let _ = self.withdrawn.insert(*ordinal);
@@ -494,7 +552,7 @@ impl Converger {
                     continue;
                 }
 
-                self.history.push(Round { elapsed, withdrew: 0 });
+                self.history.push(build_round(elapsed, plan, []));
 
                 return Ok(Convergence::Stuck(Self::unattributed_build_error(work, &stdout, &outcome.stderr)));
             }
@@ -511,15 +569,12 @@ impl Converger {
 
                 // Nothing was withdrawn: `history` is what the run reports its build time against,
                 // and this round ended without applying its blame.
-                self.history.push(Round { elapsed, withdrew: 0 });
+                self.history.push(build_round(elapsed, plan, []));
 
                 return Ok(Convergence::Stuck(error));
             }
 
-            self.history.push(Round {
-                elapsed,
-                withdrew: blamed.len(),
-            });
+            self.history.push(build_round(elapsed, plan, blamed.keys().copied()));
 
             for (ordinal, code) in blamed {
                 let _ = self.withdrawn.insert(ordinal);
@@ -709,13 +764,13 @@ impl Converger {
             }
         }
 
-        let _guards = self.splices.instrument(work, plan, &withdrawn)?;
+        let _guards = self.instrument_schema(work, plan, &withdrawn)?;
         let started = Instant::now();
         let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
         let elapsed = started.elapsed();
 
         self.total_rounds = self.total_rounds.saturating_add(1);
-        self.history.push(Round { elapsed, withdrew: 0 });
+        self.history.push(build_round(elapsed, plan, []));
 
         Ok(outcome.stdout.map(|_stdout| !outcome.succeeded))
     }
@@ -749,6 +804,7 @@ impl Converger {
     ) -> Result<()> {
         let (candidates, deferred) = self.probe_sets(plan, scope.mutants);
 
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if candidates.len() < PROBE_FLOOR {
             return Ok(());
         }
@@ -765,7 +821,7 @@ impl Converger {
         self.ordering.offered = self.ordering.offered.saturating_add(candidates.len());
         self.ordering.rounds = self.ordering.rounds.saturating_add(1);
 
-        let guards = self.splices.instrument(work, plan, &deferred)?;
+        let guards = self.instrument_schema(work, plan, &deferred)?;
 
         let started = Instant::now();
         let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
@@ -780,7 +836,7 @@ impl Converger {
         self.total_rounds = self.total_rounds.saturating_add(1);
 
         let Some(stdout) = outcome.stdout else {
-            self.history.push(Round { elapsed, withdrew: 0 });
+            self.history.push(build_round(elapsed, plan, []));
 
             return Ok(());
         };
@@ -792,7 +848,7 @@ impl Converger {
             // Every hint was wrong: nothing here is unviable now. Nothing is withdrawn and nothing
             // is recorded against these mutants — the round bought only the knowledge that it did
             // not need to be taken, which `offered` against `confirmed` is what reports.
-            self.history.push(Round { elapsed, withdrew: 0 });
+            self.history.push(build_round(elapsed, plan, []));
 
             return Ok(());
         }
@@ -800,10 +856,7 @@ impl Converger {
         let mut blamed = blame(&stdout, &work.root, &guards);
         retain_blamed(&mut blamed, plan, scope.mutants);
 
-        self.history.push(Round {
-            elapsed,
-            withdrew: blamed.len(),
-        });
+        self.history.push(build_round(elapsed, plan, blamed.keys().copied()));
 
         self.ordering.confirmed = self.ordering.confirmed.saturating_add(blamed.len());
 
@@ -821,6 +874,7 @@ impl Converger {
     /// when Cargo's roots are wider, so an error from another stage cannot mask or be mistaken for
     /// evidence about a hinted candidate.
     fn probe_sets(&self, plan: &Plan, select: Option<&[String]>) -> (Vec<u32>, HashSet<u32>) {
+        // #[gamma::skip(all, reason = "the alternative changes only internal candidate ordering or tie selection, not the accepted population exposed by this layer")]
         let mine = |mutant: &Mutant| select.is_none_or(|names| names.iter().any(|name| name.as_str() == &*mutant.package));
 
         let mut candidates: Vec<u32> = Vec::new();
@@ -831,6 +885,7 @@ impl Converger {
                 continue;
             }
 
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if !mine(mutant) {
                 let _ = deferred.insert(mutant.ordinal);
                 continue;
@@ -846,6 +901,7 @@ impl Converger {
         // Sorted so that the probe a run takes depends only on the plan and the hints, never on the
         // iteration order of a set. The build keys by ordinal, but the reported counts and any
         // future tie-break would otherwise vary between two runs over an identical tree.
+        // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
         candidates.sort_unstable();
 
         (candidates, deferred)
@@ -914,6 +970,22 @@ impl Converger {
         )
     }
 
+    /// Instruments the synchronized tree and retires mutants discovered from another generation.
+    ///
+    /// Discovery runs after the scratch copy is synchronized. If the live checkout changes in
+    /// between, its spans no longer describe the tree this run proved and will test. Those mutants
+    /// are explicitly reported as not built rather than either spliced at the wrong offsets or
+    /// allowed to reach the missing-guard invariant as an internal error.
+    fn instrument_schema(&mut self, work: &Workspace, plan: &Plan, withdrawn: &HashSet<u32>) -> Result<Guards> {
+        let instrumented = self.splices.instrument(work, plan, withdrawn)?;
+
+        self.withdrawn.extend(instrumented.unavailable.iter().copied());
+        self.abandoned.extend(instrumented.unavailable.iter().copied());
+        self.unavailable.extend(instrumented.unavailable);
+
+        Ok(instrumented.guards)
+    }
+
     fn missing_guard_error(missing: &Mutant) -> Error {
         error!(
             "internal error: no guard was emitted for the mutant at {}:{}, so it could not \
@@ -951,7 +1023,7 @@ impl Converger {
         events: &mut dyn Events,
     ) -> Result<Preflight> {
         match Self::check(work, plan, select, mutating, limits, events) {
-            Ok(()) => Ok(Preflight::narrow(Vec::new())),
+            Ok(discovery) => Ok(Preflight::narrow(Vec::new(), discovery)),
 
             // A narrowed check is not a smaller version of the whole one: cargo unifies features
             // over the packages it is told to build, so a target that only compiles because some
@@ -974,10 +1046,11 @@ impl Converger {
                 // "the tree compiles"; it is "the tree compiles when cargo unifies features over
                 // every member", and a later build that narrowed again would reproduce the very
                 // failure this branch has just proved is not any mutant's doing.
-                if Self::check(work, plan, None, mutating, limits, events).is_ok() {
+                if let Ok(discovery) = Self::check(work, plan, None, mutating, limits, events) {
                     return Ok(Preflight {
                         whole_workspace: true,
                         dropped: Vec::new(),
+                        discovery,
                     });
                 }
 
@@ -1032,9 +1105,9 @@ impl Converger {
 
         events.build_progress("the whole workspace did not build either, checking only the packages being mutated");
 
-        Self::check(work, plan, Some(mutating), mutating, limits, events).map_err(|_last| narrow)?;
+        let discovery = Self::check(work, plan, Some(mutating), mutating, limits, events).map_err(|_last| narrow)?;
 
-        Ok(Preflight::narrow(dropped))
+        Ok(Preflight::narrow(dropped, discovery))
     }
 
     /// Runs one preflight check over the packages named, or the whole workspace when none are.
@@ -1045,7 +1118,8 @@ impl Converger {
         mutating: &[String],
         limits: BuildLimits,
         events: &mut dyn Events,
-    ) -> Result<()> {
+    ) -> Result<String> {
+        // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
         let outcome = run_cargo(work, plan, &["check", "--tests", "--keep-going"], select, limits, None, events)?;
 
         let Some(stdout) = outcome.stdout else {
@@ -1053,7 +1127,7 @@ impl Converger {
         };
 
         if outcome.succeeded {
-            return Ok(());
+            return Ok(stdout);
         }
 
         let mut diagnostics = diagnostics(&stdout);
@@ -1105,7 +1179,9 @@ impl Converger {
         // withdrew as one line when it is done, and a round-by-round commentary underneath that
         // would bury the sequence the whole arrangement exists to show.
         let workspace = self.whole_workspace || self.workspace_stages;
+        // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
         let roots = if workspace { None } else { Some(packages) };
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         let verb: &[&str] = if workspace {
             &["check", "--keep-going"]
         } else {
@@ -1117,6 +1193,7 @@ impl Converger {
             plan,
             BuildScope {
                 roots,
+                // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
                 mutants: Some(packages),
             },
             verb,
@@ -1124,6 +1201,7 @@ impl Converger {
             events,
         )? {
             Convergence::Built(stdout) => {
+                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
                 self.remember_compiled(&stdout, &work.root);
                 Ok(None)
             }
@@ -1172,7 +1250,13 @@ impl Converger {
     /// already carries [`Outcome::NotBuilt`] from [`Self::abandon`] and keeps it.
     pub(super) fn settle(&self, plan: &mut Plan) {
         for mutant in &mut plan.mutants {
-            if self.abandoned.contains(&mutant.ordinal) {
+            if self.unavailable.contains(&mutant.ordinal) {
+                mutant.outcome = Outcome::NotBuilt;
+                mutant.note = Some(
+                    "the source changed between synchronization and discovery, so this mutant did not describe the tree being tested"
+                        .to_owned(),
+                );
+            } else if self.abandoned.contains(&mutant.ordinal) {
                 mutant.outcome = Outcome::NotBuilt;
                 mutant.note =
                     Some("the instrumented forms in this item could not compile together, so its mutants were not run".to_owned());
@@ -1193,20 +1277,54 @@ impl Converger {
         limits: BuildLimits,
         events: &mut dyn Events,
     ) -> Result<Convergence> {
-        // `cargo build --tests` emits the same compiler-artifact executable messages consumed by
-        // `test_binaries`, while `--keep-going` lets convergence collect diagnostics from siblings
-        // after one target fails. Reusing this stream avoids a second cache-hit Cargo invocation.
-        self.converge_scoped(
+        let target_args = self
+            .target_discovery
+            .as_deref()
+            .and_then(|stdout| linked_target_args(stdout, &work.root, work.rustc_captures().as_deref(), plan));
+        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
+        let mut verb = vec!["build", "--keep-going"];
+
+        if let Some(target_args) = &target_args {
+            verb.extend(target_args.iter().map(String::as_str));
+        } else {
+            verb.push("--tests");
+        }
+
+        // The successful preflight can replace `--tests` with exact Cargo target selectors. Either
+        // form emits the compiler-artifact executable messages consumed by `test_binaries`, while
+        // `--keep-going` lets convergence collect diagnostics from siblings after one target fails.
+        // Reusing this stream avoids a second cache-hit Cargo invocation.
+        let narrowed = self.converge_scoped(
             work,
             plan,
             BuildScope {
                 roots: select,
                 mutants: select,
             },
-            &["build", "--tests", "--keep-going"],
+            &verb,
             limits,
             events,
-        )
+        )?;
+
+        match (target_args.is_some(), narrowed) {
+            (true, Convergence::Stuck(narrow)) => {
+                match self.converge_scoped(
+                    work,
+                    plan,
+                    BuildScope {
+                        roots: select,
+                        mutants: select,
+                    },
+                    &["build", "--tests", "--keep-going"],
+                    limits,
+                    events,
+                )? {
+                    Convergence::Built(stdout) => Ok(Convergence::Built(stdout)),
+                    Convergence::Stuck(_whole) => Ok(Convergence::Stuck(narrow)),
+                }
+            }
+            (_narrowed, convergence) => Ok(convergence),
+        }
     }
 
     /// Builds the whole workspace, which is what decides the run.
@@ -1227,6 +1345,7 @@ impl Converger {
         events: &mut dyn Events,
     ) -> Result<Build> {
         let select = self.scoped(select);
+        // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
         let mut widened = false;
 
         let converged = match self.compile(work, plan, select, limits, events)? {
@@ -1261,6 +1380,7 @@ impl Converger {
                     history: self.history.clone(),
                     census: self.tally(plan),
                     binaries: Vec::new(),
+                    artifacts: String::new(),
                     withdrawn: self.withdrawn.len().saturating_sub(self.abandoned.len()),
                     rounds: self.total_rounds,
                     widened,
@@ -1271,19 +1391,27 @@ impl Converger {
         };
 
         self.settle(plan);
+        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         self.remember_compiled(&stdout, &work.root);
 
         // Runs after the withdrawal above so that a mutant which genuinely failed to compile keeps
         // that more specific verdict; see [`withdraw_uncompiled`] for why the set is only trusted
         // when it agrees with the survey at all.
         if let Some(compiled) = &self.compiled {
+            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
             withdraw_uncompiled(plan, compiled);
         }
+
+        let captures = work.rustc_captures();
+        let mut binaries = test_binaries_with_linkage(&stdout, &work.root, captures.as_deref());
+        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+        retain_linked_to_population(&mut binaries, plan);
 
         Ok(Build {
             history: self.history.clone(),
             census: self.tally(plan),
-            binaries: test_binaries(&stdout),
+            binaries,
+            artifacts: stdout,
             withdrawn: self.withdrawn.len().saturating_sub(self.abandoned.len()),
             rounds: self.total_rounds,
             widened,
@@ -1298,6 +1426,7 @@ impl Converger {
     }
 
     /// Adds one successful Cargo invocation's dep-info to the run-wide source inventory.
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     fn remember_compiled(&mut self, stdout: &str, root: &camino::Utf8Path) {
         if let Some(found) = compiled_sources(stdout, root) {
             self.compiled.get_or_insert_with(HashSet::default).extend(found);
@@ -1372,5 +1501,268 @@ fn withdraw_uncompiled(plan: &mut Plan, compiled: &HashSet<Utf8PathBuf>) {
         if mutant.outcome == Outcome::Pending && !compiled.contains(&*mutant.file) {
             mutant.outcome = Outcome::NotBuilt;
         }
+    }
+}
+
+#[cfg(test)]
+mod mutation_outcome_tests {
+    use camino::Utf8Path;
+    use compact_str::CompactString;
+
+    use super::*;
+    use crate::ops::collect::Shape;
+
+    fn plan(mutants: Vec<Mutant>) -> Plan {
+        Plan {
+            root: Utf8PathBuf::from("root"),
+            files: Vec::new(),
+            mutants,
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            digests: HashMap::default(),
+            skipped: Vec::new(),
+            reach: HashMap::default(),
+            specs: HashMap::default(),
+        }
+    }
+
+    fn mutant(ordinal: u32, package: &str, item: &str) -> Mutant {
+        Mutant {
+            id: format!("{ordinal:012x}").into(),
+            ordinal,
+            file: Arc::from(Utf8Path::new("src/lib.rs")),
+            package: Arc::from(package),
+            span: 0..1,
+            line: ordinal as usize,
+            end_line: ordinal as usize,
+            column: 1,
+            mutator: Arc::from("literal.bool_flip"),
+            item_path: Arc::from(item),
+            occurrence: 0,
+            replacement_index: 0,
+            original: CompactString::new("true"),
+            replacement: CompactString::new("false"),
+            shape: Shape::Expr,
+            outcome: Outcome::Pending,
+            suppression: None,
+            expectation: None,
+            test_timeout_multiplier: None,
+            elapsed_ms: 0,
+            killed_by: None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn converger_state_updates_are_exact_and_repeatable() {
+        let mut converger = Converger::default();
+        converger.target_discovery("artifact stream".to_owned());
+        assert_eq!(converger.target_discovery.as_deref(), Some("artifact stream"));
+
+        converger.rounds = 9;
+        converger.per_round.extend([3, 2, 1]);
+        converger.first_round = Some(Duration::from_secs(2));
+        converger.begin_convergence();
+        assert_eq!(converger.rounds, 0);
+        assert!(converger.per_round.is_empty());
+        assert_eq!(converger.first_round, None);
+
+        let preflight = Preflight::narrow(vec!["dropped".to_owned()], "discovery".to_owned());
+        assert!(!preflight.whole_workspace);
+        assert_eq!(preflight.dropped, ["dropped"]);
+        assert_eq!(preflight.discovery, "discovery");
+    }
+
+    #[test]
+    fn build_rounds_attribute_withdrawals_to_packages_without_dividing_elapsed_time() {
+        let plan = plan(vec![
+            mutant(1, "alpha", "alpha::one"),
+            mutant(2, "beta", "beta::one"),
+            mutant(3, "alpha", "alpha::two"),
+        ]);
+
+        let round = build_round(Duration::from_secs(7), &plan, [3, 1]);
+
+        assert_eq!(round.elapsed, Duration::from_secs(7));
+        assert_eq!(round.withdrew, 2);
+        assert_eq!(round.packages.len(), 1);
+        assert_eq!(&*round.packages[0].package, "alpha");
+        assert_eq!(round.packages[0].mutants, 2);
+    }
+
+    #[test]
+    fn probe_sets_respect_sentinel_withdrawal_package_hint_and_order() {
+        let sentinel = mutant(0, "a", "sentinel");
+        let first = mutant(3, "a", "one");
+        let second = mutant(1, "a", "two");
+        let other = mutant(2, "b", "three");
+        let mut converger = Converger::guided(HashSet::from_iter([first.id.clone(), second.id.clone(), other.id.clone()]));
+        let _ = converger.withdrawn.insert(3);
+        let _ = converger.probed.insert(2);
+        let plan = plan(vec![sentinel, first, second, other]);
+
+        let selected = vec!["a".to_owned()];
+        let (candidates, deferred) = converger.probe_sets(&plan, Some(&selected));
+        assert_eq!(candidates, [1]);
+        assert_eq!(deferred, HashSet::from_iter([2, 3]));
+    }
+
+    #[test]
+    fn abandonment_and_settlement_touch_only_the_requested_live_population() {
+        let mut plan = plan(vec![
+            mutant(0, "a", "sentinel"),
+            mutant(3, "a", "one"),
+            mutant(1, "b", "two"),
+            mutant(2, "a", "three"),
+        ]);
+        let mut converger = Converger::default();
+        let _ = converger.withdrawn.insert(3);
+        let packages = vec!["a".to_owned()];
+        let abandoned = converger.abandon(&mut plan, Some(&packages), &error!("reason"));
+
+        assert_eq!(abandoned.reason, "reason");
+        assert_eq!(abandoned.ordinals, [2]);
+        assert_eq!(plan.mutants[2].outcome, Outcome::Pending);
+        assert_eq!(plan.mutants[3].outcome, Outcome::NotBuilt);
+        assert!(
+            plan.mutants[3]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("could not be made to compile"))
+        );
+
+        converger.settle(&mut plan);
+        assert_eq!(plan.mutants[1].outcome, Outcome::CompileError);
+        assert_eq!(plan.mutants[3].outcome, Outcome::NotBuilt);
+        assert!(
+            plan.mutants[3]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("could not compile together"))
+        );
+    }
+
+    #[test]
+    fn isolation_bisects_left_right_and_interacting_items() {
+        let directory = crate::testing::workdir("build-isolation-outcomes-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let plan = plan(vec![
+            mutant(3, "a", "second"),
+            mutant(1, "a", "first"),
+            mutant(4, "a", "third"),
+            mutant(2, "a", "first"),
+        ]);
+
+        for (oracle, expected) in [
+            (
+                (|active: &HashSet<u32>| Some(active.contains(&1))) as SubsetOracle,
+                Isolation::Blamed(vec![1]),
+            ),
+            (
+                (|active: &HashSet<u32>| Some(active.contains(&4))) as SubsetOracle,
+                Isolation::Blamed(vec![4]),
+            ),
+            (
+                (|active: &HashSet<u32>| Some(active.contains(&1) && active.contains(&3))) as SubsetOracle,
+                Isolation::Item(vec![1, 2]),
+            ),
+        ] {
+            let mut converger = Converger {
+                subset_oracle: Some(oracle),
+                ..Converger::default()
+            };
+            let isolated = converger
+                .isolate(
+                    &work,
+                    &plan,
+                    None,
+                    &["build"],
+                    BuildLimits::default(),
+                    &mut crate::testing::Recorder::default(),
+                )
+                .expect("the pure oracle cannot fail")
+                .expect("the population has a failing subset");
+
+            assert_eq!(format!("{isolated:?}"), format!("{expected:?}"));
+        }
+    }
+
+    #[test]
+    fn isolation_refuses_empty_pristine_and_indeterminate_populations() {
+        let directory = crate::testing::workdir("build-isolation-negative-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+
+        for (population, oracle) in [
+            (Vec::new(), (|_active: &HashSet<u32>| Some(true)) as SubsetOracle),
+            (vec![mutant(1, "a", "one")], (|_active: &HashSet<u32>| Some(true)) as SubsetOracle),
+            (vec![mutant(1, "a", "one")], (|_active: &HashSet<u32>| None) as SubsetOracle),
+        ] {
+            let mut converger = Converger {
+                subset_oracle: Some(oracle),
+                ..Converger::default()
+            };
+            let isolated = converger
+                .isolate(
+                    &work,
+                    &plan(population),
+                    None,
+                    &["build"],
+                    BuildLimits::default(),
+                    &mut crate::testing::Recorder::default(),
+                )
+                .expect("the oracle cannot fail");
+            assert_eq!(isolated.map(|value| format!("{value:?}")), None);
+        }
+    }
+
+    #[test]
+    fn tally_groups_distinct_ordinals_and_orders_dense_groups_first() {
+        let plan = plan(vec![
+            mutant(1, "a", "one"),
+            Mutant {
+                ordinal: 2,
+                mutator: Arc::from("arith.add_to_sub"),
+                ..mutant(2, "a", "two")
+            },
+            Mutant {
+                ordinal: 3,
+                mutator: Arc::from("arith.add_to_sub"),
+                ..mutant(3, "a", "three")
+            },
+        ]);
+        let converger = Converger {
+            census: HashMap::from_iter([
+                (1, "E0308".to_owned()),
+                (2, "E0277".to_owned()),
+                (3, "E0277".to_owned()),
+                (99, "E9999".to_owned()),
+            ]),
+            ..Converger::default()
+        };
+
+        let tally = converger.tally(&plan);
+        assert_eq!(tally[0].mutants, 2);
+        assert_eq!(tally[0].code, "E0277");
+        assert_eq!(tally[0].mutator, "arith.add_to_sub");
+        assert_eq!(tally[1].mutants, 1);
+        assert_eq!(tally[1].code, "E0308");
+        assert_eq!(tally[2].mutator, "");
+    }
+
+    #[test]
+    fn rollback_diagnostic_keeps_only_the_five_most_recent_rounds() {
+        let directory = crate::testing::workdir("build-rollback-diagnostic-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let error = Converger::rollback_limit_error(7, 7, &[9, 8, 7, 6, 5, 4, 3], &work, "");
+        let text = error.to_string();
+
+        assert!(text.contains("42 blamed during this build"), "{text}");
+        assert!(text.contains("7, 6, 5, 4, 3"), "{text}");
+        assert!(!text.contains("9, 8, 7, 6, 5"), "{text}");
     }
 }

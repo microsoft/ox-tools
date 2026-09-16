@@ -43,11 +43,34 @@ ones that look identical do not always mean the same thing, so reading it would 
 silently differs from what either tool would do. It is unsupported; configure Gamma independently
 in `gamma.toml`. When it is present and `gamma.toml` is not, the tool says so.
 
-`gamma-hints.json` may sit beside it. It is not configuration and has no keys: it is a
-generated artifact written by `cargo gamma hints`, holding the parts of a previous run that cannot
-move a score — which test caught which mutant, and which mutants failed to compile — so that a fresh
-checkout starts warm instead of cold. Runs read it automatically and it needs no setting here. See
+`gamma-hints.yaml` may sit beside it. It is not configuration and has no user-editable settings: it
+is a generated artifact written by `cargo gamma hints`, holding the parts of previous runs that
+cannot move a score. Ordinary promotion merges exact killers, generalized item/file candidates,
+reaching-test sets, and compiler-unviability ordering into the existing workspace artifact.
+Knowledge outside a package, file, diff, feature, or mutator selection is preserved; pass
+`--replace` only to rebuild the artifact from the selected population intentionally.
+
+Candidate tests are executed again rather than trusted as verdicts, so a fresh checkout starts warm
+without carrying a score forward. Format version 3 groups mutants by workspace-relative source
+file and stores each repeated killer identity once in that file's killer table; mutant entries
+refer to the table by index. Its `context` contains only the full `repo_sha` at generation time and
+the UTC `generated_on` date. These fields describe artifact provenance and do not gate hints or
+claim that retained entries originated at that revision. No-op promotion preserves the date and
+bytes.
+
+Runs read the artifact automatically and it needs no setting here. Legacy JSON versions 1 and 2
+remain readable only while `gamma-hints.yaml` is absent. The next successful promotion writes YAML
+and removes the JSON file after verifying its replacement. Malformed artifacts, unsupported
+versions, and artifacts whose producer is not cargo-gamma are ignored safely. See
 [checking in the hints file](../README.md#checking-in-the-hints-file).
+
+Explicit promotion is stricter than automatic reading. Ordinary promotion refuses a malformed,
+foreign, or unsupported existing generation rather than silently replacing knowledge it cannot
+round-trip. `--replace` permits discarding that unsupported knowledge, but it does not disable
+publication safety: the command still compares the exact YAML and legacy JSON bytes it read, leaves
+a concurrently written generation alone, writes atomically, and verifies the published artifact
+before deleting migration input. An unreadable or over-limit existing file is never overwritten
+implicitly, even with `--replace`.
 
 ## How settings combine
 
@@ -196,8 +219,12 @@ test-packages = ["my-integration-tests"]
 # Default: false.
 test-workspace = false
 
-# Disable the default case-level reachability census and run each reachable test binary whole.
+# Experimentally measure case-level reachability before testing mutants.
 # Default: false.
+optimize-test-execution = false
+
+# Explicitly suppress case-level selection and run each reachable test binary whole.
+# This conflicts with optimize-test-execution.
 whole-test-binaries = false
 
 # Test target name globs that may or may not decide a verdict.
@@ -222,18 +249,19 @@ not merely slower under a threaded harness; it is red, and a red baseline stops 
 still judged against binaries this run built itself, so nextest never invokes cargo and a mutant
 costs one extra process rather than one extra build.
 
-By default gamma considers a case-level census for test binaries that can reach selected pending
-mutants. It measures listing startup cost and skips the census when its projected process-launch cost
-cannot repay the maximum test work it could save. A census that proceeds is bounded by that same
-maximum saving, and sampling stops early when every relevant site already reaches more than half the
-binary's tests and would therefore use the whole binary.
+By default gamma performs no case-level census: exact and generalized probes still run first, and
+anything they do not kill falls back to the complete reachable test binary. Set
+`optimize-test-execution = true` (or pass `--optimize-test-execution`) to enable the experimental
+census. The opt-in still passes through an economic gate: gamma measures listing startup cost and
+skips sampling when its projected process-launch cost cannot repay the maximum test work it could
+save. A census that proceeds is bounded by that same maximum saving, and sampling stops early when
+every relevant site already reaches more than half the binary's tests.
 
 Only a complete census may exclude tests or establish that a site is uncovered. Positive reach
 observations from a budget-limited census are checked hints: the named cases run first, and any result
-other than a kill falls back to the whole binary. Failed samples are discarded. Set
-`whole-test-binaries = true` (or pass `--whole-test-binaries`) when reachability depends on threads,
-clocks, randomness or hash iteration order. The opt-out keeps target and package filters intact; it
-only stops filtering reachable binaries down to individual cases.
+other than a kill falls back to the whole binary. Failed samples are discarded.
+`whole-test-binaries = true` (or `--whole-test-binaries`) explicitly forbids case-level selection
+and conflicts with the census opt-in. Both modes keep target and package filters intact.
 
 ## Baseline
 

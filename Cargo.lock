@@ -18,6 +18,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocation_hints"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1822e8bbb2c4d6662020c9c95049f9ad39b08aceaba3b9b5a538e9b2674a2a2"
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -113,6 +119,12 @@ checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
 dependencies = [
  "rustversion",
 ]
+
+[[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "arrayvec"
@@ -562,7 +574,7 @@ version = "0.2.1"
 dependencies = [
  "cargo-gamma-lib",
  "clap",
- "mimalloc",
+ "rallocator",
  "terminal_size",
 ]
 
@@ -623,13 +635,16 @@ dependencies = [
  "proc-macro2",
  "reflink-copy",
  "rustc-hash 2.1.3",
+ "saphyr-parser",
  "serde",
  "serde_json",
  "syn 3.0.4",
  "tempfile",
+ "tick",
  "toml",
  "toml_edit 0.25.13+spec-1.1.0",
  "walkdir",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2896,6 +2911,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libyaml-rs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
+
+[[package]]
 name = "libz-sys"
 version = "1.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3545,6 +3566,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "rallocator"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c34b03da2f1c161c608dad2e01d61218d59569144eb24501c917b31486b725b6"
+dependencies = [
+ "allocation_hints",
+ "libc",
+ "rallocator_telemetry",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rallocator_telemetry"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7193bf3b2860d9226227448a3f64ed00ccc59135e3eaff96f62b502691cebd32"
+dependencies = [
+ "rallocator_wire",
+]
+
+[[package]]
+name = "rallocator_wire"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f66c46553d2329a96aa13e64851251c80f38a48a240b9c1461316e9ec166612"
+
+[[package]]
 name = "rand"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4037,6 +4085,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "saphyr-parser"
+version = "0.0.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0b1b76852c5643f558e7347e4de549474c3ecb7154295a189f4668428c1b453"
+dependencies = [
+ "arraydeque",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4467,7 +4525,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -4560,6 +4618,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8b890df44ed42f77de97f2aa630091bf96fac578ca2a93953e8aee926ebcba"
 dependencies = [
  "futures-core",
+ "jiff",
  "pin-project-lite",
  "thread_aware",
  "tokio",
@@ -5579,6 +5638,19 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "yaml_serde"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33b729a08a9a6be689bbad3e2bf8015926db54b6622cc89c3a5f7dc174b9e918"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "libyaml-rs",
+ "ryu",
+ "serde",
+]
 
 [[package]]
 name = "yoke"

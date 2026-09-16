@@ -79,3 +79,38 @@ impl<T, A: ExactSizeIterator<Item = T>, B: ExactSizeIterator<Item = T>> ExactSiz
 
 /// Kept for the same reason, and sound because neither side resumes after returning `None`.
 impl<T, A: FusedIterator<Item = T>, B: FusedIterator<Item = T>> FusedIterator for Either<A, B> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_variants_forward_iterator_operations() {
+        let mut left: Either<_, core::ops::Range<u8>> = Either::L([1_u8, 2, 3].into_iter());
+        assert_eq!(left.size_hint(), (3, Some(3)));
+        assert_eq!(left.next(), Some(1));
+        assert_eq!(left.next_back(), Some(3));
+        assert_eq!(left.next(), Some(2));
+        assert_eq!(left.next(), None);
+
+        let mut right: Either<core::array::IntoIter<u8, 3>, _> = Either::R(4_u8..7);
+        assert_eq!(right.size_hint(), (3, Some(3)));
+        assert_eq!(right.next(), Some(4));
+        assert_eq!(right.next_back(), Some(6));
+        assert_eq!(right.next(), Some(5));
+        assert_eq!(right.next(), None);
+    }
+
+    #[test]
+    fn either_preserves_exact_and_fused_iterator_contracts() {
+        fn require_exact_and_fused<I: ExactSizeIterator + FusedIterator>(iterator: &I) -> usize {
+            iterator.len()
+        }
+
+        let left: Either<_, core::ops::Range<u8>> = Either::L([1_u8, 2].into_iter());
+        let right: Either<core::array::IntoIter<u8, 2>, _> = Either::R(3_u8..5);
+
+        assert_eq!(require_exact_and_fused(&left), 2);
+        assert_eq!(require_exact_and_fused(&right), 2);
+    }
+}

@@ -340,6 +340,16 @@
 
 use proc_macro::TokenStream;
 
+fn inert(name: &str, attr: TokenStream, item: TokenStream) -> TokenStream {
+    cargo_gamma_attrs_impl::inert(name, attr.into(), item.into()).into()
+}
+
+fn inert_timeout(name: &str, attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr = attr.into();
+
+    cargo_gamma_attrs_impl::inert_timeout(name, &attr, item.into()).into()
+}
+
 /// Suppresses mutations on the annotated item and everything beneath it.
 ///
 /// With no arguments, every mutator is suppressed. With arguments, only the listed selectors are:
@@ -369,7 +379,7 @@ use proc_macro::TokenStream;
 /// ```
 #[proc_macro_attribute]
 pub fn skip(attr: TokenStream, item: TokenStream) -> TokenStream {
-    cargo_gamma_attrs_impl::inert("skip", attr.into(), item.into()).into()
+    inert("skip", attr, item)
 }
 
 /// Asserts that the selected mutants *survive*, and fails the run if any is killed.
@@ -390,7 +400,7 @@ pub fn skip(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn expect_survived(attr: TokenStream, item: TokenStream) -> TokenStream {
-    cargo_gamma_attrs_impl::inert("expect_survived", attr.into(), item.into()).into()
+    inert("expect_survived", attr, item)
 }
 
 /// Asserts that the selected mutants are *killed*, and fails the run if any survives.
@@ -417,7 +427,7 @@ pub fn expect_survived(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn expect_killed(attr: TokenStream, item: TokenStream) -> TokenStream {
-    cargo_gamma_attrs_impl::inert("expect_killed", attr.into(), item.into()).into()
+    inert("expect_killed", attr, item)
 }
 
 /// States the expression a function's return-value mutant substitutes for its body.
@@ -656,13 +666,13 @@ pub fn value(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn test_timeout_multiplier(attr: TokenStream, item: TokenStream) -> TokenStream {
-    cargo_gamma_attrs_impl::inert_timeout("test_timeout_multiplier", &attr.into(), item.into()).into()
+    inert_timeout("test_timeout_multiplier", attr, item)
 }
 
 /// Alias for [`macro@test_timeout_multiplier`].
 #[proc_macro_attribute]
 pub fn timeout_multiplier(attr: TokenStream, item: TokenStream) -> TokenStream {
-    cargo_gamma_attrs_impl::inert_timeout("timeout_multiplier", &attr.into(), item.into()).into()
+    inert_timeout("timeout_multiplier", attr, item)
 }
 
 /// Generic `gamma` attribute for mutant control, including timeout multiplier overrides.
@@ -679,5 +689,5 @@ pub fn timeout_multiplier(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn gamma(attr: TokenStream, item: TokenStream) -> TokenStream {
-    cargo_gamma_attrs_impl::inert_timeout("gamma", &attr.into(), item.into()).into()
+    inert_timeout("gamma", attr, item)
 }

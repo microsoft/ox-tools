@@ -52,13 +52,16 @@ owo-colors = { workspace = true }
 proc-macro2 = { workspace = true, features = ["span-locations", "proc-macro"] }
 reflink-copy = { workspace = true }
 rustc-hash = { workspace = true, features = ["std"] }
+saphyr-parser = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc", "std"] }
 serde_json = { workspace = true, features = ["std"] }
 syn = { workspace = true, features = ["full", "parsing", "printing", "visit", "extra-traits", "clone-impls", "proc-macro"] }
 tempfile = { workspace = true, optional = true }
+tick = { workspace = true, features = ["fmt"] }
 toml = { workspace = true, features = ["parse", "display", "serde", "std"] }
 toml_edit = { workspace = true, features = ["parse", "display"] }
 walkdir = { workspace = true }
+yaml_serde = { workspace = true, features = ["std"] }
 
 # loom drives the deterministic-scheduler models in `exec::verdict::hubs`, which only compile under
 # `--cfg loom`. Gating the dependency on that cfg keeps it out of every ordinary build and test:

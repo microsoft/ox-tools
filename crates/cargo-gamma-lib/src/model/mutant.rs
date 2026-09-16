@@ -217,6 +217,8 @@ pub fn one_line(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use cargo_gamma_engine::model::MutationSite;
+
     use super::*;
     use crate::fixtures;
 
@@ -312,6 +314,7 @@ mod tests {
     #[test]
     fn a_short_construct_is_left_alone() {
         assert_eq!(one_line("a + b", 48), "a + b");
+        assert_eq!(one_line("exact", 5), "exact");
     }
 
     #[test]
@@ -319,5 +322,34 @@ mod tests {
         let text = "ééééééééééééééééééééééééé";
 
         assert_eq!(one_line(text, 10).chars().count(), 10);
+    }
+
+    #[test]
+    fn a_definition_starts_with_no_execution_state() {
+        let definition = MutantDefinition {
+            id: "deadbeefcafe".to_owned().into(),
+            file: Arc::from(Utf8Path::new("src/lib.rs")),
+            site: Arc::new(MutationSite {
+                span: 4..9,
+                line: 2,
+                end_line: 2,
+                column: 5,
+                original: "a < b".to_owned().into(),
+            }),
+            mutator: Arc::from("relational.lt_to_le"),
+            item_path: Arc::from("subject::less"),
+            trait_impl: None,
+            occurrence: 3,
+            replacement_index: 1,
+            replacement: "a <= b".to_owned().into(),
+            shape: Shape::Expr,
+        };
+
+        let mutant = Mutant::from_definition(definition, Arc::from("subject"));
+
+        assert_eq!(mutant.ordinal, 0);
+        assert_eq!(mutant.elapsed_ms, 0);
+        assert_eq!(mutant.killed_by, None);
+        assert_eq!(mutant.note, None);
     }
 }

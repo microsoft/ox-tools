@@ -14,6 +14,10 @@ whole-file traversal because it has no selected build configuration.
 The combined visitor retains the audit and indexer as separate state objects.
 Their per-node update methods are shared with the standalone implementations,
 which keeps equivalence tests able to compare the fused and separate paths.
+The numeric index also records imports so external constants are eligible only
+when their imported qualifier is a known numeric type. Direct zero literals
+inherit unsigned evidence from function return types and annotated locals;
+signed and unresolved contexts remain eligible for decrement.
 
 ## Schema positions and text encoding
 

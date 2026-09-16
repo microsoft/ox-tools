@@ -14,10 +14,10 @@ use syn::spanned::Spanned as _;
 use syn::token::Comma;
 use syn::visit::{self, Visit};
 use syn::{
-    Arm, Attribute, BinOp, Block, Expr, ExprBinary, ExprBreak, ExprCall, ExprContinue, ExprForLoop, ExprIf, ExprIndex, ExprLit, ExprLoop,
-    ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat, ExprReturn, ExprStruct, ExprUnary, ExprWhile, FnArg, GenericArgument,
-    Generics, ImplItem, ImplItemConst, ImplItemFn, ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic, ItemTrait, Lit, Local, Macro, Member,
-    Pat, RangeLimits, ReturnType, Signature, Stmt, TraitItemConst, TraitItemFn, Type, UnOp, Variant,
+    Arm, Attribute, BinOp, Block, Expr, ExprAsync, ExprBinary, ExprBreak, ExprCall, ExprClosure, ExprContinue, ExprForLoop, ExprIf,
+    ExprIndex, ExprLit, ExprLoop, ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat, ExprReturn, ExprStruct, ExprUnary,
+    ExprWhile, FnArg, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemFn, ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic,
+    ItemTrait, Lit, Local, Macro, Member, Pat, RangeLimits, ReturnType, Signature, Stmt, TraitItemConst, TraitItemFn, Type, UnOp, Variant,
 };
 
 use super::stated::stated_range;
@@ -42,8 +42,8 @@ use indexes::{Indexes, NumericUses, indexes_in};
 use noop::is_noop;
 use predicates::{
     binds_a_pattern, boolean_literal, callee_name, callee_type, declared_name, diverges, expr_attrs, is_assign_op, is_capacity_call,
-    is_capacity_result, is_catch_all, is_constant_case, is_default_call, is_diagnostic_message, is_integer_zero_literal,
-    is_numeric_binding, is_numeric_return, is_numeric_type, is_promotable, is_textual, loop_produces_value, returns_numeric,
+    is_capacity_result, is_catch_all, is_default_call, is_diagnostic_message, is_integer_zero_literal, is_numeric_binding,
+    is_numeric_return, is_numeric_type, is_promotable, is_textual, is_unsigned_binding, loop_produces_value, returns_numeric,
     returns_result, stmt_attrs,
 };
 use tables::{binary_replacements, in_place_reorder, method_renames};
@@ -76,6 +76,13 @@ enum Undo {
 struct LoopContext {
     label: Option<String>,
     produces_value: bool,
+}
+
+#[derive(Clone, Copy)]
+enum UnsignedReturn {
+    Other,
+    BodyPending,
+    BodyEntered,
 }
 
 /// The traversal state.
@@ -139,6 +146,12 @@ pub(super) struct Collector<'a> {
     /// collection, and each of those costs a rollback round to discover it never compiled.
     numeric_return: bool,
 
+    /// Whether an unsigned-returning function is awaiting or traversing its body.
+    unsigned_return: UnsignedReturn,
+
+    /// Zero literals in value-producing positions whose surrounding syntax requires unsigned.
+    unsigned_zeros: Vec<Range<usize>>,
+
     /// Whether the enclosing function returns a `Result` whose error type comes from another crate.
     ///
     /// `Ok(v)` becoming `Err(Default::default())` needs an error value, and the error type is fixed
@@ -175,10 +188,9 @@ pub(super) struct Collector<'a> {
 
     /// Whether each constant and static declared anywhere in this file holds a number.
     ///
-    /// A screaming-case name is otherwise taken for a number, which is right for `MAX` and
-    /// `DEFAULT_SIZE` and wrong for every `const PREFIX: &str` and `const CAP: Duration` — and
-    /// adding one to those is the single largest source of mutants that cannot compile. The
-    /// declaration says which is which, in the file, in writing, so it is read rather than guessed.
+    /// Constant-style spelling says nothing about type: `MAX` may be numeric, while
+    /// `JUSTFILE_PATH` and `UNIX_EPOCH` are not. The declaration says which is which, in the file,
+    /// in writing, so it is read rather than guessed.
     /// Collected in one pass ahead of traversal for the same reason the field index is: a constant
     /// is very often used above the item that declares it.
     constants: HashMap<String, bool>,
@@ -299,6 +311,8 @@ impl<'a> Collector<'a> {
             impl_self_associated: HashMap::default(),
             default_paths,
             numeric_return: false,
+            unsigned_return: UnsignedReturn::Other,
+            unsigned_zeros: Vec::new(),
             foreign_error_return: false,
             bindings: HashMap::default(),
             fields: indexes.fields,
@@ -413,6 +427,7 @@ impl<'a> Collector<'a> {
     fn replacement_at(&self, at: u32) -> &str {
         self.candidates
             .get(at as usize)
+            // #[gamma::skip(literal.str_to_xyzzy, reason = "an absent candidate has no replacement; callers compare this sentinel only with non-empty proposed replacements")]
             .map_or("", |candidate| candidate.replacement.as_str())
     }
 
@@ -429,6 +444,7 @@ impl<'a> Collector<'a> {
     /// Borrowed from the file rather than the collector, so a caller can hold the result across a
     /// mutating call and no copy is made for a span that turns out not to be wanted.
     fn text_of(&self, span: Span) -> &'a str {
+        // #[gamma::skip(literal.str_to_xyzzy, reason = "an out-of-file span has no spliceable source text, and invented text would create a candidate with no valid site")]
         self.file.text.get(span.byte_range()).unwrap_or("")
     }
 
@@ -467,6 +483,8 @@ impl<'a> Collector<'a> {
     /// path just below is read.
     fn impl_scope(&self, node: &ItemImpl) -> String {
         let self_type = compact_path(self.text_of(node.self_ty.span()));
+        // #[gamma::skip(cond.always_false, reason = "a parsed self type always contains a non-trivia token; this fallback is only defensive for an unmapped expansion")]
+        // #[gamma::skip(all, reason = "the fallback is reachable only for an unmapped expansion, and Collector never descends into expansions")]
         let self_type = if self_type.is_empty() { "_".to_owned() } else { self_type };
 
         let Some((trait_path, _for)) = &node.trait_ else {
@@ -475,6 +493,7 @@ impl<'a> Collector<'a> {
 
         let trait_path = compact_path(self.text_of(trait_path.span()));
 
+        // #[gamma::skip(cond.always_false, reason = "a parsed trait path always has a non-trivia token; an empty path can only be an unmapped expansion")]
         if trait_path.is_empty() {
             return self_type;
         }
@@ -740,7 +759,14 @@ impl<'a> Collector<'a> {
             return;
         }
 
-        for (index, field) in node.fields.iter().enumerate() {
+        let next_starts = node
+            .fields
+            .iter()
+            .skip(1)
+            .map(|next| next.span().byte_range().start)
+            .chain(core::iter::once(rest.byte_range().start));
+
+        for ((index, field), to) in node.fields.iter().enumerate().zip(next_starts) {
             // A field behind a predicate that does not hold is not in the compiled literal, so
             // omitting it changes nothing that could be observed.
             if self.skipped(&field.attrs) {
@@ -748,11 +774,6 @@ impl<'a> Collector<'a> {
             }
 
             let from = field.span().byte_range().start;
-            let to = node
-                .fields
-                .iter()
-                .nth(index.saturating_add(1))
-                .map_or_else(|| rest.byte_range().start, |next| next.span().byte_range().start);
 
             // Everything between the two is the field, its comma and the space after it.
             if from < whole.start || to > whole.end || from >= to {
@@ -907,6 +928,7 @@ impl<'a> Collector<'a> {
         let span = expression.span();
         let text = self.text_of(span);
 
+        // #[gamma::skip(cond.always_false, reason = "empty text means the span is unmapped or the file was artificially truncated, so there is no site to perturb")]
         if text.is_empty() {
             return;
         }
@@ -959,25 +981,34 @@ impl<'a> Collector<'a> {
             },
 
             Expr::Path(path) if path.qself.is_none() => {
-                // A constant is one of the most worthwhile things this family has to offer, and
-                // the screaming case tells `MAX` and `DEFAULT_SIZE` apart from `PhantomData` and
-                // `Ordering::Relaxed`, which are a unit struct and a variant.
                 let last = path.path.segments.last().is_some_and(|segment| {
                     let name = segment.ident.to_string();
+                    let numeric_qualifier = path
+                        .path
+                        .segments
+                        .iter()
+                        .rev()
+                        .nth(1)
+                        .is_some_and(|qualifier| is_numeric_type(&qualifier.ident.to_string()));
 
-                    // What the file declares outranks how the name is spelled, in both directions:
-                    // a `const LIMIT: usize` is a number however it is reached, and a
-                    // `const PREFIX: &str` is not one however loudly it is spelled.
-                    self.constants.get(&name).copied().unwrap_or_else(|| is_constant_case(&name))
+                    // A declaration is exact evidence in either direction. For constants declared
+                    // elsewhere, only a numeric type qualifier is enough: `usize::MAX` says what
+                    // it is, while `FmtSpan::NONE` and `DateTime::UNIX_EPOCH` do not.
+                    numeric_qualifier || self.constants.get(&name).copied().unwrap_or(false)
                 });
 
                 last || path.path.get_ident().is_some_and(|ident| {
                     let name = ident.to_string();
 
-                    self.bindings
-                        .get(&name)
-                        .copied()
-                        .unwrap_or_else(|| self.numeric_uses.names.contains(&name))
+                    self.bindings.get(&name).copied().unwrap_or_else(|| {
+                        self.numeric_uses.names.contains(&name)
+                            || self
+                                .imports
+                                .get(&name)
+                                .and_then(Option::as_ref)
+                                .and_then(|path| path.last())
+                                .is_some_and(|qualifier| is_numeric_type(qualifier))
+                    })
                 })
             }
 
@@ -1056,9 +1087,14 @@ impl<'a> Collector<'a> {
     /// leave the outer one's `return` expressions looking like its own.
     fn in_function<T>(&mut self, sig: &Signature, body: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.numeric_return;
+        let outer_unsigned = self.unsigned_return;
         let outer_error = self.foreign_error_return;
 
         self.numeric_return = is_numeric_return(&sig.output);
+        self.unsigned_return = match &sig.output {
+            ReturnType::Type(_, ty) if is_unsigned_binding(ty) => UnsignedReturn::BodyPending,
+            _other => UnsignedReturn::Other,
+        };
         self.foreign_error_return = returns_undefaultable_error(
             &sig.output,
             &Types {
@@ -1094,7 +1130,52 @@ impl<'a> Collector<'a> {
         self.deferred = outer_deferred;
         self.undo.truncate(mark);
         self.numeric_return = outer;
+        self.unsigned_return = outer_unsigned;
         self.foreign_error_return = outer_error;
+        result
+    }
+
+    /// Runs `body` with the return context of a closure or async block.
+    ///
+    /// A closure's explicit return type is authoritative. An inferred closure or async block has
+    /// its own return type, but the syntax does not reveal any return-sensitive properties.
+    fn in_nested_return_context<T>(&mut self, output: Option<&ReturnType>, body: impl FnOnce(&mut Self) -> T) -> T {
+        let outer_numeric = self.numeric_return;
+        let outer_unsigned = self.unsigned_return;
+        let outer_error = self.foreign_error_return;
+
+        self.numeric_return = output.is_some_and(is_numeric_return);
+        self.unsigned_return = match output {
+            Some(ReturnType::Type(_, ty)) if is_unsigned_binding(ty) => UnsignedReturn::BodyPending,
+            _other => UnsignedReturn::Other,
+        };
+        self.foreign_error_return = output.is_some_and(|output| {
+            returns_undefaultable_error(
+                output,
+                &Types {
+                    abstracts: &[],
+                    imports: &self.imports,
+                    defaults: self.defaults,
+                    self_type: self.impl_self_type.as_ref(),
+                    self_associated: Some(&self.impl_self_associated),
+                },
+            )
+        });
+
+        let result = body(self);
+
+        self.numeric_return = outer_numeric;
+        self.unsigned_return = outer_unsigned;
+        self.foreign_error_return = outer_error;
+        result
+    }
+
+    /// Visits an expression while marking zeros in its value-producing positions as unsigned-only.
+    fn in_unsigned_expression<T>(&mut self, expression: &Expr, body: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.unsigned_zeros.len();
+        unsigned_zero_spans(expression, &mut self.unsigned_zeros);
+        let result = body(self);
+        self.unsigned_zeros.truncate(outer);
         result
     }
 
@@ -1235,6 +1316,36 @@ const fn word_like(kind: TokenKind) -> bool {
     )
 }
 
+/// Records zero literals reached only through syntax that preserves the expected value type.
+fn unsigned_zero_spans(expression: &Expr, spans: &mut Vec<Range<usize>>) {
+    match expression {
+        Expr::Lit(literal) if matches!(&literal.lit, Lit::Int(value) if value.base10_digits() == "0") => {
+            spans.push(literal.span().byte_range());
+        }
+        Expr::Paren(paren) => unsigned_zero_spans(&paren.expr, spans),
+        Expr::Group(group) => unsigned_zero_spans(&group.expr, spans),
+        Expr::Block(block) => {
+            if let Some(Stmt::Expr(tail, None)) = block.block.stmts.last() {
+                unsigned_zero_spans(tail, spans);
+            }
+        }
+        Expr::If(branch) => {
+            if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
+                unsigned_zero_spans(tail, spans);
+            }
+            if let Some((_, otherwise)) = &branch.else_branch {
+                unsigned_zero_spans(otherwise, spans);
+            }
+        }
+        Expr::Match(matched) => {
+            for arm in &matched.arms {
+                unsigned_zero_spans(&arm.body, spans);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[expect(
     clippy::renamed_function_params,
     reason = "syn names every visitor parameter `i`, which says nothing about what it is"
@@ -1274,7 +1385,18 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             _ => {}
         }
 
-        visit::visit_local(self, node);
+        if let Pat::Type(typed) = &node.pat
+            && is_unsigned_binding(&typed.ty)
+            && let Some(init) = &node.init
+        {
+            visit::visit_pat(self, &node.pat);
+            self.in_unsigned_expression(&init.expr, |collector| collector.visit_expr(&init.expr));
+            if let Some((_, diverge)) = &init.diverge {
+                self.visit_expr(diverge);
+            }
+        } else {
+            visit::visit_local(self, node);
+        }
     }
 
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
@@ -1536,6 +1658,11 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_block(&mut self, node: &'ast Block) {
+        let unsigned_tail = matches!(self.unsigned_return, UnsignedReturn::BodyPending);
+        if unsigned_tail {
+            self.unsigned_return = UnsignedReturn::BodyEntered;
+        }
+
         self.in_scope(|collector| {
             for statement in &node.stmts {
                 // A statement behind a predicate that does not hold is discarded after parsing, so
@@ -1560,12 +1687,19 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
             // Descended into statement by statement rather than through `visit_block`, so that the
             // configured-out ones are not entered either.
-            for statement in &node.stmts {
+            for (index, statement) in node.stmts.iter().enumerate() {
                 if collector.skipped(stmt_attrs(statement)) {
                     continue;
                 }
 
-                visit::visit_stmt(collector, statement);
+                if unsigned_tail
+                    && index + 1 == node.stmts.len()
+                    && let Stmt::Expr(expression, None) = statement
+                {
+                    collector.in_unsigned_expression(expression, |collector| collector.visit_expr(expression));
+                } else {
+                    visit::visit_stmt(collector, statement);
+                }
             }
         });
     }
@@ -1581,6 +1715,14 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         }
 
         visit::visit_expr(self, node);
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast ExprClosure) {
+        self.in_nested_return_context(Some(&node.output), |collector| visit::visit_expr_closure(collector, node));
+    }
+
+    fn visit_expr_async(&mut self, node: &'ast ExprAsync) {
+        self.in_nested_return_context(None, |collector| visit::visit_expr_async(collector, node));
     }
 
     fn visit_expr_unary(&mut self, node: &'ast ExprUnary) {
@@ -1738,6 +1880,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         );
 
         if requires_value {
+            // #[gamma::skip(stmt.delete_call, reason = "a continue has no expression children and its label contains no mutable expression")]
             visit::visit_expr_continue(self, node);
             return;
         }
@@ -1751,6 +1894,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
         self.emit_shaped("loop.continue_to_break", node.span(), replacement, 0, Shape::Continue);
 
+        // #[gamma::skip(stmt.delete_call, reason = "a continue has no expression children and its label contains no mutable expression")]
         visit::visit_expr_continue(self, node);
     }
 
@@ -1779,6 +1923,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             self.emit("option.none_to_some", node.span(), "Some(Default::default())", 0);
         }
 
+        // #[gamma::skip(stmt.delete_call, reason = "an expression path contains no child expressions or declarations handled by Collector")]
         visit::visit_expr_path(self, node);
     }
 
@@ -1827,7 +1972,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             self.perturb_proven(value);
         }
 
-        visit::visit_expr_return(self, node);
+        if matches!(self.unsigned_return, UnsignedReturn::BodyPending | UnsignedReturn::BodyEntered)
+            && let Some(value) = node.expr.as_ref()
+        {
+            self.in_unsigned_expression(value, |collector| collector.visit_expr(value));
+        } else {
+            visit::visit_expr_return(self, node);
+        }
     }
 
     fn visit_expr_lit(&mut self, node: &'ast ExprLit) {
@@ -1847,9 +1998,10 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                         self.emit("literal.int_increment", span, incremented.to_string(), 2);
                     }
 
-                    if !(digits == "0" && value.suffix().starts_with('u'))
-                        && let Some(decremented) = parsed.checked_sub(1)
-                    {
+                    let unsigned_zero =
+                        digits == "0" && (value.suffix().starts_with('u') || self.unsigned_zeros.contains(&span.byte_range()));
+
+                    if !unsigned_zero && let Some(decremented) = parsed.checked_sub(1) {
                         self.emit("literal.int_decrement", span, decremented.to_string(), 3);
                     }
                 }
@@ -1875,6 +2027,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 }
 
                 // Replacing `"xyzzy"` with `"xyzzy"` is the original program.
+                // #[gamma::skip(cond.always_true, reason = "at an `\"xyzzy\"` site this only offers the original text, which `emit_at` rejects as a no-op")]
                 if text != XYZZY {
                     self.emit("literal.str_to_xyzzy", span, "\"xyzzy\"", 1);
                 }
@@ -1883,6 +2036,120 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             _ => {}
         }
 
+        // #[gamma::skip(stmt.delete_call, reason = "a literal is a leaf syntax node, so recursive descent cannot alter collector state")]
         visit::visit_expr_lit(self, node);
+    }
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    use crate::ops::collect::collect_in;
+
+    fn candidates(source: &str, names: &str) -> Vec<Candidate> {
+        let file = SourceFile::parse("mutation.rs", source.to_owned()).expect("fixture parses");
+        let selection = Selection::parse(names).expect("selectors resolve");
+        collect_in(&file, &selection, &CfgSet::unconditional())
+    }
+
+    #[test]
+    fn exact_candidate_text_indices_shapes_and_paths_are_observable() {
+        let found = candidates(
+            r#"fn ordinary(flag: bool, value: usize) -> usize {
+                if flag { consume(value, 2); }
+                let _ = Some(0); let _ = None; let _ = "value"; value
+            }
+            fn iter() -> impl Iterator<Item = usize> { core::iter::once(1) }"#,
+            "cond.negate,cond.always_true,cond.always_false,option.some_to_none,option.none_to_some,literal.int_increment,literal.int_decrement,literal.str_to_empty,literal.str_to_xyzzy,expr.increment,expr.decrement,fn_value",
+        );
+
+        assert!(found.iter().any(|c| c.mutator == "cond.negate" && c.replacement == "!(flag)"));
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "cond.always_true" && c.replacement_index == 1 && c.replacement == "true")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "cond.always_false" && c.replacement_index == 2 && c.replacement == "false")
+        );
+        assert!(found.iter().any(|c| c.mutator == "option.some_to_none" && c.replacement == "None"));
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "option.none_to_some" && c.replacement == "Some(Default::default())")
+        );
+        assert!(found.iter().any(|c| c.mutator == "literal.str_to_empty" && c.replacement == "\"\""));
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "literal.str_to_xyzzy" && c.replacement == "\"xyzzy\"")
+        );
+        assert!(found.iter().any(|c| c.item_path.as_ref() == "ordinary" && c.shape == Shape::Block));
+        assert!(found.iter().any(|c| c.item_path.as_ref() == "iter" && c.shape == Shape::IterBlock));
+    }
+
+    #[test]
+    fn collection_match_struct_range_and_loop_boundaries_are_observable() {
+        let found = candidates(
+            r"
+                #[derive(Default)] struct S { a: usize, b: usize }
+                fn f(mut value: usize, stop: usize, base: S) {
+                    value += 1;
+                    match value { 0 if value > 1 => {}, 1 => {}, _ => {} }
+                    let _ = S { a: value, b: 2, ..base };
+                    let _ = vec![10, 20, 30];
+                    for index in value..stop { consume(index); }
+                    loop { continue; } loop { break; }
+                }
+            ",
+            "assign.add_to_sub,stmt.delete_assign,match_guard.negate,match_guard.always_true,match_guard.always_false,match_arm.never_matches,struct_field.omit,collection.omit_element,range.exclusive_to_inclusive,expr.increment,expr.decrement,loop.continue_to_break,loop.break_to_continue",
+        );
+
+        assert_eq!(found.iter().filter(|c| c.mutator == "struct_field.omit").count(), 2);
+        assert_eq!(found.iter().filter(|c| c.mutator == "collection.omit_element").count(), 3);
+        assert_eq!(found.iter().filter(|c| c.mutator == "match_arm.never_matches").count(), 1);
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "assign.add_to_sub" && c.replacement == "value -= (1)")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "range.exclusive_to_inclusive" && c.replacement == "(value)..((stop) + 1)")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "loop.continue_to_break" && c.replacement == "break")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "loop.break_to_continue" && c.replacement == "continue")
+        );
+    }
+
+    #[test]
+    fn configuration_const_and_scope_state_change_candidate_population() {
+        assert!(candidates("fn f() { #[cfg(test)] consume(1 + 2); }", "stmt.delete_call,arith.add_to_sub").is_empty());
+        assert!(candidates("const N: usize = 1 + 2; static S: usize = 3 + 4;", "arith.add_to_sub").is_empty());
+
+        let found = candidates(
+            "fn outer(value: usize) -> usize { { let value: String = String::new(); consume(value); } fn inner(value: String) { consume(value); } value }",
+            "expr.increment,expr.decrement,stmt.delete_call",
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "expr.increment" && c.item_path.as_ref() == "outer")
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|c| c.mutator == "expr.increment" && c.item_path.as_ref() == "outer::inner")
+        );
     }
 }

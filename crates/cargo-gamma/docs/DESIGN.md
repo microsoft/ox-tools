@@ -236,6 +236,22 @@ For `cfg_attr`, a definitely false predicate leaves the nested directive inactiv
 predicate applies it, and an unknown predicate applies it conservatively rather than manufacturing
 a survivor the author believed suppressed.
 
+The same selector language also supports `#[gamma::expect_survived(...)]` and
+`#[gamma::expect_killed(...)]`, with equivalent comment spellings for statements and expressions.
+These are assertions about the test oracle, not suppressions: governed mutants still run and still
+count normally. Once a governed mutant has a score-bearing outcome, a disagreement fails the
+campaign's correctness gate. `expect_killed` requires `killed`;
+`expect_survived` accepts every undetected outcome — `survived`, `uncovered`, `timeout`, or
+`outofmem` — because its assertion is that the suite did not detect the mutant, not that execution
+completed normally. Unviable, ignored, not-built, flaky, and pending mutants prove neither
+expectation. An expectation that currently governs no mutant is not reported as an idle
+suppression.
+
+`#[gamma::test_timeout_multiplier(...)]` and its `timeout_multiplier` compatibility spelling apply
+a positive per-site multiplier to the normal baseline-derived timeout. They change how long the
+mutant is allowed to run, not how it is scored, and may be combined with a skip or expectation
+directive only when the site states one unambiguous multiplier.
+
 Every uncertainty fails toward **keeping** work. Running an unnecessary mutant costs time; silently
 dropping a valid mutant improves the score without evidence.
 
@@ -359,17 +375,53 @@ Normal runs publish `gamma-report.json`, `gamma-report.html`, `gamma-report.sari
 `--cache-dir` relocates only reusable cache state. `--artifact-dir` relocates all five published
 artifacts together, and its directory is created when absent.
 
-Those five files are the completed-run set. A baseline that fails before a campaign can complete
-instead publishes `baseline-failure.json` and `gamma-diagnostics.json`. The baseline record uses
-`schemaVersion: 1` and records the failure kind and reason; package, target, runner, executable, and
-working directory; cargo-gamma's explicit environment overrides; failing and last-observed tests;
-termination, elapsed time, budget, peak, and memory limit; and safely encoded stdout and stderr
-tails. Each stream retains at most 64 KiB and 2,000 lines, and the record says when output was
-truncated. Both early-failure artifacts are written before the failed scratch workspace is removed.
+The diagnostics bundle contains aggregate algorithm-health telemetry rather than one row per
+mutant. Build rounds attribute newly withdrawn mutants to packages while retaining the round's
+actual workspace-wide elapsed time; they do not invent per-package build durations. Census
+telemetry records candidate binaries and sites, listing attempts and successes, the estimated walk
+cost and economic-gate decision, sample launches, and complete versus partial evidence. Sweep
+telemetry records whole, case-selected, hinted-fallback, and uncovered
+decisions; named tests available and selected; exact and generalized candidate/probe/hit funnels
+split into item, reach, file, and census tiers; and each package's first mutant start and final
+completion relative to the sweep start. Package CPU time remains in the package breakdown, while
+the package sweep span is wall time and may overlap other packages under concurrency.
+
+Those five files are the completed-run set. Before a build starts, cargo-gamma removes the prior
+`baseline-failures/` tree; inability to remove it stops the run so stale records cannot be mistaken
+for current failures. A baseline failure publishes one stable, filesystem-safe directory per
+failed test beneath
+`baseline-failures/<package>/<target>/tests/<test-name>/`. Unnamed binary-level failures use
+categorical leaves such as `timeout`, `out-of-memory`, `enumeration-failure`,
+`environment-failure`, and `anonymous-failure`. Components are length-bounded and valid on Windows
+and Unix. The common path stays readable; when sanitized, truncated, case-folded, or duplicate
+identities collide, a short BLAKE3 suffix derived from package, target, package-id, executable,
+failure kind, and test identity disambiguates them deterministically. Each failure directory
+contains `failure.json` and `diags.json`.
+
+The baseline record uses `schemaVersion: 1` and records the failure kind and reason; package,
+target, runner, executable, and working directory; cargo-gamma's explicit environment overrides;
+failing and last-observed tests; termination, elapsed time, budget, peak, and memory limit; and
+safely encoded stdout and stderr tails. Each stream retains at most 64 KiB and 2,000 lines, and the
+record says when output was truncated. Direct libtest baselines run to completion within their time
+and memory budgets instead of stopping at the first `FAILED` announcement, so every named failure
+and libtest's trailing captured output are retained. Mutant attempts still stop at the first
+killing test. All retained binaries settle before one concise aggregate error reports the failure
+count and directs the reader to `baseline-failures/`. The canonical diagnostics and each
+successfully published `failure.json` and `diags.json` are announced with a `Wrote` line using the
+platform's native path separator, while the verbose per-failure summaries are not repeated. Both
+early-failure artifacts are written before the failed scratch workspace is removed.
+The diagnostics retain the settled plan from the completed instrumented build, so population,
+unviable, pending, mutator, and package data already known before the baseline failure are not
+replaced by an empty survey skeleton.
 
 The source tree preserves symlinks and honors workspace ignore rules. Relative path dependencies
 that leave the workspace are anchored to their original locations so moving the workspace does not
 change Cargo's dependency graph.
+
+The 0.3 compatibility boundary and adopter actions are recorded in
+[the migration guide](MIGRATION.md). In particular, case-level census is
+opt-in, whole-binary mode explicitly disables case selection, promoted hints
+use YAML, and baseline failures use a per-failure directory tree.
 
 Only one cargo-gamma command may operate on an original workspace at a time. A process-held lock in
 that workspace's default external cache applies even when `--cache-dir` redirects reusable state.
@@ -388,6 +440,13 @@ rather than trusted — the default base also carries the ownership marker, and 
 landing on the same name is refused with a usage error naming both roots and suggesting
 `--cache-dir`. An unmarked cache containing anything other than the lock created while claiming it
 is refused rather than adopted.
+
+Before creating, claiming, or cleaning a default cache, cargo-gamma independently verifies that the
+derived path is an identity directory directly beneath the dedicated `cargo-gamma` namespace. A
+malformed path that names the platform cache home, the namespace itself, or a differently named
+child is refused before a lock, ownership marker, synchronized workspace, Cargo target, or removal
+can touch it. This check is deliberately separate from path construction so a defect in the latter
+cannot redefine what counts as a valid default cache.
 
 An explicit `--cache-dir` names the cache base itself and must be empty on first use. cargo-gamma
 writes an ownership marker tying it to the original workspace and takes a second process-held lock
@@ -441,8 +500,16 @@ so tests in unrelated workspace packages are not presented as costs of the run.
 
 ### Baseline
 
-The unmutated test binaries run first. A red baseline stops the campaign: if a test already fails,
-every mutant appears detected and the mutation score becomes meaningless.
+The unmutated test binaries run first. Direct libtest binaries are allowed to complete after a
+failure announcement, within the existing time and memory budgets, so one pass discovers every
+failure the harness reports and retains its final panic and captured-output section. A test-failing
+binary receives one clean retry so that a transient host or tool failure does not discard an
+otherwise valid campaign; failures observed across the attempts remain represented. Timeouts,
+stalls, resource failures, and infrastructure failures are not retried because repeating them
+cannot establish a trustworthy calibration. A terminal failure does not cancel other retained
+binaries: all settle, then one error reports the failure count and artifact directory. The red
+baseline still stops the campaign before mutants run, because a test that already fails makes every
+mutant appear detected and the mutation score meaningless.
 
 The baseline also measures:
 
@@ -456,17 +523,28 @@ independent constant. The baseline and mutant runs use the same harness and exec
 ### Harnesses
 
 By default, cargo-gamma launches libtest binaries directly. Direct launch avoids invoking Cargo for
-every mutant.
+every mutant. Before the first launch, cargo-gamma reconstructs Cargo's test-process environment
+once from the successful build stream and `cargo metadata`. Each binary receives its package's
+`CARGO_MANIFEST_*` and `CARGO_PKG_*` values, build-script `OUT_DIR` and `rustc-env` values, and,
+for integration tests and benchmarks, `CARGO_BIN_EXE_*` paths. The shared environment carries the
+Cargo and rustup toolchain selection and reproduces Cargo's executable and dynamic-library search
+paths. Test listing, the baseline, and mutant attempts all use that same environment.
 
 Nextest mode provides process isolation for suites that cannot run safely on libtest's shared
 threaded process. cargo-gamma prepares nextest's description of the already-built binaries once,
 then reuses it; allowing nextest to rebuild for every mutant would reintroduce compilation into the
-inner loop.
+inner loop. Cargo-gamma supplies the same Cargo package and toolchain context to nextest, while
+nextest remains responsible for its runner-specific `NEXTEST_*` values and may normalize values
+according to its own compatibility contract.
 
 ## Selecting only tests that can matter
 
 After removing per-mutant builds, test execution is the dominant cost. cargo-gamma narrows it using
 evidence that preserves the verdict.
+
+The complete operational sequence—from loading hints through census admission, mutant queue
+construction, and per-mutant test selection—is summarized in
+[Scheduling](SCHEDULING.md).
 
 ### Package reachability
 
@@ -476,8 +554,18 @@ letting reverse dependents improve another package's score. `--test-package` nam
 oracle, and `--test-workspace` admits every workspace package.
 
 Within the admitted package set, a test binary cannot execute code it does not link. The Cargo
-dependency graph identifies binaries that cannot reach a mutated package, and those binaries are
-omitted. Uncertain relationships are treated as reachable.
+dependency graph first identifies binaries that cannot reach a mutated package. Cargo Gamma then
+interposes on the successful preflight's rustc invocations and combines their exact artifact,
+primary-source, dependency-file, and `--extern` relationships with Cargo's artifact messages. Test
+targets proven not to link any pending mutated source are omitted from subsequent builds, baseline
+measurement, census, and mutant judgement.
+
+Compiler capture is an optimization, never an oracle by itself. A missing or corrupt capture,
+ambiguous artifact association, unsupported target kind, opaque path dependency, or untraceable
+workspace `--extern` abandons target-level narrowing and retains package-level behavior. If a build
+using exact Cargo target selectors fails, the same build is retried with all test targets before
+the failure can affect a verdict. Unknown relationships therefore run or build more tests; they
+never hide one.
 
 ### Guard census
 
@@ -485,23 +573,36 @@ Package reachability is coarse: many tests link a crate but never execute a part
 guard runtime therefore has a census mode in which guards record that their sites were reached while
 always returning the original branch.
 
+The census is an experimental optimization disabled by default. Passing
+`--optimize-test-execution`, or setting `optimize-test-execution = true`, requests it; the request
+still has to pass the economic gate below. A default run performs no census listing or sampling.
+Exact killer hints, persisted generalized reach hints, and in-run item/file learning remain active,
+and anything they do not kill conservatively falls back to the complete reachable binary.
+`--whole-test-binaries` explicitly suppresses all case-level selection and conflicts with the
+census opt-in. Diagnostics distinguish a disabled census from one declined by the economic gate,
+and distinguish incomplete checked-hint evidence from a complete census.
+
 Only test binaries that can reach selected pending mutants are census candidates, and only those
-mutants' sites are retained. Each test is run separately when the census proceeds. Its recorded site
-set becomes the exact candidate set for that test under deterministic execution:
+mutants' sites are retained. The census first runs deterministic groups: top-level libtest module
+prefixes when test names expose a hierarchy, or stable contiguous chunks otherwise. A group's
+recorded sites are conservatively attributed to every test in that group. Mixed groups are
+subdivided only when their measured launch cost is clearly less than the remaining mutant work
+that finer attribution could save. This produces the same safe relation as an exact per-case walk:
 
 - if the baseline test reaches a site, it can observe that site's mutant;
 - if it does not reach the site, activating the site cannot change anything before the site is
   reached, so that test remains irrelevant.
 
-Case selection must pay for itself. Listing launch time is multiplied by the number of listed cases
-as a startup-cost estimate. The census is skipped when that estimate is at least the serial upper
-bound on everything selection could save: one whole baseline duration per reachable
-mutant/binary pair. If it proceeds, that upper bound is also the census deadline. Sampling a binary
-stops once every selected site has been reached by more than half its tests, because the sweep would
-run that binary whole for every such site regardless of further attribution.
+Case selection must pay for itself. Listing launch time and observed group costs estimate the
+sampling work. The census is skipped when that estimate is at least the serial upper bound on
+everything selection could save: one whole baseline duration per reachable mutant/binary pair. If
+it proceeds, that upper bound is also the census deadline. Refinement stops when its extra launches
+cannot conservatively repay themselves, or once every selected site has been attributed to more
+than half the suite, because the sweep would run that binary whole for those sites regardless.
 
-Only a complete, non-empty census can exclude a test or establish that a site is uncovered. Positive
-reach observations collected before the deadline are retained as checked hints. A filtered census
+Only a complete, internally consistent census hierarchy can exclude a group or establish that a
+site is uncovered. Positive reach observations collected before the deadline, or before a failed
+or inconsistent subdivision, are retained as checked hints. A filtered census
 failure is provisional and the whole binary is rerun before assigning its canonical outcome,
 because filtering changes runtime, peak memory, and failure order. Incomplete-census cases run
 first only when filtering cannot bypass another outcome from that binary, and any result other than
@@ -536,6 +637,34 @@ only a hint: when its test is rerun, it must convict again, and filtering is use
 binary cannot instead produce a resource, confirmation-flake, or metering outcome. If the hint
 cannot be used or does not convict, normal testing continues. Stale hints can waste work but cannot
 settle or change a verdict.
+
+Learning generalizes successful exact probes within one run and across promoted run records. Exact
+tests learned from the same `(source file, enclosing item)` are ranked ahead of test binaries that
+killed another mutant in the source file. Hits, misses, and observed cost rank candidates; two
+misses demote an atypical candidate.
+
+Workers choose mutants at assignment time rather than advancing through a fixed queue. The first
+unhinted assignment for an item is its scout. While it runs, workers prefer files with no active
+mutant and then inactive items in the least-contended file. If only still-cold siblings of that
+active item remain, workers wait on a scheduler state change instead of starting redundant work or
+sleeping for a duration. The scout publishes its exact-test and file/reach learning before releasing
+the reservation, so every awakened sibling sees the result. Hinted work is already informed and may
+share an active item.
+
+The durable generalized-hint schema stores those item and file rankings plus interned census reach
+sets keyed by stable source-site identity. It is independently versioned and shared by the run
+record and checked-in hints artifact. Unsupported generalized tiers are ignored without discarding
+exact per-mutant probes. Diagnostics report candidates, attempts, and hits separately for exact
+mutant hints and for generalized item, reach, file, and census tiers. Every generalized candidate
+is rerun before use; persistence never turns reach or historical ordering into a verdict.
+
+Ordinary mutant launches reuse the census wire protocol to report whether the active guard was
+reached, without another subprocess. Positive observations promote that binary for later mutants
+in the same item or file. A sealed, passing, whole-binary observation that did not reach the guard
+may exclude that binary only for another replacement of the exact same stable source site, and only
+while deterministic reach narrowing is enabled. Filtered, failed, incomplete, or nondeterministic
+observations never establish absence. Reports count launches avoided by sweep-derived reach
+evidence separately from other learned-order savings.
 
 The first observed test failure settles a mutant, so remaining tests are stopped. This is safe only
 when harness output is unambiguous; modes that interleave user output with harness protocol disable
@@ -665,7 +794,24 @@ hash the workspace, or load a prior campaign record.
 
 Build-order and killer hints can be promoted into a version-controlled artifact because they never
 settle a verdict without being checked. Deleting that artifact can cost time but cannot change the
-answer.
+answer. `gamma-hints.yaml` groups exact hints by source file and interns repeated killer identities.
+Ordinary promotion updates knowledge produced by the selected run and preserves everything else;
+`--replace` is the explicit request to rebuild from only that selected population. The artifact's
+context is provenance, not an admission gate: it records the repository HEAD SHA and UTC generation
+date, while every retained hint remains subject to execution or compilation.
+
+Automatic hint consumption remains best-effort: malformed or unsupported knowledge is ignored
+because an optimization cannot be allowed to stop a run. Explicit incremental promotion has the
+opposite failure policy. It refuses an existing artifact it cannot understand rather than replacing
+unknown knowledge with a partial generation; `--replace` is the explicit permission to discard it.
+That refusal includes an unsupported independently versioned generalized section, whose future
+fields cannot be preserved by today's typed serializer. Publication and legacy migration cleanup
+compare against the exact YAML and JSON bytes used for the merge, so another writer's intervening
+generation causes a conflict instead of being overwritten.
+
+Legacy JSON formats remain read-only migration inputs while no YAML artifact exists. YAML is
+published atomically and read back before the JSON input is removed, so interruption cannot leave
+the workspace without a complete artifact.
 
 Suppression is different. It is a reviewed policy decision and therefore lives in source or
 configuration, not in an ephemeral cache. A cache directory must always be safe to delete without
@@ -778,6 +924,13 @@ local to the run.
 Reports are projections, not independent calculations. The console, JSON, HTML, merged report, and
 score gate must agree because they consume the same outcomes and scoring rules.
 
+Process exit status is another projection of that model: `0` means the command and every requested
+gate or expectation passed, `1` is invalid usage or configuration, `2` is a completed command whose
+correctness or score gate failed, `3` means the requested answer could not be completed, and `70`
+marks an internal cargo-gamma panic. A score gate also fails with `2` when the denominator is empty
+or selected mutants remain pending; without a score gate those states are reportable results rather
+than implicit grading policy.
+
 Limits imposed by CI platforms are explicit. Truncating annotations or SARIF silently would make a
 successful upload look like the complete result.
 
@@ -829,9 +982,11 @@ that cannot supply what it needs. A test that returns early and reports success 
 the coverage, not just the absence of the capability.
 
 Tests that change process-wide state which cannot be restored — an interrupt registry that has been
-told a run is ending, a fixed set of watch slots — run in a process of their own. Left in the shared
-one, they decide what unrelated tests are able to do next, and which tests those are depends on the
-harness's scheduling rather than on anything the suite states.
+told a run is ending, a fixed set of watch slots — must run in a process of their own or against an
+isolated injected instance. Left in the shared one, they decide what unrelated tests are able to do
+next, and which tests those are depends on the harness's scheduling rather than on anything the
+suite states. The remaining production-handler isolation gap is tracked explicitly in
+[TODO.md](TODO.md#t1-isolate-tests-from-the-production-interrupt-registry).
 
 ## Costs and limitations
 

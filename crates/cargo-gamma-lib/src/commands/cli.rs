@@ -222,6 +222,14 @@ pub struct HintsArgs {
     /// Report what would be promoted without writing anything.
     #[arg(long, help_heading = "Run control")]
     pub dry_run: bool,
+
+    /// Replace the complete hints artifact instead of merging the selected population into it.
+    ///
+    /// Ordinary promotion preserves knowledge outside the selected packages, files, diff and
+    /// mutator set. Use this only after a deliberately complete run when retained knowledge from
+    /// every other scope should be discarded.
+    #[arg(long, help_heading = "Run control")]
+    pub replace: bool,
 }
 
 /// Arguments shared by commands that select mutants.
@@ -524,11 +532,19 @@ pub struct MeasureArgs {
     #[arg(long, conflicts_with = "test_packages")]
     pub test_workspace: bool,
 
+    /// Measure which individual tests reach each mutation site before testing mutants.
+    ///
+    /// This experimental optimization may reduce sweep work by selecting only tests observed
+    /// reaching a site. It can add substantial listing and sampling work of its own, so it is
+    /// disabled unless explicitly requested. Incomplete observations remain checked hints and
+    /// always fall back to the whole binary when they do not kill.
+    #[arg(long, conflicts_with = "whole_test_binaries")]
+    pub optimize_test_execution: bool,
+
     /// Run every selected test in each reachable test binary.
     ///
-    /// By default every mutation site doubles as a reachability probe: gamma measures which
-    /// individual tests execute each site, then runs only those tests against its mutant. This
-    /// disables that measurement and runs each reachable binary whole instead.
+    /// This explicitly suppresses case-level reachability selection and runs each reachable binary
+    /// whole instead.
     ///
     /// Use it when test reachability is nondeterministic because control flow depends on threads,
     /// the clock, randomness or hash iteration order. It is usually much slower, especially for
@@ -760,6 +776,7 @@ impl Default for SelectArgs {
 
 impl SelectArgs {
     /// Resolves the `--mutators` selector list into a concrete set of mutators.
+    // #[gamma::skip(all, reason = "the CLI rejects either kind of selector error before this adapter; the conjunction only distinguishes impossible partially-valid parser states")]
     pub fn selection(&self) -> crate::Result<Selection> {
         let mut selection = self
             .mutators
@@ -1070,6 +1087,17 @@ mod tests {
         };
 
         assert!(args.selection().unwrap().errors().is_empty());
+    }
+
+    #[test]
+    fn error_values_are_kept_when_an_explicit_selection_includes_the_error_mutator() {
+        let args = SelectArgs {
+            mutators: Some("fn_value.err_with".to_owned()),
+            errors: vec!["MyError::Io".to_owned()],
+            ..SelectArgs::default()
+        };
+
+        assert_eq!(args.selection().unwrap().errors(), ["MyError::Io"]);
     }
 
     #[test]

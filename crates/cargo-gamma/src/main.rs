@@ -64,6 +64,7 @@
 //! | --- | --- |
 //! | [docs/CMDLINE.md](docs/CMDLINE.md) | Every subcommand and option, grouped by category. |
 //! | [docs/CONFIG.md](docs/CONFIG.md) | Every configuration key, with examples. |
+//! | [docs/MIGRATION.md](docs/MIGRATION.md) | Breaking changes and upgrade guidance. |
 //! | [docs/MUTATORS.md](docs/MUTATORS.md) | Every mutator and profile, and what each one asks of a suite. |
 //! | [docs/DESIGN.md](docs/DESIGN.md) | How the tool works internally. |
 //! | [docs/gamma.toml](docs/gamma.toml) | A fully documented configuration file to copy as a starting point. |
@@ -402,7 +403,7 @@
 //! the same compiler, Cargo configuration, and
 //! build policy plus unchanged compilation inputs. See
 //! [What a run remembers](#what-a-run-remembers) for the details; `--incremental no` performs a cold
-//! run. `cargo gamma hints` promotes the parts that cannot move a score into `gamma-hints.json`,
+//! run. `cargo gamma hints` promotes the parts that cannot move a score into `gamma-hints.yaml`,
 //! which you can commit so a fresh CI container starts warm.
 //!
 //! Control how the tree is compiled and how the tests are invoked:
@@ -1110,8 +1111,9 @@
 //! Mutation testing with schemas is orders of magnitude faster than rebuilding per mutant because the
 //! build is paid once for the entire population. Even so, running thousands of mutants against a large
 //! test suite takes time. Improving performance means knowing where time is spent and applying the
-//! right combination of levers: checking in hints for warm CI runs, the default case-level test
-//! selection, incremental runs with `--incremental`, and tuning timeouts and harness options.
+//! right combination of levers: checking in hints for warm CI runs, optional case-level test
+//! selection with `--optimize-test-execution`, incremental runs with `--incremental`, and tuning
+//! timeouts and harness options.
 //!
 //! ### Where the time goes
 //!
@@ -1226,32 +1228,57 @@
 //!
 //! Every cold run — such as a fresh CI container where `target/` is not preserved — starts with an
 //! empty killer map and an unguided build, on exactly the runs that cost the most.
-//! `cargo gamma hints` promotes the two pieces of information that cannot move a score into a file you
+//! `cargo gamma hints` promotes scheduling information that cannot move a score into a file you
 //! can commit:
 //!
 //! ```bash
 //! cargo gamma run                       # learn killer tests and unviable mutants
 //! cargo gamma hints --dry-run           # see what would be promoted
-//! cargo gamma hints                     # write gamma-hints.json
+//! cargo gamma hints                     # update gamma-hints.yaml
 //! ```
 //!
-//! Later runs read `gamma-hints.json` automatically without any command-line flags. Only two
-//! kinds of information are promoted into the hints file, and neither can change an answer:
+//! Later runs read `gamma-hints.yaml` automatically without any command-line flags. Three
+//! kinds of information are promoted into the hints file, and none can change an answer:
 //!
 //! - **Killer hints** — which test caught each mutant. Canonical binary order is preserved, and the
 //!   named test narrows its own binary only when filtering cannot replace another outcome. It is run
 //!   rather than believed, so a stale hint costs one filtered process before falling back to the
 //!   standard whole-binary sweep.
+//! - **Generalized scheduling hints** — ranked candidate tests for an item, candidate binaries for
+//!   a source file, and test sets observed reaching a stable source site. Every candidate is run
+//!   again and falls back conservatively when stale; no prior verdict is carried forward.
 //! - **Build order** — which mutants failed to compile for whoever promoted the file. These are *not*
 //!   carried as verdicts. They are spliced in and offered to the compiler first, on their own, so a
 //!   mutant that really is unviable is blamed in a single probe round without another mutant's error
 //!   hiding it. A hint that is wrong produces a mutant that compiles, stays live, and is judged exactly
 //!   as if it had never been named.
 //!
+//! The version-3 YAML layout groups mutants by workspace-relative source file. Within each file,
+//! repeated killer identities are stored once in a table and mutants refer to them by index, so a
+//! large run does not repeat the same path, package, target, and test for every adjacent mutant.
+//! Groups and tables are sorted deterministically for stable reviewable diffs. Ordinary promotion
+//! merges the selected run's knowledge into the artifact and preserves everything outside that
+//! selection; `--replace` intentionally rebuilds it from only the selected population. Its
+//! `context` contains only the generating repository's full HEAD SHA and UTC date. These identify
+//! the artifact generation rather than gating hints or attributing retained entries to that commit.
+//! Incremental promotion refuses an existing artifact it cannot understand rather than replacing
+//! unknown knowledge with a partial generation; `--replace` is the explicit permission to discard
+//! it. This includes a newer independently versioned generalized section, whose future fields
+//! cannot be round-tripped by today's serializer. YAML or legacy JSON changed by another writer
+//! after loading is left intact and reported as a conflict.
+//! Legacy JSON versions 1 and 2 remain readable while YAML is absent and are removed only after a
+//! YAML replacement has been published and verified. Malformed, foreign, and unsupported artifacts
+//! remain safe to ignore.
+//!
 //! ### Running only the tests that reach the mutant
 //!
-//! By default gamma narrows a mutant to the test cases that actually execute its line, instead of every
-//! test in every binary that links its package.
+//! By default gamma skips the reachability census and runs complete reachable test binaries after
+//! exact and generalized test hints have been tried. Pass `--optimize-test-execution` to
+//! experimentally narrow mutants to the test cases observed executing their sites:
+//!
+//! ```bash
+//! cargo gamma run --optimize-test-execution
+//! ```
 //!
 //! It needs no coverage instrumentation and no second build, because the instrumented tree is already
 //! carrying the probe. Every mutation site is a call into the gamma runtime, so running the suite once
@@ -1277,17 +1304,16 @@
 //! because those sites will use the whole binary anyway.
 //!
 //! Reachability can vary in a suite whose control flow depends on threads, the clock, randomness or
-//! hash iteration order. Use `--whole-test-binaries` for that uncommon case. It skips the census and
-//! runs every selected test in each reachable binary, trading speed for a conservative oracle:
+//! hash iteration order. `--whole-test-binaries` explicitly suppresses case-level selection and
+//! conflicts with `--optimize-test-execution`:
 //!
 //! ```bash
 //! cargo gamma run --whole-test-binaries
 //! ```
 //!
-//! The default assumes a test reaches the same code every time it runs. A suite whose control flow
+//! The optimization assumes a test reaches the same code every time it runs. A suite whose control flow
 //! turns on threads, the clock, the network or hash iteration order can be censused on a run where some
-//! test did not reach a site it usually does, and the mutant that test would have caught is then
-//! reported as surviving. Only a complete census may exclude tests or establish that a site is
+//! test did not reach a site it usually does. Only a complete census may exclude tests or establish that a site is
 //! uncovered. A test positively observed before the economic budget expires is retained only as a
 //! checked hint: gamma tries it when filtering cannot replace another outcome, accepts an actual
 //! failure as a kill, and otherwise falls back to the whole binary. A failure from a complete census
@@ -1322,7 +1348,7 @@
 //!     end
 //!
 //!     subgraph Hints [Version Control]
-//!         C -->|cargo gamma hints| D[(gamma-hints.json<br/><i>Checked-in hints</i>)]
+//!         C -->|cargo gamma hints| D[(gamma-hints.yaml<br/><i>Checked-in hints</i>)]
 //!     end
 //!
 //!     subgraph Run2 [Run N+1 / Fresh CI: Accelerated Sweep]
@@ -1335,7 +1361,7 @@
 //! | | Lives in | Lasts | Believed |
 //! |---|---|---|---|
 //! | The run record | cache `last-gamma-run.json` | Until the cache is deleted | Matching compiler unviability; killer tests are checked hints |
-//! | The hints file | `gamma-hints.json` | Forever, and through review | Never — every hint is checked |
+//! | The hints file | `gamma-hints.yaml` | Forever, and through review | Never — every hint is checked |
 //! | A skip directive | Your source | Forever, and through review | Always — you wrote it |
 //!
 //! The record is the tool's own memory and it is written on every run. It holds compiler unviability
@@ -1349,7 +1375,7 @@
 //! a finding into the source, where it is reviewed, committed, and survives a clean checkout. That is a
 //! claim you stand behind. Everything in the record — and everything in the hints file, committed or
 //! not — is a convenience that must be safe to delete: removing the cargo-gamma cache and
-//! `rm gamma-hints.json` cost you time and nothing else.
+//! `rm gamma-hints.yaml` cost you time and nothing else.
 //!
 //! ### Diagnosing a slow run
 //!
@@ -1446,6 +1472,13 @@
 //!
 //! The file carries its own `schemaVersion`, independent of the mutation-testing-elements version the
 //! JSON report follows, so a diagnostic tool can tell what it is reading.
+//! Its aggregate telemetry is intended to answer whether the algorithms paid off without making the
+//! bundle scale one row per mutant. Build rounds show package-attributed withdrawals against the real
+//! workspace-wide round duration. Census fields show admission size, listing success, estimated walk
+//! cost and admission, sampling work, and evidence completeness. Sweep fields show whole versus narrowed decisions, selected versus available
+//! tests, candidate/probe/hit funnels by hint tier, launches saved, and overlapping package wall spans.
+//! Package CPU totals and wall spans are deliberately separate: concurrent packages can occupy the same
+//! wall-clock interval, and Cargo does not expose a truthful per-package share of a workspace build round.
 //!
 //! ### What to reach for
 //!
@@ -1454,7 +1487,7 @@
 //! | If the time is going to | Try | What it costs |
 //! |---|---|---|
 //! | the suite itself | make the suite faster; check for per-test fixtures, sleeps and network calls | nothing |
-//! | cold CI runs starting from scratch | check in `gamma-hints.json` with `cargo gamma hints` | nothing |
+//! | cold CI runs starting from scratch | check in `gamma-hints.yaml` with `cargo gamma hints` | nothing |
 //! | the build, on a narrow run | incremental execution (`--incremental`) | nothing |
 //! | non-deterministic test reachability | `--whole-test-binaries` | every selected case in a reachable binary is repeated for every mutant |
 //! | unviable convergence across checkouts | `cargo gamma hints` or `cargo gamma suppress` | nothing |
@@ -1621,12 +1654,18 @@ use cargo_gamma_lib::run;
 use real_host::RealHost;
 
 #[cfg(not(miri))]
-#[global_allocator]
-static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+rallocator::rallocator!();
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn main() {
+fn main() -> process::ExitCode {
+    #[cfg(not(miri))]
+    rallocator::initialize();
+
+    if let Some(code) = cargo_gamma_lib::run_rustc_wrapper_if_requested(env::args_os()) {
+        return code;
+    }
+
     // `run` returns the process exit code rather than exiting itself, so that every code path
     // through the CLI is reachable from an ordinary integration test.
-    process::exit(run(&mut RealHost, env::args_os()));
+    u8::try_from(run(&mut RealHost, env::args_os())).map_or(process::ExitCode::FAILURE, process::ExitCode::from)
 }
