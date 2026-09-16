@@ -19,7 +19,7 @@ use semver::Version;
 use crate::cli::{CollectionArgs, CoverageGateArgs, FeatureConfiguration};
 
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-const MIN_CARGO_LLVM_COV_VERSION: &str = "0.8.0";
+const MIN_CARGO_LLVM_COV_VERSION: &str = "0.9.0";
 const ARM64_WINDOWS_TARGET: &str = "aarch64-pc-windows-msvc";
 const TOOLCHAIN_ENV: &str = "COVERAGE_GATE_TOOLCHAIN";
 
@@ -1227,9 +1227,9 @@ mod tests {
             cargo_llvm_cov_version("cargo-llvm-cov 0.9.0\n").expect("valid version"),
             Version::new(0, 9, 0)
         );
-        let minimum = Version::new(0, 8, 0);
-        assert!(!cargo_llvm_cov_is_supported(&Version::new(0, 7, 1), &minimum));
-        assert!(cargo_llvm_cov_is_supported(&Version::new(0, 8, 0), &minimum));
+        let minimum = Version::new(0, 9, 0);
+        assert!(!cargo_llvm_cov_is_supported(&Version::new(0, 8, 7), &minimum));
+        assert!(cargo_llvm_cov_is_supported(&Version::new(0, 9, 0), &minimum));
         cargo_llvm_cov_version("cargo llvm-cov 0.9.0\n").expect_err("missing package version prefix must fail");
         cargo_llvm_cov_version("cargo-llvm-cov development\n").expect_err("non-semver version must fail");
     }

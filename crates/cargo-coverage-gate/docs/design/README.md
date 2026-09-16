@@ -154,13 +154,15 @@ hand, so every change appears in a PR diff and is reviewed.
   queries, nextest, cargo-llvm-cov, and LLVM discovery. When omitted,
   `COVERAGE_GATE_TOOLCHAIN` is used, then the active toolchain. Instrumented
   collection validates that the selected Cargo release is nightly and that
-  cargo-llvm-cov is at least 0.8.0 before cleaning or building. Version 0.8.0
-  is the first release that accepts the exact `name@version` package specs
-  passed by the collector.
+  cargo-llvm-cov is at least 0.9.0 before cleaning or building. Version 0.9.0
+  is the first release that accepts `--workspace` on the `report` subcommand
+  used by the collector's default workspace selection.
   Rustup itself is resolved from an absolute, nonempty `RUSTUP` override or
   from explicit nonempty `PATH` entries (using `PATHEXT` on Windows). The
   repository working directory is not searched implicitly; it participates
   only when an entry such as `.` or its absolute path appears in `PATH`.
+  Cargo and rustc paths returned by `rustup which` must also be absolute;
+  relative output is a configuration error before metadata or collection.
 - `--package-file <path>` — one `name@version` workspace package spec per
   nonempty UTF-8 line. A present empty file is an explicit empty selection and
   makes the command a successful no-op. It may be combined with repeatable
@@ -823,8 +825,11 @@ Child processes receive arguments directly rather than through a shell.
 Package specs read from a file are resolved against workspace metadata before
 execution; they are never interpreted as command fragments.
 When a named Rustup toolchain is selected, rustup is resolved to an absolute
-executable before spawning. This avoids Windows executable lookup searching the
-repository working directory ahead of `PATH`.
+executable before spawning, and the Cargo and rustc paths returned by
+`rustup which` are rejected unless they are also absolute. This prevents
+Windows executable lookup from searching the repository working directory
+ahead of `PATH` and prevents the metadata and collection working directories
+from resolving the same relative output to different executables.
 
 ### 10.3 Monorepo / multi-workspace
 
@@ -850,7 +855,7 @@ records) are hard errors with exit code 2.
 #### Tooling requirements
 
 To get faithful numbers, run the tracefile-producing step on **nightly
-Rust with `cargo-llvm-cov ≥ 0.8`**. Three reasons:
+Rust with `cargo-llvm-cov ≥ 0.9`**. Four reasons:
 
 - `#[coverage(off)]` is gated behind `feature(coverage_attribute)`,
   which is nightly-only. On stable, files annotated with
@@ -863,6 +868,8 @@ Rust with `cargo-llvm-cov ≥ 0.8`**. Three reasons:
 - cargo-llvm-cov 0.8.0 added support for the exact `name@version` package
   selectors that `run` resolves from workspace metadata and passes to both
   test and report commands.
+- cargo-llvm-cov 0.9.0 added `--workspace` support to the `report` subcommand,
+  which `run` uses when no explicit package selection is supplied.
 
 `cargo coverage-gate run` enforces these prerequisites before instrumented
 collection. Select a pinned nightly with `--toolchain`, set

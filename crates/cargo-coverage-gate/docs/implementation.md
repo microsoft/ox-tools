@@ -14,15 +14,18 @@ The optional `run` mode keeps collection and evaluation separated internally:
 2. The selected toolchain comes from `--toolchain`,
    `COVERAGE_GATE_TOOLCHAIN`, or the active Rustup toolchain, in that order.
    Instrumented runs validate a nightly Cargo release and cargo-llvm-cov
-   0.8.0 or newer. Version 0.8.0 is required because it introduced support for
-   the exact `name@version` selectors passed by the collector. The same Rustup
+   0.9.0 or newer. Version 0.9.0 is required because it introduced
+   `--workspace` support for the `report` subcommand used by the default
+   selection. The same Rustup
    selection is applied to metadata,
    target-policy rustc queries, and collection commands.
    The rustup executable comes from a validated absolute `RUSTUP` override or
    a manual search of nonempty `PATH` entries, with Windows `PATHEXT`
    expansion. Every candidate is converted to an absolute path before
    `Command` is created, so Windows cannot inject a project-root
-   `rustup.exe` through implicit current-directory lookup.
+   `rustup.exe` through implicit current-directory lookup. Cargo and rustc
+   paths returned by `rustup which` are likewise rejected unless absolute,
+   before metadata or collection can resolve them from different directories.
 3. Each feature configuration gets an isolated clean, instrumented
    `cargo llvm-cov nextest --no-report --locked` run. Plain-nextest no-gate
    paths also pass `--locked`. Nextest and Cargo retain their ordinary output,

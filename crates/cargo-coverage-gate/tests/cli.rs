@@ -1102,7 +1102,7 @@ fn run_rejects_stable_rust_and_old_cargo_llvm_cov() {
         ("FAKE_FAIL_CARGO_VERSION", "1", "cargo toolchain validation failed"),
         ("FAKE_STABLE_TOOLCHAIN", "1", "requires a nightly Rust toolchain"),
         ("FAKE_STABLE_RUSTC", "1", "requires nightly rustc"),
-        ("FAKE_LLVM_COV_VERSION", "0.7.1", "requires cargo-llvm-cov >= 0.8.0"),
+        ("FAKE_LLVM_COV_VERSION", "0.8.7", "requires cargo-llvm-cov >= 0.9.0"),
     ] {
         let tmp = TempDir::new().expect("tempdir");
         make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
