@@ -15,6 +15,12 @@ use crate::parse::{BOM, strip_bom};
 use crate::schema::{self, Guard};
 use crate::{HashMap, HashSet, Result};
 
+#[derive(Debug)]
+pub(super) struct Instrumented {
+    pub(super) guards: Guards,
+    pub(super) unavailable: Vec<u32>,
+}
+
 /// What each file of the copied tree was last instrumented with, so a round can skip the rest.
 ///
 /// The rollback loop instruments the whole tree once per round, but between two rounds only the
@@ -60,6 +66,7 @@ pub(super) struct Splices {
 pub(super) struct Original {
     parsed: String,
     serialized: String,
+    digest: String,
 }
 
 impl Original {
@@ -102,7 +109,7 @@ impl Splices {
     /// The implementation visits only files whose live ordinals actually changed since the prior
     /// round ("dirty" files). Every other file's cached guards are returned from `self.placed`
     /// without re-reading, re-splicing or re-writing the file.
-    pub(super) fn instrument(&mut self, work: &Workspace, plan: &Plan, withdrawn: &HashSet<u32>) -> Result<Guards> {
+    pub(super) fn instrument(&mut self, work: &Workspace, plan: &Plan, withdrawn: &HashSet<u32>) -> Result<Instrumented> {
         if self.root != work.root {
             self.root = work.root.clone();
             self.sources.clear();
@@ -125,6 +132,7 @@ impl Splices {
         self.restore_removed_files(work, plan)?;
         let dirty = self.refresh_index(plan, withdrawn);
         let mut guards = Guards::default();
+        let mut unavailable = Vec::new();
 
         for (path, (_ordinals, found)) in &self.placed {
             if !dirty.contains(path) {
@@ -164,13 +172,17 @@ impl Splices {
                 continue 'dirty_files;
             }
 
-            let original = self.original(file)?;
+            let original = self.original(work, file)?;
+            let generation_matches = plan.digests.get(&file.path).is_none_or(|expected| original.digest == *expected);
 
             // A file whose every mutant has been withdrawn still has to be rewritten, back to the
             // original, or the previous round's instrumented copy would survive its own withdrawal
             // and the rollback loop could never converge.
             // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-            let (instrumented, found) = if live.as_slice().is_empty() {
+            let (instrumented, found) = if live.as_slice().is_empty() || !generation_matches {
+                if !generation_matches {
+                    unavailable.extend(live.iter().map(|mutant| mutant.ordinal));
+                }
                 (original.serialized.clone(), HashMap::default())
             } else {
                 let (parsed, found) = schema::instrument_with_guards(&original.parsed, &live)?;
@@ -185,7 +197,7 @@ impl Splices {
             // behave differently — and its verdict recorded as a survivor. That is a wrong answer
             // rather than a missing one, and nothing downstream could tell the difference, so the
             // invariant is checked rather than assumed.
-            if let Some(missing) = live.iter().find(|mutant| !guards.contains_key(&mutant.ordinal)) {
+            if generation_matches && let Some(missing) = live.iter().find(|mutant| !guards.contains_key(&mutant.ordinal)) {
                 return Err(Converger::missing_guard_error(missing));
             }
 
@@ -204,7 +216,7 @@ impl Splices {
             }
         }
 
-        Ok(guards)
+        Ok(Instrumented { guards, unavailable })
     }
 
     fn restore_removed_files(&mut self, work: &Workspace, plan: &Plan) -> Result<()> {
@@ -281,17 +293,32 @@ impl Splices {
         dirty
     }
 
-    /// The file's original text, read from disk the first time a round needs it and kept after.
+    /// The copied file's original text, read the first time a round needs it and kept after.
+    ///
+    /// The scratch tree is the immutable snapshot this run builds. Reading `file.absolute` would
+    /// consult the live checkout again after discovery and synchronization; if an editor,
+    /// generator, or another process changed that file meanwhile, the discovered spans would be
+    /// applied to a different generation. A span that moved beyond the new text then lost its
+    /// guard, while spans that remained in bounds could mutate the wrong construct.
     ///
     /// Read here rather than taken from the survey's `SourceFile`, so the byte-order mark has to be
     /// dropped here too: mutant spans index the text `syn` saw, which is the text after the mark.
-    pub(super) fn original(&mut self, file: &TargetFile) -> Result<&Original> {
+    pub(super) fn original(&mut self, work: &Workspace, file: &TargetFile) -> Result<&Original> {
         if !self.sources.contains_key(&file.path) {
-            let serialized = fs::read_to_string(file.absolute.as_std_path())
-                .map_err(|cause| error!("could not read `{}`", file.absolute).caused_by(cause))?;
+            let source = work.root.join(&file.path);
+            let serialized =
+                fs::read_to_string(source.as_std_path()).map_err(|cause| error!("could not read `{source}`").caused_by(cause))?;
             let parsed = strip_bom(&serialized).to_owned();
+            let digest = crate::discover::digest(parsed.as_bytes());
 
-            let _stored = self.sources.insert(file.path.clone(), Original { parsed, serialized });
+            let _stored = self.sources.insert(
+                file.path.clone(),
+                Original {
+                    parsed,
+                    serialized,
+                    digest,
+                },
+            );
         }
 
         Ok(self.sources.get(&file.path).unwrap_or_else(|| unreachable!("just inserted")))
@@ -316,6 +343,7 @@ mod tests {
         let original = Original {
             parsed: parsed.to_owned(),
             serialized: format!("{BOM}{parsed}"),
+            digest: crate::discover::digest(parsed.as_bytes()),
         };
 
         assert_eq!(
@@ -329,6 +357,7 @@ mod tests {
         let original = Original {
             parsed: "original".to_owned(),
             serialized: "original".to_owned(),
+            digest: crate::discover::digest(b"original"),
         };
 
         assert_eq!(original.instrumented("replacement".to_owned()), "replacement");
@@ -387,6 +416,7 @@ mod tests {
                 Original {
                     parsed: "old".to_owned(),
                     serialized: "old".to_owned(),
+                    digest: crate::discover::digest(b"old"),
                 },
             )]),
             placed: HashMap::from_iter([(Utf8PathBuf::from("src/lib.rs"), (vec![1], HashMap::default()))]),
@@ -403,7 +433,8 @@ mod tests {
             .instrument(&work, &empty_plan(&root), &HashSet::default())
             .expect("an empty plan resets stale caches");
 
-        assert!(guards.is_empty());
+        assert!(guards.guards.is_empty());
+        assert!(guards.unavailable.is_empty());
         assert_eq!(splices.root, root);
         assert!(splices.sources.is_empty());
         assert!(splices.placed.is_empty());
@@ -493,9 +524,9 @@ mod tests {
             package: "subject".to_owned(),
         };
         let mut splices = Splices::default();
-        assert_eq!(splices.original(&file).unwrap().parsed, "first");
+        assert_eq!(splices.original(&work, &file).unwrap().parsed, "first");
         fs::write(root.join(&path), "second").expect("changed source");
-        assert_eq!(splices.original(&file).unwrap().parsed, "first");
+        assert_eq!(splices.original(&work, &file).unwrap().parsed, "first");
 
         splices.root = root.clone();
         splices.plan_identity = Some(usize::MAX);

@@ -972,54 +972,72 @@ fn emit_failure_artifacts<H: Host>(
     started: Instant,
     styler: Styler,
 ) {
-    let Some(artifact) = failure.artifact() else {
+    if failure.artifacts().is_empty() {
         return;
-    };
+    }
 
-    let path = artifact_dir.join(artifact.file_name);
-    let diagnostics = Documents::resolve(args, &plan.root).diag;
-    let written = serde_json::to_string_pretty(&artifact.value)
-        .map_err(|cause| error!("could not encode `{path}`").caused_by(cause))
-        .and_then(|contents| crate::elements::write(&path, &contents));
+    if let Err(diag_failure) = emit_diag_bundle(events.host, args, plan, None, started, styler) {
+        crate::exec::Events::warn(
+            events,
+            &format!("could not preserve the canonical diagnostics bundle after the baseline failure: {diag_failure}"),
+        );
+    }
 
-    let baseline_written = match written {
-        Ok(()) => {
-            let _announced = writeln!(events.host.error(), "{} {path}", styler.verb("Wrote"));
-            true
-        }
-        Err(artifact_failure) => {
-            crate::exec::Events::warn(
-                events,
-                &format!("could not preserve the baseline failure record: {artifact_failure}"),
-            );
-            false
-        }
-    };
+    let mut published = Vec::new();
 
-    let diagnostics_written = match emit_diag(events.host, args, plan, None, started, styler) {
-        Ok(()) => true,
-        Err(diag_failure) => {
-            crate::exec::Events::warn(
-                events,
-                &format!("could not preserve the diagnostics bundle after the baseline failure: {diag_failure}"),
-            );
-            false
-        }
-    };
+    for artifact in failure.artifacts() {
+        let directory = artifact_dir.join(&artifact.directory);
+        let path = directory.join(artifact.file_name);
+        let diagnostics = directory.join("gamma-diagnostics.json");
+        let written = serde_json::to_string_pretty(&artifact.value)
+            .map_err(|cause| error!("could not encode `{path}`").caused_by(cause))
+            .and_then(|contents| crate::elements::write(&path, &contents));
 
-    match (baseline_written, diagnostics_written) {
-        (true, true) => failure.append_message(&format!(
-            "\nDiagnostics:   {}\n               {}",
-            encode_controls(path.as_str()),
-            encode_controls(diagnostics.as_str()),
-        )),
-        (true, false) => {
-            failure.append_message(&format!("\nDiagnostics:   {}", encode_controls(path.as_str())));
+        let baseline_written = match written {
+            Ok(()) => {
+                let _announced = writeln!(events.host.error(), "{} {path}", styler.verb("Wrote"));
+                true
+            }
+            Err(artifact_failure) => {
+                crate::exec::Events::warn(
+                    events,
+                    &format!("could not preserve the baseline failure record: {artifact_failure}"),
+                );
+                false
+            }
+        };
+        let diagnostics_written = match emit_diag_bundle_to(events.host, args, plan, None, started, styler, &diagnostics) {
+            Ok(()) => true,
+            Err(diag_failure) => {
+                crate::exec::Events::warn(
+                    events,
+                    &format!("could not preserve the diagnostics bundle after the baseline failure: {diag_failure}"),
+                );
+                false
+            }
+        };
+
+        let paths = match (baseline_written, diagnostics_written) {
+            (true, true) => Some(format!(
+                "{}\n                 {}",
+                encode_controls(path.as_str()),
+                encode_controls(diagnostics.as_str())
+            )),
+            (true, false) => Some(encode_controls(path.as_str()).into_owned()),
+            (false, true) => Some(encode_controls(diagnostics.as_str()).into_owned()),
+            (false, false) => None,
+        };
+        if let Some(paths) = paths {
+            published.push(format!(
+                "{} / {}: {paths}",
+                encode_controls(artifact.value["package"].as_str().unwrap_or("unknown package")),
+                encode_controls(artifact.value["target"].as_str().unwrap_or("unknown target"))
+            ));
         }
-        (false, true) => {
-            failure.append_message(&format!("\nDiagnostics:   {}", encode_controls(diagnostics.as_str())));
-        }
-        (false, false) => {}
+    }
+
+    if !published.is_empty() {
+        failure.append_message(&format!("\nDiagnostics:   {}", published.join("\n               ")));
     }
 }
 
@@ -1139,7 +1157,7 @@ fn emit_diag<H: Host>(
         write!(host.error(), "\n{}", crate::diag::render(plan, session, jobs, started.elapsed()))?;
     }
 
-    emit_diag_bundle(host, args, plan, session, jobs, started, styler)
+    emit_diag_bundle(host, args, plan, session, started, styler)
 }
 
 /// Writes the diagnostics bundle.
@@ -1152,11 +1170,24 @@ fn emit_diag_bundle<H: Host>(
     args: &RunArgs,
     plan: &Plan,
     session: Option<&exec::Session>,
-    jobs: usize,
     started: Instant,
     styler: Styler,
 ) -> crate::Result<()> {
     let path = Documents::resolve(args, &plan.root).diag;
+
+    emit_diag_bundle_to(host, args, plan, session, started, styler, &path)
+}
+
+fn emit_diag_bundle_to<H: Host>(
+    host: &mut H,
+    args: &RunArgs,
+    plan: &Plan,
+    session: Option<&exec::Session>,
+    started: Instant,
+    styler: Styler,
+    path: &Utf8Path,
+) -> crate::Result<()> {
+    let jobs = exec::resolve_jobs(args.measure.jobs);
     let context = crate::diag::Context {
         cores: exec::available_parallelism(),
         jobs,
@@ -1176,7 +1207,7 @@ fn emit_diag_bundle<H: Host>(
 
     let bundle = crate::diag::bundle(plan, session, &context);
 
-    crate::elements::write(&path, &crate::diag::to_json(&bundle)?)
+    crate::elements::write(path, &crate::diag::to_json(&bundle)?)
         .map_err(|cause| crate::error::error!("could not write the diagnostics bundle to `{path}`").caused_by(cause))?;
 
     writeln!(host.error(), "{} {}", styler.verb("Wrote"), path)?;
@@ -1950,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn a_baseline_error_writes_its_record_and_the_diagnostics_bundle() {
+    fn baseline_errors_write_distinct_records_and_diagnostics_bundles() {
         let dir = workdir("run-baseline-failure-artifacts-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
         let args = RunArgs {
@@ -1958,14 +1989,23 @@ mod tests {
             ..Default::default()
         };
         let plan = plan();
-        let mut failure = Error::new("baseline failed").with_artifact(
-            "baseline-failure.json",
-            serde_json::json!({
-                "schemaVersion": 1,
-                "kind": "testFailure",
-                "stderrTail": "assertion failed",
-            }),
-        );
+        let mut failure = Error::new("baseline failed")
+            .with_nested_artifact(
+                "baseline-failures/first--shared--1111".to_owned(),
+                "baseline-failure.json",
+                serde_json::json!({
+                    "schemaVersion": 1, "kind": "testFailure", "package": "first",
+                    "target": "shared", "stderrTail": "assertion failed",
+                }),
+            )
+            .with_nested_artifact(
+                "baseline-failures/second--shared--2222".to_owned(),
+                "baseline-failure.json",
+                serde_json::json!({
+                    "schemaVersion": 1, "kind": "timeout", "package": "second",
+                    "target": "shared", "reason": "time budget exceeded",
+                }),
+            );
         let mut host = Sink::default();
         let mut events = ConsoleEvents {
             host: &mut host,
@@ -1978,14 +2018,22 @@ mod tests {
 
         emit_failure_artifacts(&mut events, &args, &plan, &mut failure, &root, Instant::now(), Styler::new(false));
 
-        let baseline = fs::read_to_string(root.join("baseline-failure.json")).expect("baseline record");
-        let diagnostics = fs::read_to_string(root.join("gamma-diagnostics.json")).expect("diagnostics bundle");
+        let first = root.join("baseline-failures/first--shared--1111");
+        let second = root.join("baseline-failures/second--shared--2222");
+        let first_baseline = fs::read_to_string(first.join("baseline-failure.json")).expect("first record");
+        let second_baseline = fs::read_to_string(second.join("baseline-failure.json")).expect("second record");
+        let first_diagnostics = fs::read_to_string(first.join("gamma-diagnostics.json")).expect("first diagnostics");
+        let second_diagnostics = fs::read_to_string(second.join("gamma-diagnostics.json")).expect("second diagnostics");
 
-        assert!(baseline.contains("assertion failed"), "{baseline}");
-        assert!(diagnostics.contains("\"schemaVersion\": \"3\""), "{diagnostics}");
+        assert!(first_baseline.contains("assertion failed"), "{first_baseline}");
+        assert!(second_baseline.contains("time budget exceeded"), "{second_baseline}");
+        assert!(first_diagnostics.contains("\"schemaVersion\": \"3\""), "{first_diagnostics}");
+        assert!(second_diagnostics.contains("\"schemaVersion\": \"3\""), "{second_diagnostics}");
         assert!(failure.to_string().contains("Diagnostics:"), "{failure}");
-        assert!(failure.to_string().contains("baseline-failure.json"), "{failure}");
-        assert!(failure.to_string().contains("gamma-diagnostics.json"), "{failure}");
+        assert!(failure.to_string().contains("first / shared"), "{failure}");
+        assert!(failure.to_string().contains("second / shared"), "{failure}");
+        assert_eq!(failure.to_string().matches("baseline-failure.json").count(), 2);
+        assert_eq!(failure.to_string().matches("gamma-diagnostics.json").count(), 2);
     }
 
     /// A run that censused says so in its bundle: the phase carries its own elapsed time, the tests

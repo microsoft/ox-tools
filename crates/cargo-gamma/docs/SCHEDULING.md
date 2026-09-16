@@ -25,7 +25,7 @@ flowchart TD
     candidates[4. Census candidates and budget]
     census[5. Per-binary reach observations]
     selections[6. Mutant/binary selections]
-    queue[7. Fixed mutant queue]
+    queue[7. Assignment-time scheduler]
     tests[8. Mutant verdicts]
     learning[9. Updated in-memory knowledge]
     persistence[10. Run record and diagnostics]
@@ -188,6 +188,20 @@ Hints are guesses, not verdicts. A test or binary named by a hint is run again
 before it can affect the result. Missing, stale, corrupt, or unsupported hints
 fall back to colder scheduling.
 
+The version-2 artifact groups exact mutant hints by workspace-relative source
+file. Each file group contains a deterministic table of distinct killer
+identities, and its mutant entries refer to those identities by index. The
+source path and repeated package, target, and test strings therefore occur
+once per shared group instead of once per mutant. Generalized item, file, and
+reach hints retain their independently versioned representation and interned
+reach-test sets.
+
+Version-1 flat artifacts remain readable during the transition. Loading them
+produces the same in-memory scheduling knowledge as version 2, and the next
+successful `cargo gamma hints` promotion rewrites them in the grouped format.
+Malformed artifacts, foreign producers, and unsupported versions are ignored
+rather than partially trusted.
+
 **Output:**
 
 - mutant ID to exact candidate killer;
@@ -296,10 +310,10 @@ Additional rules:
 **Output:** a `(mutant, test binary) -> Whole | Uncovered | Selected(tests) |
 Hinted(tests)` selection map used by cost estimation and execution.
 
-## 7. Building the mutant queue
+## 7. Scheduling mutant work
 
-**Goal:** keep workers occupied while reducing the chance that expensive
-mutants form a long serial tail at the end of the campaign.
+**Goal:** overlap independent work, expose useful learning before related work
+starts, and avoid leaving expensive work as a long serial tail.
 
 Cargo-gamma estimates each pending mutant's serial test cost:
 
@@ -309,21 +323,38 @@ Cargo-gamma estimates each pending mutant's serial test cost:
 - `Hinted`: whole-binary baseline duration because fallback may be required;
 - `Uncovered`: zero.
 
-It then:
+The cost order is still partitioned into package queues and interleaved. That
+order supplies deterministic package-fair, longest-work-first secondary
+priority, but workers no longer claim it through a fixed cursor. A worker asks
+the scheduler for an assignment only when it is ready to run one.
 
-1. Sorts mutants by descending estimated cost, breaking ties by stable plan
-   position.
-2. Partitions that order into package queues.
-3. Interleaves one mutant from each non-empty package queue.
-4. Lets workers claim positions from the resulting fixed queue atomically.
+For unhinted work the scheduler ranks distance first:
 
-This is longest-work-first load balancing across packages. The queue is not
-reordered after execution begins, and source file is not an explicit sort key.
-File siblings may remain near one another through plan order, but there is no
-file barrier.
+1. an item in a file with no active mutant;
+2. an inactive item in an active file, preferring the least-contended file;
+3. no assignment for a still-cold item that already has an unhinted scout
+   active.
 
-**Output:** one immutable, ordered list of pending mutants shared by all
-workers, plus each mutant's estimated serial test duration.
+The third rule is stronger than file separation because an exact same-item
+test is more reusable than file-level binary evidence. Within the same
+distance tier the scheduler preserves package turns, prefers greater learning
+leverage per estimated evaluation cost, retains longest-work-first value, and
+finally uses the stable pre-sweep order. Learning leverage is the number of
+pending siblings that can reuse the scout.
+
+A mutant with an exact killer hint is already informed and may share an active
+item. It still participates in file contention so cold work is steered toward
+more independent files when possible.
+
+The explicit tail policy is **wait for learning**: when only unhinted
+same-item conflicts remain for a cold item, capacity stays idle until the
+active item changes state. Once that scout publishes, its informed siblings
+may run concurrently. The waiter holds no file or item reservation and blocks
+on the scheduler condition variable; there is no duration-based sleep or
+timeout.
+
+**Output:** immutable work metadata and a synchronized assignment-time
+scheduler tracking remaining work and active file/item reservations.
 
 ## 8. Testing one mutant
 
@@ -359,13 +390,11 @@ optional diagnostic note.
 **Goal:** let completed mutant work improve the ordering of related mutants
 that have not yet committed to their test work.
 
-When an unhinted item is first encountered:
-
-- the first worker becomes its scout;
-- workers that claim sibling mutants in the same item synchronously wait for
-  `estimated candidate cost / sibling count`, clamped to 5–200 ms;
-- after that timeout they proceed even if the scout is still running;
-- mutants in different items of the same file do not wait for one another.
+The scheduler makes the first assigned unhinted mutant in an item its scout.
+Same-item siblings remain unreserved while it runs. Workers use unrelated
+files first, then inactive items in the least-contended active file. If no
+independent item remains, they wait for a scheduler state-change notification
+rather than for an elapsed duration.
 
 A completed mutant publishes:
 
@@ -374,9 +403,11 @@ A completed mutant publishes:
 - safe negative reach evidence for another replacement at the exact same
   stable source site.
 
-The short wait prevents workers from remaining idle, but tests taking seconds
-or minutes commonly outlive it. Several same-item or same-file mutants can
-therefore begin expensive fallback work before the first result is published.
+The worker publishes all exact-test, reaching-binary, file-binary, and safe
+negative-reach learning before releasing its file/item reservation. Releasing
+the reservation wakes waiters, so a related follow-on assignment observes the
+completed learning. Hinted mutants are not spaced, but their checked result is
+published before their reservation is released in the same way.
 
 **Output:** updated in-memory exact killers, ranked item/file candidates, and
 safe exact-site reach exclusions for work that has not started yet.
@@ -394,6 +425,11 @@ After the sweep:
   `gamma-hints.json`;
 - diagnostics report census samples, total sweep launches, exact and
   generalized probe hits, and launches saved.
+
+Promotion writes version 2 atomically. File groups, mutant entries, killer
+tables, generalized identities, and interned reach sets use canonical ordering,
+so equivalent knowledge produces identical reviewable bytes regardless of
+discovery or completion order.
 
 Persisted knowledge changes ordering and selection only. It never carries a
 verdict into a new campaign without executing the relevant test again.

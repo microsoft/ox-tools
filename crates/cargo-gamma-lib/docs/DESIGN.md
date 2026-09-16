@@ -75,16 +75,19 @@ The baseline error identifies the package, target, runner, executable, working
 directory, elapsed time, resource failure, and failing or last-observed test.
 It points to the generated diagnostics instead of printing captured test output
 to the console. Successful observations retain none of this output. Before
-early failure cleanup, the command writes the structured record, including
-safely encoded output tails, to `baseline-failure.json` and writes the ordinary
-`gamma-diagnostics.json` bundle; only environment values cargo-gamma explicitly
-controls are eligible for diagnostic records, never the inherited process
-environment.
+early failure cleanup, the command writes one structured record per failed
+target, including safely encoded output tails, beneath
+`baseline-failures/<package>--<target>--<identity>/baseline-failure.json`.
+Each target directory also receives its relevant `gamma-diagnostics.json`, and
+the ordinary canonical diagnostics bundle is retained at its configured path.
+Only environment values cargo-gamma explicitly controls are eligible for
+diagnostic records, never the inherited process environment.
 
 Completed runs publish the five ordinary `gamma-report.json`, HTML, SARIF,
 performance-advice, and diagnostics artifacts. An early baseline failure
-instead publishes `baseline-failure.json` and `gamma-diagnostics.json` before
-the scratch workspace is removed. The baseline record uses `schemaVersion: 1`
+instead publishes every target's nested `baseline-failure.json` and
+`gamma-diagnostics.json`, plus the canonical diagnostics bundle, before the
+scratch workspace is removed. The baseline record uses `schemaVersion: 1`
 and records the failure kind and reason; package, target, runner, executable,
 and working directory; cargo-gamma's explicit environment overrides; failing
 and last-observed tests; termination, elapsed time, budget, peak, and memory
@@ -102,6 +105,14 @@ Diagnostic blame, isolation, and withdrawal therefore remain limited to the
 current stage even though Cargo checks the wider graph. The final test-target
 build retains its reachability-based package selection; runs whose original
 Cargo selection is a package subset retain their narrowed graph throughout.
+
+Instrumentation reads the synchronized scratch tree rather than re-reading the
+live checkout after discovery. Each copied source is checked against the
+generation digest recorded when its mutants were discovered. If they differ,
+those mutants receive the explicit `notbuilt` outcome: their spans do not
+describe the tree being tested, so emitting no guard is not treated as an
+internal instrumentation failure and splicing them at plausible-but-wrong
+offsets is never attempted.
 
 Diff paths are resolved to the workspace-relative Rust files discovered by the
 survey. Absolute or rooted paths inside the workspace are normalized to those

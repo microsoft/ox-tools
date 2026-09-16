@@ -742,13 +742,17 @@ fn promoting_hints_writes_only_what_cannot_move_a_score() {
     let written = fs::read_to_string(dir.path().join("gamma-hints.json")).expect("the artifact should have been written");
     let hints: serde_json::Value = serde_json::from_str(&written).expect("the artifact is JSON");
 
-    assert_eq!(hints["version"], 1, "{written}");
+    assert_eq!(hints["version"], 2, "{written}");
     assert!(
         hints["tool"].as_str().is_some_and(|tool| tool.starts_with("cargo-gamma ")),
         "the artifact has to say what wrote it: {written}"
     );
 
-    let entries = hints["mutants"].as_array().expect("the artifact lists mutants");
+    let files = hints["files"].as_array().expect("the artifact groups source files");
+    let entries = files
+        .iter()
+        .flat_map(|file| file["mutants"].as_array().expect("the file group lists mutants"))
+        .collect::<Vec<_>>();
 
     assert_eq!(entries.len(), 2, "one unviable mutant and one probe: {written}");
 
@@ -757,7 +761,13 @@ fn promoting_hints_writes_only_what_cannot_move_a_score() {
         "the build-order tier is missing: {written}"
     );
     assert!(
-        entries.iter().any(|entry| entry["killer"]["test"] == "tests::ranges_work"),
+        files.iter().any(|file| {
+            file["killers"]
+                .as_array()
+                .expect("the file group interns killers")
+                .iter()
+                .any(|killer| killer["test"] == "tests::ranges_work")
+        }),
         "the probe tier is missing: {written}"
     );
 

@@ -11,7 +11,7 @@ use crate::cfg::CfgSet;
 use crate::model::{MutantId, SiteIndex, mutant_id_with_discriminator, normalize_site_text};
 use crate::ops::registry::{REGISTRY, Selection};
 use crate::parse::SourceFile;
-use crate::schema::{AssignedMutant, Ordinal, instrument};
+use crate::schema::{AssignedMutant, Ordinal, instrument, instrument_with_guards};
 
 fn candidates(source: &str, ops: &str) -> Vec<Candidate> {
     let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
@@ -22,6 +22,62 @@ fn candidates(source: &str, ops: &str) -> Vec<Candidate> {
 
 fn mutators(source: &str, ops: &str) -> Vec<&'static str> {
     candidates(source, ops).into_iter().map(|c| c.mutator).collect()
+}
+
+#[test]
+fn whole_function_and_nested_boolean_mutants_instrument_together() {
+    let source = r"
+mod pb {
+    pub struct AzureEgressTarget {
+        pub host: String,
+    }
+}
+
+pub fn is_azure_egress_clear_request(input: &[pb::AzureEgressTarget]) -> bool {
+    input.len() == 1 && input[0].host.trim().is_empty()
+}
+";
+    let file = SourceFile::parse("test.rs", source.to_owned()).expect("the fixture parses");
+    let definitions = into_definitions(
+        &file,
+        collect(
+            &file,
+            &Selection::parse("fn_value,logical,relational").expect("the selectors resolve"),
+        ),
+    );
+    let assigned: Vec<_> = definitions
+        .iter()
+        .enumerate()
+        .map(|(index, definition)| {
+            AssignedMutant::new(
+                Ordinal::new(u32::try_from(index + 1).expect("the fixture has few mutants")),
+                definition,
+            )
+        })
+        .collect();
+
+    let (instrumented, guards) = instrument_with_guards(file.text(), &assigned).expect("the discovered population instruments");
+
+    assert!(
+        definitions.iter().any(|mutant| mutant.mutator.as_ref() == "fn_value.bool_false"),
+        "{definitions:#?}"
+    );
+    assert!(
+        definitions.iter().any(|mutant| mutant.site.original.contains("&&")),
+        "the fixture must contain nested boolean mutants: {definitions:#?}"
+    );
+    assert_eq!(guards.len(), definitions.len(), "{instrumented}");
+
+    for ordinal in 1..=u32::try_from(definitions.len()).expect("the fixture has few mutants") {
+        assert_eq!(
+            instrumented.matches(&format!("::gamma_rt::a({ordinal}u32)")).count(),
+            1,
+            "ordinal {ordinal} must have exactly one guard:\n{instrumented}"
+        );
+        assert!(guards.contains_key(&ordinal), "ordinal {ordinal} has no recorded guard");
+    }
+
+    let _parsed = parse_file(&instrumented).expect("the complete schema remains valid Rust");
 }
 
 fn with_errors(source: &str, errors: &[&str]) -> Vec<Candidate> {

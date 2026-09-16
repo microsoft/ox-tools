@@ -225,6 +225,9 @@ pub(super) struct Converger {
     /// judged unbuildable, which is the exact confusion this run is trying to avoid.
     abandoned: HashSet<u32>,
 
+    /// Mutants discovered from a different source generation than the synchronized build tree.
+    unavailable: HashSet<u32>,
+
     /// How many rounds the build currently converging has spent, reset at the start of each one.
     rounds: u32,
 
@@ -462,7 +465,7 @@ impl Converger {
             self.total_rounds = self.total_rounds.saturating_add(1);
 
             let withdrawn = self.scoped_withdrawn(plan, scope.mutants);
-            let guards = self.splices.instrument(work, plan, &withdrawn)?;
+            let guards = self.instrument_schema(work, plan, &withdrawn)?;
 
             let started = Instant::now();
             let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
@@ -728,7 +731,7 @@ impl Converger {
             }
         }
 
-        let _guards = self.splices.instrument(work, plan, &withdrawn)?;
+        let _guards = self.instrument_schema(work, plan, &withdrawn)?;
         let started = Instant::now();
         let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
         let elapsed = started.elapsed();
@@ -785,7 +788,7 @@ impl Converger {
         self.ordering.offered = self.ordering.offered.saturating_add(candidates.len());
         self.ordering.rounds = self.ordering.rounds.saturating_add(1);
 
-        let guards = self.splices.instrument(work, plan, &deferred)?;
+        let guards = self.instrument_schema(work, plan, &deferred)?;
 
         let started = Instant::now();
         let outcome = run_cargo(work, plan, verb, scope.roots, limits, self.first_round, events)?;
@@ -935,6 +938,22 @@ impl Converger {
             work.inspect_hint(),
             leading(&diagnostics(stdout), DIAGNOSTIC_LIMIT)
         )
+    }
+
+    /// Instruments the synchronized tree and retires mutants discovered from another generation.
+    ///
+    /// Discovery runs after the scratch copy is synchronized. If the live checkout changes in
+    /// between, its spans no longer describe the tree this run proved and will test. Those mutants
+    /// are explicitly reported as not built rather than either spliced at the wrong offsets or
+    /// allowed to reach the missing-guard invariant as an internal error.
+    fn instrument_schema(&mut self, work: &Workspace, plan: &Plan, withdrawn: &HashSet<u32>) -> Result<Guards> {
+        let instrumented = self.splices.instrument(work, plan, withdrawn)?;
+
+        self.withdrawn.extend(instrumented.unavailable.iter().copied());
+        self.abandoned.extend(instrumented.unavailable.iter().copied());
+        self.unavailable.extend(instrumented.unavailable);
+
+        Ok(instrumented.guards)
     }
 
     fn missing_guard_error(missing: &Mutant) -> Error {
@@ -1201,7 +1220,13 @@ impl Converger {
     /// already carries [`Outcome::NotBuilt`] from [`Self::abandon`] and keeps it.
     pub(super) fn settle(&self, plan: &mut Plan) {
         for mutant in &mut plan.mutants {
-            if self.abandoned.contains(&mutant.ordinal) {
+            if self.unavailable.contains(&mutant.ordinal) {
+                mutant.outcome = Outcome::NotBuilt;
+                mutant.note = Some(
+                    "the source changed between synchronization and discovery, so this mutant did not describe the tree being tested"
+                        .to_owned(),
+                );
+            } else if self.abandoned.contains(&mutant.ordinal) {
                 mutant.outcome = Outcome::NotBuilt;
                 mutant.note =
                     Some("the instrumented forms in this item could not compile together, so its mutants were not run".to_owned());

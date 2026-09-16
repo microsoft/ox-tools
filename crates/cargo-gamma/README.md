@@ -1260,6 +1260,14 @@ kinds of information are promoted into the hints file, and none can change an an
   hiding it. A hint that is wrong produces a mutant that compiles, stays live, and is judged exactly
   as if it had never been named.
 
+The version-2 JSON layout groups mutants by workspace-relative source file. Within each file,
+repeated killer identities are stored once in a table and mutants refer to them by index, so a
+large run does not repeat the same path, package, target, and test for every adjacent mutant.
+Groups and tables are sorted deterministically for stable reviewable diffs. Version-1 flat
+artifacts remain readable during the transition and are rewritten as version 2 by the next
+successful promotion; malformed, foreign, and otherwise unsupported versions remain safe to
+ignore.
+
 #### Running only the tests that reach the mutant
 
 By default gamma narrows a mutant to the test cases that actually execute its line, instead of every

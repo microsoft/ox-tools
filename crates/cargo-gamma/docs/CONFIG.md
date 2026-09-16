@@ -48,8 +48,17 @@ generated artifact written by `cargo gamma hints`, holding the parts of a previo
 move a score: exact killer tests, generalized item/file candidates and reaching-test sets, and
 build-order hints for mutants that failed to compile. Candidate tests are executed again rather
 than trusted as verdicts, so that a fresh checkout starts warm without carrying a score forward.
-Runs read the artifact automatically and it needs no setting here.
-Artifacts with an unsupported format version or a producer other than cargo-gamma are ignored. See
+Runs read the artifact automatically and it needs no setting here. Format version 2 groups mutants
+by workspace-relative source file and stores each repeated killer identity once in that file's
+killer table; mutant entries refer to the table by index. Generalized item, file, and reach hints
+retain their independently versioned representation, including interned reach sets. File groups,
+mutants, killer tables, and generalized identities have deterministic ordering so regeneration
+produces reviewable diffs.
+
+Format version 1, whose flat mutant entries repeated the file and full killer identity, remains
+readable during this transition. The next successful `cargo gamma hints` promotion writes version
+2. Malformed artifacts, artifacts with any other enclosing format version, and artifacts whose
+producer is not cargo-gamma are ignored safely. See
 [checking in the hints file](../README.md#checking-in-the-hints-file).
 
 ## How settings combine

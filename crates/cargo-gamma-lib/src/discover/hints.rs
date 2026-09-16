@@ -42,11 +42,10 @@ use crate::{HashMap, HashSet, Result};
 const FILE: &str = "gamma-hints.json";
 
 /// What the artifact format is; a file written by any other version is ignored rather than read.
-///
-/// Ignored rather than migrated, deliberately. This file is an optimization that must be safe to
-/// delete, so the cost of refusing to read it is time; the cost of reading a format whose fields
-/// have changed meaning is a wrong hint, and there is no version of that trade worth taking.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+
+/// The flat format accepted during the grouped-format transition.
+const LEGACY_VERSION: u32 = 1;
 
 /// Producer prefix written into artifacts whose schema cargo-gamma owns.
 const TOOL_PREFIX: &str = "cargo-gamma ";
@@ -64,8 +63,7 @@ pub fn path(root: &Utf8Path) -> Utf8PathBuf {
 /// unreviewable file in version control is a liability rather than an asset. Both keys are needed:
 /// the file is what makes a diff readable against a change, and the id is what makes the order
 /// total.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Hints {
     /// The format this was written in.
     version: u32,
@@ -82,16 +80,17 @@ pub struct Hints {
     context: ContextDigest,
 
     /// One entry per mutant with something to say about it, ordered by file and then by id.
+    ///
+    /// This is the semantic form used in memory. The version-2 wire form groups these entries by
+    /// file and interns killers within each group.
     mutants: Vec<Hint>,
 
     /// Optional score-neutral tiers shared verbatim with the run record.
-    #[serde(default)]
     generalized: GeneralizedHints,
 }
 
 /// What the artifact remembers about one mutant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Hint {
     /// The workspace-relative file the mutant lives in, which is the artifact's primary sort key.
     ///
@@ -104,7 +103,6 @@ struct Hint {
     id: MutantId,
 
     /// The test that caught it, when one did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     killer: Option<Killer>,
 
     /// Whether it failed to compile for the run that was promoted.
@@ -113,14 +111,70 @@ struct Hint {
     /// exactly as it would have been, and all this decides is that it is offered to the compiler
     /// early, where a mutant that does turn out to be unviable costs one round instead of hiding
     /// behind another one for several.
+    unviable: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Header {
+    version: u32,
+    tool: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyHints {
+    #[serde(rename = "version")]
+    _version: u32,
+    #[serde(rename = "tool")]
+    _tool: String,
+    context: ContextDigest,
+    mutants: Vec<LegacyHint>,
+    #[serde(default)]
+    generalized: GeneralizedHints,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyHint {
+    file: Utf8PathBuf,
+    id: MutantId,
+    #[serde(default)]
+    killer: Option<Killer>,
+    #[serde(default)]
+    unviable: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GroupedHints {
+    version: u32,
+    tool: String,
+    context: ContextDigest,
+    files: Vec<FileHints>,
+    #[serde(default)]
+    generalized: GeneralizedHints,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileHints {
+    path: Utf8PathBuf,
+    killers: Vec<Killer>,
+    mutants: Vec<GroupedHint>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GroupedHint {
+    id: MutantId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    killer: Option<u32>,
     #[serde(default, skip_serializing_if = "is_not_set")]
     unviable: bool,
 }
 
 /// Whether a flag is at its default, so that the common entry serializes without it.
-///
-/// Takes a reference because `skip_serializing_if` hands the field to it by reference and will not
-/// accept any other shape.
 #[expect(clippy::trivially_copy_pass_by_ref, reason = "the signature is dictated by serde")]
 const fn is_not_set(flag: &bool) -> bool {
     !*flag
@@ -171,9 +225,78 @@ impl Hints {
     /// Reads and validates the artifact at `path`, or nothing when it cannot be trusted.
     fn read(path: &Utf8Path) -> Option<Self> {
         let text = input::text(File::open(path.as_std_path()).ok()?).ok()??;
-        let hints = serde_json::from_str::<Self>(&text).ok()?;
+        let header = serde_json::from_str::<Header>(&text).ok()?;
 
-        (hints.version == VERSION && Self::valid_tool(&hints.tool)).then_some(hints)
+        if !Self::valid_tool(&header.tool) {
+            return None;
+        }
+
+        match header.version {
+            VERSION => Self::from_grouped(serde_json::from_str(&text).ok()?),
+            LEGACY_VERSION => Some(Self::from_legacy(serde_json::from_str(&text).ok()?)),
+            _unsupported => None,
+        }
+    }
+
+    fn from_legacy(legacy: LegacyHints) -> Self {
+        let mut hints = Self {
+            version: VERSION,
+            tool: format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION")),
+            context: legacy.context,
+            mutants: legacy
+                .mutants
+                .into_iter()
+                .map(|hint| Hint {
+                    file: hint.file,
+                    id: hint.id,
+                    killer: hint.killer,
+                    unviable: hint.unviable,
+                })
+                .collect(),
+            generalized: legacy.generalized,
+        };
+        hints.normalize();
+        hints
+    }
+
+    fn from_grouped(grouped: GroupedHints) -> Option<Self> {
+        let mut mutants = Vec::new();
+
+        for file in grouped.files {
+            for hint in file.mutants {
+                let killer = match hint.killer {
+                    Some(index) => Some(file.killers.get(usize::try_from(index).ok()?)?.clone()),
+                    None => None,
+                };
+                mutants.push(Hint {
+                    file: file.path.clone(),
+                    id: hint.id,
+                    killer,
+                    unviable: hint.unviable,
+                });
+            }
+        }
+
+        let mut hints = Self {
+            version: VERSION,
+            tool: grouped.tool,
+            context: grouped.context,
+            mutants,
+            generalized: grouped.generalized,
+        };
+        hints.normalize();
+        Some(hints)
+    }
+
+    fn normalize(&mut self) {
+        self.mutants.sort_by(|left, right| {
+            left.file
+                .cmp(&right.file)
+                .then_with(|| left.id.cmp(&right.id))
+                .then_with(|| left.killer.as_ref().map(killer_key).cmp(&right.killer.as_ref().map(killer_key)))
+                .then_with(|| left.unviable.cmp(&right.unviable))
+        });
+        self.mutants.dedup();
     }
 
     /// The tests to try first, keyed by mutant id.
@@ -285,26 +408,42 @@ impl Hints {
             .filter(|entry| items.contains(&(entry.file.as_path(), entry.item.as_str())))
             .cloned()
             .collect();
+        output
+            .items
+            .sort_by(|left, right| left.file.cmp(&right.file).then_with(|| left.item.cmp(&right.item)));
         output.binaries = source
             .binaries
             .iter()
             .filter(|entry| files.contains(entry.file.as_path()))
             .cloned()
             .collect();
+        output.binaries.sort_by(|left, right| left.file.cmp(&right.file));
 
+        let mut reach = Vec::new();
         for cluster in source.reach.iter().filter(|cluster| sites.contains(&cluster.site)) {
             let Some(old) = usize::try_from(cluster.test_set).ok().and_then(|index| source.test_sets.get(index)) else {
                 continue;
             };
-            let index = output.test_sets.iter().position(|set| set == old).unwrap_or_else(|| {
-                output.test_sets.push(old.clone());
-                output.test_sets.len() - 1
-            });
+            let mut tests = old.clone();
+            tests.sort_by(|left, right| killer_key(left).cmp(&killer_key(right)));
+            tests.dedup();
+            reach.push((cluster.site.clone(), tests));
+        }
+        reach.sort_by(|(left, _), (right, _)| site_key(left).cmp(&site_key(right)));
+        output.test_sets = reach.iter().map(|(_, tests)| tests.clone()).collect();
+        output
+            .test_sets
+            .sort_by(|left, right| left.iter().map(killer_key).cmp(right.iter().map(killer_key)));
+        output.test_sets.dedup();
+
+        for (site, tests) in reach {
+            let index = output
+                .test_sets
+                .iter()
+                .position(|set| set == &tests)
+                .expect("every retained reach set was inserted above");
             if let Ok(test_set) = u32::try_from(index) {
-                output.reach.push(super::record::ReachCluster {
-                    site: cluster.site.clone(),
-                    test_set,
-                });
+                output.reach.push(super::record::ReachCluster { site, test_set });
             }
         }
 
@@ -390,7 +529,7 @@ impl Hints {
 
     /// The artifact as it goes to disk.
     fn rendered(&self) -> Result<String> {
-        let mut text = serde_json::to_string_pretty(self)
+        let mut text = serde_json::to_string_pretty(&GroupedHints::from(self))
             .map_err(|cause| error!("the hints could not be serialized; please report this").caused_by(cause))?;
 
         // A trailing newline, because every other text file in a repository has one and a diff of a
@@ -423,6 +562,63 @@ impl Hints {
             changed,
         }
     }
+}
+
+impl From<&Hints> for GroupedHints {
+    fn from(hints: &Hints) -> Self {
+        let mut files = Vec::new();
+        let mut start = 0;
+
+        while start < hints.mutants.len() {
+            let path = hints.mutants[start].file.clone();
+            let end = hints.mutants[start..]
+                .iter()
+                .position(|hint| hint.file != path)
+                .map_or(hints.mutants.len(), |offset| start + offset);
+            let group = &hints.mutants[start..end];
+            let mut killers: Vec<Killer> = group.iter().filter_map(|hint| hint.killer.clone()).collect();
+            killers.sort_by(|left, right| killer_key(left).cmp(&killer_key(right)));
+            killers.dedup();
+            let mutants = group
+                .iter()
+                .map(|hint| GroupedHint {
+                    id: hint.id.clone(),
+                    killer: hint.killer.as_ref().map(|killer| {
+                        let index = killers
+                            .iter()
+                            .position(|known| known == killer)
+                            .expect("the killer pool was built from every killer in this file group");
+                        u32::try_from(index).expect("a killer index cannot exceed the number of mutants retained in the bounded artifact")
+                    }),
+                    unviable: hint.unviable,
+                })
+                .collect();
+            files.push(FileHints { path, killers, mutants });
+            start = end;
+        }
+
+        Self {
+            version: VERSION,
+            tool: hints.tool.clone(),
+            context: hints.context.clone(),
+            files,
+            generalized: hints.generalized.clone(),
+        }
+    }
+}
+
+fn killer_key(killer: &Killer) -> (&str, &str, &str) {
+    (killer.package.as_str(), killer.target.as_str(), killer.test.as_str())
+}
+
+fn site_key(site: &super::record::SiteIdentity) -> (&Utf8Path, &str, &str, &str, u32) {
+    (
+        site.file.as_path(),
+        site.item.as_str(),
+        site.mutator.as_str(),
+        site.normalized_text.as_str(),
+        site.occurrence,
+    )
 }
 
 /// Puts back whatever was at `path` before a promotion that could not be verified.
@@ -570,6 +766,23 @@ mod tests {
 
         assert!(Hints::load(&root).is_empty());
         assert!(!Hints::is_missing(&root));
+
+        fs::write(
+            path(&root).as_std_path(),
+            serde_json::to_vec(&serde_json::json!({
+                "version": VERSION,
+                "tool": "cargo-gamma test",
+                "context": context_of(),
+                "files": [{
+                    "path": "src/lib.rs",
+                    "killers": [],
+                    "mutants": [{ "id": "abc", "killer": 0 }],
+                }],
+            }))
+            .expect("malformed grouped JSON"),
+        )
+        .expect("the malformed artifact should be writable");
+        assert!(Hints::load(&root).is_empty(), "an invalid killer-table reference was accepted");
     }
 
     /// Somebody else's JSON at this name is not this tool's file, and must not be read as one.
@@ -584,7 +797,11 @@ mod tests {
             generalized: GeneralizedHints::empty_supported(),
         };
 
-        fs::write(path(&root).as_std_path(), serde_json::to_vec(&foreign).expect("serializable")).expect("writable");
+        fs::write(
+            path(&root).as_std_path(),
+            serde_json::to_vec(&GroupedHints::from(&foreign)).expect("serializable"),
+        )
+        .expect("writable");
 
         assert!(Hints::load(&root).is_empty());
         assert!(!Hints::is_missing(&root));
@@ -729,6 +946,229 @@ mod tests {
         let again = Hints::promoted(&record, &population);
 
         assert_eq!(hints.rendered().unwrap(), again.rendered().unwrap());
+    }
+
+    #[test]
+    fn grouped_schema_emits_each_file_and_shared_killer_once_per_group() {
+        let shared = killer("tests::shared");
+        let hints = Hints {
+            version: VERSION,
+            tool: "cargo-gamma test".to_owned(),
+            context: context_of(),
+            mutants: vec![
+                Hint {
+                    file: "src/lib.rs".into(),
+                    id: "alpha".into(),
+                    killer: Some(shared.clone()),
+                    unviable: false,
+                },
+                Hint {
+                    file: "src/lib.rs".into(),
+                    id: "beta".into(),
+                    killer: Some(shared),
+                    unviable: true,
+                },
+            ],
+            generalized: GeneralizedHints::empty_supported(),
+        };
+        let text = hints.rendered().expect("the grouped artifact serializes");
+        let json: serde_json::Value = serde_json::from_str(&text).expect("the grouped artifact is JSON");
+
+        assert_eq!(json["version"], VERSION);
+        assert_eq!(json["files"].as_array().expect("file groups").len(), 1);
+        assert_eq!(text.matches("src/lib.rs").count(), 1, "{text}");
+        assert_eq!(text.matches("tests::shared").count(), 1, "{text}");
+        assert_eq!(json["files"][0]["killers"].as_array().expect("killer pool").len(), 1);
+        assert_eq!(json["files"][0]["mutants"][0]["killer"], 0);
+        assert_eq!(json["files"][0]["mutants"][1]["killer"], 0);
+    }
+
+    #[test]
+    fn legacy_schema_loads_semantically_and_rewrites_as_grouped() {
+        let (_dir, root) = workspace("hints-legacy-");
+        let legacy = serde_json::json!({
+            "version": LEGACY_VERSION,
+            "tool": "cargo-gamma legacy",
+            "context": context_of(),
+            "mutants": [
+                { "file": "src/lib.rs", "id": "killed", "killer": killer("tests::caught") },
+                { "file": "src/lib.rs", "id": "unviable", "unviable": true },
+            ],
+            "generalized": GeneralizedHints::empty_supported(),
+        });
+        fs::write(path(&root), serde_json::to_vec_pretty(&legacy).expect("legacy JSON")).expect("legacy artifact");
+        let loaded = Hints::load(&root);
+
+        assert_eq!(loaded.probes().get("killed"), Some(&killer("tests::caught")));
+        assert_eq!(loaded.ordering(), ["unviable"]);
+        assert!(loaded.write(&path(&root)).expect("legacy rewrite").changed);
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path(&root)).expect("rewritten artifact")).expect("new JSON");
+        assert_eq!(json["version"], VERSION);
+        assert!(json.get("files").is_some());
+        assert!(json.get("mutants").is_none());
+    }
+
+    #[test]
+    fn unsupported_older_and_newer_versions_are_ignored() {
+        let (_dir, root) = workspace("hints-unsupported-version-");
+
+        for version in [0, VERSION + 1] {
+            fs::write(
+                path(&root),
+                serde_json::to_vec(&serde_json::json!({
+                    "version": version,
+                    "tool": "cargo-gamma test",
+                    "context": context_of(),
+                    "files": [],
+                }))
+                .expect("unsupported JSON"),
+            )
+            .expect("unsupported artifact");
+            assert!(Hints::load(&root).is_empty(), "version {version} was accepted");
+        }
+    }
+
+    #[test]
+    fn grouped_round_trip_preserves_all_semantics_and_counts() {
+        let (_dir, root) = workspace("hints-round-trip-");
+        let mut site = mutant("site", "src/lib.rs");
+        site.item_path = "subject::changed".into();
+        let mut hints = Hints {
+            version: VERSION,
+            tool: "cargo-gamma provenance".to_owned(),
+            context: context_of(),
+            mutants: vec![
+                Hint {
+                    file: "src/lib.rs".into(),
+                    id: "killed".into(),
+                    killer: Some(killer("tests::caught")),
+                    unviable: false,
+                },
+                Hint {
+                    file: "src/lib.rs".into(),
+                    id: "unviable".into(),
+                    killer: None,
+                    unviable: true,
+                },
+            ],
+            generalized: GeneralizedHints {
+                version: record::GENERALIZED_HINTS_VERSION,
+                items: vec![record::ItemHints {
+                    file: "src/lib.rs".into(),
+                    item: "subject::changed".to_owned(),
+                    candidates: vec![record::RankedHint {
+                        candidate: killer("tests::item"),
+                        hits: 3,
+                        misses: 1,
+                        measured_ms: 12,
+                        samples: 4,
+                        order: 5,
+                    }],
+                }],
+                binaries: vec![record::FileBinaryHints {
+                    file: "src/lib.rs".into(),
+                    candidates: vec![record::RankedHint {
+                        candidate: record::BinaryHint {
+                            package: "subject".to_owned(),
+                            target: "lib".to_owned(),
+                        },
+                        hits: 2,
+                        misses: 0,
+                        measured_ms: 8,
+                        samples: 2,
+                        order: 6,
+                    }],
+                }],
+                test_sets: vec![vec![killer("tests::reach")]],
+                reach: vec![record::ReachCluster {
+                    site: record::SiteIdentity::from_mutant(&site),
+                    test_set: 0,
+                }],
+            },
+        };
+        hints.normalize();
+        hints.write(&path(&root)).expect("grouped artifact");
+        let loaded = Hints::load(&root);
+
+        assert_eq!(loaded, hints);
+        assert_eq!(
+            loaded.counts(),
+            Promotion {
+                mutants: 2,
+                probes: 1,
+                ordering: 1,
+                generalized: 3,
+                changed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn equivalent_input_orders_render_identical_bytes_and_minimal_reach_sets() {
+        let site_a_mutant = mutant("site-a", "src/lib.rs");
+        let site_a = record::SiteIdentity::from_mutant(&site_a_mutant);
+        let mut second_mutant = mutant("site-b", "src/lib.rs");
+        second_mutant.item_path = "subject::z".into();
+        let site_b = record::SiteIdentity::from_mutant(&second_mutant);
+        let shared = vec![killer("tests::z"), killer("tests::a"), killer("tests::a")];
+        let generalized = GeneralizedHints {
+            version: record::GENERALIZED_HINTS_VERSION,
+            test_sets: vec![shared.clone(), shared.into_iter().rev().collect()],
+            reach: vec![
+                record::ReachCluster {
+                    site: site_b.clone(),
+                    test_set: 1,
+                },
+                record::ReachCluster {
+                    site: site_a.clone(),
+                    test_set: 0,
+                },
+            ],
+            ..GeneralizedHints::empty_supported()
+        };
+        let population = [site_a_mutant, second_mutant];
+        let first = Hints::generalized_for(&generalized, &population);
+        let reversed = GeneralizedHints {
+            test_sets: generalized.test_sets.iter().cloned().rev().collect(),
+            reach: vec![
+                record::ReachCluster { site: site_a, test_set: 1 },
+                record::ReachCluster { site: site_b, test_set: 0 },
+            ],
+            ..generalized.clone()
+        };
+        let second = Hints::generalized_for(&reversed, &population);
+
+        assert_eq!(first, second);
+        assert_eq!(first.test_sets.len(), 1);
+        assert_eq!(first.test_sets[0].len(), 2);
+
+        let make = |generalized| Hints {
+            version: VERSION,
+            tool: "cargo-gamma test".to_owned(),
+            context: context_of(),
+            mutants: vec![
+                Hint {
+                    file: "src/lib.rs".into(),
+                    id: "beta".into(),
+                    killer: Some(killer("tests::same")),
+                    unviable: false,
+                },
+                Hint {
+                    file: "src/lib.rs".into(),
+                    id: "alpha".into(),
+                    killer: Some(killer("tests::same")),
+                    unviable: true,
+                },
+            ],
+            generalized,
+        };
+        let mut left = make(first);
+        let mut right = make(second);
+        right.mutants.reverse();
+        left.normalize();
+        right.normalize();
+        assert_eq!(left.rendered().unwrap(), right.rendered().unwrap());
     }
 
     #[test]

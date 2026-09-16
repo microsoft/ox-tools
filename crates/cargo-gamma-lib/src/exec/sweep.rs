@@ -31,6 +31,11 @@ use crate::model::Outcome;
 use crate::report::{encode_controls, encode_preserving_color};
 use crate::{Result, notes};
 
+/// The minimum launch-cost estimate used by census admission.
+///
+/// Kept here for the existing shared cost model; sweep workers do not wait for this duration.
+pub(super) const MIN_SCOUT_WAIT: Duration = Duration::from_millis(5);
+
 /// Describes a mutant stopped by the memory ceiling installed for its test binary.
 ///
 /// Written to say what was measured and against what, because the reader's questions are whether
@@ -178,11 +183,11 @@ fn mutant_cost(position: usize, plan: &Plan, reach: &Reachability<'_>, census: &
     total
 }
 
-/// Orders package queues longest-first, then interleaves them.
+/// Builds the stable package-fair, longest-work-first priority used by the live scheduler.
 ///
-/// Workers pull from a single queue, so package queues start in descending expected-cost order
-/// rather than whatever order discovery happened to enumerate them. Pulling already balances
-/// individual mutants across workers; this ordering decides which independent workloads overlap.
+/// Package queues start in descending expected-cost order rather than whatever order discovery
+/// happened to enumerate them. Assignment-time distance and learning value may move work ahead of
+/// this order, which remains the deterministic secondary priority.
 ///
 /// When census data is available, each mutant's cost is estimated from the measured duration of
 /// its reaching tests. When a killer hint exists, the expected cost reflects a single probe.
@@ -236,6 +241,201 @@ fn schedule(pending: &mut [usize], plan: &Plan, reach: &Reachability<'_>, census
             break 'interleave;
         }
     }
+}
+
+#[derive(Debug)]
+struct ScheduledWork {
+    file: usize,
+    item: Arc<str>,
+    package: Arc<str>,
+    cost: Duration,
+    sibling_benefit: usize,
+    hinted: bool,
+    stable_order: usize,
+}
+
+#[derive(Debug)]
+struct SchedulerState {
+    remaining: Vec<bool>,
+    active_files: Vec<usize>,
+    active_items: crate::HashMap<(usize, Arc<str>), usize>,
+    learned_items: crate::HashSet<(usize, Arc<str>)>,
+    package_turns: crate::HashMap<Arc<str>, usize>,
+}
+
+struct Scheduler {
+    work: Vec<ScheduledWork>,
+    state: Mutex<SchedulerState>,
+    changed: Condvar,
+}
+
+struct Assignment<'a> {
+    scheduler: &'a Scheduler,
+    index: usize,
+    learned: bool,
+}
+
+impl Assignment<'_> {
+    const fn index(&self) -> usize {
+        self.index
+    }
+
+    fn complete(mut self) {
+        self.learned = true;
+    }
+}
+
+impl Drop for Assignment<'_> {
+    fn drop(&mut self) {
+        self.scheduler.release(self.index, self.learned);
+    }
+}
+
+impl Scheduler {
+    fn new(work: Vec<ScheduledWork>, files: usize) -> Self {
+        let remaining = vec![true; work.len()];
+        Self {
+            work,
+            state: Mutex::new(SchedulerState {
+                remaining,
+                active_files: vec![0; files],
+                active_items: crate::HashMap::default(),
+                learned_items: crate::HashSet::default(),
+                package_turns: crate::HashMap::default(),
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn claim(&self, abandoned: &OnceLock<String>) -> Option<usize> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+
+        loop {
+            if abandoned.get().is_some() {
+                return None;
+            }
+
+            if let Some(index) = self.select(&state) {
+                let work = &self.work[index];
+                state.remaining[index] = false;
+                state.active_files[work.file] = state.active_files[work.file].saturating_add(1);
+                let active_item = state.active_items.entry((work.file, Arc::clone(&work.item))).or_default();
+                *active_item = active_item.saturating_add(1);
+                let turns = state.package_turns.entry(Arc::clone(&work.package)).or_default();
+                *turns = turns.saturating_add(1);
+                return Some(index);
+            }
+
+            if !state.remaining.iter().any(|remaining| *remaining) {
+                return None;
+            }
+
+            state = self.changed.wait(state).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    fn assignment<'a>(&'a self, abandoned: &OnceLock<String>) -> Option<Assignment<'a>> {
+        self.claim(abandoned).map(|index| Assignment {
+            scheduler: self,
+            index,
+            learned: false,
+        })
+    }
+
+    #[cfg(test)]
+    fn complete(&self, index: usize) {
+        self.release(index, true);
+    }
+
+    fn release(&self, index: usize, learned: bool) {
+        let work = &self.work[index];
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let key = (work.file, Arc::clone(&work.item));
+        if learned {
+            let _inserted = state.learned_items.insert(key.clone());
+        }
+        state.active_files[work.file] = state.active_files[work.file].saturating_sub(1);
+        if let Some(active) = state.active_items.get_mut(&key) {
+            *active = active.saturating_sub(1);
+            if *active == 0 {
+                state.active_items.remove(&key);
+            }
+        }
+        core::mem::drop(state);
+        self.changed.notify_all();
+    }
+
+    fn abandon(&self) {
+        self.changed.notify_all();
+    }
+
+    fn select(&self, state: &SchedulerState) -> Option<usize> {
+        let mut selected = None;
+
+        for (index, remaining) in state.remaining.iter().copied().enumerate() {
+            if !remaining || self.distance(state, index).is_none() {
+                continue;
+            }
+
+            if selected.is_none_or(|current| self.precedes(state, index, current)) {
+                selected = Some(index);
+            }
+        }
+
+        selected
+    }
+
+    fn distance(&self, state: &SchedulerState, index: usize) -> Option<(u8, usize)> {
+        let work = &self.work[index];
+        let file_contention = state.active_files[work.file];
+        if file_contention == 0 {
+            return Some((0, 0));
+        }
+
+        let item_contention = state.active_items.get(&(work.file, Arc::clone(&work.item))).copied().unwrap_or(0);
+        if item_contention == 0 {
+            return Some((1, file_contention));
+        }
+
+        // The deterministic tail policy leaves capacity idle while an unhinted same-item scout is
+        // active. Hinted work is already informed and may share an item without waiting.
+        (work.hinted || state.learned_items.contains(&(work.file, Arc::clone(&work.item)))).then_some((2, file_contention))
+    }
+
+    fn precedes(&self, state: &SchedulerState, left: usize, right: usize) -> bool {
+        let left_work = &self.work[left];
+        let right_work = &self.work[right];
+        let left_distance = self.distance(state, left).expect("selection considers only eligible work");
+        let right_distance = self.distance(state, right).expect("selection considers only eligible work");
+        let left_turns = state.package_turns.get(&left_work.package).copied().unwrap_or(0);
+        let right_turns = state.package_turns.get(&right_work.package).copied().unwrap_or(0);
+
+        left_distance
+            .cmp(&right_distance)
+            .then_with(|| left_turns.cmp(&right_turns))
+            .then_with(|| {
+                learning_value_cmp(
+                    left_work,
+                    right_work,
+                    state.learned_items.contains(&(left_work.file, Arc::clone(&left_work.item))),
+                    state.learned_items.contains(&(right_work.file, Arc::clone(&right_work.item))),
+                )
+            })
+            .then_with(|| right_work.cost.cmp(&left_work.cost))
+            .then_with(|| left_work.stable_order.cmp(&right_work.stable_order))
+            .is_lt()
+    }
+}
+
+fn learning_value_cmp(left: &ScheduledWork, right: &ScheduledWork, left_learned: bool, right_learned: bool) -> core::cmp::Ordering {
+    let left_cost = left.cost.as_nanos().max(1);
+    let right_cost = right.cost.as_nanos().max(1);
+    let left_benefit = usize::from(!left_learned && !left.hinted).saturating_mul(left.sibling_benefit);
+    let right_benefit = usize::from(!right_learned && !right.hinted).saturating_mul(right.sibling_benefit);
+    let left_value = (left_benefit as u128).saturating_mul(right_cost);
+    let right_value = (right_benefit as u128).saturating_mul(left_cost);
+
+    right_value.cmp(&left_value)
 }
 
 /// What a sweep spent, tallied across its workers as they run.
@@ -335,7 +535,6 @@ pub(super) fn test_all(
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     schedule_pending(&mut pending, plan, reach, sweep.census, killers);
 
-    let next = AtomicUsize::new(0);
     let tally = Tally::default();
     let abandoned: OnceLock<String> = OnceLock::new();
     let negative = NegativeLearning::default();
@@ -394,6 +593,10 @@ pub(super) fn test_all(
                 .map_or(0, |count| count.saturating_sub(1))
         })
         .collect();
+    let costs: Vec<Duration> = pending
+        .iter()
+        .map(|position| mutant_cost(*position, plan, reach, sweep.census, killers))
+        .collect();
     let mut file_paths = files.into_iter().collect::<Vec<_>>();
     // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
     file_paths.sort_by_key(|(_file, slot)| *slot);
@@ -431,13 +634,29 @@ pub(super) fn test_all(
             .collect()
         })
         .collect();
+    let scheduler = Scheduler::new(
+        pending
+            .iter()
+            .enumerate()
+            .map(|(index, position)| ScheduledWork {
+                file: file_slots[index],
+                item: Arc::clone(&item_paths[index]),
+                package: Arc::clone(&plan.mutants[*position].package),
+                cost: costs[index],
+                sibling_benefit: sibling_benefits[index],
+                hinted: hints[index].is_some(),
+                stable_order: index,
+            })
+            .collect(),
+        file_paths.len(),
+    );
     let notes = notes::current();
 
     thread::scope(|scope| {
         // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
         for _worker in 0..worker_count(jobs) {
             let sender = sender.clone();
-            let next = &next;
+            let scheduler = &scheduler;
             let ordinals = &ordinals;
             let reachable = &reachable;
             let hints = &hints;
@@ -446,7 +665,6 @@ pub(super) fn test_all(
             let file_slots = &file_slots;
             let item_paths = &item_paths;
             let site_identities = &site_identities;
-            let sibling_benefits = &sibling_benefits;
             let file_killers = &file_killers;
             let abandoned = &abandoned;
             let tally = &tally;
@@ -457,12 +675,11 @@ pub(super) fn test_all(
                 let _notes = notes::enter(notes.as_ref());
 
                 while abandoned.get().is_none() {
-                    // #[gamma::skip(literal.int_decrement, reason = "fetching without advancing repeatedly executes the first mutant and never drains the shared work queue")]
-                    let index = claim_index(next);
-
-                    let Some(position) = pending.get(index).copied() else {
+                    let Some(assignment) = scheduler.assignment(abandoned) else {
                         return;
                     };
+                    let index = assignment.index();
+                    let position = pending[index];
 
                     let (ordinal, timeout_multiplier) = ordinals[index];
                     let active = ordinal;
@@ -479,7 +696,6 @@ pub(super) fn test_all(
                         &site_identities[index],
                         negative,
                         deterministic_reach,
-                        sibling_benefits[index],
                         timeout_multiplier,
                         sweep,
                         tally,
@@ -489,12 +705,15 @@ pub(super) fn test_all(
                         Judgement::Reached(outcome, killer, note) => (outcome, killer, note),
                         Judgement::Abandoned(reason) => {
                             let _first = abandoned.set(reason);
+                            core::mem::drop(assignment);
+                            scheduler.abandon();
 
                             return;
                         }
                     };
 
                     let elapsed = elapsed_millis(started.elapsed());
+                    assignment.complete();
 
                     // A closed receiver means the calling thread is gone, which cannot happen while
                     // the scope is open; there is nothing useful to do about it either way.
@@ -562,11 +781,6 @@ fn increment_item_count(counts: &mut crate::HashMap<(Arc<Utf8Path>, Arc<str>), u
 
 fn worker_count(jobs: usize) -> usize {
     jobs.max(1)
-}
-
-// #[gamma::skip(all, reason = "the shared work cursor must advance; this resource mutant repeats work indefinitely and is suppressed rather than weakening queue progress")]
-fn claim_index(next: &AtomicUsize) -> usize {
-    next.fetch_add(1, Ordering::Relaxed)
 }
 
 fn elapsed_millis(elapsed: Duration) -> u64 {
@@ -1230,7 +1444,6 @@ fn judge_learning(
     site: &SiteIdentity,
     negative: &NegativeLearning,
     deterministic_reach: bool,
-    sibling_benefit: usize,
     timeout_multiplier: Option<f64>,
     sweep: Sweep<'_>,
     tally: &Tally,
@@ -1258,21 +1471,6 @@ fn judge_learning(
     let mut candidates = promoted.to_vec();
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     candidates.extend(FileLearning::candidates(observed, item_path));
-    // #[gamma::skip(all, reason = "the alternative changes only internal candidate ordering or tie selection, not the accepted population exposed by this layer")]
-    let estimated_cost = candidates.first().map_or_else(
-        || reachable.iter().map(|binary| binary.baseline).sum(),
-        |candidate| candidate.estimated_cost(reachable),
-    );
-    // #[gamma::skip(all, reason = "the alternative changes only internal candidate ordering or tie selection, not the accepted population exposed by this layer")]
-    let scout = FileLearning::scout(observed, item_path, candidates.first(), estimated_cost, sibling_benefit);
-
-    if let Scout::Wait { candidate, duration } = &scout {
-        FileLearning::wait_for_scout(observed, item_path, candidate.as_ref(), *duration);
-    }
-
-    let mut candidates = promoted.to_vec();
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    candidates.extend(FileLearning::candidates(observed, item_path));
     let judged = judge_ranked(
         work,
         active,
@@ -1289,20 +1487,7 @@ fn judge_learning(
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     FileLearning::publish(observed, item_path, &judged);
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-    if scout.is_lead() {
-        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-        FileLearning::complete_scout(observed, item_path);
-    }
     judged
-}
-
-pub(super) const MIN_SCOUT_WAIT: Duration = Duration::from_millis(5);
-const MAX_SCOUT_WAIT: Duration = Duration::from_millis(200);
-fn scout_wait(cost: Duration, sibling_benefit: usize) -> Duration {
-    let benefit = sibling_benefit.max(1);
-    let divisor = u32::try_from(benefit).unwrap_or(u32::MAX);
-    (cost / divisor).clamp(MIN_SCOUT_WAIT, MAX_SCOUT_WAIT)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1353,6 +1538,7 @@ enum Candidate {
     FileBinary(BinaryIdentity),
 }
 
+#[cfg(test)]
 impl Candidate {
     fn estimated_cost(&self, reachable: &[&TestBinary]) -> Duration {
         let identity = match self {
@@ -1430,7 +1616,6 @@ impl<T: Clone> RankedCandidate<T> {
 struct ItemLearning {
     exact: Vec<RankedCandidate<Killer>>,
     reached: Vec<RankedCandidate<BinaryIdentity>>,
-    scout: Learning,
 }
 
 #[derive(Debug, Default)]
@@ -1443,7 +1628,6 @@ struct LearningState {
 
 struct FileLearning {
     state: Mutex<LearningState>,
-    notify: Condvar,
 }
 
 impl FileLearning {
@@ -1451,7 +1635,6 @@ impl FileLearning {
     fn new() -> Self {
         Self {
             state: Mutex::new(LearningState::default()),
-            notify: Condvar::new(),
         }
     }
 
@@ -1468,7 +1651,6 @@ impl FileLearning {
                         .map(|candidate| RankedCandidate::from_hint(candidate, Clone::clone))
                         .collect(),
                     reached: Vec::new(),
-                    scout: Learning::Untried,
                 },
             );
         }
@@ -1492,10 +1674,7 @@ impl FileLearning {
         let binary_order = state.binaries.iter().map(|candidate| candidate.order).max().unwrap_or(0);
         state.next_order = item_order.max(binary_order).saturating_add(1);
 
-        Self {
-            state: Mutex::new(state),
-            notify: Condvar::new(),
-        }
+        Self { state: Mutex::new(state) }
     }
 
     fn persist(&self, file: &Utf8Path, output: &mut GeneralizedHints) {
@@ -1575,36 +1754,6 @@ impl FileLearning {
             .collect()
     }
 
-    fn scout(&self, item_path: &str, top: Option<&Candidate>, cost: Duration, sibling_benefit: usize) -> Scout {
-        let mut state = self.locked();
-        let item = state.items.entry(item_path.to_owned()).or_default();
-
-        match &item.scout {
-            Learning::Untried => {
-                item.scout = Learning::InProgress(top.cloned());
-                Scout::Lead
-            }
-            Learning::InProgress(candidate) if same_candidate(candidate.as_ref(), top) => Scout::Wait {
-                candidate: candidate.clone(),
-                duration: wait_for_siblings(cost, sibling_benefit),
-            },
-            Learning::InProgress(_) | Learning::Exhausted => Scout::Proceed,
-        }
-    }
-
-    fn wait_for_scout(&self, item_path: &str, candidate: Option<&Candidate>, duration: Duration) {
-        let state = self.locked();
-        let (_state, _timed_out) = self
-            .notify
-            .wait_timeout_while(state, duration, |state| {
-                matches!(
-                    state.items.get(item_path).map(|item| &item.scout),
-                    Some(Learning::InProgress(current)) if current.as_ref() == candidate
-                )
-            })
-            .unwrap_or_else(PoisonError::into_inner);
-    }
-
     fn observe(&self, item_path: &str, candidate: &Candidate, hit: bool, elapsed: Duration) {
         let mut state = self.locked();
         match candidate {
@@ -1651,12 +1800,6 @@ impl FileLearning {
                 }
             }
         }
-        if let Some(item) = state.items.get_mut(item_path)
-            && matches!(&item.scout, Learning::InProgress(current) if current.as_ref() == Some(candidate))
-        {
-            exhaust_scout(item);
-        }
-        release_and_notify(state, &self.notify);
     }
 
     fn reached(&self, item_path: &str, binary: &TestBinary, elapsed: Duration) {
@@ -1673,13 +1816,10 @@ impl FileLearning {
         if !contains_ranked_identity(&state.reached_file, &identity) {
             state.reached_file.push(candidate());
         }
-        release_and_notify(state, &self.notify);
     }
 
     fn publish(&self, item_path: &str, judged: &Judgement) {
         let Judgement::Reached(_outcome, Some(killer), _note) = judged else {
-            // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-            notify(&self.notify);
             return;
         };
 
@@ -1691,24 +1831,11 @@ impl FileLearning {
         if !contains_ranked_identity(&item.exact, killer) {
             item.exact.push(published_candidate(killer.clone(), order));
         }
-        exhaust_scout(item);
 
         let binary = BinaryIdentity::from_killer(killer);
         if !contains_ranked_identity(&state.binaries, &binary) {
             state.binaries.push(published_candidate(binary, order));
         }
-        release_and_notify(state, &self.notify);
-    }
-
-    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-    fn complete_scout(&self, item_path: &str) {
-        let mut state = self.locked();
-        if let Some(item) = state.items.get_mut(item_path)
-            && matches!(item.scout, Learning::InProgress(_))
-        {
-            exhaust_scout(item);
-        }
-        release_and_notify(state, &self.notify);
     }
 }
 
@@ -1722,14 +1849,6 @@ fn contains_identity(candidates: &[&RankedCandidate<BinaryIdentity>], identity: 
 
 fn contains_ranked_identity<T: PartialEq>(candidates: &[RankedCandidate<T>], identity: &T) -> bool {
     candidates.iter().any(|candidate| same_identity(&candidate.identity, identity))
-}
-
-fn same_candidate(left: Option<&Candidate>, right: Option<&Candidate>) -> bool {
-    left == right
-}
-
-fn wait_for_siblings(cost: Duration, sibling_benefit: usize) -> Duration {
-    scout_wait(cost, sibling_benefit)
 }
 
 fn advance_order(state: &mut LearningState) {
@@ -1756,43 +1875,6 @@ fn published_candidate<T>(identity: T, order: u64) -> RankedCandidate<T> {
         samples: u32::from(false),
         order,
     }
-}
-
-// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-fn exhaust_scout(item: &mut ItemLearning) {
-    let _previous = core::mem::replace(&mut item.scout, Learning::Exhausted);
-}
-
-// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-fn notify(notify: &Condvar) {
-    notify.notify_all();
-}
-
-// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-fn release_and_notify(state: MutexGuard<'_, LearningState>, notify: &Condvar) {
-    core::mem::drop(state);
-    notify.notify_all();
-}
-
-#[derive(Clone, Debug)]
-enum Scout {
-    Lead,
-    Wait { candidate: Option<Candidate>, duration: Duration },
-    Proceed,
-}
-
-impl Scout {
-    fn is_lead(&self) -> bool {
-        matches!(self, Self::Lead)
-    }
-}
-
-#[derive(Debug, Default)]
-enum Learning {
-    #[default]
-    Untried,
-    InProgress(Option<Candidate>),
-    Exhausted,
 }
 
 #[cfg(test)]
@@ -2083,8 +2165,9 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn same_file_survivors_run_in_parallel_after_one_learning_attempt_starts() {
+    fn different_items_in_the_same_file_run_in_parallel() {
         let (_directory, work, mut plan, binaries) = harness_n("sleep 0.20; exit 0", Duration::from_secs(30), 2);
+        plan.mutants[1].item_path = "subject::other".to_owned().into();
         let started = Instant::now();
 
         let scope = TestScope {
@@ -3674,9 +3757,6 @@ mod tests {
         assert_eq!(worker_count(8), 8);
         assert_eq!(elapsed_millis(Duration::from_millis(17)), 17);
         assert_eq!(elapsed_millis(Duration::MAX), u64::MAX);
-        let next = AtomicUsize::new(0);
-        assert_eq!(claim_index(&next), 0);
-        assert_eq!(claim_index(&next), 1);
 
         let killer = Killer {
             package: "subject".to_owned(),
@@ -3830,8 +3910,6 @@ mod tests {
         };
         advance_order(&mut state);
         assert_eq!(state.next_order, u64::MAX, "learning order saturates instead of wrapping");
-        assert!(Scout::Lead.is_lead());
-        assert!(!Scout::Proceed.is_lead());
     }
 
     #[test]
@@ -4634,37 +4712,299 @@ mod tests {
         assert_eq!(recorded.samples, 2);
     }
 
-    #[test]
-    fn adaptive_scout_wait_is_divided_by_benefit_and_clamped() {
-        assert_eq!(scout_wait(Duration::from_millis(300), 3), Duration::from_millis(100));
-        assert_eq!(scout_wait(Duration::from_millis(1), 100), MIN_SCOUT_WAIT);
-        assert_eq!(scout_wait(Duration::from_secs(5), 1), MAX_SCOUT_WAIT);
+    fn scheduled(
+        file: usize,
+        item: &str,
+        package: &str,
+        cost_ms: u64,
+        sibling_benefit: usize,
+        hinted: bool,
+        stable_order: usize,
+    ) -> ScheduledWork {
+        ScheduledWork {
+            file,
+            item: item.to_owned().into(),
+            package: package.to_owned().into(),
+            cost: Duration::from_millis(cost_ms),
+            sibling_benefit,
+            hinted,
+            stable_order,
+        }
     }
 
     #[test]
-    fn timed_out_and_exhausted_fallbacks_publish_without_overwriting() {
-        let learning = FileLearning::new();
-        assert!(matches!(
-            learning.scout("subject::a", None, Duration::from_millis(20), 1),
-            Scout::Lead
+    fn scheduler_prefers_idle_files_then_the_least_contended_inactive_item() {
+        let scheduler = Scheduler::new(
+            vec![
+                scheduled(0, "active", "a", 10, 0, false, 0),
+                scheduled(0, "idle-item", "a", 10, 0, false, 1),
+                scheduled(1, "idle-item", "b", 10, 0, false, 2),
+            ],
+            2,
+        );
+        let mut state = scheduler.state.lock().expect("scheduler state is healthy");
+        state.active_files[0] = 2;
+        state.active_items.insert((0, "active".to_owned().into()), 1);
+
+        assert_eq!(scheduler.select(&state), Some(2), "an idle file outranks every active file");
+
+        state.active_files[1] = 1;
+        assert_eq!(
+            scheduler.select(&state),
+            Some(2),
+            "the inactive item in the less-contended file outranks both a duplicate and a busier file"
+        );
+    }
+
+    #[test]
+    fn scheduler_keeps_same_item_exclusion_stronger_than_file_separation() {
+        let scheduler = Scheduler::new(
+            vec![
+                scheduled(0, "active", "a", 100, 9, false, 0),
+                scheduled(0, "other", "a", 1, 0, false, 1),
+            ],
+            1,
+        );
+        let mut state = scheduler.state.lock().expect("scheduler state is healthy");
+        state.active_files[0] = 1;
+        state.active_items.insert((0, "active".to_owned().into()), 1);
+
+        assert_eq!(scheduler.select(&state), Some(1));
+        state.remaining[1] = false;
+        assert_eq!(scheduler.select(&state), None, "an unhinted same-item duplicate is not reserved");
+    }
+
+    #[test]
+    fn scheduler_balances_learning_value_cost_long_work_and_stable_order() {
+        let scheduler = Scheduler::new(
+            vec![
+                scheduled(0, "low-value", "a", 20, 2, false, 3),
+                scheduled(1, "high-value", "a", 5, 2, false, 2),
+                scheduled(2, "long", "a", 10, 4, false, 1),
+                scheduled(3, "stable", "a", 10, 4, false, 0),
+            ],
+            4,
+        );
+        let state = scheduler.state.lock().expect("scheduler state is healthy");
+
+        assert_eq!(
+            scheduler.select(&state),
+            Some(3),
+            "learning per estimated cost wins, then equal value keeps useful long work and stable order"
+        );
+    }
+
+    #[test]
+    fn scheduler_preserves_package_fairness_at_assignment_time() {
+        let scheduler = Scheduler::new(
+            vec![
+                scheduled(0, "a1", "a", 20, 0, false, 0),
+                scheduled(1, "a2", "a", 20, 0, false, 1),
+                scheduled(2, "b1", "b", 1, 0, false, 2),
+            ],
+            3,
+        );
+        let abandoned = OnceLock::new();
+
+        assert_eq!(scheduler.claim(&abandoned), Some(0));
+        assert_eq!(
+            scheduler.claim(&abandoned),
+            Some(2),
+            "a package that has not received a turn outranks another assignment from the leading package"
+        );
+    }
+
+    #[test]
+    fn hinted_work_may_share_an_active_item() {
+        let scheduler = Arc::new(Scheduler::new(
+            vec![
+                scheduled(0, "same", "a", 10, 1, false, 0),
+                scheduled(0, "same", "a", 10, 1, true, 1),
+            ],
+            1,
         ));
-        let Scout::Wait { candidate, duration } = learning.scout("subject::a", None, Duration::from_millis(20), 1) else {
-            panic!("a sibling of the current top scout should wait");
+        let abandoned = OnceLock::new();
+
+        assert_eq!(scheduler.claim(&abandoned), Some(0));
+        assert_eq!(scheduler.claim(&abandoned), Some(1));
+    }
+
+    #[test]
+    fn unwinding_assignment_releases_its_reservation_and_wakes_follow_on_work() {
+        let scheduler = Scheduler::new(
+            vec![
+                scheduled(0, "same", "a", 10, 1, false, 0),
+                scheduled(0, "same", "a", 10, 1, false, 1),
+            ],
+            1,
+        );
+        let abandoned = OnceLock::new();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let assignment = scheduler.assignment(&abandoned).expect("the first mutant is assigned");
+            assert_eq!(assignment.index(), 0);
+            panic!("simulated worker failure");
+        }));
+
+        assert!(panic.is_err());
+        assert_eq!(
+            scheduler.claim(&abandoned),
+            Some(1),
+            "dropping a panicking assignment releases its item and file reservations"
+        );
+    }
+
+    #[test]
+    fn conflicting_tail_waits_for_a_state_change_without_reserving_work() {
+        let scheduler = Arc::new(Scheduler::new(
+            vec![
+                scheduled(0, "same", "a", 10, 2, false, 0),
+                scheduled(0, "same", "a", 10, 2, false, 1),
+                scheduled(0, "same", "a", 10, 2, false, 2),
+            ],
+            1,
+        ));
+        let abandoned = Arc::new(OnceLock::new());
+        assert_eq!(scheduler.claim(&abandoned), Some(0));
+
+        let (sent, received) = mpsc::channel();
+        let waiting_scheduler = Arc::clone(&scheduler);
+        let waiting_abandoned = Arc::clone(&abandoned);
+        let waiter = thread::spawn(move || {
+            let _sent = sent.send(waiting_scheduler.claim(&waiting_abandoned));
+        });
+
+        assert!(
+            received.recv_timeout(Duration::from_millis(30)).is_err(),
+            "the conflicting tail must wait for notification"
+        );
+        {
+            let state = scheduler.state.lock().expect("scheduler state is healthy");
+            assert!(state.remaining[1], "waiting must not reserve the sibling");
+            assert_eq!(state.active_files[0], 1);
+        }
+
+        scheduler.complete(0);
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(1)).expect("completion wakes the waiter"),
+            Some(1)
+        );
+        waiter.join().expect("the waiter exits normally");
+    }
+
+    #[test]
+    fn learning_is_published_before_a_related_follow_on_assignment() {
+        let scheduler = Scheduler::new(
+            vec![
+                scheduled(0, "same", "a", 10, 2, false, 0),
+                scheduled(0, "same", "a", 10, 2, false, 1),
+                scheduled(0, "same", "a", 10, 2, false, 2),
+            ],
+            1,
+        );
+        let abandoned = OnceLock::new();
+        let learning = FileLearning::new();
+
+        assert_eq!(scheduler.claim(&abandoned), Some(0));
+        learning.publish("same", &Judgement::Reached(Outcome::Killed, Some(killer("tests::learned")), None));
+        scheduler.complete(0);
+        assert_eq!(scheduler.claim(&abandoned), Some(1));
+        assert!(matches!(&learning.candidates("same")[0], Candidate::Exact(found) if found.test == "tests::learned"));
+        assert_eq!(
+            scheduler.claim(&abandoned),
+            Some(2),
+            "published learning removes cold-scout spacing from informed siblings"
+        );
+    }
+
+    #[test]
+    fn long_running_scouts_do_not_block_unrelated_work_or_race_same_item_siblings() {
+        let scheduler = Arc::new(Scheduler::new(
+            vec![
+                scheduled(0, "scouted", "a", 100, 1, false, 0),
+                scheduled(0, "scouted", "a", 100, 1, false, 1),
+                scheduled(1, "unrelated", "a", 1, 0, false, 2),
+            ],
+            2,
+        ));
+        let abandoned = Arc::new(OnceLock::new());
+        let (started, scout_started) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let scout_scheduler = Arc::clone(&scheduler);
+        let scout_abandoned = Arc::clone(&abandoned);
+        let scout = thread::spawn(move || {
+            let index = scout_scheduler.claim(&scout_abandoned).expect("the scout is assigned");
+            let _sent = started.send(index);
+            released.recv().expect("the test eventually releases the long-running scout");
+            scout_scheduler.complete(index);
+        });
+
+        assert_eq!(scout_started.recv().expect("the scout starts"), 0);
+        assert_eq!(
+            scheduler.claim(&abandoned),
+            Some(2),
+            "unrelated work proceeds while the scout remains active"
+        );
+        {
+            let state = scheduler.state.lock().expect("scheduler state is healthy");
+            assert!(state.remaining[1], "the same-item sibling remains unreserved");
+        }
+
+        scheduler.complete(2);
+        release.send(()).expect("the scout can be released");
+        scout.join().expect("the scout exits normally");
+        assert_eq!(scheduler.claim(&abandoned), Some(1));
+    }
+
+    #[test]
+    fn equivalent_serial_and_dynamic_schedules_produce_the_same_verdicts() {
+        let (_directory, work, serial_template, binaries) = helper_harness(&["exit:1"]);
+        let template = serial_template.mutants[0].clone();
+        let mutants = || {
+            (0..4)
+                .map(|index| {
+                    let mut mutant = template.clone();
+                    mutant.id = format!("m{index}").into();
+                    mutant.ordinal = u32::try_from(index + 1).expect("four mutants fit in u32");
+                    mutant.file = Utf8PathBuf::from(format!("src/{index}.rs")).into();
+                    mutant.item_path = format!("subject::f{index}").into();
+                    mutant
+                })
+                .collect()
         };
-        learning.wait_for_scout("subject::a", candidate.as_ref(), duration);
+        let mut serial = serial_template;
+        serial.mutants = mutants();
+        let mut dynamic = one_mutant_plan(work.root.clone());
+        dynamic.mutants = mutants();
+        let scope = TestScope {
+            packages: &[],
+            package_local: false,
+            whole_workspace: true,
+        };
+        let serial_reach = Reachability::build(&serial, &binaries, &scope);
+        let dynamic_reach = Reachability::build(&dynamic, &binaries, &scope);
 
-        learning.publish(
-            "subject::a",
-            &Judgement::Reached(Outcome::Killed, Some(killer("tests::fallback")), None),
-        );
-        learning.complete_scout("subject::a");
-        learning.publish(
-            "subject::a",
-            &Judgement::Reached(Outcome::Killed, Some(killer("tests::exhausted")), None),
-        );
+        for (plan, reach, jobs) in [(&mut serial, serial_reach, 1), (&mut dynamic, dynamic_reach, 4)] {
+            let _spent = test_all(
+                &work,
+                plan,
+                &reach,
+                Sweep {
+                    jobs,
+                    confirm: false,
+                    ..sweep(Stall::NONE)
+                },
+                false,
+                &mut Killers::default(),
+                &mut crate::testing::Recorder::default(),
+            )
+            .expect("the sweep completes");
+        }
 
-        let candidates = learning.candidates("subject::a");
-        assert!(matches!(&candidates[0], Candidate::Exact(found) if found.test == "tests::fallback"));
-        assert!(matches!(&candidates[1], Candidate::Exact(found) if found.test == "tests::exhausted"));
+        assert_eq!(
+            serial.mutants.iter().map(|mutant| mutant.outcome).collect::<Vec<_>>(),
+            dynamic.mutants.iter().map(|mutant| mutant.outcome).collect::<Vec<_>>()
+        );
+        assert!(serial.mutants.iter().all(|mutant| mutant.outcome == Outcome::Killed));
     }
 }

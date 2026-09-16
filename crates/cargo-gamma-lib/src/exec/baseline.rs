@@ -129,8 +129,9 @@ where
     // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
     let mut peak: Option<u64> = None;
 
-    // Folded in the binaries' own order rather than in the order the workers happened to finish, so
-    // that which failure a red suite reports does not depend on the scheduler.
+    let mut failures = Vec::new();
+
+    // Folded in binary order so the aggregate is deterministic regardless of worker completion.
     for (entry, taken) in binaries.iter_mut().zip(measured) {
         let Some((took, observation)) = taken else {
             continue;
@@ -161,9 +162,16 @@ where
             // there is no mutant to record it against, and a baseline binary that went unmeasured
             // leaves every mutant that binary covers without a budget to be judged against.
             verdict => {
-                return Err(baseline_failure_error(work, entry, took, budget, &verdict, failure));
+                failures.push(baseline_failure_error(work, entry, took, budget, &verdict, failure));
             }
         }
+    }
+
+    if failures.len() == 1 {
+        return Err(failures.pop().expect("the length check proves one baseline failure exists"));
+    }
+    if !failures.is_empty() {
+        return Err(aggregate_baseline_failures(failures));
     }
 
     Ok(Baseline {
@@ -377,8 +385,6 @@ fn baseline_failure_error(
 
     let mut message = format!(
         "the baseline could not be measured\n\n\
-         Every verdict in a run is a comparison against the baseline, so there is nothing to \
-         measure until this failure is resolved.\n\n\
          Package:       {}\n\
          Target:        {}\n\
          Runner:        {runner}\n\
@@ -405,7 +411,59 @@ fn baseline_failure_error(
         _other => {}
     }
 
-    error!("{message}").with_artifact("baseline-failure.json", artifact)
+    error!("{message}").with_nested_artifact(baseline_artifact_directory(binary), "baseline-failure.json", artifact)
+}
+
+fn aggregate_baseline_failures(mut failures: Vec<Error>) -> Error {
+    let count = failures.len();
+    let mut message = format!("the baseline could not be measured for {count} test binaries");
+
+    for (index, failure) in failures.iter().enumerate() {
+        let _ = write!(message, "\n\nFailure {} of {count}:\n{}", index + 1, failure.message());
+    }
+
+    let mut aggregate = Error::new(message);
+    for failure in &mut failures {
+        aggregate.append_artifacts(failure);
+    }
+
+    aggregate
+}
+
+fn baseline_artifact_directory(binary: &TestBinary) -> String {
+    let identity = format!("{}\0{}\0{}\0{}", binary.package, binary.target, binary.package_id, binary.path);
+
+    format!(
+        "baseline-failures/{}--{}--{}",
+        filesystem_component(&binary.package),
+        filesystem_component(&binary.target),
+        blake3::hash(identity.as_bytes()).to_hex()
+    )
+}
+
+fn filesystem_component(value: &str) -> String {
+    let mut component = String::new();
+    let mut separated = false;
+
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+            component.push(character);
+            separated = false;
+        } else if !separated {
+            component.push('_');
+            separated = true;
+        }
+
+        if component.len() >= 32 {
+            break;
+        }
+    }
+
+    if component.is_empty() {
+        component.push('_');
+    }
+
+    component
 }
 
 fn baseline_failure_description(verdict: &Verdict, budget: Duration) -> String {
@@ -544,6 +602,7 @@ mod tests {
 
         assert!(message.contains("test `a::b`"), "{message}");
         assert!(message.contains("exit code 101"), "{message}");
+        assert!(!message.contains("Every verdict in a run"), "{message}");
         assert!(!message.contains("test a::b ... FAILED"), "{message}");
         assert!(!message.contains("assertion failed: left != right"), "{message}");
 
@@ -726,6 +785,69 @@ mod tests {
 
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
         assert!(failure.to_string().contains("test `always_red` failed"), "{failure}");
+    }
+
+    #[test]
+    fn every_binary_settles_and_failures_get_distinct_artifacts() {
+        let (_directory, work) = crate::testing::helper_workspace("baseline-aggregate", &["exit:0"]);
+        let mut binaries: Vec<TestBinary> = ["pass-before", "red/package", "timed:package", "pass-after"]
+            .into_iter()
+            .map(|package| TestBinary {
+                package: package.to_owned(),
+                package_id: format!("path+file:///workspace/{package}#0.1.0"),
+                target: "shared".to_owned(),
+                ..crate::testing::helper()
+            })
+            .collect();
+        let attempts = [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)];
+
+        let failure = measure_within_reporting_with(
+            &work,
+            &mut binaries,
+            Duration::from_secs(30),
+            MemoryRequest::default(),
+            3,
+            |_work, binary, _attempt| {
+                let (index, verdict) = match binary.package.as_str() {
+                    "pass-before" => (0, Verdict::Passed),
+                    "red/package" => (1, Verdict::Failed(Some("red::case".to_owned()))),
+                    "timed:package" => (2, Verdict::TimedOut),
+                    "pass-after" => (3, Verdict::Passed),
+                    other => panic!("unexpected package {other}"),
+                };
+                attempts[index].fetch_add(1, Ordering::Relaxed);
+                Observation {
+                    verdict,
+                    reach: crate::exec::verdict::ReachObservation::Unknown,
+                    failure: None,
+                    quiet: Duration::ZERO,
+                    tests: Some(1),
+                    peak: None,
+                }
+            },
+            || {},
+        )
+        .expect_err("terminal failures reject the baseline");
+
+        assert_eq!(attempts.map(|count| count.load(Ordering::Relaxed)), [1, 2, 1, 1]);
+        let message = failure.to_string();
+        assert!(message.contains("2 test binaries"), "{message}");
+        assert!(message.contains("red/package"), "{message}");
+        assert!(message.contains("timed:package"), "{message}");
+        assert!(!message.contains("Every verdict in a run"), "{message}");
+
+        let artifacts = failure.artifacts();
+        assert_eq!(artifacts.len(), 2);
+        assert_ne!(artifacts[0].directory, artifacts[1].directory);
+        assert!(artifacts.iter().all(|artifact| {
+            artifact.directory.strip_prefix("baseline-failures/").is_some_and(|component| {
+                component
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+        }));
+        assert_eq!(artifacts[0].value["kind"], "testFailure");
+        assert_eq!(artifacts[1].value["kind"], "timeout");
     }
 
     /// A red binary is reported whichever worker happened to reach it first.

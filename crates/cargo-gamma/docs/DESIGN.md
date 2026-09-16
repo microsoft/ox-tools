@@ -359,13 +359,19 @@ Normal runs publish `gamma-report.json`, `gamma-report.html`, `gamma-report.sari
 `--cache-dir` relocates only reusable cache state. `--artifact-dir` relocates all five published
 artifacts together, and its directory is created when absent.
 
-Those five files are the completed-run set. A baseline that fails before a campaign can complete
-instead publishes `baseline-failure.json` and `gamma-diagnostics.json`. The baseline record uses
-`schemaVersion: 1` and records the failure kind and reason; package, target, runner, executable, and
-working directory; cargo-gamma's explicit environment overrides; failing and last-observed tests;
-termination, elapsed time, budget, peak, and memory limit; and safely encoded stdout and stderr
-tails. Each stream retains at most 64 KiB and 2,000 lines, and the record says when output was
-truncated. Both early-failure artifacts are written before the failed scratch workspace is removed.
+Those five files are the completed-run set. A baseline failure instead publishes one stable,
+filesystem-safe directory per failed test-binary identity beneath `baseline-failures/`. Its name
+incorporates package and target plus a digest of package, target, package-id, and executable
+identity. Each target directory contains its own `baseline-failure.json` and
+`gamma-diagnostics.json`, preventing same-name, cross-package, and concurrent collisions.
+
+The baseline record uses `schemaVersion: 1` and records the failure kind and reason; package,
+target, runner, executable, and working directory; cargo-gamma's explicit environment overrides;
+failing and last-observed tests; termination, elapsed time, budget, peak, and memory limit; and
+safely encoded stdout and stderr tails. Each stream retains at most 64 KiB and 2,000 lines, and the
+record says when output was truncated. All retained binaries settle before one aggregate error
+reports every terminal failure and links each target to its artifacts. Both early-failure artifacts
+are written before the failed scratch workspace is removed.
 
 The source tree preserves symlinks and honors workspace ignore rules. Relative path dependencies
 that leave the workspace are anchored to their original locations so moving the workspace does not
@@ -449,10 +455,12 @@ so tests in unrelated workspace packages are not presented as costs of the run.
 ### Baseline
 
 The unmutated test binaries run first. A test-failing binary receives one clean retry so that a
-transient host or tool failure does not discard an otherwise valid campaign. If that retry also
-fails, the red baseline stops the campaign: if a test already fails, every mutant appears detected
-and the mutation score becomes meaningless. Timeouts, stalls, resource failures, and infrastructure
-failures are not retried because repeating them cannot establish a trustworthy calibration.
+transient host or tool failure does not discard an otherwise valid campaign. Timeouts, stalls,
+resource failures, and infrastructure failures are not retried because repeating them cannot
+establish a trustworthy calibration. A terminal failure does not cancel other retained binaries:
+all settle, then one error reports every failed target. The red baseline still stops the campaign
+before mutants run, because a test that already fails makes every mutant appear detected and the
+mutation score meaningless.
 
 The baseline also measures:
 
