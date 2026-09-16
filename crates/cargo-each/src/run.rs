@@ -344,11 +344,19 @@ fn run_streamed(invocation: &Invocation) -> InvocationResult {
 }
 
 fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration) -> InvocationResult {
+    run_streamed_with_timeout_with(invocation, timeout, spawn_sealed_tree)
+}
+
+fn run_streamed_with_timeout_with(
+    invocation: &Invocation,
+    timeout: Duration,
+    spawn: impl FnOnce(Command) -> Result<ProcessTree, String>,
+) -> InvocationResult {
     let (program, command) = match command_for(invocation) {
         Ok(command) => command,
         Err(message) => return InvocationResult::Infrastructure(message),
     };
-    let mut tree = match spawn_sealed_tree(command) {
+    let mut tree = match spawn(command) {
         Ok(tree) => tree,
         Err(error) => {
             return InvocationResult::Infrastructure(format!("failed to spawn `{program}`: {error}"));
@@ -1358,10 +1366,10 @@ mod tests {
         Plan, ReaderCompletion, RunningWorker, SpillFile, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
         combine_captured_output, display_duration, emit_buffered, emit_buffered_to, execute_parallel, exit_byte, failure_stops_launching,
         finish_ordinary_termination_with, finish_ordinary_wait_with, finish_output_reader, finish_wait_with_cleanup, panic_description,
-        parallel_failure_exit_code, run_captured, run_captured_with_spawner, run_streamed, run_streamed_with_timeout, spawn_if_sealed,
-        spawn_output_reader, spawn_output_reader_with, spawn_tree, spawn_worker, terminate_ordinary_child, terminate_ordinary_with,
-        wait_for_captured_process, wait_for_tree, wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker,
-        with_cleanup_failure,
+        parallel_failure_exit_code, run_captured, run_captured_with_spawner, run_streamed, run_streamed_with_timeout,
+        run_streamed_with_timeout_with, spawn_if_sealed, spawn_output_reader, spawn_output_reader_with, spawn_tree, spawn_worker,
+        terminate_ordinary_child, terminate_ordinary_with, wait_for_captured_process, wait_for_tree, wait_for_tree_with,
+        wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
     };
 
     const ORDINARY_BOUNDARY: &str = "ordinary process tree";
@@ -2354,11 +2362,17 @@ mod tests {
         assert!(result_infrastructure_message(run_streamed_with_timeout(&missing, Duration::from_secs(1))).contains("failed to spawn"));
         assert!(infrastructure_message(run_captured(&missing, None)).contains("failed to spawn"));
 
-        let InvocationResult::Exited(status) = run_streamed_with_timeout(&invocation(&["rustc", "--version"]), Duration::from_secs(2))
+        let InvocationResult::Exited(status) =
+            run_streamed_with_timeout_with(&invocation(&["rustc", "--version"]), Duration::from_secs(2), spawn_tree)
         else {
             panic!("the timed streamed runner must execute rustc");
         };
         assert!(status.success());
+
+        let spawn_failure = run_streamed_with_timeout_with(&invocation(&["rustc", "--version"]), Duration::from_secs(2), |_command| {
+            Err("injected timed-stream spawn failure".to_owned())
+        });
+        assert!(result_infrastructure_message(spawn_failure).contains("injected timed-stream spawn failure"));
     }
 
     #[test]
