@@ -283,7 +283,9 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                     }
 
                     if matches!(punct.as_char(), ',' | ';') {
+                        // #[gamma::skip(assign_value.default, reason = "usize::default() is zero, so replacing this reset is behavior-identical")]
                         frame.links = 0;
+                        // #[gamma::skip(assign_value.default, reason = "usize::default() is zero, so replacing this reset is behavior-identical")]
                         frame.ladders = 0;
                     }
 
@@ -703,7 +705,8 @@ fn validate_shape_tokens(tokens: Vec<TokenTree>, strict: bool, multiplier: &mut 
                         return Err(format!("`{key}` must not have trailing tokens after its value"));
                     }
 
-                    // #[gamma::skip(literal.int_decrement, literal.int_to_one, reason = "the two tokens this steps over are the `=` and the string literal, and neither branch of this loop acts on either, so a shorter step reaches the same next meaningful token")]
+                    // #[gamma::skip(all, reason = "the adjacent tokens are the inert `=`/literal before the cursor and an inert comma after it; each nonzero step reaches the same next meaningful token")]
+                    // #[gamma::skip(literal.int_to_zero, reason = "zero leaves the cursor on the same key and makes the token walk loop forever")]
                     index += 3;
                     continue;
                 }
@@ -742,7 +745,9 @@ fn validate_shape_tokens(tokens: Vec<TokenTree>, strict: bool, multiplier: &mut 
                         return Err(format!("`{key}` must not have trailing tokens after its value"));
                     }
 
+                    // #[gamma::skip(all, reason = "the fourth token, when present, is the comma required by the trailing-token check above; either control statement resumes at the same next meaningful token")]
                     index += 3;
+                    // #[gamma::skip(loop.continue_to_break, reason = "the current list has only the optional comma left, so breaking it or advancing past that comma resumes the same parent frame")]
                     continue;
                 }
             }
@@ -772,13 +777,14 @@ fn validate_shape_tokens(tokens: Vec<TokenTree>, strict: bool, multiplier: &mut 
 
                 // The rest of this list is resumed once the group is done — the point a recursive
                 // walk would return to.
+                // #[gamma::skip(all, reason = "multiplication by one or decrementing one leaves the cursor on the parenthesized group and makes the heap-based walk repeat it forever")]
                 frames.push((trees, index + 1));
                 frames.push((inner, 0));
 
                 continue 'frames;
             }
 
-            // #[gamma::skip(assign.add_to_sub, stmt.delete_assign, literal.int_decrement, reason = "subtracting, removing, or zeroing this advancement intentionally makes the token walk loop forever")]
+            // #[gamma::skip(all, reason = "subtracting, removing, or zeroing this advancement intentionally makes the token walk loop forever")]
             index += 1;
         }
     }
@@ -1607,6 +1613,133 @@ mod tests {
         let deep_item = format!("fn f() -> u32 {{ {}1{} }}", "(".repeat(depth), ")".repeat(depth));
         let err = validate_value(stream("1"), &stream(&deep_item)).expect_err("nested item rejected");
         assert_eq!(err, "item nests too deeply to be safely parsed");
+    }
+
+    #[test]
+    fn the_documented_nesting_boundary_is_accepted_for_attributes_and_items() {
+        let boundary_expression = format!("{}1{}", "(".repeat(NESTING_LIMIT), ")".repeat(NESTING_LIMIT));
+        assert_eq!(validate_value(stream(&boundary_expression), &stream("fn f() -> u32 { 1 }")), Ok(()));
+
+        let item_expression_depth = NESTING_LIMIT - 1;
+        let boundary_item = format!(
+            "fn f() -> u32 {{ {}1{} }}",
+            "(".repeat(item_expression_depth),
+            ")".repeat(item_expression_depth)
+        );
+        assert_eq!(validate_value(stream("1"), &stream(&boundary_item)), Ok(()));
+    }
+
+    #[test]
+    fn each_chain_counter_accepts_the_exact_limit() {
+        let empty = TokenStream::new();
+        let at_links_limit = Frame {
+            iter: empty.clone().into_iter(),
+            depth: 0,
+            links: 7,
+            ladders: 0,
+            awaiting_else: false,
+            previous: Previous::Other,
+        };
+        let at_ladders_limit = Frame {
+            iter: empty.into_iter(),
+            depth: 0,
+            links: 0,
+            ladders: 7,
+            awaiting_else: false,
+            previous: Previous::Other,
+        };
+
+        assert!(!at_links_limit.exceeds_chain_limit(7));
+        assert!(!at_ladders_limit.exceeds_chain_limit(7));
+    }
+
+    #[test]
+    fn the_expression_chain_boundary_uses_the_full_chain_factor() {
+        let chain_limit = NESTING_LIMIT * CHAIN_FACTOR;
+        let expression = format!("1{}", " + 1".repeat(chain_limit));
+
+        assert!(!exceeds_nesting_limit(&stream(&expression), NESTING_LIMIT));
+    }
+
+    #[test]
+    fn postfix_punctuation_uses_the_exact_chain_boundary() {
+        let chain_limit = NESTING_LIMIT * CHAIN_FACTOR;
+        let at_limit = format!("value{}", ".field".repeat(chain_limit));
+        let over_limit = format!("value{}", ".field".repeat(chain_limit + 1));
+
+        assert!(!exceeds_nesting_limit(&stream(&at_limit), NESTING_LIMIT));
+        assert!(exceeds_nesting_limit(&stream(&over_limit), NESTING_LIMIT));
+    }
+
+    #[test]
+    fn separators_restart_the_expression_chain_budget() {
+        let chain_limit = NESTING_LIMIT * CHAIN_FACTOR;
+
+        for separator in [",", ";"] {
+            let chain = format!("1{}", " + 1".repeat(chain_limit));
+            let separated = format!("{chain}{separator}{chain}");
+
+            assert!(
+                !exceeds_nesting_limit(&stream(&separated), NESTING_LIMIT),
+                "`{separator}` did not restart the chain budget"
+            );
+        }
+    }
+
+    #[test]
+    fn separators_restart_the_else_ladder_budget() {
+        let chain_limit = NESTING_LIMIT * CHAIN_FACTOR;
+        let ladder = format!("if true {{ 0 }}{} else {{ 0 }}", " else if false { 1 }".repeat(chain_limit - 1));
+
+        for separator in [",", ";"] {
+            let separated = format!("{ladder}{separator}{ladder}");
+            assert!(
+                !exceeds_nesting_limit(&stream(&separated), NESTING_LIMIT),
+                "`{separator}` did not restart the ladder budget"
+            );
+        }
+    }
+
+    #[test]
+    fn only_expression_ending_punctuation_makes_a_following_group_postfix() {
+        let links = NESTING_LIMIT * CHAIN_FACTOR / 2 + 1;
+
+        for operator in ["?", ">"] {
+            let expression = format!("value{}", format!("{operator}()").repeat(links));
+            assert!(
+                exceeds_nesting_limit(&stream(&expression), NESTING_LIMIT),
+                "`{operator}` did not make the following group part of the expression chain"
+            );
+        }
+
+        let assignment_groups = format!("value{}", " = ()".repeat(links));
+        assert!(
+            !exceeds_nesting_limit(&stream(&assignment_groups), NESTING_LIMIT),
+            "non-postfix punctuation made following groups part of the expression chain"
+        );
+    }
+
+    #[test]
+    fn selector_validation_does_not_apply_timeout_only_literal_rules() {
+        assert_eq!(validate(stream("42")), Ok(()));
+        assert_eq!(validate(stream("-1")), Ok(()));
+        assert_eq!(validate(stream("factor = 2, multiplier = 3")), Ok(()));
+    }
+
+    #[test]
+    fn keyed_and_nested_arguments_do_not_hide_later_errors() {
+        assert_eq!(
+            validate_timeout_multiplier(&stream("factor = 2, reason = invalid")),
+            Err("`reason` must be a string literal".to_owned())
+        );
+        assert_eq!(
+            validate_timeout_multiplier(&stream("2, selector(group), tag = invalid")),
+            Err("`tag` must be a string literal".to_owned())
+        );
+        assert_eq!(
+            validate_timeout_multiplier(&stream("2, selector(group) reason = invalid")),
+            Err("`reason` must be a string literal".to_owned())
+        );
     }
 
     #[test]

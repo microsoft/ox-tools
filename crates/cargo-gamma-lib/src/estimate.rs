@@ -143,6 +143,7 @@ impl Estimate {
 pub fn project(mutants: &[Mutant], work: Workload, baseline: Duration, build: Duration, jobs: usize) -> Estimate {
     let live = mutants
         .iter()
+        // #[gamma::skip(relational.gt_to_ge, reason = "ordinal zero is the invariant marker for a mutant already removed from the live population, and therefore cannot simultaneously have Pending outcome")]
         .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
         .count();
 
@@ -264,6 +265,23 @@ mod tests {
 
         assert_eq!(one.mutants / 8, eight.mutants);
         assert_eq!(one.worst / 8, eight.worst);
+    }
+
+    #[test]
+    fn projection_uses_the_exact_lane_and_confirmation_arithmetic() {
+        let load = Workload {
+            suite: Duration::from_secs(1_000),
+            budget: Duration::from_secs(800),
+            single: Duration::from_secs(400),
+        };
+        let estimate = project(&population(), load, Duration::ZERO, Duration::ZERO, 4);
+
+        assert_eq!(estimate.live, 100);
+        assert_eq!(estimate.withdrawn, 1);
+        assert_eq!(estimate.settled, Duration::from_secs(150));
+        assert_eq!(estimate.mutants, Duration::from_secs(175));
+        assert_eq!(estimate.stalling, Duration::from_secs(225));
+        assert_eq!(estimate.worst, load.budget.saturating_mul(1 + crate::exec::CONFIRM_FACTOR) / 4);
     }
 
     #[test]

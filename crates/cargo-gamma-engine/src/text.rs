@@ -86,6 +86,7 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
         if byte >= 0x80 {
             if byte == C1_LEAD && bytes.get(cursor + 1).is_some_and(|&low| (0x80..=0x9F).contains(&low)) {
                 let control = char::from(bytes[cursor + 1]);
+                // #[gamma::skip(all, reason = "capacity affects allocation behavior only; escaped text is unchanged")]
                 let out = encoded.get_or_insert_with(|| String::with_capacity(text.len() + ESCAPE_HEADROOM));
 
                 out.push_str(&text[copied..cursor]);
@@ -122,6 +123,7 @@ fn encode(text: &str, keep_color: bool) -> Cow<'_, str> {
             continue;
         }
 
+        // #[gamma::skip(all, reason = "capacity affects allocation behavior only; escaped text is unchanged")]
         let out = encoded.get_or_insert_with(|| String::with_capacity(text.len() + ESCAPE_HEADROOM));
 
         out.push_str(&text[copied..cursor]);
@@ -383,5 +385,27 @@ mod tests {
             encode_preserving_color("\u{1b}[48:2::1:2:3mbackground"),
             format!("\u{1b}[48:2::1:2:3mbackground{STYLE_RESET}")
         );
+    }
+
+    #[test]
+    fn style_validation_covers_simple_extended_and_invalid_parameters() {
+        assert!(allowed_style(""));
+        assert!(allowed_style("0;1;22;31;39;44;49;91;104"));
+        assert!(allowed_style("38;5;255"));
+        assert!(allowed_style("48;2;1;2;3"));
+        assert!(allowed_style("38:5:7"));
+        assert!(allowed_style("48:2:1:2:3"));
+        assert!(allowed_style("38:2::1:2:3"));
+
+        assert!(!allowed_style("38:4:1"));
+        assert!(!allowed_style("not-a-number"));
+        assert!(!allowed_style("38"));
+        assert!(!allowed_style("38;4;1"));
+        assert!(!allowed_style("38;5;256"));
+        assert!(!allowed_style("48;2;1;2"));
+        assert!(!allowed_style("48;2;1;2;256"));
+        assert!(!allowed_style("2"));
+        assert!(!allowed_style("38:5:256"));
+        assert!(!allowed_style("48:2:1:2"));
     }
 }

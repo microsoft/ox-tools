@@ -1919,6 +1919,93 @@ fn a_region_with_no_deletion_falls_back_to_every_guard_in_it() {
     assert_eq!(ordinals_blamed(&stdout, Utf8Path::new(""), &guards), HashSet::from_iter([3]));
 }
 
+#[test]
+fn flow_sensitive_regions_match_guards_by_path_suffix() {
+    let mut guards = Guards::default();
+    let _ = guards.insert(
+        3,
+        (Utf8PathBuf::from("crates/pkg/src/codegen.rs"), guard(at(400, 5)..at(400, 9), None)),
+    );
+    let stdout = coded_message(
+        "E0499",
+        &[span("/other/crates/pkg/src/codegen.rs", 432, 9, 432, 13, true)],
+        &[span("/other/crates/pkg/src/codegen.rs", 383, 9, 383, 13, false)],
+    );
+
+    assert_eq!(
+        ordinals_blamed(&stdout, Utf8Path::new("/scratch/tree"), &guards),
+        HashSet::from_iter([3])
+    );
+}
+
+#[test]
+fn blame_and_region_collection_ignore_messages_without_usable_spans() {
+    let mut guards = Guards::default();
+    let _ = guards.insert(1, (Utf8PathBuf::from("src/lib.rs"), guard(at(1, 1)..at(2, 1), None)));
+
+    let artifact = serde_json::json!({
+        "reason": "compiler-artifact",
+        "message": {
+            "level": "error",
+            "rendered": "error: not a compiler diagnostic\n",
+            "spans": [span("src/lib.rs", 1, 1, 1, 2, true)],
+        },
+    })
+    .to_string();
+    assert!(ordinals_blamed(&artifact, Utf8Path::new(""), &guards).is_empty());
+
+    let malformed = serde_json::json!({
+        "reason": "compiler-message",
+        "message": {
+            "level": "error",
+            "rendered": "error: incomplete span\n",
+            "spans": [{"file_name": "src/lib.rs", "line_start": 1}],
+        },
+    })
+    .to_string();
+    let message = super::messages::cargo_message(&malformed).expect("the message is valid JSON");
+    let diagnostic = message.message.expect("the message has a diagnostic");
+    assert!(super::blame::regions(&diagnostic).is_empty());
+}
+
+#[test]
+fn diagnostic_regions_widen_inclusively_across_children_and_clamp_hostile_numbers() {
+    let line = serde_json::json!({
+        "reason": "compiler-message",
+        "message": {
+            "level": "error",
+            "spans": [
+                {"file_name": "src/lib.rs", "line_start": 20, "line_end": 25},
+                {"file_name": "src/other.rs", "line_start": 7, "line_end": 7}
+            ],
+            "children": [{
+                "spans": [
+                    {"file_name": "src/lib.rs", "line_start": 10, "line_end": 30},
+                    {"file_name": "src/max.rs", "line_start": u64::MAX, "line_end": u64::MAX}
+                ]
+            }]
+        }
+    })
+    .to_string();
+    let message = super::messages::cargo_message(&line).expect("valid cargo message");
+    let diagnostic = message.message.expect("the message has a diagnostic");
+    let regions = super::blame::regions(&diagnostic);
+
+    assert_eq!(regions["src/lib.rs"], 10..=30);
+    assert_eq!(regions["src/other.rs"], 7..=7);
+    assert_eq!(regions["src/max.rs"], u32::MAX..=u32::MAX);
+    assert_eq!(super::blame::clamped(u64::MAX), u32::MAX);
+}
+
+#[test]
+fn source_range_boundaries_are_half_open() {
+    let outer = at(1, 1)..at(1, 5);
+
+    assert!(super::blame::covers(&outer, &(at(1, 1)..at(1, 5))));
+    assert!(super::blame::covers(&outer, &(at(1, 2)..at(1, 4))));
+    assert!(!super::blame::covers(&outer, &(at(1, 1)..at(1, 6))));
+}
+
 /// The positional tiers are still the better answer when they have one, since they name a
 /// single mutant rather than a region's worth of them.
 #[test]
@@ -1967,6 +2054,35 @@ fn diagnostics_are_read_from_the_json_stream() {
     assert!(rendered.contains("E0308"));
     assert!(!rendered.contains("just a warning"));
     assert!(!rendered.contains("unused manifest key"));
+}
+
+#[test]
+fn diagnostics_skip_every_non_error_shape_before_accepting_a_later_error() {
+    let stdout = [
+        "not json",
+        r#"{"reason":"compiler-artifact","message":{"level":"error","rendered":"artifact"}}"#,
+        r#"{"reason":"compiler-message","message":{"level":"warning","rendered":"warning"}}"#,
+        r#"{"reason":"compiler-message"}"#,
+        r#"{"reason":"compiler-message","message":{"level":"error"}}"#,
+        r#"{"reason":"compiler-message","manifest_path":"C:\\w\\Cargo.toml","message":{"level":"error","rendered":"kept"}}"#,
+    ]
+    .join("\n");
+
+    let found = diagnostics(&stdout);
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].rendered, "kept");
+    assert_eq!(found[0].manifest.as_deref(), Some("C:/w/Cargo.toml"));
+}
+
+#[test]
+fn dependency_tokenization_ignores_empty_separators_and_flushes_the_final_path() {
+    assert_eq!(
+        super::messages::dependencies("  src/one.rs\t src/my\\ file.rs  C:\\src\\two.rs"),
+        ["src/one.rs", "src/my file.rs", "C:\\src\\two.rs"]
+    );
+    assert!(super::messages::dependencies(" \t ").is_empty());
+    assert_eq!(super::messages::dependencies("last.rs"), ["last.rs"]);
 }
 
 /// An error-level compiler message with no `rendered` field is not something real `rustc`
@@ -2025,6 +2141,21 @@ fn errors_in_the_mutated_packages_are_quoted_before_anyone_elses() {
         "{}",
         leading(&found, 3)
     );
+}
+
+#[test]
+fn mutated_package_manifests_include_root_and_nested_members() {
+    let work = Workspace::adopt(Utf8PathBuf::from("C:/workspace"), Utf8PathBuf::from("C:/target"));
+    let mut plan = empty_plan(&work);
+    let _ = plan.specs.insert("root".to_owned(), (Utf8PathBuf::new(), "1.0.0".to_owned()));
+    let _ = plan
+        .specs
+        .insert("nested".to_owned(), (Utf8PathBuf::from("crates/nested"), "1.0.0".to_owned()));
+
+    let manifests = manifests_of(&plan, &work.root, &["root".to_owned(), "nested".to_owned()]);
+
+    assert!(manifests.contains("C:/workspace/Cargo.toml"), "{manifests:?}");
+    assert!(manifests.contains("C:/workspace/crates/nested/Cargo.toml"), "{manifests:?}");
 }
 
 fn reported(manifest: Option<&str>, rendered: &str) -> Diagnostic {

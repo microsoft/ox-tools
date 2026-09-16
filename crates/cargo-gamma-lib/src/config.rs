@@ -435,6 +435,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cargo_discovery_receives_the_profile_and_extra_arguments() {
+        let config = Config {
+            profile: Some("release".to_owned()),
+            cargo_args: vec!["--locked".to_owned(), "--offline".to_owned()],
+            ..Config::default()
+        };
+
+        let options = config.cargo_options();
+
+        assert_eq!(options.profile.as_deref(), Some("release"));
+        assert_eq!(options.extra, ["--locked", "--offline"]);
+    }
+
+    #[test]
+    fn absent_feature_settings_do_not_enable_cargo_features() {
+        let mut select = SelectArgs::default();
+
+        Config::default().apply_selection(&mut select).expect("defaults do not contradict");
+
+        assert!(!select.features.all_features);
+        assert!(!select.features.no_default_features);
+    }
+
+    #[test]
+    fn absent_boolean_run_settings_leave_their_branches_disabled() {
+        let mut args = RunArgs::default();
+
+        Config::default().apply(&mut args).expect("defaults do not contradict");
+
+        assert!(!args.measure.nextest);
+        assert!(!args.no_baseline);
+        assert!(!args.no_confirm);
+    }
+
     /// `packages` in the file and `--workspace` on the command line both reach `selected_packages`,
     /// where `packages` wins — so a committed file quietly reduces `--workspace` to a fraction of
     /// the workspace and says nothing. clap cannot see it: `conflicts_with` constrains what was
@@ -998,6 +1033,32 @@ mod tests {
         let config = Config::load(path).expect("the foreign file must not be parsed as ours");
 
         assert!(config.mutators.is_none());
+    }
+
+    #[test]
+    fn foreign_project_detection_distinguishes_every_marker_combination() {
+        let detected = |foreign: bool, native: bool| {
+            let dir = TempDir::new().expect("a temporary directory");
+            let path = Utf8Path::from_path(dir.path()).expect("path is not UTF-8");
+
+            if foreign {
+                fs::create_dir_all(path.join(".cargo")).expect("could not create .cargo");
+                fs::write(path.join(FOREIGN_PATH), "foreign").expect("could not write the foreign marker");
+            }
+            if native {
+                fs::write(path.join(RELATIVE_PATH), "native").expect("could not write the native marker");
+            }
+
+            Config::foreign_present(path)
+        };
+
+        assert!(!detected(false, false), "no markers are not a foreign configuration");
+        assert!(detected(true, false), "the foreign marker alone must be noticed");
+        assert!(!detected(false, true), "the native marker alone is not foreign");
+        assert!(
+            !detected(true, true),
+            "a native configuration makes the foreign marker non-actionable"
+        );
     }
 
     #[test]

@@ -413,6 +413,7 @@ impl<'a> Collector<'a> {
     fn replacement_at(&self, at: u32) -> &str {
         self.candidates
             .get(at as usize)
+            // #[gamma::skip(literal.str_to_xyzzy, reason = "an absent candidate has no replacement; callers compare this sentinel only with non-empty proposed replacements")]
             .map_or("", |candidate| candidate.replacement.as_str())
     }
 
@@ -429,6 +430,7 @@ impl<'a> Collector<'a> {
     /// Borrowed from the file rather than the collector, so a caller can hold the result across a
     /// mutating call and no copy is made for a span that turns out not to be wanted.
     fn text_of(&self, span: Span) -> &'a str {
+        // #[gamma::skip(literal.str_to_xyzzy, reason = "an out-of-file span has no spliceable source text, and invented text would create a candidate with no valid site")]
         self.file.text.get(span.byte_range()).unwrap_or("")
     }
 
@@ -467,6 +469,8 @@ impl<'a> Collector<'a> {
     /// path just below is read.
     fn impl_scope(&self, node: &ItemImpl) -> String {
         let self_type = compact_path(self.text_of(node.self_ty.span()));
+        // #[gamma::skip(cond.always_false, reason = "a parsed self type always contains a non-trivia token; this fallback is only defensive for an unmapped expansion")]
+        // #[gamma::skip(all, reason = "the fallback is reachable only for an unmapped expansion, and Collector never descends into expansions")]
         let self_type = if self_type.is_empty() { "_".to_owned() } else { self_type };
 
         let Some((trait_path, _for)) = &node.trait_ else {
@@ -475,6 +479,7 @@ impl<'a> Collector<'a> {
 
         let trait_path = compact_path(self.text_of(trait_path.span()));
 
+        // #[gamma::skip(cond.always_false, reason = "a parsed trait path always has a non-trivia token; an empty path can only be an unmapped expansion")]
         if trait_path.is_empty() {
             return self_type;
         }
@@ -907,6 +912,7 @@ impl<'a> Collector<'a> {
         let span = expression.span();
         let text = self.text_of(span);
 
+        // #[gamma::skip(cond.always_false, reason = "empty text means the span is unmapped or the file was artificially truncated, so there is no site to perturb")]
         if text.is_empty() {
             return;
         }
@@ -1738,6 +1744,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         );
 
         if requires_value {
+            // #[gamma::skip(stmt.delete_call, reason = "a continue has no expression children and its label contains no mutable expression")]
             visit::visit_expr_continue(self, node);
             return;
         }
@@ -1751,6 +1758,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
         self.emit_shaped("loop.continue_to_break", node.span(), replacement, 0, Shape::Continue);
 
+        // #[gamma::skip(stmt.delete_call, reason = "a continue has no expression children and its label contains no mutable expression")]
         visit::visit_expr_continue(self, node);
     }
 
@@ -1779,6 +1787,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             self.emit("option.none_to_some", node.span(), "Some(Default::default())", 0);
         }
 
+        // #[gamma::skip(stmt.delete_call, reason = "an expression path contains no child expressions or declarations handled by Collector")]
         visit::visit_expr_path(self, node);
     }
 
@@ -1875,6 +1884,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 }
 
                 // Replacing `"xyzzy"` with `"xyzzy"` is the original program.
+                // #[gamma::skip(cond.always_true, reason = "at an `\"xyzzy\"` site this only offers the original text, which `emit_at` rejects as a no-op")]
                 if text != XYZZY {
                     self.emit("literal.str_to_xyzzy", span, "\"xyzzy\"", 1);
                 }
@@ -1883,6 +1893,120 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             _ => {}
         }
 
+        // #[gamma::skip(stmt.delete_call, reason = "a literal is a leaf syntax node, so recursive descent cannot alter collector state")]
         visit::visit_expr_lit(self, node);
+    }
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    use crate::ops::collect::collect_in;
+
+    fn candidates(source: &str, names: &str) -> Vec<Candidate> {
+        let file = SourceFile::parse("mutation.rs", source.to_owned()).expect("fixture parses");
+        let selection = Selection::parse(names).expect("selectors resolve");
+        collect_in(&file, &selection, &CfgSet::unconditional())
+    }
+
+    #[test]
+    fn exact_candidate_text_indices_shapes_and_paths_are_observable() {
+        let found = candidates(
+            r#"fn ordinary(flag: bool, value: usize) -> usize {
+                if flag { consume(value, 2); }
+                let _ = Some(0); let _ = None; let _ = "value"; value
+            }
+            fn iter() -> impl Iterator<Item = usize> { core::iter::once(1) }"#,
+            "cond.negate,cond.always_true,cond.always_false,option.some_to_none,option.none_to_some,literal.int_increment,literal.int_decrement,literal.str_to_empty,literal.str_to_xyzzy,expr.increment,expr.decrement,fn_value",
+        );
+
+        assert!(found.iter().any(|c| c.mutator == "cond.negate" && c.replacement == "!(flag)"));
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "cond.always_true" && c.replacement_index == 1 && c.replacement == "true")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "cond.always_false" && c.replacement_index == 2 && c.replacement == "false")
+        );
+        assert!(found.iter().any(|c| c.mutator == "option.some_to_none" && c.replacement == "None"));
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "option.none_to_some" && c.replacement == "Some(Default::default())")
+        );
+        assert!(found.iter().any(|c| c.mutator == "literal.str_to_empty" && c.replacement == "\"\""));
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "literal.str_to_xyzzy" && c.replacement == "\"xyzzy\"")
+        );
+        assert!(found.iter().any(|c| c.item_path.as_ref() == "ordinary" && c.shape == Shape::Block));
+        assert!(found.iter().any(|c| c.item_path.as_ref() == "iter" && c.shape == Shape::IterBlock));
+    }
+
+    #[test]
+    fn collection_match_struct_range_and_loop_boundaries_are_observable() {
+        let found = candidates(
+            r"
+                #[derive(Default)] struct S { a: usize, b: usize }
+                fn f(mut value: usize, stop: usize, base: S) {
+                    value += 1;
+                    match value { 0 if value > 1 => {}, 1 => {}, _ => {} }
+                    let _ = S { a: value, b: 2, ..base };
+                    let _ = vec![10, 20, 30];
+                    for index in value..stop { consume(index); }
+                    loop { continue; } loop { break; }
+                }
+            ",
+            "assign.add_to_sub,stmt.delete_assign,match_guard.negate,match_guard.always_true,match_guard.always_false,match_arm.never_matches,struct_field.omit,collection.omit_element,range.exclusive_to_inclusive,expr.increment,expr.decrement,loop.continue_to_break,loop.break_to_continue",
+        );
+
+        assert_eq!(found.iter().filter(|c| c.mutator == "struct_field.omit").count(), 2);
+        assert_eq!(found.iter().filter(|c| c.mutator == "collection.omit_element").count(), 3);
+        assert_eq!(found.iter().filter(|c| c.mutator == "match_arm.never_matches").count(), 1);
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "assign.add_to_sub" && c.replacement == "value -= (1)")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "range.exclusive_to_inclusive" && c.replacement == "(value)..((stop) + 1)")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "loop.continue_to_break" && c.replacement == "break")
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "loop.break_to_continue" && c.replacement == "continue")
+        );
+    }
+
+    #[test]
+    fn configuration_const_and_scope_state_change_candidate_population() {
+        assert!(candidates("fn f() { #[cfg(test)] consume(1 + 2); }", "stmt.delete_call,arith.add_to_sub").is_empty());
+        assert!(candidates("const N: usize = 1 + 2; static S: usize = 3 + 4;", "arith.add_to_sub").is_empty());
+
+        let found = candidates(
+            "fn outer(value: usize) -> usize { { let value: String = String::new(); consume(value); } fn inner(value: String) { consume(value); } value }",
+            "expr.increment,expr.decrement,stmt.delete_call",
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.mutator == "expr.increment" && c.item_path.as_ref() == "outer")
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|c| c.mutator == "expr.increment" && c.item_path.as_ref() == "outer::inner")
+        );
     }
 }

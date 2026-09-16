@@ -45,8 +45,11 @@ in `gamma.toml`. When it is present and `gamma.toml` is not, the tool says so.
 
 `gamma-hints.json` may sit beside it. It is not configuration and has no keys: it is a
 generated artifact written by `cargo gamma hints`, holding the parts of a previous run that cannot
-move a score — which test caught which mutant, and which mutants failed to compile — so that a fresh
-checkout starts warm instead of cold. Runs read it automatically and it needs no setting here. See
+move a score: exact killer tests, generalized item/file candidates and reaching-test sets, and
+build-order hints for mutants that failed to compile. Candidate tests are executed again rather
+than trusted as verdicts, so that a fresh checkout starts warm without carrying a score forward.
+Runs read the artifact automatically and it needs no setting here.
+Artifacts with an unsupported format version or a producer other than cargo-gamma are ignored. See
 [checking in the hints file](../README.md#checking-in-the-hints-file).
 
 ## How settings combine

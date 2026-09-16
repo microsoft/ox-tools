@@ -21,41 +21,34 @@ use crate::Situation;
 /// no memory controller to hand to children, a kernel missing the interface files a leaf needs, or
 /// a Unix that is not Linux. This classification describes a host-wide capability limitation
 /// rather than the failure of one launch.
-#[cfg_attr(
-    windows,
-    expect(
-        clippy::missing_const_for_fn,
-        clippy::unnecessary_wraps,
-        reason = "the answer is settled at compile time on Windows alone; every other platform has \
-                  to go and look, and the signature is shared"
-    )
+#[cfg(target_os = "linux")]
+pub fn support() -> Result<(), PlatformError> {
+    crate::cgroup::root()
+        .map(|_root| ())
+        .map_err(|reason| PlatformError::new(Situation::Unsupported, reason))
+}
+
+/// Windows job objects need no host-wide preparation.
+#[cfg(windows)]
+#[expect(
+    clippy::missing_const_for_fn,
+    clippy::unnecessary_wraps,
+    reason = "the cross-platform signature reports unsupported hosts, while Windows support is \
+              settled at compile time"
 )]
 pub fn support() -> Result<(), PlatformError> {
-    #[cfg(target_os = "linux")]
-    {
-        crate::cgroup::root()
-            .map(|_root| ())
-            .map_err(|reason| PlatformError::new(Situation::Unsupported, reason))
-    }
+    Ok(())
+}
 
-    #[cfg(windows)]
-    {
-        // A job object needs no delegation and no privilege, and one is created for every child
-        // already. Whether this particular one can be created is settled per invocation.
-        // #[gamma::skip(result.ok_to_err, reason = "this compile-time branch is observable only in a Windows build; Linux mutation runs cannot execute it")]
-        Ok(())
-    }
-
-    #[cfg(not(any(target_os = "linux", windows)))]
-    {
-        // #[gamma::skip(result.err_to_ok, literal.str_to_empty, literal.str_to_xyzzy, reason = "this compile-time branch exists only on unsupported non-Linux, non-Windows targets and cannot be executed by the Linux mutation run")]
-        Err(PlatformError::new_static(
-            Situation::Unsupported,
-            "bounding a test subtree's memory needs cgroup v2 on Linux or a job object on Windows, \
-             and this platform offers no unprivileged equivalent that accounts for a whole process \
-             tree. An inherited `RLIMIT_AS` is not one: it bounds each process separately, and \
-             bounds reserved address space rather than resident memory, so scaling it from a \
-             measured peak would stop healthy tests while leaving the runaway case unbounded",
-        ))
-    }
+/// Other hosts have no unprivileged whole-process-tree memory boundary.
+#[cfg(not(any(target_os = "linux", windows)))]
+pub fn support() -> Result<(), PlatformError> {
+    Err(PlatformError::new_static(
+        Situation::Unsupported,
+        "bounding a test subtree's memory needs cgroup v2 on Linux or a job object on Windows, \
+         and this platform offers no unprivileged equivalent that accounts for a whole process \
+         tree. An inherited `RLIMIT_AS` is not one: it bounds each process separately, and \
+         bounds reserved address space rather than resident memory, so scaling it from a \
+         measured peak would stop healthy tests while leaving the runaway case unbounded",
+    ))
 }

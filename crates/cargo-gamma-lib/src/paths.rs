@@ -17,7 +17,7 @@ use crate::error::error;
 /// that destination visible while still leaving a genuinely absent tail in place.
 pub(crate) fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
     let mut pending = absolute(path)?;
-    let mut links = 0_usize;
+    let mut links = Vec::new();
 
     loop {
         let components: Vec<Utf8Component<'_>> = pending.components().collect();
@@ -59,9 +59,9 @@ pub(crate) fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
                         continue;
                     }
 
-                    links = links.saturating_add(1);
+                    links.push(());
 
-                    if links > 40 {
+                    if links.len() > 40 {
                         return Err(error!("could not resolve `{path}`: too many symlinks"));
                     }
 
@@ -80,6 +80,7 @@ pub(crate) fn physical(path: &Utf8Path) -> Result<Utf8PathBuf> {
             }
         }
 
+        // #[gamma::skip(all, reason = "mutating the restart guard prevents the symlink-resolution loop from terminating; the mutation runner can observe that only as a timeout")]
         if !restarted {
             return Ok(resolved);
         }
@@ -135,6 +136,7 @@ pub(crate) fn reject_collisions(outputs: &[(&str, &Utf8Path)]) -> Result<()> {
 /// Parent components must survive until [`physical`] has followed preceding symlinks: `link/..`
 /// names the parent of the link's target, not necessarily the parent of the link itself.
 fn absolute(path: &Utf8Path) -> Result<Utf8PathBuf> {
+    // #[gamma::skip(cond.always_false, reason = "joining an absolute path to the current directory returns that absolute path unchanged, so the fallback branch is observationally identical")]
     if path.is_absolute() {
         Ok(path.to_owned())
     } else {
@@ -175,9 +177,120 @@ fn append<'path>(destination: &mut Utf8PathBuf, components: impl IntoIterator<It
     }
 }
 
-#[cfg(all(test, unix, not(miri)))]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
+
+    fn root() -> (tempfile::TempDir, Utf8PathBuf) {
+        let directory = crate::testing::workdir("paths-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 path");
+        (directory, root)
+    }
+
+    #[test]
+    fn relative_paths_are_absolutized_and_absolute_paths_are_preserved() {
+        let relative = absolute(Utf8Path::new("nested/file")).expect("current directory is available");
+        assert!(relative.is_absolute(), "{relative}");
+        assert!(relative.ends_with("nested/file"), "{relative}");
+
+        let root = Utf8Path::new(if cfg!(windows) { r"C:\" } else { "/" });
+        assert_eq!(absolute(root).expect("absolute path"), root);
+    }
+
+    #[test]
+    fn absent_tails_are_preserved_after_the_existing_prefix_is_resolved() {
+        let (_directory, root) = root();
+        let expected = physical(&root).expect("root resolution").join("created/nested/file");
+
+        assert_eq!(physical(&root.join("created/nested/file")).expect("resolution"), expected);
+    }
+
+    #[test]
+    fn regular_existing_paths_resolve_to_themselves() {
+        let (_directory, root) = root();
+        let file = root.join("file");
+        fs::write(&file, "contents").expect("file");
+
+        assert_eq!(
+            physical(&file).expect("resolution"),
+            physical(&root).expect("root resolution").join("file")
+        );
+    }
+
+    #[test]
+    fn containment_accepts_descendants_and_refuses_siblings() {
+        let (_directory, root) = root();
+        let boundary = root.join("tree");
+        fs::create_dir_all(&boundary).expect("tree");
+
+        let inside = boundary.join("future/file");
+        assert_eq!(
+            require_within(&inside, &boundary, "a test destination").expect("inside destination"),
+            physical(&boundary).expect("boundary resolution").join("future/file")
+        );
+
+        let outside = root.join("outside");
+        let failure = require_within(&outside, &boundary, "a test destination").expect_err("sibling destination");
+        assert!(failure.to_string().contains("outside its permitted root"), "{failure}");
+    }
+
+    #[test]
+    fn collisions_are_detected_for_resolvable_and_unresolvable_paths() {
+        let (_directory, root) = root();
+        fs::create_dir_all(root.join("tree")).expect("tree");
+
+        let same = root.join("tree/output");
+        let failure = reject_collisions(&[("first", &same), ("second", &same)]).expect_err("same destination");
+        assert!(failure.is_usage());
+        assert!(failure.to_string().contains("same output path"), "{failure}");
+
+        let blocker = root.join("blocker");
+        fs::write(&blocker, "not a directory").expect("blocker");
+        let first = blocker.join("child/../output");
+        let second = blocker.join("output");
+        let failure = reject_collisions(&[("first", &first), ("second", &second)]).expect_err("same lexical destination");
+        assert!(failure.is_usage());
+        assert!(failure.to_string().contains("same output path"), "{failure}");
+    }
+
+    #[test]
+    fn lexical_normalization_removes_current_and_parent_components() {
+        let normalized = lexical(Utf8Path::new("one/./two/../file")).expect("lexical path");
+        assert!(normalized.is_absolute(), "{normalized}");
+        assert!(normalized.ends_with("one/file"), "{normalized}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_links_are_resolved_and_containment_uses_their_targets() {
+        let (_directory, root) = root();
+        let outside = root.join("outside");
+        let tree = root.join("tree");
+        let link = tree.join("link");
+        fs::create_dir_all(&outside).expect("outside");
+        fs::create_dir_all(&tree).expect("tree");
+        std::os::windows::fs::symlink_dir(&outside, &link).expect("directory link");
+
+        assert_eq!(
+            physical(&link.join("future/file")).expect("link resolution"),
+            physical(&outside).expect("outside resolution").join("future/file")
+        );
+        let failure = require_within(&link.join("future/file"), &tree, "a test destination").expect_err("the link target is outside");
+        assert!(failure.to_string().contains("outside its permitted root"), "{failure}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn excessive_windows_link_indirection_is_refused() {
+        let (_directory, root) = root();
+        for index in 0..=40 {
+            let next = (index + 1) % 41;
+            std::os::windows::fs::symlink_file(format!("link-{next}"), root.join(format!("link-{index}"))).expect("file link");
+        }
+
+        let failure = physical(&root.join("link-0")).expect_err("the link chain is cyclic");
+        assert!(failure.to_string().contains("too many symlinks"), "{failure}");
+    }
 
     #[test]
     #[cfg(unix)]

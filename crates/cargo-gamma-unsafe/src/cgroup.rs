@@ -809,15 +809,16 @@ impl Cgroup {
         self.kill.as_ref().map(|kill| KillHandle(kill.as_raw_fd()))
     }
 
-    /// Records where this leaf's kill descriptor was published, so its drop can take it back.
-    ///
-    /// Called by [`interrupt::Spawning::watch_cgroup`] as the descriptor is published. The unique
-    /// cgroup borrow keeps the owning file live until this reminder is stored.
+    /// Whether this leaf's kill descriptor has been published to the signal registry.
     pub(crate) const fn is_watched(&self) -> bool {
         self.watch.is_some()
     }
 
-    /// Records the owned registry lifetime of this leaf's kill descriptor.
+    /// Records where this leaf's kill descriptor was published, so its drop can take it back.
+    ///
+    /// Called by [`interrupt::Spawning::watch_cgroup`] as the descriptor is published. The unique
+    /// cgroup borrow keeps the owning file live until this reminder is stored, and this cgroup
+    /// retains ownership of the descriptor until `Drop` removes the registry entry.
     pub(crate) const fn watched_at(&mut self, slot: usize, descriptor: RawFd) {
         self.watch = Some(CgroupWatch { slot, descriptor });
     }

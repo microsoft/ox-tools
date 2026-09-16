@@ -148,13 +148,11 @@ pub fn sarif(mutants: &[Mutant], root: &Utf8Path, level: Level) -> Result<(Strin
     // arithmetic rather than in a multi-megabyte `String` that is looked at once and dropped. Only
     // the prefix that fits is rendered, exactly once. The sequence of prefixes is the same one the
     // repeated-render form walked, so the log that comes out is the same log.
-    let lengths = core::iter::successors(Some(results.len()), |length| (*length > 0).then_some(*length / 2));
-
-    for length in lengths {
+    for length in candidate_lengths(results.len()) {
         let rules = rules(&kept[..length], level);
         let log = log(&results[..length], rules);
 
-        if measure(&log)? <= SARIF_BYTES || length == 0 {
+        if fits(measure(&log)?) || length == 0 {
             let text = serde_json::to_string_pretty(&log)
                 .map_err(|cause| crate::error::error!("could not serialize the SARIF log").caused_by(cause))?;
             let truncation = (found > length).then_some(Truncation { found, written: length });
@@ -164,6 +162,17 @@ pub fn sarif(mutants: &[Mutant], root: &Utf8Path, level: Level) -> Result<(Strin
     }
 
     unreachable!("the zero-length SARIF document always fits");
+}
+
+/// Candidate prefix lengths, ending at the empty prefix that is guaranteed to fit.
+fn candidate_lengths(length: usize) -> impl Iterator<Item = usize> {
+    // #[gamma::skip(literal.int_decrement, reason = "changing the divisor from two to one prevents an oversized SARIF candidate from ever shrinking")]
+    core::iter::successors(Some(length), |length| (*length > 0).then_some(*length / 2))
+}
+
+/// Whether a serialized candidate is within GitHub's inclusive byte limit.
+const fn fits(bytes: usize) -> bool {
+    bytes <= SARIF_BYTES
 }
 
 /// The byte length the log would serialize to, without keeping the bytes.
@@ -330,6 +339,30 @@ mod tests {
 
         assert_eq!(region["artifactLocation"]["uri"], "src/a.rs");
         assert_eq!(region["region"]["startLine"], 7);
+    }
+
+    #[test]
+    fn candidate_prefixes_halve_until_the_empty_log() {
+        assert_eq!(candidate_lengths(5).take(5).collect::<Vec<_>>(), [5, 2, 1, 0]);
+        assert_eq!(candidate_lengths(0).take(2).collect::<Vec<_>>(), [0]);
+    }
+
+    #[test]
+    fn githubs_byte_limit_is_inclusive() {
+        assert!(fits(SARIF_BYTES - 1));
+        assert!(fits(SARIF_BYTES));
+        assert!(!fits(SARIF_BYTES + 1));
+    }
+
+    #[test]
+    fn measuring_a_log_matches_the_json_writer_exactly() {
+        let mutants = [mutant("/w/src/a.rs", 7, "relational.gt_to_ge", Outcome::Survived)];
+        let kept = [&mutants[0]];
+        let results = results(&kept, &root(), Level::Warning);
+        let document = log(&results, rules(&kept, Level::Warning));
+        let expected = serde_json::to_vec_pretty(&document).expect("valid JSON").len();
+
+        assert_eq!(measure(&document).expect("measurable JSON"), expected);
     }
 
     /// The count cap only matters at its boundary, and the boundary is the one place nothing

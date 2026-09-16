@@ -55,5 +55,6 @@ mod tests {
         assert!(Arc::ptr_eq(&mutants[0].file, &mutants[1].file));
         assert!(Arc::ptr_eq(&mutants[0].mutator, &mutants[1].mutator));
         assert!(Arc::ptr_eq(&mutants[0].package, &mutants[1].package));
+        assert!(Arc::ptr_eq(&mutants[0].item_path, &mutants[1].item_path));
     }
 }

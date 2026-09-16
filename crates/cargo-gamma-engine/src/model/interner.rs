@@ -124,6 +124,8 @@ mod tests {
         };
 
         let mut mutations = vec![sample("a.rs"), sample("a.rs")];
+        mutations[0].trait_impl = Some(Arc::from("Display for Subject"));
+        mutations[1].trait_impl = Some(Arc::from("Display for Subject"));
 
         assert!(
             !Arc::ptr_eq(&mutations[0].file, &mutations[1].file),
@@ -139,5 +141,10 @@ mod tests {
         assert_eq!(before, after, "sharing changed a value");
         assert!(Arc::ptr_eq(&mutations[0].file, &mutations[1].file));
         assert!(Arc::ptr_eq(&mutations[0].mutator, &mutations[1].mutator));
+        assert!(Arc::ptr_eq(&mutations[0].item_path, &mutations[1].item_path));
+        assert!(Arc::ptr_eq(
+            mutations[0].trait_impl.as_ref().expect("the fixture has a trait"),
+            mutations[1].trait_impl.as_ref().expect("the fixture has a trait")
+        ));
     }
 }

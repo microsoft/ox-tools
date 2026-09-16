@@ -125,6 +125,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selector_forms_and_catalog_order_have_exact_oracles() {
+        assert_eq!(find("arith.add_to_sub").map(|m| m.name), Some("arith.add_to_sub"));
+        assert_eq!(find_preset("default").map(|p| p.name), Some("default"));
+        let families = families();
+        let unique: HashSet<_> = families.iter().copied().collect();
+        assert_eq!(families.len(), unique.len());
+        assert_eq!(families.first(), Some(&"fn_value"));
+        assert_eq!(resolve("arith.add_to_sub").unwrap(), ["arith.add_to_sub"]);
+        assert!(resolve("arith").unwrap().len() > 1);
+        assert_eq!(resolve("@pedantic").unwrap(), ["fn_value.some"]);
+        assert_eq!(resolve("all").unwrap().len(), REGISTRY.len());
+        assert_eq!(resolve("@all").unwrap().len(), REGISTRY.len());
+    }
+
+    #[test]
     fn a_distant_unknown_selector_falls_back_to_the_registry_hint() {
         let error = resolve("zzzzzzzzzz").expect_err("the selector is not in the registry");
         let message = error.to_string();
@@ -141,5 +156,11 @@ mod tests {
 
         assert!(message.contains("unknown mutator selector `reltional`"), "{message}");
         assert!(message.contains("did you mean `relational`?"), "{message}");
+    }
+
+    #[test]
+    fn equally_close_candidates_keep_the_first_catalog_choice() {
+        let error = resolve("fn_value.bool").expect_err("the selector is incomplete").to_string();
+        assert!(error.contains("did you mean `fn_value.bool_true`?"), "{error}");
     }
 }

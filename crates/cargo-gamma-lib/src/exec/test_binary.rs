@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use core::time::Duration;
+use std::fs;
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -10,6 +11,7 @@ use serde_json::Value;
 use super::census::{Census, CensusWork};
 use super::config::Config;
 use super::memory::MemoryPolicy;
+use super::rustc_wrapper::RustcInvocation;
 use crate::discover::{Glob, Plan};
 use crate::estimate::Workload;
 use crate::model::{Mutant, Outcome};
@@ -40,6 +42,11 @@ pub struct TestBinary {
     /// every binary from the workspace root makes those tests fail identically with and without a
     /// mutant active, which turns a whole package's worth of mutants into false survivors.
     pub manifest_dir: Utf8PathBuf,
+
+    /// Workspace sources whose compiled units are proven to be linked into this executable.
+    ///
+    /// `None` is deliberately fail-open: capture was unavailable, incomplete, or ambiguous.
+    pub(crate) linked_sources: Option<crate::HashSet<Utf8PathBuf>>,
 
     /// How long it took with no mutant active, so the cheapest can be tried first.
     ///
@@ -170,26 +177,34 @@ pub(super) fn harness_threads(jobs: usize, cores: usize, inherited: Option<&str>
 }
 
 /// Extracts the test executables cargo reported building.
+#[cfg(test)]
 pub(super) fn test_binaries(stdout: &str) -> Vec<TestBinary> {
+    test_binaries_with_linkage(stdout, Utf8Path::new(""), None)
+}
+
+/// Extracts test executables and attaches compiler-proven source linkage when capture is complete.
+pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_dir: Option<&Utf8Path>) -> Vec<TestBinary> {
+    let captures = capture_dir.and_then(read_captures);
+    let origins = artifact_origins(stdout, root);
     let mut binaries = Vec::new();
 
-    for line in stdout.lines() {
+    'messages: for line in stdout.lines() {
         let Ok(message) = serde_json::from_str::<Value>(line) else {
-            continue;
+            continue 'messages;
         };
 
-        if message.get("reason").and_then(Value::as_str) != Some("compiler-artifact") {
-            continue;
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+        if !is_compiler_artifact(&message) {
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+            continue 'messages;
         }
 
-        let is_test = message
-            .get("profile")
-            .and_then(|profile| profile.get("test"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let is_test = is_test_profile(&message);
 
-        if !is_test {
-            continue;
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+        if is_non_test_profile(is_test) {
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+            continue 'messages;
         }
 
         if let Some(path) = message.get("executable").and_then(Value::as_str) {
@@ -202,6 +217,11 @@ pub(super) fn test_binaries(stdout: &str) -> Vec<TestBinary> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            let target_source = message
+                .get("target")
+                .and_then(|target| target.get("src_path"))
+                .and_then(Value::as_str)
+                .map(Utf8PathBuf::from);
 
             let manifest_dir = message
                 .get("manifest_path")
@@ -216,18 +236,276 @@ pub(super) fn test_binaries(stdout: &str) -> Vec<TestBinary> {
                 package_id,
                 target,
                 manifest_dir,
+                linked_sources: captures
+                    .as_ref()
+                    .zip(target_source.as_ref())
+                    .and_then(|(captures, source)| linked_sources(path, source, captures, &origins, root)),
                 baseline: Duration::ZERO,
-                budget: None,
-                tests: None,
-                peak: None,
-                memory: None,
+                budget: Option::default(),
+                tests: Option::default(),
+                peak: Option::default(),
+                memory: Option::default(),
             });
         }
     }
 
+    normalize_binaries(&mut binaries);
+    binaries
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactOrigin {
+    Workspace,
+    Registry,
+    Opaque,
+}
+
+fn artifact_origins(stdout: &str, root: &Utf8Path) -> crate::HashMap<Utf8PathBuf, ArtifactOrigin> {
+    let mut origins = crate::HashMap::default();
+
+    'messages: for line in stdout.lines() {
+        let Ok(message) = serde_json::from_str::<Value>(line) else {
+            continue 'messages;
+        };
+
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+        if !is_compiler_artifact(&message) {
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+            continue 'messages;
+        }
+
+        let package_id = message.get("package_id").and_then(Value::as_str).unwrap_or_default();
+        let manifest = manifest_path(&message);
+        let origin = if external_package_id(package_id) {
+            ArtifactOrigin::Registry
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+        } else if workspace_manifest(manifest, root) {
+            ArtifactOrigin::Workspace
+        } else {
+            ArtifactOrigin::Opaque
+        };
+
+        for path in artifact_paths(&message) {
+            let _ = origins.insert(Utf8PathBuf::from(path), origin);
+        }
+    }
+
+    origins
+}
+
+fn read_captures(directory: &Utf8Path) -> Option<Vec<RustcInvocation>> {
+    let mut captures: Vec<RustcInvocation> = Vec::new();
+    let entries = fs::read_dir(directory.as_std_path()).ok()?;
+
+    for entry in entries {
+        let entry = entry.ok()?;
+        if entry.path().extension() != Some(std::ffi::OsStr::new("json")) {
+            continue;
+        }
+        let bytes = fs::read(entry.path()).ok()?;
+        captures.push(serde_json::from_slice(&bytes).ok()?);
+    }
+
+    normalize_captures(&mut captures);
+
+    (!captures.is_empty()).then_some(captures)
+}
+
+fn normalize_captures(captures: &mut Vec<RustcInvocation>) {
+    captures.sort_unstable_by(|left, right| {
+        left.out_dir
+            .cmp(&right.out_dir)
+            .then_with(|| left.crate_name.cmp(&right.crate_name))
+            .then_with(|| left.extra_filename.cmp(&right.extra_filename))
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    captures.dedup_by(|left, right| left == right);
+}
+
+fn linked_sources(
+    executable: &str,
+    target_source: &Utf8Path,
+    captures: &[RustcInvocation],
+    origins: &crate::HashMap<Utf8PathBuf, ArtifactOrigin>,
+    root: &Utf8Path,
+) -> Option<crate::HashSet<Utf8PathBuf>> {
+    let executable = Utf8Path::new(executable);
+    let target_source = absolute_source(target_source, root);
+    let starts: Vec<usize> = captures
+        .iter()
+        .enumerate()
+        .filter(|(_index, capture)| capture_starts_executable(capture, executable, &target_source, root))
+        .map(|(index, _capture)| index)
+        .collect();
+
+    let [start] = starts.as_slice() else {
+        return None;
+    };
+
+    let mut pending = vec![*start];
+    let mut visited = crate::HashSet::default();
+    let mut sources = crate::HashSet::default();
+
+    'captures: while let Some(index) = pending.pop() {
+        if !visit_capture(&mut visited, index) {
+            continue 'captures;
+        }
+
+        let capture = &captures[index];
+
+        if capture.opaque_extern {
+            return None;
+        }
+
+        sources.extend(dep_sources(capture, root)?);
+
+        'dependencies: for dependency in &capture.externs {
+            match origins.get(dependency) {
+                Some(ArtifactOrigin::Registry) => continue 'dependencies,
+                Some(ArtifactOrigin::Opaque) => return None,
+                Some(ArtifactOrigin::Workspace) | None => {}
+            }
+
+            let matches: Vec<usize> = captures
+                .iter()
+                .enumerate()
+                .filter(|(_candidate, invocation)| output_matches(invocation, dependency))
+                .map(|(candidate, _invocation)| candidate)
+                .collect();
+
+            let [dependency] = matches.as_slice() else {
+                return None;
+            };
+
+            pending.push(*dependency);
+        }
+    }
+
+    Some(sources)
+}
+
+fn output_matches(invocation: &RustcInvocation, artifact: &Utf8Path) -> bool {
+    if artifact.parent() != Some(invocation.out_dir.as_path()) {
+        return false;
+    }
+
+    let Some(file) = artifact.file_name() else {
+        return false;
+    };
+    let file = file.strip_suffix(std::env::consts::EXE_SUFFIX).unwrap_or(file);
+    let stem = file.rsplit_once('.').map_or(file, |(stem, _extension)| stem);
+    let stem = stem.strip_prefix("lib").unwrap_or(stem);
+
+    stem.strip_prefix(invocation.crate_name.as_str())
+        .is_some_and(|suffix| suffix == invocation.extra_filename)
+}
+
+fn dep_sources(invocation: &RustcInvocation, root: &Utf8Path) -> Option<Vec<Utf8PathBuf>> {
+    let primary = workspace_relative(&invocation.source, root)?;
+    let dep_file = invocation
+        .out_dir
+        .join(format!("{}{}.d", invocation.crate_name, invocation.extra_filename));
+    let text = fs::read_to_string(dep_file.as_std_path()).ok()?;
+    let mut sources = Vec::new();
+    let mut dependency_lines = 0_usize;
+
+    for line in text.lines() {
+        let Some((_artifact, dependencies)) = line.split_once(": ") else {
+            continue;
+        };
+        dependency_lines = dependency_lines.saturating_add(1);
+
+        for dependency in super::build::messages::dependencies(dependencies) {
+            if let Some(relative) = workspace_relative(Utf8Path::new(&dependency), root) {
+                sources.push(relative);
+            }
+        }
+    }
+
+    dep_sources_complete(dependency_lines, &sources, &primary).then_some(sources)
+}
+
+fn absolute_source(path: &Utf8Path, root: &Utf8Path) -> Utf8PathBuf {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    if path.is_absolute() { path.to_owned() } else { root.join(path) }
+}
+
+fn is_compiler_artifact(message: &Value) -> bool {
+    message.get("reason").and_then(Value::as_str) == Some("compiler-artifact")
+}
+
+fn is_test_profile(message: &Value) -> bool {
+    message
+        .get("profile")
+        .and_then(|profile| profile.get("test"))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+const fn is_non_test_profile(is_test: bool) -> bool {
+    !is_test
+}
+
+fn manifest_path(message: &Value) -> Option<&Utf8Path> {
+    message.get("manifest_path").and_then(Value::as_str).map(Utf8Path::new)
+}
+
+fn workspace_manifest(manifest: Option<&Utf8Path>, root: &Utf8Path) -> bool {
+    manifest.and_then(|manifest| workspace_relative(manifest, root)).is_some()
+}
+
+fn artifact_paths(message: &Value) -> impl Iterator<Item = &str> {
+    message
+        .get("filenames")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .chain(message.get("executable").and_then(Value::as_str))
+}
+
+fn capture_starts_executable(capture: &RustcInvocation, executable: &Utf8Path, target_source: &Utf8Path, root: &Utf8Path) -> bool {
+    capture.test && absolute_source(&capture.source, root) == target_source && output_matches(capture, executable)
+}
+
+fn visit_capture(visited: &mut crate::HashSet<usize>, index: usize) -> bool {
+    visited.insert(index)
+}
+
+fn external_package_id(package_id: &str) -> bool {
+    ["registry+", "git+"].iter().any(|marker| package_id.starts_with(marker))
+        || ["(registry+", "(git+"].iter().any(|marker| package_id.contains(marker))
+}
+
+// #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
+fn pending_mutant(mutant: &Mutant) -> bool {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    mutant.ordinal != 0 && mutant.outcome == Outcome::Pending
+}
+
+fn normalize_binaries(binaries: &mut Vec<TestBinary>) {
     binaries.sort_by(|left, right| left.path.cmp(&right.path));
     binaries.dedup_by(|left, right| left.path == right.path);
-    binaries
+}
+
+fn dep_sources_complete(lines: usize, sources: &[Utf8PathBuf], primary: &Utf8Path) -> bool {
+    lines != 0 && sources.iter().any(|source| source == primary)
+}
+
+fn workspace_relative(path: &Utf8Path, root: &Utf8Path) -> Option<Utf8PathBuf> {
+    let absolute = absolute_source(path, root);
+    let relative = absolute.strip_prefix(root).ok()?;
+
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            camino::Utf8Component::ParentDir | camino::Utf8Component::RootDir | camino::Utf8Component::Prefix(_)
+        )
+    }) {
+        return no_target_selection();
+    }
+
+    Some(Utf8PathBuf::from(super::build::messages::normalize_separators(relative.as_str())))
 }
 
 /// Drops the test binaries `--include-test` and `--exclude-test` say must not decide a verdict.
@@ -235,13 +513,152 @@ pub(super) fn test_binaries(stdout: &str) -> Vec<TestBinary> {
 /// This has to run before the baseline, not after, so the baseline only runs and measures binaries
 /// that will actually decide verdicts.
 pub(super) fn restrict(binaries: &mut Vec<TestBinary>, include: &[String], exclude: &[String]) {
-    if include.is_empty() && exclude.is_empty() {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    if no_target_patterns(include, exclude) {
         return;
     }
 
     let patterns = TargetPatterns::new(include, exclude);
 
     binaries.retain(|binary| patterns.admits(&binary.target));
+}
+
+fn no_target_patterns(include: &[String], exclude: &[String]) -> bool {
+    include.is_empty() && exclude.is_empty()
+}
+
+/// Drops binaries proven not to link any pending mutated source.
+///
+/// Unknown linkage remains in the population, so this can only save baseline and launch work; it
+/// cannot turn missing capture into a verdict.
+pub(super) fn retain_linked_to_population(binaries: &mut Vec<TestBinary>, plan: &Plan) {
+    let pending: crate::HashSet<&Utf8Path> = plan
+        .mutants
+        .iter()
+        .filter(|mutant| pending_mutant(mutant))
+        .map(|mutant| mutant.file.as_ref())
+        .collect();
+
+    binaries.retain(|binary| {
+        binary
+            .linked_sources
+            .as_ref()
+            .is_none_or(|sources| populations_intersect(&pending, sources))
+    });
+}
+
+/// Cargo target selectors for test artifacts that may link a pending mutated source.
+///
+/// The identities come from Cargo's own successful preflight artifact messages. Any missing
+/// capture, ambiguous association, or unsupported target kind abandons narrowing entirely.
+pub(super) fn linked_target_args(stdout: &str, root: &Utf8Path, capture_dir: Option<&Utf8Path>, plan: &Plan) -> Option<Vec<String>> {
+    let captures = read_captures(capture_dir?)?;
+    let origins = artifact_origins(stdout, root);
+    let pending: crate::HashSet<&Utf8Path> = plan
+        .mutants
+        .iter()
+        .filter(|mutant| pending_mutant(mutant))
+        .map(|mutant| mutant.file.as_ref())
+        .collect();
+    let mut selectors = Vec::new();
+    let mut saw_test_target = false;
+
+    'messages: for line in stdout.lines() {
+        let Ok(message) = serde_json::from_str::<Value>(line) else {
+            continue 'messages;
+        };
+
+        if !is_compiler_artifact(&message)
+            || message
+                .get("profile")
+                .and_then(|profile| profile.get("test"))
+                .and_then(Value::as_bool)
+                != Some(true)
+        {
+            continue 'messages;
+        }
+
+        saw_test_target = true;
+        let target = message.get("target")?;
+        let name = target.get("name").and_then(Value::as_str)?;
+        let source = target.get("src_path").and_then(Value::as_str).map(Utf8Path::new)?;
+        let artifacts: Vec<&str> = message
+            .get("filenames")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        // Cargo's `filenames` are outputs of this compilation unit. Even a PDB or metadata output
+        // carries the same crate stem and is matched by `output_matches`; silently discarding one
+        // would let a partially captured unit look exact, so every listed output must agree.
+        let associations: Vec<crate::HashSet<Utf8PathBuf>> = artifacts
+            .iter()
+            .map(|artifact| linked_sources(artifact, source, &captures, &origins, root))
+            .collect::<Option<_>>()?;
+        // #[gamma::skip(iter.first_to_last, reason = "the next check requires every association to equal this slice, so choosing the first or last equal slice returns the same sources")]
+        let sources = associations.first()?;
+
+        if !all_associations_equal(&associations, sources) {
+            return no_target_selection();
+        }
+
+        let linked = populations_intersect(&pending, sources);
+
+        if !linked {
+            continue 'messages;
+        }
+
+        let is_integration_test = target
+            .get("kind")
+            .and_then(Value::as_array)?
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|kind| kind == "test");
+        let selector = if is_integration_test {
+            ["--test".to_owned(), name.to_owned()]
+        } else {
+            // `cargo build --lib`, `--bin`, and `--example` build ordinary targets, not their
+            // unit-test harnesses. Cargo cannot select those harnesses exactly under `build`, so
+            // retain the package-scoped `--tests` fallback instead.
+            return no_target_selection();
+        };
+
+        selectors.push(selector);
+    }
+
+    if target_selection_failed(saw_test_target, &selectors) {
+        return None;
+    }
+
+    selectors.sort();
+    // #[gamma::skip(iter.remove_dedup, reason = "duplicate Cargo target selectors select the same target population and Cargo accepts repeated identical selector flags")]
+    selectors.dedup();
+
+    Some(selectors.into_iter().flatten().filter(|value| !value.is_empty()).collect())
+}
+
+fn populations_intersect(pending: &crate::HashSet<&Utf8Path>, sources: &crate::HashSet<Utf8PathBuf>) -> bool {
+    pending.iter().any(|source| sources.contains(*source))
+}
+
+fn all_associations_equal(associations: &[crate::HashSet<Utf8PathBuf>], sources: &crate::HashSet<Utf8PathBuf>) -> bool {
+    associations.iter().all(|candidate| candidate == sources)
+}
+
+fn census_duration(census: Option<&Census>, binary: &TestBinary, ordinal: u32) -> Option<Duration> {
+    match census.map_or(CensusWork::Whole, |census| census.work(binary, ordinal)) {
+        CensusWork::Whole | CensusWork::Hinted(_) => Some(binary.baseline),
+        CensusWork::Uncovered => None,
+        CensusWork::Selected(duration) => Some(duration),
+    }
+}
+
+fn target_selection_failed(saw_test_target: bool, selectors: &[[String; 2]]) -> bool {
+    !saw_test_target || selectors.is_empty()
+}
+
+const fn no_target_selection<T>() -> Option<T> {
+    None
 }
 
 /// Whether a target name survives the include and exclude patterns.
@@ -280,8 +697,7 @@ impl<'args> TargetPatterns<'args> {
     }
 
     fn admits(&self, name: &str) -> bool {
-        !self.exclude.iter().any(|(_pattern, compiled)| compiled.matches(name))
-            && (self.include.is_empty() || self.include.iter().any(|(_pattern, compiled)| compiled.matches(name)))
+        patterns_admit(&self.include, &self.exclude, name)
     }
 
     fn unmatched(&self, tests: &[String]) -> Option<&'args str> {
@@ -291,6 +707,12 @@ impl<'args> TargetPatterns<'args> {
             .find(|(_pattern, compiled)| !tests.iter().any(|name| compiled.matches(name)))
             .map(|(pattern, _compiled)| *pattern)
     }
+}
+
+fn patterns_admit(include: &[(&str, Glob)], exclude: &[(&str, Glob)], name: &str) -> bool {
+    let excluded = exclude.iter().any(|(_pattern, compiled)| compiled.matches(name));
+    let included = include.is_empty() || include.iter().any(|(_pattern, compiled)| compiled.matches(name));
+    included && !excluded
 }
 
 /// Whether a test binary can possibly reach code in `package`.
@@ -343,6 +765,15 @@ pub(super) fn reaches(binary: &TestBinary, package: &str, plan: &Plan, scope: &T
     plan.reach.get(&binary.package).is_none_or(|reachable| reachable.contains(package))
 }
 
+/// Applies exact source linkage after the package-level admission rule has admitted a binary.
+fn reaches_mutant(binary: &TestBinary, mutant: &Mutant, plan: &Plan, scope: &TestScope<'_>) -> bool {
+    reaches(binary, &mutant.package, plan, scope)
+        && binary
+            .linked_sources
+            .as_ref()
+            .is_none_or(|sources| sources.contains(mutant.file.as_ref()))
+}
+
 /// Orders an unhinted mutant's reachable binaries without changing which binaries are reachable.
 ///
 /// Tests from the package that owns the mutant are normally the closest oracle. Within the own
@@ -378,7 +809,7 @@ pub(super) fn order_reachable(binaries: &mut [&TestBinary], mutant_package: &str
 /// [`Census`], and only when its own census for that binary completed, settles that.
 #[derive(Debug, Default)]
 pub(super) struct Reachability<'binaries> {
-    by_package: crate::HashMap<Arc<str>, Vec<&'binaries TestBinary>>,
+    by_source: crate::HashMap<(Arc<str>, Arc<Utf8Path>), Vec<&'binaries TestBinary>>,
 }
 
 impl<'binaries> Reachability<'binaries> {
@@ -388,35 +819,38 @@ impl<'binaries> Reachability<'binaries> {
     /// Distinct packages are far fewer than mutants, so the reachable set is worked out once per
     /// package rather than once per mutant.
     pub(super) fn build(plan: &Plan, binaries: &'binaries [TestBinary], scope: &TestScope<'_>) -> Self {
-        let mut by_package: crate::HashMap<Arc<str>, Vec<&TestBinary>> = crate::HashMap::default();
+        let mut by_source: crate::HashMap<(Arc<str>, Arc<Utf8Path>), Vec<&TestBinary>> = crate::HashMap::default();
 
-        for mutant in plan
-            .mutants
-            .iter()
-            .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
-        {
-            if by_package.contains_key(&mutant.package) {
-                continue;
+        'mutants: for mutant in plan.mutants.iter().filter(|mutant| pending_mutant(mutant)) {
+            let key = (Arc::clone(&mutant.package), Arc::clone(&mutant.file));
+
+            let vacant = !by_source.contains_key(&key);
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+            if !vacant {
+                // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+                continue 'mutants;
             }
 
             let mut found: Vec<&TestBinary> = binaries
                 .iter()
-                .filter(|binary| reaches(binary, &mutant.package, plan, scope))
+                .filter(|binary| reaches_mutant(binary, mutant, plan, scope))
                 .collect();
 
             order_reachable(&mut found, &mutant.package);
 
-            let _fresh = by_package.insert(Arc::clone(&mutant.package), found);
+            let _fresh = by_source.insert(key, found);
         }
 
-        Self { by_package }
+        Self { by_source }
     }
 
     /// The binaries that can reach `package`'s mutants, or `None` when this index was never asked
     /// to cover that package — every package holding a pending mutant this run judges was, so
     /// `None` here means the caller asked about a package with no pending work.
-    pub(super) fn reachable(&self, package: &str) -> Option<&[&'binaries TestBinary]> {
-        self.by_package.get(package).map(Vec::as_slice)
+    pub(super) fn reachable(&self, mutant: &Mutant) -> Option<&[&'binaries TestBinary]> {
+        self.by_source
+            .get(&(Arc::clone(&mutant.package), Arc::clone(&mutant.file)))
+            .map(Vec::as_slice)
     }
 
     /// How many distinct packages this index covers.
@@ -424,7 +858,12 @@ impl<'binaries> Reachability<'binaries> {
     /// Only the tests ask, to confirm the index memoizes by package rather than by mutant.
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
-        self.by_package.len()
+        self.by_source.len()
+    }
+
+    #[cfg(test)]
+    fn has_package(&self, package: &str) -> bool {
+        self.by_source.keys().any(|(candidate, _file)| &**candidate == package)
     }
 }
 
@@ -461,7 +900,7 @@ pub(super) fn build_packages(plan: &Plan, scope: &TestScope<'_>) -> Option<Vec<S
     let mutated: crate::HashSet<&str> = plan
         .mutants
         .iter()
-        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
+        .filter(|mutant| pending_mutant(mutant))
         .map(|mutant| &*mutant.package)
         .collect();
 
@@ -483,7 +922,8 @@ pub(super) fn reaching_packages(
 ) -> Option<Vec<String>> {
     // Reach is keyed by every workspace member, so its keys are the population being narrowed from.
     // Without it there is nothing to compare a subset against, so there is no subset.
-    if reach.is_empty() {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    if no_reachability(reach) {
         return None;
     }
 
@@ -516,6 +956,10 @@ pub(super) fn reaching_packages(
     Some(wanted)
 }
 
+fn no_reachability(reach: &crate::HashMap<String, crate::HashSet<String>>) -> bool {
+    reach.is_empty()
+}
+
 /// Totals the work every live mutant represents, counting only the binaries that can reach it.
 ///
 /// Returns the serial suite time and the serial budget: what testing each live mutant once would
@@ -528,12 +972,9 @@ pub(super) fn workload(mutants: &[Mutant], reach: &Reachability<'_>, census: Opt
 
     // Its cost remains per-mutant when a census is present because each site has its own measured
     // set of tests; only the reachable set behind it is shared across every mutant of a package.
-    for mutant in mutants
-        .iter()
-        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
-    {
+    for mutant in mutants.iter().filter(|mutant| pending_mutant(mutant)) {
         let reachable = reach
-            .reachable(&mutant.package)
+            .reachable(mutant)
             .expect("the shared reachability index was built from these same pending mutants");
 
         let mut suite = Duration::ZERO;
@@ -541,12 +982,10 @@ pub(super) fn workload(mutants: &[Mutant], reach: &Reachability<'_>, census: Opt
         let mut running = 0_usize;
 
         for binary in reachable {
-            match census.map_or(CensusWork::Whole, |census| census.work(binary, mutant.ordinal)) {
-                CensusWork::Whole => suite += binary.baseline,
-                CensusWork::Uncovered => continue,
-                CensusWork::Selected(duration) => suite += duration,
-                CensusWork::Hinted(_duration) => suite += binary.baseline,
-            }
+            let Some(duration) = census_duration(census, binary, mutant.ordinal) else {
+                continue;
+            };
+            suite = suite.saturating_add(duration);
 
             worst += binary.budget.unwrap_or_default();
             running = running.saturating_add(1);
@@ -618,10 +1057,12 @@ fn package_name(id: &str) -> String {
 /// since those are made of the same letters a name is.
 fn is_version(fragment: &str) -> bool {
     let release = fragment.split(['-', '+']).next().unwrap_or(fragment);
+    let mut characters = release.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
 
-    !release.is_empty()
-        && release.starts_with(|character: char| character.is_ascii_digit())
-        && release.chars().all(|character| character.is_ascii_digit() || character == '.')
+    first.is_ascii_digit() && characters.all(|character| character.is_ascii_digit() || character == '.')
 }
 
 #[cfg(test)]
@@ -669,6 +1110,516 @@ mod tests {
         let stdout = r#"{"reason":"compiler-artifact","profile":{"test":true},"executable":null}"#;
 
         assert!(test_binaries(stdout).is_empty());
+    }
+
+    #[test]
+    fn exact_compiler_linkage_excludes_only_unlinked_integration_tests() {
+        let directory = tempfile::tempdir().expect("capture directory");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("utf-8 root");
+        let out = Utf8PathBuf::from_path_buf(directory.path().join("target").join("debug").join("deps")).expect("utf-8 target");
+        let captures = Utf8PathBuf::from_path_buf(directory.path().join("captures")).expect("utf-8 captures");
+        fs::create_dir_all(root.join("src").as_std_path()).expect("source directory");
+        fs::create_dir_all(root.join("tests").as_std_path()).expect("tests directory");
+        fs::create_dir_all(out.as_std_path()).expect("output directory");
+        fs::create_dir_all(captures.as_std_path()).expect("capture directory");
+
+        let library = RustcInvocation {
+            crate_name: "subject".to_owned(),
+            crate_types: vec!["lib".to_owned()],
+            test: false,
+            source: root.join("src/lib.rs"),
+            out_dir: out.clone(),
+            extra_filename: "-libhash".to_owned(),
+            externs: Vec::new(),
+            opaque_extern: false,
+        };
+        let linked = RustcInvocation {
+            crate_name: "linked".to_owned(),
+            crate_types: vec!["bin".to_owned()],
+            test: true,
+            source: root.join("tests/linked.rs"),
+            out_dir: out.clone(),
+            extra_filename: "-linkedhash".to_owned(),
+            externs: vec![out.join("libsubject-libhash.rlib")],
+            opaque_extern: false,
+        };
+        let independent = RustcInvocation {
+            crate_name: "independent".to_owned(),
+            crate_types: vec!["bin".to_owned()],
+            test: true,
+            source: root.join("tests/independent.rs"),
+            out_dir: out.clone(),
+            extra_filename: "-independenthash".to_owned(),
+            externs: Vec::new(),
+            opaque_extern: false,
+        };
+
+        write_capture(&captures, "library", &library);
+        write_capture(&captures, "linked", &linked);
+        write_capture(&captures, "independent", &independent);
+        write_dep(&library, &[root.join("src/lib.rs")]);
+        write_dep(&linked, &[root.join("tests/linked.rs")]);
+        write_dep(&independent, &[root.join("tests/independent.rs")]);
+
+        let linked_executable = out.join(format!("linked-linkedhash{}", std::env::consts::EXE_SUFFIX));
+        let independent_executable = out.join(format!("independent-independenthash{}", std::env::consts::EXE_SUFFIX));
+        let stdout = artifact_stream(&[
+            ("linked", &root.join("tests/linked.rs"), &linked_executable),
+            ("independent", &root.join("tests/independent.rs"), &independent_executable),
+        ]);
+        let binaries = test_binaries_with_linkage(&stdout, &root, Some(&captures));
+        let mut plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
+        plan.mutants[0].file = Utf8PathBuf::from("src/lib.rs").into();
+        let target_args = linked_target_args(&stdout, &root, Some(&captures), &plan).expect("exact target selection");
+        let mut admitted = binaries.clone();
+        retain_linked_to_population(&mut admitted, &plan);
+        let reach = Reachability::build(&plan, &binaries, &ANY);
+        let reachable = reach.reachable(&plan.mutants[0]).expect("pending mutant");
+
+        assert_eq!(
+            target_args,
+            ["--test", "linked"],
+            "one of two compiler targets is selected for mutant builds"
+        );
+        assert_eq!(admitted.len(), 1, "only the linked target reaches baseline");
+        assert_eq!(admitted[0].target, "linked");
+        assert_eq!(reachable.len(), 1);
+        assert_eq!(reachable[0].target, "linked");
+
+        fs::write(
+            root.join("Cargo.toml").as_std_path(),
+            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("fixture manifest");
+        fs::write(root.join("tests/linked.rs").as_std_path(), "#[test]\nfn linked() {}\n").expect("linked target");
+        fs::write(root.join("tests/independent.rs").as_std_path(), "#[test]\nfn independent() {}\n").expect("independent target");
+        let cargo_target = root.join("cargo-target");
+        let initial = built_test_targets(&root, &cargo_target, &["build", "--tests"]);
+        let mut narrowed = vec!["build"];
+        narrowed.extend(target_args.iter().map(String::as_str));
+        let subsequent = built_test_targets(&root, &cargo_target, &narrowed);
+
+        assert_eq!(initial, ["independent", "linked"], "initial discovery builds both compiler targets");
+        assert_eq!(
+            subsequent,
+            ["linked"],
+            "the subsequent mutant build invokes only the linked compiler target"
+        );
+    }
+
+    #[test]
+    fn unit_test_target_kinds_disable_exact_cargo_build_selection() {
+        let directory = tempfile::tempdir().expect("capture directory");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("utf-8 root");
+        let out = Utf8PathBuf::from_path_buf(directory.path().join("target").join("deps")).expect("utf-8 target");
+        let captures = Utf8PathBuf::from_path_buf(directory.path().join("captures")).expect("utf-8 captures");
+        fs::create_dir_all(root.join("src").as_std_path()).expect("source directory");
+        fs::create_dir_all(out.as_std_path()).expect("output directory");
+        fs::create_dir_all(captures.as_std_path()).expect("capture directory");
+
+        let mut messages = vec!["not cargo JSON".to_owned()];
+        for (name, kind) in [("library", "lib"), ("binary", "bin"), ("example", "example")] {
+            let invocation = RustcInvocation {
+                crate_name: name.to_owned(),
+                crate_types: vec!["bin".to_owned()],
+                test: true,
+                source: root.join(format!("src/{name}.rs")),
+                out_dir: out.clone(),
+                extra_filename: format!("-{name}hash"),
+                externs: Vec::new(),
+                opaque_extern: false,
+            };
+            write_capture(&captures, name, &invocation);
+            write_dep(&invocation, &[root.join("src/lib.rs"), invocation.source.clone()]);
+            let artifact = if kind == "lib" {
+                out.join(format!("lib{name}-{name}hash.rlib"))
+            } else {
+                out.join(format!("{name}-{name}hash{}", std::env::consts::EXE_SUFFIX))
+            };
+            assert!(
+                output_matches(&invocation, &artifact),
+                "{name} did not match {} in {} with suffix {:?}",
+                artifact,
+                invocation.out_dir,
+                invocation.extra_filename
+            );
+            assert!(
+                dep_sources(&invocation, &root).is_some_and(|sources| sources.contains(&Utf8PathBuf::from("src/lib.rs"))),
+                "{name} did not read its linked source"
+            );
+            messages.push(
+                serde_json::json!({
+                    "reason": "compiler-artifact",
+                    "profile": {"test": true},
+                    "target": {
+                        "name": name,
+                        "src_path": invocation.source,
+                        "kind": [kind],
+                    },
+                    "filenames": [artifact],
+                })
+                .to_string(),
+            );
+        }
+        let mut plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
+        plan.mutants[0].file = Utf8PathBuf::from("src/lib.rs").into();
+
+        assert!(
+            linked_target_args(&messages.join("\n"), &root, Some(&captures), &plan).is_none(),
+            "cargo build cannot name lib, bin, or example unit-test harnesses exactly"
+        );
+    }
+
+    #[test]
+    fn missing_ambiguous_and_opaque_capture_all_fail_open() {
+        let directory = tempfile::tempdir().expect("capture directory");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("utf-8 root");
+        let out = Utf8PathBuf::from_path_buf(directory.path().join("target").join("deps")).expect("utf-8 target");
+        let captures = Utf8PathBuf::from_path_buf(directory.path().join("captures")).expect("utf-8 captures");
+        fs::create_dir_all(root.join("tests").as_std_path()).expect("source directory");
+        fs::create_dir_all(out.as_std_path()).expect("output directory");
+        fs::create_dir_all(captures.as_std_path()).expect("capture directory");
+
+        let executable = out.join(format!("opaque-hash{}", std::env::consts::EXE_SUFFIX));
+        let stdout = artifact_stream(&[("opaque", &root.join("tests/opaque.rs"), &executable)]);
+        let plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
+        assert!(test_binaries_with_linkage(&stdout, &root, None)[0].linked_sources.is_none());
+        assert!(linked_target_args(&stdout, &root, None, &plan).is_none());
+
+        let mut opaque = RustcInvocation {
+            crate_name: "opaque".to_owned(),
+            crate_types: vec!["bin".to_owned()],
+            test: true,
+            source: root.join("tests/opaque.rs"),
+            out_dir: out,
+            extra_filename: "-hash".to_owned(),
+            externs: Vec::new(),
+            opaque_extern: true,
+        };
+        write_capture(&captures, "opaque", &opaque);
+        write_dep(&opaque, &[root.join("tests/opaque.rs")]);
+        assert!(
+            test_binaries_with_linkage(&stdout, &root, Some(&captures))[0]
+                .linked_sources
+                .is_none()
+        );
+        assert!(linked_target_args(&stdout, &root, Some(&captures), &plan).is_none());
+
+        opaque.opaque_extern = false;
+        opaque.crate_types.push("rlib".to_owned());
+        write_capture(&captures, "ambiguous", &opaque);
+        assert!(
+            test_binaries_with_linkage(&stdout, &root, Some(&captures))[0]
+                .linked_sources
+                .is_none()
+        );
+        assert!(linked_target_args(&stdout, &root, Some(&captures), &plan).is_none());
+    }
+
+    #[test]
+    fn one_unmatched_filename_among_multiple_artifacts_disables_target_narrowing() {
+        let directory = tempfile::tempdir().expect("capture directory");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("utf-8 root");
+        let out = Utf8PathBuf::from_path_buf(directory.path().join("target").join("deps")).expect("utf-8 target");
+        let captures = Utf8PathBuf::from_path_buf(directory.path().join("captures")).expect("utf-8 captures");
+        fs::create_dir_all(root.join("tests").as_std_path()).expect("source directory");
+        fs::create_dir_all(out.as_std_path()).expect("output directory");
+        fs::create_dir_all(captures.as_std_path()).expect("capture directory");
+
+        let invocation = RustcInvocation {
+            crate_name: "linked".to_owned(),
+            crate_types: vec!["bin".to_owned()],
+            test: true,
+            source: root.join("tests/linked.rs"),
+            out_dir: out.clone(),
+            extra_filename: "-hash".to_owned(),
+            externs: Vec::new(),
+            opaque_extern: false,
+        };
+        write_capture(&captures, "linked", &invocation);
+        write_dep(&invocation, &[root.join("tests/linked.rs"), root.join("src/lib.rs")]);
+
+        let matched = out.join(format!("linked-hash{}", std::env::consts::EXE_SUFFIX));
+        let unmatched = out.join("linked-unmatched.rmeta");
+        let stdout = serde_json::json!({
+            "reason": "compiler-artifact",
+            "profile": {"test": true},
+            "package_id": "path+file:///workspace#subject@0.0.0",
+            "target": {
+                "name": "linked",
+                "src_path": root.join("tests/linked.rs"),
+                "kind": ["test"],
+            },
+            "filenames": [matched, unmatched],
+        })
+        .to_string();
+        let mut plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
+        plan.mutants[0].file = Utf8PathBuf::from("src/lib.rs").into();
+
+        assert!(
+            linked_target_args(&stdout, &root, Some(&captures), &plan).is_none(),
+            "an unresolved relevant artifact must fail open to the package-level build"
+        );
+    }
+
+    #[test]
+    fn external_path_artifacts_are_opaque_while_registry_artifacts_are_known_external() {
+        let directory = tempfile::tempdir().expect("workspace parent");
+        let base = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf-8 parent");
+        let root = base.join("workspace");
+        let outside_manifest = base.join("outside/path-dep/Cargo.toml");
+        let path_artifact = Utf8PathBuf::from("/target/libpath_dep.rlib");
+        let registry_artifact = Utf8PathBuf::from("/target/libregistry_dep.rlib");
+        let stdout = [
+            serde_json::json!({
+                "reason": "compiler-artifact",
+                "package_id": "path+file:///outside/path-dep#0.0.0",
+                "manifest_path": outside_manifest,
+                "filenames": [path_artifact],
+            })
+            .to_string(),
+            serde_json::json!({
+                "reason": "compiler-artifact",
+                "package_id": "registry+https://github.com/rust-lang/crates.io-index#dep@1.0.0",
+                "manifest_path": "/cargo/registry/src/dep/Cargo.toml",
+                "filenames": [registry_artifact],
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        let origins = artifact_origins(&stdout, &root);
+
+        assert_eq!(
+            origins.get(&Utf8PathBuf::from("/target/libpath_dep.rlib")),
+            Some(&ArtifactOrigin::Opaque)
+        );
+        assert_eq!(
+            origins.get(&Utf8PathBuf::from("/target/libregistry_dep.rlib")),
+            Some(&ArtifactOrigin::Registry)
+        );
+    }
+
+    #[test]
+    fn non_normalized_paths_never_create_a_positive_linkage_match() {
+        let directory = tempfile::tempdir().expect("workspace parent");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("utf-8 root");
+        assert!(workspace_relative(&root.join("../outside.rs"), &root).is_none());
+
+        let invocation = RustcInvocation {
+            crate_name: "subject".to_owned(),
+            crate_types: vec!["lib".to_owned()],
+            test: false,
+            source: "src/lib.rs".into(),
+            out_dir: root.join("target/deps"),
+            extra_filename: "-hash".to_owned(),
+            externs: Vec::new(),
+            opaque_extern: false,
+        };
+
+        assert!(!output_matches(&invocation, &root.join("target/deps/../deps/libsubject-hash.rlib")));
+    }
+
+    #[test]
+    fn linkage_graph_cycles_registry_edges_and_ambiguous_edges_fail_safely() {
+        let directory = tempfile::tempdir().expect("workspace parent");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("utf-8 root");
+        let out = root.join("target/deps");
+        fs::create_dir_all(root.join("tests").as_std_path()).expect("tests");
+        fs::create_dir_all(out.as_std_path()).expect("output");
+        let executable = out.join(format!("subject-hash{}", std::env::consts::EXE_SUFFIX));
+        let own_artifact = out.join("libsubject-hash.rlib");
+        let registry = out.join("libregistry.rlib");
+        let mut capture = RustcInvocation {
+            crate_name: "subject".to_owned(),
+            crate_types: vec!["bin".to_owned()],
+            test: true,
+            source: root.join("tests/subject.rs"),
+            out_dir: out.clone(),
+            extra_filename: "-hash".to_owned(),
+            externs: vec![own_artifact, registry.clone()],
+            opaque_extern: false,
+        };
+        write_dep(&capture, &[capture.source.clone()]);
+        let origins = std::iter::once((registry, ArtifactOrigin::Registry)).collect();
+
+        assert_eq!(
+            linked_sources(executable.as_str(), &capture.source, &[capture.clone()], &origins, &root),
+            Some(std::iter::once(Utf8PathBuf::from("tests/subject.rs")).collect()),
+            "a cycle is visited once and a registry dependency needs no workspace capture"
+        );
+
+        let opaque = out.join("libopaque.rlib");
+        capture.externs = vec![opaque.clone()];
+        assert!(
+            linked_sources(
+                executable.as_str(),
+                &capture.source,
+                &[capture.clone()],
+                &std::iter::once((opaque, ArtifactOrigin::Opaque)).collect(),
+                &root,
+            )
+            .is_none()
+        );
+
+        let dependency = out.join("libdependency.rlib");
+        capture.externs = vec![dependency];
+        let duplicate = RustcInvocation {
+            crate_name: "dependency".to_owned(),
+            source: root.join("src/dependency.rs"),
+            out_dir: out,
+            extra_filename: String::new(),
+            ..capture.clone()
+        };
+        assert!(
+            linked_sources(
+                executable.as_str(),
+                &capture.source,
+                &[capture.clone(), duplicate.clone(), duplicate],
+                &crate::HashMap::default(),
+                &root,
+            )
+            .is_none(),
+            "an ambiguous workspace artifact association fails open"
+        );
+    }
+
+    #[test]
+    fn malformed_dep_info_and_unsupported_targets_disable_narrowing() {
+        let directory = tempfile::tempdir().expect("workspace parent");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("utf-8 root");
+        let out = root.join("target/deps");
+        let captures = root.join("captures");
+        fs::create_dir_all(root.join("tests").as_std_path()).expect("tests");
+        fs::create_dir_all(out.as_std_path()).expect("output");
+        fs::create_dir_all(captures.as_std_path()).expect("captures");
+        let invocation = RustcInvocation {
+            crate_name: "subject".to_owned(),
+            crate_types: vec!["bin".to_owned()],
+            test: true,
+            source: root.join("tests/subject.rs"),
+            out_dir: out.clone(),
+            extra_filename: "-hash".to_owned(),
+            externs: Vec::new(),
+            opaque_extern: false,
+        };
+        fs::write(
+            out.join("subject-hash.d").as_std_path(),
+            format!("malformed\nartifact: {} {}\n", invocation.source, root.join("../outside.rs")),
+        )
+        .expect("dep-info");
+        assert_eq!(dep_sources(&invocation, &root), Some(vec![Utf8PathBuf::from("tests/subject.rs")]));
+        assert!(!output_matches(&invocation, Utf8Path::new("/")));
+
+        write_capture(&captures, "subject", &invocation);
+        let artifact = out.join(format!("subject-hash{}", std::env::consts::EXE_SUFFIX));
+        let message = serde_json::json!({
+            "reason": "compiler-artifact",
+            "profile": {"test": true},
+            "target": {
+                "name": "subject",
+                "src_path": invocation.source,
+                "kind": ["bench"],
+            },
+            "filenames": [artifact],
+        })
+        .to_string();
+        let mut plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
+        plan.mutants[0].file = Utf8PathBuf::from("tests/subject.rs").into();
+
+        assert!(linked_target_args(&message, &root, Some(&captures), &plan).is_none());
+        assert!(linked_target_args("not json", &root, Some(&captures), &plan).is_none());
+    }
+
+    fn write_capture(directory: &Utf8Path, name: &str, capture: &RustcInvocation) {
+        fs::write(
+            directory.join(format!("{name}.json")).as_std_path(),
+            serde_json::to_vec(capture).expect("capture serializes"),
+        )
+        .expect("capture writes");
+    }
+
+    #[test]
+    fn capture_reader_ignores_unpublished_temporary_entries() {
+        let directory = tempfile::tempdir().expect("capture directory");
+        let captures = Utf8PathBuf::from_path_buf(directory.path().to_owned()).expect("UTF-8 capture directory");
+        let capture = RustcInvocation {
+            crate_name: "subject".to_owned(),
+            crate_types: vec!["lib".to_owned()],
+            test: false,
+            source: "src/lib.rs".into(),
+            out_dir: "target/debug/deps".into(),
+            extra_filename: "-hash".to_owned(),
+            externs: Vec::new(),
+            opaque_extern: false,
+        };
+        write_capture(&captures, "complete", &capture);
+        fs::write(captures.join("interrupted.tmp").as_std_path(), b"{").expect("temporary capture");
+
+        assert_eq!(read_captures(&captures), Some(vec![capture]));
+    }
+
+    fn write_dep(invocation: &RustcInvocation, sources: &[Utf8PathBuf]) {
+        let path = invocation
+            .out_dir
+            .join(format!("{}{}.d", invocation.crate_name, invocation.extra_filename));
+        let dependencies = sources.iter().map(|source| source.as_str()).collect::<Vec<_>>().join(" ");
+        fs::write(path.as_std_path(), format!("artifact: {dependencies}\n")).expect("dep-info writes");
+    }
+
+    fn artifact_stream(targets: &[(&str, &Utf8Path, &Utf8Path)]) -> String {
+        targets
+            .iter()
+            .map(|(target, source, executable)| {
+                serde_json::json!({
+                    "reason": "compiler-artifact",
+                    "profile": {"test": true},
+                    "package_id": "path+file:///workspace#subject@0.0.0",
+                    "target": {"name": target, "src_path": source, "kind": ["test"]},
+                    "filenames": [executable],
+                    "executable": executable,
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn built_test_targets(root: &Utf8Path, target: &Utf8Path, args: &[&str]) -> Vec<String> {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let output = std::process::Command::new(cargo)
+            .current_dir(root.as_std_path())
+            .env("CARGO_TARGET_DIR", target.as_std_path())
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .args(args)
+            .arg("--message-format=json")
+            .output()
+            .expect("fixture cargo runs");
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+        let mut targets: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|message| {
+                message.get("reason").and_then(Value::as_str) == Some("compiler-artifact")
+                    && message
+                        .get("target")
+                        .and_then(|target| target.get("kind"))
+                        .and_then(Value::as_array)
+                        .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("test")))
+            })
+            .filter_map(|message| {
+                message
+                    .get("target")
+                    .and_then(|target| target.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect();
+        targets.sort();
+        targets.dedup();
+        targets
     }
 
     /// Nothing to apportion is not an error.
@@ -1019,7 +1970,7 @@ mod tests {
         let reach = Reachability::build(&plan, &binaries, &ANY);
 
         assert!(
-            reach.reachable("aside").is_none(),
+            !reach.has_package("aside"),
             "aside holds no pending mutant, so nothing should have asked about it"
         );
     }
@@ -1037,7 +1988,7 @@ mod tests {
         let binaries = vec![app_dependent, own];
 
         let reach = Reachability::build(&plan, &binaries, &ANY);
-        let ordered = reach.reachable("core").expect("core holds a pending mutant");
+        let ordered = reach.reachable(&plan.mutants[0]).expect("core holds a pending mutant");
 
         assert_eq!(
             ordered.iter().map(|binary| binary.package.as_str()).collect::<Vec<_>>(),
@@ -1426,5 +2377,106 @@ mod tests {
         // Guessing "nothing" would silently stop testing a mutant and report it as unreachable,
         // which reads as a finding about the code rather than a failure of this parser.
         assert_eq!(package_name(""), "");
+    }
+
+    #[test]
+    fn calibration_orders_every_binary_and_sets_both_derived_limits() {
+        let mut binaries = vec![binary("slow"), binary("fast")];
+        binaries[0].baseline = Duration::from_secs(20);
+        binaries[0].peak = Some(300);
+        binaries[1].baseline = Duration::from_secs(2);
+        binaries[1].peak = Some(100);
+        let config = Config {
+            baseline: true,
+            test_timeout_multiplier: 2.0,
+            timeout_floor: Duration::from_secs(5),
+            ..Config::default()
+        };
+        let memory = MemoryPolicy {
+            control: super::super::memory::MemoryControl::Enforce,
+            multiplier: 2.0,
+            headroom: 50,
+            ..MemoryPolicy::default()
+        };
+
+        calibrate(&mut binaries, &config, &memory);
+
+        assert_eq!(
+            binaries.iter().map(|binary| binary.package.as_str()).collect::<Vec<_>>(),
+            ["fast", "slow"]
+        );
+        assert_eq!(binaries[0].budget, Some(Duration::from_secs(5)));
+        assert_eq!(binaries[1].budget, Some(Duration::from_secs(40)));
+        assert_eq!(binaries[0].memory, Some(200));
+        assert_eq!(binaries[1].memory, Some(600));
+
+        bound(&mut binaries, &memory, false);
+        assert_eq!(binaries[0].memory, None);
+        assert_eq!(binaries[1].memory, None);
+    }
+
+    #[test]
+    fn artifact_and_reachability_predicates_cover_positive_and_negative_rows() {
+        let artifact = serde_json::json!({"reason":"compiler-artifact","profile":{"test":true}});
+        let message = serde_json::json!({"reason":"compiler-message","profile":{"test":false}});
+        assert!(is_compiler_artifact(&artifact));
+        assert!(!is_compiler_artifact(&message));
+        assert!(is_test_profile(&artifact));
+        assert!(!is_test_profile(&message));
+        assert!(!is_non_test_profile(true));
+        assert!(is_non_test_profile(false));
+
+        let rooted = serde_json::json!({
+            "manifest_path": "/workspace/crate/Cargo.toml",
+            "filenames": ["/target/a", "/target/b"],
+            "executable": "/target/test"
+        });
+        assert_eq!(manifest_path(&rooted), Some(Utf8Path::new("/workspace/crate/Cargo.toml")));
+        assert!(workspace_manifest(manifest_path(&rooted), Utf8Path::new("/workspace")));
+        assert!(!workspace_manifest(manifest_path(&rooted), Utf8Path::new("/elsewhere")));
+        assert_eq!(
+            artifact_paths(&rooted).collect::<Vec<_>>(),
+            ["/target/a", "/target/b", "/target/test"]
+        );
+
+        for id in [
+            "registry+https://example#x",
+            "git+https://example#x",
+            "x (registry+url)",
+            "x (git+url)",
+        ] {
+            assert!(external_package_id(id), "{id}");
+        }
+        assert!(!external_package_id("path+file:///workspace#x"));
+
+        let mut binaries = vec![binary("b"), binary("a"), binary("a")];
+        binaries[0].path = Utf8PathBuf::from("z");
+        binaries[1].path = Utf8PathBuf::from("a");
+        binaries[2].path = Utf8PathBuf::from("a");
+        normalize_binaries(&mut binaries);
+        assert_eq!(binaries.iter().map(|binary| binary.path.as_str()).collect::<Vec<_>>(), ["a", "z"]);
+
+        let primary = Utf8PathBuf::from("src/lib.rs");
+        assert!(dep_sources_complete(1, std::slice::from_ref(&primary), &primary));
+        assert!(!dep_sources_complete(0, std::slice::from_ref(&primary), &primary));
+        assert!(!dep_sources_complete(1, &[], &primary));
+        assert!(no_target_patterns(&[], &[]));
+        assert!(!no_target_patterns(&["x".to_owned()], &[]));
+
+        let pending = crate::HashSet::from_iter([primary.as_path()]);
+        let matching = crate::HashSet::from_iter([primary.clone()]);
+        let different = crate::HashSet::from_iter([Utf8PathBuf::from("src/other.rs")]);
+        assert!(populations_intersect(&pending, &matching));
+        assert!(!populations_intersect(&pending, &different));
+        assert!(all_associations_equal(&[matching.clone(), matching.clone()], &matching));
+        assert!(!all_associations_equal(&[matching.clone(), different], &matching));
+        assert!(!target_selection_failed(true, &[["--lib".to_owned(), String::new()]]));
+        assert!(target_selection_failed(false, &[["--lib".to_owned(), String::new()]]));
+        assert!(target_selection_failed(true, &[]));
+        assert!(no_reachability(&crate::HashMap::default()));
+        let mut visited = crate::HashSet::default();
+        assert!(visit_capture(&mut visited, 3));
+        assert!(!visit_capture(&mut visited, 3));
+        assert_eq!(no_target_selection::<usize>(), None);
     }
 }

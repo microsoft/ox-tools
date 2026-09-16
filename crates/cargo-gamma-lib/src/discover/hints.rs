@@ -32,7 +32,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::input;
-use super::record::{ContextDigest, Killer, RunRecord, Tier};
+use super::record::{ContextDigest, GeneralizedHints, Killer, RunRecord, Tier};
 use crate::elements::Publication;
 use crate::error::error;
 use crate::model::{Mutant, MutantId, Outcome};
@@ -47,6 +47,9 @@ const FILE: &str = "gamma-hints.json";
 /// delete, so the cost of refusing to read it is time; the cost of reading a format whose fields
 /// have changed meaning is a wrong hint, and there is no version of that trade worth taking.
 const VERSION: u32 = 1;
+
+/// Producer prefix written into artifacts whose schema cargo-gamma owns.
+const TOOL_PREFIX: &str = "cargo-gamma ";
 
 /// Where the artifact lives for a workspace rooted at `root`.
 #[must_use]
@@ -80,6 +83,10 @@ pub struct Hints {
 
     /// One entry per mutant with something to say about it, ordered by file and then by id.
     mutants: Vec<Hint>,
+
+    /// Optional score-neutral tiers shared verbatim with the run record.
+    #[serde(default)]
+    generalized: GeneralizedHints,
 }
 
 /// What the artifact remembers about one mutant.
@@ -131,6 +138,9 @@ pub struct Promotion {
     /// How many of them are offered to the build as likely to fail.
     pub ordering: usize,
 
+    /// Number of generalized item, binary and reach-cluster entries.
+    pub generalized: usize,
+
     /// Whether the bytes on disk changed.
     pub changed: bool,
 }
@@ -163,7 +173,7 @@ impl Hints {
         let text = input::text(File::open(path.as_std_path()).ok()?).ok()??;
         let hints = serde_json::from_str::<Self>(&text).ok()?;
 
-        (hints.version == VERSION).then_some(hints)
+        (hints.version == VERSION && Self::valid_tool(&hints.tool)).then_some(hints)
     }
 
     /// The tests to try first, keyed by mutant id.
@@ -185,10 +195,19 @@ impl Hints {
             .collect()
     }
 
+    /// Generalized tiers, empty when their independent schema version is unsupported.
+    #[must_use]
+    pub fn generalized(&self) -> GeneralizedHints {
+        self.generalized
+            .supported()
+            .cloned()
+            .unwrap_or_else(GeneralizedHints::empty_supported)
+    }
+
     /// Whether it holds nothing at all.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.mutants.is_empty()
+    pub fn is_empty(&self) -> bool {
+        self.mutants.is_empty() && self.generalized.is_empty()
     }
 
     /// What this artifact holds, for a caller that wants to report it without writing it.
@@ -241,10 +260,55 @@ impl Hints {
 
         Self {
             version: VERSION,
-            tool: format!("cargo-gamma {}", env!("CARGO_PKG_VERSION")),
+            tool: format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION")),
             context: record.context().clone(),
             mutants,
+            generalized: Self::generalized_for(&record.generalized(), population),
         }
+    }
+
+    fn valid_tool(tool: &str) -> bool {
+        tool.strip_prefix(TOOL_PREFIX).is_some_and(|version| !version.trim().is_empty())
+    }
+
+    fn generalized_for(source: &GeneralizedHints, population: &[Mutant]) -> GeneralizedHints {
+        let files: HashSet<&Utf8Path> = population.iter().map(|mutant| mutant.file.as_ref()).collect();
+        let items: HashSet<(&Utf8Path, &str)> = population
+            .iter()
+            .map(|mutant| (mutant.file.as_ref(), mutant.item_path.as_ref()))
+            .collect();
+        let sites: HashSet<super::record::SiteIdentity> = population.iter().map(super::record::SiteIdentity::from_mutant).collect();
+        let mut output = GeneralizedHints::empty_supported();
+        output.items = source
+            .items
+            .iter()
+            .filter(|entry| items.contains(&(entry.file.as_path(), entry.item.as_str())))
+            .cloned()
+            .collect();
+        output.binaries = source
+            .binaries
+            .iter()
+            .filter(|entry| files.contains(entry.file.as_path()))
+            .cloned()
+            .collect();
+
+        for cluster in source.reach.iter().filter(|cluster| sites.contains(&cluster.site)) {
+            let Some(old) = usize::try_from(cluster.test_set).ok().and_then(|index| source.test_sets.get(index)) else {
+                continue;
+            };
+            let index = output.test_sets.iter().position(|set| set == old).unwrap_or_else(|| {
+                output.test_sets.push(old.clone());
+                output.test_sets.len() - 1
+            });
+            if let Ok(test_set) = u32::try_from(index) {
+                output.reach.push(super::record::ReachCluster {
+                    site: cluster.site.clone(),
+                    test_set,
+                });
+            }
+        }
+
+        output
     }
 
     /// Writes the artifact to `path`, reads it back, and conditionally puts the old one back if it did not survive.
@@ -355,6 +419,7 @@ impl Hints {
             mutants: self.mutants.len(),
             probes: self.mutants.iter().filter(|hint| hint.killer.is_some()).count(),
             ordering: self.mutants.iter().filter(|hint| hint.unviable).count(),
+            generalized: self.generalized.items.len() + self.generalized.binaries.len() + self.generalized.reach.len(),
             changed,
         }
     }
@@ -511,8 +576,15 @@ mod tests {
     #[test]
     fn a_foreign_artifact_is_no_hints_at_all() {
         let (_dir, root) = workspace("hints-foreign-");
+        let foreign = Hints {
+            version: VERSION,
+            tool: "other".to_owned(),
+            context: context_of(),
+            mutants: Vec::new(),
+            generalized: GeneralizedHints::empty_supported(),
+        };
 
-        fs::write(path(&root).as_std_path(), r#"{"version":99,"tool":"other","mutants":[]}"#).expect("writable");
+        fs::write(path(&root).as_std_path(), serde_json::to_vec(&foreign).expect("serializable")).expect("writable");
 
         assert!(Hints::load(&root).is_empty());
         assert!(!Hints::is_missing(&root));
@@ -547,6 +619,69 @@ mod tests {
 
         assert!(!text.contains("killed\":"), "{text}");
         assert!(!text.contains("outcome"), "a verdict reached the artifact: {text}");
+    }
+
+    #[test]
+    fn promotion_carries_generalized_tiers_for_a_clean_checkout() {
+        let (_dir, root) = workspace("hints-generalized-promote-");
+        let record = recorded(&root);
+        let generalized = GeneralizedHints {
+            version: super::super::record::GENERALIZED_HINTS_VERSION,
+            items: vec![super::super::record::ItemHints {
+                file: "src/lib.rs".into(),
+                item: "subject::changed".to_owned(),
+                candidates: vec![super::super::record::RankedHint {
+                    candidate: killer("tests::likely"),
+                    hits: 3,
+                    misses: 1,
+                    measured_ms: 12,
+                    samples: 4,
+                    order: 0,
+                }],
+            }],
+            ..GeneralizedHints::empty_supported()
+        };
+        RunRecord::store_knowledge(&root, record.probes(), Some(&generalized));
+
+        let mut changed = mutant("new-id", "src/lib.rs");
+        changed.item_path = "subject::changed".into();
+        let promoted = Hints::promoted(&RunRecord::load(&root), &[changed]);
+        promoted.write(&path(&root)).expect("generalized hints should be promotable");
+        let clean = Hints::load(&root).generalized();
+
+        assert_eq!(clean.items, generalized.items);
+        assert_eq!(clean.items[0].candidates[0].candidate.test, "tests::likely");
+    }
+
+    #[test]
+    fn an_unsupported_generalized_tier_is_ignored_without_losing_exact_hints() {
+        let (_dir, root) = workspace("hints-generalized-version-");
+        let unsupported = Hints {
+            version: VERSION,
+            tool: "cargo-gamma test".to_owned(),
+            context: context_of(),
+            mutants: vec![Hint {
+                file: "src/lib.rs".into(),
+                id: "abc".into(),
+                killer: Some(killer("tests::exact")),
+                unviable: false,
+            }],
+            generalized: GeneralizedHints {
+                version: 999,
+                items: vec![super::super::record::ItemHints {
+                    file: "src/lib.rs".into(),
+                    item: "subject::f".to_owned(),
+                    candidates: Vec::new(),
+                }],
+                ..GeneralizedHints::default()
+            },
+        };
+        fs::write(path(&root), unsupported.rendered().expect("the artifact should serialize")).expect("the artifact should be writable");
+
+        let loaded = Hints::load(&root);
+
+        assert_eq!(loaded.probes().get("abc"), Some(&killer("tests::exact")));
+        assert!(loaded.generalized().is_empty());
     }
 
     /// A promoted hint whose mutant no longer exists would grow the file forever and fill its diff

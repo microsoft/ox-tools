@@ -314,6 +314,26 @@ mod tests {
     }
 
     #[test]
+    fn standard_time_detection_handles_unknown_and_imported_names() {
+        let defaults = Defaults::default();
+        let abstracts = Vec::new();
+        let mut imports = HashMap::default();
+        let _old = imports.insert("Instant".to_owned(), Some(vec!["std".to_owned(), "time".to_owned()]));
+        let types = Types {
+            abstracts: &abstracts,
+            imports: &imports,
+            defaults: &defaults,
+            self_type: None,
+            self_associated: None,
+        };
+
+        assert!(!types.lacks_default(&empty_path_type()));
+        assert!(types.lacks_default(&parse_quote!(Instant)));
+        assert!(!types.lacks_default(&parse_quote!(SystemTime)));
+        assert!(!types.lacks_default(&parse_quote!(&'static str)));
+    }
+
+    #[test]
     fn result_aliases_and_direct_errors_can_both_be_screened() {
         let defaults = defaults(
             "

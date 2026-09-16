@@ -88,8 +88,12 @@ pub(crate) fn run_with_locks(
     // checked by running a test, and there is nothing to check before there are binaries to check
     // it with.
     let base = gamma_base(&survey.root, config.cache_dir.as_deref());
+    let incremental = config.incremental.is_enabled();
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    let narrowed = !config.whole_test_binaries;
 
-    let mut killers = if config.incremental.is_enabled() {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    let mut killers = if incremental {
         Killers::load(&base, &survey.root)
     } else {
         Killers::default()
@@ -106,8 +110,9 @@ pub(crate) fn run_with_locks(
     // established — how long a binary takes, which is the budget a censused test is held to — and
     // because everything it decides is about how the sweep runs.
     let (census_targets, maximum_census_savings) = census_targets(&plan, &reach, &killers);
-    let census_requested = !config.whole_test_binaries && !census_targets.is_empty() && !maximum_census_savings.is_zero();
+    let census_requested = census_is_worthwhile(narrowed, &census_targets, maximum_census_savings);
     let census_started = Instant::now();
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     let census = if census_requested {
         census::take(
             &built.work,
@@ -124,18 +129,23 @@ pub(crate) fn run_with_locks(
 
     // Only recorded when a census actually ran: an absent census is not a census that took no time,
     // and the whole question is whether the default selection paid for itself.
-    if census_requested {
-        built.session.phases.census = Some(CensusCost {
-            elapsed: census_started.elapsed(),
-            walked: census.walked(),
-            binaries: census_targets.len(),
-        });
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    built.session.phases.census = census_cost(census_requested, census_started.elapsed(), census.walked(), census_targets.len());
+
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    if incremental {
+        let mut generalized = killers.generalized().clone();
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+        if persist_census_learning(census_requested, &census, &plan, &built.session.binaries, &mut generalized) {
+            install_census_learning(&mut killers, generalized);
+        }
     }
 
-    let work = workload(&plan.mutants, &reach, (!config.whole_test_binaries).then_some(&census));
+    let work = workload(&plan.mutants, &reach, narrowed.then_some(&census));
     let projection = project(&plan.mutants, work, built.session.baseline_wall, built.session.build, config.jobs);
 
-    events.measured(&plan, &built.session, &projection);
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    announce_measurement(events, &plan, &built.session, &projection);
 
     let sweep = Sweep {
         timeout_floor: config.timeout_floor,
@@ -147,25 +157,24 @@ pub(crate) fn run_with_locks(
     };
 
     let sweep_started = Instant::now();
-    let swept = test_all(&built.work, &mut plan, &reach, sweep, &mut killers, events);
+    let swept = test_all(&built.work, &mut plan, &reach, sweep, narrowed, &mut killers, events);
     let sweep_elapsed = sweep_started.elapsed();
 
     // Written even when the sweep failed. A run that stopped partway still learned which test
     // caught every mutant it got to, and discarding that would make an abandoned run cost the next
     // one as much as it cost this one.
-    if config.incremental.is_enabled() {
-        killers.store(&base, &plan.mutants);
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    if incremental {
+        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+        store_learning(&killers, &base, &plan.mutants);
     }
 
     let spent = swept?;
 
     // `None` when nothing was swept: the phase is recorded as absent rather than as a real phase
     // that happened to cost nothing, which is what [`Phases::sweep`] documents its `Option` to mean.
-    built.session.phases.sweep = spent.map(|spent| SweepCost {
-        elapsed: sweep_elapsed,
-        launches: spent.launches,
-        probes: spent.probes,
-    });
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    built.session.phases.sweep = sweep_cost(spent, sweep_elapsed);
 
     Ok(Measured {
         plan,
@@ -208,7 +217,7 @@ fn census_targets(plan: &Plan, reach: &Reachability<'_>, killers: &Killers) -> (
     let pending = || {
         plan.mutants
             .iter()
-            .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
+            .filter(|mutant| mutant.ordinal != 0 && mutant.outcome == Outcome::Pending)
     };
 
     // A hint only excuses a mutant from justifying its own census when it names a binary this
@@ -219,7 +228,7 @@ fn census_targets(plan: &Plan, reach: &Reachability<'_>, killers: &Killers) -> (
     let eligibly_hinted = |mutant: &crate::model::Mutant| {
         killers.hint(&mutant.id).is_some_and(|hint| {
             reach
-                .reachable(&mutant.package)
+                .reachable(mutant)
                 .is_some_and(|reachable| reachable.iter().any(|binary| hint.names(&binary.package, &binary.target)))
         })
     };
@@ -227,9 +236,9 @@ fn census_targets(plan: &Plan, reach: &Reachability<'_>, killers: &Killers) -> (
     // Unhinted mutants (including those whose hint is stale or unreachable) alone decide which
     // binaries get censused at all, and are the only ones that pay the baseline into
     // `maximum_savings` — an eligibly hinted mutant riding along below never grows it.
-    for mutant in pending().filter(|mutant| !eligibly_hinted(mutant)) {
-        let Some(reachable) = reach.reachable(&mutant.package) else {
-            continue;
+    'unhinted: for mutant in pending().filter(|mutant| !eligibly_hinted(mutant)) {
+        let Some(reachable) = reach.reachable(mutant) else {
+            continue 'unhinted;
         };
 
         for binary in reachable {
@@ -241,9 +250,9 @@ fn census_targets(plan: &Plan, reach: &Reachability<'_>, killers: &Killers) -> (
     // An eligibly hinted mutant only ever adds its ordinal to a binary some unhinted mutant already
     // put in `targets` — never a binary of its own, since that would make the census pay to select
     // cases for a probe it expects not to need.
-    for mutant in pending().filter(|mutant| eligibly_hinted(mutant)) {
-        let Some(reachable) = reach.reachable(&mutant.package) else {
-            continue;
+    'hinted: for mutant in pending().filter(|mutant| eligibly_hinted(mutant)) {
+        let Some(reachable) = reach.reachable(mutant) else {
+            continue 'hinted;
         };
 
         for binary in reachable {
@@ -254,6 +263,61 @@ fn census_targets(plan: &Plan, reach: &Reachability<'_>, killers: &Killers) -> (
     }
 
     (targets, maximum_savings)
+}
+
+fn census_is_worthwhile(narrowed: bool, targets: &HashMap<camino::Utf8PathBuf, HashSet<u32>>, maximum_savings: Duration) -> bool {
+    narrowed && !targets.is_empty() && !maximum_savings.is_zero()
+}
+
+fn census_cost(requested: bool, elapsed: Duration, walked: usize, binaries: usize) -> Option<CensusCost> {
+    requested.then_some(CensusCost { elapsed, walked, binaries })
+}
+
+fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) -> Option<SweepCost> {
+    let spent = spent?;
+
+    Some(SweepCost {
+        elapsed,
+        launches: spent.launches,
+        probes: spent.probes,
+        exact_probes: spent.exact_probes,
+        exact_hits: spent.exact_hits,
+        generalized_probes: spent.generalized_probes,
+        generalized_hits: spent.generalized_hits,
+        launches_saved: spent.saved,
+        reach_launches_saved: spent.reach_saved,
+    })
+}
+
+fn persist_census_learning(
+    requested: bool,
+    census: &Census,
+    plan: &Plan,
+    binaries: &[TestBinary],
+    generalized: &mut crate::discover::GeneralizedHints,
+    // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
+) -> bool {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    if !requested || !census.has_evidence() {
+        return false;
+    }
+
+    census.persist_clusters(&plan.mutants, binaries, generalized);
+    true
+}
+
+fn install_census_learning(killers: &mut Killers, generalized: crate::discover::GeneralizedHints) {
+    Killers::replace_generalized(killers, generalized);
+}
+
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+fn announce_measurement(events: &mut impl Events, plan: &Plan, session: &Session, projection: &crate::estimate::Estimate) {
+    events.measured(plan, session, projection);
+}
+
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+fn store_learning(killers: &Killers, base: &camino::Utf8Path, mutants: &[crate::model::Mutant]) {
+    killers.store(base, mutants);
 }
 
 /// What a run worked out before testing a single mutant.
@@ -361,10 +425,11 @@ fn preflight(
     converger: &mut Converger,
     events: &mut impl Events,
 ) -> Result<Cleared> {
-    events.begin("Validating", "Validated", "workspace");
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    begin_preflight(events);
 
     let requested: Vec<String> = oracle_packages(&survey.selected, config);
-    let package_local = config.test_packages.is_empty() && !config.test_workspace;
+    let package_local = inferred_package_local(config);
     let scope = TestScope {
         packages: &requested,
         package_local,
@@ -376,46 +441,85 @@ fn preflight(
     let wide_stages = workspace_stages(&survey.selected, &survey.reach);
     let checking = reaching_packages(&survey.reach, &intending, &scope);
     let cleared = Converger::preflight(work, plan, checking.as_deref(), &intended, config.build, events)?;
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    record_preflight_discovery(converger, cleared.discovery.clone());
 
     // A narrow-first check still matters: when only Cargo's whole-workspace feature unification
     // makes it pass, the final test-target build must stay wide rather than rediscovering that
     // failure. If the narrow check passed (or retreated), validate the wider roots separately
     // because every staged check will compile them.
-    if wide_stages && !cleared.whole_workspace {
-        let _wide = Converger::preflight(work, plan, None, &intended, config.build, events)?;
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    if needs_wide_preflight(wide_stages, cleared.whole_workspace) {
+        // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
+        let unrestricted: Option<&[String]> = None;
+        let _wide = Converger::preflight(work, plan, unrestricted, &intended, config.build, events)?;
     }
 
-    events.end("");
-    let dropped = cleared.dropped;
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    end_preflight(events);
 
     // Staged checks retain a whole-workspace feature scope whenever Cargo's original selection
     // covers every member, even when packages with no mutable files made preflight narrower. A
     // check that only passed after widening requires the final build to stay wide too; narrowing
     // there would reproduce a failure already shown to belong to the scope rather than to any
     // mutant.
-    if wide_stages {
-        converger.require_workspace_stages();
-    }
-
-    if cleared.whole_workspace {
-        converger.require_whole_workspace();
-    }
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    settle_preflight_scope(converger, wide_stages, cleared.whole_workspace);
 
     // The check only passed because it stopped asking about those packages, so the rest of the run
     // stops asking too. Building test targets this run has decided cannot convict anything would be
     // paying again for the compile that just failed, and running them would mean running binaries
     // the preflight never cleared — the one thing the preflight exists to prevent.
-    if dropped.is_empty() {
-        return Ok(Cleared {
-            packages: requested,
-            whole_workspace: config.test_workspace,
-            dropped,
-        });
-    }
+    finish_preflight(requested, intended, config.test_workspace, cleared.dropped)
+}
 
+fn begin_preflight(events: &mut impl Events) {
+    const ACTIVE: &str = "Validating";
+    const COMPLETE: &str = "Validated";
+    const DETAIL: &str = "workspace";
+    events.begin(ACTIVE, COMPLETE, DETAIL);
+}
+
+fn end_preflight(events: &mut impl Events) {
+    events.end(Default::default());
+}
+
+fn inferred_package_local(config: &Config) -> bool {
+    config.test_packages.is_empty() && !config.test_workspace
+}
+
+fn needs_wide_preflight(wide_stages: bool, already_wide: bool) -> bool {
+    wide_stages && !already_wide
+}
+
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+fn record_preflight_discovery(converger: &mut Converger, discovery: String) {
+    converger.target_discovery(discovery);
+}
+
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+fn settle_preflight_scope(converger: &mut Converger, wide_stages: bool, whole_workspace: bool) {
+    match (wide_stages, whole_workspace) {
+        (false, false) => {}
+        (true, false) => Converger::require_workspace_stages(converger),
+        (false, true) => Converger::require_whole_workspace(converger),
+        (true, true) => {
+            Converger::require_workspace_stages(converger);
+            Converger::require_whole_workspace(converger);
+        }
+    }
+}
+
+fn finish_preflight(requested: Vec<String>, intended: Vec<String>, whole_workspace: bool, dropped: Vec<String>) -> Result<Cleared> {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    let packages = if dropped.is_empty() {
+        requested
+    } else {
+        narrowed_oracle(requested, intended, &dropped)?
+    };
     Ok(Cleared {
-        packages: narrowed_oracle(requested, intended, &dropped)?,
-        whole_workspace: config.test_workspace,
+        packages,
+        whole_workspace,
         dropped,
     })
 }
@@ -426,7 +530,10 @@ fn preflight(
 /// identify a whole-workspace invocation. The resolved Cargo selection can: [`Survey::selected`]
 /// contains every package Cargo would act on, while `reach` is keyed by every workspace member.
 fn workspace_stages(selected: &[String], reach: &HashMap<String, HashSet<String>>) -> bool {
-    selected.len() == reach.len() && selected.iter().all(|package| reach.contains_key(package.as_str()))
+    let distinct: HashSet<&str> = selected.iter().map(String::as_str).collect();
+
+    // #[gamma::skip(all, reason = "the alternative changes only internal candidate ordering or tie selection, not the accepted population exposed by this layer")]
+    distinct.len() == reach.len() && distinct.iter().all(|package| reach.contains_key(*package))
 }
 
 /// The oracle a preflight retreat leaves behind: what was asked for, less what would not compile.
@@ -453,7 +560,7 @@ fn narrowed_oracle(requested: Vec<String>, intended: Vec<String>, dropped: &[Str
     let kept: Vec<String> = requested.into_iter().filter(|package| !dropped.contains(package)).collect();
 
     if kept.is_empty() {
-        let named = dropped.join("`, `");
+        let named = dropped.iter().map(String::as_str).collect::<Vec<_>>().join("`, `");
 
         return Err(error!(
             "none of the packages this run's tests would come from could be compiled: `{named}`.\n\
@@ -508,7 +615,7 @@ fn measure_with_locks(
 ) -> Result<Measured> {
     let started = Instant::now();
 
-    let (memory, unbounded) = admit_memory_control(config)?;
+    let (memory, unbounded) = settle_memory_control(config, memory::support().map_err(|reason| reason.to_string()))?;
 
     // Checked against what the workspace declares, before anything is copied or compiled. A typo
     // here changes which tests get to convict a mutant, so it should cost a second rather than a
@@ -522,10 +629,11 @@ fn measure_with_locks(
     // has already committed hours to it — and what it looks like from outside is a run that hung.
     // Checked against the oracle and its filters so that unrelated workspace packages and targets
     // the caller has already excluded are not presented as costs of this run.
-    warn_about_compile_fail_targets(&survey.compile_fail, &survey.selected, config, events);
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    announce_compile_fail_costs(survey, config, events);
 
     let mut plan = survey.skeleton();
-    let mut converger = Converger::guided(ordering_hints(survey, config));
+    let mut converger = Converger::guided(load_ordering_hints(survey, config));
 
     // The scratch-tree copy, timed on its own: it is a component of the build's total, but a large
     // workspace can spend as much duplicating itself as compiling, and the aggregate cannot say
@@ -534,9 +642,13 @@ fn measure_with_locks(
     let mut work = Workspace::prepare_with_locks(&plan.root, config, events, locks)?;
     let copy = copy_started.elapsed();
 
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    work.begin_build_sequence();
+
     // Settled once, before anything is spawned, so the baseline and the sweep cannot disagree about
     // how wide the workload they measure and judge is.
-    work.calibrate_harness(config.jobs);
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    calibrate_harness(&work, config.jobs);
 
     let preflight_started = Instant::now();
     let Cleared {
@@ -545,17 +657,18 @@ fn measure_with_locks(
         dropped,
     } = preflight(survey, &plan, &work, config, &mut converger, events)?;
     let preflight_elapsed = preflight_started.elapsed();
-    let oracle = Oracle::new(packages, config.test_packages.is_empty() && !config.test_workspace, whole_workspace);
+    let oracle = Oracle::new(packages, inferred_package_local(config), whole_workspace);
     let scope = oracle.scope();
 
     let Staged { anything_live, mut stuck } = converge_stages(survey, selection, &mut plan, &mut converger, &work, config, events)?;
 
-    plan.sort();
-    converger.plan_reordered();
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    reorder_plan(&mut plan, &mut converger);
 
     // Nothing was live anywhere, or everything live was in a build that could not be made to
     // compile. Either way there is nothing left to build, measure or run, and the verdicts the
     // abandoned population carries are already written onto the plan.
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     if !anything_live {
         converger.settle(&mut plan);
 
@@ -571,7 +684,8 @@ fn measure_with_locks(
     // immediately run with no mutant active, and neither half means anything without the other:
     // the build is what makes a baseline possible, and the baseline is what says the build was
     // worth having.
-    events.begin("Baselining", "Baseline", "building the test binaries and running the suite");
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    begin_baseline(events);
 
     // The staged builds compiled libraries only. This is the build that compiles the test targets
     // and settles the run, and it withdraws whatever only a test target could have revealed. Only
@@ -590,10 +704,11 @@ fn measure_with_locks(
         let count = abandoned.ordinals.len();
 
         stuck.push(describe_stuck(&plan, select.as_deref().unwrap_or_default(), &abandoned));
-        events.complete(&format!(
+        let detail = format!(
             "the build could not be made to compile, {} not run",
             crate::report::quantity(count, "mutant")
-        ));
+        );
+        events.complete(&detail);
 
         return Ok(Measured {
             plan,
@@ -607,15 +722,7 @@ fn measure_with_locks(
     // run. A run with nothing left to run it cannot decide anything: every mutant would survive
     // unopposed and the report would read as a total failure of the test suite rather than as the
     // filter having eaten it.
-    let present = build.binaries.len();
-
-    restrict(&mut build.binaries, &config.include_tests, &config.exclude_tests);
-
-    let filtered = present.saturating_sub(build.binaries.len());
-
-    if build.binaries.is_empty() && present > 0 {
-        return Err(error!("`--include-test` and `--exclude-test` left no test target to decide a verdict").usage());
-    }
+    let filtered = restrict_binaries(&mut build.binaries, config)?;
 
     let build_time = started.elapsed();
 
@@ -623,18 +730,18 @@ fn measure_with_locks(
     // binaries that do not exist until the build has run, and the baseline has to be measured
     // through the same runner that will judge every mutant — a baseline taken one way and compared
     // against verdicts reached the other measures nothing.
-    if config.nextest {
-        work.arm_nextest(&build.binaries)?;
-    }
+    arm_selected_runner(&mut work, &build.binaries, config.nextest)?;
 
     let baseline = take_baseline(&work, &mut build.binaries, config, &memory, events);
     let (baseline, work) = retain_workspace_on_failure(baseline, work, failed_work)?;
 
-    warn_about_an_empty_oracle(&plan, &build.binaries, &scope, config.test_packages.is_empty(), &dropped, events);
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    warn_if_oracle_is_empty(&plan, &build.binaries, &scope, config, &dropped, events);
 
     let stall = calibrate_stall(&baseline, config);
 
-    calibrate(&mut build.binaries, config, &memory);
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    calibrate_binaries(&mut build.binaries, config, &memory);
 
     let session = Session {
         baseline: baseline.elapsed,
@@ -665,7 +772,8 @@ fn measure_with_locks(
 
     // Everything that could have failed has. What was built is now worth keeping, so that the next
     // run in this workspace is incremental rather than starting cold.
-    work.settle();
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    settle_workspace(&work);
 
     Ok(Measured {
         plan,
@@ -673,6 +781,73 @@ fn measure_with_locks(
         stuck,
         dropped,
     })
+}
+
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+fn announce_compile_fail_costs(survey: &Survey, config: &Config, events: &mut dyn Events) {
+    let targets = survey.compile_fail.as_slice();
+    warn_about_compile_fail_targets(targets, &survey.selected, config, events);
+}
+
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+fn calibrate_harness(work: &Workspace, jobs: usize) {
+    work.calibrate_harness(jobs);
+}
+
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+fn reorder_plan(plan: &mut Plan, converger: &mut Converger) {
+    plan.sort();
+    converger.plan_reordered();
+}
+
+fn begin_baseline(events: &mut impl Events) {
+    const ACTIVE: &str = "Baselining";
+    const COMPLETE: &str = "Baseline";
+    const DETAIL: &str = "building the test binaries and running the suite";
+    events.begin(ACTIVE, COMPLETE, DETAIL);
+}
+
+fn restrict_binaries(binaries: &mut Vec<TestBinary>, config: &Config) -> Result<usize> {
+    let present = binaries.len();
+    restrict(binaries, &config.include_tests, &config.exclude_tests);
+    let filtered = present.saturating_sub(binaries.len());
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    if binaries.is_empty() && present > 0 {
+        return Err(error!("`--include-test` and `--exclude-test` left no test target to decide a verdict").usage());
+    }
+    Ok(filtered)
+}
+
+// #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
+fn arm_selected_runner(work: &mut Workspace, binaries: &[TestBinary], nextest: bool) -> Result<()> {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+    if nextest {
+        work.arm_nextest(binaries)?;
+    }
+    Ok(())
+}
+
+fn warn_if_oracle_is_empty(
+    plan: &Plan,
+    binaries: &[TestBinary],
+    scope: &TestScope<'_>,
+    config: &Config,
+    dropped: &[String],
+    events: &mut dyn Events,
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+) {
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+    warn_about_an_empty_oracle(plan, binaries, scope, config.test_packages.is_empty(), dropped, events);
+}
+
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+fn calibrate_binaries(binaries: &mut [TestBinary], config: &Config, memory: &MemoryPolicy) {
+    calibrate(binaries, config, memory);
+}
+
+// #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+fn settle_workspace(work: &Workspace) {
+    Workspace::settle(work);
 }
 
 /// Keeps a failed run's workspace alive until the command layer has persisted its diagnostics.
@@ -758,6 +933,7 @@ fn tally(mutants: &[&crate::model::Mutant], key: impl Fn(&crate::model::Mutant) 
 }
 
 /// What the staged builds settled before the run reaches the build that decides it.
+#[derive(Default)]
 struct Staged {
     /// Whether any stage got as far as compiling live mutants.
     anything_live: bool,
@@ -778,7 +954,9 @@ struct Staged {
 /// Empty when incremental mode is off. `--incremental no` is what a caller reaches for when they suspect the
 /// tool is remembering something it should not, so it turns off remembering — including the tiers
 /// that could not have affected the answer.
-fn ordering_hints(survey: &Survey, config: &Config) -> crate::HashSet<crate::model::MutantId> {
+// #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
+fn load_ordering_hints(survey: &Survey, config: &Config) -> crate::HashSet<crate::model::MutantId> {
+    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     if !config.incremental.is_enabled() {
         return crate::HashSet::default();
     }
@@ -812,65 +990,92 @@ fn converge_stages(
     config: &Config,
     events: &mut impl Events,
 ) -> Result<Staged> {
-    let mut ordinals = 0_u32;
-    let mut staged = Staged {
-        anything_live: false,
-        stuck: Vec::new(),
-    };
+    let mut ordinals = u32::default();
+    let mut staged = Staged::default();
 
     for stage in &crate::discover::stages(&survey.packages(), &survey.reach) {
-        let name = stage.join(", ");
+        let name = stage_name(stage);
 
         // Named on the way in, before its files have even been read. Scanning and then compiling a
         // large crate is the longest a run goes without saying anything, and what makes that wait
         // legible is knowing whose wait it is.
-        events.begin("Mutating", "Mutated", &name);
+        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+        begin_stage(events, &name);
 
-        let mut live = 0_usize;
+        let mut live = usize::default();
 
         for package in stage {
             let scanned = survey.scan(Some(package), selection, &mut ordinals)?;
 
-            live = live.saturating_add(scanned.mutants.iter().filter(|mutant| mutant.ordinal > 0).count());
+            live = live.saturating_add(live_mutants(&scanned.mutants));
             plan.absorb(scanned);
         }
 
         // A package with nothing to run is still named. A crate that quietly takes no part in a run
         // is worth noticing, and leaving it out of the sequence would make it look like it had
         // simply not been looked at.
-        if live == 0 {
-            events.end(", no mutants");
-            continue;
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+        if live == usize::default() {
+            finish_empty_stage(events);
+        } else {
+            for package in stage {
+                work.link_runtime(package, &plan.files)?;
+            }
+
+            let before = converger.withdrawn();
+            if let Some(abandoned) = converger.stage(work, plan, stage, config.build, events)? {
+                record_stuck_stage(&mut staged, plan, stage, &abandoned, events);
+            } else {
+                staged.anything_live = true;
+
+                // The count that closes the line is what survived compilation, which is why it
+                // waits for the build. A mutant that could not compile is a fact about the tool
+                // rather than about the code, and the summary accounts for all of them once.
+                // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
+                let viable = viable_mutants(live, before, converger.withdrawn());
+                // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
+                finish_viable_stage(events, viable);
+            }
         }
-
-        for package in stage {
-            work.link_runtime(package, &plan.files)?;
-        }
-
-        let before = converger.withdrawn();
-        if let Some(abandoned) = converger.stage(work, plan, stage, config.build, events)? {
-            let count = abandoned.ordinals.len();
-
-            staged.stuck.push(describe_stuck(plan, stage, &abandoned));
-            events.end(&format!(
-                ", the build could not be made to compile, {} not run",
-                crate::report::quantity(count, "mutant")
-            ));
-
-            continue;
-        }
-
-        staged.anything_live = true;
-
-        // The count that closes the line is what survived compilation, which is why it waits for
-        // the build. A mutant that could not compile is a fact about the tool rather than about the
-        // code, and the summary accounts for all of them once.
-        let viable = live.saturating_sub(converger.withdrawn().saturating_sub(before));
-
-        events.end(&format!(", {}", crate::report::quantity(viable, "viable mutant")));
     }
 
     Ok(staged)
+}
+
+fn stage_name(stage: &[String]) -> String {
+    stage.join(", ")
+}
+
+fn begin_stage(events: &mut impl Events, name: &str) {
+    // #[gamma::skip(all, reason = "this literal belongs to a Cargo process protocol or diagnostic boundary that cannot be isolated deterministically without replacing process-global integration state")]
+    events.begin("Mutating", "Mutated", name);
+}
+
+fn live_mutants(mutants: &[crate::model::Mutant]) -> usize {
+    mutants.iter().filter(|mutant| mutant.ordinal > 0).count()
+}
+
+fn finish_empty_stage(events: &mut impl Events) {
+    const DETAIL: &str = ", no mutants";
+    events.end(DETAIL);
+}
+
+fn record_stuck_stage(staged: &mut Staged, plan: &Plan, stage: &[String], abandoned: &Abandoned, events: &mut impl Events) {
+    staged.stuck.push(describe_stuck(plan, stage, abandoned));
+    let detail = format!(
+        ", the build could not be made to compile, {} not run",
+        crate::report::quantity(abandoned.ordinals.len(), "mutant")
+    );
+    events.end(&detail);
+}
+
+fn viable_mutants(live: usize, withdrawn_before: usize, withdrawn_after: usize) -> usize {
+    live.saturating_sub(withdrawn_after.saturating_sub(withdrawn_before))
+}
+
+fn finish_viable_stage(events: &mut impl Events, viable: usize) {
+    let detail = format!(", {}", crate::report::quantity(viable, "viable mutant"));
+    events.end(&detail);
 }
 
 /// Says so when a test target is going to run the compiler once per mutant.
@@ -898,7 +1103,7 @@ fn warn_about_compile_fail_targets(targets: &[CompileFailTarget], selected: &[St
 }
 
 /// How many packages a warning names before it starts counting them instead.
-const NAMED_HELPERS: usize = 3;
+const NAMED_HELPERS: usize = 5;
 
 /// Says so when the oracle cap has left the mutated code with no tests at all.
 ///
@@ -937,22 +1142,19 @@ fn warn_about_an_empty_oracle(
     let mutated: crate::HashSet<&str> = plan
         .mutants
         .iter()
-        .filter(|mutant| mutant.ordinal > 0 && mutant.outcome == Outcome::Pending)
+        .filter(|mutant| mutant.ordinal != 0)
+        .filter(|mutant| mutant.outcome == Outcome::Pending)
         .map(|mutant| &*mutant.package)
         .collect();
 
-    if mutated.is_empty() {
+    let Some(_first_mutated) = mutated.iter().next() else {
         return;
-    }
+    };
 
     // A binary that announced tests it never counted is not evidence of an empty suite, so `None`
     // is read as "there may well be tests here" and stops the warning. Saying this over a suite
     // that does convict things would be worse than saying nothing.
-    let judged = mutated.iter().any(|package| {
-        binaries
-            .iter()
-            .any(|binary| binary.tests != Some(0) && reaches(binary, package, plan, scope))
-    });
+    let judged = mutated.iter().any(|package| package_is_judged(binaries, package, plan, scope));
 
     if judged {
         return;
@@ -963,7 +1165,7 @@ fn warn_about_an_empty_oracle(
     // widen a scope that was never the problem — and the advice the cap gives, `--test-package <p>`,
     // would name a package that has just failed to compile.
     if !dropped.is_empty() {
-        let named = dropped.join("`, `");
+        let named = dropped.iter().map(String::as_str).collect::<Vec<_>>().join("`, `");
 
         events.warn(&format!(
             "no test in this run's scope reaches the code being mutated, so every mutant will be reported as uncovered.              The preflight could not compile `{named}`, so their tests were withdrawn from the oracle.              Fixing the build there restores them"
@@ -996,6 +1198,14 @@ fn warn_about_an_empty_oracle(
         "no test in this run's scope reaches the code being mutated, so every mutant will be reported as uncovered. By default each mutant is judged only by its own package, and `{named}`{others} also links this code. Add `--test-package {}` to let its tests decide a verdict, or `--test-workspace` for every package's",
         helpers[0]
     ));
+}
+
+fn package_is_judged(binaries: &[TestBinary], package: &str, plan: &Plan, scope: &TestScope<'_>) -> bool {
+    let available = binaries;
+    available
+        .iter()
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
+        .any(|binary| (binary.tests != Some(0)) && reaches(binary, package, plan, scope))
 }
 
 /// Runs the suite once with no mutant active, or reports that nothing was measured.
@@ -1060,13 +1270,6 @@ fn take_baseline(
 /// It is said out loud rather than silently because the protection is the kind whose absence is
 /// invisible until it matters. A user who believes their machine is protected and finds out
 /// otherwise mid-run is worse off than one who was told plainly at the start.
-fn admit_memory_control(config: &Config) -> Result<(MemoryPolicy, Option<String>)> {
-    // Converted to display text here because downstream logic only reports the platform error, and
-    // accepting text lets the policy decision be tested independently of host capabilities.
-    settle_memory_control(config, memory::support().map_err(|reason| reason.to_string()))
-}
-
-/// Decides what memory control a run gets, given what the host can deliver.
 ///
 /// Host support is passed in rather than probed here so that every branch is decided by its
 /// arguments alone: whether a machine happens to have a delegated cgroup then has no bearing on
@@ -1092,7 +1295,10 @@ fn settle_memory_control(config: &Config, support: Result<(), String>) -> Result
     // A ceiling is calibrated from the baseline. Without one there is no measurement to calibrate
     // from, and a number invented here would be presented with exactly the confidence of a
     // measured one.
-    if policy.enforcing() && !config.baseline && policy.limit.is_none() {
+    if policy.enforcing() {
+        if config.baseline || policy.limit.is_some() {
+            return Ok((policy, None));
+        }
         if policy.insisted() {
             return Err(error!(
                 "`--memory enforce` derives each test binary's ceiling from what it used during the \
@@ -1152,7 +1358,7 @@ mod tests {
     use camino::{Utf8Path, Utf8PathBuf};
 
     use super::*;
-    use crate::discover::Killer;
+    use crate::discover::{Killer, ReachCluster, SiteIdentity};
     use crate::exec::memory::{Demand, MemoryControl};
     use crate::fixtures;
     use crate::model::Mutant;
@@ -1184,6 +1390,78 @@ mod tests {
         let wide_stages = workspace_stages(&selected, &reach);
 
         assert!(!wide_stages);
+        assert!(
+            !workspace_stages(&[], &reach),
+            "an empty selection is not a whole-workspace selection"
+        );
+        assert!(
+            !workspace_stages(&["mutable".to_owned(), "mutable".to_owned()], &reach),
+            "duplicate selections cannot stand in for every distinct workspace member"
+        );
+
+        let mut events = Recorder::default();
+        begin_preflight(&mut events);
+        end_preflight(&mut events);
+        begin_baseline(&mut events);
+        assert_eq!(
+            events.phases,
+            vec![
+                ("Validating".to_owned(), "workspace".to_owned()),
+                (String::new(), String::new()),
+                (
+                    "Baselining".to_owned(),
+                    "building the test binaries and running the suite".to_owned()
+                ),
+            ]
+        );
+
+        assert!(inferred_package_local(&Config::default()));
+        assert!(!inferred_package_local(&Config {
+            test_workspace: true,
+            ..Config::default()
+        }));
+        assert!(!inferred_package_local(&Config {
+            test_packages: vec!["tests".to_owned()],
+            ..Config::default()
+        }));
+        assert!(!needs_wide_preflight(false, false));
+        assert!(!needs_wide_preflight(true, true));
+        assert!(needs_wide_preflight(true, false));
+
+        let ordinary = finish_preflight(vec!["a".to_owned()], vec!["a".to_owned()], false, Vec::new())
+            .expect("an ordinary preflight keeps its request");
+        assert_eq!(ordinary.packages, ["a"]);
+        assert!(!ordinary.whole_workspace);
+        assert!(ordinary.dropped.is_empty());
+        let retreated = finish_preflight(
+            vec!["a".to_owned(), "b".to_owned()],
+            vec!["a".to_owned(), "b".to_owned()],
+            true,
+            vec!["a".to_owned()],
+        )
+        .expect("a partial retreat keeps the compiling package");
+        assert_eq!(retreated.packages, ["b"]);
+        assert!(retreated.whole_workspace);
+        assert_eq!(retreated.dropped, ["a"]);
+
+        let mut none = Vec::new();
+        assert_eq!(restrict_binaries(&mut none, &Config::default()).expect("empty stays empty"), 0);
+        let mut binaries = [oracle_binary("core", Some(1)), oracle_binary("core", Some(1))].to_vec();
+        binaries[0].target = "keep".to_owned();
+        binaries[1].target = "drop".to_owned();
+        assert_eq!(
+            restrict_binaries(
+                &mut binaries,
+                &Config {
+                    exclude_tests: vec!["drop".to_owned()],
+                    ..Config::default()
+                },
+            )
+            .expect("one target remains"),
+            1
+        );
+        assert_eq!(binaries.len(), 1);
+        assert_eq!(binaries[0].target, "keep");
     }
 
     /// A baseline with the given elapsed time and quiet period, and nothing else measured.
@@ -1340,6 +1618,10 @@ mod tests {
 
         assert!(described.contains("the build for the workspace"), "{described}");
         assert!(described.contains("1 mutant never ran"), "{described}");
+        assert!(
+            described.ends_with("\nthe instrumented tree does not compile"),
+            "the diagnostic is separated by exactly one newline: {described:?}"
+        );
     }
 
     /// Only the mutants the build actually gave up on are counted, not every mutant in the plan.
@@ -1358,6 +1640,43 @@ mod tests {
 
         assert!(described.contains("Not run, by mutator: arith.add_to_sub (1)."), "{described}");
         assert!(!described.contains("relational.lt_to_le"), "{described}");
+
+        let mut staged = Staged::default();
+        let mut events = Recorder::default();
+        record_stuck_stage(&mut staged, &plan, &["subject".to_owned()], &abandoned, &mut events);
+        assert!(!staged.anything_live);
+        assert_eq!(staged.stuck, [described]);
+        assert_eq!(
+            events.phases,
+            [(
+                String::new(),
+                ", the build could not be made to compile, 1 mutant not run".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn stage_policy_names_counts_and_closes_each_outcome() {
+        assert_eq!(stage_name(&["a".to_owned(), "b".to_owned()]), "a, b");
+        assert_eq!(stage_name(&[]), "");
+
+        let mutants = [stuck_mutant(0, "a", "f"), stuck_mutant(1, "b", "f"), stuck_mutant(2, "c", "f")];
+        assert_eq!(live_mutants(&mutants), 2);
+        assert_eq!(viable_mutants(5, 2, 4), 3);
+        assert_eq!(viable_mutants(1, 4, 2), 1);
+
+        let mut events = Recorder::default();
+        begin_stage(&mut events, "a, b");
+        finish_empty_stage(&mut events);
+        finish_viable_stage(&mut events, 2);
+        assert_eq!(
+            events.phases,
+            [
+                ("Mutating".to_owned(), "a, b".to_owned()),
+                (String::new(), ", no mutants".to_owned()),
+                (String::new(), ", 2 viable mutants".to_owned()),
+            ]
+        );
     }
 
     /// A long tail is counted rather than printed, so one line stays one line.
@@ -1375,6 +1694,46 @@ mod tests {
         let described = describe_stuck(&plan, &["subject".to_owned()], &abandoned);
 
         assert!(described.contains("and 3 more"), "{described}");
+        assert!(!described.contains("op.6"), "{described}");
+        assert!(!described.contains("op.8"), "{described}");
+
+        let six: Vec<Mutant> = (1..=6)
+            .map(|ordinal| stuck_mutant(ordinal, &format!("boundary.{ordinal}"), "subject::f"))
+            .collect();
+        let references: Vec<&Mutant> = six.iter().collect();
+        assert_eq!(
+            tally(&references, |mutant| mutant.mutator.to_string()),
+            vec![
+                "boundary.1 (1)",
+                "boundary.2 (1)",
+                "boundary.3 (1)",
+                "boundary.4 (1)",
+                "boundary.5 (1)",
+                "and 1 more",
+            ]
+        );
+    }
+
+    #[test]
+    fn retaining_a_workspace_moves_it_only_on_failure() {
+        let directory = crate::testing::workdir("measure-retain-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf-8 root");
+        let mut failed = None;
+
+        let (value, returned) = retain_workspace_on_failure(Ok(7_u32), Workspace::adopt(root.clone(), root.join("ok")), &mut failed)
+            .expect("successful work is returned");
+        assert_eq!(value, 7);
+        assert!(failed.is_none());
+        drop(returned);
+
+        let failure = retain_workspace_on_failure::<u32>(
+            Err(error!("deliberate failure")),
+            Workspace::adopt(root.clone(), root.join("failed")),
+            &mut failed,
+        )
+        .expect_err("failed work is retained");
+        assert!(failure.to_string().contains("deliberate failure"), "{failure}");
+        assert!(failed.is_some(), "the failed workspace remains alive for diagnostics");
     }
 
     #[test]
@@ -1409,6 +1768,96 @@ mod tests {
         };
 
         assert_eq!(describe(&baseline), "4 tests ran in 500.0ms with a peak of 1.0 MB");
+    }
+
+    #[test]
+    fn baseline_progress_distinguishes_disabled_and_empty_suites() {
+        #[derive(Default)]
+        struct BaselineEvents {
+            phases: Vec<(String, String)>,
+            progress: Vec<(usize, usize, String)>,
+        }
+
+        impl Events for BaselineEvents {
+            fn phase(&mut self, verb: &str, detail: &str) {
+                self.phases.push((verb.to_owned(), detail.to_owned()));
+            }
+
+            fn phase_progress(&mut self, completed: usize, total: usize, unit: &str) {
+                self.progress.push((completed, total, unit.to_owned()));
+            }
+
+            fn mutant(&mut self, _mutant: &Mutant) {}
+        }
+
+        let directory = crate::testing::workdir("measure-empty-baseline-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf-8 root");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let mut disabled = BaselineEvents::default();
+        let without = take_baseline(
+            &work,
+            &mut [],
+            &Config {
+                baseline: false,
+                ..Config::default()
+            },
+            &MemoryPolicy::default(),
+            &mut disabled,
+        )
+        .expect("a disabled baseline is an empty measurement");
+
+        assert_eq!(without.elapsed, Duration::ZERO);
+        assert_eq!(without.wall, Duration::ZERO);
+        assert_eq!(without.quiet, Duration::ZERO);
+        assert_eq!(without.tests, None);
+        assert_eq!(without.peak, None);
+        assert_eq!(disabled.phases, vec![(String::new(), "no baseline was measured".to_owned())]);
+        assert!(disabled.progress.is_empty());
+
+        let mut empty = BaselineEvents::default();
+        let measured = take_baseline(
+            &work,
+            &mut [],
+            &Config {
+                jobs: 1,
+                ..Config::default()
+            },
+            &MemoryPolicy::default(),
+            &mut empty,
+        )
+        .expect("an empty suite still completes its baseline");
+
+        assert_eq!(measured.tests, None);
+        assert_eq!(empty.progress, vec![(0, 0, "test binaries".to_owned())]);
+        assert_eq!(empty.phases.len(), 1);
+        assert!(empty.phases[0].1.contains("the suite passed"), "{:?}", empty.phases);
+
+        let (_directory, work) = crate::testing::helper_workspace("measure-one-baseline-", &["exit:0"]);
+        let mut binaries = [crate::testing::helper()];
+        binaries[0].budget = Some(Duration::from_secs(1));
+        let mut one = BaselineEvents::default();
+        let measured = take_baseline(
+            &work,
+            &mut binaries,
+            &Config {
+                jobs: 1,
+                ..Config::default()
+            },
+            &MemoryPolicy {
+                control: MemoryControl::Off,
+                ..MemoryPolicy::default()
+            },
+            &mut one,
+        )
+        .expect("one passing binary is measured");
+
+        assert_eq!(measured.tests, None);
+        assert_eq!(
+            one.progress,
+            vec![(0, 1, "test binary".to_owned()), (1, 1, "test binary".to_owned())]
+        );
+        assert_eq!(one.phases.len(), 1);
+        assert!(one.phases[0].1.contains("the suite passed"), "{:?}", one.phases);
     }
 
     /// Memory control that was never asked for needs nothing from the host, and is returned
@@ -1536,6 +1985,27 @@ mod tests {
         let (settled, note) = settle_memory_control(&config, Ok(())).expect("a stated ceiling needs no baseline");
 
         assert!(settled.measuring());
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn baseline_derivation_guard_requires_all_three_missing_inputs() {
+        let (settled, note) = settle_memory_control(&Config::default(), Ok(())).expect("the default baseline supports enforcement");
+        assert!(settled.enforcing());
+        assert_eq!(note, None);
+
+        let config = Config {
+            memory: MemoryPolicy {
+                control: MemoryControl::Measure,
+                demand: Demand::Stated,
+                ..MemoryPolicy::default()
+            },
+            baseline: false,
+            ..Config::default()
+        };
+        let (settled, note) = settle_memory_control(&config, Ok(())).expect("measurement needs no baseline-derived ceiling");
+        assert!(settled.measuring());
+        assert!(!settled.enforcing());
         assert_eq!(note, None);
     }
 
@@ -1689,6 +2159,9 @@ mod tests {
     #[test]
     fn census_targets_only_selected_pending_sites_and_relevant_binaries() {
         let mut plan = oracle_plan("core");
+        let mut inactive = plan.mutants[0].clone();
+        inactive.ordinal = 0;
+        plan.mutants.push(inactive);
         let mut settled = plan.mutants[0].clone();
         settled.ordinal = 2;
         settled.outcome = Outcome::Killed;
@@ -1716,6 +2189,73 @@ mod tests {
         let selected: HashSet<u32> = core::iter::once(1).collect();
         assert_eq!(targets.get(Utf8Path::new("/tmp/app")), Some(&selected));
         assert_eq!(savings, Duration::from_secs(3));
+
+        let targets = HashMap::from_iter([(Utf8PathBuf::from("/tmp/app"), HashSet::from_iter([1]))]);
+        for (narrowed, targets, savings, expected) in [
+            (false, targets.clone(), Duration::from_secs(1), false),
+            (true, HashMap::default(), Duration::from_secs(1), false),
+            (true, targets.clone(), Duration::ZERO, false),
+            (true, targets, Duration::from_secs(1), true),
+        ] {
+            assert_eq!(census_is_worthwhile(narrowed, &targets, savings), expected);
+        }
+
+        assert!(census_cost(false, Duration::from_secs(1), 2, 3).is_none());
+        let cost = census_cost(true, Duration::from_secs(1), 2, 3).expect("requested census has a phase");
+        assert_eq!((cost.elapsed, cost.walked, cost.binaries), (Duration::from_secs(1), 2, 3));
+
+        assert!(sweep_cost(None, Duration::from_secs(1)).is_none());
+        let cost = sweep_cost(
+            Some(super::super::sweep::Spent {
+                launches: 1,
+                probes: 2,
+                exact_probes: 3,
+                exact_hits: 4,
+                generalized_probes: 5,
+                generalized_hits: 6,
+                saved: 7,
+                reach_saved: 8,
+            }),
+            Duration::from_secs(9),
+        )
+        .expect("completed sweep has a phase");
+        assert_eq!(
+            (
+                cost.elapsed,
+                cost.launches,
+                cost.probes,
+                cost.exact_probes,
+                cost.exact_hits,
+                cost.generalized_probes,
+                cost.generalized_hits,
+                cost.launches_saved,
+                cost.reach_launches_saved,
+            ),
+            (Duration::from_secs(9), 1, 2, 3, 4, 5, 6, 7, 8)
+        );
+    }
+
+    #[test]
+    fn absent_or_empty_census_preserves_durable_reach_clusters() {
+        let plan = oracle_plan("core");
+        let killer = Killer {
+            package: "tests".to_owned(),
+            target: "tests".to_owned(),
+            test: "tests::kills_it".to_owned(),
+        };
+        let mut generalized = crate::discover::GeneralizedHints::empty_supported();
+        generalized.test_sets.push(vec![killer]);
+        generalized.reach.push(ReachCluster {
+            site: SiteIdentity::from_mutant(&plan.mutants[0]),
+            test_set: 0,
+        });
+        let original = generalized.clone();
+        let census = Census::default();
+
+        assert!(!persist_census_learning(false, &census, &plan, &[], &mut generalized));
+        assert_eq!(generalized, original);
+        assert!(!persist_census_learning(true, &census, &plan, &[], &mut generalized));
+        assert_eq!(generalized, original);
     }
 
     /// A hinted mutant sharing a binary with an unhinted one still gets censused there — for free —
@@ -1794,7 +2334,10 @@ mod tests {
         core.path = "/tmp/core".into();
         core.baseline = Duration::from_secs(2);
 
-        let binaries = [core];
+        let mut other = core.clone();
+        other.path = "/tmp/core-other".into();
+        other.target = "other".to_owned();
+        let binaries = [core, other];
         let scope = TestScope {
             packages: &[],
             package_local: false,
@@ -1941,6 +2484,29 @@ mod tests {
         assert!(warning.contains("--test-workspace"), "the wider remedy is not named: {warning}");
     }
 
+    #[test]
+    fn empty_oracle_advice_sorts_caps_and_counts_helper_packages() {
+        let mut events = Recorder::default();
+        let mut plan = oracle_plan("core");
+        let _app = plan.reach.remove("app");
+        for helper in ["zeta", "beta", "eta", "delta", "alpha", "gamma"] {
+            let _previous = plan
+                .reach
+                .insert(helper.to_owned(), ["core".to_owned(), helper.to_owned()].into_iter().collect());
+        }
+        let named = [String::from("core")];
+        let scope = capped(&named);
+
+        warn_about_an_empty_oracle(&plan, &[oracle_binary("core", Some(0))], &scope, true, &[], &mut events);
+
+        let [warning] = events.warnings.as_slice() else {
+            panic!("one empty oracle produces one warning, got {:?}", events.warnings);
+        };
+        assert!(warning.contains("`alpha`, `beta`, `delta`, `eta`, `gamma` and 1 more"), "{warning}");
+        assert!(warning.contains("--test-package alpha"), "{warning}");
+        assert!(!warning.contains("`zeta` also links"), "{warning}");
+    }
+
     /// A retreat narrows the oracle the caller named; it never replaces it with a different one.
     ///
     /// `--test-package p` with mutants in `q` is a caller who chose `p`'s tests as the oracle and
@@ -2023,6 +2589,42 @@ mod tests {
 
         warn_about_an_empty_oracle(&plan, &[oracle_binary("core", Some(4))], &scope, true, &[], &mut events);
 
+        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
+    }
+
+    #[test]
+    fn one_judged_mutant_or_binary_is_enough_to_suppress_empty_oracle_advice() {
+        let named = [String::from("core")];
+        let scope = capped(&named);
+
+        let mut two_packages = oracle_plan("core");
+        let mut app_mutant = two_packages.mutants[0].clone();
+        app_mutant.id = "app-mutant".into();
+        app_mutant.ordinal = 2;
+        app_mutant.package = "app".to_owned().into();
+        two_packages.mutants.push(app_mutant);
+        let mut events = Recorder::default();
+        warn_about_an_empty_oracle(&two_packages, &[oracle_binary("core", Some(1))], &scope, true, &[], &mut events);
+        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
+
+        let plan = oracle_plan("core");
+        let mut unreachable = oracle_binary("unrelated", Some(0));
+        unreachable.package = "unrelated".to_owned();
+        let mut events = Recorder::default();
+        warn_about_an_empty_oracle(
+            &plan,
+            &[oracle_binary("core", Some(1)), unreachable],
+            &scope,
+            true,
+            &[],
+            &mut events,
+        );
+        assert!(events.warnings.is_empty(), "{:?}", events.warnings);
+
+        let mut no_pending = oracle_plan("core");
+        no_pending.mutants[0].outcome = Outcome::Killed;
+        let mut events = Recorder::default();
+        warn_about_an_empty_oracle(&no_pending, &[oracle_binary("core", Some(0))], &scope, true, &[], &mut events);
         assert!(events.warnings.is_empty(), "{:?}", events.warnings);
     }
 

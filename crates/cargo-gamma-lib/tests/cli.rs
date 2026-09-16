@@ -8,9 +8,7 @@
 use std::fs;
 
 use camino::Utf8PathBuf;
-use cargo_gamma_lib::internals::exec::gamma_base;
-use cargo_gamma_lib::run;
-use cargo_gamma_lib::testing::Sink;
+use cargo_gamma_lib::testing::{Sink, gamma_base, run};
 use tempfile::TempDir;
 
 /// Exit code for a run in which every gate passed.
@@ -56,7 +54,7 @@ fn runtime_stub(root: &std::path::Path) {
 fn scratch_base(dir: &TempDir) -> Utf8PathBuf {
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
 
-    gamma_base(&root, None)
+    gamma_base(&root)
 }
 
 /// Reproduces the cache-owner marker validated by `exec::workspace`.
@@ -404,13 +402,28 @@ fn clean_deletes_only_the_current_workspaces_cached_data() {
 #[test]
 fn a_measured_run_journals_every_testing_verdict_in_the_cache_directory() {
     let dir = workspace(SUBJECT);
+    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
+    let production = cargo_gamma_lib::testing::production_gamma_base(&root);
+
+    assert!(
+        !production.exists(),
+        "the fixture started with a production-cache entry at `{production}`"
+    );
+
     let (code, host) = invoke(&dir, &["run", "--whole-test-binaries", "--jobs", "1"]);
 
     assert_eq!(code, EXIT_OK, "{}", host.err());
 
-    let path = scratch_base(&dir).join("gamma-progress.log");
+    let base = scratch_base(&dir);
+    let path = base.join("gamma-progress.log");
     let text = fs::read_to_string(&path).unwrap_or_else(|cause| panic!("could not read `{path}`: {cause}"));
 
+    assert!(base.starts_with(&root), "the test cache escaped its workspace: `{base}`");
+    assert!(base.join(".cargo-gamma-owner").exists(), "the private cache was not claimed");
+    assert!(
+        !production.exists(),
+        "the run wrote into the user's production cache at `{production}`"
+    );
     assert!(text.contains("killed"), "{text}");
     assert!(text.contains("SURVIVED"), "{text}");
     assert!(!text.contains('\x1b'), "the log contains terminal escapes: {text:?}");
