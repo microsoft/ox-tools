@@ -73,7 +73,7 @@ impl DoctestEvidence {
 /// Returns an error when rustc cannot be launched or the capture file cannot be
 /// written.
 pub fn shim(args: &[OsString], capture: &Path) -> Result<ExitCode> {
-    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+    let rustc = tool_or_default(std::env::var_os("RUSTC"), "rustc");
     let output = Command::new(&rustc)
         .args(args)
         .arg("-W")
@@ -119,10 +119,10 @@ fn record(capture: &Path, stderr: &str) -> Result<()> {
         .create(true)
         .append(true)
         .open(capture)
-        .with_context(|| format!("failed to open the doctest capture file {}", capture.display()))?;
+        .context(format!("failed to open the doctest capture file {}", capture.display()))?;
 
     file.write_all(lines.as_bytes())
-        .with_context(|| format!("failed to write the doctest capture file {}", capture.display()))
+        .context(format!("failed to write the doctest capture file {}", capture.display()))
 }
 
 /// The dependency named by one output line from rustc, if it is the lint.
@@ -149,17 +149,16 @@ fn unused_name(line: &str) -> Option<String> {
 /// Returns an error when cargo cannot be launched, the doctest build fails, or
 /// the capture file cannot be read.
 pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, shim_path: &Path) -> Result<PackageDoctests> {
-    std::fs::create_dir_all(target_dir).with_context(|| format!("failed to create {}", target_dir.display()))?;
+    std::fs::create_dir_all(target_dir).context(format!("failed to create {}", target_dir.display()))?;
 
     let capture = target_dir.join(format!("doctests-{package}.tsv"));
-    if capture.exists() {
-        std::fs::remove_file(&capture).with_context(|| format!("failed to clear {}", capture.display()))?;
-    }
+    clear_capture(&capture)?;
 
     let mut rustdocflags = OsString::from("-Z unstable-options --no-run --test-builder ");
     rustdocflags.push(shim_path);
 
-    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")))
+    let cargo = tool_or_default(std::env::var_os("CARGO"), "cargo");
+    let output = Command::new(cargo)
         .arg("test")
         .arg("--doc")
         .arg("--manifest-path")
@@ -184,6 +183,19 @@ pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, sh
     read_captures(&capture)
 }
 
+/// Use an environment-selected tool or its conventional executable name.
+fn tool_or_default(selected: Option<OsString>, default: &str) -> OsString {
+    selected.unwrap_or_else(|| OsString::from(default))
+}
+
+/// Remove stale captures from an earlier run.
+fn clear_capture(capture: &Path) -> Result<()> {
+    if capture.exists() {
+        std::fs::remove_file(capture).context(format!("failed to clear {}", capture.display()))?;
+    }
+    Ok(())
+}
+
 /// Read the capture file the shim wrote for one package.
 fn read_captures(capture: &Path) -> Result<PackageDoctests> {
     let mut doctests = PackageDoctests::default();
@@ -191,7 +203,7 @@ fn read_captures(capture: &Path) -> Result<PackageDoctests> {
         return Ok(doctests);
     }
 
-    let text = std::fs::read_to_string(capture).with_context(|| format!("failed to read {}", capture.display()))?;
+    let text = std::fs::read_to_string(capture).context(format!("failed to read {}", capture.display()))?;
     for line in text.lines() {
         match line.strip_prefix('\t') {
             Some(name) => {
@@ -202,4 +214,92 @@ fn read_captures(capture: &Path) -> Result<PackageDoctests> {
     }
 
     Ok(doctests)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::{DoctestEvidence, PackageDoctests, clear_capture, read_captures, record, tool_or_default, unused_name};
+
+    #[test]
+    fn lint_diagnostics_yield_normalized_dependency_names() {
+        assert_eq!(unused_name("warning: extern crate `my-dep` is unused"), Some("my_dep".to_owned()));
+        assert_eq!(unused_name("error: extern crate `broken` is unused"), Some("broken".to_owned()));
+        assert_eq!(unused_name("warning: something else"), None);
+        assert_eq!(unused_name("warning: extern crate without backticks"), None);
+    }
+
+    #[test]
+    fn captures_count_each_compilation_and_report() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path().join("capture.tsv");
+
+        record(
+            &path,
+            "warning: extern crate `unused` is unused\nwarning: extern crate `also-unused` is unused",
+        )
+        .expect("first capture is recorded");
+        record(&path, "warning: extern crate `unused` is unused").expect("second capture is recorded");
+
+        let captures = read_captures(&path).expect("captures are readable");
+        assert_eq!(captures.compiled, 2);
+        assert_eq!(captures.reports.get("unused"), Some(&2));
+        assert_eq!(captures.reports.get("also_unused"), Some(&1));
+    }
+
+    #[test]
+    fn a_missing_capture_is_empty() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let captures = read_captures(&dir.path().join("missing.tsv")).expect("a missing capture is valid");
+
+        assert_eq!(captures.compiled, 0);
+        assert!(captures.reports.is_empty());
+    }
+
+    #[test]
+    fn stale_captures_are_cleared() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path().join("capture.tsv");
+        fs::write(&path, "stale").expect("failed to seed capture");
+
+        clear_capture(&path).expect("capture is cleared");
+        assert!(!path.exists());
+        clear_capture(&path).expect("an absent capture is already clear");
+    }
+
+    #[test]
+    fn tool_selection_honors_an_override_and_has_a_default() {
+        assert_eq!(tool_or_default(Some("custom".into()), "rustc"), "custom");
+        assert_eq!(tool_or_default(None, "rustc"), "rustc");
+    }
+
+    #[test]
+    fn doctest_use_requires_fewer_reports_than_compilations() {
+        let mut evidence = DoctestEvidence::default();
+        evidence.insert(
+            "fixture".to_owned(),
+            PackageDoctests {
+                compiled: 2,
+                reports: [("sometimes".to_owned(), 1), ("never".to_owned(), 2)].into_iter().collect(),
+            },
+        );
+
+        assert!(evidence.used("fixture", "sometimes"));
+        assert!(!evidence.used("fixture", "never"));
+        assert!(!evidence.used("missing", "sometimes"));
+    }
+
+    #[test]
+    fn malformed_capture_text_is_still_counted_conservatively() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path().join("capture.tsv");
+        fs::write(&path, "compiled\n\tunused\n").expect("failed to seed capture");
+
+        let captures = read_captures(&path).expect("capture is readable");
+        assert_eq!(captures.compiled, 1);
+        assert_eq!(captures.reports.get("unused"), Some(&1));
+    }
 }

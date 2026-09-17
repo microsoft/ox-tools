@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! A cargo sub-command that finds unused dependencies.
+//! A Cargo subcommand that finds unused dependencies.
 #![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-unused-deps/logo.png")]
 #![doc(
     html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-unused-deps/favicon.ico"
@@ -26,15 +26,16 @@
 //!
 //! # Requirements
 //!
-//! A nightly toolchain, because compiling doctests without running them is
-//! unstable. Run it as `cargo +nightly unused-deps`.
+//! Package-level checks require a nightly toolchain because compiling doctests
+//! without running them is unstable. The catalog-only invocation with no package
+//! selector is manifest-only and runs on stable.
 //!
 //! # Usage
 //!
-//! Run in a Cargo workspace:
+//! Run every check across a Cargo workspace:
 //!
 //! ```bash
-//! cargo +nightly unused-deps
+//! cargo +nightly unused-deps --workspace
 //! ```
 //!
 //! Restrict the compiled evidence the way cargo does, which is what lets an
@@ -44,10 +45,10 @@
 //! cargo +nightly unused-deps --package my-crate --package other-crate
 //! ```
 //!
-//! Run one check only:
+//! Run only the workspace-global catalog check by omitting package selection:
 //!
 //! ```bash
-//! cargo +nightly unused-deps --check catalog
+//! cargo unused-deps
 //! ```
 //!
 //! Remove the catalog entries nobody inherits:
@@ -63,7 +64,8 @@
 //!
 //! Package selection scopes the compiled evidence only. The catalog check always
 //! reads every member, because "no member inherits this entry" is only true if
-//! every member was consulted.
+//! every member was consulted. With no `--package` or `--workspace`, no package
+//! is compiled and only that catalog check runs.
 //!
 //! # Configuration
 //!
@@ -150,7 +152,7 @@ const CLAP_STYLES: Styles = Styles::styled()
     .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
     .placeholder(AnsiColor::Cyan.on_default());
 
-/// Cargo subcommand to ensure every workspace dependency is inherited.
+/// Cargo subcommand to find unused and misplaced dependencies.
 #[derive(Parser, Debug)]
 #[command(bin_name = "cargo", version, about, author)]
 #[command(styles = CLAP_STYLES)]
@@ -202,7 +204,7 @@ enum Commands {
 
 /// The checks a run can perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum Check {
+enum Check {
     /// Declared dependencies no unit loaded.
     Unused,
 
@@ -231,6 +233,11 @@ impl Check {
 /// # Errors
 ///
 /// Returns whatever the selected mode returns.
+//
+// The shim branch runs in rustdoc's child process. Its behavior is covered by
+// the doctest integration cases, but that child does not contribute a profile
+// to the parent coverage run.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn dispatch(args: &[OsString]) -> Result<ExitCode> {
     if let Some(capture) = std::env::var_os(doctests::CAPTURE_VAR) {
         let subcommand = args.get(1).map(OsString::as_os_str);
@@ -341,9 +348,14 @@ fn source_checks(manifest_path: &Path, selection: &[OsString], checks: &[Check])
         .collect();
 
     if wanted.is_empty() {
+        let selected = workspace
+            .packages
+            .iter()
+            .filter(|package| all.saw_package(&package.manifest_path))
+            .count();
         println!(
-            "✅ Every declared dependency in {} packages is used where it is declared.",
-            workspace.packages.len()
+            "✅ Every declared dependency in {selected} {} is used where it is declared.",
+            if selected == 1 { "package" } else { "packages" }
         );
         return Ok(false);
     }
@@ -517,8 +529,7 @@ fn write_back(manifest_path: &Path, original: &str, member_inputs: &[ManifestInp
     );
 
     for input in member_inputs {
-        let current =
-            fs::read_to_string(&input.path).with_context(|| format!("failed to re-read {} before writing", input.path.display()))?;
+        let current = fs::read_to_string(&input.path).context(format!("failed to re-read {} before writing", input.path.display()))?;
         ensure!(
             current == input.contents,
             "{} changed on disk while the check was running; not writing",
@@ -550,7 +561,7 @@ fn members_of(manifest_path: &Path) -> Result<Vec<PathBuf>> {
         .manifest_path(manifest_path)
         .no_deps()
         .exec()
-        .with_context(|| format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
+        .context(format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
 
     Ok(metadata
         .workspace_packages()
@@ -599,7 +610,7 @@ fn workspace_of(manifest_path: &Path) -> Result<Workspace> {
         .manifest_path(manifest_path)
         .no_deps()
         .exec()
-        .with_context(|| format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
+        .context(format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
 
     let mut packages = Vec::new();
     for package in metadata.workspace_packages() {

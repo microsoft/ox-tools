@@ -1,13 +1,12 @@
 # cargo-unused-deps — Design
 
-> Status: **Implemented, except where noted below.**
+> Status: **Implemented.**
 > Crate name: `cargo-unused-deps`.
 > Home: `github.com/microsoft/ox-tools`, published to crates.io.
 >
 > Built: the catalog check with `--fix`, the unused and misplaced checks from
 > compile evidence, doctest evidence through the shim, package selection, and the
-> allow-list. Not yet built: the optional/feature check (question 5) and `--fix`
-> for a misplaced dependency; both are reported as designed but unimplemented.
+> allow-list. Removing or moving package declarations remains deliberately manual.
 
 ## 1. Problem
 
@@ -377,8 +376,8 @@ That leaves the honest summary of the composition:
 
 ## 4. Questions answered
 
-The tool answers six questions over one model of the workspace. Two are manifest-only;
-the rest need compile evidence.
+The tool answers five questions over one model of the workspace. The catalog question
+is manifest-only; the rest need compile evidence.
 
 | # | Question | Evidence | Covered today by |
 |---|----------|----------|------------------|
@@ -386,15 +385,14 @@ the rest need compile evidence.
 | 2 | Is a declared dependency used by its crate at all? | compile | udeps |
 | 3 | Is a `[dependencies]` entry used only by tests, benches or examples? | compile (unit kind) | udeps' two-pass trick |
 | 4 | Is a `[dev-dependencies]` entry unused, doctests included? | compile (`--all-targets` + doctest shim) | udeps' second pass, minus doctests |
-| 5 | Is an `optional` dependency enabled by no feature, or named only in `[features]`? | manifest | nothing |
-| 6 | Is a dependency declared more broadly than the build ever uses it? | compile (absence) | nothing |
+| 5 | Is a dependency declared more broadly than the build ever uses it? | compile (absence) | nothing |
 
 Question 3 is the clearest simplification. Elsewhere it is inferred from the
 *difference* between two whole udeps runs — an encoding so indirect that the invoking
-recipe carries a paragraph explaining it. With per-unit evidence the tool knows which
-unit kind consumed a dependency, so it answers directly, in one pass.
+recipe carries a paragraph explaining it. This tool compares target-level counters from
+the default-target and all-target passes and reports the declaration directly.
 
-Question 6 is question 2's finding phrased usefully: rather than "unused", the report
+Question 5 is question 2's finding phrased usefully: rather than "unused", the report
 names the declarations Cargo offers — a target table, an optional dependency, a
 dev-dependency — and lets the author pick. It does not guess which `cfg` gates the
 code, and it is not a separate check.
@@ -414,11 +412,11 @@ safe:
 So the expensive half scopes to whatever packages the caller selected, and the cheap
 half always reads the whole workspace.
 
-One pass, four phases, no branching on toolchain or evidence availability.
+One invocation has four phases, with no alternate static-analysis path.
 
 **1. Read the workspace.** `cargo metadata --no-deps` for the member set and each
 member's declared dependencies by section; the root manifest for the catalog and the
-allow-lists. This phase alone answers questions 1 and 5, and it always reads *every*
+allow-lists. This phase alone answers question 1, and it always reads *every*
 member regardless of package selection — see below.
 
 **2. Gather compile evidence.** Twice — once over default targets, once over
@@ -564,6 +562,10 @@ when no package selector is supplied. Package selection applies only to compile
 evidence. This gives impact-scoped callers a safe zero-selection representation:
 invoke the tool with no selector to check the global catalog without compiling any
 package. An ordinary full-workspace run is explicit as `--workspace`.
+
+Package-level checks require nightly because collecting doctest evidence uses
+rustdoc's unstable `--no-run` and `--test-builder` options. A selector-free
+catalog-only invocation is manifest-only and runs on stable.
 
 ### Manifests without a `[workspace]` table
 

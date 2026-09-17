@@ -190,7 +190,12 @@ pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, a
 
 /// The cargo to invoke, honoring the one cargo set for us.
 fn cargo() -> OsString {
-    std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
+    cargo_or_default(std::env::var_os("CARGO"))
+}
+
+/// Use Cargo selected by the environment or its conventional executable name.
+fn cargo_or_default(selected: Option<OsString>) -> OsString {
+    selected.unwrap_or_else(|| OsString::from("cargo"))
 }
 
 /// `RUSTFLAGS` for the child build, preserving any the caller set.
@@ -262,4 +267,77 @@ fn reported_name(message: &serde_json::Value) -> Option<String> {
     let (name, _) = after.split_once('`')?;
 
     Some(name.replace('-', "_"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{Evidence, Scope, TargetKind, cargo_or_default, parse, reported_name};
+
+    #[test]
+    fn target_kinds_are_classified_explicitly() {
+        assert_eq!(TargetKind::classify("custom-build"), Some(TargetKind::Build));
+        assert_eq!(TargetKind::classify("test"), Some(TargetKind::Development));
+        assert_eq!(TargetKind::classify("lib"), Some(TargetKind::Code));
+        assert_eq!(TargetKind::classify("unknown"), None);
+    }
+
+    #[test]
+    fn cargo_selection_honors_an_override_and_has_a_default() {
+        assert_eq!(cargo_or_default(Some("custom".into())), "custom");
+        assert_eq!(cargo_or_default(None), "cargo");
+    }
+
+    #[test]
+    fn parser_rejects_malformed_json_messages() {
+        parse("{not json").expect_err("malformed JSON must be rejected");
+    }
+
+    #[test]
+    fn parser_ignores_non_messages_and_unknown_targets() {
+        let evidence = parse(
+            "not json\n\
+             {\"reason\":\"compiler-artifact\",\"manifest_path\":\"Cargo.toml\",\
+             \"target\":{\"kind\":[\"unknown\"],\"name\":\"fixture\"}}\n\
+             {\"reason\":\"build-script-executed\",\"manifest_path\":\"Cargo.toml\",\
+             \"target\":{\"kind\":[\"lib\"],\"name\":\"fixture\"}}\n",
+        )
+        .expect("unknown target kinds are ignored");
+
+        assert!(!evidence.saw_package(Path::new("Cargo.toml")));
+    }
+
+    #[test]
+    fn parser_counts_units_and_matching_lint_reports() {
+        let target = "\"manifest_path\":\"Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"name\":\"fixture\"}";
+        let evidence = parse(&format!(
+            "{{\"reason\":\"compiler-artifact\",{target}}}\n\
+             {{\"reason\":\"compiler-message\",{target},\"message\":{{\"code\":{{\"code\":\"unused_crate_dependencies\"}},\
+             \"message\":\"warning: extern crate `unused` is unused\"}}}}\n"
+        ))
+        .expect("compiler messages are parsed");
+
+        assert!(evidence.saw_package(Path::new("Cargo.toml")));
+        assert!(!evidence.used_by_any_unit(Path::new("Cargo.toml"), "unused", Scope::Always));
+    }
+
+    #[test]
+    fn missing_evidence_never_claims_use() {
+        let evidence = Evidence::default();
+
+        assert!(!evidence.used_by_plain_unit(Path::new("Cargo.toml"), "dep"));
+        assert!(!evidence.used_by_any_unit(Path::new("Cargo.toml"), "dep", Scope::Always));
+        assert!(!evidence.used_by_build_script(Path::new("Cargo.toml"), "dep"));
+    }
+
+    #[test]
+    fn diagnostic_names_are_read_only_from_the_expected_lint_shape() {
+        let warning = serde_json::json!({"message": {"message": "warning: extern crate `my_dep` is unused"}});
+        let malformed = serde_json::json!({"message": {"message": "warning without backticks"}});
+
+        assert_eq!(reported_name(&warning).as_deref(), Some("my_dep"));
+        assert_eq!(reported_name(&malformed), None);
+        assert_eq!(reported_name(&serde_json::json!({})), None);
+    }
 }

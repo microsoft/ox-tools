@@ -10,7 +10,11 @@ use anyhow::{Context, Result, anyhow};
 use toml_edit::{DocumentMut, Item, TableLike, Value};
 
 /// Dependency tables a member manifest can inherit workspace dependencies from.
-const DEP_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+const DEP_TABLES: [(&str, Section); 3] = [
+    ("dependencies", Section::Normal),
+    ("dev-dependencies", Section::Development),
+    ("build-dependencies", Section::Build),
+];
 
 /// Key under `[workspace.metadata]` holding this tool's configuration.
 const METADATA_KEY: &str = "unused-deps";
@@ -71,24 +75,6 @@ pub enum Section {
     Build,
 }
 
-impl Section {
-    /// The manifest table name.
-    fn table(self) -> &'static str {
-        match self {
-            Self::Normal => "dependencies",
-            Self::Development => "dev-dependencies",
-            Self::Build => "build-dependencies",
-        }
-    }
-
-    /// The section a table name denotes, if it denotes one.
-    fn of_table(table: &str) -> Option<Self> {
-        [Self::Normal, Self::Development, Self::Build]
-            .into_iter()
-            .find(|section| section.table() == table)
-    }
-}
-
 /// One dependency a member declares.
 #[derive(Debug, Clone)]
 pub struct Declared {
@@ -111,17 +97,17 @@ impl Declared {
 pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
     let mut declared = Vec::new();
 
-    for table in DEP_TABLES {
+    for (table, section) in DEP_TABLES {
         if let Some(item) = doc.get(table).and_then(Item::as_table_like) {
-            collect_declared(item, table, &mut declared);
+            collect_declared(item, section, &mut declared);
         }
     }
 
     if let Some(targets) = doc.get("target").and_then(Item::as_table_like) {
         for target in targets.iter().filter_map(|(_, target)| target.as_table_like()) {
-            for table in DEP_TABLES {
+            for (table, section) in DEP_TABLES {
                 if let Some(item) = target.get(table).and_then(Item::as_table_like) {
-                    collect_declared(item, table, &mut declared);
+                    collect_declared(item, section, &mut declared);
                 }
             }
         }
@@ -131,11 +117,7 @@ pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
 }
 
 /// Record one dependency table's declarations.
-fn collect_declared(table: &dyn TableLike, name: &str, into: &mut Vec<Declared>) {
-    let Some(section) = Section::of_table(name) else {
-        return;
-    };
-
+fn collect_declared(table: &dyn TableLike, section: Section, into: &mut Vec<Declared>) {
     for (key, _) in table.iter() {
         into.push(Declared {
             name: key.to_owned(),
@@ -146,13 +128,12 @@ fn collect_declared(table: &dyn TableLike, name: &str, into: &mut Vec<Declared>)
 
 /// Read a manifest's text.
 pub fn read_manifest_text(path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
+    std::fs::read_to_string(path).context(format!("failed to read {}", path.display()))
 }
 
 /// Parse manifest text that came from `path`.
 pub fn parse_manifest(text: &str, path: &Path) -> Result<DocumentMut> {
-    text.parse::<DocumentMut>()
-        .with_context(|| format!("failed to parse {}", path.display()))
+    text.parse::<DocumentMut>().context(format!("failed to parse {}", path.display()))
 }
 
 /// Read and parse a manifest.
@@ -251,7 +232,7 @@ pub fn inherited(members: &[PathBuf]) -> Result<Inheritance> {
 
 /// Record every catalog key a single manifest inherits.
 fn collect_inherited(doc: &DocumentMut, inherited: &mut BTreeSet<String>) {
-    for name in DEP_TABLES {
+    for (name, _) in DEP_TABLES {
         if let Some(table) = doc.get(name).and_then(Item::as_table_like) {
             collect_from_dep_table(table, inherited);
         }
@@ -263,7 +244,7 @@ fn collect_inherited(doc: &DocumentMut, inherited: &mut BTreeSet<String>) {
     };
 
     for target in targets.iter().filter_map(|(_, target)| target.as_table_like()) {
-        for name in DEP_TABLES {
+        for (name, _) in DEP_TABLES {
             if let Some(table) = target.get(name).and_then(Item::as_table_like) {
                 collect_from_dep_table(table, inherited);
             }
@@ -322,4 +303,31 @@ pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>) -> (V
     let stale = catalog.allowed.iter().filter(|name| !uninherited.contains(name)).cloned().collect();
 
     (unused, stale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Section, declared_dependencies};
+
+    #[test]
+    fn declarations_include_target_specific_sections() {
+        let manifest = r#"
+[dependencies]
+normal = "1"
+
+[target.'cfg(windows)'.dev-dependencies]
+development = "1"
+
+[target.'cfg(unix)'.build-dependencies]
+build = "1"
+"#
+        .parse()
+        .expect("fixture manifest is valid");
+
+        let declared = declared_dependencies(&manifest);
+        assert_eq!(declared.len(), 3);
+        assert_eq!(declared[0].section, Section::Normal);
+        assert_eq!(declared[1].section, Section::Development);
+        assert_eq!(declared[2].section, Section::Build);
+    }
 }

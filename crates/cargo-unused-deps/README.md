@@ -13,7 +13,7 @@
 
 </div>
 
-A cargo sub-command that finds unused dependencies.
+A Cargo subcommand that finds unused dependencies.
 
 It answers three questions that usually take two other tools and still leave
 a gap:
@@ -34,15 +34,16 @@ and keeps a copy.
 
 ## Requirements
 
-A nightly toolchain, because compiling doctests without running them is
-unstable. Run it as `cargo +nightly unused-deps`.
+Package-level checks require a nightly toolchain because compiling doctests
+without running them is unstable. The catalog-only invocation with no package
+selector is manifest-only and runs on stable.
 
 ## Usage
 
-Run in a Cargo workspace:
+Run every check across a Cargo workspace:
 
 ```bash
-cargo +nightly unused-deps
+cargo +nightly unused-deps --workspace
 ```
 
 Restrict the compiled evidence the way cargo does, which is what lets an
@@ -52,10 +53,10 @@ impact-scoped pipeline pass its own package list straight through:
 cargo +nightly unused-deps --package my-crate --package other-crate
 ```
 
-Run one check only:
+Run only the workspace-global catalog check by omitting package selection:
 
 ```bash
-cargo +nightly unused-deps --check catalog
+cargo unused-deps
 ```
 
 Remove the catalog entries nobody inherits:
@@ -71,7 +72,8 @@ run; `--require-workspace` turns it into an error instead.
 
 Package selection scopes the compiled evidence only. The catalog check always
 reads every member, because “no member inherits this entry” is only true if
-every member was consulted.
+every member was consulted. With no `--package` or `--workspace`, no package
+is compiled and only that catalog check runs.
 
 ## Configuration
 

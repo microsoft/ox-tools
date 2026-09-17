@@ -393,6 +393,7 @@ fn the_allow_list_suppresses_a_finding() {
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(dir.path().join("Cargo.toml"))
+        .arg("--workspace")
         .output()
         .expect("failed to execute the binary");
 
@@ -419,6 +420,37 @@ fn no_package_selector_runs_only_the_catalog_check() {
     let report = String::from_utf8_lossy(&output.stderr);
     assert!(!report.contains("dead:"), "the catalog check does not judge declarations: {report}");
     assert!(output.status.success(), "the catalog is clean here");
+}
+
+#[test]
+fn exclude_requires_workspace_selection() {
+    let fixture = Fixture::new(&[], "", "pub fn go() {}\n");
+
+    let output = Command::new(binary())
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--exclude", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "--exclude without --workspace must be rejected");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--workspace"));
+}
+
+#[test]
+fn package_and_workspace_selection_conflict() {
+    let fixture = Fixture::new(&[], "", "pub fn go() {}\n");
+
+    let output = Command::new(binary())
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--workspace", "--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "--workspace and --package must be rejected together");
 }
 
 /// The tool's own workspace is the acceptance test: it must not accuse a
@@ -462,6 +494,7 @@ fn package_selection_limits_compile_evidence() {
         .expect("failed to execute the binary");
     assert!(leaf.status.success(), "the unselected main package must not be judged");
     assert!(!String::from_utf8_lossy(&leaf.stderr).contains("dead: no compiled unit loaded"));
+    assert!(String::from_utf8_lossy(&leaf.stdout).contains("in 1 package"));
 
     let main = Command::new(binary())
         .args(["unused-deps", "--manifest-path"])
@@ -471,6 +504,14 @@ fn package_selection_limits_compile_evidence() {
         .expect("failed to execute the binary");
     assert!(!main.status.success(), "the selected main package contains an unused dependency");
     assert!(String::from_utf8_lossy(&main.stderr).contains("dead: no compiled unit loaded"));
+
+    let repeated = Command::new(binary())
+        .args(["unused-deps", "--manifest-path"])
+        .arg(&manifest)
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary again");
+    assert!(!repeated.status.success(), "a repeated analysis must retain the finding");
 }
 
 #[test]
@@ -490,4 +531,74 @@ fn workspace_exclude_limits_compile_evidence() {
 
     assert!(output.status.success(), "the excluded main package must not be judged");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("dead: no compiled unit loaded"));
+}
+
+#[test]
+fn package_checks_support_a_non_workspace_manifest() {
+    if !nightly() {
+        return;
+    }
+
+    let dir = TempDir::new().expect("failed to create temp dir");
+    fs::create_dir_all(dir.path().join("src")).expect("failed to create source dir");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("failed to write manifest");
+    fs::write(dir.path().join("src/lib.rs"), "pub fn go() {}\n").expect("failed to write source");
+
+    let output = Command::new(binary())
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(dir.path().join("Cargo.toml"))
+        .args(["--package", "solo"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(output.status.success(), "package analysis should support a standalone crate");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("in 1 package"));
+}
+
+#[test]
+fn a_failing_doctest_fails_evidence_collection() {
+    if !nightly() {
+        return;
+    }
+
+    let fixture = Fixture::new(
+        &["dead"],
+        &format!("[dependencies]\n{}", dep("dead")),
+        "/// ```rust\n/// this is not rust\n/// ```\npub fn go() {}\n",
+    );
+
+    let output = Command::new(binary())
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "invalid doctests must fail the check");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("failed while collecting doctest evidence"));
+}
+
+#[test]
+fn a_package_that_does_not_compile_fails_evidence_collection() {
+    if !nightly() {
+        return;
+    }
+
+    let fixture = Fixture::new(&[], "", "this is not rust\n");
+    let output = Command::new(binary())
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "an unbuildable package must fail the check");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("`cargo check` failed while collecting compile evidence"));
 }
