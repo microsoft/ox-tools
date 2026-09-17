@@ -2465,10 +2465,10 @@ fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
 
 // --- credential-specific behaviour -----------------------------------------
 
-/// Native `anvil-aprz` must not preempt cargo-aprz's host-aware credential
-/// discovery with a token hard-coded for github.com.
+/// Generated `anvil-aprz` must neither query gh itself nor opt cargo-aprz into
+/// GitHub CLI credential discovery.
 #[test]
-fn aprz_leaves_native_credential_discovery_to_cargo_aprz() {
+fn aprz_does_not_opt_into_github_cli_credential_discovery() {
     if !tools_available() {
         return;
     }
@@ -2490,8 +2490,8 @@ fn aprz_leaves_native_credential_discovery_to_cargo_aprz() {
     );
     let planned = format!("{}{}", String::from_utf8_lossy(&plan.stdout), String::from_utf8_lossy(&plan.stderr));
     assert!(
-        planned.contains("$null = $env:GITHUB_TOKEN"),
-        "the executable plan must signal that the container needs token forwarding:\n{planned}"
+        !planned.contains("--github-token-from-gh"),
+        "the generated recipe must not opt into GitHub CLI discovery:\n{planned}"
     );
 
     let output = run_just(
@@ -2506,7 +2506,7 @@ fn aprz_leaves_native_credential_discovery_to_cargo_aprz() {
 
     assert!(
         output.status.success(),
-        "credential discovery must be left to cargo-aprz\nstdout:\n{}\nstderr:\n{}",
+        "anvil-aprz must run without GitHub CLI discovery\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2764,14 +2764,15 @@ fn unscoped_wrapper_exports_impact_off_before_dependencies_run() {
 /// launches its tier that way, so a plan of the public tier name reveals the
 /// wrapper alone.
 ///
-/// The container driver decides whether to mint a GitHub token by matching the
-/// plan for `GITHUB_TOKEN`, so this is why it has to follow each nested target
-/// rather than reading one plan. If this test ever fails because a plan now
-/// reaches through the child process, that expansion can be deleted.
+/// The container driver decides whether to query the GitHub CLI by finding an
+/// exact `--github-token-from-gh` in the expanded plan, so it has to follow
+/// each nested target rather than reading one plan. If this test ever fails
+/// because a plan now reaches through the child process, that expansion can be
+/// deleted.
 #[test]
-fn a_wrapped_tier_hides_its_checks_from_a_plan() {
+fn a_wrapped_tier_hides_its_github_cli_opt_in_from_a_plan() {
     const PROBE: &str = "[private]\n[script(\"pwsh\", \"-NoProfile\")]\n_anvil-probe:\n    \
-        if (-not $env:GITHUB_TOKEN) { exit 1 }\n\n\
+        & cargo aprz deps --github-token-from-gh\n\n\
         probe: (_anvil-unscoped \"probe\")\n";
 
     if !tools_available() {
@@ -2787,7 +2788,7 @@ fn a_wrapped_tier_hides_its_checks_from_a_plan() {
         String::from_utf8_lossy(&wrapped.stderr)
     );
     assert!(
-        !wrapped_plan.contains("GITHUB_TOKEN"),
+        !wrapped_plan.contains("--github-token-from-gh"),
         "a wrapped tier's plan must not reach the recipe it launches, or the driver's expansion is dead code\n{wrapped_plan}"
     );
     assert!(
@@ -2802,8 +2803,8 @@ fn a_wrapped_tier_hides_its_checks_from_a_plan() {
         String::from_utf8_lossy(&direct.stderr)
     );
     assert!(
-        direct_plan.contains("GITHUB_TOKEN"),
-        "planning the launched recipe directly must reveal the variable, or this test proves nothing\n{direct_plan}"
+        direct_plan.contains("--github-token-from-gh"),
+        "planning the launched recipe directly must reveal the opt-in switch, or this test proves nothing\n{direct_plan}"
     );
 }
 

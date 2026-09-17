@@ -76,13 +76,20 @@ pub enum ConsoleSection {
 
 /// Common arguments shared between crates and deps commands
 #[derive(Args, Debug)]
+#[expect(clippy::struct_excessive_bools, reason = "each bool is an independent clap CLI flag")]
 pub struct CommonArgs {
     /// GitHub token.
     ///
-    /// Defaults to `GITHUB_TOKEN`, then the authenticated `gh` token for the
-    /// configured GitHub host. If none is available, GitHub access is anonymous.
+    /// Defaults to `GITHUB_TOKEN`. If none is available, GitHub access is anonymous.
     #[arg(long, value_name = "TOKEN")]
     pub github_token: Option<GitHubToken>,
+
+    /// Discover a GitHub token from the authenticated `gh` CLI.
+    ///
+    /// Used only after `--github-token` and `GITHUB_TOKEN`, for the configured
+    /// GitHub host.
+    #[arg(long)]
+    pub github_token_from_gh: bool,
 
     /// Codeberg personal access token
     #[arg(long, value_name = "TOKEN", env = "CODEBERG_TOKEN")]
@@ -265,7 +272,7 @@ impl<'a, H: super::Host> Common<'a, H> {
         let progress_reporter = ProgressReporter::new(delay, use_colors_for_progress);
 
         let endpoints = args.endpoints();
-        let github_token = discover(args.github_token.as_ref(), &endpoints).await;
+        let github_token = discover(args.github_token.as_ref(), args.github_token_from_gh, &endpoints).await;
 
         let collector = Collector::new(
             github_token.as_ref().map(GitHubToken::expose_secret),
@@ -685,7 +692,7 @@ fn should_include_rejection_details(console_mode: Option<&ConsoleOutputMode>) ->
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use semver::{Version, VersionReq};
 
     use super::*;
@@ -730,6 +737,27 @@ mod tests {
         assert_eq!(endpoints.host_url("github.com"), defaults.host_url("github.com"));
         assert_eq!(endpoints.host_url("codeberg.org"), defaults.host_url("codeberg.org"));
         assert_eq!(endpoints.advisory_url(), defaults.advisory_url());
+    }
+
+    #[test]
+    fn github_cli_token_discovery_is_visible_and_opt_in() {
+        let crates_default = crate::commands::CratesArgs::parse_from(["crates"]);
+        assert!(!crates_default.common.github_token_from_gh);
+        let deps_default = crate::commands::DepsArgs::parse_from(["deps"]);
+        assert!(!deps_default.common.github_token_from_gh);
+
+        let crates = crate::commands::CratesArgs::parse_from(["crates", "--github-token-from-gh"]);
+        assert!(crates.common.github_token_from_gh);
+        let deps = crate::commands::DepsArgs::parse_from(["deps", "--github-token-from-gh"]);
+        assert!(deps.common.github_token_from_gh);
+
+        for mut command in [crate::commands::CratesArgs::command(), crate::commands::DepsArgs::command()] {
+            let help = command.render_long_help().to_string();
+            assert!(
+                help.contains("--github-token-from-gh"),
+                "the opt-in switch must be visible in help:\n{help}"
+            );
+        }
     }
 
     #[test]

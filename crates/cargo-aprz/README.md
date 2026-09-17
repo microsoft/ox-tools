@@ -178,14 +178,16 @@ GitHub credentials are discovered in this order:
 
 1. `--github-token`
 1. `GITHUB_TOKEN`
-1. the token reported by `gh auth token --hostname <host>`
+1. when `--github-token-from-gh` is present, the token reported by
+   `gh auth token --hostname <host>`
 1. anonymous access
 
 The host passed to `gh` comes from the effective GitHub service URL, including
 `--github-url` or `APRZ_GITHUB_URL` overrides for GitHub Enterprise. Missing
 or blank credentials and a `gh` lookup that exceeds its finite deadline are
-ignored and retain the existing anonymous rate-limit behavior. Codeberg
-credentials continue to use `--codeberg-token` or `CODEBERG_TOKEN`.
+ignored and retain the existing anonymous rate-limit behavior. Without
+`--github-token-from-gh`, `cargo-aprz` never searches for or invokes `gh`.
+Codeberg credentials continue to use `--codeberg-token` or `CODEBERG_TOKEN`.
 
 ### Reports
 

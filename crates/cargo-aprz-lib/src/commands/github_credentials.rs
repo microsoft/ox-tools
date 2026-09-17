@@ -76,12 +76,20 @@ struct GhCommandRequest {
 }
 
 /// Resolve the GitHub credential used by the hosting provider.
-pub(super) async fn discover(explicit: Option<&GitHubToken>, endpoints: &Endpoints) -> Option<GitHubToken> {
-    discover_with(explicit, endpoints, || std::env::var_os(GITHUB_TOKEN_ENV), query_gh).await
+pub(super) async fn discover(explicit: Option<&GitHubToken>, github_token_from_gh: bool, endpoints: &Endpoints) -> Option<GitHubToken> {
+    discover_with(
+        explicit,
+        github_token_from_gh,
+        endpoints,
+        || std::env::var_os(GITHUB_TOKEN_ENV),
+        query_gh,
+    )
+    .await
 }
 
 async fn discover_with<OutputFuture>(
     explicit: Option<&GitHubToken>,
+    github_token_from_gh: bool,
     endpoints: &Endpoints,
     read_environment: impl FnOnce() -> Option<OsString>,
     query_gh: impl FnOnce(String) -> OutputFuture,
@@ -111,6 +119,11 @@ where
             target: LOG_TARGET,
             "GitHub credential source {GITHUB_TOKEN_ENV} is blank; continuing credential discovery"
         );
+    }
+
+    if !github_token_from_gh {
+        log::trace!(target: LOG_TARGET, "GitHub CLI credential discovery was not requested; using anonymous access");
+        return None;
     }
 
     let Some(hostname) = github_hostname(endpoints) else {
@@ -357,6 +370,7 @@ mod tests {
 
         let selected = discover_with(
             Some(&explicit),
+            true,
             &Endpoints::default(),
             || {
                 environment_read.set(true);
@@ -381,6 +395,7 @@ mod tests {
 
         let selected = discover_with(
             None,
+            true,
             &Endpoints::default(),
             || Some(OsString::from("environment-secret")),
             |_| {
@@ -396,12 +411,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blank_environment_tokens_continue_to_gh() {
+    async fn default_off_never_queries_gh_for_absent_or_blank_environment_tokens() {
+        for environment in [None, Some(""), Some(" \r\n\t ")] {
+            let gh_called = Cell::new(false);
+
+            let selected = discover_with(
+                None,
+                false,
+                &Endpoints::default(),
+                || environment.map(OsString::from),
+                |_| {
+                    gh_called.set(true);
+                    std::future::ready(Ok(successful(b"gh-secret")))
+                },
+            )
+            .await;
+
+            assert!(selected.is_none());
+            assert!(!gh_called.get(), "gh must remain disabled for environment value {environment:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn blank_environment_tokens_continue_to_gh_when_enabled() {
         for environment in ["", " \r\n\t "] {
             let gh_called = Cell::new(false);
 
             let selected = discover_with(
                 None,
+                true,
                 &Endpoints::default(),
                 || Some(OsString::from(environment)),
                 |_| {
@@ -424,6 +462,7 @@ mod tests {
 
         let selected = discover_with(
             None,
+            true,
             &endpoints,
             || None,
             |hostname| {
@@ -444,6 +483,7 @@ mod tests {
 
         let selected = discover_with(
             None,
+            true,
             &Endpoints::default(),
             || None,
             |hostname| {
@@ -461,6 +501,7 @@ mod tests {
     async fn command_not_found_continues_anonymously() {
         let selected = discover_with(
             None,
+            true,
             &Endpoints::default(),
             || None,
             |_| std::future::ready(Err(io::Error::new(io::ErrorKind::NotFound, "test gh is absent"))),
@@ -474,6 +515,7 @@ mod tests {
     async fn timed_out_command_continues_anonymously() {
         let selected = discover_with(
             None,
+            true,
             &Endpoints::default(),
             || None,
             |_| std::future::ready(Err(io::Error::new(io::ErrorKind::TimedOut, "test gh lookup expired"))),
@@ -488,6 +530,7 @@ mod tests {
         let secret = "failed-command-secret";
         let selected = discover_with(
             None,
+            true,
             &Endpoints::default(),
             || None,
             |_| {
@@ -506,6 +549,7 @@ mod tests {
     async fn blank_command_output_continues_anonymously() {
         let selected = discover_with(
             None,
+            true,
             &Endpoints::default(),
             || None,
             |_| std::future::ready(Ok(successful(b" \r\n\t "))),
@@ -519,6 +563,7 @@ mod tests {
     async fn non_utf8_command_output_continues_anonymously() {
         let selected = discover_with(
             None,
+            true,
             &Endpoints::default(),
             || None,
             |_| std::future::ready(Ok(successful(&[0xff, 0xfe]))),

@@ -10,10 +10,10 @@
 # capped at 60 requests an hour, and on a full workspace it exhausts that
 # and then waits for the quota to reset rather than failing; an
 # authenticated token raises the cap to 5000/hour. CI injects GITHUB_TOKEN
-# (github.token). For native local runs, cargo-aprz performs host-aware
-# discovery from GITHUB_TOKEN and the gh CLI. In a container the driver
-# resolves and forwards GITHUB_TOKEN by name because the image has no gh CLI
-# of its own.
+# (github.token). Local runs use an exported GITHUB_TOKEN when available and
+# otherwise remain anonymous. Developers can opt into host-aware GitHub CLI
+# discovery by invoking cargo-aprz themselves with --github-token-from-gh;
+# this generated check deliberately does not access their gh credentials.
 #
 # Unscoped (consults external risk DB).
 
@@ -21,9 +21,6 @@
 [script("pwsh", "-NoProfile")]
 anvil-aprz: anvil-aprz-validate-prereqs
     $ErrorActionPreference = 'Stop'
-    # Load-bearing no-op: the container driver scans the executable dry-run
-    # plan for this variable before deriving a token for its gh-less image.
-    $null = $env:GITHUB_TOKEN
     & cargo {{_anvil_stable_toolchain_args}} aprz deps --error-if-high-risk --console appraisal
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

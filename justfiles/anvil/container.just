@@ -927,52 +927,29 @@ anvil-container *command:
     $forwardedEnv = @()
     $hookEnv = @()
 
-    # anvil-aprz queries the GitHub advisory API, which allows 60 requests an
-    # hour unauthenticated -- less than a full tier needs. Unauthenticated is
-    # not a degraded-but-working mode: `cargo aprz deps` sleeps until the quota
-    # resets rather than failing, so a containerized tier blocks for up to an
-    # hour with no way to opt out. Authentication is what makes the check
-    # terminate, not what makes it fast.
-    #
-    # Resolve the token exactly as the recipe does natively -- GITHUB_TOKEN
-    # first, then the gh CLI's stored token -- so a containerized run
-    # authenticates for the same developers a native run does.
-    #
     # An already-exported GITHUB_TOKEN is forwarded whatever the command is:
     # that is exact parity, since a native run exposes it to every process the
-    # shell spawns too. Deriving one from `gh` is different -- it manufactures a
-    # credential the developer did not put in this environment, and PID 1's
-    # environment is inherited by every build script and proc macro in the
-    # container, where natively the recipe would mint it in its own process. So
-    # it is derived only when the command is known to read the variable, or when
-    # there is no command at all: an interactive session can run anything, and
-    # refusing there would reintroduce the silent hour-long stall on a tier the
-    # developer runs from inside the shell.
-    # `gh auth token` is non-interactive and never opens a prompt.
+    # shell spawns too. Deriving one from `gh` is different: it manufactures a
+    # credential the developer did not export, and PID 1 exposes it to every
+    # build script and proc macro in the container. It therefore requires the
+    # exact --github-token-from-gh switch in a direct command's argv or in an
+    # expanded `just --dry-run` plan. Interactive execution never opts in.
     #
-    # The predicate is the variable itself rather than the name of a check, so
-    # the driver stays generic: a catalog that adds another GitHub-authenticated
-    # check is covered without touching this recipe.
-    #
-    # Set here and passed by NAME, so the value never reaches the host's
-    # process command line, and unset again with the hook's variables below.
-    if (-not $env:GITHUB_TOKEN -and (Get-Command gh -ErrorAction SilentlyContinue)) {
-        $needsToken = $argv.Count -eq 0
-        # Only a `just` command can be planned, and planning is the only way to
-        # know whether what runs reads the variable. Anything else keeps the
-        # environment it was given: a manufactured credential reaches every
-        # process in the container, so an unknown command does not earn one.
-        if (-not $needsToken -and $argv[0] -eq 'just') {
+    # Explicit --github-token and GITHUB_TOKEN remain authoritative even when
+    # the opt-in switch is also present, so neither path invokes gh.
+    if (-not $env:GITHUB_TOKEN) {
+        $githubTokenFromGh = $false
+        $hasExplicitGitHubToken = $false
+        if ($argv.Count -gt 0 -and $argv[0] -eq 'just') {
             # A dry run has no side effects, and a target that cannot be planned
-            # (a typo, a recipe needing arguments) yields nothing, so the run
-            # fails on its own terms rather than on a missing token.
+            # yields no consent, so the run fails on its own terms.
             #
             # A plan covers the bodies just runs itself, not the body of a
             # recipe that one of them launches as a child process. The unscoped
             # tier wrapper launches its tier that way, so planning
             # `anvil-scheduled` shows the wrapper and none of the checks
             # underneath it. Follow each nested target a plan names, or a
-            # wrapped tier reads as needing nothing and runs unauthenticated.
+            # wrapped tier can hide an explicit opt-in in one of its checks.
             $plan = ''
             $targets = [System.Collections.Generic.List[object]]::new()
             $targets.Add([string[]]@($argv | Select-Object -Skip 1))
@@ -985,10 +962,7 @@ anvil-container *command:
                 # The same executable that launched this tree, for the reason
                 # every other nested call uses it: a caller invoking `just` by
                 # absolute path with its directory off PATH would otherwise fail
-                # here. That failure is silent, because an empty plan reads as
-                # "does not need a token" -- so anvil-aprz would run
-                # unauthenticated in an image with no gh of its own and block on
-                # the rate limit for up to an hour.
+                # here. An empty plan means no GitHub CLI consent.
                 $step = ''
                 try {
                     $step = (& '{{ replace(just_executable(), "'", "''") }}' --dry-run @target 2>&1 |
@@ -1002,9 +976,20 @@ anvil-container *command:
                     $targets.Add([string[]]@($nested.Groups[1].Value))
                 }
             }
-            $needsToken = $plan -match 'GITHUB_TOKEN'
+            $githubTokenFromGh = [regex]::IsMatch(
+                $plan, '(?m)(^|[\s''"])--github-token-from-gh($|[\s''"])'
+            )
+            $hasExplicitGitHubToken = [regex]::IsMatch(
+                $plan, '(?m)(^|[\s''"])--github-token(?:=|$|[\s''"])'
+            )
+        } elseif ($argv.Count -gt 0) {
+            $githubTokenFromGh = $argv -contains '--github-token-from-gh'
+            $hasExplicitGitHubToken = @(
+                $argv | Where-Object { $_ -eq '--github-token' -or $_.StartsWith('--github-token=') }
+            ).Count -gt 0
         }
-        if ($needsToken) {
+
+        if ($githubTokenFromGh -and -not $hasExplicitGitHubToken -and (Get-Command gh -ErrorAction SilentlyContinue)) {
             $ghToken = $null
             try { $ghToken = (gh auth token --hostname github.com 2>$null) } catch { $ghToken = $null }
             if ($ghToken -and $ghToken.Trim()) {

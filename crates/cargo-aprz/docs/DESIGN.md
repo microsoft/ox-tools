@@ -66,20 +66,27 @@ exhaust anonymous API limits quickly. Credential resolution follows this order:
 
 1. the explicit `--github-token` command-line option;
 2. the `GITHUB_TOKEN` environment variable;
-3. the output of `gh auth token --hostname <host>` when the `gh` executable is
-   available and has an authenticated account for the configured GitHub host;
+3. when `--github-token-from-gh` is present, the output of
+   `gh auth token --hostname <host>` when the `gh` executable is available and
+   has an authenticated account for the configured GitHub host;
 4. anonymous access.
 
 `<host>` comes from the effective GitHub service address, so a
 `--github-url`/`APRZ_GITHUB_URL` override can use the matching GitHub Enterprise
 login rather than accidentally querying `github.com`.
 
-The `gh` fallback is convenience, not a prerequisite. A missing executable,
-missing login, nonzero `gh auth token` result, blank output, or non-UTF-8 output
-continues anonymously and retains the provider's existing rate-limit behavior.
-An explicit option is authoritative, as is a nonblank environment token;
-cargo-aprz never invokes `gh` when either applies. Environment values are
-trimmed; an empty or whitespace-only `GITHUB_TOKEN` is treated as absent so
+GitHub CLI discovery is explicit opt-in rather than a default fallback. Without
+`--github-token-from-gh`, exhausting the explicit and environment sources
+continues anonymously without resolving the effective hostname, searching
+`PATH`, scheduling a blocking lookup, or starting a `gh` process.
+
+When enabled, the `gh` fallback is convenience, not a prerequisite. A missing
+executable, missing login, nonzero `gh auth token` result, blank output, or
+non-UTF-8 output continues anonymously and retains the provider's existing
+rate-limit behavior. An explicit option is authoritative, as is a nonblank
+environment token; cargo-aprz never invokes `gh` when either applies, even when
+the switch is present. Environment values are trimmed; an empty or
+whitespace-only `GITHUB_TOKEN` is treated as absent so explicitly authorized,
 host-aware `gh` discovery can continue.
 
 The command is spawned directly without a shell. Its stdout is trimmed and used
