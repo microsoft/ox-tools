@@ -12,6 +12,7 @@
 
 - 🐛 Bug Fixes
 
+  - isolate evidence runs
   - normalize doctest diagnostics
   - make evidence collection authoritative
   - preserve compiler configuration
@@ -27,6 +28,7 @@
 
 - 📚 Documentation
 
+  - refresh release notes
   - refresh release notes
   - refresh 0.2.0 changelog
   - generate 0.2.0 changelog

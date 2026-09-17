@@ -87,10 +87,11 @@ allowed = ["kept-on-purpose"]
 allowed = ["package-local-side-effect"]
 ```
 
-An `allowed` name that suppresses nothing is reported as stale, on stderr,
-without failing the run. The list is also the answer for a dependency linked
-for its side effects and never named – an allocator, a `-sys` shim – where
-“unused” is literally true and operationally wrong.
+A workspace-level `allowed` name declared by neither the catalog nor any
+member is reported as stale without failing the run. The lists are also the
+answer for a dependency linked for its side effects and never named – an
+allocator or `-sys` shim – where “unused” is literally true and
+operationally wrong.
 
 ## Fixing
 
