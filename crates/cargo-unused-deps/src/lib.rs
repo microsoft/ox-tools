@@ -79,10 +79,11 @@
 //! allowed = ["package-local-side-effect"]
 //! ```
 //!
-//! An `allowed` name that suppresses nothing is reported as stale, on stderr,
-//! without failing the run. The list is also the answer for a dependency linked
-//! for its side effects and never named -- an allocator, a `-sys` shim -- where
-//! "unused" is literally true and operationally wrong.
+//! A workspace-level `allowed` name declared by neither the catalog nor any
+//! member is reported as stale without failing the run. The lists are also the
+//! answer for a dependency linked for its side effects and never named -- an
+//! allocator or `-sys` shim -- where "unused" is literally true and
+//! operationally wrong.
 //!
 //! # Fixing
 //!
@@ -179,7 +180,7 @@ enum Commands {
         #[arg(long, default_value = "Cargo.toml", value_name = "PATH")]
         manifest_path: PathBuf,
 
-        /// Package to gather compile evidence for. Repeatable
+        /// Exact package NAME or NAME@VERSION to gather compile evidence for. Repeatable
         #[arg(short = 'p', long = "package", value_name = "SPEC")]
         packages: Vec<String>,
 
@@ -344,10 +345,10 @@ impl PackageSelection {
         let mut selected = if self.workspace {
             packages.iter().map(|package| package.manifest_path.clone()).collect()
         } else {
-            resolve_selectors(packages, &self.packages)?
+            resolve_selectors(packages, &self.packages, false)?
         };
 
-        for excluded in resolve_selectors(packages, &self.exclude)? {
+        for excluded in resolve_selectors(packages, &self.exclude, true)? {
             selected.remove(&excluded);
         }
 
@@ -356,7 +357,7 @@ impl PackageSelection {
 }
 
 /// Resolve exact package names and `name@version` specs.
-fn resolve_selectors(packages: &[verdict::Package], selectors: &[String]) -> Result<BTreeSet<PathBuf>> {
+fn resolve_selectors(packages: &[verdict::Package], selectors: &[String], allow_missing: bool) -> Result<BTreeSet<PathBuf>> {
     let mut resolved = BTreeSet::new();
     for selector in selectors {
         let matches: Vec<&verdict::Package> = packages
@@ -364,6 +365,7 @@ fn resolve_selectors(packages: &[verdict::Package], selectors: &[String]) -> Res
             .filter(|package| selector == &package.name || selector == &format!("{}@{}", package.name, package.version))
             .collect();
         match matches.as_slice() {
+            [] if allow_missing => {}
             [] => bail!("package selector `{selector}` did not match any workspace member"),
             [package] => {
                 resolved.insert(package.manifest_path.clone());
@@ -381,8 +383,8 @@ fn source_checks(manifest_path: &Path, selection: &PackageSelection, checks: &[C
     let workspace = workspace_of(manifest_path)?;
     let selected = selection.resolve(&workspace.packages)?;
     let selection_flags = selection.flags();
-    let plain_target_dir = workspace.evidence_target_dir.join("plain");
-    let all_target_dir = workspace.evidence_target_dir.join("all-targets");
+    let plain_target_dir = workspace.evidence_target_dir.path().join("plain");
+    let all_target_dir = workspace.evidence_target_dir.path().join("all-targets");
     // Two passes: default targets first, where a report can only have come from
     // a target's single plain unit, then everything.
     let plain = evidence::gather(manifest_path, &selection_flags, &plain_target_dir, false)?;
@@ -445,7 +447,12 @@ fn doctest_evidence(manifest_path: &Path, workspace: &Workspace, candidates: &[v
         // doctests of a bin-only package is an error, not an empty answer.
         if package.has_doctests && accused.contains(package.manifest_path.as_path()) {
             let selector = format!("{}@{}", package.name, package.version);
-            let found = doctests::gather_package(manifest_path, &selector, &workspace.evidence_target_dir.join("doctests"), &shim)?;
+            let found = doctests::gather_package(
+                manifest_path,
+                &selector,
+                &workspace.evidence_target_dir.path().join("doctests"),
+                &shim,
+            )?;
             evidence.insert(package.manifest_path.clone(), found);
         }
     }
@@ -647,7 +654,7 @@ fn verify_members_unchanged(manifest_path: &Path, expected: &[PathBuf]) -> Resul
     Ok(())
 }
 
-/// Report allow-list entries that suppressed nothing.
+/// Report workspace allow-list entries declared nowhere.
 fn report_stale(stale: &[String]) {
     for name in stale {
         eprintln!("⚠️ '{name}' is allowed but is not declared by the workspace or any member; the allow-list entry can be removed.");
@@ -664,7 +671,7 @@ struct Workspace {
 
     /// Where the evidence build writes, kept apart from the shared cache
     /// because the lint flag changes the build fingerprint.
-    evidence_target_dir: PathBuf,
+    evidence_target_dir: tempfile::TempDir,
 }
 
 /// Read every member's declarations, the workspace allow-list, and where to build.
@@ -703,10 +710,17 @@ fn workspace_of(manifest_path: &Path) -> Result<Workspace> {
         Catalog::NotAWorkspace => BTreeSet::new(),
     };
 
+    let evidence_root = metadata.target_directory.into_std_path_buf().join("unused-deps");
+    fs::create_dir_all(&evidence_root).context(format!("failed to create {}", evidence_root.display()))?;
+    let evidence_target_dir = tempfile::Builder::new()
+        .prefix("run-")
+        .tempdir_in(&evidence_root)
+        .context(format!("failed to create an evidence directory under {}", evidence_root.display()))?;
+
     Ok(Workspace {
         packages,
         allowed,
-        evidence_target_dir: metadata.target_directory.into_std_path_buf().join("unused-deps"),
+        evidence_target_dir,
     })
 }
 
@@ -821,8 +835,17 @@ mod selection_tests {
             has_doctests: false,
         });
 
-        let error = resolve_selectors(&packages, &["same".to_owned()]).expect_err("ambiguous selectors must fail");
+        let error = resolve_selectors(&packages, &["same".to_owned()], false).expect_err("ambiguous selectors must fail");
         assert!(error.to_string().contains("matched more than one workspace member"));
+    }
+
+    #[test]
+    fn missing_exclusions_are_ignored_locally_for_cargo_to_warn_about() {
+        assert!(
+            resolve_selectors(&[], &["optional".to_owned()], true)
+                .expect("missing excludes are allowed")
+                .is_empty()
+        );
     }
 }
 

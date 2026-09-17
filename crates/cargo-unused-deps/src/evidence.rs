@@ -229,11 +229,10 @@ fn failure_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter_map(|message| {
-            message
-                .get("message")
-                .and_then(|diagnostic| diagnostic.get("rendered"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
+            let diagnostic = message.get("message")?;
+            (diagnostic.get("level").and_then(serde_json::Value::as_str) == Some("error"))
+                .then(|| diagnostic.get("rendered").and_then(serde_json::Value::as_str).map(str::to_owned))
+                .flatten()
         })
         .collect::<String>();
     let cargo_errors = String::from_utf8_lossy(stderr);
@@ -430,7 +429,11 @@ mod tests {
 
     #[test]
     fn failed_builds_render_json_diagnostics_and_cargo_errors() {
-        let stdout = br#"{"reason":"compiler-message","message":{"rendered":"error: bad source\n"}}"#;
+        let stdout = concat!(
+            "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"rendered\":\"warning: unused\\n\"}}\n",
+            "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\"rendered\":\"error: bad source\\n\"}}",
+        )
+        .as_bytes();
 
         assert_eq!(
             failure_diagnostics(stdout, b"cargo: build failed\n"),

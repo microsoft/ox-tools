@@ -414,6 +414,11 @@ fn one_doctest_among_many_is_enough_to_spare_a_dependency() {
         !report.contains("usedonce"),
         "one doctest out of three uses it, which is enough: {report}"
     );
+    let repeated = fixture.report();
+    assert!(
+        !repeated.contains("usedonce"),
+        "a repeated run must compile fresh doctest evidence: {repeated}"
+    );
 }
 
 #[test]
@@ -697,7 +702,7 @@ fn workspace_exclude_limits_compile_evidence() {
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(fixture.dir.path().join("Cargo.toml"))
-        .args(["--workspace", "--exclude", "main"])
+        .args(["--workspace", "--exclude", "main", "--exclude", "optional"])
         .output()
         .expect("failed to execute the binary");
 

@@ -120,8 +120,9 @@ So the lint level belongs to *this tool's own invocation* and nowhere else. The 
 installs a chaining `RUSTC_WRAPPER` and appends `--force-warn
 unused_crate_dependencies` after Cargo has resolved configured and environment flags.
 `--force-warn` cannot be lowered by crate attributes, and a caller's existing wrapper
-is invoked behind this one. The build gets a dedicated `--target-dir` because the
-forced lint changes the build fingerprint; ordinary builds stay silent.
+is invoked behind this one. Each analysis gets a fresh temporary `--target-dir`
+because Cargo does not replay lint diagnostics for cached artifacts; ordinary builds
+stay silent and stale evidence cannot cross invocations.
 
 Cargo's own lint, below, is exempt from this: it aggregates before reporting, so it can
 sit in a manifest without lying about correct code.
@@ -270,10 +271,9 @@ single release from 2025 with no commits since — not something to pin.
 ## 3. The evidence model
 
 There is exactly one source of truth about source-level use: **what the compiler
-loaded**. The tool requires a nightly toolchain and gathers that evidence for every
-unit, doctests included. It does not parse Rust, and it has no stable-toolchain mode —
-a second, weaker analysis to fall back on would double the code and halve the
-confidence in the result.
+loaded**. Package-level checks require a nightly toolchain and gather that evidence
+for every unit, doctests included. They do not have a weaker stable fallback. The
+selector-free workspace catalog check remains manifest-only and runs on stable.
 
 - **Positive evidence is authoritative.** If rustc loaded the crate while compiling
   any unit, the dependency is used.
@@ -427,8 +427,9 @@ an unused dependency into false evidence of use. The two runs answer different
 questions; see phase 4.
 
 The tool runs `cargo +nightly check <selection> --all-targets --all-features
---target-dir target/unused-deps/all-targets --message-format=json` with its chaining
-rustc wrapper; the default-target pass uses `target/unused-deps/plain`.
+--target-dir target/unused-deps/run-<unique>/all-targets --message-format=json`
+with its chaining rustc wrapper; the default-target pass uses the sibling `plain`
+directory. The whole run directory is new for every invocation.
 The wrapper preserves Cargo's resolved flags and appends the non-overridable lint for
 this run only, never in the workspace lint catalog. Every diagnostic carries the target
 it came from, so the output is a stream of `(target, target kind, extern name, unused)`
@@ -546,9 +547,9 @@ cargo +nightly unused-deps [--manifest-path <PATH>]
 | Option                | Default      | Meaning                                                                      |
 |-----------------------|--------------|------------------------------------------------------------------------------|
 | `--manifest-path`     | `Cargo.toml` | Workspace root or crate manifest to check.                                   |
-| `-p`, `--package`     | *(none)*     | Gather compile evidence for the selected package. Repeatable.                |
+| `-p`, `--package`     | *(none)*     | Gather compile evidence for an exact package name or `name@version`. Repeatable. |
 | `--workspace`         | *(off)*      | Gather compile evidence for every workspace member.                          |
-| `--exclude`           | *(none)*     | Exclude a package from `--workspace`. Repeatable; requires `--workspace`.     |
+| `--exclude`           | *(none)*     | Exclude an exact package name or `name@version` from `--workspace`. Missing exclusions retain Cargo's warning-only behavior. |
 | `--check`             | *(all)*      | Restrict per-package checks to `unused` and/or `misplaced`; catalog still runs. |
 | `--fix`               | *(off)*      | Remove uninherited catalog entries.                                          |
 | `--require-workspace` | *(off)*      | Treat a manifest with no `[workspace]` table as an error.                    |

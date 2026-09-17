@@ -308,7 +308,8 @@ fn inherits_from_workspace(spec: &Item) -> bool {
 /// Split the catalog into unused entries and stale allow-list entries.
 ///
 /// An entry is unused when no member inherits it and the allow-list does not
-/// exempt it; an allow-list entry is stale when it suppresses nothing.
+/// exempt it; an allow-list entry is stale when neither the catalog nor any
+/// member declares its name.
 ///
 /// Declaration order is preserved so the report reads alongside the manifest.
 pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>, declarations: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
