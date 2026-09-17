@@ -110,7 +110,7 @@ pub fn judge(
 fn judge_one(package: &Package, declared: &Declared, plain: &Evidence, all: &Evidence, doctests: &DoctestEvidence) -> Option<Verdict> {
     let name = declared.extern_name();
     let manifest = package.manifest_path.as_path();
-    let used_by_doctest = doctests.used(&package.name, &name);
+    let used_by_doctest = doctests.used(&package.manifest_path, &name);
 
     match declared.section {
         Section::Normal => {

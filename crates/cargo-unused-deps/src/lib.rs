@@ -258,13 +258,14 @@ const SUBCOMMAND: &str = "unused-deps";
 
 /// Main entry point for the library, called from the binary crate.
 ///
-/// Returns [`ExitCode::SUCCESS`] when every catalog entry is inherited by at
-/// least one member -- or, under `--fix`, once the entries that were not have
-/// been removed -- and [`ExitCode::FAILURE`] otherwise. Returning an exit code
-/// (rather than calling `std::process::exit`) lets `main` unwind normally so the
-/// process terminates through the standard runtime path -- important under
-/// coverage instrumentation, where an abrupt `process::exit` skips the profile
-/// flush on some platforms (notably Windows).
+/// Returns [`ExitCode::SUCCESS`] when every catalog entry is inherited or
+/// allowed and the selected package checks find no unused or misplaced
+/// declarations. Under `--fix`, successfully removing uninherited catalog
+/// entries satisfies the catalog half. Returns [`ExitCode::FAILURE`] for any
+/// remaining finding. Returning an exit code (rather than calling
+/// `std::process::exit`) lets `main` unwind normally so the process terminates
+/// through the standard runtime path -- important under coverage
+/// instrumentation, where an abrupt exit can skip the profile flush.
 ///
 /// # Errors
 ///
@@ -380,10 +381,12 @@ fn source_checks(manifest_path: &Path, selection: &PackageSelection, checks: &[C
     let workspace = workspace_of(manifest_path)?;
     let selected = selection.resolve(&workspace.packages)?;
     let selection_flags = selection.flags();
+    let plain_target_dir = workspace.evidence_target_dir.join("plain");
+    let all_target_dir = workspace.evidence_target_dir.join("all-targets");
     // Two passes: default targets first, where a report can only have come from
     // a target's single plain unit, then everything.
-    let plain = evidence::gather(manifest_path, &selection_flags, &workspace.evidence_target_dir, false)?;
-    let all = evidence::gather(manifest_path, &selection_flags, &workspace.evidence_target_dir, true)?;
+    let plain = evidence::gather(manifest_path, &selection_flags, &plain_target_dir, false)?;
+    let all = evidence::gather(manifest_path, &selection_flags, &all_target_dir, true)?;
 
     // Doctest evidence can only ever spare a dependency, never accuse one, so
     // it is gathered lazily: judge first without it, then compile the doctests
@@ -435,14 +438,15 @@ fn doctest_evidence(manifest_path: &Path, workspace: &Workspace, candidates: &[v
     }
 
     let shim = std::env::current_exe().context("failed to locate this executable to use as the doctest shim")?;
-    let accused: BTreeSet<&str> = candidates.iter().map(|finding| finding.package.as_str()).collect();
+    let accused: BTreeSet<&Path> = candidates.iter().map(|finding| finding.manifest_path.as_path()).collect();
 
     for package in &workspace.packages {
         // Only a library target can have doctests; asking cargo for the
         // doctests of a bin-only package is an error, not an empty answer.
-        if package.has_doctests && accused.contains(package.name.as_str()) {
-            let found = doctests::gather_package(manifest_path, &package.name, &workspace.evidence_target_dir, &shim)?;
-            evidence.insert(package.name.clone(), found);
+        if package.has_doctests && accused.contains(package.manifest_path.as_path()) {
+            let selector = format!("{}@{}", package.name, package.version);
+            let found = doctests::gather_package(manifest_path, &selector, &workspace.evidence_target_dir.join("doctests"), &shim)?;
+            evidence.insert(package.manifest_path.clone(), found);
         }
     }
 

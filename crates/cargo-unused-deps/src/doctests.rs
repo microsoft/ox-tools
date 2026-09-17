@@ -43,16 +43,16 @@ pub struct PackageDoctests {
     reports: BTreeMap<String, usize>,
 }
 
-/// Doctest evidence for a whole run, keyed by package name.
+/// Doctest evidence for a whole run, keyed by package manifest.
 #[derive(Debug, Default)]
 pub struct DoctestEvidence {
     /// Per-package findings.
-    packages: BTreeMap<String, PackageDoctests>,
+    packages: BTreeMap<std::path::PathBuf, PackageDoctests>,
 }
 
 impl DoctestEvidence {
     /// Record one package's findings.
-    pub fn insert(&mut self, package: String, doctests: PackageDoctests) {
+    pub fn insert(&mut self, package: std::path::PathBuf, doctests: PackageDoctests) {
         self.packages.insert(package, doctests);
     }
 
@@ -63,7 +63,7 @@ impl DoctestEvidence {
     /// means some doctest used it. Treating a single report as proof of disuse
     /// would convict a dependency that one example needs and the other 174 do
     /// not mention.
-    pub fn used(&self, package: &str, name: &str) -> bool {
+    pub fn used(&self, package: &Path, name: &str) -> bool {
         self.packages.get(package).is_some_and(|doctests| {
             let reports = doctests.reports.get(name).copied().unwrap_or_default();
 
@@ -253,6 +253,7 @@ fn read_captures(capture: &Path) -> Result<PackageDoctests> {
 #[cfg(not(miri))]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use tempfile::TempDir;
 
@@ -316,16 +317,16 @@ mod tests {
     fn doctest_use_requires_fewer_reports_than_compilations() {
         let mut evidence = DoctestEvidence::default();
         evidence.insert(
-            "fixture".to_owned(),
+            "fixture/Cargo.toml".into(),
             PackageDoctests {
                 compiled: 2,
                 reports: [("sometimes".to_owned(), 1), ("never".to_owned(), 2)].into_iter().collect(),
             },
         );
 
-        assert!(evidence.used("fixture", "sometimes"));
-        assert!(!evidence.used("fixture", "never"));
-        assert!(!evidence.used("missing", "sometimes"));
+        assert!(evidence.used(Path::new("fixture/Cargo.toml"), "sometimes"));
+        assert!(!evidence.used(Path::new("fixture/Cargo.toml"), "never"));
+        assert!(!evidence.used(Path::new("missing/Cargo.toml"), "sometimes"));
     }
 
     #[test]

@@ -186,6 +186,29 @@ fn encoded_rustflags_are_preserved_by_the_compiler_wrapper() {
 }
 
 #[test]
+fn inactive_target_dependencies_are_not_reported() {
+    let fixture = Fixture::new(
+        &["inactive"],
+        &format!("[target.'cfg(any())'.dependencies]\n{}", dep("inactive")),
+        "pub fn go() {}\n",
+    );
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(
+        output.status.success(),
+        "an inactive target dependency is outside the evidence scope: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn filtered_success_does_not_claim_every_dependency_is_used() {
     let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
     let output = command()

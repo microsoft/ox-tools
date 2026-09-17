@@ -419,11 +419,15 @@ allow-lists. This phase alone answers question 1, and it always reads *every*
 member regardless of package selection — see below.
 
 **2. Gather compile evidence.** Twice — once over default targets, once over
-`--all-targets`, into the same directory so the second pass reuses the first's
-artifacts. The two runs answer different questions; see phase 4.
+`--all-targets` — into separate target directories. Cargo emits fresh
+`compiler-artifact` messages for cached units without replaying their lint diagnostics;
+sharing artifacts would therefore make the unit count exceed the report count and turn
+an unused dependency into false evidence of use. The two runs answer different
+questions; see phase 4.
 
 The tool runs `cargo +nightly check <selection> --all-targets --all-features
---target-dir target/unused-deps --message-format=json` with its chaining rustc wrapper.
+--target-dir target/unused-deps/all-targets --message-format=json` with its chaining
+rustc wrapper; the default-target pass uses `target/unused-deps/plain`.
 The wrapper preserves Cargo's resolved flags and appends the non-overridable lint for
 this run only, never in the workspace lint catalog. Every diagnostic carries the target
 it came from, so the output is a stream of `(target, target kind, extern name, unused)`
