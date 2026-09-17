@@ -84,10 +84,12 @@ impl DoctestEvidence {
 /// written.
 pub fn shim(args: &[OsString], capture: &Path) -> Result<ExitCode> {
     let rustc = tool_or_default(std::env::var_os("RUSTC"), "rustc");
+    let args = stable_diagnostic_args(args);
     let output = Command::new(&rustc)
-        .args(args)
+        .args(&args)
         .arg("--force-warn")
         .arg("unused_crate_dependencies")
+        .args(["--error-format=human", "--color=never"])
         // rustdoc feeds the doctest source on stdin; without this the shim
         // would hand rustc an empty program and every doctest would fail.
         .stdin(Stdio::inherit())
@@ -108,6 +110,25 @@ pub fn shim(args: &[OsString], capture: &Path) -> Result<ExitCode> {
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// Preserve compiler semantics while normalizing diagnostics for the parser.
+fn stable_diagnostic_args(args: &[OsString]) -> Vec<OsString> {
+    let mut kept = Vec::with_capacity(args.len());
+    let mut skip_value = false;
+    for arg in args {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        let text = arg.to_string_lossy();
+        if matches!(text.as_ref(), "--error-format" | "--color" | "--json") {
+            skip_value = true;
+        } else if !text.starts_with("--error-format=") && !text.starts_with("--color=") && !text.starts_with("--json=") {
+            kept.push(arg.clone());
+        }
+    }
+    kept
 }
 
 /// Run as Cargo's rustdoc executable and install the doctest compiler shim.
@@ -252,12 +273,15 @@ fn read_captures(capture: &Path) -> Result<PackageDoctests> {
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
     use std::path::Path;
 
     use tempfile::TempDir;
 
-    use super::{DoctestEvidence, PackageDoctests, clear_capture, read_captures, record, tool_or_default, unused_name};
+    use super::{
+        DoctestEvidence, PackageDoctests, clear_capture, read_captures, record, stable_diagnostic_args, tool_or_default, unused_name,
+    };
 
     #[test]
     fn lint_diagnostics_yield_normalized_dependency_names() {
@@ -265,6 +289,24 @@ mod tests {
         assert_eq!(unused_name("error: extern crate `broken` is unused"), Some("broken".to_owned()));
         assert_eq!(unused_name("warning: something else"), None);
         assert_eq!(unused_name("warning: extern crate without backticks"), None);
+    }
+
+    #[test]
+    fn diagnostic_flags_are_normalized_without_dropping_compiler_inputs() {
+        let args = [
+            "input.rs".into(),
+            "--error-format=json".into(),
+            "--color".into(),
+            "always".into(),
+            "--json=diagnostic-rendered-ansi".into(),
+            "--cfg".into(),
+            "feature=\"x\"".into(),
+        ];
+
+        assert_eq!(
+            stable_diagnostic_args(&args),
+            [OsString::from("input.rs"), OsString::from("--cfg"), OsString::from("feature=\"x\"")]
+        );
     }
 
     #[test]

@@ -337,9 +337,10 @@ unstable-options`), and a replacement is free to keep what rustdoc throws away:
 The tool installs itself as a chaining `RUSTDOC` executable. After Cargo resolves
 configured and environment rustdoc flags, the wrapper appends `-Z unstable-options
 --no-run --test-builder <shim>`. The shim runs the real rustc with `--force-warn
-unused_crate_dependencies`, preserves rustc's human-readable diagnostics for rustdoc,
-and writes the unused-crate names it parses to one unique record per compiler
-invocation. Measured, on a crate whose
+unused_crate_dependencies`, replaces only diagnostic-format/color arguments with
+`--error-format=human --color=never`, preserves those diagnostics for rustdoc, and
+writes the unused-crate names it parses to one unique record per compiler invocation.
+Measured, on a crate whose
 `doconly` dev-dependency is used only from a doctest and whose `deaddev` is used
 nowhere:
 
