@@ -87,7 +87,9 @@ rate-limit behavior. An explicit option is authoritative, as is a nonblank
 environment token; cargo-aprz never invokes `gh` when either applies, even when
 the switch is present. Environment values are trimmed; an empty or
 whitespace-only `GITHUB_TOKEN` is treated as absent so explicitly authorized,
-host-aware `gh` discovery can continue.
+host-aware `gh` discovery can continue. The rejected value is removed from the
+`gh` child environment so the CLI can consult its authenticated account instead
+of treating the blank environment override as authoritative.
 
 The command is spawned directly without a shell. Its stdout is trimmed and used
 only as the request credential; it is never logged, cached, included in an

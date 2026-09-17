@@ -571,6 +571,59 @@ fn run_just_with_real_cargo(root: &Path, arguments: &[&str]) -> Output {
     command.output().expect("just is required to verify generated recipe behavior")
 }
 
+fn run_container_github_credential_probe(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> (Output, String) {
+    let start = CONTAINER
+        .find("    # An already-exported GITHUB_TOKEN")
+        .expect("container GitHub credential block");
+    let end = CONTAINER[start..]
+        .find("    # The recipe contract's own inputs.")
+        .map(|offset| start + offset)
+        .expect("end of container GitHub credential block");
+    let block = CONTAINER[start..end].replace("'{{ replace(just_executable(), \"'\", \"''\") }}'", "'just'");
+    let argv = arguments
+        .iter()
+        .map(|argument| format!("'{}'", argument.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let script = format!(
+        "$argv = @({argv})\n\
+         $runArgs = @()\n\
+         $forwardedEnv = @()\n\
+         $hookEnv = @()\n\
+         {block}\n\
+         Write-Output \"TOKEN=$($env:GITHUB_TOKEN)\"\n\
+         Write-Output \"RUN_ARGS=$($runArgs -join '|')\"\n"
+    );
+    let log = root.join("gh.log");
+    if log.exists() {
+        fs::remove_file(&log).unwrap();
+    }
+
+    let mut command = Command::new("pwsh");
+    command
+        .args(["-NoProfile", "-Command", &script])
+        .current_dir(root)
+        .env("PATH", path_with_fake_bin(root))
+        .env("FAKE_GH_LOG", &log)
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("APRZ_GITHUB_URL");
+    for &(key, value) in environment {
+        command.env(key, value);
+    }
+    let output = command.output().expect("pwsh is required to verify generated recipe behavior");
+    let calls = fs::read_to_string(log).unwrap_or_default();
+    (output, calls)
+}
+
+fn assert_probe_success(output: &Output, context: &str) {
+    assert!(
+        output.status.success(),
+        "{context}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn assert_failed(output: &Output, context: &str) {
     assert!(
         !output.status.success(),
@@ -2522,6 +2575,111 @@ fn aprz_does_not_opt_into_github_cli_credential_discovery() {
 
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(calls.contains("aprz deps"), "cargo aprz must still be invoked:\n{calls}");
+}
+
+#[test]
+fn container_github_cli_discovery_is_opt_in_host_aware_and_preserves_precedence() {
+    const PROBE: &str = "[script(\"pwsh\", \"-NoProfile\")]\n\
+        enterprise-probe:\n    \
+        & cargo aprz deps --github-url https://github.plan.test/api/v3 --github-token-from-gh\n";
+
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("probe.just", PROBE)], &[]);
+    let root = tmp.path();
+    write(
+        &root.join("fake-bin/gh.ps1"),
+        "if (Test-Path -LiteralPath 'Env:GITHUB_TOKEN') {\n    \
+         Add-Content -LiteralPath $env:FAKE_GH_LOG -Value \"inherited-token=[$env:GITHUB_TOKEN]\"\n\
+         }\n\
+         Add-Content -LiteralPath $env:FAKE_GH_LOG -Value ($args -join '|')\n\
+         Write-Output 'discovered-token'\n",
+    );
+
+    let (planned, calls) = run_container_github_credential_probe(root, &["just", "enterprise-probe"], &[]);
+    assert_probe_success(&planned, "expanded-plan credential discovery failed");
+    assert_eq!(calls.trim(), "auth|token|--hostname|github.plan.test");
+    assert!(
+        String::from_utf8_lossy(&planned.stdout).contains("TOKEN=discovered-token"),
+        "the discovered token must be forwarded\n{}",
+        String::from_utf8_lossy(&planned.stdout)
+    );
+
+    let (direct, calls) = run_container_github_credential_probe(
+        root,
+        &[
+            "cargo",
+            "aprz",
+            "deps",
+            "--github-url=https://github.argv.test/api/v3",
+            "--github-token-from-gh",
+        ],
+        &[("APRZ_GITHUB_URL", OsStr::new("https://github.environment.test/api/v3"))],
+    );
+    assert_probe_success(&direct, "direct-argv credential discovery failed");
+    assert_eq!(
+        calls.trim(),
+        "auth|token|--hostname|github.argv.test",
+        "the command-line service URL must win over the environment override"
+    );
+    let direct_stdout = String::from_utf8_lossy(&direct.stdout);
+    assert!(
+        direct_stdout.contains("RUN_ARGS=-e|GITHUB_TOKEN|-e|APRZ_GITHUB_URL"),
+        "the token and endpoint override must both reach the container\n{direct_stdout}"
+    );
+
+    let (environment_url, calls) = run_container_github_credential_probe(
+        root,
+        &["cargo", "aprz", "deps", "--github-token-from-gh"],
+        &[("APRZ_GITHUB_URL", OsStr::new("https://github.environment.test/api/v3"))],
+    );
+    assert_probe_success(&environment_url, "environment-host credential discovery failed");
+    assert_eq!(calls.trim(), "auth|token|--hostname|github.environment.test");
+
+    let (explicit, calls) = run_container_github_credential_probe(
+        root,
+        &[
+            "cargo",
+            "aprz",
+            "deps",
+            "--github-token",
+            "explicit-token",
+            "--github-token-from-gh",
+        ],
+        &[],
+    );
+    assert_probe_success(&explicit, "explicit-token precedence probe failed");
+    assert!(calls.is_empty(), "an explicit command token must suppress host gh discovery");
+
+    let (environment_token, calls) = run_container_github_credential_probe(
+        root,
+        &["cargo", "aprz", "deps", "--github-token-from-gh"],
+        &[("GITHUB_TOKEN", OsStr::new("environment-token"))],
+    );
+    assert_probe_success(&environment_token, "environment-token precedence probe failed");
+    assert!(calls.is_empty(), "a nonblank environment token must suppress host gh discovery");
+    assert!(
+        String::from_utf8_lossy(&environment_token.stdout).contains("RUN_ARGS=-e|GITHUB_TOKEN"),
+        "the authoritative environment token must still be forwarded\n{}",
+        String::from_utf8_lossy(&environment_token.stdout)
+    );
+
+    let (whitespace_token, calls) = run_container_github_credential_probe(
+        root,
+        &["cargo", "aprz", "deps", "--github-token-from-gh"],
+        &[("GITHUB_TOKEN", OsStr::new(" \t "))],
+    );
+    assert_probe_success(&whitespace_token, "blank environment-token probe failed");
+    assert_eq!(
+        calls.trim(),
+        "auth|token|--hostname|github.com",
+        "a whitespace-only environment token is absent, so opted-in discovery must continue"
+    );
+
+    let (not_opted_in, calls) = run_container_github_credential_probe(root, &["echo", "--github-token-from-gh-extra"], &[]);
+    assert_probe_success(&not_opted_in, "non-opt-in probe failed");
+    assert!(calls.is_empty(), "only an exact opt-in argument may invoke host gh");
 }
 
 /// `anvil-mutants-diff` diffs the base against the WORKING TREE, not against

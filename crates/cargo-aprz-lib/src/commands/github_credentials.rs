@@ -233,6 +233,8 @@ async fn run_gh_command(request: GhCommandRequest) -> io::Result<GhCommandOutput
     } = request;
     let child = Command::new(executable)
         .args(args)
+        // Rejected blank values must not make gh ignore its authenticated account.
+        .env_remove(GITHUB_TOKEN_ENV)
         .stdin(stdin.into_stdio())
         .stdout(stdout.into_stdio())
         .stderr(stderr.into_stdio())

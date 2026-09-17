@@ -935,11 +935,13 @@ anvil-container *command:
     # exact --github-token-from-gh switch in a direct command's argv or in an
     # expanded `just --dry-run` plan. Interactive execution never opts in.
     #
-    # Explicit --github-token and GITHUB_TOKEN remain authoritative even when
-    # the opt-in switch is also present, so neither path invokes gh.
-    if (-not $env:GITHUB_TOKEN) {
+    # Explicit --github-token and a nonblank GITHUB_TOKEN remain authoritative
+    # even when the opt-in switch is also present, so neither path invokes gh.
+    $hasEnvironmentGitHubToken = -not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)
+    if (-not $hasEnvironmentGitHubToken) {
         $githubTokenFromGh = $false
         $hasExplicitGitHubToken = $false
+        $githubUrl = $null
         if ($argv.Count -gt 0 -and $argv[0] -eq 'just') {
             # A dry run has no side effects, and a target that cannot be planned
             # yields no consent, so the run fails on its own terms.
@@ -982,25 +984,79 @@ anvil-container *command:
             $hasExplicitGitHubToken = [regex]::IsMatch(
                 $plan, '(?m)(^|[\s''"])--github-token(?:=|$|[\s''"])'
             )
+            if ($githubTokenFromGh) {
+                $githubUrlMatch = [regex]::Match(
+                    $plan,
+                    '(?m)(?:^|[\s''"])--github-url(?:=|\s+)(?:''([^'']*)''|"([^"]*)"|([^\s''"]+))'
+                )
+                if ($githubUrlMatch.Success) {
+                    foreach ($group in 1..3) {
+                        if ($githubUrlMatch.Groups[$group].Success) {
+                            $githubUrl = $githubUrlMatch.Groups[$group].Value
+                            break
+                        }
+                    }
+                }
+            }
         } elseif ($argv.Count -gt 0) {
             $githubTokenFromGh = $argv -contains '--github-token-from-gh'
             $hasExplicitGitHubToken = @(
                 $argv | Where-Object { $_ -eq '--github-token' -or $_.StartsWith('--github-token=') }
             ).Count -gt 0
+            if ($githubTokenFromGh) {
+                for ($i = 0; $i -lt $argv.Count; $i++) {
+                    if ($argv[$i] -eq '--github-url' -and $i + 1 -lt $argv.Count) {
+                        $githubUrl = $argv[$i + 1]
+                        break
+                    }
+                    if ($argv[$i].StartsWith('--github-url=')) {
+                        $githubUrl = $argv[$i].Substring('--github-url='.Length)
+                        break
+                    }
+                }
+            }
         }
 
-        if ($githubTokenFromGh -and -not $hasExplicitGitHubToken -and (Get-Command gh -ErrorAction SilentlyContinue)) {
-            $ghToken = $null
-            try { $ghToken = (gh auth token --hostname github.com 2>$null) } catch { $ghToken = $null }
-            if ($ghToken -and $ghToken.Trim()) {
-                Set-Item -LiteralPath 'Env:GITHUB_TOKEN' -Value $ghToken.Trim()
-                $hookEnv += 'GITHUB_TOKEN'
+        if ($githubTokenFromGh -and -not $hasExplicitGitHubToken) {
+            if ([string]::IsNullOrWhiteSpace($githubUrl) -and
+                -not [string]::IsNullOrWhiteSpace($env:APRZ_GITHUB_URL)) {
+                $githubUrl = $env:APRZ_GITHUB_URL
+            }
+
+            $githubHostname = 'github.com'
+            if (-not [string]::IsNullOrWhiteSpace($githubUrl)) {
+                $githubUri = $null
+                try { $githubUri = [Uri]::new($githubUrl, [UriKind]::Absolute) } catch {}
+                if ($null -eq $githubUri -or [string]::IsNullOrWhiteSpace($githubUri.Host)) {
+                    $githubHostname = $null
+                } elseif ($githubUri.Host -eq 'api.github.com') {
+                    $githubHostname = 'github.com'
+                } else {
+                    $githubHostname = $githubUri.Host
+                }
+            }
+
+            if ($githubHostname -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+                # gh treats even a whitespace-only inherited GITHUB_TOKEN as
+                # authoritative. Remove the value cargo-aprz already rejected
+                # so the authenticated account lookup can actually proceed.
+                Remove-Item -LiteralPath 'Env:GITHUB_TOKEN' -ErrorAction SilentlyContinue
+                $ghToken = $null
+                try { $ghToken = (gh auth token --hostname $githubHostname 2>$null) } catch { $ghToken = $null }
+                if ($ghToken -and $ghToken.Trim()) {
+                    Set-Item -LiteralPath 'Env:GITHUB_TOKEN' -Value $ghToken.Trim()
+                    $hookEnv += 'GITHUB_TOKEN'
+                }
             }
         }
     }
-    if ($env:GITHUB_TOKEN) {
+    if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
         $forwardedEnv += 'GITHUB_TOKEN'
         $runArgs += @('-e', 'GITHUB_TOKEN')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:APRZ_GITHUB_URL)) {
+        $forwardedEnv += 'APRZ_GITHUB_URL'
+        $runArgs += @('-e', 'APRZ_GITHUB_URL')
     }
 
     # The recipe contract's own inputs. These are read by generated checks --

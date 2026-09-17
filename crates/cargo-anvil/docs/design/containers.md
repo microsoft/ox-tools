@@ -401,11 +401,17 @@ is — exact parity with a native run, where every process the shell spawns can 
 
 GitHub CLI discovery is different: it manufactures a credential the developer did not export, and PID 1's environment
 is inherited by every build script and proc macro in the container. The driver therefore invokes
-`gh auth token --hostname github.com` only when the containerized command explicitly opts in with
+`gh auth token --hostname <host>` only when the containerized command explicitly opts in with
 `--github-token-from-gh`. A direct command opts in through an exact argv occurrence. A `just` command opts in when the
 switch occurs as an exact argument in its expanded `just --dry-run <target>` plan. An explicit `--github-token` in the
-same command or plan suppresses the host `gh` lookup, as does an exported `GITHUB_TOKEN`. The no-command interactive
-form never derives a token.
+same command or plan suppresses the host `gh` lookup, as does a nonblank exported `GITHUB_TOKEN`. The no-command
+interactive form never derives a token.
+
+`<host>` follows cargo-aprz's effective endpoint: `--github-url` in the direct argv or expanded plan wins over
+`APRZ_GITHUB_URL`, and no override means `github.com`. The environment override is forwarded into the container so
+the host lookup and the process using its token keep the same endpoint. An invalid override suppresses host discovery
+rather than querying an unrelated login; the inner command retains responsibility for reporting its invalid service
+address.
 
 This wrapper lookup exists only because the image has no gh CLI of its own. Native cargo-aprz performs the same
 discovery only when its switch is present and selects the gh login from its effective GitHub endpoint, including
