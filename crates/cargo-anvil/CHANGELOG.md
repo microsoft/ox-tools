@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-17
+
+- 🐛 Bug Fixes
+
+  - scope coverage reports to affected packages
+
+- ✔️ Tasks
+
+  - bump version to 0.10.1
+
 ## [0.10.0] - 2026-09-16
 
 - ✨ Features
