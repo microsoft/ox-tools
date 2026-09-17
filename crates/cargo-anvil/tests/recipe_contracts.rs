@@ -2348,7 +2348,11 @@ fn coverage_reports_use_requested_package_scope() {
         );
         let log = tmp.path().join("cargo.log");
         seed_include(tmp.path(), "affected", scope);
-        let mut environment = vec![("FAKE_CARGO_LOG", log.as_os_str())];
+        let mut environment = vec![
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("PROCESSOR_ARCHITECTURE", OsStr::new("AMD64")),
+            ("PROCESSOR_ARCHITEW6432", OsStr::new("AMD64")),
+        ];
         if include_second_package {
             environment.push(("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")));
         }
