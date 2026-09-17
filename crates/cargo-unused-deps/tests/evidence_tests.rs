@@ -89,6 +89,7 @@ impl Fixture {
             .arg("unused-deps")
             .arg("--manifest-path")
             .arg(self.dir.path().join("Cargo.toml"))
+            .arg("--workspace")
             .output()
             .expect("failed to execute the binary");
 
@@ -403,15 +404,13 @@ fn the_allow_list_suppresses_a_finding() {
 }
 
 #[test]
-fn check_catalog_skips_the_compiler() {
+fn no_package_selector_runs_only_the_catalog_check() {
     let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
 
     let output = Command::new(binary())
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(fixture.dir.path().join("Cargo.toml"))
-        .arg("--check")
-        .arg("catalog")
         .output()
         .expect("failed to execute the binary");
 
@@ -436,8 +435,6 @@ fn the_tools_own_catalog_is_clean() {
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(&manifest)
-        .arg("--check")
-        .arg("catalog")
         .output()
         .expect("failed to execute the binary");
 
@@ -446,4 +443,51 @@ fn the_tools_own_catalog_is_clean() {
         "this repository's catalog should be clean: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn package_selection_limits_compile_evidence() {
+    if !nightly() {
+        return;
+    }
+
+    let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
+    let manifest = fixture.dir.path().join("Cargo.toml");
+
+    let leaf = Command::new(binary())
+        .args(["unused-deps", "--manifest-path"])
+        .arg(&manifest)
+        .args(["--package", "dead"])
+        .output()
+        .expect("failed to execute the binary");
+    assert!(leaf.status.success(), "the unselected main package must not be judged");
+    assert!(!String::from_utf8_lossy(&leaf.stderr).contains("dead: no compiled unit loaded"));
+
+    let main = Command::new(binary())
+        .args(["unused-deps", "--manifest-path"])
+        .arg(&manifest)
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+    assert!(!main.status.success(), "the selected main package contains an unused dependency");
+    assert!(String::from_utf8_lossy(&main.stderr).contains("dead: no compiled unit loaded"));
+}
+
+#[test]
+fn workspace_exclude_limits_compile_evidence() {
+    if !nightly() {
+        return;
+    }
+
+    let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
+    let output = Command::new(binary())
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--workspace", "--exclude", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(output.status.success(), "the excluded main package must not be judged");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("dead: no compiled unit loaded"));
 }

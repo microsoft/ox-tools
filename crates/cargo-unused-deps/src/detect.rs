@@ -155,6 +155,12 @@ pub fn parse_manifest(text: &str, path: &Path) -> Result<DocumentMut> {
         .with_context(|| format!("failed to parse {}", path.display()))
 }
 
+/// Read and parse a manifest.
+pub fn read_manifest(path: &Path) -> Result<DocumentMut> {
+    let text = read_manifest_text(path)?;
+    parse_manifest(&text, path)
+}
+
 /// Classify a parsed manifest.
 ///
 /// When the manifest is a workspace root, its catalog and allow-list are

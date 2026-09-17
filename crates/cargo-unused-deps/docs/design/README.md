@@ -8,8 +8,6 @@
 > compile evidence, doctest evidence through the shim, package selection, and the
 > allow-list. Not yet built: the optional/feature check (question 5) and `--fix`
 > for a misplaced dependency; both are reported as designed but unimplemented.
->
-> Companion docs: [workspace dependency catalog](./workspace-catalog.md).
 
 ## 1. Problem
 
@@ -546,14 +544,26 @@ entry — so the second defect is not a surprise on the next run.
 ### Invocation
 
 ```text
-cargo unused-deps [--manifest-path <PATH>] [--fix] [--require-workspace]
+cargo +nightly unused-deps [--manifest-path <PATH>]
+    [-p <SPEC>...] [--workspace [--exclude <SPEC>...]]
+    [--check <NAME>...] [--fix] [--require-workspace]
 ```
 
-| Option                | Default      | Meaning                                                              |
-|-----------------------|--------------|----------------------------------------------------------------------|
-| `--manifest-path`     | `Cargo.toml` | Workspace root manifest to check, relative to the current directory. |
-| `--fix`               | *(off)*      | Remove the unused entries instead of only reporting them.            |
-| `--require-workspace` | *(off)*      | Treat a manifest with no `[workspace]` table as an error.            |
+| Option                | Default      | Meaning                                                                      |
+|-----------------------|--------------|------------------------------------------------------------------------------|
+| `--manifest-path`     | `Cargo.toml` | Workspace root or crate manifest to check.                                   |
+| `-p`, `--package`     | *(none)*     | Gather compile evidence for the selected package. Repeatable.                |
+| `--workspace`         | *(off)*      | Gather compile evidence for every workspace member.                          |
+| `--exclude`           | *(none)*     | Exclude a package from `--workspace`. Repeatable; requires `--workspace`.     |
+| `--check`             | *(all)*      | Restrict per-package checks to `unused` and/or `misplaced`; catalog still runs. |
+| `--fix`               | *(off)*      | Remove uninherited catalog entries.                                          |
+| `--require-workspace` | *(off)*      | Treat a manifest with no `[workspace]` table as an error.                    |
+
+The catalog check always reads every workspace member and always runs, including
+when no package selector is supplied. Package selection applies only to compile
+evidence. This gives impact-scoped callers a safe zero-selection representation:
+invoke the tool with no selector to check the global catalog without compiling any
+package. An ordinary full-workspace run is explicit as `--workspace`.
 
 ### Manifests without a `[workspace]` table
 
@@ -682,49 +692,32 @@ carried onto normally; it is only appending *after* one that has nowhere to go.)
 report describes what happened rather than what was attempted: claiming a move that
 did not happen would send the reviewer hunting for text that is not in the diff.
 
-## 6. Relationship to the other dependency checks
-
-| Question                                                | Answered by                  |
-|---------------------------------------------------------|------------------------------|
-| Is this catalog entry inherited by any member?          | this tool                    |
-| Is an inherited dependency actually referenced in code? | `udeps`                      |
-| Is it declared with explicit features?                  | `ensure-no-default-features` |
-
-This tool and `udeps` compose without overlap and without gaps: this tool is
-manifest-only and cannot be fooled by macro-hidden imports; `udeps` is
-compile-accurate and cannot see uninherited entries.
-
-**`cargo-shear` was evaluated and rejected as the vehicle.** It does implement a
-`shear/unused_workspace_dependency` diagnostic, but derives it from static
-source-usage analysis, so its verdict inherits that analysis's macro-expansion blind
-spots — on this repository it reports eight entries that are inherited and genuinely
-used through macro arguments. It also skips the check for single-member workspaces.
-Its other diagnostics remain independently interesting; that is a separate decision.
-The dormant `cargo-unused-workspace-deps` crate (one release in 2025, no commits
-since) was likewise rejected as a pinned dependency.
-
 ## 7. CI integration
 
-The check joins the `pr-fast` group of anvil's PR tier (see
-[cargo-anvil's check catalog](../../../cargo-anvil/docs/design/checks.md)), invoked as
-`cargo unused-deps` alongside `ensure-no-cyclic-deps` and
-`ensure-no-default-features`. Like those two it is a text/metadata check: one platform
-would be enough and no nightly toolchain is required; the existing group matrix runs it
-redundantly because splitting out a separate job costs more than the check.
+The complete check replaces both `cargo-udeps` and `cargo-machete`, but Anvil cannot
+adopt it in the same change that first publishes the implementation. Generated Anvil
+setup installs the pinned release from crates.io, so the sequence is:
 
-Its impact-scoping include level is `modified`: it reads the root manifest
-and every member manifest in one pass, so it runs once from the repository
-root against its own input domain rather than taking impact-selected package
-arguments. Single-crate repositories run the same command and pass without
-configuration.
+1. publish `cargo-unused-deps` 0.2.0 with the complete checker;
+2. update Anvil's pin and generated recipes in a follow-up change.
 
-The catalog wiring consists of a pinned version in `versions.just`, install and validate
-recipes in `tools.just`, a check recipe under `checks/`, and entries in the `pr-fast`
-group and the `modified` include list.
+The Anvil recipe always invokes the tool. It obtains the `required` impact tier and
+forwards a nonempty result as Cargo-style package selectors. When impact reports
+`--skip`, the recipe passes no package selector: the workspace-global catalog check
+still runs, while compile-evidence checks have an explicitly empty package set.
+With impact disabled, the recipe passes `--workspace`.
+
+This split is essential. A workspace-root manifest change may be invisible to
+package-level impact analysis, so allowing `--skip` to bypass the process would miss
+an uninherited catalog entry. Conversely, compiling the whole workspace merely to ask
+the global manifest question would discard the value of impact scoping.
 
 ## 8. Out of scope
 
-- Unused entries in the `[workspace.dependencies]` of a *nested* workspace. Each
-  workspace root is checked on its own terms by its own invocation.
+- Unused entries in a nested workspace's catalog; each workspace root is checked by
+  its own invocation.
 - `[patch]`, `[replace]`, and `[profile]` tables.
-- Any judgment about whether an inherited dependency *should* be inherited.
+- Dependencies used only on uncompiled platforms or feature selections. The allow-list
+  handles intentional cases; exhaustively cross-compiling every target is not a lint.
+- Automatically deleting a package dependency or moving a misplaced declaration.
+  Compile evidence is sufficient to fail and explain, not to edit uncompiled paths.

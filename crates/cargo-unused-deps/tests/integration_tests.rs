@@ -58,11 +58,6 @@ fn run(manifest_path: &Path, args: &[&str]) -> Output {
         // parser expects that repeated name. Running the binary directly
         // bypasses Cargo, so the test has to supply the token itself.
         .arg("unused-deps")
-        // These fixtures exist to exercise the catalog check, and their
-        // dependencies are names rather than real crates, so the checks that
-        // compile are not asked for here.
-        .arg("--check")
-        .arg("catalog")
         .arg("--manifest-path")
         .arg(manifest_path)
         .args(args)

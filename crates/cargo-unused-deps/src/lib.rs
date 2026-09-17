@@ -179,11 +179,11 @@ enum Commands {
         packages: Vec<String>,
 
         /// Gather compile evidence for every workspace member
-        #[arg(long)]
+        #[arg(long, conflicts_with = "packages")]
         workspace: bool,
 
         /// Exclude a member from a --workspace run. Repeatable
-        #[arg(long, value_name = "SPEC")]
+        #[arg(long, value_name = "SPEC", requires = "workspace")]
         exclude: Vec<String>,
 
         /// Run only the named checks
@@ -203,9 +203,6 @@ enum Commands {
 /// The checks a run can perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Check {
-    /// `[workspace.dependencies]` entries no member inherits.
-    Catalog,
-
     /// Declared dependencies no unit loaded.
     Unused,
 
@@ -274,14 +271,14 @@ pub fn run() -> Result<ExitCode> {
         require_workspace,
     } = cli.command;
 
-    let selection = selection_flags(&packages, workspace, &exclude);
     let mut failed = false;
 
-    if Check::Catalog.wanted(&checks) {
-        failed |= catalog_check(&manifest_path, fix, require_workspace)? != ExitCode::SUCCESS;
-    }
+    // The catalog question is workspace-global and always runs. Package
+    // selection applies only to checks backed by compile evidence.
+    failed |= catalog_check(&manifest_path, fix, require_workspace)? != ExitCode::SUCCESS;
 
-    if Check::any_needs_evidence(&checks) {
+    if (!packages.is_empty() || workspace) && Check::any_needs_evidence(&checks) {
+        let selection = selection_flags(&packages, workspace, &exclude);
         failed |= source_checks(&manifest_path, &selection, &checks)?;
     }
 
@@ -297,7 +294,7 @@ fn selection_flags(packages: &[String], workspace: bool, exclude: &[String]) -> 
         flags.push(OsString::from(package));
     }
 
-    if workspace || packages.is_empty() {
+    if workspace {
         flags.push(OsString::from("--workspace"));
     }
 
@@ -621,7 +618,7 @@ fn workspace_of(manifest_path: &Path) -> Result<Workspace> {
     }
 
     let root = detect::read_manifest(manifest_path)?;
-    let allowed = match detect::catalog(&root) {
+    let allowed = match detect::catalog(&root)? {
         Catalog::Workspace(catalog) => catalog.allowed,
         Catalog::NotAWorkspace => BTreeSet::new(),
     };
