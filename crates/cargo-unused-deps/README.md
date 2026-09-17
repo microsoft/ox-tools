@@ -82,6 +82,9 @@ A dependency kept on purpose is exempted in the workspace manifest:
 ```toml
 [workspace.metadata.unused-deps]
 allowed = ["kept-on-purpose"]
+
+[package.metadata.unused-deps]
+allowed = ["package-local-side-effect"]
 ```
 
 An `allowed` name that suppresses nothing is reported as stale, on stderr,

@@ -74,6 +74,9 @@
 //! ```toml
 //! [workspace.metadata.unused-deps]
 //! allowed = ["kept-on-purpose"]
+//!
+//! [package.metadata.unused-deps]
+//! allowed = ["package-local-side-effect"]
 //! ```
 //!
 //! An `allowed` name that suppresses nothing is reported as stale, on stderr,
@@ -234,6 +237,12 @@ impl Check {
 // to the parent coverage run.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn dispatch(args: &[OsString]) -> Result<ExitCode> {
+    if std::env::var_os(evidence::WRAPPER_VAR).is_some() {
+        return evidence::wrapper(&args[1..]);
+    }
+    if std::env::var_os(doctests::RUSTDOC_WRAPPER_VAR).is_some() {
+        return doctests::rustdoc_wrapper(&args[1..]);
+    }
     if let Some(capture) = std::env::var_os(doctests::CAPTURE_VAR) {
         let subcommand = args.get(1).map(OsString::as_os_str);
         if subcommand != Some(SUBCOMMAND.as_ref()) {
@@ -671,6 +680,7 @@ fn workspace_of(manifest_path: &Path) -> Result<Workspace> {
             name: package.name.to_string(),
             version: package.version.to_string(),
             declared: detect::declared_dependencies(&document),
+            allowed: detect::package_allowed(&document)?,
             has_doctests: package.targets.iter().any(|target| {
                 target.kind.iter().any(|kind| {
                     matches!(
@@ -759,6 +769,7 @@ fn lines(count: usize) -> &'static str {
 
 #[cfg(test)]
 mod selection_tests {
+    use std::collections::BTreeSet;
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -802,6 +813,7 @@ mod selection_tests {
             version: version.to_owned(),
             manifest_path: PathBuf::from(path),
             declared: Vec::new(),
+            allowed: BTreeSet::new(),
             has_doctests: false,
         });
 

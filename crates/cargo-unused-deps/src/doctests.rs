@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, bail};
 
@@ -22,6 +23,15 @@ use anyhow::{Context, Result, bail};
 /// Its presence is also what puts this binary into shim mode, since rustdoc
 /// invokes a test builder as a bare rustc and passes no flag of our own.
 pub const CAPTURE_VAR: &str = "CARGO_UNUSED_DEPS_CAPTURE";
+
+/// Marks an invocation of this binary as Cargo's rustdoc executable.
+pub const RUSTDOC_WRAPPER_VAR: &str = "CARGO_UNUSED_DEPS_RUSTDOC_WRAPPER";
+
+/// Preserves a caller-selected rustdoc executable behind this tool's wrapper.
+const INNER_RUSTDOC_VAR: &str = "CARGO_UNUSED_DEPS_INNER_RUSTDOC";
+
+/// Distinguishes several shim invocations in one process.
+static CAPTURE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 /// What one package's doctests did and did not use.
 #[derive(Debug, Default, Clone)]
@@ -76,7 +86,7 @@ pub fn shim(args: &[OsString], capture: &Path) -> Result<ExitCode> {
     let rustc = tool_or_default(std::env::var_os("RUSTC"), "rustc");
     let output = Command::new(&rustc)
         .args(args)
-        .arg("-W")
+        .arg("--force-warn")
         .arg("unused_crate_dependencies")
         // rustdoc feeds the doctest source on stdin; without this the shim
         // would hand rustc an empty program and every doctest would fail.
@@ -100,7 +110,25 @@ pub fn shim(args: &[OsString], capture: &Path) -> Result<ExitCode> {
     })
 }
 
-/// Append the findings from one doctest to the capture file.
+/// Run as Cargo's rustdoc executable and install the doctest compiler shim.
+pub fn rustdoc_wrapper(args: &[OsString]) -> Result<ExitCode> {
+    let rustdoc = tool_or_default(std::env::var_os(INNER_RUSTDOC_VAR), "rustdoc");
+    let shim = std::env::current_exe().context("failed to locate this executable to use as the doctest shim")?;
+    let status = Command::new(rustdoc)
+        .args(args)
+        .args(["-Z", "unstable-options", "--no-run", "--test-builder"])
+        .arg(shim)
+        .env_remove(RUSTDOC_WRAPPER_VAR)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run rustdoc from the doctest wrapper")?;
+
+    Ok(if status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+}
+
+/// Write the findings from one doctest to its own capture record.
 ///
 /// The format is deliberately trivial -- a bare line to record that a doctest
 /// compiled, and a `\tname` line per unused dependency -- because both writer
@@ -115,14 +143,16 @@ fn record(capture: &Path, stderr: &str) -> Result<()> {
         lines.push('\n');
     }
 
+    let sequence = CAPTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let record = capture.join(format!("{}-{sequence}.tsv", std::process::id()));
     let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(capture)
-        .context(format!("failed to open the doctest capture file {}", capture.display()))?;
+        .write(true)
+        .create_new(true)
+        .open(&record)
+        .context(format!("failed to create the doctest capture record {}", record.display()))?;
 
     file.write_all(lines.as_bytes())
-        .context(format!("failed to write the doctest capture file {}", capture.display()))
+        .context(format!("failed to write the doctest capture record {}", record.display()))
 }
 
 /// The dependency named by one output line from rustc, if it is the lint.
@@ -151,11 +181,9 @@ fn unused_name(line: &str) -> Option<String> {
 pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, shim_path: &Path) -> Result<PackageDoctests> {
     std::fs::create_dir_all(target_dir).context(format!("failed to create {}", target_dir.display()))?;
 
-    let capture = target_dir.join(format!("doctests-{package}.tsv"));
+    let capture = target_dir.join(format!("doctests-{package}"));
     clear_capture(&capture)?;
-
-    let mut rustdocflags = OsString::from("-Z unstable-options --no-run --test-builder ");
-    rustdocflags.push(shim_path);
+    std::fs::create_dir(&capture).context(format!("failed to create {}", capture.display()))?;
 
     let cargo = tool_or_default(std::env::var_os("CARGO"), "cargo");
     let output = Command::new(cargo)
@@ -168,7 +196,9 @@ pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, sh
         .arg("--all-features")
         .arg("--target-dir")
         .arg(target_dir)
-        .env("RUSTDOCFLAGS", rustdocflags)
+        .env("RUSTDOC", shim_path)
+        .envs(std::env::var_os("RUSTDOC").map(|rustdoc| (INNER_RUSTDOC_VAR, rustdoc)))
+        .env(RUSTDOC_WRAPPER_VAR, "1")
         .env(CAPTURE_VAR, &capture)
         .output()
         .context("failed to run `cargo test --doc` to collect doctest evidence")?;
@@ -191,7 +221,7 @@ fn tool_or_default(selected: Option<OsString>, default: &str) -> OsString {
 /// Remove stale captures from an earlier run.
 fn clear_capture(capture: &Path) -> Result<()> {
     if capture.exists() {
-        std::fs::remove_file(capture).context(format!("failed to clear {}", capture.display()))?;
+        std::fs::remove_dir_all(capture).context(format!("failed to clear {}", capture.display()))?;
     }
     Ok(())
 }
@@ -203,13 +233,16 @@ fn read_captures(capture: &Path) -> Result<PackageDoctests> {
         return Ok(doctests);
     }
 
-    let text = std::fs::read_to_string(capture).context(format!("failed to read {}", capture.display()))?;
-    for line in text.lines() {
-        match line.strip_prefix('\t') {
-            Some(name) => {
-                *doctests.reports.entry(name.to_owned()).or_default() += 1;
+    for entry in std::fs::read_dir(capture).context(format!("failed to read {}", capture.display()))? {
+        let path = entry.context(format!("failed to enumerate {}", capture.display()))?.path();
+        let text = std::fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
+        for line in text.lines() {
+            match line.strip_prefix('\t') {
+                Some(name) => {
+                    *doctests.reports.entry(name.to_owned()).or_default() += 1;
+                }
+                None => doctests.compiled += 1,
             }
-            None => doctests.compiled += 1,
         }
     }
 
@@ -236,7 +269,8 @@ mod tests {
     #[test]
     fn captures_count_each_compilation_and_report() {
         let dir = TempDir::new().expect("failed to create temp dir");
-        let path = dir.path().join("capture.tsv");
+        let path = dir.path().join("capture");
+        fs::create_dir(&path).expect("failed to create capture dir");
 
         record(
             &path,
@@ -263,8 +297,9 @@ mod tests {
     #[test]
     fn stale_captures_are_cleared() {
         let dir = TempDir::new().expect("failed to create temp dir");
-        let path = dir.path().join("capture.tsv");
-        fs::write(&path, "stale").expect("failed to seed capture");
+        let path = dir.path().join("capture");
+        fs::create_dir(&path).expect("failed to create capture dir");
+        fs::write(path.join("stale.tsv"), "stale").expect("failed to seed capture");
 
         clear_capture(&path).expect("capture is cleared");
         assert!(!path.exists());
@@ -296,8 +331,9 @@ mod tests {
     #[test]
     fn malformed_capture_text_is_still_counted_conservatively() {
         let dir = TempDir::new().expect("failed to create temp dir");
-        let path = dir.path().join("capture.tsv");
-        fs::write(&path, "compiled\n\tunused\n").expect("failed to seed capture");
+        let path = dir.path().join("capture");
+        fs::create_dir(&path).expect("failed to create capture dir");
+        fs::write(path.join("record.tsv"), "compiled\n\tunused\n").expect("failed to seed capture");
 
         let captures = read_captures(&path).expect("capture is readable");
         assert_eq!(captures.compiled, 1);

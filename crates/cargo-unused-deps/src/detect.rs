@@ -177,19 +177,36 @@ pub fn catalog(manifest: &DocumentMut) -> Result<Catalog> {
         .and_then(Item::as_table_like)
         .and_then(|config| config.get("allowed"));
 
+    let allowed = allowed_names(configured, &format!("workspace.metadata.{METADATA_KEY}"))?;
+
+    Ok(Catalog::Workspace(WorkspaceCatalog { declared, allowed }))
+}
+
+/// Read package-local source-finding suppressions.
+pub fn package_allowed(manifest: &DocumentMut) -> Result<BTreeSet<String>> {
+    let configured = manifest
+        .get("package")
+        .and_then(Item::as_table_like)
+        .and_then(|package| package.get("metadata"))
+        .and_then(Item::as_table_like)
+        .and_then(|metadata| metadata.get(METADATA_KEY))
+        .and_then(Item::as_table_like)
+        .and_then(|config| config.get("allowed"));
+
+    allowed_names(configured, &format!("package.metadata.{METADATA_KEY}"))
+}
+
+/// Parse one metadata scope's allowed dependency names.
+fn allowed_names(configured: Option<&Item>, scope: &str) -> Result<BTreeSet<String>> {
     let mut allowed = BTreeSet::new();
-    for value in array_of(configured, "allowed")? {
-        let name = value.as_str().ok_or_else(|| {
-            anyhow!(
-                "[workspace.metadata.{METADATA_KEY}] allowed must contain only strings, found {}",
-                value.type_name()
-            )
-        })?;
+    for value in array_of(configured, scope, "allowed")? {
+        let name = value
+            .as_str()
+            .ok_or_else(|| anyhow!("[{scope}] allowed must contain only strings, found {}", value.type_name()))?;
 
         allowed.insert(name.to_owned());
     }
-
-    Ok(Catalog::Workspace(WorkspaceCatalog { declared, allowed }))
+    Ok(allowed)
 }
 
 /// The values of a configured array, or none when the key is absent.
@@ -197,15 +214,13 @@ pub fn catalog(manifest: &DocumentMut) -> Result<Catalog> {
 /// A present value of any other type is an error rather than a silent empty
 /// list: a mis-typed key that behaves like an absent one is indistinguishable
 /// from configuration that does not work.
-fn array_of<'a>(configured: Option<&'a Item>, key: &str) -> Result<impl Iterator<Item = &'a Value>> {
+fn array_of<'a>(configured: Option<&'a Item>, scope: &str, key: &str) -> Result<impl Iterator<Item = &'a Value>> {
     let array = match configured {
         None => None,
-        Some(item) => Some(item.as_array().ok_or_else(|| {
-            anyhow!(
-                "[workspace.metadata.{METADATA_KEY}] {key} must be an array, found {}",
-                item.type_name()
-            )
-        })?),
+        Some(item) => Some(
+            item.as_array()
+                .ok_or_else(|| anyhow!("[{scope}] {key} must be an array, found {}", item.type_name()))?,
+        ),
     };
 
     Ok(array.into_iter().flatten())

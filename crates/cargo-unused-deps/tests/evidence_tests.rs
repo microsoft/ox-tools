@@ -150,11 +150,39 @@ fn dep(name: &str) -> String {
 
 #[test]
 fn a_dependency_no_unit_loads_is_unused() {
-    let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
+    let fixture = Fixture::new(
+        &["dead"],
+        &format!("[dependencies]\n{}", dep("dead")),
+        "#![allow(unused_crate_dependencies)]\npub fn go() {}\n",
+    );
 
     let report = fixture.report();
 
     assert!(report.contains("dead: no compiled unit loaded it"), "unexpected report: {report}");
+}
+
+#[test]
+fn encoded_rustflags_are_preserved_by_the_compiler_wrapper() {
+    let fixture = Fixture::new(
+        &["used"],
+        &format!("[dependencies]\n{}", dep("used")),
+        "#[cfg(custom_evidence)]\npub fn go() { used::f(); }\n",
+    );
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .env("CARGO_ENCODED_RUSTFLAGS", "--cfg\u{1f}custom_evidence")
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(
+        output.status.success(),
+        "the wrapper must preserve encoded flags that select dependency-using code: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -658,12 +686,23 @@ fn workspace_exclude_limits_compile_evidence() {
 fn package_checks_support_a_non_workspace_manifest() {
     let dir = TempDir::new().expect("failed to create temp dir");
     fs::create_dir_all(dir.path().join("src")).expect("failed to create source dir");
+    fs::create_dir_all(dir.path().join("side/src")).expect("failed to create dependency source dir");
     fs::write(
         dir.path().join("Cargo.toml"),
-        "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        concat!(
+            "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
+            "[package.metadata.unused-deps]\nallowed = [\"side\"]\n\n",
+            "[dependencies]\nside = { path = \"side\" }\n",
+        ),
     )
     .expect("failed to write manifest");
     fs::write(dir.path().join("src/lib.rs"), "pub fn go() {}\n").expect("failed to write source");
+    fs::write(
+        dir.path().join("side/Cargo.toml"),
+        "[package]\nname = \"side\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("failed to write dependency manifest");
+    fs::write(dir.path().join("side/src/lib.rs"), "pub fn side_effect() {}\n").expect("failed to write dependency source");
 
     let output = command()
         .arg("unused-deps")

@@ -10,15 +10,18 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
 
 /// The diagnostic this tool listens for.
 const LINT: &str = "unused_crate_dependencies";
 
-/// Lint flag handed to every unit rustc compiles for us.
-const LINT_FLAG: &str = "-W unused_crate_dependencies";
+/// Marks an invocation of this binary as Cargo's rustc wrapper.
+pub const WRAPPER_VAR: &str = "CARGO_UNUSED_DEPS_RUSTC_WRAPPER";
+
+/// Preserves a caller-provided rustc wrapper behind this tool's wrapper.
+const INNER_WRAPPER_VAR: &str = "CARGO_UNUSED_DEPS_INNER_RUSTC_WRAPPER";
 
 /// What a cargo target is, for the purpose of reading its evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -159,7 +162,11 @@ impl Evidence {
 pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, all_targets: bool) -> Result<Evidence> {
     let mut command = Command::new(cargo());
     command.arg("check").arg("--manifest-path").arg(manifest_path).args(selection);
-    configure_rustflags(&mut command);
+    let wrapper = std::env::current_exe().context("failed to locate this executable to use as the rustc wrapper")?;
+    if let Some(inner) = std::env::var_os("RUSTC_WRAPPER") {
+        command.env(INNER_WRAPPER_VAR, inner);
+    }
+    command.env("RUSTC_WRAPPER", wrapper).env(WRAPPER_VAR, "1");
 
     if all_targets {
         command.arg("--all-targets");
@@ -183,27 +190,37 @@ pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, a
     parse(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Add the lint to whichever rustflags representation Cargo will consume.
-fn configure_rustflags(command: &mut Command) {
-    let (name, value) = rustflags_env(std::env::var_os("CARGO_ENCODED_RUSTFLAGS"), std::env::var_os("RUSTFLAGS"));
-    command.env(name, value);
+/// Run as Cargo's rustc wrapper and make the evidence lint non-overridable.
+///
+/// Cargo has already resolved config and environment rustflags before invoking
+/// the wrapper, so appending here preserves every active flag source. A
+/// pre-existing wrapper is chained with Cargo's standard wrapper protocol.
+pub fn wrapper(args: &[OsString]) -> Result<ExitCode> {
+    let (rustc, rustc_args) = args.split_first().context("rustc wrapper was invoked without a compiler path")?;
+    let mut command = wrapper_command(std::env::var_os(INNER_WRAPPER_VAR), rustc);
+    let status = command
+        .args(rustc_args)
+        .args(["--force-warn", LINT])
+        .env_remove(WRAPPER_VAR)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run rustc from the compile-evidence wrapper")?;
+
+    Ok(if status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
-/// Select the rustflags representation Cargo gives precedence.
-fn rustflags_env(encoded: Option<OsString>, plain: Option<OsString>) -> (&'static str, OsString) {
-    match encoded {
-        Some(flags) => ("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(flags)),
-        None => ("RUSTFLAGS", rustflags(plain)),
+/// Construct the wrapper chain before appending rustc's ordinary arguments.
+fn wrapper_command(inner: Option<OsString>, rustc: &OsString) -> Command {
+    match inner {
+        Some(wrapper) => {
+            let mut command = Command::new(wrapper);
+            command.arg(rustc);
+            command
+        }
+        None => Command::new(rustc),
     }
-}
-
-/// Append the lint to Cargo's unit-separator encoded argument list.
-fn encoded_rustflags(mut flags: OsString) -> OsString {
-    if !flags.is_empty() {
-        flags.push("\u{1f}");
-    }
-    flags.push("-W\u{1f}unused_crate_dependencies");
-    flags
 }
 
 /// Render compiler diagnostics from Cargo's JSON stream alongside Cargo errors.
@@ -237,16 +254,6 @@ fn cargo() -> OsString {
 /// Use Cargo selected by the environment or its conventional executable name.
 fn cargo_or_default(selected: Option<OsString>) -> OsString {
     selected.unwrap_or_else(|| OsString::from("cargo"))
-}
-
-/// `RUSTFLAGS` for the child build, preserving any the caller set.
-fn rustflags(selected: Option<OsString>) -> OsString {
-    let mut flags = selected.unwrap_or_default();
-    if !flags.is_empty() {
-        flags.push(" ");
-    }
-    flags.push(LINT_FLAG);
-    flags
 }
 
 /// Read cargo's JSON stream into evidence.
@@ -315,10 +322,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::Path;
 
-    use super::{
-        Evidence, Scope, TargetKind, cargo_or_default, encoded_rustflags, failure_diagnostics, parse, reported_name, rustflags,
-        rustflags_env,
-    };
+    use super::{Evidence, Scope, TargetKind, cargo_or_default, failure_diagnostics, parse, reported_name, wrapper_command};
 
     #[test]
     fn target_kinds_are_classified_explicitly() {
@@ -335,28 +339,15 @@ mod tests {
     }
 
     #[test]
-    fn lint_flags_preserve_plain_and_encoded_caller_flags() {
-        assert_eq!(rustflags(None), "-W unused_crate_dependencies");
-        assert_eq!(
-            rustflags(Some("-C target-cpu=native".into())),
-            "-C target-cpu=native -W unused_crate_dependencies"
-        );
-        assert_eq!(encoded_rustflags(OsString::new()), "-W\u{1f}unused_crate_dependencies");
-        assert_eq!(
-            encoded_rustflags("-C\u{1f}target-cpu=native".into()),
-            "-C\u{1f}target-cpu=native\u{1f}-W\u{1f}unused_crate_dependencies"
-        );
-        assert_eq!(
-            rustflags_env(Some("-C".into()), Some("ignored".into())),
-            (
-                "CARGO_ENCODED_RUSTFLAGS",
-                OsString::from("-C\u{1f}-W\u{1f}unused_crate_dependencies")
-            )
-        );
-        assert_eq!(
-            rustflags_env(None, Some("-C opt-level=1".into())),
-            ("RUSTFLAGS", OsString::from("-C opt-level=1 -W unused_crate_dependencies"))
-        );
+    fn compiler_wrapper_chains_an_existing_wrapper() {
+        let rustc = OsString::from("rustc");
+        let direct = wrapper_command(None, &rustc);
+        assert_eq!(direct.get_program(), "rustc");
+        assert_eq!(direct.get_args().count(), 0);
+
+        let chained = wrapper_command(Some("sccache".into()), &rustc);
+        assert_eq!(chained.get_program(), "sccache");
+        assert_eq!(chained.get_args().collect::<Vec<_>>(), ["rustc"]);
     }
 
     #[test]

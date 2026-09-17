@@ -117,11 +117,11 @@ error: could not compile `main` (lib test) due to 1 previous error
 ```
 
 So the lint level belongs to *this tool's own invocation* and nowhere else. The tool
-sets `RUSTFLAGS=-W unused_crate_dependencies` for the cargo commands it runs, and gives
-them a dedicated `--target-dir`, because changing `RUSTFLAGS` changes the build
-fingerprint and would otherwise invalidate the shared cache on every alternating build.
-That costs one build's worth of artifacts, kept out of everyone's way, and keeps
-ordinary builds silent.
+installs a chaining `RUSTC_WRAPPER` and appends `--force-warn
+unused_crate_dependencies` after Cargo has resolved configured and environment flags.
+`--force-warn` cannot be lowered by crate attributes, and a caller's existing wrapper
+is invoked behind this one. The build gets a dedicated `--target-dir` because the
+forced lint changes the build fingerprint; ordinary builds stay silent.
 
 Cargo's own lint, below, is exempt from this: it aggregates before reporting, so it can
 sit in a manifest without lying about correct code.
@@ -334,14 +334,12 @@ That last row is the tell. The lint is not absent — its output is *swallowed*.
 lets the compiler behind doctests be replaced (`--test-builder`, `-Z
 unstable-options`), and a replacement is free to keep what rustdoc throws away:
 
-```
-RUSTDOCFLAGS="-Z unstable-options --test-builder <shim> --no-run" \
-  cargo +nightly test --doc
-```
-
-where the shim runs the real rustc with `-W unused_crate_dependencies`, preserves
-rustc's human-readable diagnostics for rustdoc, and appends the unused-crate names it
-parses from those diagnostics to a file. Measured, on a crate whose
+The tool installs itself as a chaining `RUSTDOC` executable. After Cargo resolves
+configured and environment rustdoc flags, the wrapper appends `-Z unstable-options
+--no-run --test-builder <shim>`. The shim runs the real rustc with `--force-warn
+unused_crate_dependencies`, preserves rustc's human-readable diagnostics for rustdoc,
+and writes the unused-crate names it parses to one unique record per compiler
+invocation. Measured, on a crate whose
 `doconly` dev-dependency is used only from a doctest and whose `deaddev` is used
 nowhere:
 
@@ -355,7 +353,7 @@ matter for the implementation:
 
 - Every doctest compiles as a crate called `rust_out`, so diagnostics carry no
   per-doctest identity. None is needed: the question is "did *any* doctest use this
-  dependency", so the shim's captures are unioned.
+  dependency", so the shim's per-process records are unioned after rustdoc exits.
 - The crate under test is itself passed as an `--extern` and is reported unused by any
   doctest that does not mention it. It is excluded from the analysis, not counted.
 - The shim is this tool in another mode, the way `RUSTC_WRAPPER` tools work — not a
@@ -424,28 +422,21 @@ member regardless of package selection — see below.
 `--all-targets`, into the same directory so the second pass reuses the first's
 artifacts. The two runs answer different questions; see phase 4.
 
-```bash
-RUSTFLAGS="-W unused_crate_dependencies" \
-  cargo +nightly check <selection> --all-targets --all-features \
-    --target-dir target/unused-deps --message-format=json
-```
-
-The lint level is set here, for this run only, never in the workspace lint catalog —
-see §2. The dedicated target directory keeps the altered `RUSTFLAGS` from invalidating
-the cache every other build. Every diagnostic carries the unit it came from, so the
-output is a stream of `(unit, unit kind, extern name, unused)` facts.
+The tool runs `cargo +nightly check <selection> --all-targets --all-features
+--target-dir target/unused-deps --message-format=json` with its chaining rustc wrapper.
+The wrapper preserves Cargo's resolved flags and appends the non-overridable lint for
+this run only, never in the workspace lint catalog. Every diagnostic carries the target
+it came from, so the output is a stream of `(target, target kind, extern name, unused)`
+facts.
 
 **3. Gather doctest evidence.**
 
-```bash
-RUSTDOCFLAGS="-Z unstable-options --test-builder <self> --no-run" \
-  cargo +nightly test --doc <selection> --all-features
-```
-
-`<self>` is this binary in shim mode: it execs the real rustc with
-`-W unused_crate_dependencies --error-format=json`, appends the diagnostics to a file
-whose path it takes from the environment, and forwards rustc's exit status. rustdoc
-discards the compiler's stderr on success, which is why the shim keeps its own copy.
+The tool runs `cargo +nightly test --doc <package> --all-features` with itself as a
+chaining rustdoc executable. That wrapper appends the unstable test-builder options
+without replacing Cargo's active rustdoc flags. `<self>` then acts as the test-builder:
+it invokes the real rustc with `--force-warn unused_crate_dependencies`, writes one
+unique capture record, and forwards rustc's diagnostics and exit status. Per-process
+records avoid concurrent append interleaving.
 
 **4. Aggregate and judge.** The diagnostics are per *unit*, and cargo compiles a
 library or binary twice under `--all-targets` — plainly and with `cfg(test)` — while
@@ -591,13 +582,18 @@ line, because the generated CI recipe invokes the tool with a fixed argument lis
 ```toml
 [workspace.metadata.unused-deps]
 allowed = ["kept-on-purpose"]
+
+[package.metadata.unused-deps]
+allowed = ["package-local-side-effect"]
 ```
 
-An allowed name suppresses both catalog and source-level findings and is never removed.
-It is stale only when neither the workspace catalog nor any member manifest declares that
-name. This lets an inherited or direct side-effect dependency use the same suppression
-without the catalog phase incorrectly recommending that the exception be removed. A stale
-entry produces a warning without changing the exit code.
+A workspace-level allowed name suppresses both catalog and source-level findings. A
+package-level name suppresses source findings for that package, including in a standalone
+non-workspace crate. A workspace-level entry is stale only when neither the workspace
+catalog nor any member manifest declares that name. This lets an inherited or direct
+side-effect dependency use the same suppression without the catalog phase incorrectly
+recommending that the exception be removed. A stale entry produces a warning without
+changing the exit code.
 
 ### Reporting
 

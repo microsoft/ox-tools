@@ -53,6 +53,9 @@ pub struct Package {
     /// Everything it declares.
     pub declared: Vec<Declared>,
 
+    /// Package-local source-finding suppressions.
+    pub allowed: BTreeSet<String>,
+
     /// Whether it has a library or proc-macro target, and so can have doctests.
     pub has_doctests: bool,
 }
@@ -84,7 +87,7 @@ pub fn judge(
         }
 
         for declared in &package.declared {
-            if allowed.contains(&declared.name) {
+            if allowed.contains(&declared.name) || package.allowed.contains(&declared.name) {
                 continue;
             }
 
