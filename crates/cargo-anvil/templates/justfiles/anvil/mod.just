@@ -68,7 +68,7 @@ import 'checks/pr-title.just'
 import 'checks/readme-check.just'
 import 'checks/semver-check.just'
 import 'checks/spellcheck.just'
-import 'checks/unused-deps.just'
+import 'checks/udeps.just'
 # Optional: the container artifacts can be removed through `without_artifact`,
 # which deletes this file. A hard import would then fail parsing for every
 # recipe in the tree, not merely the container ones, so the documented opt-out

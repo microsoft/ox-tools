@@ -35,7 +35,6 @@ const MIRI_TREE_BORROWS: &str = include_str!("../templates/justfiles/anvil/check
 const MSRV_TEST: &str = include_str!("../templates/justfiles/anvil/checks/msrv-test.just");
 const README: &str = include_str!("../templates/justfiles/anvil/checks/readme-check.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
-const UNUSED_DEPS: &str = include_str!("../templates/justfiles/anvil/checks/unused-deps.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const APRZ: &str = include_str!("../templates/justfiles/anvil/checks/aprz.just");
@@ -149,14 +148,6 @@ fn developer_options_are_explicit_and_cloud_defaults_stay_non_interactive() {
     assert!(MIRI.contains("[arg(\"test\", long"));
     assert!(MIRI.contains("[arg(\"example\", long"));
     assert!(README.contains("[arg(\"fix\", long, value=\"true\")]"));
-}
-
-#[test]
-fn unused_deps_checks_the_whole_manifest_domain_on_stable() {
-    assert!(UNUSED_DEPS.contains("_anvil-impact-include modified"));
-    assert!(UNUSED_DEPS.contains("cargo {{_anvil_stable_toolchain_args}} unused-deps"));
-    assert!(!UNUSED_DEPS.contains("--package"));
-    assert!(!UNUSED_DEPS.contains("rust_nightly"));
 }
 
 const FAKE_CARGO_PS1: &str = r#"

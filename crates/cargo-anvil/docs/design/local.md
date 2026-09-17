@@ -143,7 +143,7 @@ full-workspace mutants recipe:
 anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
                anvil-ensure-no-cyclic-deps anvil-ensure-no-default-features \
                anvil-doc-build anvil-readme-check anvil-spellcheck anvil-pr-title \
-               anvil-deny anvil-audit anvil-unused-deps anvil-semver-check \
+               anvil-deny anvil-audit anvil-udeps anvil-semver-check \
                anvil-external-types anvil-aprz
 
 anvil-pr-slow: anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
@@ -448,12 +448,12 @@ minimum-version run. Without a root MSRV the recipe is a no-op.
 
 `anvil-tool-rustc-validate-prereqs` verifies that `rustc` is available and
 enforces the workspace MSRV compatibility rule. Per-check toolchain
-requirements (for example, miri and careful need nightly) remain
+requirements (for example, miri, careful, and udeps need nightly) remain
 enforced by their matching prerequisite validation.
 
 ### 3.6 Nightly pinning
 
-A handful of catalog checks need nightly Rust: `fmt`, `miri`, `careful`, and
+A handful of catalog checks need nightly Rust: `fmt`, `udeps`, `miri`, `careful`, and
 `check-external-types`. We **pin** the nightly snapshots used by these checks rather than
 floating bare `+nightly`. Pinning eliminates "rustup update on Tuesday broke main on
 Wednesday" — every cloud-workflow run uses the same nightly until we deliberately bump the pin.
@@ -472,13 +472,13 @@ rust_nightly := "nightly-YYYY-MM-DD"
 rust_nightly_external_types := "nightly-YYYY-MM-DD"
 ```
 
-**One source of truth, two consumers.** Recipes read the pins by `{{ }}` interpolation.
-The `anvil-toolchain-<name>-install`
+**One source of truth, two consumers.** Recipes read the pins by `{{ }}` interpolation
+(`cargo +{{ rust_nightly }} udeps ...`). The `anvil-toolchain-<name>-install`
 recipes read the same variables and pass them to `rustup toolchain install`. The
 setup composites/templates call those install recipes (directly or transitively via
 a group's `*-setup` recipe). There is no env-file duplicate.
 
-**Two pins, not one.** `rust_nightly` is the general-purpose nightly used by miri and
+**Two pins, not one.** `rust_nightly` is the general-purpose nightly used by udeps, miri,
 careful. `rust_nightly_external_types` is intentionally narrower: it's tied to the rustdoc
 JSON schema version that the currently-selected `cargo-check-external-types` release
 accepts. Bump it alongside `cargo-check-external-types` upgrades, not on the general
@@ -556,7 +556,7 @@ Each check requests one cargo-delta **category** — the selector it passes to
 |------------|------------------------------------------------------------------------------------------------|
 | `modified` | `--skip` → recipe exits 0. Otherwise the recipe runs against the input domain defined by its own command; impact-selected package arguments are not forwarded. |
 | `affected` | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when empty. |
-| `required` | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack). |
+| `required` | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
 `$include` is either the literal sentinel `--skip` (the tier is empty), a pre-built
 argument string like `--package alpha@1.0.0 --package beta@0.2.0` (version-qualified cargo

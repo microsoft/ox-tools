@@ -51,7 +51,7 @@ stages:
     displayName: anvil scheduled-advisories
     dependsOn: []
     jobs:
-      # Cross-OS because clippy in this group compiles per host,
+      # Cross-OS because clippy and udeps in this group compile per host,
       # so cfg-gated code must be linted/scanned on both OSes.
       - template: steps/job.yml
         parameters:

@@ -34,7 +34,7 @@ implemented six different ways:
 | `assistants-oxide` | ADO 1ESPT (custom `rust/`) | Monolith + `.just/tds.just`            | caller-provisioned | Symcrypt setup steps, NuGet publish stage |
 | `ox-docs`          | ADO classic               | Monolith                                | caller-provisioned | Mixed C#/.NET + Rust, mdbook/docfx |
 
-The same logical checks (clippy, fmt, deny, miri, mutants, coverage, hack feature-powerset, unused-deps,
+The same logical checks (clippy, fmt, deny, miri, mutants, coverage, hack feature-powerset, udeps,
 semver, spellcheck, license headers, doc/doctest, careful, audit, ensure-no-cyclic-deps,
 ensure-no-default-features, doc2readme, …) are spelled in subtly different ways in each repo, with
 different argument sets, different tool versions, and different opinions about which tier (PR vs.
@@ -427,7 +427,7 @@ pipeline.
 
 | Group                                                       | OS / arch scope (default)              | Rationale                                                                                                                                          |
 |-------------------------------------------------------------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`, `scheduled-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, semver-check, external-types) that only see the host's compiled crate graph -- cfg-gated code is invisible to a single-leg run. Text/metadata checks such as unused-deps run redundantly because that is cheaper than splitting jobs. |
+| `pr-fast`, `scheduled-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph -- cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
 | `pr-test`, `pr-msrv`, `pr-runtime-analysis`, `scheduled-test`          | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface. `pr-msrv` runs the affected test suite under the minimum supported compiler. The slow PR groups run as parallel cloud-workflow jobs for shorter wall-clock per leg. |
 | `pr-mutants`                                                    | GH: Linux x86_64 + Windows x86_64 + Linux aarch64 (windows-arm self-skips). ADO: Linux x86_64 + Windows x86_64 | Diff-scoped mutation testing. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; the recipe self-skips so the windows-arm leg is a no-op. |
 | `scheduled-exhaustive`                                       | Linux x86_64 + Windows x86_64 | Full `cargo-mutants` / `cargo-hack` / `bench`. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; rather than splitting the matrix to add an ARM-Linux leg for cargo-hack and bench, the whole group is x86-only. Adopters with ARM-specific concerns extend the matrix in their root workflow. |

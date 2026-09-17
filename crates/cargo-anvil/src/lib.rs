@@ -189,7 +189,7 @@
 //! - **Dependencies and public API:** [`cargo-deny`](https://embarkstudios.github.io/cargo-deny/),
 //!   [`cargo-audit`](https://crates.io/crates/cargo-audit),
 //!   [`cargo-aprz`](https://crates.io/crates/cargo-aprz),
-//!   [`cargo-unused-deps`](https://crates.io/crates/cargo-unused-deps),
+//!   [`cargo-udeps`](https://crates.io/crates/cargo-udeps),
 //!   [`cargo-semver-checks`](https://crates.io/crates/cargo-semver-checks), and
 //!   [`cargo-check-external-types`](https://crates.io/crates/cargo-check-external-types).
 //! - **Tests and coverage:** tests under the declared MSRV, coverage with

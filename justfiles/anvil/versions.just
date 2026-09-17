@@ -86,7 +86,7 @@ Write-Output ('+' + $msrv)
 })
 ''')
 
-# General nightly used by miri, careful, and any future
+# General nightly used by udeps, miri, careful, and any future
 # nightly-dependent check. Bumped on a regular cadence (monthly is a
 # reasonable default) when an adopter has time to absorb formatting /
 # lint / API-surface drift. Pin only -- do not use bare `nightly` here.
@@ -125,4 +125,4 @@ cargo_nextest_version := "0.9.143"
 cargo_semver_checks_version := "0.50.0"
 cargo_sort_version := "2.1.4"
 cargo_spellcheck_version := "0.15.7"
-cargo_unused_deps_version := "0.1.0"
+cargo_udeps_version := "0.1.61"

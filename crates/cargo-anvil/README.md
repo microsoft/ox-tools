@@ -189,7 +189,7 @@ above compose these recipes into the default policy:
 * **Dependencies and public API:** [`cargo-deny`][__link10],
   [`cargo-audit`][__link11],
   [`cargo-aprz`][__link12],
-  [`cargo-unused-deps`][__link13],
+  [`cargo-udeps`][__link13],
   [`cargo-semver-checks`][__link14], and
   [`cargo-check-external-types`][__link15].
 * **Tests and coverage:** tests under the declared MSRV, coverage with
@@ -400,13 +400,13 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbqqgE8u6HXogbGKq-ULHPkXIb-niUQv9lPwcbsNSFXpEUQ0RhZIGDa2NhcmdvLWFudmlsZjAuMTAuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbBALu36V1VAYbFUDdfp-8dCobobFjKbRep8AbYNMPgi_aMhFhZIGDa2NhcmdvLWFudmlsZjAuMTAuMGtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://embarkstudios.github.io/cargo-deny/
  [__link11]: https://crates.io/crates/cargo-audit
  [__link12]: https://crates.io/crates/cargo-aprz
- [__link13]: https://crates.io/crates/cargo-unused-deps
+ [__link13]: https://crates.io/crates/cargo-udeps
  [__link14]: https://crates.io/crates/cargo-semver-checks
  [__link15]: https://crates.io/crates/cargo-check-external-types
  [__link16]: https://crates.io/crates/cargo-llvm-cov

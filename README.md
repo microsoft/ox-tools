@@ -211,9 +211,9 @@ These focused operations are not substitutes for either verification tier.
   crates in the repo don't create funny referential cycles using `dev-dependencies`. Things break or get difficult when
   these cycles exist.
 
-- **Unused Workspace Dependencies**. We use
-  [`cargo-unused-deps`](https://crates.io/crates/cargo-unused-deps) to ensure every dependency in the workspace
-  catalog is inherited by at least one member.
+- **Unneeded Dependencies**. We use [`cargo-udeps`](https://crates.io/crates/cargo-udeps) to ensure our crates don't
+  have superfluous
+  dependencies.
 
 - **Dependency Validation**. We use [`cargo-deny`](https://crates.io/crates/cargo-deny) to ensure our dependencies
   have acceptable licenses and don't contain known vulnerabilities.
