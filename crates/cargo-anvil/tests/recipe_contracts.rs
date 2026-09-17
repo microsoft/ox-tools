@@ -587,7 +587,13 @@ fn scoped_check_propagates_missing_consumed_impact_cache() {
     }
     let tmp = fixture(
         &[("fmt.just", FMT), ("impact.just", IMPACT)],
-        &["anvil-fmt-validate-prereqs", "anvil-impact"],
+        &[
+            "anvil-component-nightly-rustfmt-validate-prereqs",
+            "anvil-component-nightly-rustfmt-install",
+            "anvil-tool-cargo-each-validate-prereqs",
+            "anvil-tool-cargo-each-install installer",
+            "anvil-impact",
+        ],
     );
     let log = tmp.path().join("cargo.log");
     let output = run_just(
@@ -597,6 +603,15 @@ fn scoped_check_propagates_missing_consumed_impact_cache() {
     );
 
     assert_failed(&output, "missing consumed impact cache");
+    // anvil-impact is stubbed here, so the only component that can report a
+    // missing include file is the resolver called from inside anvil-fmt --
+    // which proves the recipe body ran and propagated, rather than just
+    // failing to load the fixture or tripping the dependency's own guard.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("include_modified.txt"),
+        "the scoped check must surface the resolver's own cache-missing error\nstderr:\n{stderr}"
+    );
     assert_eq!(output.status.code(), Some(1));
     assert!(!log.exists(), "the scoped command must not run after impact scope resolution fails");
 }
