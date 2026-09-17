@@ -96,9 +96,9 @@ pub fn ensure_reaper() -> io::Result<()> {
 ///
 /// The reaper polls every retained child rather than blocking on one, so a
 /// leader that survives termination cannot prevent unrelated leaders from
-/// being collected. An observation error emits a warning to stderr and
-/// permanently stops tracking that child. On Unix, the child may then remain a
-/// zombie until this process exits.
+/// being collected. Interrupted observations are retried. Any other observation
+/// error emits a warning to stderr and permanently stops tracking that child.
+/// On Unix, the child may then remain a zombie until this process exits.
 ///
 /// # Errors
 ///
@@ -177,6 +177,7 @@ fn retain_reaper_child(id: u32, observation: io::Result<Option<ExitStatus>>) -> 
     match observation {
         Ok(None) => true,
         Ok(Some(_status)) => false,
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => true,
         Err(error) => {
             eprintln!("warning: detached child reaper stopped tracking process {id} after observation failed: {error}");
             false
@@ -1910,6 +1911,10 @@ mod tests {
     #[test]
     fn detached_reaper_drops_unobservable_children() {
         assert!(retain_reaper_child(17, Ok(None)));
+        assert!(retain_reaper_child(
+            17,
+            Err(io::Error::new(io::ErrorKind::Interrupted, "wait interrupted")),
+        ));
         assert!(!retain_reaper_child(
             17,
             Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid child handle")),

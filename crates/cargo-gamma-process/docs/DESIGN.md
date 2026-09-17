@@ -84,9 +84,10 @@ therefore covers the complete descendant tree.
   remain owned until the `ProcessTree` itself is dropped. An error while polling
   the leader follows the same handoff before the observation error is returned,
   because an observation failure does not prove the child was reaped. If the
-  detached reaper itself later receives an observation error, it emits a warning
-  to stderr and permanently stops tracking that child. The released handle may
-  leave a zombie on Unix until this process exits.
+  detached reaper itself later receives an interrupted observation, it keeps the
+  child queued and retries. Any other observation error emits a warning to stderr
+  and permanently stops tracking that child. The released handle may leave a
+  zombie on Unix until this process exits.
 - Sealed containment uses a boundary that descendants cannot leave. A host that
   offers no sealed boundary at all silently uses best-effort process-group
   containment for an unmetered launch; absence of a warning does not establish

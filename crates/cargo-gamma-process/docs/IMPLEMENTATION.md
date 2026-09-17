@@ -33,9 +33,10 @@ the thread exists, and direct `reap_later` startup failures return an unqueued
 child in `ReapFailure` rather than abandoning ownership. A `try_wait` error also
 transfers the still-owned leader handle before returning the observation error;
 only a successful `Some(status)` proves that no later reaping is required. If a
-later `try_wait` in the detached reaper fails, the reaper writes a warning to
-stderr and permanently releases that child handle. On Unix, the child may
-remain a zombie until this process exits.
+later `try_wait` in the detached reaper is interrupted, the child remains queued
+for another attempt. Any other observation error writes a warning to stderr and
+permanently releases that child handle. On Unix, the child may remain a zombie
+until this process exits.
 
 ## Platform composition
 
