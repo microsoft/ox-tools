@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -572,6 +572,15 @@ fn run_just_with_real_cargo(root: &Path, arguments: &[&str]) -> Output {
 }
 
 fn run_container_github_credential_probe(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> (Output, String) {
+    run_container_github_credential_probe_with_timeout(root, arguments, environment, None)
+}
+
+fn run_container_github_credential_probe_with_timeout(
+    root: &Path,
+    arguments: &[&str],
+    environment: &[(&str, &OsStr)],
+    timeout_milliseconds: Option<u32>,
+) -> (Output, String) {
     let start = CONTAINER
         .find("    # An already-exported GITHUB_TOKEN")
         .expect("container GitHub credential block");
@@ -579,14 +588,21 @@ fn run_container_github_credential_probe(root: &Path, arguments: &[&str], enviro
         .find("    # The recipe contract's own inputs.")
         .map(|offset| start + offset)
         .expect("end of container GitHub credential block");
-    let block = CONTAINER[start..end].replace("'{{ replace(just_executable(), \"'\", \"''\") }}'", "'just'");
+    let mut block = CONTAINER[start..end].replace("'{{ replace(just_executable(), \"'\", \"''\") }}'", "'just'");
+    if let Some(timeout_milliseconds) = timeout_milliseconds {
+        block = block.replace(
+            "[int]$TimeoutMilliseconds = 10000",
+            &format!("[int]$TimeoutMilliseconds = {timeout_milliseconds}"),
+        );
+    }
     let argv = arguments
         .iter()
         .map(|argument| format!("'{}'", argument.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(", ");
     let script = format!(
-        "$argv = @({argv})\n\
+        "function gh {{ throw 'PowerShell command shim invoked' }}\n\
+         $argv = @({argv})\n\
          $runArgs = @()\n\
          $forwardedEnv = @()\n\
          $hookEnv = @()\n\
@@ -613,6 +629,84 @@ fn run_container_github_credential_probe(root: &Path, arguments: &[&str], enviro
     let output = command.output().expect("pwsh is required to verify generated recipe behavior");
     let calls = fs::read_to_string(log).unwrap_or_default();
     (output, calls)
+}
+
+fn install_fake_gh(root: &Path) -> PathBuf {
+    const SOURCE: &str = r#"
+use std::env;
+use std::fs;
+use std::io::{self, Write as _};
+use std::process::{self, Command};
+use std::thread;
+use std::time::Duration;
+
+fn main() {
+    let mode = env::var("FAKE_GH_MODE").unwrap_or_else(|_| "token".to_owned());
+    if mode == "descendant" {
+        thread::sleep(Duration::from_secs(8));
+        fs::write(env::var_os("FAKE_GH_SENTINEL").expect("sentinel path"), b"survived")
+            .expect("write descendant sentinel");
+        return;
+    }
+
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    let executable = env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let log = format!(
+        "executable={executable}\ninherited-token={}\nargs={}",
+        env::var_os("GITHUB_TOKEN").is_some(),
+        args.join("|")
+    );
+    fs::write(env::var_os("FAKE_GH_LOG").expect("log path"), log).expect("write invocation log");
+
+    match mode.as_str() {
+        "token" => println!("{}", env::var("FAKE_GH_TOKEN").unwrap_or_else(|_| "discovered-token".to_owned())),
+        "nonzero" => {
+            println!("nonzero-output-secret");
+            eprintln!("nonzero-stderr-secret");
+            process::exit(17);
+        }
+        "blank" => println!(" \t "),
+        "invalid" => io::stdout().write_all(&[0xff, 0xfe]).expect("write invalid UTF-8"),
+        "timeout" => {
+            Command::new(env::current_exe().expect("current executable"))
+                .env("FAKE_GH_MODE", "descendant")
+                .spawn()
+                .expect("spawn descendant");
+            thread::sleep(Duration::from_secs(30));
+        }
+        other => panic!("unknown fake gh mode: {other}"),
+    }
+}
+"#;
+
+    let source = root.join("fake-gh.rs");
+    write(&source, SOURCE);
+    let executable = root.join("fake-bin").join(if cfg!(windows) { "gh.exe" } else { "gh" });
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+    let output = Command::new(rustc)
+        .args(["--edition=2024", "-o"])
+        .arg(&executable)
+        .arg(&source)
+        .output()
+        .expect("rustc is available while running Rust integration tests");
+    assert!(
+        output.status.success(),
+        "compiling fake gh failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    executable
+}
+
+fn assert_gh_call(calls: &str, hostname: &str) {
+    assert!(calls.contains("inherited-token=false"), "gh inherited the rejected token:\n{calls}");
+    assert!(
+        calls.contains(&format!("args=auth|token|--hostname|{hostname}")),
+        "unexpected gh arguments:\n{calls}"
+    );
 }
 
 fn assert_probe_success(output: &Output, context: &str) {
@@ -2588,18 +2682,11 @@ fn container_github_cli_discovery_is_opt_in_host_aware_and_preserves_precedence(
     }
     let tmp = fixture(&[("probe.just", PROBE)], &[]);
     let root = tmp.path();
-    write(
-        &root.join("fake-bin/gh.ps1"),
-        "if (Test-Path -LiteralPath 'Env:GITHUB_TOKEN') {\n    \
-         Add-Content -LiteralPath $env:FAKE_GH_LOG -Value \"inherited-token=[$env:GITHUB_TOKEN]\"\n\
-         }\n\
-         Add-Content -LiteralPath $env:FAKE_GH_LOG -Value ($args -join '|')\n\
-         Write-Output 'discovered-token'\n",
-    );
+    install_fake_gh(root);
 
     let (planned, calls) = run_container_github_credential_probe(root, &["just", "enterprise-probe"], &[]);
     assert_probe_success(&planned, "expanded-plan credential discovery failed");
-    assert_eq!(calls.trim(), "auth|token|--hostname|github.plan.test");
+    assert_gh_call(&calls, "github.plan.test");
     assert!(
         String::from_utf8_lossy(&planned.stdout).contains("TOKEN=discovered-token"),
         "the discovered token must be forwarded\n{}",
@@ -2618,11 +2705,7 @@ fn container_github_cli_discovery_is_opt_in_host_aware_and_preserves_precedence(
         &[("APRZ_GITHUB_URL", OsStr::new("https://github.environment.test/api/v3"))],
     );
     assert_probe_success(&direct, "direct-argv credential discovery failed");
-    assert_eq!(
-        calls.trim(),
-        "auth|token|--hostname|github.argv.test",
-        "the command-line service URL must win over the environment override"
-    );
+    assert_gh_call(&calls, "github.argv.test");
     let direct_stdout = String::from_utf8_lossy(&direct.stdout);
     assert!(
         direct_stdout.contains("RUN_ARGS=-e|GITHUB_TOKEN|-e|APRZ_GITHUB_URL"),
@@ -2635,7 +2718,7 @@ fn container_github_cli_discovery_is_opt_in_host_aware_and_preserves_precedence(
         &[("APRZ_GITHUB_URL", OsStr::new("https://github.environment.test/api/v3"))],
     );
     assert_probe_success(&environment_url, "environment-host credential discovery failed");
-    assert_eq!(calls.trim(), "auth|token|--hostname|github.environment.test");
+    assert_gh_call(&calls, "github.environment.test");
 
     let (explicit, calls) = run_container_github_credential_probe(
         root,
@@ -2671,15 +2754,132 @@ fn container_github_cli_discovery_is_opt_in_host_aware_and_preserves_precedence(
         &[("GITHUB_TOKEN", OsStr::new(" \t "))],
     );
     assert_probe_success(&whitespace_token, "blank environment-token probe failed");
-    assert_eq!(
-        calls.trim(),
-        "auth|token|--hostname|github.com",
-        "a whitespace-only environment token is absent, so opted-in discovery must continue"
-    );
+    assert_gh_call(&calls, "github.com");
 
     let (not_opted_in, calls) = run_container_github_credential_probe(root, &["echo", "--github-token-from-gh-extra"], &[]);
     assert_probe_success(&not_opted_in, "non-opt-in probe failed");
     assert!(calls.is_empty(), "only an exact opt-in argument may invoke host gh");
+}
+
+#[test]
+fn container_github_cli_output_failures_continue_anonymously_without_leaking_output() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    install_fake_gh(root);
+
+    for mode in ["nonzero", "blank", "invalid"] {
+        let (output, calls) = run_container_github_credential_probe(
+            root,
+            &["cargo", "aprz", "deps", "--github-token-from-gh"],
+            &[("FAKE_GH_MODE", OsStr::new(mode))],
+        );
+        assert_probe_success(&output, &format!("{mode} gh output must continue anonymously"));
+        assert_gh_call(&calls, "github.com");
+        let diagnostics = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            diagnostics.contains("TOKEN="),
+            "the probe must report its final state:\n{diagnostics}"
+        );
+        assert!(
+            !diagnostics.contains("TOKEN=discovered-token"),
+            "{mode} output became a credential:\n{diagnostics}"
+        );
+        assert!(!diagnostics.contains("nonzero-output-secret"), "gh stdout leaked:\n{diagnostics}");
+        assert!(!diagnostics.contains("nonzero-stderr-secret"), "gh stderr leaked:\n{diagnostics}");
+    }
+}
+
+#[test]
+fn container_github_cli_timeout_terminates_the_process_tree() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    install_fake_gh(root);
+    let sentinel = root.join("descendant-survived");
+    let started = Instant::now();
+
+    let (output, calls) = run_container_github_credential_probe_with_timeout(
+        root,
+        &["cargo", "aprz", "deps", "--github-token-from-gh"],
+        &[("FAKE_GH_MODE", OsStr::new("timeout")), ("FAKE_GH_SENTINEL", sentinel.as_os_str())],
+        Some(5000),
+    );
+
+    assert_probe_success(&output, "a timed-out gh lookup must continue anonymously");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "the fake gh process was awaited instead of terminated"
+    );
+    assert_gh_call(&calls, "github.com");
+    std::thread::sleep(Duration::from_millis(8500));
+    assert!(!sentinel.exists(), "the timed-out gh descendant survived process-tree termination");
+}
+
+#[test]
+fn container_github_cli_resolution_ignores_command_shims_and_implicit_cwd() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    let executable = install_fake_gh(root);
+    let cwd_executable = root.join(if cfg!(windows) { "gh.exe" } else { "gh" });
+    fs::copy(&executable, &cwd_executable).expect("copy fake gh into the current directory");
+    let empty_path = if cfg!(windows) { OsStr::new(";") } else { OsStr::new(":") };
+
+    let (implicit_cwd, calls) =
+        run_container_github_credential_probe(root, &["cargo", "aprz", "deps", "--github-token-from-gh"], &[("PATH", empty_path)]);
+    assert_probe_success(&implicit_cwd, "implicit-current-directory lookup must continue anonymously");
+    assert!(
+        calls.is_empty(),
+        "empty PATH entries must not select a planted current-directory executable"
+    );
+
+    if cfg!(windows) {
+        let com = root.join("fake-bin/gh.com");
+        fs::copy(&executable, &com).expect("copy fake gh as a COM image");
+        let (ordered, calls) = run_container_github_credential_probe(
+            root,
+            &["cargo", "aprz", "deps", "--github-token-from-gh"],
+            &[
+                ("PATH", root.join("fake-bin").as_os_str()),
+                ("PATHEXT", OsStr::new(".COM;.CMD;.EXE;.PS1")),
+            ],
+        );
+        assert_probe_success(&ordered, "PATHEXT-ordered lookup failed");
+        assert!(
+            calls.to_ascii_lowercase().contains("executable=gh.com"),
+            "COM must win in PATHEXT order:\n{calls}"
+        );
+
+        fs::remove_file(executable).expect("remove direct EXE image");
+        fs::remove_file(com).expect("remove direct COM image");
+        write(&root.join("fake-bin/gh.cmd"), "@echo off\r\nexit /b 99\r\n");
+        write(&root.join("fake-bin/gh.ps1"), "throw 'shim invoked'\n");
+    } else {
+        fs::remove_file(executable).expect("remove executable image");
+        write(&root.join("fake-bin/gh"), "#!/bin/sh\nexit 99\n");
+    }
+
+    let (shims, calls) = run_container_github_credential_probe(
+        root,
+        &["cargo", "aprz", "deps", "--github-token-from-gh"],
+        &[("PATH", root.join("fake-bin").as_os_str()), ("PATHEXT", OsStr::new(".CMD;.PS1"))],
+    );
+    assert_probe_success(&shims, "rejected command shims must continue anonymously");
+    assert!(
+        calls.is_empty(),
+        "a function, batch/PowerShell shim, or non-executable file was invoked"
+    );
 }
 
 /// `anvil-mutants-diff` diffs the base against the WORKING TREE, not against

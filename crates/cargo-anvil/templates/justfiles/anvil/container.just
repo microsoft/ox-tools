@@ -937,6 +937,120 @@ anvil-container *command:
     #
     # Explicit --github-token and a nonblank GITHUB_TOKEN remain authoritative
     # even when the opt-in switch is also present, so neither path invokes gh.
+    function Resolve-AnvilGhExecutable {
+        $path = [Environment]::GetEnvironmentVariable('PATH')
+        if ([string]::IsNullOrEmpty($path)) { return $null }
+
+        if ($IsWindows) {
+            $pathExt = [Environment]::GetEnvironmentVariable('PATHEXT')
+            if ([string]::IsNullOrEmpty($pathExt)) {
+                $pathExt = '.COM;.EXE;.BAT;.CMD'
+            }
+            $names = @(
+                foreach ($extension in ($pathExt -split ';')) {
+                    if ([string]::IsNullOrEmpty($extension)) { continue }
+                    if (-not $extension.StartsWith('.')) { $extension = ".$extension" }
+                    if ($extension -ieq '.COM' -or $extension -ieq '.EXE') {
+                        "gh$extension"
+                    }
+                }
+            )
+        } else {
+            $names = @('gh')
+        }
+
+        foreach ($entry in ($path -split [IO.Path]::PathSeparator)) {
+            # Empty PATH entries implicitly mean the current directory to
+            # command lookup. Require an explicit entry such as `.` instead.
+            if ([string]::IsNullOrEmpty($entry)) { continue }
+            try {
+                $directory = if ([IO.Path]::IsPathRooted($entry)) {
+                    [IO.Path]::GetFullPath($entry)
+                } else {
+                    [IO.Path]::GetFullPath((Join-Path (Get-Location).Path $entry))
+                }
+            } catch {
+                continue
+            }
+
+            foreach ($name in $names) {
+                $candidate = Join-Path $directory $name
+                if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+                if (-not $IsWindows) {
+                    # FileInfo.UnixMode is unavailable on the PowerShell 7.0
+                    # floor, so ask the host directly whether this regular file
+                    # is executable.
+                    & /usr/bin/test -f $candidate
+                    if ($LASTEXITCODE -ne 0) { continue }
+                    & /usr/bin/test -x $candidate
+                    if ($LASTEXITCODE -ne 0) { continue }
+                }
+                return [IO.Path]::GetFullPath($candidate)
+            }
+        }
+        $null
+    }
+
+    function Invoke-AnvilGhToken(
+        [Parameter(Mandatory)][string]$Executable,
+        [Parameter(Mandatory)][string]$Hostname,
+        [int]$TimeoutMilliseconds = 10000
+    ) {
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = $Executable
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardInput = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
+        foreach ($argument in @('auth', 'token', '--hostname', $Hostname)) {
+            $null = $start.ArgumentList.Add($argument)
+        }
+        # gh treats even a whitespace-only inherited GITHUB_TOKEN as
+        # authoritative. Remove the value cargo-aprz already rejected so the
+        # authenticated account lookup can actually proceed.
+        $null = $start.Environment.Remove('GITHUB_TOKEN')
+
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $start
+        $started = $false
+        try {
+            $started = $process.Start()
+            if (-not $started) { return $null }
+            $process.StandardInput.Close()
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+                $process.Kill($true)
+                $process.WaitForExit()
+                try { $null = $stdout.GetAwaiter().GetResult() } catch {}
+                try { $null = $stderr.GetAwaiter().GetResult() } catch {}
+                return $null
+            }
+            try {
+                $token = $stdout.GetAwaiter().GetResult()
+                $null = $stderr.GetAwaiter().GetResult()
+            } catch {
+                return $null
+            }
+            if ($process.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
+                return $null
+            }
+            $token.Trim()
+        } catch {
+            $null
+        } finally {
+            if ($started -and -not $process.HasExited) {
+                try {
+                    $process.Kill($true)
+                    $process.WaitForExit()
+                } catch {}
+            }
+            $process.Dispose()
+        }
+    }
+
     $hasEnvironmentGitHubToken = -not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)
     if (-not $hasEnvironmentGitHubToken) {
         $githubTokenFromGh = $false
@@ -1036,15 +1150,15 @@ anvil-container *command:
                 }
             }
 
-            if ($githubHostname -and (Get-Command gh -ErrorAction SilentlyContinue)) {
-                # gh treats even a whitespace-only inherited GITHUB_TOKEN as
-                # authoritative. Remove the value cargo-aprz already rejected
-                # so the authenticated account lookup can actually proceed.
-                Remove-Item -LiteralPath 'Env:GITHUB_TOKEN' -ErrorAction SilentlyContinue
-                $ghToken = $null
-                try { $ghToken = (gh auth token --hostname $githubHostname 2>$null) } catch { $ghToken = $null }
-                if ($ghToken -and $ghToken.Trim()) {
-                    Set-Item -LiteralPath 'Env:GITHUB_TOKEN' -Value $ghToken.Trim()
+            if ($githubHostname) {
+                $ghExecutable = Resolve-AnvilGhExecutable
+                if ($ghExecutable) {
+                    $ghToken = Invoke-AnvilGhToken $ghExecutable $githubHostname
+                } else {
+                    $ghToken = $null
+                }
+                if ($ghToken) {
+                    Set-Item -LiteralPath 'Env:GITHUB_TOKEN' -Value $ghToken
                     $hookEnv += 'GITHUB_TOKEN'
                 }
             }

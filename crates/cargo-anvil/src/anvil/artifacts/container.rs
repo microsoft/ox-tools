@@ -784,7 +784,8 @@ mod tests {
 
     #[test]
     fn a_host_token_is_forwarded_by_name_without_exposing_its_value() {
-        assert!(RECIPE.contains("gh auth token --hostname github.com"));
+        assert!(RECIPE.contains("$ghToken = Invoke-AnvilGhToken $ghExecutable $githubHostname"));
+        assert!(RECIPE.contains("@('auth', 'token', '--hostname', $Hostname)"));
         assert!(RECIPE.contains("$forwardedEnv += 'GITHUB_TOKEN'"));
         assert!(RECIPE.contains("$runArgs += @('-e', 'GITHUB_TOKEN')"));
         // By name, never by value: `-e NAME=VALUE` would put the credential on
@@ -795,10 +796,40 @@ mod tests {
         assert!(RECIPE.contains("$hookEnv += 'GITHUB_TOKEN'"));
         // An exported token is left alone rather than re-derived; scoping of
         // the derived one is asserted in its own test below.
-        assert!(RECIPE.contains("if (-not $env:GITHUB_TOKEN)"));
+        assert!(RECIPE.contains("if (-not $hasEnvironmentGitHubToken)"));
         // Forwarding by name only works if the engine can see the name, so a
         // WSL engine needs it bridged -- otherwise `-e NAME` forwards nothing.
         assert!(RECIPE.contains("$engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0"));
+    }
+
+    #[test]
+    fn host_github_cli_discovery_is_direct_bounded_and_non_interactive() {
+        assert!(RECIPE.contains("$ghExecutable = Resolve-AnvilGhExecutable"));
+        assert!(RECIPE.contains("$start.FileName = $Executable"));
+        assert!(RECIPE.contains("$start.ArgumentList.Add($argument)"));
+        assert!(RECIPE.contains("$start.UseShellExecute = $false"));
+        assert!(RECIPE.contains("$start.RedirectStandardInput = $true"));
+        assert!(RECIPE.contains("$start.RedirectStandardOutput = $true"));
+        assert!(RECIPE.contains("$start.RedirectStandardError = $true"));
+        assert!(RECIPE.contains("$process.WaitForExit($TimeoutMilliseconds)"));
+        assert!(RECIPE.contains("[int]$TimeoutMilliseconds = 10000"));
+        assert!(RECIPE.contains("$process.Kill($true)"));
+        assert!(RECIPE.contains("$start.Environment.Remove('GITHUB_TOKEN')"));
+        assert!(!RECIPE.contains("Get-Command gh"));
+        assert!(!RECIPE.contains("& gh "));
+        assert!(!RECIPE.contains("(gh "));
+    }
+
+    #[test]
+    fn host_github_cli_resolution_uses_only_direct_path_executables() {
+        assert!(RECIPE.contains("$path = [Environment]::GetEnvironmentVariable('PATH')"));
+        assert!(RECIPE.contains("if ([string]::IsNullOrEmpty($entry)) { continue }"));
+        assert!(RECIPE.contains("[IO.Path]::GetFullPath($candidate)"));
+        assert!(RECIPE.contains("$extension -ieq '.COM' -or $extension -ieq '.EXE'"));
+        assert!(!RECIPE.contains("$extension -ieq '.BAT'"));
+        assert!(!RECIPE.contains("$extension -ieq '.CMD'"));
+        assert!(RECIPE.contains("& /usr/bin/test -f $candidate"));
+        assert!(RECIPE.contains("& /usr/bin/test -x $candidate"));
     }
 
     #[test]
@@ -894,7 +925,9 @@ mod tests {
         // Each search covers the whole recipe, so the comparison below is the
         // thing under test. Bounding a search by an earlier match makes the
         // ordering true by construction and the assertion vacuous.
-        let derive = RECIPE.find("gh auth token --hostname").expect("the gh fallback must exist");
+        let derive = RECIPE
+            .find("$ghToken = Invoke-AnvilGhToken $ghExecutable $githubHostname")
+            .expect("the host-aware gh fallback must exist");
         let guard = RECIPE
             .find("if ($githubTokenFromGh -and -not $hasExplicitGitHubToken")
             .expect("the derive must require consent and no explicit token");

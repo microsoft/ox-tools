@@ -413,10 +413,17 @@ the host lookup and the process using its token keep the same endpoint. An inval
 rather than querying an unrelated login; the inner command retains responsibility for reporting its invalid service
 address.
 
-This wrapper lookup exists only because the image has no gh CLI of its own. Native cargo-aprz performs the same
-discovery only when its switch is present and selects the gh login from its effective GitHub endpoint, including
-GitHub Enterprise overrides. The generated `anvil-aprz` recipe does not pass the switch, so it uses an exported
-`GITHUB_TOKEN` when available and otherwise runs anonymously without invoking the host gh CLI.
+This wrapper lookup exists only because the image has no gh CLI of its own. It applies the same process boundary as
+native cargo-aprz: explicit nonempty `PATH` entries only, resolved to an absolute executable; `.COM` and `.EXE` only
+in Windows `PATHEXT` order, excluding functions, aliases, batch files and PowerShell shims; and a regular executable
+file on Unix. The executable is launched directly with an argument vector and no shell, with stdin closed, stderr
+captured and discarded, stdout captured as strict UTF-8, and the rejected blank `GITHUB_TOKEN` removed from its
+environment. A missing executable, nonzero result, blank or invalid output, or ten-second deadline continues
+anonymously. Deadline expiry terminates the complete process tree.
+
+Native cargo-aprz performs discovery only when its switch is present and selects the gh login from its effective
+GitHub endpoint, including GitHub Enterprise overrides. The generated `anvil-aprz` recipe does not pass the switch,
+so it uses an exported `GITHUB_TOKEN` when available and otherwise runs anonymously without invoking the host gh CLI.
 
 A plan covers the bodies `just` runs itself, not the body of a recipe that one of them launches as a child process.
 The unscoped tier wrapper (§`helpers.just`) launches its tier that way, so planning `anvil-scheduled` shows the wrapper
