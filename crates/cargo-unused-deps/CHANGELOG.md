@@ -12,6 +12,7 @@
 
 - 🐛 Bug Fixes
 
+  - make evidence collection authoritative
   - preserve compiler configuration
   - harden scoped evidence
   - make package scoping sound
@@ -25,6 +26,7 @@
 
 - 📚 Documentation
 
+  - refresh 0.2.0 changelog
   - generate 0.2.0 changelog
 
 ## [0.1.0] - 2026-09-15
