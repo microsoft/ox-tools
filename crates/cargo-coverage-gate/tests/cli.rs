@@ -152,6 +152,24 @@ fn one_crate_below_threshold_exits_1() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn displayed_rounding_does_not_satisfy_full_coverage_threshold() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 2_000, 1_999)]);
+
+    coverage_gate(tmp.path())
+        .args(["--lcov", &lcov_path])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("99.9%"))
+        .stdout(predicate::str::contains("100.0%"))
+        .stdout(predicate::str::contains("-<0.1pp"))
+        .stdout(predicate::str::contains("FAIL"))
+        .stdout(predicate::str::contains("1999/2000 lines covered; 1 uncovered."));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn multiple_lcov_files_merge_at_line_level() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);

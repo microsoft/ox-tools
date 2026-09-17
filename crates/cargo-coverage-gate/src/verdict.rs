@@ -285,21 +285,13 @@ fn classify(totals: LineTotals, threshold: Threshold) -> Status {
     let Some(pct) = totals.percent() else {
         return Status::NoData;
     };
-    // Compare at the displayed precision (one decimal place) by rounding
-    // both sides. This guarantees the rendered "Δ vs threshold" column
-    // always agrees with the pass/fail verdict: anything that prints as
-    // ≥ the threshold passes, anything that prints as below it fails.
-    // No separate tolerance constant to tune.
-    if round_to_displayed_precision(pct) >= round_to_displayed_precision(threshold.min_lines_percent) {
+    // Display rounding must not weaken the configured floor. In particular,
+    // 100% requires every coverable line to be covered.
+    if pct >= threshold.min_lines_percent {
         Status::Ok
     } else {
         Status::Fail
     }
-}
-
-/// Round to the one-decimal-place precision used by the renderer.
-fn round_to_displayed_precision(pct: f64) -> f64 {
-    (pct * 10.0).round() / 10.0
 }
 
 /// Classify a package that declared `expect-no-coverable-lines = true`.
@@ -574,8 +566,6 @@ mod tests {
 
     #[test]
     fn exact_threshold_match_passes() {
-        // 82.0 = 82.0 must pass even if f64 arithmetic introduces sub-bit jitter,
-        // because both sides round to the same displayed value.
         let totals = LineTotals { count: 100, covered: 82 };
         let threshold = Threshold {
             min_lines_percent: 82.0,
@@ -585,27 +575,12 @@ mod tests {
     }
 
     #[test]
-    fn measured_rounds_up_to_threshold_passes() {
-        // 81.95% renders as "82.0%" — it must pass an 82.0 threshold so the
-        // rendered Δ column ("0.0pp" or "+0.1pp") agrees with the verdict.
+    fn displayed_rounding_does_not_raise_measured_coverage() {
+        // 81.95% renders as "82.0%", but presentation rounding must not make
+        // it satisfy an 82.0 threshold.
         let totals = LineTotals {
             count: 10_000,
             covered: 8_195,
-        };
-        let threshold = Threshold {
-            min_lines_percent: 82.0,
-            source: ThresholdSource::Default,
-        };
-        assert_eq!(classify(totals, threshold), Status::Ok);
-    }
-
-    #[test]
-    fn measured_rounds_down_below_threshold_fails() {
-        // 81.94% renders as "81.9%" — it must fail an 82.0 threshold so the
-        // rendered Δ column ("-0.1pp") agrees with the verdict.
-        let totals = LineTotals {
-            count: 10_000,
-            covered: 8_194,
         };
         let threshold = Threshold {
             min_lines_percent: 82.0,
@@ -615,14 +590,28 @@ mod tests {
     }
 
     #[test]
-    fn threshold_rounds_to_match_measured() {
-        // 82.04 threshold renders as "82.0%", so 82.0% measured must pass.
+    fn full_coverage_threshold_requires_every_line() {
+        let totals = LineTotals {
+            count: 2_000,
+            covered: 1_999,
+        };
+        let threshold = Threshold {
+            min_lines_percent: 100.0,
+            source: ThresholdSource::Default,
+        };
+        assert_eq!(classify(totals, threshold), Status::Fail);
+    }
+
+    #[test]
+    fn displayed_rounding_does_not_lower_threshold() {
+        // Both values render as "82.0%", but the configured 82.04 floor is
+        // still greater than the measured 82.0%.
         let totals = LineTotals { count: 100, covered: 82 };
         let threshold = Threshold {
             min_lines_percent: 82.04,
             source: ThresholdSource::Default,
         };
-        assert_eq!(classify(totals, threshold), Status::Ok);
+        assert_eq!(classify(totals, threshold), Status::Fail);
     }
 
     #[test]
@@ -764,21 +753,5 @@ mod tests {
         assert_eq!(r.verdict(), Verdict::Pass);
         let beta = r.outcomes.iter().find(|o| o.name == "beta").unwrap();
         assert_eq!(beta.status, Status::Ok);
-    }
-
-    #[test]
-    fn round_to_displayed_precision_keeps_one_decimal() {
-        // Direct unit test for the rounding helper used by both the renderer
-        // and the pass/fail comparison. Pinning these exact values kills
-        // arithmetic mutants like `*` <-> `/` on the `10.0` factor.
-        fn close(a: f64, b: f64) -> bool {
-            (a - b).abs() < 1e-9
-        }
-        assert!(close(round_to_displayed_precision(0.0), 0.0));
-        assert!(close(round_to_displayed_precision(100.0), 100.0));
-        assert!(close(round_to_displayed_precision(99.94), 99.9));
-        assert!(close(round_to_displayed_precision(99.95), 100.0));
-        assert!(close(round_to_displayed_precision(80.05), 80.1));
-        assert!(close(round_to_displayed_precision(80.04), 80.0));
     }
 }
