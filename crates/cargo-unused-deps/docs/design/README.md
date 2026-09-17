@@ -339,8 +339,9 @@ RUSTDOCFLAGS="-Z unstable-options --test-builder <shim> --no-run" \
   cargo +nightly test --doc
 ```
 
-where the shim runs the real rustc with `-W unused_crate_dependencies
---error-format=json` and appends the diagnostics to a file. Measured, on a crate whose
+where the shim runs the real rustc with `-W unused_crate_dependencies`, preserves
+rustc's human-readable diagnostics for rustdoc, and appends the unused-crate names it
+parses from those diagnostics to a file. Measured, on a crate whose
 `doconly` dev-dependency is used only from a doctest and whose `deaddev` is used
 nowhere:
 
@@ -531,11 +532,10 @@ Reading the counters gives every verdict directly:
 Catalog entries are judged in phase 1 and need no evidence at all: an entry no member
 inherits cannot be used by anything.
 
-The two halves interact in one direction, worth knowing when reading a report. A member
-that inherits a catalog entry it does not use is a per-crate finding; the catalog entry
-stays "inherited" and therefore clean until that member's declaration is removed. The
-report says so — a per-crate finding notes when it is the last inheritor of its catalog
-entry — so the second defect is not a surprise on the next run.
+The two halves interact in one direction. A member that inherits a catalog entry it does
+not use is a per-crate finding; the catalog entry stays "inherited" and therefore clean
+until that member's declaration is removed. A later run may then expose the catalog entry
+as uninherited.
 
 ## 6. User-visible shape
 
@@ -593,10 +593,11 @@ line, because the generated CI recipe invokes the tool with a fixed argument lis
 allowed = ["kept-on-purpose"]
 ```
 
-An allowed name is neither reported nor removed. An `allowed` entry that suppresses
-no unused catalog entry is a *stale allow-list entry*: it produces a warning on
-stderr without changing the exit code — a stale exception is a maintenance smell, and
-failing the build for one would punish the act of fixing the underlying problem.
+An allowed name suppresses both catalog and source-level findings and is never removed.
+It is stale only when neither the workspace catalog nor any member manifest declares that
+name. This lets an inherited or direct side-effect dependency use the same suppression
+without the catalog phase incorrectly recommending that the exception be removed. A stale
+entry produces a warning without changing the exit code.
 
 ### Reporting
 
@@ -612,10 +613,9 @@ the file. The success line goes to stdout.
 | 1    | Unused entries found without `--fix`, or a manifest could not be read, parsed, or enumerated.     |
 
 A `[workspace]` table with no `dependencies` catalog is a pass: no entry can be
-uninherited when none is declared. It is not silent, though — that is the boundary
-where *every* configured `allowed` name suppresses nothing, so each one is reported
-as a stale allow-list entry on stderr before the run succeeds. A manifest with no
-`[workspace]` table at all is a pass with a note on stderr, or an error under
+uninherited when none is declared. Configured allow-list names are still compared with
+member declarations, and only names declared nowhere are reported as stale. A manifest
+with no `[workspace]` table at all is a pass with a note on stderr, or an error under
 `--require-workspace`.
 
 The exit code is returned from `run` as an `ExitCode` rather than raised with

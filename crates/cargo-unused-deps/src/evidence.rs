@@ -133,11 +133,6 @@ impl Evidence {
             .any(|target| self.reports_for(target, name) == 0)
     }
 
-    /// Whether anything at all was compiled for a package.
-    pub fn saw_package(&self, manifest_path: &Path) -> bool {
-        self.units.keys().any(|target| target.manifest_path == manifest_path)
-    }
-
     /// Targets of one kind belonging to a package.
     fn targets_of<'a>(&'a self, manifest_path: &'a Path, kind: TargetKind) -> impl Iterator<Item = &'a Target> {
         self.units
@@ -164,6 +159,7 @@ impl Evidence {
 pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, all_targets: bool) -> Result<Evidence> {
     let mut command = Command::new(cargo());
     command.arg("check").arg("--manifest-path").arg(manifest_path).args(selection);
+    configure_rustflags(&mut command);
 
     if all_targets {
         command.arg("--all-targets");
@@ -174,18 +170,63 @@ pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, a
         .arg("--target-dir")
         .arg(target_dir)
         .arg("--message-format=json")
-        .env("RUSTFLAGS", rustflags())
         .output()
         .context("failed to run `cargo check` to collect compile evidence")?;
 
     if !output.status.success() {
         bail!(
             "`cargo check` failed while collecting compile evidence:\n{}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            failure_diagnostics(&output.stdout, &output.stderr)
         );
     }
 
     parse(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Add the lint to whichever rustflags representation Cargo will consume.
+fn configure_rustflags(command: &mut Command) {
+    let (name, value) = rustflags_env(std::env::var_os("CARGO_ENCODED_RUSTFLAGS"), std::env::var_os("RUSTFLAGS"));
+    command.env(name, value);
+}
+
+/// Select the rustflags representation Cargo gives precedence.
+fn rustflags_env(encoded: Option<OsString>, plain: Option<OsString>) -> (&'static str, OsString) {
+    match encoded {
+        Some(flags) => ("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags(flags)),
+        None => ("RUSTFLAGS", rustflags(plain)),
+    }
+}
+
+/// Append the lint to Cargo's unit-separator encoded argument list.
+fn encoded_rustflags(mut flags: OsString) -> OsString {
+    if !flags.is_empty() {
+        flags.push("\u{1f}");
+    }
+    flags.push("-W\u{1f}unused_crate_dependencies");
+    flags
+}
+
+/// Render compiler diagnostics from Cargo's JSON stream alongside Cargo errors.
+fn failure_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
+    let rendered = String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|message| {
+            message
+                .get("message")
+                .and_then(|diagnostic| diagnostic.get("rendered"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<String>();
+    let cargo_errors = String::from_utf8_lossy(stderr);
+
+    match (rendered.trim(), cargo_errors.trim()) {
+        ("", "") => "cargo failed without diagnostics".to_owned(),
+        ("", errors) => errors.to_owned(),
+        (diagnostics, "") => diagnostics.to_owned(),
+        (diagnostics, errors) => format!("{diagnostics}\n{errors}"),
+    }
 }
 
 /// The cargo to invoke, honoring the one cargo set for us.
@@ -199,8 +240,8 @@ fn cargo_or_default(selected: Option<OsString>) -> OsString {
 }
 
 /// `RUSTFLAGS` for the child build, preserving any the caller set.
-fn rustflags() -> OsString {
-    let mut flags = std::env::var_os("RUSTFLAGS").unwrap_or_default();
+fn rustflags(selected: Option<OsString>) -> OsString {
+    let mut flags = selected.unwrap_or_default();
     if !flags.is_empty() {
         flags.push(" ");
     }
@@ -271,9 +312,13 @@ fn reported_name(message: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::path::Path;
 
-    use super::{Evidence, Scope, TargetKind, cargo_or_default, parse, reported_name};
+    use super::{
+        Evidence, Scope, TargetKind, cargo_or_default, encoded_rustflags, failure_diagnostics, parse, reported_name, rustflags,
+        rustflags_env,
+    };
 
     #[test]
     fn target_kinds_are_classified_explicitly() {
@@ -287,6 +332,31 @@ mod tests {
     fn cargo_selection_honors_an_override_and_has_a_default() {
         assert_eq!(cargo_or_default(Some("custom".into())), "custom");
         assert_eq!(cargo_or_default(None), "cargo");
+    }
+
+    #[test]
+    fn lint_flags_preserve_plain_and_encoded_caller_flags() {
+        assert_eq!(rustflags(None), "-W unused_crate_dependencies");
+        assert_eq!(
+            rustflags(Some("-C target-cpu=native".into())),
+            "-C target-cpu=native -W unused_crate_dependencies"
+        );
+        assert_eq!(encoded_rustflags(OsString::new()), "-W\u{1f}unused_crate_dependencies");
+        assert_eq!(
+            encoded_rustflags("-C\u{1f}target-cpu=native".into()),
+            "-C\u{1f}target-cpu=native\u{1f}-W\u{1f}unused_crate_dependencies"
+        );
+        assert_eq!(
+            rustflags_env(Some("-C".into()), Some("ignored".into())),
+            (
+                "CARGO_ENCODED_RUSTFLAGS",
+                OsString::from("-C\u{1f}-W\u{1f}unused_crate_dependencies")
+            )
+        );
+        assert_eq!(
+            rustflags_env(None, Some("-C opt-level=1".into())),
+            ("RUSTFLAGS", OsString::from("-C opt-level=1 -W unused_crate_dependencies"))
+        );
     }
 
     #[test]
@@ -305,7 +375,7 @@ mod tests {
         )
         .expect("unknown target kinds are ignored");
 
-        assert!(!evidence.saw_package(Path::new("Cargo.toml")));
+        assert!(evidence.units.is_empty());
     }
 
     #[test]
@@ -318,8 +388,34 @@ mod tests {
         ))
         .expect("compiler messages are parsed");
 
-        assert!(evidence.saw_package(Path::new("Cargo.toml")));
+        assert!(!evidence.units.is_empty());
         assert!(!evidence.used_by_any_unit(Path::new("Cargo.toml"), "unused", Scope::Always));
+    }
+
+    #[test]
+    fn development_scope_requires_a_second_code_unit() {
+        let target = "\"manifest_path\":\"Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"name\":\"fixture\"}";
+        let one = parse(&format!("{{\"reason\":\"compiler-artifact\",{target}}}\n")).expect("one unit is parsed");
+        let two = parse(&format!(
+            "{{\"reason\":\"compiler-artifact\",{target}}}\n{{\"reason\":\"compiler-artifact\",{target}}}\n"
+        ))
+        .expect("two units are parsed");
+
+        assert!(!one.used_by_any_unit(Path::new("Cargo.toml"), "devdep", Scope::DevelopmentOnly));
+        assert!(two.used_by_any_unit(Path::new("Cargo.toml"), "devdep", Scope::DevelopmentOnly));
+    }
+
+    #[test]
+    fn unrelated_compiler_messages_are_not_unused_dependency_reports() {
+        let target = "\"manifest_path\":\"Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"name\":\"fixture\"}";
+        let evidence = parse(&format!(
+            "{{\"reason\":\"compiler-artifact\",{target}}}\n\
+             {{\"reason\":\"compiler-message\",{target},\"message\":{{\"code\":{{\"code\":\"dead_code\"}},\
+             \"message\":\"warning: extern crate `dep` is unused\"}}}}\n"
+        ))
+        .expect("compiler messages are parsed");
+
+        assert!(evidence.used_by_any_unit(Path::new("Cargo.toml"), "dep", Scope::Always));
     }
 
     #[test]
@@ -339,5 +435,18 @@ mod tests {
         assert_eq!(reported_name(&warning).as_deref(), Some("my_dep"));
         assert_eq!(reported_name(&malformed), None);
         assert_eq!(reported_name(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn failed_builds_render_json_diagnostics_and_cargo_errors() {
+        let stdout = br#"{"reason":"compiler-message","message":{"rendered":"error: bad source\n"}}"#;
+
+        assert_eq!(
+            failure_diagnostics(stdout, b"cargo: build failed\n"),
+            "error: bad source\ncargo: build failed"
+        );
+        assert_eq!(failure_diagnostics(b"", b"cargo failed"), "cargo failed");
+        assert_eq!(failure_diagnostics(stdout, b""), "error: bad source");
+        assert_eq!(failure_diagnostics(b"", b""), "cargo failed without diagnostics");
     }
 }

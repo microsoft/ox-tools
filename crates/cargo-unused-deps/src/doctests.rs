@@ -217,6 +217,7 @@ fn read_captures(capture: &Path) -> Result<PackageDoctests> {
 }
 
 #[cfg(test)]
+#[cfg(not(miri))]
 mod tests {
     use std::fs;
 

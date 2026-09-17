@@ -44,14 +44,17 @@ pub struct Package {
     /// Package name, for reporting.
     pub name: String,
 
+    /// Package version, for resolving qualified selectors.
+    pub version: String,
+
     /// Its manifest.
     pub manifest_path: PathBuf,
 
     /// Everything it declares.
     pub declared: Vec<Declared>,
 
-    /// Whether it has a library target, and so can have doctests at all.
-    pub has_library: bool,
+    /// Whether it has a library or proc-macro target, and so can have doctests.
+    pub has_doctests: bool,
 }
 
 /// Judge every declaration of every package against the evidence.
@@ -65,6 +68,7 @@ pub struct Package {
 /// produces no finding of any kind.
 pub fn judge(
     packages: &[Package],
+    selected: &BTreeSet<PathBuf>,
     plain: &Evidence,
     all: &Evidence,
     doctests: &DoctestEvidence,
@@ -73,9 +77,9 @@ pub fn judge(
     let mut findings = Vec::new();
 
     for package in packages {
-        // A package nothing was compiled for was not part of this selection;
-        // silence about it is absence of evidence, not evidence of absence.
-        if !all.saw_package(&package.manifest_path) {
+        // Transitive workspace dependencies can also produce artifacts. Only
+        // roots resolved from the caller's package selectors are judged.
+        if !selected.contains(&package.manifest_path) {
             continue;
         }
 

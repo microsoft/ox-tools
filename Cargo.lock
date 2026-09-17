@@ -700,6 +700,7 @@ dependencies = [
  "anyhow",
  "cargo_metadata",
  "clap",
+ "mutants",
  "serde_json",
  "tempfile",
  "toml_edit 0.25.13+spec-1.1.0",

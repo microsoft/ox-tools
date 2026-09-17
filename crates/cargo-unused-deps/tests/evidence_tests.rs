@@ -22,16 +22,57 @@ use tempfile::TempDir;
 
 /// Path to the binary under test.
 fn binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_cargo-unused-deps"))
+    let test = std::env::current_exe().expect("failed to locate the test executable");
+    test.parent()
+        .and_then(Path::parent)
+        .expect("integration tests run from the profile's deps directory")
+        .join(format!("cargo-unused-deps{}", std::env::consts::EXE_SUFFIX))
 }
 
-/// Whether the toolchain running the tests can compile doctests without running
-/// them, which the tool needs and only nightly offers.
-fn nightly() -> bool {
-    Command::new("rustc")
-        .arg("-vV")
+#[test]
+fn a_bin_only_finding_does_not_try_to_compile_doctests() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\", \"dead\"]\nresolver = \"2\"\n",
+    )
+    .expect("failed to write workspace manifest");
+
+    for (name, body, source) in [
+        ("dead", "", "pub fn f() {}\n"),
+        ("app", "[dependencies]\ndead = { path = \"../dead\" }\n", "fn main() {}\n"),
+    ] {
+        let crate_dir = dir.path().join(name);
+        fs::create_dir_all(crate_dir.join("src")).expect("failed to create source dir");
+        fs::write(
+            crate_dir.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n{body}"),
+        )
+        .expect("failed to write manifest");
+        let source_name = if name == "app" { "main.rs" } else { "lib.rs" };
+        fs::write(crate_dir.join("src").join(source_name), source).expect("failed to write source");
+    }
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(dir.path().join("Cargo.toml"))
+        .args(["--package", "app"])
         .output()
-        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("nightly"))
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "the bin has an unused dependency");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("dead: no compiled unit loaded it"));
+}
+
+/// Command the binary under test with nightly-only rustdoc options enabled.
+///
+/// `RUSTC_BOOTSTRAP` is confined to synthetic fixture builds. It lets the same
+/// behavioral tests run under cargo-mutants' stable compiler.
+fn command() -> Command {
+    let mut command = Command::new(binary());
+    command.env("RUSTC_BOOTSTRAP", "1");
+    command
 }
 
 /// A fixture workspace: one `main` package plus a leaf crate per dependency.
@@ -85,7 +126,7 @@ impl Fixture {
 
     /// Run the tool over the fixture and return its stderr.
     fn report(&self) -> String {
-        let output = Command::new(binary())
+        let output = command()
             .arg("unused-deps")
             .arg("--manifest-path")
             .arg(self.dir.path().join("Cargo.toml"))
@@ -93,7 +134,12 @@ impl Fixture {
             .output()
             .expect("failed to execute the binary");
 
-        String::from_utf8_lossy(&output.stderr).into_owned()
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.is_empty() {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        } else {
+            stderr.into_owned()
+        }
     }
 }
 
@@ -104,10 +150,6 @@ fn dep(name: &str) -> String {
 
 #[test]
 fn a_dependency_no_unit_loads_is_unused() {
-    if !nightly() {
-        return;
-    }
-
     let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
 
     let report = fixture.report();
@@ -116,11 +158,27 @@ fn a_dependency_no_unit_loads_is_unused() {
 }
 
 #[test]
-fn a_dependency_only_tests_use_is_misplaced() {
-    if !nightly() {
-        return;
-    }
+fn filtered_success_does_not_claim_every_dependency_is_used() {
+    let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main", "--check", "misplaced"])
+        .output()
+        .expect("failed to execute the binary");
 
+    assert!(output.status.success(), "the unused-only finding was filtered out");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No selected dependency problems found"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(!stdout.contains("Every declared dependency"), "unexpected stdout: {stdout}");
+}
+
+#[test]
+fn a_dependency_only_tests_use_is_misplaced() {
     // Used from an integration test, never from the library.
     let fixture = Fixture::new(&["helper"], &format!("[dependencies]\n{}", dep("helper")), "pub fn go() {}\n")
         .with_file("tests/it.rs", "#[test]\nfn t() { helper::f(); }\n");
@@ -135,10 +193,6 @@ fn a_dependency_only_tests_use_is_misplaced() {
 
 #[test]
 fn a_dependency_only_cfg_test_code_uses_is_misplaced() {
-    if !nightly() {
-        return;
-    }
-
     // The `cfg(test)` unit of the library is the only user. Distinguishing it
     // from the plain library unit is what the report depends on.
     let fixture = Fixture::new(
@@ -157,10 +211,6 @@ fn a_dependency_only_cfg_test_code_uses_is_misplaced() {
 
 #[test]
 fn evidence_is_counted_per_target_not_per_package() {
-    if !nightly() {
-        return;
-    }
-
     // A package with a library and two binaries. Each dependency is used in
     // production by exactly one target, so the *other* targets all report it
     // unused. Counting per package would convict them; counting per target and
@@ -194,10 +244,6 @@ fn evidence_is_counted_per_target_not_per_package() {
 
 #[test]
 fn several_development_targets_each_testify_separately() {
-    if !nightly() {
-        return;
-    }
-
     // Each dependency is used by exactly one development target, so every other
     // target reports it unused. Only the one nothing uses should be reported.
     let fixture = Fixture::new(
@@ -227,10 +273,6 @@ fn several_development_targets_each_testify_separately() {
 
 #[test]
 fn a_development_target_compiled_twice_is_counted_like_a_library() {
-    if !nightly() {
-        return;
-    }
-
     // An example declared `test = true` is compiled twice, exactly as a library
     // is. Treating any report at all as "unused" would convict a dependency its
     // `cfg(test)` code uses, because the plain unit reports while the
@@ -252,10 +294,6 @@ fn a_development_target_compiled_twice_is_counted_like_a_library() {
 
 #[test]
 fn a_dependency_used_only_outside_cfg_test_is_not_misplaced() {
-    if !nightly() {
-        return;
-    }
-
     // The `cfg(test)` unit is *not* a superset of the plain one: this
     // dependency is used from `#[cfg(not(test))]` code, so the plain unit uses
     // it and the `cfg(test)` unit reports it. Inferring "one report must be the
@@ -276,10 +314,6 @@ fn a_dependency_used_only_outside_cfg_test_is_not_misplaced() {
 
 #[test]
 fn a_dependency_the_library_uses_is_not_reported() {
-    if !nightly() {
-        return;
-    }
-
     let fixture = Fixture::new(
         &["helper"],
         &format!("[dependencies]\n{}", dep("helper")),
@@ -293,10 +327,6 @@ fn a_dependency_the_library_uses_is_not_reported() {
 
 #[test]
 fn an_unused_build_dependency_is_reported() {
-    if !nightly() {
-        return;
-    }
-
     let fixture = Fixture::new(
         &["used", "dead"],
         &format!("[build-dependencies]\n{}{}", dep("used"), dep("dead")),
@@ -312,10 +342,6 @@ fn an_unused_build_dependency_is_reported() {
 
 #[test]
 fn one_doctest_among_many_is_enough_to_spare_a_dependency() {
-    if !nightly() {
-        return;
-    }
-
     // Every doctest is its own compilation with the dev-dependency in scope, so
     // the ones that do not mention it each report it unused. Treating any report
     // as proof of disuse would convict a dependency a single example needs --
@@ -341,10 +367,6 @@ fn one_doctest_among_many_is_enough_to_spare_a_dependency() {
 
 #[test]
 fn a_dev_dependency_only_a_doctest_uses_is_not_reported() {
-    if !nightly() {
-        return;
-    }
-
     // The case no other tool reaches: `--all-targets` never builds doctests, so
     // without the shim this dependency looks dead.
     let fixture = Fixture::new(
@@ -366,11 +388,66 @@ fn a_dev_dependency_only_a_doctest_uses_is_not_reported() {
 }
 
 #[test]
-fn the_allow_list_suppresses_a_finding() {
-    if !nightly() {
-        return;
-    }
+fn a_proc_macro_doctest_can_spare_a_dependency() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"macro-fixture\", \"doctestdep\"]\nresolver = \"2\"\n",
+    )
+    .expect("failed to write workspace manifest");
 
+    let dependency = dir.path().join("doctestdep");
+    fs::create_dir_all(dependency.join("src")).expect("failed to create dependency source dir");
+    fs::write(
+        dependency.join("Cargo.toml"),
+        "[package]\nname = \"doctestdep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("failed to write dependency manifest");
+    fs::write(dependency.join("src/lib.rs"), "pub fn used() {}\n").expect("failed to write dependency source");
+
+    let proc_macro = dir.path().join("macro-fixture");
+    fs::create_dir_all(proc_macro.join("src")).expect("failed to create proc-macro source dir");
+    fs::write(
+        proc_macro.join("Cargo.toml"),
+        concat!(
+            "[package]\nname = \"macro-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
+            "[lib]\nproc-macro = true\n\n",
+            "[dependencies]\ndoctestdep = { path = \"../doctestdep\" }\n",
+        ),
+    )
+    .expect("failed to write proc-macro manifest");
+    fs::write(
+        proc_macro.join("src/lib.rs"),
+        concat!(
+            "extern crate proc_macro;\nuse proc_macro::TokenStream;\n\n",
+            "/// ```rust\n/// doctestdep::used();\n/// ```\n",
+            "#[proc_macro]\npub fn fixture(_input: TokenStream) -> TokenStream { TokenStream::new() }\n",
+        ),
+    )
+    .expect("failed to write proc-macro source");
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(dir.path().join("Cargo.toml"))
+        .args(["--package", "macro-fixture"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "the normal dependency is used only for development");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("doctestdep: only development units load it"),
+        "unexpected report: {stderr}"
+    );
+    assert!(
+        !stderr.contains("doctestdep: no compiled unit loaded it"),
+        "the proc-macro doctest used it: {stderr}"
+    );
+}
+
+#[test]
+fn the_allow_list_suppresses_a_finding() {
     let dir = TempDir::new().expect("failed to create temp dir");
     fs::write(
         dir.path().join("Cargo.toml"),
@@ -389,7 +466,7 @@ fn the_allow_list_suppresses_a_finding() {
         fs::write(crate_dir.join("src").join("lib.rs"), "pub fn f() {}\n").expect("failed to write source");
     }
 
-    let output = Command::new(binary())
+    let output = command()
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(dir.path().join("Cargo.toml"))
@@ -402,13 +479,17 @@ fn the_allow_list_suppresses_a_finding() {
         !report.contains("dead: no compiled unit loaded"),
         "an allowed name is not reported: {report}"
     );
+    assert!(
+        !report.contains("allow-list entry can be removed"),
+        "a declared source suppression is not stale: {report}"
+    );
 }
 
 #[test]
 fn no_package_selector_runs_only_the_catalog_check() {
     let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
 
-    let output = Command::new(binary())
+    let output = command()
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(fixture.dir.path().join("Cargo.toml"))
@@ -426,7 +507,7 @@ fn no_package_selector_runs_only_the_catalog_check() {
 fn exclude_requires_workspace_selection() {
     let fixture = Fixture::new(&[], "", "pub fn go() {}\n");
 
-    let output = Command::new(binary())
+    let output = command()
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(fixture.dir.path().join("Cargo.toml"))
@@ -442,7 +523,7 @@ fn exclude_requires_workspace_selection() {
 fn package_and_workspace_selection_conflict() {
     let fixture = Fixture::new(&[], "", "pub fn go() {}\n");
 
-    let output = Command::new(binary())
+    let output = command()
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(fixture.dir.path().join("Cargo.toml"))
@@ -451,6 +532,22 @@ fn package_and_workspace_selection_conflict() {
         .expect("failed to execute the binary");
 
     assert!(!output.status.success(), "--workspace and --package must be rejected together");
+}
+
+#[test]
+fn unknown_package_selection_fails_loudly() {
+    let fixture = Fixture::new(&[], "", "pub fn go() {}\n");
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "missing"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "an unknown package selector must be rejected");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("did not match any workspace member"));
 }
 
 /// The tool's own workspace is the acceptance test: it must not accuse a
@@ -463,7 +560,7 @@ fn the_tools_own_catalog_is_clean() {
         .expect("the crate lives two levels below the workspace root")
         .join("Cargo.toml");
 
-    let output = Command::new(binary())
+    let output = command()
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(&manifest)
@@ -479,14 +576,10 @@ fn the_tools_own_catalog_is_clean() {
 
 #[test]
 fn package_selection_limits_compile_evidence() {
-    if !nightly() {
-        return;
-    }
-
     let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
     let manifest = fixture.dir.path().join("Cargo.toml");
 
-    let leaf = Command::new(binary())
+    let leaf = command()
         .args(["unused-deps", "--manifest-path"])
         .arg(&manifest)
         .args(["--package", "dead"])
@@ -496,7 +589,7 @@ fn package_selection_limits_compile_evidence() {
     assert!(!String::from_utf8_lossy(&leaf.stderr).contains("dead: no compiled unit loaded"));
     assert!(String::from_utf8_lossy(&leaf.stdout).contains("in 1 package"));
 
-    let main = Command::new(binary())
+    let main = command()
         .args(["unused-deps", "--manifest-path"])
         .arg(&manifest)
         .args(["--package", "main"])
@@ -505,7 +598,7 @@ fn package_selection_limits_compile_evidence() {
     assert!(!main.status.success(), "the selected main package contains an unused dependency");
     assert!(String::from_utf8_lossy(&main.stderr).contains("dead: no compiled unit loaded"));
 
-    let repeated = Command::new(binary())
+    let repeated = command()
         .args(["unused-deps", "--manifest-path"])
         .arg(&manifest)
         .args(["--package", "main"])
@@ -515,13 +608,41 @@ fn package_selection_limits_compile_evidence() {
 }
 
 #[test]
-fn workspace_exclude_limits_compile_evidence() {
-    if !nightly() {
-        return;
-    }
+fn transitive_workspace_packages_are_not_treated_as_selected_roots() {
+    let fixture = Fixture::new(
+        &["middle", "leaf"],
+        &format!("[dependencies]\n{}", dep("middle")),
+        "pub fn go() { middle::f(); }\n",
+    );
+    fs::write(
+        fixture.dir.path().join("middle/Cargo.toml"),
+        concat!(
+            "[package]\nname = \"middle\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
+            "[dependencies]\nleaf = { path = \"../leaf\" }\n",
+        ),
+    )
+    .expect("failed to add the middle package dependency");
 
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(
+        output.status.success(),
+        "the transitive middle package is outside the selected roots: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("middle [dependencies] leaf"));
+}
+
+#[test]
+fn workspace_exclude_limits_compile_evidence() {
     let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
-    let output = Command::new(binary())
+    let output = command()
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(fixture.dir.path().join("Cargo.toml"))
@@ -535,10 +656,6 @@ fn workspace_exclude_limits_compile_evidence() {
 
 #[test]
 fn package_checks_support_a_non_workspace_manifest() {
-    if !nightly() {
-        return;
-    }
-
     let dir = TempDir::new().expect("failed to create temp dir");
     fs::create_dir_all(dir.path().join("src")).expect("failed to create source dir");
     fs::write(
@@ -548,7 +665,7 @@ fn package_checks_support_a_non_workspace_manifest() {
     .expect("failed to write manifest");
     fs::write(dir.path().join("src/lib.rs"), "pub fn go() {}\n").expect("failed to write source");
 
-    let output = Command::new(binary())
+    let output = command()
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(dir.path().join("Cargo.toml"))
@@ -562,17 +679,13 @@ fn package_checks_support_a_non_workspace_manifest() {
 
 #[test]
 fn a_failing_doctest_fails_evidence_collection() {
-    if !nightly() {
-        return;
-    }
-
     let fixture = Fixture::new(
         &["dead"],
         &format!("[dependencies]\n{}", dep("dead")),
         "/// ```rust\n/// this is not rust\n/// ```\npub fn go() {}\n",
     );
 
-    let output = Command::new(binary())
+    let output = command()
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(fixture.dir.path().join("Cargo.toml"))
@@ -586,12 +699,8 @@ fn a_failing_doctest_fails_evidence_collection() {
 
 #[test]
 fn a_package_that_does_not_compile_fails_evidence_collection() {
-    if !nightly() {
-        return;
-    }
-
     let fixture = Fixture::new(&[], "", "this is not rust\n");
-    let output = Command::new(binary())
+    let output = command()
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(fixture.dir.path().join("Cargo.toml"))
@@ -600,5 +709,10 @@ fn a_package_that_does_not_compile_fails_evidence_collection() {
         .expect("failed to execute the binary");
 
     assert!(!output.status.success(), "an unbuildable package must fail the check");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("`cargo check` failed while collecting compile evidence"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("`cargo check` failed while collecting compile evidence"));
+    assert!(
+        stderr.contains("this is not rust"),
+        "the compiler diagnostic must be rendered: {stderr}"
+    );
 }

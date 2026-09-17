@@ -133,7 +133,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use cargo_metadata::MetadataCommand;
 use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Effects};
@@ -217,11 +217,6 @@ impl Check {
     fn wanted(self, selected: &[Self]) -> bool {
         selected.is_empty() || selected.contains(&self)
     }
-
-    /// Whether any selected check needs the compiler.
-    fn any_needs_evidence(selected: &[Self]) -> bool {
-        Self::Unused.wanted(selected) || Self::Misplaced.wanted(selected)
-    }
 }
 
 /// Entry point: either the check, or the compiler shim rustdoc invokes.
@@ -284,44 +279,102 @@ pub fn run() -> Result<ExitCode> {
     // selection applies only to checks backed by compile evidence.
     failed |= catalog_check(&manifest_path, fix, require_workspace)? != ExitCode::SUCCESS;
 
-    if (!packages.is_empty() || workspace) && Check::any_needs_evidence(&checks) {
-        let selection = selection_flags(&packages, workspace, &exclude);
+    if package_checks_selected(&packages, workspace) {
+        let selection = PackageSelection {
+            packages,
+            workspace,
+            exclude,
+        };
         failed |= source_checks(&manifest_path, &selection, &checks)?;
     }
 
     Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
-/// Cargo's own package-selection flags, forwarded verbatim to the child builds.
-fn selection_flags(packages: &[String], workspace: bool, exclude: &[String]) -> Vec<OsString> {
-    let mut flags: Vec<OsString> = Vec::new();
+/// Whether the caller requested compiler-backed package checks.
+///
+/// Mutating this predicate in either direction makes a selector-free catalog
+/// run compile the entire workspace, which is an unbounded timeout rather than
+/// a useful mutation-test result. CLI integration tests cover both outcomes.
+#[mutants::skip]
+fn package_checks_selected(packages: &[String], workspace: bool) -> bool {
+    !packages.is_empty() || workspace
+}
 
-    for package in packages {
-        flags.push(OsString::from("--package"));
-        flags.push(OsString::from(package));
+/// Cargo-style package selection for compiler-backed checks.
+struct PackageSelection {
+    /// Explicit package names or exact `name@version` specs.
+    packages: Vec<String>,
+    /// Whether every workspace package is selected.
+    workspace: bool,
+    /// Packages removed from a workspace selection.
+    exclude: Vec<String>,
+}
+
+impl PackageSelection {
+    /// Flags forwarded to Cargo after the same selectors are resolved locally.
+    fn flags(&self) -> Vec<OsString> {
+        let mut flags = Vec::new();
+        for package in &self.packages {
+            flags.push(OsString::from("--package"));
+            flags.push(OsString::from(package));
+        }
+        if self.workspace {
+            flags.push(OsString::from("--workspace"));
+        }
+        for excluded in &self.exclude {
+            flags.push(OsString::from("--exclude"));
+            flags.push(OsString::from(excluded));
+        }
+        flags
     }
 
-    if workspace {
-        flags.push(OsString::from("--workspace"));
-    }
+    /// Resolve the explicitly selected roots against workspace metadata.
+    fn resolve(&self, packages: &[verdict::Package]) -> Result<BTreeSet<PathBuf>> {
+        let mut selected = if self.workspace {
+            packages.iter().map(|package| package.manifest_path.clone()).collect()
+        } else {
+            resolve_selectors(packages, &self.packages)?
+        };
 
-    for excluded in exclude {
-        flags.push(OsString::from("--exclude"));
-        flags.push(OsString::from(excluded));
-    }
+        for excluded in resolve_selectors(packages, &self.exclude)? {
+            selected.remove(&excluded);
+        }
 
-    flags
+        Ok(selected)
+    }
+}
+
+/// Resolve exact package names and `name@version` specs.
+fn resolve_selectors(packages: &[verdict::Package], selectors: &[String]) -> Result<BTreeSet<PathBuf>> {
+    let mut resolved = BTreeSet::new();
+    for selector in selectors {
+        let matches: Vec<&verdict::Package> = packages
+            .iter()
+            .filter(|package| selector == &package.name || selector == &format!("{}@{}", package.name, package.version))
+            .collect();
+        match matches.as_slice() {
+            [] => bail!("package selector `{selector}` did not match any workspace member"),
+            [package] => {
+                resolved.insert(package.manifest_path.clone());
+            }
+            _ => bail!("package selector `{selector}` matched more than one workspace member; qualify it with @version"),
+        }
+    }
+    Ok(resolved)
 }
 
 /// The checks that read compile evidence: unused declarations and misplaced ones.
 ///
 /// Returns whether anything was found.
-fn source_checks(manifest_path: &Path, selection: &[OsString], checks: &[Check]) -> Result<bool> {
+fn source_checks(manifest_path: &Path, selection: &PackageSelection, checks: &[Check]) -> Result<bool> {
     let workspace = workspace_of(manifest_path)?;
+    let selected = selection.resolve(&workspace.packages)?;
+    let selection_flags = selection.flags();
     // Two passes: default targets first, where a report can only have come from
     // a target's single plain unit, then everything.
-    let plain = evidence::gather(manifest_path, selection, &workspace.evidence_target_dir, false)?;
-    let all = evidence::gather(manifest_path, selection, &workspace.evidence_target_dir, true)?;
+    let plain = evidence::gather(manifest_path, &selection_flags, &workspace.evidence_target_dir, false)?;
+    let all = evidence::gather(manifest_path, &selection_flags, &workspace.evidence_target_dir, true)?;
 
     // Doctest evidence can only ever spare a dependency, never accuse one, so
     // it is gathered lazily: judge first without it, then compile the doctests
@@ -330,6 +383,7 @@ fn source_checks(manifest_path: &Path, selection: &[OsString], checks: &[Check])
     // builds and one per package.
     let candidates = verdict::judge(
         &workspace.packages,
+        &selected,
         &plain,
         &all,
         &doctests::DoctestEvidence::default(),
@@ -337,7 +391,7 @@ fn source_checks(manifest_path: &Path, selection: &[OsString], checks: &[Check])
     );
     let doctests = doctest_evidence(manifest_path, &workspace, &candidates)?;
 
-    let findings = verdict::judge(&workspace.packages, &plain, &all, &doctests, &workspace.allowed);
+    let findings = verdict::judge(&workspace.packages, &selected, &plain, &all, &doctests, &workspace.allowed);
 
     let wanted: Vec<&verdict::Finding> = findings
         .iter()
@@ -348,14 +402,10 @@ fn source_checks(manifest_path: &Path, selection: &[OsString], checks: &[Check])
         .collect();
 
     if wanted.is_empty() {
-        let selected = workspace
-            .packages
-            .iter()
-            .filter(|package| all.saw_package(&package.manifest_path))
-            .count();
         println!(
-            "✅ Every declared dependency in {selected} {} is used where it is declared.",
-            if selected == 1 { "package" } else { "packages" }
+            "✅ No selected dependency problems found in {} {}.",
+            selected.len(),
+            if selected.len() == 1 { "package" } else { "packages" }
         );
         return Ok(false);
     }
@@ -381,7 +431,7 @@ fn doctest_evidence(manifest_path: &Path, workspace: &Workspace, candidates: &[v
     for package in &workspace.packages {
         // Only a library target can have doctests; asking cargo for the
         // doctests of a bin-only package is an error, not an empty answer.
-        if package.has_library && accused.contains(package.name.as_str()) {
+        if package.has_doctests && accused.contains(package.name.as_str()) {
             let found = doctests::gather_package(manifest_path, &package.name, &workspace.evidence_target_dir, &shim)?;
             evidence.insert(package.name.clone(), found);
         }
@@ -441,21 +491,21 @@ fn catalog_check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Re
         }
     };
 
-    if catalog.declared.is_empty() {
-        // An empty catalog is the boundary where *every* allowed name
-        // suppresses nothing, so the stale report is due here too.
-        let (_, stale) = detect::partition(&catalog, &BTreeSet::new());
-        report_stale(&stale);
-
+    if catalog.declared.is_empty() && catalog.allowed.is_empty() {
         println!("✅ {} declares no workspace dependencies.", manifest_path.display());
         return Ok(ExitCode::SUCCESS);
     }
 
     let members = members_of(manifest_path)?;
     let inheritance = detect::inherited(&members)?;
-    let (unused, stale) = detect::partition(&catalog, &inheritance.keys);
+    let (unused, stale) = detect::partition(&catalog, &inheritance.keys, &inheritance.declarations);
 
     report_stale(&stale);
+
+    if catalog.declared.is_empty() {
+        println!("✅ {} declares no workspace dependencies.", manifest_path.display());
+        return Ok(ExitCode::SUCCESS);
+    }
 
     if unused.is_empty() {
         report_clean(manifest_path, &catalog, &inheritance.keys, members.len());
@@ -587,7 +637,7 @@ fn verify_members_unchanged(manifest_path: &Path, expected: &[PathBuf]) -> Resul
 /// Report allow-list entries that suppressed nothing.
 fn report_stale(stale: &[String]) {
     for name in stale {
-        eprintln!("⚠️ '{name}' is allowed but is inherited or not declared; the allow-list entry can be removed.");
+        eprintln!("⚠️ '{name}' is allowed but is not declared by the workspace or any member; the allow-list entry can be removed.");
     }
 }
 
@@ -619,11 +669,16 @@ fn workspace_of(manifest_path: &Path) -> Result<Workspace> {
 
         packages.push(verdict::Package {
             name: package.name.to_string(),
+            version: package.version.to_string(),
             declared: detect::declared_dependencies(&document),
-            has_library: package
-                .targets
-                .iter()
-                .any(|target| target.kind.iter().any(|kind| kind.to_string().contains("lib"))),
+            has_doctests: package.targets.iter().any(|target| {
+                target.kind.iter().any(|kind| {
+                    matches!(
+                        kind.to_string().as_str(),
+                        "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro"
+                    )
+                })
+            }),
             manifest_path: path,
         });
     }
@@ -700,6 +755,59 @@ fn entries(count: usize) -> &'static str {
 /// Pluralize `line` for `count`.
 fn lines(count: usize) -> &'static str {
     if count == 1 { "line" } else { "lines" }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use super::{Check, PackageSelection, resolve_selectors, verdict};
+
+    #[test]
+    fn check_filtering_selects_only_requested_findings() {
+        assert!(Check::Unused.wanted(&[]));
+        assert!(Check::Unused.wanted(&[Check::Unused]));
+        assert!(!Check::Unused.wanted(&[Check::Misplaced]));
+    }
+
+    #[test]
+    fn package_selection_forwards_every_cargo_flag() {
+        let selection = PackageSelection {
+            packages: vec!["alpha@1.0.0".to_owned()],
+            workspace: false,
+            exclude: Vec::new(),
+        };
+        assert_eq!(selection.flags(), [OsString::from("--package"), OsString::from("alpha@1.0.0")]);
+
+        let workspace = PackageSelection {
+            packages: Vec::new(),
+            workspace: true,
+            exclude: vec!["beta@1.0.0".to_owned()],
+        };
+        assert_eq!(
+            workspace.flags(),
+            [
+                OsString::from("--workspace"),
+                OsString::from("--exclude"),
+                OsString::from("beta@1.0.0"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ambiguous_package_names_require_a_version() {
+        let packages = [("one", "1.0.0"), ("two", "2.0.0")].map(|(path, version)| verdict::Package {
+            name: "same".to_owned(),
+            version: version.to_owned(),
+            manifest_path: PathBuf::from(path),
+            declared: Vec::new(),
+            has_doctests: false,
+        });
+
+        let error = resolve_selectors(&packages, &["same".to_owned()]).expect_err("ambiguous selectors must fail");
+        assert!(error.to_string().contains("matched more than one workspace member"));
+    }
 }
 
 #[cfg(test)]

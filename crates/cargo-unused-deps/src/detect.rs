@@ -49,6 +49,9 @@ pub struct Inheritance {
     /// Catalog keys inherited by at least one member.
     pub keys: BTreeSet<String>,
 
+    /// Dependency keys declared by at least one member.
+    pub declarations: BTreeSet<String>,
+
     /// Manifest inputs whose contents support that conclusion.
     pub inputs: Vec<ManifestInput>,
 }
@@ -215,19 +218,25 @@ fn array_of<'a>(configured: Option<&'a Item>, key: &str) -> Result<impl Iterator
 /// inheriting nothing, which would turn a read error into false accusations.
 pub fn inherited(members: &[PathBuf]) -> Result<Inheritance> {
     let mut keys = BTreeSet::new();
+    let mut declarations = BTreeSet::new();
     let mut inputs = Vec::with_capacity(members.len());
 
     for member in members {
         let contents = read_manifest_text(member)?;
         let doc = parse_manifest(&contents, member)?;
         collect_inherited(&doc, &mut keys);
+        declarations.extend(declared_dependencies(&doc).into_iter().map(|dependency| dependency.name));
         inputs.push(ManifestInput {
             path: member.clone(),
             contents,
         });
     }
 
-    Ok(Inheritance { keys, inputs })
+    Ok(Inheritance {
+        keys,
+        declarations,
+        inputs,
+    })
 }
 
 /// Record every catalog key a single manifest inherits.
@@ -287,7 +296,7 @@ fn inherits_from_workspace(spec: &Item) -> bool {
 /// exempt it; an allow-list entry is stale when it suppresses nothing.
 ///
 /// Declaration order is preserved so the report reads alongside the manifest.
-pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
+pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>, declarations: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
     let uninherited: Vec<String> = catalog
         .declared
         .iter()
@@ -300,7 +309,12 @@ pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>) -> (V
         .filter(|name| !catalog.allowed.contains(name.as_str()))
         .cloned()
         .collect();
-    let stale = catalog.allowed.iter().filter(|name| !uninherited.contains(name)).cloned().collect();
+    let stale = catalog
+        .allowed
+        .iter()
+        .filter(|name| !catalog.declared.contains(name) && !declarations.contains(name.as_str()))
+        .cloned()
+        .collect();
 
     (unused, stale)
 }
