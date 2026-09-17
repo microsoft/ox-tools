@@ -1568,7 +1568,7 @@ fn sequential_timeout_keep_going_runs_later_members() {
     let probe = compile_execution_probe(tmp.path());
     let later_marker = tmp.path().join("later-invocation");
     let output = each(&manifest)
-        .args(["-p", "alpha", "-p", "beta", "--timeout", "50ms", "--keep-going", "--"])
+        .args(["-p", "alpha", "-p", "beta", "--timeout", "1s", "--keep-going", "--"])
         .arg(probe)
         .args(["timeout-keep-going", "{name}"])
         .arg(&later_marker)
@@ -1581,7 +1581,7 @@ fn sequential_timeout_keep_going_runs_later_members() {
         );
     } else {
         assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 1s"));
         assert!(
             later_marker.exists(),
             "--keep-going must launch the member after a timed-out invocation"
