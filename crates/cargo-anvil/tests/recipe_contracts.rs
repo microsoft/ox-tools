@@ -2322,6 +2322,52 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
     assert_failed(&failed, "plain nextest failure for an opted-out package");
 }
 
+#[test]
+fn coverage_reports_use_affected_package_scope() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-llvm-tools-validate-prereqs",
+            "anvil-tool-cargo-llvm-cov-validate-prereqs",
+            "anvil-tool-cargo-nextest-validate-prereqs",
+            "anvil-tool-cargo-coverage-gate-validate-prereqs",
+            "anvil-component-nightly-llvm-tools-install",
+            "anvil-tool-cargo-llvm-cov-install installer",
+            "anvil-tool-cargo-nextest-install installer",
+            "anvil-tool-cargo-coverage-gate-install installer",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    seed_include(tmp.path(), "affected", "--package measured@0.1.0");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-llvm-cov"],
+        &[
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "affected coverage path should succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let calls = fs::read_to_string(&log).unwrap();
+    let reports: Vec<_> = calls.lines().filter(|call| call.contains("llvm-cov report")).collect();
+    assert_eq!(reports.len(), 2, "calls:\n{calls}");
+    assert!(
+        reports
+            .iter()
+            .all(|call| call.contains("llvm-cov report --package measured@0.1.0 --lcov")),
+        "coverage reports must match the affected package scope:\n{calls}"
+    );
+}
+
 #[cfg(all(windows, not(target_arch = "aarch64")))]
 #[test]
 fn windows_coverage_report_retries_error_206_with_response_file() {
