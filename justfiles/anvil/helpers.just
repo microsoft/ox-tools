@@ -25,7 +25,7 @@
 #   - "required": run on the required set (affected ∪ workspace-internal
 #     transitive deps). Same splice/default as affected, for checks whose tool
 #     resolves through the dep graph (cargo doc -> intra-doc links; cargo hack
-#     -> feature powerset; cargo udeps -> unused-deps).
+#     -> feature powerset).
 #
 #   - "unscoped": always run. External-input checks (deny, audit, aprz) and
 #     PR-context checks (pr-title) live here, as do checks whose inputs

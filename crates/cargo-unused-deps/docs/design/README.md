@@ -240,25 +240,22 @@ since) was likewise rejected as a pinned dependency.
 
 ## 7. CI integration
 
-**Not wired yet.** Anvil installs pinned tools from crates.io, so the wiring follows
-the crate's first release. Until then the tool is runnable by hand and enforces
-nothing. The intended shape is recorded here so the wiring change has a target.
-
-The check will join the `pr-fast` group of anvil's PR tier (see
+The check joins the `pr-fast` group of anvil's PR tier (see
 [cargo-anvil's check catalog](../../../cargo-anvil/docs/design/checks.md)), invoked as
 `cargo unused-deps` alongside `ensure-no-cyclic-deps` and
 `ensure-no-default-features`. Like those two it is a text/metadata check: one platform
-is enough and no toolchain pin is required.
+would be enough and no nightly toolchain is required; the existing group matrix runs it
+redundantly because splitting out a separate job costs more than the check.
 
-Its impact-scoping include level will be `modified`: it reads the root manifest
+Its impact-scoping include level is `modified`: it reads the root manifest
 and every member manifest in one pass, so it runs once from the repository
 root against its own input domain rather than taking impact-selected package
 arguments. Single-crate repositories run the same command and pass without
 configuration.
 
-Wiring it means a pinned version in `versions.just`, install and validate recipes in
-`tools.just`, a check recipe under `checks/`, and entries in the `pr-fast` group and
-the `modified` include list.
+The catalog wiring consists of a pinned version in `versions.just`, install and validate
+recipes in `tools.just`, a check recipe under `checks/`, and entries in the `pr-fast`
+group and the `modified` include list.
 
 ## 8. Out of scope
 

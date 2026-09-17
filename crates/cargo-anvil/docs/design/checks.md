@@ -66,7 +66,7 @@ flowchart LR
     pr_fast --> pr_title[pr-title]:::check
     pr_fast --> deny[deny]:::check
     pr_fast --> audit[audit]:::check
-    pr_fast --> udeps[udeps]:::check
+    pr_fast --> unused_deps[unused-deps]:::check
     pr_fast --> semver_check[semver-check]:::check
     pr_fast --> external_types[external-types]:::check
     pr_fast --> aprz[aprz]:::check
@@ -116,7 +116,7 @@ jobs/stages. Locally, `just anvil-pr-slow` invokes those groups in order, and
 
 | Group              | OS scope                              | Purpose                                                                                                              |
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
+| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `unused-deps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, semver-check, and external-types compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
 | `pr-msrv`         | Same default as `pr-test`             | Affected-package all-target tests under the declared MSRV, in all-features and default-features configurations. The recipe is a no-op when no root MSRV is declared. |
 | `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
@@ -188,7 +188,7 @@ while paired prerequisite validation remains read-only.
 | `pr-title`                     | Repository policy regex applied to the title in the `PR_TITLE` env var. The accepted types (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `build`, `ci`, `perf`, `revert`) are a deliberate subset of Conventional Commits, not the complete grammar. The title must occupy a single line, so trailing content after the description is rejected. A rejected title reports the accepted title formats and the case-insensitive type names, so the author can correct the title from the check output alone. Skipped only outside a pull request context, where `PR_TITLE` is unset or empty (local runs and cloud builds that are not pull request builds); an invalid title or failure to retrieve a known PR's title fails loudly. GitHub supplies the event title directly. ADO resolves it through the REST API because `System.PullRequest.Title` does not exist. | oxidizer-github |
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
-| `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
+| `unused-deps`                  | `cargo unused-deps`. Reads the workspace root and every member manifest once and fails when a `[workspace.dependencies]` entry is inherited by no member. It does not compile targets or judge whether an inherited dependency is referenced in source. | ox-tools |
 | `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
 | `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
 
@@ -295,9 +295,9 @@ Re-running these on the scheduled tier turns "something landed
 upstream yesterday" into a tracked failure rather than an invisible regression discovered
 next time someone opens an unrelated PR.
 
-(`udeps` and `external-types` use pinned nightlies and are not re-run here: their outcome is
-deterministic given the source + pinned tool versions, so re-running on the same `main`
-commit can't surface anything new.)
+(`unused-deps` and `external-types` are not re-run here: their outcome is deterministic
+given the source + pinned tool versions, so re-running on the same `main` commit can't
+surface anything new.)
 
 ### `scheduled-runtime-analysis`
 
@@ -363,7 +363,7 @@ What that means concretely:
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,
   `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
-  `udeps`, `semver-check`, `external-types`, `careful`, `loom`, `bolero`,
+  `unused-deps`, `semver-check`, `external-types`, `careful`, `loom`, `bolero`,
   diff-scoped `mutants`.
 - **Run only in scheduled** -- the expensive whole-workspace work that doesn't fit a PR
   budget: the non-stacked miri profiles `miri-tree-borrows`, `miri-strict-provenance`,
@@ -410,9 +410,9 @@ Bucket assignments per check:
 
 | Bucket    | Checks                                                                                                                |
 |-----------|-----------------------------------------------------------------------------------------------------------------------|
-| modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features` |
+| modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`, `unused-deps` |
 | affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `msrv-test`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
-| required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
+| required  | `doc-build`, `cargo-hack` (feature powerset)                                                                           |
 | unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck` |
 
 \* cargo-delta's README recommends `clippy` with the modified tier. anvil deliberately
@@ -424,8 +424,17 @@ incremental — and the recall benefit avoids a class of merge surprises.
 `required` is `affected ∪ workspace-internal transitive deps`, not "the whole workspace".
 For a small PR it can still be much narrower than `--workspace`. It is used for tools
 whose correctness resolves through the dep graph: `cargo doc` (intra-doc links walk into
-deps), `cargo udeps` (unused-deps detection needs the resolved graph), `cargo hack
---feature-powerset` (feature combinations cascade through dep features).
+deps) and `cargo hack --feature-powerset` (feature combinations cascade through dep
+features).
+
+`unused-deps` uses `modified` because it must inspect the root and every member manifest
+as one input domain. Impact analysis decides whether it runs, but package arguments would
+incorrectly narrow the workspace-wide inheritance question.
+
+Anvil intentionally does not run `cargo-udeps` or `cargo-machete`. The replacement trades
+their source-level unused-dependency analysis for a deterministic manifest-level rule with
+no macro-expansion or target-selection ambiguity. An inherited dependency that is never
+referenced in code is therefore outside the default Anvil catalog.
 
 `unscoped` is for checks that have nothing to do with workspace-member identity:
 `deny`/`audit` read `Cargo.lock`, `pr-title` reads PR metadata, `aprz` consults an

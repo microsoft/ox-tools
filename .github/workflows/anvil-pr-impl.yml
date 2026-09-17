@@ -100,7 +100,7 @@ jobs:
   pr-fast:
     name: "Check Group: Fast Checks (${{ matrix.os }})"
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
-    # checks (clippy, doc-build, udeps, semver-check, external-types)
+    # checks (clippy, doc-build, semver-check, external-types)
     # whose results can differ across host for crates that use
     # #[cfg(target_os = ...)] or #[cfg(target_arch = ...)] gating.
     needs: [impact-linux, impact-windows]

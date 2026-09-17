@@ -125,7 +125,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "readme-check",
         "semver-check",
         "spellcheck",
-        "udeps",
+        "unused-deps",
     ]
 );
 
@@ -295,7 +295,7 @@ mod tests {
             ("readme-check", Unscoped),
             ("semver-check", Affected),
             ("spellcheck", Unscoped),
-            ("udeps", Required),
+            ("unused-deps", Modified),
         ]
     };
 

@@ -81,7 +81,7 @@ jobs:
           fail_ci_if_error: false
 
   scheduled-advisories:
-    # Cross-OS / cross-arch because clippy and udeps in this group
+    # Cross-OS / cross-arch because clippy in this group
     # compile per host, so cfg-gated code must be linted/scanned on
     # every leg.
     strategy:

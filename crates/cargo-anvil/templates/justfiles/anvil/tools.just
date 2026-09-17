@@ -1077,10 +1077,10 @@ anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-s
 [group("anvil-setup")]
 anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
 
-# Install the pinned `cargo-udeps` tool.
+# Install the pinned `cargo-unused-deps` tool.
 [group("anvil-setup")]
-anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps" cargo_udeps_version installer)
+anvil-tool-cargo-unused-deps-install installer="install": (_install-tool "cargo-unused-deps" cargo_unused_deps_version installer)
 
-# Validate that the pinned `cargo-udeps` tool is available.
+# Validate that the pinned `cargo-unused-deps` tool is available.
 [group("anvil-setup")]
-anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)
+anvil-tool-cargo-unused-deps-validate-prereqs: (_check-tool "cargo-unused-deps" cargo_unused_deps_version)

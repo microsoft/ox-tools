@@ -25,7 +25,6 @@ homepage = "https://github.com/microsoft/ox-tools"
 # external dependencies
 anyhow = { version = "1.0.104", default-features = false }
 assert_cmd = { version = "2.2.2", default-features = false }
-async-once-cell = { version = "0.5", default-features = false }
 blake3 = { version = "1.8.7", default-features = false }
 # bolero-libfuzzer 0.13.0 calls bolero_engine::any; bolero/std enables that API for its host build.
 bolero = { version = "0.13.4", default-features = false, features = ["std"] }
@@ -40,7 +39,6 @@ cargo-gamma-lib = { path = "crates/cargo-gamma-lib", default-features = false, v
 cargo-gamma-process = { path = "crates/cargo-gamma-process", default-features = false, version = "0.2.1" }
 cargo-gamma-rt = { path = "crates/cargo-gamma-rt", default-features = false, version = "0.2.1" }
 cargo-gamma-unsafe = { path = "crates/cargo-gamma-unsafe", default-features = false, version = "0.2.1" }
-cargo-heather = { path = "crates/cargo-heather", default-features = false, version = "0.2.1" }
 # external dependencies
 cargo-platform = { version = "0.3.3", default-features = false }
 cargo_metadata = { version = "0.23.1", default-features = false }
@@ -63,7 +61,6 @@ lcov = { version = "0.8.2", default-features = false }
 libc = { version = "0.2.189", default-features = false }
 log = { version = "0.4.34", default-features = false }
 loom = { version = "0.7.2", default-features = false }
-many_cpus = { version = "2.4.16", default-features = false }
 mimalloc = { version = "0.1.52", default-features = false }
 mmap-rs = { version = "0.7.0", default-features = false }
 mutants = { version = "0.0.4", default-features = false }
@@ -76,7 +73,6 @@ predicates = { version = "3.1.4", default-features = false }
 proc-macro2 = { version = "1.0.107", default-features = false }
 # 0.0.349 includes a parser fixture that crashes CodeQL 2.26.4; retry the bump with a newer CodeQL release.
 ra_ap_syntax = { version = "0.0.331", default-features = false }
-rapidhash = { version = "4.5.1", default-features = false }
 reflink-copy = { version = "0.1.30", default-features = false }
 regex = { version = "1.13.1", default-features = false }
 reqwest = { version = "0.13.4", default-features = false }
