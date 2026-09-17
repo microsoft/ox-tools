@@ -142,6 +142,10 @@ impl FakeCoverageTools {
 }
 
 fn fake_collection_command(dir: &Path, tools: &FakeCoverageTools, object: &Path) -> Command {
+    fake_collection_command_with_coverage_dir(dir, tools, object, &dir.join("coverage"))
+}
+
+fn fake_collection_command_with_coverage_dir(dir: &Path, tools: &FakeCoverageTools, object: &Path, coverage_dir: &Path) -> Command {
     let real_cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
     let fake_path = std::env::join_paths(
@@ -160,7 +164,7 @@ fn fake_collection_command(dir: &Path, tools: &FakeCoverageTools, object: &Path)
         .arg("run")
         .args(["--configuration", "all-features"])
         .arg("--coverage-dir")
-        .arg(dir.join("coverage"))
+        .arg(coverage_dir)
         .env("CARGO", &tools.cargo)
         .env("RUSTC", &tools.rustc)
         .env("PATH", fake_path)
@@ -252,6 +256,24 @@ fn one_crate_below_threshold_exits_1() {
         .stdout(predicate::str::contains("1 package below threshold"))
         .stdout(predicate::str::contains("beta: 60/100 lines covered; 40 uncovered."))
         .stdout(predicate::str::contains("src/lib.rs: 61-100"));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn displayed_rounding_does_not_satisfy_full_coverage_threshold() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 2_000, 1_999)]);
+
+    coverage_gate(tmp.path())
+        .args(["--lcov", &lcov_path])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("99.9%"))
+        .stdout(predicate::str::contains("100.0%"))
+        .stdout(predicate::str::contains("-<0.1pp"))
+        .stdout(predicate::str::contains("FAIL"))
+        .stdout(predicate::str::contains("1999/2000 lines covered; 1 uncovered."));
 }
 
 #[test]
@@ -802,9 +824,11 @@ fn concurrent_runs_use_isolated_coverage_targets_and_clean_them() {
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
 
-    let mut first = fake_collection_command(tmp.path(), &tools, &object);
+    let first_coverage = tmp.path().join("coverage-first");
+    let second_coverage = tmp.path().join("coverage-second");
+    let mut first = fake_collection_command_with_coverage_dir(tmp.path(), &tools, &object, &first_coverage);
     first.env("FAKE_NEXTEST_DELAY_MS", "250");
-    let mut second = fake_collection_command(tmp.path(), &tools, &object);
+    let mut second = fake_collection_command_with_coverage_dir(tmp.path(), &tools, &object, &second_coverage);
     second.env("FAKE_NEXTEST_DELAY_MS", "250");
 
     let first = run_concurrently(&first);
@@ -823,7 +847,8 @@ fn concurrent_runs_use_isolated_coverage_targets_and_clean_them() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(targets.len(), 2, "concurrent commands must use distinct targets:\n{log}");
     assert!(targets.iter().all(|target| !target.exists()), "isolated targets must be cleaned");
-    assert!(tmp.path().join("coverage/lcov-all-features.info").is_file());
+    assert!(first_coverage.join("lcov-all-features.info").is_file());
+    assert!(second_coverage.join("lcov-all-features.info").is_file());
 }
 
 #[test]
@@ -1030,23 +1055,97 @@ fn zero_threshold_only_selection_is_instrumented_and_accepts_empty_lcov() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
-fn target_is_not_automatically_excluded_from_coverage() {
+fn explicit_target_is_propagated_to_collection_and_evaluation() {
     let tmp = TempDir::new().expect("tempdir");
-    make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
+    make_workspace_with_gate(
+        tmp.path(),
+        &[(
+            "alpha",
+            "min-lines-percent = 100\n\n\
+             [package.metadata.coverage-gate.target.'aarch64-pc-windows-msvc']\n\
+             min-lines-percent = 0",
+        )],
+    );
     let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
     fs::write(&object, b"object").expect("write fake object");
     let tools = FakeCoverageTools::compile();
 
     fake_collection_command(tmp.path(), &tools, &object)
         .args(["--target", "aarch64-pc-windows-msvc"])
+        .env("FAKE_LCOV_HITS", "0")
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("all packages meet their threshold"));
 
     let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
-    assert!(log.contains("cargo\tllvm-cov\tnextest"), "{log}");
-    assert!(log.contains("cargo\tllvm-cov\treport"), "{log}");
+    let collection_commands = log
+        .lines()
+        .filter(|line| line.contains("cargo\tllvm-cov\tnextest") || line.contains("cargo\tllvm-cov\treport"))
+        .collect::<Vec<_>>();
+    assert_eq!(collection_commands.len(), 2, "{log}");
+    assert!(
+        collection_commands
+            .iter()
+            .all(|line| line.contains("--target\taarch64-pc-windows-msvc")),
+        "{log}"
+    );
+    assert!(
+        log.contains("rustc\t--print\tcfg\t--target\taarch64-pc-windows-msvc"),
+        "evaluation must use the explicit collection target:\n{log}"
+    );
     assert!(!log.contains("cargo\tnextest\trun"), "{log}");
     assert!(tmp.path().join("coverage/lcov-all-features.info").is_file());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn omitted_target_uses_one_host_for_collection_and_evaluation() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(
+        tmp.path(),
+        &[
+            (
+                "alpha",
+                "min-lines-percent = 100\n\n\
+                 [package.metadata.coverage-gate.target.'x86_64-pc-windows-msvc']\n\
+                 min-lines-percent = 0",
+            ),
+            ("beta", "min-lines-percent = 0"),
+        ],
+    );
+    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&object, b"object").expect("write fake object");
+    let tools = FakeCoverageTools::compile();
+
+    fake_collection_command(tmp.path(), &tools, &object)
+        .env("CARGO_BUILD_TARGET", "aarch64-pc-windows-msvc")
+        .env("FAKE_LCOV_HITS", "0")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("all packages meet their threshold"));
+
+    let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
+    assert_eq!(
+        log.matches("rustc\t-vV").count(),
+        1,
+        "host discovery must be reused for validation:\n{log}"
+    );
+    let collection_commands = log
+        .lines()
+        .filter(|line| line.contains("cargo\tllvm-cov\tnextest") || line.contains("cargo\tllvm-cov\treport"))
+        .collect::<Vec<_>>();
+    assert_eq!(collection_commands.len(), 2, "{log}");
+    assert!(
+        collection_commands
+            .iter()
+            .all(|line| line.contains("--target\tx86_64-pc-windows-msvc")),
+        "{log}"
+    );
+    assert!(
+        log.contains("rustc\t--print\tcfg\t--target\tx86_64-pc-windows-msvc"),
+        "evaluation must use the same resolved host target:\n{log}"
+    );
+    assert!(!log.contains("--target\taarch64-pc-windows-msvc"), "{log}");
 }
 
 #[test]
@@ -1069,6 +1168,9 @@ fn configured_no_coverage_target_runs_plain_tests_without_advertising_coverage()
             "aarch64-pc-windows-msvc",
         ])
         .env("FAKE_PLAIN_NEXTEST_STDOUT", "1")
+        .env("FAKE_FAIL_CARGO_VERSION", "1")
+        .env("FAKE_FAIL_RUSTC", "1")
+        .env("FAKE_LLVM_COV_VERSION", "0.8.7")
         .assert()
         .success()
         .stdout(predicate::str::contains("plain-nextest-stdout"))
@@ -1082,12 +1184,15 @@ fn configured_no_coverage_target_runs_plain_tests_without_advertising_coverage()
     assert!(log.contains("\t--locked"), "{log}");
     assert!(log.contains("--target\taarch64-pc-windows-msvc"), "{log}");
     assert!(!log.contains("llvm-cov\tnextest"), "{log}");
+    assert!(!log.contains("cargo\t--version\t--verbose"), "{log}");
+    assert!(!log.contains("cargo\tllvm-cov\t--version"), "{log}");
+    assert!(!log.contains("rustc\t-vV"), "{log}");
     assert!(!tmp.path().join("coverage/lcov-all-features.info").exists());
 }
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
-fn configured_no_coverage_host_target_is_resolved_lazily() {
+fn configured_no_coverage_host_target_is_resolved_and_propagated_without_tool_validation() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100"))], None);
     let object = tmp.path().join(format!("unused-object{}", std::env::consts::EXE_SUFFIX));
@@ -1095,14 +1200,23 @@ fn configured_no_coverage_host_target_is_resolved_lazily() {
 
     fake_collection_command(tmp.path(), &tools, &object)
         .args(["--no-coverage-target", "x86_64-pc-windows-msvc"])
+        .env("FAKE_FAIL_CARGO_VERSION", "1")
+        .env("FAKE_STABLE_RUSTC", "1")
+        .env("FAKE_LLVM_COV_VERSION", "0.8.7")
         .assert()
         .success()
         .stderr(predicate::str::contains("configured for no coverage"));
 
     let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
-    assert!(log.contains("rustc\t-vV"), "{log}");
-    assert!(log.contains("cargo\tnextest\trun"), "{log}");
+    assert_eq!(log.matches("rustc\t-vV").count(), 1, "{log}");
+    let plain_nextest = log
+        .lines()
+        .find(|line| line.contains("cargo\tnextest\trun"))
+        .expect("plain nextest command must be logged");
+    assert!(plain_nextest.contains("--target\tx86_64-pc-windows-msvc"), "{log}");
     assert!(!log.contains("llvm-cov\tnextest"), "{log}");
+    assert!(!log.contains("cargo\t--version\t--verbose"), "{log}");
+    assert!(!log.contains("cargo\tllvm-cov\t--version"), "{log}");
 }
 
 #[test]

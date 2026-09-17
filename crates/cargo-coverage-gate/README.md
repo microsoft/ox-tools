@@ -158,10 +158,12 @@ and cargo-llvm-cov 0.9.0 or newer. The command honors inherited `CARGO`,
 `RUSTC`, `RUSTUP_TOOLCHAIN`, and `PATH` rather than selecting a toolchain
 itself. Every selected package is instrumented regardless of its coverage
 policy. Callers may repeat `--no-coverage-target <TRIPLE>` to explicitly run
-plain nextest without LCOV or gating on listed targets. The effective target
-is resolved only when that list is nonempty. `--quiet` suppresses all
-collection and verdict stdout while preserving stderr diagnostics and
-summary output.
+plain nextest without LCOV or gating on listed targets. `run` resolves one
+effective target from explicit `--target` or the rustc host, then passes it
+explicitly to test execution, reporting, and evaluation. This deliberately
+overrides `CARGO_BUILD_TARGET` and Cargo `build.target` configuration.
+`--quiet` suppresses all collection and verdict stdout while preserving
+stderr diagnostics and summary output.
 
 `--lcov` may be repeated; the tracefiles are merged at the line level
 (line sets combined, coverage retained when any input has a hit) so multiple feature-config exports
@@ -208,13 +210,13 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbX6DEtuOaknMb7PKVzw10drAb0NdP6zb_GfEb39eqXE4UnW9hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQb-kz2E56mUZAbb5qgWu26ydEbiDpd97CUrZkbNwoRBl23-OphZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC41LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
- [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many.html
- [__link3]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
- [__link4]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/struct.EvaluatedReport.html
- [__link5]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link6]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link7]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/enum.Verdict.html
- [__link8]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/fn.evaluate.html
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/fn.evaluate_many.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/struct.EvaluatedReport.html
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link7]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/enum.Verdict.html
+ [__link8]: https://docs.rs/cargo-coverage-gate/0.5.0/cargo_coverage_gate/?search=EvaluatedReport::verdict

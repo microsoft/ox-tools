@@ -132,9 +132,10 @@ Flags:
   test-impact step so that impact-scoped runs only gate the packages
   whose tests actually ran. A selector that matches no member is a
   configuration error (exit 2).
-- `--target <triple>` — evaluate target-specific package policies for the
-  supplied Rust target. Defaults to the rustc host target when target
-  policies exist; workspaces without target policies do not invoke rustc.
+- `--target <triple>` — collect coverage and evaluate target-specific package
+  policies for the supplied Rust target. For standalone evaluation, omission
+  resolves the rustc host only when target policies exist. `run` always
+  resolves the rustc host when omitted and passes it explicitly to collection.
 - `--summary-file <path>` — write a Markdown verdict table to this file.
   When unset, the tool honors the environment variables
   `GITHUB_STEP_SUMMARY` (GitHub Actions) and
@@ -160,8 +161,8 @@ hand, so every change appears in a PR diff and is reviewed.
   upload completed outputs even if evaluation later fails.
 - `--no-coverage-target <triple>` — explicitly run plain nextest without
   coverage collection or gating when the effective target matches. Repeatable;
-  the default list is empty. An explicit `--target` is matched directly.
-  Otherwise the rustc host is resolved only when this list is nonempty.
+  the default list is empty. The effective target is the explicit `--target`
+  or the rustc host resolved by `run`.
 
 Both instrumented cargo-llvm-cov/nextest runs and plain-nextest no-gate runs
 always pass `--locked`. Collection therefore measures the dependency graph
@@ -308,9 +309,11 @@ Resolution follows Cargo's precedence:
 4. With no matching target table, the base package → workspace → built-in
    policy remains effective.
 
-The CLI accepts `--target <triple>`. When omitted, it obtains the rustc host
-target from `rustc -vV`. Rust target discovery is lazy: if no package declares
-target policies, evaluation does not invoke rustc.
+The CLI accepts `--target <triple>`. When omitted, standalone evaluation
+obtains the rustc host target from `rustc -vV` only if a package declares
+target policies. `run` instead resolves the host once on every omitted-target
+invocation, passes that triple explicitly to collection and evaluation, and
+reuses the same `rustc -vV` output for nightly validation.
 
 ### 5.4 The verdict table
 
@@ -399,15 +402,18 @@ cargo coverage-gate \
 
 For each requested feature configuration, `run`:
 
-1. allocates a unique per-invocation coverage target beneath
+1. resolves one effective Rust target from explicit `--target` or the rustc
+   host and uses it for no-coverage matching, test execution, reporting, and
+   policy evaluation;
+2. allocates a unique per-invocation coverage target beneath
    Cargo's target directory and cleans that isolated state;
-2. invokes cargo-llvm-cov with nextest, `--no-report`, `--no-tests=pass`, and
+3. invokes cargo-llvm-cov with nextest, `--no-report`, `--no-tests=pass`, and
    `--locked` for the selected package set;
-3. invokes `cargo llvm-cov report --lcov` for the same package and target
+4. invokes `cargo llvm-cov report --lcov` for the same package and target
    selection, delegating raw-profile merging, ordinary and nested trybuild
    object discovery, and the complete default filename exclusions to
    cargo-llvm-cov;
-4. writes that report directly to its stable consumer path under
+5. writes that report directly to its stable consumer path under
    `--coverage-dir` and passes the same path to the ordinary evaluator.
 
 The selected package set is resolved to exact `name@version` specs before
@@ -766,10 +772,10 @@ per-package aggregation must produce the same percentage byte-for-byte given
 the same lcov input, regardless of file iteration order. This holds for
 free because the aggregation step sums integer line counters (commutative
 and associative), and the f64 percentage is computed once at the end.
-The displayed value rounds to one decimal place (matching
-cargo-llvm-cov's default text-summary precision), and the pass/fail
-comparison rounds to the same precision before comparing — see
-§10.5 for the rationale.
+The displayed measured percentage rounds down to one decimal place.
+Configured thresholds display to one decimal place using normal numeric
+formatting. Pass/fail evaluation uses the unrounded values so presentation
+precision cannot weaken the configured threshold — see §10.5.
 
 ### 10.2 Security
 
@@ -779,9 +785,11 @@ the selected summary file. `run` additionally writes beneath
 deletes only temporary response files and isolated coverage state those tools
 created. cargo-coverage-gate itself performs no network calls or privileged
 operations. Its Cargo and nextest children follow the caller's Cargo
-configuration and may fetch locked dependencies when they are not cached;
-callers that require network isolation must configure Cargo offline mode
-outside this tool.
+configuration and may fetch locked dependencies when they are not cached.
+The effective target is the deliberate exception: `run` always supplies
+`--target <triple>`, so `CARGO_BUILD_TARGET` and Cargo `build.target`
+configuration cannot select a different collection target. Callers that
+require network isolation must configure Cargo offline mode outside this tool.
 
 Workspace discovery invokes the read-only `cargo metadata` command through
 `cargo_metadata::MetadataCommand::exec()` to enumerate workspace members and
@@ -789,8 +797,10 @@ resolve the workspace root. When any package declares target-specific policy,
 evaluation also invokes the executable selected by `RUSTC` (or `rustc` when
 unset). It runs `rustc -vV` when it must discover the host target, then runs
 `rustc --print cfg --target <triple>` for both explicit and discovered targets.
-`run` additionally reads the rustc host triple only when
-`--no-coverage-target` is nonempty and `--target` is omitted.
+When `--target` is omitted, `run` always reads the host triple once and reuses
+that version output for instrumentation validation. It passes the resulting
+triple explicitly to instrumented nextest, `cargo llvm-cov report`, plain
+nextest on a `--no-coverage-target` match, and policy evaluation.
 
 Child processes receive arguments directly rather than through a shell.
 Package selectors are resolved against workspace metadata before execution;
@@ -841,17 +851,28 @@ Rust with `cargo-llvm-cov ≥ 0.9`**. Four reasons:
 `cargo coverage-gate run` enforces these prerequisites before instrumented
 collection. Invoke the command through the intended nightly Cargo/toolchain;
 the collector honors inherited `CARGO`, `RUSTC`, `RUSTUP_TOOLCHAIN`, `PATH`,
-and related configuration. Only an explicit `--no-coverage-target` match takes
-the plain-test no-gate path and avoids the cargo-llvm-cov requirement.
+and related configuration except that its explicit effective `--target`
+overrides Cargo build-target configuration. Only an explicit
+`--no-coverage-target` match takes the plain-test no-gate path and avoids the
+cargo-llvm-cov requirement.
 
 ### 10.5 Float comparison
 
-Percentage comparisons round both sides to the displayed precision (one
-decimal place) before comparing: `round(pct * 10) >= round(threshold * 10)`.
-This guarantees the rendered "Δ vs threshold" column always agrees with the
-pass/fail verdict — anything that prints as ≥ the threshold passes,
-anything that prints as below it fails. There is no separate tolerance
-constant to tune.
+Percentage comparisons use the unrounded measured value:
+`pct >= threshold`. Display rounding is presentation-only and never relaxes
+the configured floor. In particular, a `100.0` threshold passes only when
+every coverable line is covered.
+
+A measured percentage is rounded down to one decimal place directly from the
+integer covered/coverable line counts, so binary floating-point representation
+cannot push an exact decimal tenth downward. A near-boundary failure remains
+visibly below its threshold: `1999 / 2000 = 99.95%` displays as `99.9%` and
+fails a `100.0%` threshold. Non-zero deltas whose raw magnitude is below
+`0.1pp` retain their direction as `+<0.1pp` or `-<0.1pp`; exact `0.1pp`
+boundaries, including values within `1e-12pp` of that boundary to account for
+binary floating-point representation, use ordinary one-decimal rendering.
+Only an exact match displays as `0.0pp`. The status and exact
+covered/coverable line counts remain authoritative.
 
 ## 11. Out-of-Scope, Possible Extensions
 

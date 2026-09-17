@@ -46,9 +46,10 @@ pub(crate) struct CoverageGateArgs {
     #[arg(long = "package", short = 'p', value_name = "SPEC", global = true)]
     pub(crate) packages: Vec<String>,
 
-    /// Rust target triple whose coverage policy should be evaluated.
+    /// Rust target triple whose coverage should be collected and evaluated.
     ///
-    /// Defaults to the rustc host target.
+    /// Defaults to the rustc host target. `run` passes the resolved target
+    /// explicitly, overriding Cargo's configured build target.
     #[arg(long, value_name = "TRIPLE", global = true)]
     pub(crate) target: Option<String>,
 
@@ -92,8 +93,7 @@ pub(crate) struct CollectionArgs {
 
     /// Run tests without coverage or gating on this Rust target.
     ///
-    /// May be repeated. The effective target is resolved only when at least
-    /// one target is configured here.
+    /// May be repeated. Matches the explicit `--target` or resolved rustc host.
     #[arg(long = "no-coverage-target", value_name = "TRIPLE")]
     pub(crate) no_coverage_targets: Vec<String>,
 

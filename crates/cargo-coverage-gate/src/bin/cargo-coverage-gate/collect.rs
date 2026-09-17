@@ -34,15 +34,19 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
     let mut collection = collection.clone();
     collection.coverage_dir = absolute_path(&collection.coverage_dir)?;
     let configurations = normalized_configurations(&collection.configurations);
+    let effective_target = EffectiveTarget::resolve(&workspace, args.target.as_deref(), &tools)?;
 
-    if let Some(target) = configured_no_coverage_target(&collection.no_coverage_targets, args.target.as_deref(), &tools)? {
-        let result = format!("target `{target}` is configured for no coverage; tests passed without coverage collection or gating");
+    if configured_no_coverage_target(&collection.no_coverage_targets, &effective_target.triple) {
+        let result = format!(
+            "target `{}` is configured for no coverage; tests passed without coverage collection or gating",
+            effective_target.triple
+        );
         run_plain_configurations(
             &workspace,
             &selection,
             &collection,
             &configurations,
-            args.target.as_deref(),
+            &effective_target.triple,
             &tools,
             args.quiet,
         )?;
@@ -51,7 +55,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         return Ok(ExitCode::SUCCESS);
     }
 
-    validate_instrumentation_tools(&workspace, &tools)?;
+    validate_instrumentation_tools(&workspace, &tools, effective_target.rustc_version.as_deref())?;
     fs::create_dir_all(&collection.coverage_dir).into_app_err(format!(
         "failed to create coverage directory `{}`",
         collection.coverage_dir.display()
@@ -66,7 +70,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         #[cfg(windows)]
         scratch_dir: coverage_scratch.path(),
         coverage_target_dir: &coverage_target_dir,
-        target: args.target.as_deref(),
+        target: &effective_target.triple,
         tools: &tools,
         quiet: args.quiet,
     };
@@ -75,7 +79,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
         lcov_paths.push(collect_configuration(&execution, configuration)?);
     }
 
-    let evaluation = crate::run::evaluate_paths(args, &lcov_paths, &selection.gated_names());
+    let evaluation = crate::run::evaluate_paths(args, &lcov_paths, &selection.gated_names(), Some(&effective_target.triple));
     combine_evaluation_and_cleanup(evaluation, coverage_scratch.cleanup()).complete()
 }
 
@@ -125,7 +129,7 @@ struct CollectionExecution<'a> {
     #[cfg(windows)]
     scratch_dir: &'a Path,
     coverage_target_dir: &'a Path,
-    target: Option<&'a str>,
+    target: &'a str,
     tools: &'a ToolPrograms,
     quiet: bool,
 }
@@ -170,6 +174,32 @@ struct WorkspaceInfo {
     root: PathBuf,
     target_dir: PathBuf,
     members: Vec<WorkspaceMember>,
+}
+
+#[derive(Debug)]
+struct EffectiveTarget {
+    triple: String,
+    rustc_version: Option<String>,
+}
+
+impl EffectiveTarget {
+    fn resolve(workspace: &WorkspaceInfo, explicit: Option<&str>, tools: &ToolPrograms) -> Result<Self, AppError> {
+        if let Some(triple) = explicit {
+            return Ok(Self {
+                triple: triple.to_owned(),
+                rustc_version: None,
+            });
+        }
+
+        let rustc_version = read_rustc_version(workspace, tools, "rustc host-target discovery")?;
+        let triple = rustc_host(&rustc_version)
+            .map(str::to_owned)
+            .ok_or_else(|| AppError::new("`rustc -vV` did not report a host target"))?;
+        Ok(Self {
+            triple,
+            rustc_version: Some(rustc_version),
+        })
+    }
 }
 
 impl WorkspaceInfo {
@@ -309,32 +339,21 @@ impl FeatureConfiguration {
     }
 }
 
-fn configured_no_coverage_target(configured: &[String], target: Option<&str>, tools: &ToolPrograms) -> Result<Option<String>, AppError> {
-    configured_no_coverage_target_with(configured, target, || resolve_rustc_host(tools))
+fn configured_no_coverage_target(configured: &[String], target: &str) -> bool {
+    configured.iter().any(|candidate| candidate == target)
 }
 
-fn configured_no_coverage_target_with(
-    configured: &[String],
-    target: Option<&str>,
-    resolve_host: impl FnOnce() -> Result<String, AppError>,
-) -> Result<Option<String>, AppError> {
-    if configured.is_empty() {
-        return Ok(None);
-    }
-    let effective = target.map(str::to_owned).map_or_else(resolve_host, Ok)?;
-    Ok(configured.iter().any(|candidate| candidate == &effective).then_some(effective))
-}
-
-fn resolve_rustc_host(tools: &ToolPrograms) -> Result<String, AppError> {
+fn read_rustc_version(workspace: &WorkspaceInfo, tools: &ToolPrograms, description: &str) -> Result<String, AppError> {
     let mut rustc_version = Command::new(tools.rustc());
-    rustc_version.arg("-vV");
-    let rustc_version = read_stdout(&mut rustc_version, "rustc host-target discovery")?;
-    rustc_host(&rustc_version)
-        .map(str::to_owned)
-        .ok_or_else(|| AppError::new("`rustc -vV` did not report a host target"))
+    rustc_version.arg("-vV").current_dir(&workspace.root);
+    read_stdout(&mut rustc_version, description)
 }
 
-fn validate_instrumentation_tools(workspace: &WorkspaceInfo, tools: &ToolPrograms) -> Result<(), AppError> {
+fn validate_instrumentation_tools(
+    workspace: &WorkspaceInfo,
+    tools: &ToolPrograms,
+    resolved_rustc_version: Option<&str>,
+) -> Result<(), AppError> {
     let mut cargo_version = cargo_command(workspace, tools);
     cargo_version.args(["--version", "--verbose"]);
     let cargo_version = read_stdout(&mut cargo_version, "cargo toolchain validation")?;
@@ -346,9 +365,10 @@ fn validate_instrumentation_tools(workspace: &WorkspaceInfo, tools: &ToolProgram
         )));
     }
 
-    let mut rustc_version = Command::new(tools.rustc());
-    rustc_version.arg("-vV").current_dir(&workspace.root);
-    let rustc_version = read_stdout(&mut rustc_version, "rustc toolchain validation")?;
+    let rustc_version = match resolved_rustc_version {
+        Some(output) => output.to_owned(),
+        None => read_rustc_version(workspace, tools, "rustc toolchain validation")?,
+    };
     let rustc_release = rustc_release(&rustc_version).ok_or_else(|| AppError::new("`rustc -vV` did not report a release"))?;
     if !rustc_release.contains("-nightly") {
         return Err(AppError::new(format!(
@@ -415,7 +435,7 @@ fn run_plain_configurations(
     selection: &Selection,
     args: &CollectionArgs,
     configurations: &[FeatureConfiguration],
-    target: Option<&str>,
+    target: &str,
     tools: &ToolPrograms,
     quiet: bool,
 ) -> Result<(), AppError> {
@@ -490,11 +510,8 @@ fn append_package_selection(command: &mut Command, selection: &Selection) {
     }
 }
 
-fn append_nextest_options(command: &mut Command, args: &CollectionArgs, configuration: FeatureConfiguration, target: Option<&str>) {
-    command.arg(configuration.cargo_flag()).arg("--locked");
-    if let Some(target) = target {
-        command.arg("--target").arg(target);
-    }
+fn append_nextest_options(command: &mut Command, args: &CollectionArgs, configuration: FeatureConfiguration, target: &str) {
+    command.arg(configuration.cargo_flag()).arg("--locked").arg("--target").arg(target);
     if let Some(jobs) = args.jobs {
         command.arg("--jobs").arg(jobs.get().to_string());
         command.arg("--build-jobs").arg(jobs.get().to_string());
@@ -517,9 +534,7 @@ fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfigu
     let mut command = coverage_command(execution.workspace, execution.coverage_target_dir, execution.tools);
     command.args(["llvm-cov", "report", "--lcov", "--output-path"]).arg(lcov_path);
     append_package_selection(&mut command, execution.selection);
-    if let Some(target) = execution.target {
-        command.arg("--target").arg(target);
-    }
+    command.arg("--target").arg(execution.target);
 
     let display = command_display(&command);
     let output = command
@@ -857,34 +872,11 @@ mod tests {
     }
 
     #[test]
-    fn no_coverage_target_matching_is_lazy_and_exact() {
-        assert!(
-            configured_no_coverage_target_with(&[], None, || panic!("empty configuration must not resolve a target"))
-                .expect("empty configuration")
-                .is_none()
-        );
-
+    fn no_coverage_target_matching_is_exact() {
         let configured = vec!["aarch64-pc-windows-msvc".to_owned()];
-        let matched = configured_no_coverage_target_with(&configured, Some("aarch64-pc-windows-msvc"), || {
-            panic!("an explicit target must not resolve the host")
-        })
-        .expect("explicit match");
-        assert_eq!(matched.as_deref(), Some("aarch64-pc-windows-msvc"));
-
-        let unmatched = configured_no_coverage_target_with(&configured, Some("x86_64-pc-windows-msvc"), || {
-            panic!("an explicit target must not resolve the host")
-        })
-        .expect("explicit mismatch");
-        assert!(unmatched.is_none());
-
-        let calls = Cell::new(0);
-        let host_match = configured_no_coverage_target_with(&configured, None, || {
-            calls.set(calls.get() + 1);
-            Ok("aarch64-pc-windows-msvc".to_owned())
-        })
-        .expect("host match");
-        assert_eq!(host_match.as_deref(), Some("aarch64-pc-windows-msvc"));
-        assert_eq!(calls.get(), 1);
+        assert!(configured_no_coverage_target(&configured, "aarch64-pc-windows-msvc"));
+        assert!(!configured_no_coverage_target(&configured, "x86_64-pc-windows-msvc"));
+        assert!(!configured_no_coverage_target(&[], "aarch64-pc-windows-msvc"));
     }
 
     #[test]

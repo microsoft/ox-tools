@@ -14,10 +14,14 @@ The optional `run` mode keeps collection and evaluation separated internally:
    collection and evaluation cover the workspace.
 2. Collection uses the invoking environment's Cargo and rustc, honoring
    inherited `CARGO`, `RUSTC`, `RUSTUP_TOOLCHAIN`, `PATH`, and related
-   variables. Instrumented runs validate that the effective Cargo and rustc are
-   nightly and that cargo-llvm-cov is 0.9.0 or newer. Version 0.9.0 is required
-   because it introduced `--workspace` support for the `report` subcommand
-   used by the default selection.
+   variables. One effective target is resolved from explicit `--target` or the
+   rustc host. The resolved target is supplied explicitly to collection and
+   evaluation, so `CARGO_BUILD_TARGET` and Cargo `build.target` cannot select a
+   different collection target. Instrumented runs validate that the effective
+   Cargo and rustc are nightly and that cargo-llvm-cov is 0.9.0 or newer.
+   Host discovery output is reused for rustc validation. Version 0.9.0 is
+   required because it introduced `--workspace` support for the `report`
+   subcommand used by the default selection.
 3. Each feature configuration gets an isolated clean, instrumented
    `cargo llvm-cov nextest --no-report --locked` run. Both instrumented and
    plain-nextest no-gate paths pass `--no-tests=pass`, allowing packages with a
@@ -55,12 +59,13 @@ then pass, while positive-threshold packages report `NO DATA`. Missing raw
 profiles, failed object discovery, malformed output, and other report failures
 remain operational errors.
 
-Plain nextest is used only when a caller explicitly lists the effective target
-with repeatable `--no-coverage-target`. If the list is empty, no target is
-resolved for this routing decision. Otherwise an explicit `--target` is matched
-directly, or the rustc host is resolved with `rustc -vV`. A match applies to all
-selected packages and feature configurations, emits explicit no-coverage and
-no-gate diagnostics, and creates no LCOV files.
+Plain nextest is used only when a caller explicitly lists the resolved
+effective target with repeatable `--no-coverage-target`. A match applies to all
+selected packages and feature configurations, passes that target explicitly,
+emits no-coverage and no-gate diagnostics, and creates no LCOV files. This
+routing decision precedes nightly Cargo, nightly rustc, and cargo-llvm-cov
+validation; an omitted target still requires one `rustc -vV` call to discover
+the host, while an explicit target needs none.
 
 All child stderr is inherited or captured and immediately forwarded when
 Windows overflow detection requires inspection. Normal collection stdout is
