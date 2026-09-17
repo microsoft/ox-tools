@@ -117,8 +117,8 @@ Flags:
 
 - `--lcov <path>` — path to a cargo-llvm-cov lcov tracefile. May be
   repeated (`--lcov a.info --lcov b.info`); the tracefiles are merged at
-  the line level (per-line counts summed, line sets combined) before
-  gating, so multiple feature-config exports (`--all-features`,
+  the line level (line sets combined, coverage retained when any input
+  has a hit) before gating, so multiple feature-config exports (`--all-features`,
   `--no-default-features`) can be gated together without a separate,
   platform-specific merge step (`lcov -a` is Linux-only). Defaults to a
   single `target/coverage/lcov.info` when omitted (matching the
@@ -478,10 +478,11 @@ gate is a line-coverage tool.
 
 `--lcov` may be supplied more than once. The tool parses each tracefile
 and merges them at the line level **before** computing per-package
-aggregates: per-line hit counts are summed and the `DA:` line set is the
-union across inputs, so a line is `covered` if it was hit in *any* input.
-This is exactly the merge `cargo-llvm-cov` performs internally on its
-`.profraw` set, so passing the `--all-features` and
+aggregates: the `DA:` line set is the union across inputs, and a line is
+`covered` if it was hit in *any* input. Execution-count magnitudes are not
+combined because the gate consumes only the covered/uncovered predicate.
+This produces the same line-coverage result as the merge `cargo-llvm-cov`
+performs internally on its `.profraw` set, so passing the `--all-features` and
 `--no-default-features` exports here yields the same per-package line
 coverage as a single merged report. The motivation is to avoid a separate
 merge step in the producing recipe: `cargo-llvm-cov`'s union *report*

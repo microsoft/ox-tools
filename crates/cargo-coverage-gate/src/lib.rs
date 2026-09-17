@@ -155,7 +155,7 @@
 //! summary output.
 //!
 //! `--lcov` may be repeated; the tracefiles are merged at the line level
-//! (per-line counts summed) so multiple feature-config exports
+//! (line sets combined, coverage retained when any input has a hit) so multiple feature-config exports
 //! (`--all-features`, `--no-default-features`) can be gated together
 //! without a separate, platform-specific merge step.
 //!
@@ -315,8 +315,8 @@ pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &
 /// workspace anchored at `manifest_path` and return the resolved
 /// [`EvaluatedReport`].
 ///
-/// The tracefiles are merged at the line level before evaluation (per-line
-/// counts summed, line sets combined), so passing the `--all-features` and
+/// The tracefiles are merged at the line level before evaluation (line sets
+/// combined, coverage retained when any input has a hit), so passing the `--all-features` and
 /// `--no-default-features` exports yields the same per-package line
 /// coverage as a single merged report — without a platform-specific lcov
 /// merger. An empty slice is treated as an empty report. Packages with

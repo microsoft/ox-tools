@@ -164,7 +164,7 @@ collection and verdict stdout while preserving stderr diagnostics and
 summary output.
 
 `--lcov` may be repeated; the tracefiles are merged at the line level
-(per-line counts summed) so multiple feature-config exports
+(line sets combined, coverage retained when any input has a hit) so multiple feature-config exports
 (`--all-features`, `--no-default-features`) can be gated together
 without a separate, platform-specific merge step.
 
@@ -208,7 +208,7 @@ code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbieDIHvlrnAUb0rA0qcTUnkYbmU5sun27L-sbSFq72InwcrBhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbX6DEtuOaknMb7PKVzw10drAb0NdP6zb_GfEb39eqXE4UnW9hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
  [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many.html
