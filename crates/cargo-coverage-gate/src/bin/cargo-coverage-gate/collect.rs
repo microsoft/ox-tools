@@ -668,8 +668,15 @@ fn run_status(command: &mut Command, description: &str) -> Result<(), AppError> 
 fn command_display(command: &Command) -> String {
     std::iter::once(command.get_program())
         .chain(command.get_args())
-        .map(|argument| argument.to_string_lossy())
-        .collect::<Vec<_>>()
+        .map(|argument| {
+            let lossy = argument.to_string_lossy();
+            if lossy.is_empty() || lossy.chars().any(char::is_whitespace) {
+                format!("{lossy:?}")
+            } else {
+                lossy.into_owned()
+            }
+        })
+        .collect::<Vec<String>>()
         .join(" ")
 }
 
@@ -973,6 +980,17 @@ mod tests {
         assert!(is_no_coverage_data(diagnostic));
         assert!(!is_no_coverage_data("error: no coverage data found"));
         assert!(!is_no_coverage_data("error: could not load coverage information"));
+    }
+
+    #[test]
+    fn command_display_preserves_argument_boundaries() {
+        let mut command = Command::new("cargo");
+        command.args(["llvm-cov", "--output-path", "coverage output/report.info", ""]);
+
+        assert_eq!(
+            command_display(&command),
+            r#"cargo llvm-cov --output-path "coverage output/report.info" """#
+        );
     }
 
     #[test]
