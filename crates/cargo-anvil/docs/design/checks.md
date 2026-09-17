@@ -390,7 +390,11 @@ dependency.
 
 Every **impact-scoped** per-crate check depends on `anvil-impact` and resolves its
 category's scope by calling `_anvil-impact-include <category>` into a local `$include`
-variable, then consumes it (the unscoped checks below take no such dependency). The
+variable, propagates a nonzero resolver exit before reading that variable, then consumes
+it (the unscoped checks below take no such dependency). The propagation matters because
+an unguarded failure would leave `$include` empty, silently widening the check to its
+unscoped default and leaving the run green — the same failure mode `anvil-impact` already
+refuses in consume mode. The
 **same** cache is read in cloud workflows — the impact job uploads `target/anvil/impact/`
 as an artifact and each group job downloads it — so the identical code path runs locally
 and in CI, with no scoping threaded through environment variables. Scoping is on by

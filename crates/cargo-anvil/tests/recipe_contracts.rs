@@ -397,7 +397,7 @@ fn write(path: &Path, contents: &str) {
 
 /// Seed the impact cache that scoped check recipes read via
 /// `_anvil-impact-include`, standing in for a completed `anvil-impact` run.
-/// Without a cache file the recipes fall back to their tier default
+/// Outside consume mode, a missing cache falls back to the tier default
 /// (`--workspace` for the affected tier), so tests that exercise a scoped run
 /// must plant the include file the recipe consumes.
 fn seed_include(root: &Path, tier: &str, spec: &str) {
@@ -578,6 +578,42 @@ fn assert_failed(output: &Output, context: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn scoped_check_propagates_missing_consumed_impact_cache() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("fmt.just", FMT), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-rustfmt-validate-prereqs",
+            "anvil-component-nightly-rustfmt-install",
+            "anvil-tool-cargo-each-validate-prereqs",
+            "anvil-tool-cargo-each-install installer",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-fmt"],
+        &[("ANVIL_IMPACT", OsStr::new("consume")), ("FAKE_CARGO_LOG", log.as_os_str())],
+    );
+
+    assert_failed(&output, "missing consumed impact cache");
+    // anvil-impact is stubbed here, so the only component that can report a
+    // missing include file is the resolver called from inside anvil-fmt --
+    // which proves the recipe body ran and propagated, rather than just
+    // failing to load the fixture or tripping the dependency's own guard.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("include_modified.txt"),
+        "the scoped check must surface the resolver's own cache-missing error\nstderr:\n{stderr}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!log.exists(), "the scoped command must not run after impact scope resolution fails");
 }
 
 fn assert_miri_cargo_calls(cargo_calls: &str) {
