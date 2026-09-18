@@ -545,11 +545,7 @@ fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfigu
     }
 
     #[cfg(windows)]
-    if output
-        .stderr
-        .windows("(os error 206)".len())
-        .any(|window| window == b"(os error 206)")
-    {
+    if is_windows_command_too_long(&output.stderr) {
         forward_output(&output, execution.quiet)?;
         let stderr =
             std::str::from_utf8(&output.stderr).into_app_err("cargo-llvm-cov's Windows command-too-long diagnostic was not UTF-8")?;
@@ -590,6 +586,11 @@ fn forward_output(output: &Output, quiet: bool) -> Result<(), AppError> {
 
 fn is_no_coverage_data(stderr: &str) -> bool {
     stderr.contains("no coverage data found") && stderr.contains("could not load coverage information")
+}
+
+#[cfg(any(windows, test))]
+fn is_windows_command_too_long(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr).contains("(os error 206)")
 }
 
 #[cfg(any(windows, test))]
@@ -1137,6 +1138,13 @@ mod tests {
             .expect("one export argument is valid"),
             ["only-argument"]
         );
+    }
+
+    #[test]
+    fn windows_command_too_long_detection_is_exact() {
+        assert!(is_windows_command_too_long(b"failed with (os error 206)"));
+        assert!(!is_windows_command_too_long(b"failed with (os error 20)"));
+        assert!(!is_windows_command_too_long(b"unrelated failure"));
     }
 
     #[test]

@@ -901,10 +901,12 @@ fn concurrent_runs_use_isolated_coverage_targets_and_clean_them() {
 
     let first_coverage = tmp.path().join("coverage-first");
     let second_coverage = tmp.path().join("coverage-second");
+    let first_log = tmp.path().join("tools-first.log");
+    let second_log = tmp.path().join("tools-second.log");
     let mut first = fake_collection_command_with_coverage_dir(tmp.path(), &tools, &object, &first_coverage);
-    first.env("FAKE_NEXTEST_DELAY_MS", "250");
+    first.env("FAKE_NEXTEST_DELAY_MS", "250").env("FAKE_TOOL_LOG", &first_log);
     let mut second = fake_collection_command_with_coverage_dir(tmp.path(), &tools, &object, &second_coverage);
-    second.env("FAKE_NEXTEST_DELAY_MS", "250");
+    second.env("FAKE_NEXTEST_DELAY_MS", "250").env("FAKE_TOOL_LOG", &second_log);
 
     let first = run_concurrently(&first);
     let second = run_concurrently(&second);
@@ -913,14 +915,18 @@ fn concurrent_runs_use_isolated_coverage_targets_and_clean_them() {
     assert_success(&first);
     assert_success(&second);
 
-    let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
-    let targets = log
-        .lines()
+    let logs = [first_log, second_log]
+        .into_iter()
+        .map(|path| fs::read_to_string(path).expect("read fake tool log"))
+        .collect::<Vec<_>>();
+    let targets = logs
+        .iter()
+        .flat_map(|log| log.lines())
         .filter(|line| line.contains("llvm-cov\tnextest"))
         .filter_map(|line| line.split('\t').find_map(|field| field.strip_prefix("COVERAGE_TARGET=")))
         .map(PathBuf::from)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(targets.len(), 2, "concurrent commands must use distinct targets:\n{log}");
+    assert_eq!(targets.len(), 2, "concurrent commands must use distinct targets:\n{logs:#?}");
     assert!(targets.iter().all(|target| !target.exists()), "isolated targets must be cleaned");
     assert!(first_coverage.join("lcov-all-features.info").is_file());
     assert!(second_coverage.join("lcov-all-features.info").is_file());
