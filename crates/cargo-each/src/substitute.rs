@@ -13,6 +13,7 @@
 //! - The once token (valid only in `--once` mode): `{packages}`. Must stand
 //!   alone as a whole argument; it expands to the resolved selection flags,
 //!   which is several tokens.
+//! - The workspace token `{workspace-rust-version}`, valid in every mode.
 //!
 //! Using a token in the wrong mode is a usage error ([`PlaceholderMisuseError`]).
 //!
@@ -23,7 +24,7 @@
 //! of the contract (`cargo-each` never interprets the command beyond these
 //! fixed substitutions), not an oversight.
 
-use crate::error::{EachError, PlaceholderMisuseError};
+use crate::error::{EachError, PlaceholderMisuseError, WorkspaceRustVersionError};
 use crate::plan::Mode;
 
 /// Per-package placeholder tokens.
@@ -32,6 +33,8 @@ const PER_PACKAGE_TOKENS: [&str; 4] = ["{name}", "{spec}", "{version}", "{manife
 const TARGET_TOKEN: &str = "{target}";
 /// The once-mode placeholder token.
 const PACKAGES_TOKEN: &str = "{packages}";
+/// The workspace-wide Rust compatibility floor token.
+const WORKSPACE_RUST_VERSION_TOKEN: &str = "{workspace-rust-version}";
 
 /// The substitution context for one command invocation.
 #[derive(Debug, Clone)]
@@ -46,6 +49,8 @@ pub(crate) enum Placeholders {
         version: String,
         /// `{manifest}` — absolute path to the member's `Cargo.toml`.
         manifest: String,
+        /// The root workspace Rust-version declaration, when requested.
+        workspace_rust_version: Option<String>,
     },
     /// Per-target mode: package facts plus the selected target name.
     Target {
@@ -54,13 +59,64 @@ pub(crate) enum Placeholders {
         version: String,
         manifest: String,
         target: String,
+        workspace_rust_version: Option<String>,
     },
     /// Once mode: `{packages}` expands to these pre-computed selection flags.
     Once {
         /// The cargo selection flags for the resolved set (e.g.
         /// `["--workspace"]` or `["--package", "a@1", "--package", "b@2"]`).
         packages: Vec<String>,
+        /// The root workspace Rust-version declaration, when requested.
+        workspace_rust_version: Option<String>,
     },
+}
+
+impl Placeholders {
+    fn workspace_rust_version(&self) -> Option<&str> {
+        match self {
+            Self::Package {
+                workspace_rust_version, ..
+            }
+            | Self::Target {
+                workspace_rust_version, ..
+            }
+            | Self::Once {
+                workspace_rust_version, ..
+            } => workspace_rust_version.as_deref(),
+        }
+    }
+}
+
+fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: Vec<(&'static str, &'a str)>) -> Result<String, EachError> {
+    if arg.contains(WORKSPACE_RUST_VERSION_TOKEN) {
+        let version = placeholders.workspace_rust_version().ok_or_else(|| {
+            WorkspaceRustVersionError::new("the command uses the placeholder but its root value was not resolved".to_owned())
+        })?;
+        replacements.push((WORKSPACE_RUST_VERSION_TOKEN, version));
+    }
+
+    let mut rest = arg;
+    let mut replaced = String::with_capacity(arg.len());
+    while let Some((offset, token, value)) = replacements
+        .iter()
+        .filter_map(|&(token, value)| rest.find(token).map(|offset| (offset, token, value)))
+        .min_by_key(|&(offset, _, _)| offset)
+    {
+        let (literal, token_and_rest) = rest.split_at(offset);
+        let (_token, remaining) = token_and_rest.split_at(token.len());
+        replaced.push_str(literal);
+        replaced.push_str(value);
+        rest = remaining;
+    }
+    replaced.push_str(rest);
+
+    Ok(replaced)
+}
+
+/// Whether a command template uses the lazy workspace Rust-version token.
+#[must_use]
+pub(crate) fn uses_workspace_rust_version(args: &[String]) -> bool {
+    args.iter().any(|arg| arg.contains(WORKSPACE_RUST_VERSION_TOKEN))
 }
 
 /// Validate that `args` only reference placeholders valid for the mode.
@@ -133,6 +189,7 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 spec,
                 version,
                 manifest,
+                ..
             } => {
                 // The `{name}` / `{spec}` / … literals are cargo-each
                 // placeholder tokens, not Rust format-string arguments.
@@ -140,11 +197,11 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                     clippy::literal_string_with_formatting_args,
                     reason = "cargo-each placeholder tokens, not format args"
                 )]
-                let replaced = arg
-                    .replace("{name}", name)
-                    .replace("{spec}", spec)
-                    .replace("{version}", version)
-                    .replace("{manifest}", manifest);
+                let replaced = replace_arg(
+                    arg,
+                    placeholders,
+                    vec![("{name}", name), ("{spec}", spec), ("{version}", version), ("{manifest}", manifest)],
+                )?;
                 out.push(replaced);
             }
             Placeholders::Target {
@@ -153,30 +210,37 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 version,
                 manifest,
                 target,
+                ..
             } => {
                 #[expect(
                     clippy::literal_string_with_formatting_args,
                     reason = "cargo-each placeholder tokens, not format args"
                 )]
-                let replaced = arg
-                    .replace("{name}", name)
-                    .replace("{spec}", spec)
-                    .replace("{version}", version)
-                    .replace("{manifest}", manifest)
-                    .replace(TARGET_TOKEN, target);
+                let replaced = replace_arg(
+                    arg,
+                    placeholders,
+                    vec![
+                        ("{name}", name),
+                        ("{spec}", spec),
+                        ("{version}", version),
+                        ("{manifest}", manifest),
+                        (TARGET_TOKEN, target),
+                    ],
+                )?;
                 out.push(replaced);
             }
-            Placeholders::Once { packages } => {
+            Placeholders::Once { packages, .. } => {
                 // Validation above guarantees each arg is either exactly
                 // `{packages}` or contains no placeholder token at all.
                 if arg == PACKAGES_TOKEN {
                     out.extend(packages.iter().cloned());
                 } else {
-                    out.push(arg.clone());
+                    out.push(replace_arg(arg, placeholders, Vec::new())?);
                 }
             }
         }
     }
+
     Ok(out)
 }
 
@@ -191,6 +255,7 @@ mod tests {
             spec: "cargo-anvil@0.4.0".to_owned(),
             version: "0.4.0".to_owned(),
             manifest: "/ws/cargo-anvil/Cargo.toml".to_owned(),
+            workspace_rust_version: None,
         }
     }
 
@@ -220,6 +285,7 @@ mod tests {
     fn once_expands_packages_token() {
         let ph = Placeholders::Once {
             packages: args(&["--package", "a@1", "--package", "b@2"]),
+            workspace_rust_version: None,
         };
         let out = substitute(&args(&["clippy", "{packages}", "--all-targets"]), &ph).expect("substitute");
         assert_eq!(out, ["clippy", "--package", "a@1", "--package", "b@2", "--all-targets"]);
@@ -229,6 +295,7 @@ mod tests {
     fn once_rejects_per_package_token() {
         let ph = Placeholders::Once {
             packages: args(&["--workspace"]),
+            workspace_rust_version: None,
         };
         let err = substitute(&args(&["test", "--package", "{name}"]), &ph).expect_err("misuse");
         assert!(err.to_string().contains("{name}"));
@@ -238,6 +305,7 @@ mod tests {
     fn once_rejects_target_token() {
         let ph = Placeholders::Once {
             packages: args(&["--workspace"]),
+            workspace_rust_version: None,
         };
         let err = substitute(&args(&["test", "--test", "{target}"]), &ph).expect_err("misuse");
         assert!(err.to_string().contains("{target}"));
@@ -247,6 +315,7 @@ mod tests {
     fn once_rejects_embedded_packages_token() {
         let ph = Placeholders::Once {
             packages: args(&["--workspace"]),
+            workspace_rust_version: None,
         };
         let err = substitute(&args(&["x={packages}"]), &ph).expect_err("misuse");
         assert!(err.to_string().contains("stand alone"));
@@ -260,6 +329,7 @@ mod tests {
             version: "0.4.0".to_owned(),
             manifest: "/ws/cargo-anvil/Cargo.toml".to_owned(),
             target: "loom".to_owned(),
+            workspace_rust_version: None,
         };
         let out = substitute(&args(&["test", "-p", "{name}", "--test", "{target}"]), &ph).expect("substitute");
         assert_eq!(out, ["test", "-p", "cargo-anvil", "--test", "loom"]);
@@ -269,5 +339,103 @@ mod tests {
     fn target_token_is_rejected_in_per_package_mode() {
         let err = substitute(&args(&["echo", "{target}"]), &pkg()).expect_err("misuse");
         assert!(err.to_string().contains("per-target"));
+    }
+
+    #[test]
+    fn workspace_rust_version_expands_in_every_mode() {
+        let command = args(&["rustup", "toolchain", "install", "{workspace-rust-version}"]);
+        let mut package = pkg();
+        let Placeholders::Package {
+            workspace_rust_version, ..
+        } = &mut package
+        else {
+            unreachable!("pkg returns package placeholders");
+        };
+        *workspace_rust_version = Some("1.80".to_owned());
+        assert_eq!(
+            substitute(&command, &package).expect("package substitution"),
+            ["rustup", "toolchain", "install", "1.80"]
+        );
+
+        let once = Placeholders::Once {
+            packages: args(&["--workspace"]),
+            workspace_rust_version: Some("1.80".to_owned()),
+        };
+        assert_eq!(
+            substitute(&command, &once).expect("once substitution"),
+            ["rustup", "toolchain", "install", "1.80"]
+        );
+    }
+
+    #[test]
+    fn unresolved_workspace_rust_version_is_reported_in_package_and_target_modes() {
+        let command = args(&["echo", "{workspace-rust-version}"]);
+        let package_error = substitute(&command, &pkg()).expect_err("package value is unresolved");
+        assert!(package_error.to_string().contains("root value was not resolved"), "{package_error}");
+
+        let target = Placeholders::Target {
+            name: "crate".to_owned(),
+            spec: "crate@1.0.0".to_owned(),
+            version: "1.0.0".to_owned(),
+            manifest: "/ws/crate/Cargo.toml".to_owned(),
+            target: "example".to_owned(),
+            workspace_rust_version: None,
+        };
+        let target_error = substitute(&command, &target).expect_err("target value is unresolved");
+        assert!(target_error.to_string().contains("root value was not resolved"), "{target_error}");
+    }
+
+    #[test]
+    fn package_values_are_not_rescanned_for_workspace_tokens() {
+        let placeholders = Placeholders::Package {
+            name: "crate".to_owned(),
+            spec: "crate@1.0.0".to_owned(),
+            version: "1.0.0".to_owned(),
+            manifest: "/ws/{workspace-rust-version}/crate/Cargo.toml".to_owned(),
+            workspace_rust_version: Some("1.80".to_owned()),
+        };
+        assert_eq!(
+            substitute(&args(&["{workspace-rust-version}", "{manifest}"]), &placeholders).expect("substitute package placeholders"),
+            ["1.80", "/ws/{workspace-rust-version}/crate/Cargo.toml"]
+        );
+    }
+
+    #[test]
+    fn target_values_are_not_rescanned_for_workspace_tokens() {
+        let placeholders = Placeholders::Target {
+            name: "crate".to_owned(),
+            spec: "crate@1.0.0".to_owned(),
+            version: "1.0.0".to_owned(),
+            manifest: "/ws/{workspace-rust-version}/crate/Cargo.toml".to_owned(),
+            target: "example".to_owned(),
+            workspace_rust_version: Some("1.80".to_owned()),
+        };
+        assert_eq!(
+            substitute(&args(&["{workspace-rust-version}", "{manifest}:{target}"]), &placeholders,)
+                .expect("substitute target placeholders"),
+            ["1.80", "/ws/{workspace-rust-version}/crate/Cargo.toml:example"]
+        );
+    }
+
+    #[test]
+    fn manifest_values_are_not_rescanned_for_target_tokens() {
+        let placeholders = Placeholders::Target {
+            name: "crate".to_owned(),
+            spec: "crate@1.0.0".to_owned(),
+            version: "1.0.0".to_owned(),
+            manifest: "/ws/{target}/crate/Cargo.toml".to_owned(),
+            target: "example".to_owned(),
+            workspace_rust_version: None,
+        };
+        assert_eq!(
+            substitute(&args(&["{manifest}:{target}"]), &placeholders).expect("substitute target placeholders"),
+            ["/ws/{target}/crate/Cargo.toml:example"]
+        );
+    }
+
+    #[test]
+    fn detects_workspace_rust_version_usage() {
+        assert!(uses_workspace_rust_version(&args(&["tool", "v={workspace-rust-version}"])));
+        assert!(!uses_workspace_rust_version(&args(&["tool", "{name}"])));
     }
 }
