@@ -173,6 +173,10 @@ name = "docs_provider_integration"
 required-features = ["internals"]
 
 [[test]]
+name = "github_credentials_process_integration"
+required-features = ["internals"]
+
+[[test]]
 name = "hosting_provider_integration"
 required-features = ["internals"]
 
