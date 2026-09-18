@@ -86,6 +86,9 @@ pub struct Declared {
 
     /// Where it was declared.
     pub section: Section,
+
+    /// Target-table predicate, or none for an unconditional declaration.
+    pub target: Option<String>,
 }
 
 impl Declared {
@@ -102,15 +105,15 @@ pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
 
     for (table, section) in DEP_TABLES {
         if let Some(item) = doc.get(table).and_then(Item::as_table_like) {
-            collect_declared(item, section, &mut declared);
+            collect_declared(item, section, None, &mut declared);
         }
     }
 
     if let Some(targets) = doc.get("target").and_then(Item::as_table_like) {
-        for target in targets.iter().filter_map(|(_, target)| target.as_table_like()) {
+        for (target_name, target) in targets.iter().filter_map(|(name, target)| Some((name, target.as_table_like()?))) {
             for (table, section) in DEP_TABLES {
                 if let Some(item) = target.get(table).and_then(Item::as_table_like) {
-                    collect_declared(item, section, &mut declared);
+                    collect_declared(item, section, Some(target_name), &mut declared);
                 }
             }
         }
@@ -120,11 +123,12 @@ pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
 }
 
 /// Record one dependency table's declarations.
-fn collect_declared(table: &dyn TableLike, section: Section, into: &mut Vec<Declared>) {
+fn collect_declared(table: &dyn TableLike, section: Section, target: Option<&str>, into: &mut Vec<Declared>) {
     for (key, _) in table.iter() {
         into.push(Declared {
             name: key.to_owned(),
             section,
+            target: target.map(str::to_owned),
         });
     }
 }
@@ -357,7 +361,10 @@ build = "1"
         let declared = declared_dependencies(&manifest);
         assert_eq!(declared.len(), 3);
         assert_eq!(declared[0].section, Section::Normal);
+        assert_eq!(declared[0].target, None);
         assert_eq!(declared[1].section, Section::Development);
+        assert_eq!(declared[1].target.as_deref(), Some("cfg(windows)"));
         assert_eq!(declared[2].section, Section::Build);
+        assert_eq!(declared[2].target.as_deref(), Some("cfg(unix)"));
     }
 }

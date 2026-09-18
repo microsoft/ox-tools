@@ -35,6 +35,9 @@ pub struct Finding {
     /// Which table declared it.
     pub section: Section,
 
+    /// Target-table predicate, or none for an unconditional declaration.
+    pub target: Option<String>,
+
     /// What the evidence says.
     pub verdict: Verdict,
 }
@@ -97,6 +100,7 @@ pub fn judge(
                     manifest_path: package.manifest_path.clone(),
                     name: declared.name.clone(),
                     section: declared.section,
+                    target: declared.target.clone(),
                     verdict,
                 });
             }

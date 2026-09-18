@@ -180,7 +180,7 @@ enum Commands {
         #[arg(long, default_value = "Cargo.toml", value_name = "PATH")]
         manifest_path: PathBuf,
 
-        /// Exact package NAME or NAME@VERSION to gather compile evidence for. Repeatable
+        /// Exact package selector to gather compile evidence for. Repeatable
         #[arg(short = 'p', long = "package", value_name = "SPEC")]
         packages: Vec<String>,
 
@@ -469,19 +469,23 @@ fn report_findings(findings: &[&verdict::Finding]) {
     );
 
     for finding in findings {
-        let table = match finding.section {
+        let section = match finding.section {
             Section::Normal => "dependencies",
             Section::Development => "dev-dependencies",
             Section::Build => "build-dependencies",
         };
+        let table = finding
+            .target
+            .as_ref()
+            .map_or_else(|| format!("[{section}]"), |target| format!("[target.'{target}'.{section}]"));
 
         match finding.verdict {
             Verdict::Unused => {
-                eprintln!("  {} [{table}] {}: no compiled unit loaded it.", finding.package, finding.name);
+                eprintln!("  {} {table} {}: no compiled unit loaded it.", finding.package, finding.name);
                 eprintln!("      remove it, or gate the declaration to where it is used.");
             }
             Verdict::Misplaced => {
-                eprintln!("  {} [{table}] {}: only development units load it.", finding.package, finding.name);
+                eprintln!("  {} {table} {}: only development units load it.", finding.package, finding.name);
                 eprintln!("      move it to [dev-dependencies].");
             }
         }

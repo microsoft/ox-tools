@@ -100,9 +100,9 @@ pub fn shim(args: &[OsString], capture: &Path) -> Result<ExitCode> {
     record(capture, &stderr)?;
 
     // rustdoc reads the compiler's stderr to report a failing doctest, so it is
-    // passed through rather than swallowed. The error format is left alone for
-    // the same reason: handing rustdoc JSON it did not ask for makes it treat
-    // every doctest as failed.
+    // passed through rather than swallowed. The format was normalized to
+    // human/no-color above because the capture parser and rustdoc both consume
+    // those diagnostics.
     std::io::Write::write_all(&mut std::io::stderr(), &output.stderr).context("failed to forward rustc diagnostics")?;
 
     Ok(if output.status.success() {

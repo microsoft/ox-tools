@@ -209,6 +209,30 @@ fn inactive_target_dependencies_are_not_reported() {
 }
 
 #[test]
+fn target_specific_findings_name_the_manifest_table() {
+    let fixture = Fixture::new(
+        &["dead"],
+        &format!("[target.'cfg(all())'.dependencies]\n{}", dep("dead")),
+        "pub fn go() {}\n",
+    );
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the active target dependency is unused");
+    assert!(
+        stderr.contains("main [target.'cfg(all())'.dependencies] dead"),
+        "the report must identify the target table: {stderr}"
+    );
+}
+
+#[test]
 fn filtered_success_does_not_claim_every_dependency_is_used() {
     let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
     let output = command()
