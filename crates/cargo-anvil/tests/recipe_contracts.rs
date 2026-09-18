@@ -57,9 +57,7 @@ const ARBITRARY_FAILURE_EXIT: &str = "23";
 static POWERSHELL_PROCESS_LOCK: Mutex<()> = Mutex::new(());
 
 fn powershell_process_lock() -> MutexGuard<'static, ()> {
-    POWERSHELL_PROCESS_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    POWERSHELL_PROCESS_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // The Miri fixture mirrors the production protocol rather than executing Rust:
@@ -424,8 +422,7 @@ fn tools_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
         let _powershell = powershell_process_lock();
-        Command::new("just").arg("--version").output().is_ok()
-            && Command::new("pwsh").arg("--version").output().is_ok()
+        Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
     })
 }
 
