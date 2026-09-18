@@ -1005,15 +1005,22 @@ fn nested_nonnumeric_returns_do_not_inherit_a_numeric_function_context() {
 }
 
 #[test]
-fn nested_returns_use_their_own_error_context() {
+fn an_explicitly_typed_closure_uses_its_own_error_context() {
+    let source = "use std::io; fn f() -> Result<u8, io::Error> { let nested = || -> Result<u8, crate::Error> { Ok(1) }; nested() }";
+    let found = mutators(source, "result.ok_to_err");
+
+    assert_eq!(found, vec!["result.ok_to_err"], "{source}: {found:?}");
+}
+
+#[test]
+fn unknown_nested_error_contexts_are_conservative() {
     for source in [
-        "use std::io; fn f() -> Result<u8, io::Error> { let nested = || -> Result<u8, crate::Error> { Ok(1) }; nested() }",
         "use std::io; fn f() -> Result<u8, io::Error> { let nested = || { Ok(1) }; nested() }",
         "use std::io; fn f() -> Result<u8, io::Error> { let nested = async { Ok(1) }; block_on(nested) }",
     ] {
         let found = mutators(source, "result.ok_to_err");
 
-        assert_eq!(found, vec!["result.ok_to_err"], "{source}: {found:?}");
+        assert!(found.is_empty(), "{source}: {found:?}");
     }
 }
 

@@ -11,6 +11,7 @@ use super::Styler;
 use super::text::{VERB_WIDTH, continuation, quantity};
 use crate::advise::human;
 use crate::commands::Host;
+use crate::estimate::{LiveEstimate, MutationWork};
 use crate::model::Outcome;
 use crate::report::{encode_controls, encode_preserving_color};
 
@@ -19,9 +20,6 @@ use crate::report::{encode_controls, encode_preserving_color};
 /// Redrawing on every event makes a fast run spend real time on terminal writes, and produces a
 /// flicker nobody can read anyway.
 const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Enough completed work to keep one unusually fast launch from becoming the first ETA.
-const MIN_ETA_SAMPLES: usize = 3;
 
 /// Width of the gauge itself, in columns.
 ///
@@ -62,6 +60,7 @@ pub struct Progress {
     timeouts: usize,
     out_of_memory: usize,
     started: Option<Instant>,
+    estimate: Option<LiveEstimate>,
 }
 
 impl Progress {
@@ -87,6 +86,7 @@ impl Progress {
             timeouts: 0,
             out_of_memory: 0,
             started: None,
+            estimate: None,
         }
     }
 
@@ -94,12 +94,52 @@ impl Progress {
     /// estimate is derived from.
     pub fn set_total(&mut self, total: usize) {
         self.total = total;
+        self.done = 0;
+        self.survived = 0;
+        self.timeouts = 0;
+        self.out_of_memory = 0;
         self.started = Some(Instant::now());
+        self.estimate = None;
         self.dirty = true;
     }
 
+    /// Installs the measured per-mutant workload and starts the live projection clock.
+    pub(crate) fn set_workload(&mut self, work: &[MutationWork], jobs: usize) {
+        self.total = work.len();
+        self.done = 0;
+        self.survived = 0;
+        self.timeouts = 0;
+        self.out_of_memory = 0;
+        self.started = Some(Instant::now());
+        self.estimate = Some(LiveEstimate::new(work, jobs));
+        self.dirty = true;
+    }
+
+    /// Records that a worker began evaluating one mutant at the given sweep-relative offset.
+    pub(crate) fn mutant_started(&mut self, ordinal: u32, elapsed: Duration) {
+        if let Some(estimate) = &mut self.estimate {
+            estimate.start(ordinal, elapsed);
+        }
+    }
+
     /// Records one evaluated mutant.
-    pub const fn record(&mut self, outcome: Outcome) {
+    pub fn record(&mut self, outcome: Outcome) {
+        let elapsed = self.started.map_or(Duration::ZERO, |started| started.elapsed());
+        if let Some(estimate) = &mut self.estimate {
+            estimate.finish_next(outcome, elapsed);
+        }
+        self.record_outcome(outcome);
+    }
+
+    /// Records a completed mutant with its identity and measured service time.
+    pub(crate) fn record_mutant(&mut self, mutant: &crate::model::Mutant) {
+        if let Some(estimate) = &mut self.estimate {
+            estimate.finish(mutant.ordinal, mutant.outcome, mutant.elapsed());
+        }
+        self.record_outcome(mutant.outcome);
+    }
+
+    fn record_outcome(&mut self, outcome: Outcome) {
         self.done += 1;
 
         match outcome {
@@ -125,23 +165,25 @@ impl Progress {
         fraction.clamp(0.0, 1.0)
     }
 
-    /// Estimates the time left, by extrapolating from the rate achieved so far.
-    ///
-    /// Extrapolation beats the up-front projection here because it needs no model: it absorbs the
-    /// job count, the machine's actual throughput, and the share of mutants that hang, all of which
-    /// the projection can only guess at. It is worthless until a few mutants have finished, so it
-    /// is reported as absent rather than as a wild number.
-    fn remaining(&self) -> Option<Duration> {
+    /// Estimates the low and high time remaining from weighted queued and in-flight work.
+    fn remaining(&self) -> Option<crate::estimate::Remaining> {
         let started = self.started?;
+        if let Some(estimate) = &self.estimate {
+            return estimate.remaining(started.elapsed());
+        }
 
-        if self.done < MIN_ETA_SAMPLES || self.done >= self.total {
+        if self.done < 8 || self.done >= self.total {
             return None;
         }
 
         #[expect(clippy::cast_precision_loss, reason = "a mutant count far exceeds any plausible workspace")]
         let (done, left) = (self.done as f64, (self.total - self.done) as f64);
+        let remaining = Duration::try_from_secs_f64(started.elapsed().as_secs_f64() / done * left).ok()?;
 
-        Duration::try_from_secs_f64(started.elapsed().as_secs_f64() / done * left).ok()
+        Some(crate::estimate::Remaining {
+            low: remaining,
+            high: remaining,
+        })
     }
 
     /// Writes a completed status line, above the progress bar.
@@ -531,9 +573,13 @@ impl Progress {
     /// already printed above, and from the summary at the end.
     #[must_use]
     pub fn render(&self) -> String {
-        let estimate = self
-            .remaining()
-            .map_or_else(String::new, |remaining| format!(", ETA ~{}", human(remaining)));
+        let estimate = self.remaining().map_or_else(String::new, |remaining| {
+            if remaining.low == remaining.high {
+                format!(", ETA ~{}", human(remaining.low))
+            } else {
+                format!(", ETA ~{}-{}", human(remaining.low), human(remaining.high))
+            }
+        });
 
         #[expect(clippy::cast_precision_loss, reason = "the operand is a bar width")]
         #[expect(
@@ -882,6 +928,7 @@ mod tests {
         assert_eq!(progress.timeouts, 0);
         assert_eq!(progress.out_of_memory, 0);
         assert!(progress.started.is_none());
+        assert!(progress.estimate.is_none());
 
         progress.set_total(3);
         let mut host = Sink::default().terminal(80);
@@ -978,11 +1025,69 @@ mod tests {
 
         assert!(!progress.render().contains("ETA"), "{}", progress.render());
 
-        for _ in 0..MIN_ETA_SAMPLES {
+        for _ in 0..8 {
             progress.record(Outcome::Killed);
         }
 
         assert!(progress.render().contains("ETA"), "{}", progress.render());
+    }
+
+    #[test]
+    fn the_live_estimate_is_rendered_as_a_range_while_uncertainty_remains() {
+        let work = (1..=100)
+            .map(|ordinal| {
+                MutationWork::new(
+                    ordinal,
+                    crate::estimate::WorkKind::Whole,
+                    Duration::from_secs(10),
+                    Duration::from_secs(100),
+                    crate::exec::CONFIRM_FACTOR,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut progress = Progress::new(true, Styler::new(false), Some(200));
+        progress.set_workload(&work, 4);
+
+        for ordinal in 1..=8 {
+            progress
+                .estimate
+                .as_mut()
+                .expect("the weighted workload installs an estimate")
+                .finish(ordinal, Outcome::Killed, Duration::from_secs(6));
+            progress.record_outcome(Outcome::Killed);
+        }
+
+        let rendered = progress.render();
+
+        assert!(rendered.contains("ETA ~"), "{rendered}");
+        assert!(
+            rendered.split_once("ETA ~").is_some_and(|(_head, estimate)| estimate.contains('-')),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn installing_a_new_workload_resets_the_previous_testing_counts() {
+        let work = [MutationWork::new(
+            1,
+            crate::estimate::WorkKind::Whole,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            crate::exec::CONFIRM_FACTOR,
+        )];
+        let mut progress = Progress::new(true, Styler::new(false), Some(200));
+
+        progress.set_total(3);
+        progress.record(Outcome::Survived);
+        progress.record(Outcome::Timeout);
+        progress.set_workload(&work, 2);
+
+        assert_eq!(progress.total, 1);
+        assert_eq!(progress.done, 0);
+        assert_eq!(progress.survived, 0);
+        assert_eq!(progress.timeouts, 0);
+        assert_eq!(progress.out_of_memory, 0);
+        assert!(progress.estimate.is_some());
     }
 
     #[test]

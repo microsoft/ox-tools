@@ -76,16 +76,16 @@ where
     with_cache_home(&root, || crate::commands::run(host, args))
 }
 
-/// Returns the default cache base an integration test gets for `root`.
+/// Returns the campaign-cache base an integration test gets for `root`.
 pub fn gamma_base(root: &Utf8Path) -> Utf8PathBuf {
-    with_cache_home(root, || crate::exec::gamma_base(root, None))
+    with_cache_home(root, || crate::exec::campaign_base(root, &root.join("target"), None))
 }
 
-/// Returns where a normal production process would cache `root`.
+/// Returns where a normal production process would keep target-resident campaign state for `root`.
 ///
 /// Tests use this only to prove that a fixture did not touch the user's platform cache.
 pub fn production_gamma_base(root: &Utf8Path) -> Utf8PathBuf {
-    crate::exec::production_gamma_base(root)
+    crate::exec::production_campaign_base(root, &root.join("target"))
 }
 
 /// The active private cache home, when this process is executing test scaffolding.
@@ -694,6 +694,12 @@ pub struct Recorder {
     /// How many mutants were announced.
     pub mutants: usize,
 
+    /// Number of workload entries and worker lanes announced for the sweep.
+    pub sweep_plan: Option<(usize, usize)>,
+
+    /// Run-local ordinals announced as workers started them.
+    pub mutant_starts: Vec<(u32, core::time::Duration)>,
+
     /// Every warning the run raised, in order.
     pub warnings: Vec<String>,
 }
@@ -709,6 +715,14 @@ impl crate::exec::Events for Recorder {
 
     fn mutant(&mut self, _mutant: &crate::model::Mutant) {
         self.mutants = self.mutants.saturating_add(1);
+    }
+
+    fn sweep_planned(&mut self, work: &[crate::estimate::MutationWork], jobs: usize) {
+        self.sweep_plan = Some((work.len(), jobs));
+    }
+
+    fn mutant_started(&mut self, ordinal: u32, elapsed: core::time::Duration) {
+        self.mutant_starts.push((ordinal, elapsed));
     }
 }
 

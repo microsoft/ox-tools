@@ -1149,8 +1149,8 @@ impl<'a> Collector<'a> {
             Some(ReturnType::Type(_, ty)) if is_unsigned_binding(ty) => UnsignedReturn::BodyPending,
             _other => UnsignedReturn::Other,
         };
-        self.foreign_error_return = output.is_some_and(|output| {
-            returns_undefaultable_error(
+        self.foreign_error_return = match output {
+            Some(output @ ReturnType::Type(_, _)) => returns_undefaultable_error(
                 output,
                 &Types {
                     abstracts: &[],
@@ -1159,8 +1159,9 @@ impl<'a> Collector<'a> {
                     self_type: self.impl_self_type.as_ref(),
                     self_associated: Some(&self.impl_self_associated),
                 },
-            )
-        });
+            ),
+            Some(ReturnType::Default) | None => true,
+        };
 
         let result = body(self);
 

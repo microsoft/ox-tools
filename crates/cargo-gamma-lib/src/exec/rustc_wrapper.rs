@@ -211,7 +211,10 @@ pub(crate) fn parse_invocation(args: &[OsString]) -> Option<RustcInvocation> {
 }
 
 fn parse_extern(value: &OsStr, externs: &mut Vec<Utf8PathBuf>, opaque: &mut bool) {
-    let value = value.to_string_lossy();
+    let Some(value) = value.to_str() else {
+        *opaque = true;
+        return;
+    };
     let Some((_name, path)) = value.split_once('=') else {
         *opaque = true;
         return;
@@ -306,6 +309,35 @@ mod tests {
 
         assert!(parsed.opaque_extern);
         assert!(parsed.externs.is_empty());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn non_utf8_extern_paths_fail_open_without_recording_a_lossy_path() {
+        let mut externs = Vec::new();
+        let mut opaque = false;
+
+        parse_extern(&non_utf8_extern(), &mut externs, &mut opaque);
+
+        assert!(opaque);
+        assert!(externs.is_empty());
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_extern() -> OsString {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        OsString::from_vec(b"dep=/tmp/libdep-\xff.rlib".to_vec())
+    }
+
+    #[cfg(windows)]
+    fn non_utf8_extern() -> OsString {
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let mut value: Vec<u16> = "dep=C:\\cache\\libdep-".encode_utf16().collect();
+        value.push(0xd800);
+        value.extend(".rlib".encode_utf16());
+        OsString::from_wide(&value)
     }
 
     #[test]

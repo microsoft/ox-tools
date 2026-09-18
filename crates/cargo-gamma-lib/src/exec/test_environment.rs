@@ -29,6 +29,25 @@ struct PackageEnvironment {
 }
 
 impl TestEnvironment {
+    #[cfg(test)]
+    pub(super) fn fake(package: &str, name: &str, value: &str) -> Self {
+        let variables = [(OsString::from(name), OsString::from(value))].into();
+        let packages = core::iter::once((
+            package.to_owned(),
+            PackageEnvironment {
+                variables,
+                binary_executables: BTreeMap::new(),
+            },
+        ))
+        .collect();
+
+        Self {
+            common: BTreeMap::new(),
+            packages,
+            integration_tests: crate::HashSet::default(),
+        }
+    }
+
     pub(super) fn from_cargo(
         metadata: &str,
         artifacts: &str,

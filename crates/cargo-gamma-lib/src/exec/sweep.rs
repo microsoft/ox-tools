@@ -5,6 +5,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
+use std::collections::BTreeSet;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread;
 use std::time::Instant;
@@ -143,6 +144,11 @@ fn enumeration_note(binary: &Utf8Path, output: &str) -> String {
 /// One mutant's result: its index in the plan, what happened, how long it took and any detail.
 type Completed = (usize, Outcome, u64, Option<Killer>, Option<String>, u64, u64);
 
+enum SweepEvent {
+    Started(usize, u64),
+    Completed(Completed),
+}
+
 /// Estimates a single mutant's cost from per-site census data when available, falling back to
 /// the sum of its reachable binary baselines.
 ///
@@ -181,6 +187,72 @@ fn mutant_cost(position: usize, plan: &Plan, reach: &Reachability<'_>, census: &
     }
 
     total
+}
+
+fn mutant_work(
+    position: usize,
+    plan: &Plan,
+    reach: &Reachability<'_>,
+    census: &Census,
+    killers: &Killers,
+    sweep: Sweep<'_>,
+) -> crate::estimate::MutationWork {
+    let mutant = &plan.mutants[position];
+    let confirmation_runs = if sweep.confirm { crate::exec::CONFIRM_FACTOR } else { 0 };
+
+    if let Some(hint) = killers.hint(&mutant.id)
+        && let Some(binaries) = reach.reachable(mutant)
+        && let Some(binary) = binaries.iter().find(|binary| hint.names(&binary.package, &binary.target))
+    {
+        return crate::estimate::MutationWork::new(
+            mutant.ordinal,
+            crate::estimate::WorkKind::Exact,
+            binary.baseline,
+            binary
+                .budget_for(mutant.test_timeout_multiplier, sweep.timeout_floor)
+                .unwrap_or_default(),
+            confirmation_runs,
+        );
+    }
+
+    let mut kind = crate::estimate::WorkKind::Selected;
+    let mut suite = Duration::ZERO;
+    let mut budgets = Duration::ZERO;
+    let mut running = 0_u32;
+
+    if let Some(binaries) = reach.reachable(mutant) {
+        for binary in binaries {
+            let selected = match census.work(binary, mutant.ordinal) {
+                CensusWork::Selected(duration) => duration,
+                CensusWork::Hinted(_duration) => {
+                    if kind != crate::estimate::WorkKind::Whole {
+                        kind = crate::estimate::WorkKind::Hinted;
+                    }
+                    binary.baseline
+                }
+                CensusWork::Whole => {
+                    kind = crate::estimate::WorkKind::Whole;
+                    binary.baseline
+                }
+                CensusWork::Uncovered => continue,
+            };
+
+            suite = suite.saturating_add(selected);
+            budgets = budgets.saturating_add(
+                binary
+                    .budget_for(mutant.test_timeout_multiplier, sweep.timeout_floor)
+                    .unwrap_or_default(),
+            );
+            running = running.saturating_add(1);
+        }
+    }
+
+    if running == 0 {
+        kind = crate::estimate::WorkKind::Uncovered;
+    }
+    let single_budget = budgets.checked_div(running).unwrap_or(budgets);
+
+    crate::estimate::MutationWork::new(mutant.ordinal, kind, suite, single_budget, confirmation_runs)
 }
 
 /// Builds the stable package-fair, longest-work-first priority used by the live scheduler.
@@ -257,16 +329,77 @@ struct ScheduledWork {
 #[derive(Debug)]
 struct SchedulerState {
     remaining: Vec<bool>,
+    remaining_count: usize,
     active_files: Vec<usize>,
     active_items: crate::HashMap<(usize, Arc<str>), usize>,
     learned_items: crate::HashSet<(usize, Arc<str>)>,
-    package_turns: crate::HashMap<Arc<str>, usize>,
+    package_turns: Vec<usize>,
+    package_queues: Vec<BTreeSet<LocalPriority>>,
+    heads: BTreeSet<PackageHead>,
+    priorities: Vec<Option<LocalPriority>>,
+    #[cfg(test)]
+    priority_updates: usize,
 }
 
 struct Scheduler {
     work: Vec<ScheduledWork>,
+    package_slots: Vec<usize>,
+    by_file: Vec<Vec<usize>>,
     state: Mutex<SchedulerState>,
     changed: Condvar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalPriority {
+    distance: (u8, usize),
+    benefit: usize,
+    cost: u128,
+    stable_order: usize,
+    index: usize,
+}
+
+impl Ord for LocalPriority {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.distance
+            .cmp(&other.distance)
+            .then_with(|| learning_priority(self, other))
+            .then_with(|| other.cost.cmp(&self.cost))
+            .then_with(|| self.stable_order.cmp(&other.stable_order))
+            .then_with(|| self.index.cmp(&other.index))
+    }
+}
+
+impl PartialOrd for LocalPriority {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PackageHead {
+    package: usize,
+    turns: usize,
+    local: LocalPriority,
+}
+
+impl Ord for PackageHead {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.local
+            .distance
+            .cmp(&other.local.distance)
+            .then_with(|| self.turns.cmp(&other.turns))
+            .then_with(|| learning_priority(&self.local, &other.local))
+            .then_with(|| other.local.cost.cmp(&self.local.cost))
+            .then_with(|| self.local.stable_order.cmp(&other.local.stable_order))
+            .then_with(|| self.local.index.cmp(&other.local.index))
+            .then_with(|| self.package.cmp(&other.package))
+    }
+}
+
+impl PartialOrd for PackageHead {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 struct Assignment<'a> {
@@ -293,16 +426,44 @@ impl Drop for Assignment<'_> {
 
 impl Scheduler {
     fn new(work: Vec<ScheduledWork>, files: usize) -> Self {
-        let remaining = vec![true; work.len()];
+        let mut packages: crate::HashMap<Arc<str>, usize> = crate::HashMap::default();
+        let package_slots = work
+            .iter()
+            .map(|item| {
+                let next = packages.len();
+                *packages.entry(Arc::clone(&item.package)).or_insert(next)
+            })
+            .collect::<Vec<_>>();
+        let mut by_file = vec![Vec::new(); files];
+        for (index, item) in work.iter().enumerate() {
+            by_file[item.file].push(index);
+        }
+
+        let mut state = SchedulerState {
+            remaining: vec![true; work.len()],
+            remaining_count: work.len(),
+            active_files: vec![0; files],
+            active_items: crate::HashMap::default(),
+            learned_items: crate::HashSet::default(),
+            package_turns: vec![0; packages.len()],
+            package_queues: vec![BTreeSet::new(); packages.len()],
+            heads: BTreeSet::new(),
+            priorities: vec![None; work.len()],
+            #[cfg(test)]
+            priority_updates: 0,
+        };
+        for index in 0..work.len() {
+            insert_priority(&work, &package_slots, &mut state, index);
+        }
+        for package in 0..packages.len() {
+            insert_head(&mut state, package);
+        }
+
         Self {
             work,
-            state: Mutex::new(SchedulerState {
-                remaining,
-                active_files: vec![0; files],
-                active_items: crate::HashMap::default(),
-                learned_items: crate::HashSet::default(),
-                package_turns: crate::HashMap::default(),
-            }),
+            package_slots,
+            by_file,
+            state: Mutex::new(state),
             changed: Condvar::new(),
         }
     }
@@ -315,18 +476,21 @@ impl Scheduler {
                 return None;
             }
 
-            if let Some(index) = self.select(&state) {
+            if let Some(index) = Self::select(&state) {
                 let work = &self.work[index];
+                let packages = self.detach_file(&mut state, work.file);
                 state.remaining[index] = false;
+                state.remaining_count = state.remaining_count.saturating_sub(1);
                 state.active_files[work.file] = state.active_files[work.file].saturating_add(1);
                 let active_item = state.active_items.entry((work.file, Arc::clone(&work.item))).or_default();
                 *active_item = active_item.saturating_add(1);
-                let turns = state.package_turns.entry(Arc::clone(&work.package)).or_default();
-                *turns = turns.saturating_add(1);
+                let package = self.package_slots[index];
+                state.package_turns[package] = state.package_turns[package].saturating_add(1);
+                self.attach_file(&mut state, work.file, &packages);
                 return Some(index);
             }
 
-            if !state.remaining.iter().any(|remaining| *remaining) {
+            if state.remaining_count == 0 {
                 return None;
             }
 
@@ -350,6 +514,7 @@ impl Scheduler {
     fn release(&self, index: usize, learned: bool) {
         let work = &self.work[index];
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let packages = self.detach_file(&mut state, work.file);
         let key = (work.file, Arc::clone(&work.item));
         if learned {
             let _inserted = state.learned_items.insert(key.clone());
@@ -361,6 +526,7 @@ impl Scheduler {
                 state.active_items.remove(&key);
             }
         }
+        self.attach_file(&mut state, work.file, &packages);
         core::mem::drop(state);
         self.changed.notify_all();
     }
@@ -369,73 +535,128 @@ impl Scheduler {
         self.changed.notify_all();
     }
 
-    fn select(&self, state: &SchedulerState) -> Option<usize> {
-        let mut selected = None;
-
-        for (index, remaining) in state.remaining.iter().copied().enumerate() {
-            if !remaining || self.distance(state, index).is_none() {
-                continue;
-            }
-
-            if selected.is_none_or(|current| self.precedes(state, index, current)) {
-                selected = Some(index);
-            }
-        }
-
-        selected
+    fn select(state: &SchedulerState) -> Option<usize> {
+        state.heads.first().map(|head| head.local.index)
     }
 
-    fn distance(&self, state: &SchedulerState, index: usize) -> Option<(u8, usize)> {
-        let work = &self.work[index];
-        let file_contention = state.active_files[work.file];
-        if file_contention == 0 {
-            return Some((0, 0));
+    fn detach_file(&self, state: &mut SchedulerState, file: usize) -> crate::HashSet<usize> {
+        let packages = self.by_file[file]
+            .iter()
+            .filter(|index| state.remaining[**index])
+            .map(|index| self.package_slots[*index])
+            .collect::<crate::HashSet<_>>();
+
+        for package in &packages {
+            remove_head(state, *package);
+        }
+        for index in &self.by_file[file] {
+            remove_priority(&self.package_slots, state, *index);
         }
 
-        let item_contention = state.active_items.get(&(work.file, Arc::clone(&work.item))).copied().unwrap_or(0);
-        if item_contention == 0 {
-            return Some((1, file_contention));
-        }
-
-        // The deterministic tail policy leaves capacity idle while an unhinted same-item scout is
-        // active. Hinted work is already informed and may share an item without waiting.
-        (work.hinted || state.learned_items.contains(&(work.file, Arc::clone(&work.item)))).then_some((2, file_contention))
+        packages
     }
 
-    fn precedes(&self, state: &SchedulerState, left: usize, right: usize) -> bool {
-        let left_work = &self.work[left];
-        let right_work = &self.work[right];
-        let left_distance = self.distance(state, left).expect("selection considers only eligible work");
-        let right_distance = self.distance(state, right).expect("selection considers only eligible work");
-        let left_turns = state.package_turns.get(&left_work.package).copied().unwrap_or(0);
-        let right_turns = state.package_turns.get(&right_work.package).copied().unwrap_or(0);
+    fn attach_file(&self, state: &mut SchedulerState, file: usize, packages: &crate::HashSet<usize>) {
+        for index in &self.by_file[file] {
+            insert_priority(&self.work, &self.package_slots, state, *index);
+        }
+        for package in packages {
+            insert_head(state, *package);
+        }
+    }
 
-        left_distance
-            .cmp(&right_distance)
-            .then_with(|| left_turns.cmp(&right_turns))
-            .then_with(|| {
-                learning_value_cmp(
-                    left_work,
-                    right_work,
-                    state.learned_items.contains(&(left_work.file, Arc::clone(&left_work.item))),
-                    state.learned_items.contains(&(right_work.file, Arc::clone(&right_work.item))),
-                )
-            })
-            .then_with(|| right_work.cost.cmp(&left_work.cost))
-            .then_with(|| left_work.stable_order.cmp(&right_work.stable_order))
-            .is_lt()
+    #[cfg(test)]
+    fn refresh_file(&self, state: &mut SchedulerState, file: usize) {
+        let packages = self.detach_file(state, file);
+        self.attach_file(state, file, &packages);
+    }
+
+    #[cfg(test)]
+    fn withdraw(&self, state: &mut SchedulerState, index: usize) {
+        let file = self.work[index].file;
+        let packages = self.detach_file(state, file);
+        if state.remaining[index] {
+            state.remaining[index] = false;
+            state.remaining_count = state.remaining_count.saturating_sub(1);
+        }
+        self.attach_file(state, file, &packages);
     }
 }
 
-fn learning_value_cmp(left: &ScheduledWork, right: &ScheduledWork, left_learned: bool, right_learned: bool) -> core::cmp::Ordering {
-    let left_cost = left.cost.as_nanos().max(1);
-    let right_cost = right.cost.as_nanos().max(1);
-    let left_benefit = usize::from(!left_learned && !left.hinted).saturating_mul(left.sibling_benefit);
-    let right_benefit = usize::from(!right_learned && !right.hinted).saturating_mul(right.sibling_benefit);
-    let left_value = (left_benefit as u128).saturating_mul(right_cost);
-    let right_value = (right_benefit as u128).saturating_mul(left_cost);
+fn priority(work: &[ScheduledWork], state: &SchedulerState, index: usize) -> Option<LocalPriority> {
+    if !state.remaining[index] {
+        return None;
+    }
+
+    let item = &work[index];
+    let file_contention = state.active_files[item.file];
+    let key = (item.file, Arc::clone(&item.item));
+    let learned = state.learned_items.contains(&key);
+    let item_contention = state.active_items.get(&key).copied().unwrap_or(0);
+    let distance = if file_contention == 0 {
+        (0, 0)
+    } else if item_contention == 0 {
+        (1, file_contention)
+    } else if item.hinted || learned {
+        (2, file_contention)
+    } else {
+        return None;
+    };
+
+    Some(LocalPriority {
+        distance,
+        benefit: usize::from(!learned && !item.hinted).saturating_mul(item.sibling_benefit),
+        cost: item.cost.as_nanos().max(1),
+        stable_order: item.stable_order,
+        index,
+    })
+}
+
+fn learning_priority(left: &LocalPriority, right: &LocalPriority) -> core::cmp::Ordering {
+    let left_value = (left.benefit as u128).saturating_mul(right.cost);
+    let right_value = (right.benefit as u128).saturating_mul(left.cost);
 
     right_value.cmp(&left_value)
+}
+
+fn remove_head(state: &mut SchedulerState, package: usize) {
+    let Some(local) = state.package_queues[package].first().copied() else {
+        return;
+    };
+    let _removed = state.heads.remove(&PackageHead {
+        package,
+        turns: state.package_turns[package],
+        local,
+    });
+}
+
+fn insert_head(state: &mut SchedulerState, package: usize) {
+    let Some(local) = state.package_queues[package].first().copied() else {
+        return;
+    };
+    let _inserted = state.heads.insert(PackageHead {
+        package,
+        turns: state.package_turns[package],
+        local,
+    });
+}
+
+fn remove_priority(package_slots: &[usize], state: &mut SchedulerState, index: usize) {
+    let Some(priority) = state.priorities[index].take() else {
+        return;
+    };
+    let _removed = state.package_queues[package_slots[index]].remove(&priority);
+}
+
+fn insert_priority(work: &[ScheduledWork], package_slots: &[usize], state: &mut SchedulerState, index: usize) {
+    #[cfg(test)]
+    {
+        state.priority_updates = state.priority_updates.saturating_add(1);
+    }
+    if let Some(priority) = priority(work, state, index) {
+        let _inserted = state.package_queues[package_slots[index]].insert(priority);
+        state.priorities[index] = Some(priority);
+    }
 }
 
 /// What a sweep spent, tallied across its workers as they run.
@@ -648,10 +869,11 @@ pub(super) fn test_all(
                 .map_or(0, |count| count.saturating_sub(1))
         })
         .collect();
-    let costs: Vec<Duration> = pending
+    let planned: Vec<crate::estimate::MutationWork> = pending
         .iter()
-        .map(|position| mutant_cost(*position, plan, reach, sweep.census, killers))
+        .map(|position| mutant_work(*position, plan, reach, sweep.census, killers, sweep))
         .collect();
+    let costs: Vec<Duration> = planned.iter().map(|work| work.scheduling_cost()).collect();
     let mut file_paths = files.into_iter().collect::<Vec<_>>();
     // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
     file_paths.sort_by_key(|(_file, slot)| *slot);
@@ -661,8 +883,10 @@ pub(super) fn test_all(
         .map(|file| FileLearning::from_hints(file, killers.generalized()))
         .collect();
 
-    let (sender, receiver) = mpsc::channel::<Completed>();
     let sweep_started = Instant::now();
+    events.sweep_planned(&planned, jobs);
+
+    let (sender, receiver) = mpsc::channel::<SweepEvent>();
     let mut package_spans: crate::HashMap<Arc<str>, (usize, u64, u64)> = crate::HashMap::default();
 
     // Resolved up front for the same reason reachability is: a worker must need nothing from the
@@ -743,6 +967,7 @@ pub(super) fn test_all(
                     let first_started_ms = elapsed_millis(sweep_started.elapsed());
                     let started = Instant::now();
                     let reachable = &reachable[index];
+                    let _sent = sender.send(SweepEvent::Started(position, first_started_ms));
                     let judged = judge_learning(
                         work,
                         active,
@@ -776,7 +1001,15 @@ pub(super) fn test_all(
 
                     // A closed receiver means the calling thread is gone, which cannot happen while
                     // the scope is open; there is nothing useful to do about it either way.
-                    let _sent = sender.send((position, outcome, elapsed, killer, note, first_started_ms, settled_ms));
+                    let _sent = sender.send(SweepEvent::Completed((
+                        position,
+                        outcome,
+                        elapsed,
+                        killer,
+                        note,
+                        first_started_ms,
+                        settled_ms,
+                    )));
                 }
             });
         }
@@ -785,16 +1018,25 @@ pub(super) fn test_all(
         // #[gamma::skip(stmt.delete_call, reason = "the receiver waits for channel closure, so retaining the coordinator sender blocks collection forever")]
         core::mem::drop(sender);
 
-        for completed in receiver {
-            if let Some(mutant) = plan.mutants.get(completed.0) {
-                let span = package_spans
-                    .entry(Arc::clone(&mutant.package))
-                    .or_insert((0, completed.5, completed.6));
-                span.0 = span.0.saturating_add(1);
-                span.1 = span.1.min(completed.5);
-                span.2 = span.2.max(completed.6);
+        for event in receiver {
+            match event {
+                SweepEvent::Started(position, elapsed_ms) => {
+                    if let Some(mutant) = plan.mutants.get(position) {
+                        events.mutant_started(mutant.ordinal, Duration::from_millis(elapsed_ms));
+                    }
+                }
+                SweepEvent::Completed(completed) => {
+                    if let Some(mutant) = plan.mutants.get(completed.0) {
+                        let span = package_spans
+                            .entry(Arc::clone(&mutant.package))
+                            .or_insert((0, completed.5, completed.6));
+                        span.0 = span.0.saturating_add(1);
+                        span.1 = span.1.min(completed.5);
+                        span.2 = span.2.max(completed.6);
+                    }
+                    publish_completed(plan, killers, events, completed);
+                }
             }
-            publish_completed(plan, killers, events, completed);
         }
     });
 
@@ -2310,6 +2552,9 @@ mod tests {
         assert_eq!(mutant.killed_by.as_deref(), Some("tests::caught"));
         assert_eq!(mutant.note, None);
         assert_eq!(events.mutants, 1);
+        assert_eq!(events.sweep_plan, Some((1, 1)));
+        assert_eq!(events.mutant_starts.len(), 1);
+        assert_eq!(events.mutant_starts[0].0, mutant.ordinal);
         assert_eq!(spent.launches, 1);
         assert_eq!(spent.probes, 0);
         assert_eq!(spent.packages.len(), 1);
@@ -4025,6 +4270,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn live_workload_preserves_exact_and_whole_execution_shapes() {
+        let plan = plan_over(&["subject", "subject"]);
+        let mut binaries = vec![
+            binary_of("subject", Duration::from_secs(5)),
+            binary_of("subject", Duration::from_secs(20)),
+        ];
+        for binary in &mut binaries {
+            binary.budget = Some(Duration::from_mins(1));
+        }
+        let reach = Reachability::build(
+            &plan,
+            &binaries,
+            &TestScope {
+                packages: &[],
+                package_local: false,
+                whole_workspace: true,
+            },
+        );
+        let mut killers = Killers::default();
+        killers.record(
+            plan.mutants[0].id.clone(),
+            Killer {
+                package: "subject".to_owned(),
+                target: String::new(),
+                test: "tests::hint".to_owned(),
+            },
+        );
+        let settings = sweep(Stall::NONE);
+
+        let exact = mutant_work(0, &plan, &reach, blind(), &killers, settings);
+        let whole = mutant_work(1, &plan, &reach, blind(), &Killers::default(), settings);
+        let census_binaries = [binary_of("subject", Duration::from_secs(20))];
+        let census_reach = Reachability::build(
+            &plan,
+            &census_binaries,
+            &TestScope {
+                packages: &[],
+                package_local: false,
+                whole_workspace: true,
+            },
+        );
+        let selected_census = Census::examined(&census_binaries[0].path, plan.mutants[1].ordinal, 1, 4);
+        let selected = mutant_work(1, &plan, &census_reach, &selected_census, &Killers::default(), settings);
+        let hinted_census = Census::partial(&census_binaries[0].path, plan.mutants[1].ordinal, 1, 4);
+        let hinted = mutant_work(1, &plan, &census_reach, &hinted_census, &Killers::default(), settings);
+        let uncovered_census = Census::examined(&census_binaries[0].path, plan.mutants[1].ordinal, 0, 4);
+        let uncovered = mutant_work(1, &plan, &census_reach, &uncovered_census, &Killers::default(), settings);
+
+        assert_eq!(exact.ordinal, plan.mutants[0].ordinal);
+        assert_eq!(exact.kind, crate::estimate::WorkKind::Exact);
+        assert_eq!(whole.ordinal, plan.mutants[1].ordinal);
+        assert_eq!(whole.kind, crate::estimate::WorkKind::Whole);
+        assert_eq!(selected.kind, crate::estimate::WorkKind::Selected);
+        assert_eq!(hinted.kind, crate::estimate::WorkKind::Hinted);
+        assert_eq!(uncovered.kind, crate::estimate::WorkKind::Uncovered);
+    }
+
     fn killer(test: &str) -> Killer {
         Killer {
             package: "subject".to_owned(),
@@ -5013,12 +5316,14 @@ mod tests {
         let mut state = scheduler.state.lock().expect("scheduler state is healthy");
         state.active_files[0] = 2;
         state.active_items.insert((0, "active".to_owned().into()), 1);
+        scheduler.refresh_file(&mut state, 0);
 
-        assert_eq!(scheduler.select(&state), Some(2), "an idle file outranks every active file");
+        assert_eq!(Scheduler::select(&state), Some(2), "an idle file outranks every active file");
 
         state.active_files[1] = 1;
+        scheduler.refresh_file(&mut state, 1);
         assert_eq!(
-            scheduler.select(&state),
+            Scheduler::select(&state),
             Some(2),
             "the inactive item in the less-contended file outranks both a duplicate and a busier file"
         );
@@ -5036,10 +5341,65 @@ mod tests {
         let mut state = scheduler.state.lock().expect("scheduler state is healthy");
         state.active_files[0] = 1;
         state.active_items.insert((0, "active".to_owned().into()), 1);
+        scheduler.refresh_file(&mut state, 0);
 
-        assert_eq!(scheduler.select(&state), Some(1));
-        state.remaining[1] = false;
-        assert_eq!(scheduler.select(&state), None, "an unhinted same-item duplicate is not reserved");
+        assert_eq!(Scheduler::select(&state), Some(1));
+        scheduler.withdraw(&mut state, 1);
+        assert_eq!(Scheduler::select(&state), None, "an unhinted same-item duplicate is not reserved");
+    }
+
+    #[test]
+    fn scheduler_selection_does_not_revisit_the_completed_population() {
+        let population = 10_000;
+        let scheduler = Scheduler::new(
+            (0..population)
+                .map(|index| scheduled(index, &format!("item-{index}"), "one-package", 1, 0, false, index))
+                .collect(),
+            population,
+        );
+        {
+            let mut state = scheduler.state.lock().expect("scheduler state is healthy");
+            state.priority_updates = 0;
+            assert_eq!(state.heads.len(), 1, "selection indexes one head for the package");
+        }
+
+        let abandoned = OnceLock::new();
+        assert_eq!(scheduler.claim(&abandoned), Some(0));
+
+        let state = scheduler.state.lock().expect("scheduler state is healthy");
+        assert_eq!(state.remaining_count, population - 1);
+        assert!(state.priorities[0].is_none(), "claimed work leaves the frontier permanently");
+        assert_eq!(
+            state.priority_updates, 1,
+            "claiming from a single-mutant file rekeys that file, not the original population"
+        );
+        assert_eq!(state.heads.len(), 1);
+    }
+
+    #[test]
+    fn scheduler_rekeys_only_candidates_in_a_changed_file() {
+        let unrelated = 10_000;
+        let mut work = (0..unrelated)
+            .map(|index| scheduled(index + 1, &format!("unrelated-{index}"), "a", 1, 0, false, index))
+            .collect::<Vec<_>>();
+        work.extend([
+            scheduled(0, "scout", "a", 1, 2, false, unrelated),
+            scheduled(0, "sibling", "b", 1, 2, false, unrelated + 1),
+            scheduled(0, "hinted", "b", 1, 2, true, unrelated + 2),
+        ]);
+        let scheduler = Scheduler::new(work, unrelated + 1);
+        let mut state = scheduler.state.lock().expect("scheduler state is healthy");
+        state.priority_updates = 0;
+        state.active_files[0] = 1;
+        state.active_items.insert((0, "scout".to_owned().into()), 1);
+
+        scheduler.refresh_file(&mut state, 0);
+
+        assert_eq!(
+            state.priority_updates, 3,
+            "a file-state change rekeys only the candidates indexed under that file"
+        );
+        assert!(state.priorities[..unrelated].iter().all(Option::is_some));
     }
 
     #[test]
@@ -5056,7 +5416,7 @@ mod tests {
         let state = scheduler.state.lock().expect("scheduler state is healthy");
 
         assert_eq!(
-            scheduler.select(&state),
+            Scheduler::select(&state),
             Some(3),
             "learning per estimated cost wins, then equal value keeps useful long work and stable order"
         );

@@ -362,18 +362,31 @@ specific replacement that caused it.
 
 ## The scratch workspace
 
-The checkout is never instrumented in place. cargo-gamma maintains a scratch area containing:
+The checkout is never instrumented in place. cargo-gamma maintains two coordinated scratch areas.
+The external per-workspace area contains:
 
 - a synchronized source workspace under `workspace/`;
 - the vendored guard runtime;
+- the stable process-held workspace lock.
+
+A configured platform cache home that physically resolves inside the original workspace is
+refused. In the split layout the source walk excludes the target-resident campaign cache, not the
+external scratch destination; accepting that placement would let an all-files copy recurse into
+the workspace it is creating.
+
+The resolved Cargo target directory contains
+`cargo-gamma/cache/<workspace-identity>/`, which contains:
+
 - Cargo build artifacts under `target/`;
-- incremental campaign records and transient execution data.
+- incremental campaign records and transient execution data, including census files,
+  `last-gamma-run.json`, and `gamma-progress.log`.
 
 Normal runs publish `gamma-report.json`, `gamma-report.html`, `gamma-report.sarif`,
 `gamma-perf-advice.md`, and `gamma-diagnostics.json` under the original workspace's
-`target/cargo-gamma/`. `last-gamma-run.json` and `gamma-progress.log` remain cache state. An explicit
-`--cache-dir` relocates only reusable cache state. `--artifact-dir` relocates all five published
-artifacts together, and its directory is created when absent.
+`target/cargo-gamma/`. `last-gamma-run.json` and `gamma-progress.log` remain reusable cache state
+rather than published artifacts. An explicit `--cache-dir` retains the all-in-one layout and
+relocates the synchronized workspace, Cargo artifacts, and campaign state together. `--artifact-dir`
+relocates all five published artifacts together, and its directory is created when absent.
 
 The diagnostics bundle contains aggregate algorithm-health telemetry rather than one row per
 mutant. Build rounds attribute newly withdrawn mutants to packages while retaining the round's
@@ -424,14 +437,17 @@ opt-in, whole-binary mode explicitly disables case selection, promoted hints
 use YAML, and baseline failures use a per-failure directory tree.
 
 Only one cargo-gamma command may operate on an original workspace at a time. A process-held lock in
-that workspace's default external cache applies even when `--cache-dir` redirects reusable state.
+that workspace's default external scratch area applies even when `--cache-dir` redirects reusable state.
 Conditional source, configuration, and hints publication uses this lock on every platform, so
 Windows never needs persistent sibling lock files in the checkout.
 
-The default cache base lives under the user cache directory as `cargo-gamma/<identity>`, where the
-identity is the first sixty-four bits of the BLAKE3 digest of the resolved physical workspace root,
-rendered as sixteen hex characters. Filesystem aliases of the same existing root therefore share
-one cache and lock domain. The algorithm is pinned by cargo-gamma rather than borrowed from the
+The default external scratch base lives under the user cache directory as
+`cargo-gamma/<identity>`. The target-resident campaign base is
+`<resolved-target>/cargo-gamma/cache/<identity>`. The identity is the first sixty-four bits of the
+BLAKE3 digest of the resolved physical workspace root, rendered as sixteen hex characters.
+Filesystem aliases of the same existing root therefore share one cache and lock domain, while
+workspaces configured to share a Cargo target directory retain separate campaign state. The
+algorithm is pinned by cargo-gamma rather than borrowed from the
 standard library's default hasher, which is explicitly free to change between releases: this name is
 where the lock serializing every source-changing command for one workspace lives, so two binaries
 that derived different names for one workspace would rewrite one tree concurrently while each
@@ -441,12 +457,12 @@ landing on the same name is refused with a usage error naming both roots and sug
 `--cache-dir`. An unmarked cache containing anything other than the lock created while claiming it
 is refused rather than adopted.
 
-Before creating, claiming, or cleaning a default cache, cargo-gamma independently verifies that the
-derived path is an identity directory directly beneath the dedicated `cargo-gamma` namespace. A
-malformed path that names the platform cache home, the namespace itself, or a differently named
-child is refused before a lock, ownership marker, synchronized workspace, Cargo target, or removal
-can touch it. This check is deliberately separate from path construction so a defect in the latter
-cannot redefine what counts as a valid default cache.
+Before creating, claiming, or cleaning default state, cargo-gamma independently verifies both
+derived paths. The external scratch must be an identity directory directly beneath the dedicated
+`cargo-gamma` namespace; the campaign cache must be the same identity directly beneath
+`<resolved-target>/cargo-gamma/cache`. A malformed path is refused before a lock, ownership marker,
+synchronized workspace, Cargo target, or removal can touch it. These checks are deliberately
+separate from path construction so a defect there cannot redefine what counts as a valid cache.
 
 An explicit `--cache-dir` names the cache base itself and must be empty on first use. cargo-gamma
 writes an ownership marker tying it to the original workspace and takes a second process-held lock
@@ -476,7 +492,7 @@ access-control lists (ACLs), which the standard library does not expose, so carg
 ownership test there and claims none; a redirected cache on Windows is trusted exactly as far as
 the directory the user named is.
 
-Successful campaigns retain the synchronized tree and build artifacts. A later campaign performs a
+Successful campaigns retain the external synchronized tree and target-resident build artifacts. A later campaign performs a
 delta synchronization:
 
 - byte-identical inputs remain untouched, preserving Cargo's incremental state;
@@ -484,10 +500,12 @@ delta synchronization:
 - inputs removed from the checkout are removed from the cached workspace;
 - generated artifacts remain outside the synchronized source tree.
 
-`cargo gamma clean` takes the campaign lock and removes the current workspace-specific cache
-contents. It does not remove published reports under `target/cargo-gamma`, durable hints, or source
-suppressions. The cleaned directory is named in the output; a workspace with nothing cached is
-told so. Cache identity uses the current stable naming scheme without a migration path.
+`cargo gamma clean` takes the campaign lock and removes both the current workspace-specific
+external scratch contents and target-resident campaign-cache contents. It preserves the external
+lock and ownership markers and does not remove published reports under `target/cargo-gamma`,
+durable hints, or source suppressions. Both cache locations are named in the output; a workspace
+with nothing cached is told so. Cache identity uses the current stable naming scheme without a
+migration path, and state from the former all-external layout is neither read nor migrated.
 
 Correct invalidation is more important than avoiding a copy. Preserving an old timestamp on changed
 bytes could let Cargo reuse an artifact compiled from stale source.
@@ -769,7 +787,7 @@ SARIF findings, and incremental records.
 
 ### Incremental knowledge
 
-The scratch area stores facts and hints learned by an earlier campaign:
+The target-resident campaign cache stores facts and hints learned by an earlier campaign:
 
 | Knowledge | How it is reused | Why it is safe |
 |---|---|---|
@@ -884,6 +902,11 @@ One verdict model feeds every output surface:
 - the diagnostics bundle records campaign phases and measurements;
 - the progress journal preserves completed verdict lines if a campaign is interrupted.
 
+`--only-survivors-from` reads a compatible cargo-gamma JSON report and intersects its genuine
+survivor IDs with the population discovered from the current source. Timeout and memory-limit
+outcomes are not selected even though the interchange schema exports them as `Survived`. This
+supports focused confirmation after tests are added without carrying any prior verdict forward.
+
 Command help follows the workspace Cargo-tool convention: green bold headings and usage,
 cyan bold literals, cyan placeholders, and package author/version metadata.
 
@@ -987,6 +1010,28 @@ isolated injected instance. Left in the shared one, they decide what unrelated t
 next, and which tests those are depends on the harness's scheduling rather than on anything the
 suite states. The remaining production-handler isolation gap is tracked explicitly in
 [TODO.md](TODO.md#t1-isolate-tests-from-the-production-interrupt-registry).
+
+### Live completion estimate
+
+The testing progress display estimates remaining work rather than extrapolating from the number of
+mutants completed. Before workers start, each pending mutant is priced from the same reachable
+binary baselines, census selections, durable killer hints, timeout budgets, and confirmation policy
+used by scheduling. Exact probes, selected tests, hinted fallbacks, whole-binary work, and
+zero-work uncovered sites retain separate calibration because their costs differ materially.
+
+Worker start events distinguish queued work from work already in flight. Time already spent by an
+active worker is subtracted from that mutant's predicted service time, while an active mutant that
+has outlived its ordinary estimate retains a resource-exhaustion tail in the high estimate.
+Predicted residuals are assigned across the configured worker lanes and the longest lane determines
+the displayed wall-time tail; a serial workload is not merely divided by the job count.
+
+Completed mutants calibrate killed, full-suite, and timeout or memory-limit outcomes independently.
+A bounded-memory exponentially weighted observation gives recent results more influence when the
+campaign's cost composition changes. The measured pre-sweep model remains a prior, so a few unusual
+results cannot immediately dominate it; as representative evidence accumulates, observed outcome
+shares and service times narrow and move the range. No estimate is shown until either enough
+predicted work or a larger minimum population has completed. The display presents a low-to-high
+range while meaningful uncertainty remains instead of implying point accuracy.
 
 ## Costs and limitations
 

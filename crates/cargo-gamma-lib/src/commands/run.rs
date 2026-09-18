@@ -591,7 +591,7 @@ struct IncrementalPreparation {
 
 impl IncrementalPreparation {
     fn for_run(args: &RunArgs, survey: &crate::discover::Survey, context: crate::discover::ContextDigest) -> Self {
-        let base = exec::gamma_base(&survey.root, args.measure.cache_dir.as_deref());
+        let base = exec::campaign_base(&survey.root, &survey.target, args.measure.cache_dir.as_deref());
         let inputs = crate::discover::RunRecord::snapshot_with_external(
             &survey.root,
             &base,
@@ -767,12 +767,21 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let config = run_config(args, styler);
     let context = incremental_context(args);
     let mut survey = crate::discover::Survey::for_build_with_cache_inputs(&args.select, shard, &config.cargo, context.is_some())?;
+
+    if let Some(path) = args.only_survivors_from.as_ref() {
+        let report = crate::merge::read_limited(path, u64::MAX)?.report;
+        let survivors = crate::elements::surviving_mutants(&report)
+            .map_err(|cause| error!("cannot select survivors from `{path}`: {cause}").usage())?;
+
+        survey.retain_only(survivors);
+    }
+
     let artifact_dir = Documents::directory(args, &survey.root);
     fs::create_dir_all(&artifact_dir).map_err(|cause| error!("could not create artifact directory `{artifact_dir}`").caused_by(cause))?;
 
     let incremental = context.map(|context| IncrementalPreparation::for_run(args, &survey, context));
     let cache_locks = if should_claim_cache(incremental.is_some(), args.dry_run) {
-        Some(exec::claim_cache(&survey.root, args.measure.cache_dir.as_deref())?)
+        Some(exec::claim_cache(&survey.root, &survey.target, args.measure.cache_dir.as_deref())?)
     } else {
         None
     };
@@ -879,7 +888,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         && let Some(record) = crate::discover::RunRecord::from_plan_snapshot(&plan, &context, inputs, &crate::discover::Killers::default())
     {
         let record_locks = if built.is_none() {
-            match exec::claim_cache(&plan.root, args.measure.cache_dir.as_deref()) {
+            match exec::claim_cache(&plan.root, &survey.target, args.measure.cache_dir.as_deref()) {
                 Ok(locks) => Some(locks),
                 Err(failure) => {
                     crate::notes::note(format!("could not lock the run-record cache: {failure}"));

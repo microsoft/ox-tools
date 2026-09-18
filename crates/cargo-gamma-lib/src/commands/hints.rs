@@ -7,7 +7,7 @@ use super::cli::HintsArgs;
 use super::dispatch::EXIT_OK;
 use super::host::Host;
 use crate::discover::{Hints, RunRecord, hints_path};
-use crate::exec::{CargoOptions, gamma_base};
+use crate::exec::{CargoOptions, campaign_base};
 use crate::report::{Styler, quantity};
 
 /// Implements `hints`.
@@ -36,9 +36,9 @@ pub(super) fn hints_with_cargo<H: Host>(host: &mut H, args: &HintsArgs, styler: 
     // Deliberately unsharded. A shard sees a fraction of the population, so promoting from one
     // would drop every hint outside it — the file would be correct and almost empty, and each shard
     // in a matrix would fight the others over it.
-    let plan = crate::discover::plan_for_build(&args.select, &selection, None, cargo, &mut |_| {})?;
+    let (plan, target) = crate::discover::plan_for_build_with_target(&args.select, &selection, None, cargo, &mut |_| {})?;
 
-    let base = gamma_base(&plan.root, args.cache_dir.as_deref());
+    let base = campaign_base(&plan.root, &target, args.cache_dir.as_deref());
     let record = RunRecord::load(&base);
     let (existing, generation, legacy_generation) = Hints::load_for_promotion(&plan.root, args.replace)?;
     let promoted = Hints::promoted(&record, &plan.mutants);

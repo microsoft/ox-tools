@@ -97,6 +97,7 @@ impl Harness {
         // it resolve the whole workspace relative to that.
         let _ = command.current_dir(work.root().as_std_path());
         work.inherit_test_cache_home(&mut command);
+        work.configure_test_environment(&mut command, binary);
 
         // Only this binary's tests. The run visits the reachable binaries one at a time and stops
         // at the first that convicts, and letting nextest run all of them would discard both that
@@ -501,11 +502,11 @@ mod tests {
     fn command_construction_is_pinned_on_every_platform() {
         let (_scratch, mut work) = crate::testing::helper_workspace("nextest-command-portable", &[]);
         work.set_test_args(vec!["--nocapture".to_owned()]);
+        let binary = crate::testing::test_binary("/t/deps/nxspike-abc");
+        work.set_test_environment(&binary.package_id, "CARGO_PKG_NAME", "nextest-package");
         let harness = Harness::fake(&[("/t/deps/nxspike-abc", "nxspike")]);
 
-        let command = harness
-            .command(&work, &crate::testing::test_binary("/t/deps/nxspike-abc"), &[])
-            .expect("a known binary yields a command");
+        let command = harness.command(&work, &binary, &[]).expect("a known binary yields a command");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(command.get_program(), "cargo-nextest");
@@ -515,6 +516,12 @@ mod tests {
                 .get_envs()
                 .any(|(name, value)| name == "CARGO_GAMMA_TEST_CACHE_HOME" && value.is_some()),
             "the private test cache follows nested helper launches"
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == "CARGO_PKG_NAME" && value == Some(std::ffi::OsStr::new("nextest-package"))),
+            "nextest receives the reconstructed Cargo test environment"
         );
         assert_eq!(
             args,

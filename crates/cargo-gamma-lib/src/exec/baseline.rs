@@ -244,8 +244,9 @@ where
         }
         disambiguate_artifact_directories(&mut baseline_failure);
         let count = baseline_failure.artifacts().len();
+        let noun = if count == 1 { "failure" } else { "failures" };
         baseline_failure.set_message(format!(
-            "baseline measurement failed due to {count} test failures; see the generated baseline-failure files for details"
+            "baseline measurement failed with {count} baseline {noun}; see the generated baseline-failure files for details"
         ));
         return Err(baseline_failure);
     }
@@ -724,7 +725,7 @@ mod tests {
         // Every verdict is a comparison against the baseline, so a red one makes every mutant
         // look killed by a failure that was there before mutation started.
         let message = failure.to_string();
-        assert!(message.contains("1 test failures"), "{message}");
+        assert!(message.contains("1 baseline failure"), "{message}");
         assert!(!message.contains("a::b"), "{message}");
 
         let artifact = failure.artifact().expect("a baseline failure carries a durable record");
@@ -958,7 +959,7 @@ mod tests {
 
         assert_eq!(attempts.map(|count| count.load(Ordering::Relaxed)), [1, 2, 1, 1]);
         let message = failure.to_string();
-        assert!(message.contains("2 test failures"), "{message}");
+        assert!(message.contains("2 baseline failures"), "{message}");
         assert!(!message.contains("red/package"), "{message}");
         assert!(!message.contains("timed:package"), "{message}");
 

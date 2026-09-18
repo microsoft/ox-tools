@@ -58,9 +58,21 @@ pub(crate) fn plan_for_build(
     cargo: &CargoOptions,
     notify: &mut impl FnMut(&str),
 ) -> Result<Plan> {
-    let survey = Survey::for_build(args, shard, cargo)?;
+    plan_for_build_with_target(args, selection, shard, cargo, notify).map(|(plan, _target)| plan)
+}
 
-    plan_survey(survey, selection, notify)
+/// Builds a plan and returns Cargo's resolved target directory from the same metadata pass.
+pub(crate) fn plan_for_build_with_target(
+    args: &SelectArgs,
+    selection: &Selection,
+    shard: Option<(u32, u32)>,
+    cargo: &CargoOptions,
+    notify: &mut impl FnMut(&str),
+) -> Result<(Plan, Utf8PathBuf)> {
+    let survey = Survey::for_build(args, shard, cargo)?;
+    let target = survey.target.clone();
+
+    plan_survey(survey, selection, notify).map(|plan| (plan, target))
 }
 
 /// Scans one resolved survey into a plan.
@@ -87,6 +99,9 @@ fn plan_survey(survey: Survey, selection: &Selection, notify: &mut impl FnMut(&s
 pub struct Survey {
     /// Absolute path of the workspace root.
     pub root: Utf8PathBuf,
+
+    /// Cargo's resolved target directory for the original workspace.
+    pub target: Utf8PathBuf,
 
     /// Every file worth mutating, sorted by path.
     pub files: Vec<TargetFile>,
@@ -179,6 +194,7 @@ pub struct Survey {
 
     diff: Option<Diff>,
     shard: Option<(u32, u32)>,
+    only_mutants: Option<HashSet<MutantId>>,
     settled: HashMap<MutantId, Outcome>,
     exclude_trait_impls: Vec<String>,
 }
@@ -278,6 +294,7 @@ impl Survey {
         let features = features::from_extra(&args.features, &cargo.extra);
         let metadata = load_metadata(&args.dir, &features)?;
         let root = Utf8PathBuf::from(metadata.workspace_root.as_str());
+        let target = Utf8PathBuf::from(metadata.target_directory.as_str());
         let external_inputs = if cache_inputs {
             external_path_inputs(&args.dir, &features, &root)?
         } else {
@@ -437,6 +454,7 @@ impl Survey {
 
         Ok(Self {
             root,
+            target,
             files,
             declaration_files,
             by_package,
@@ -449,6 +467,7 @@ impl Survey {
             cfgs,
             diff,
             shard,
+            only_mutants: None,
             settled: HashMap::default(),
             exclude_trait_impls: args.exclude_trait_impls.clone(),
             source_dirs: sorted(source_dirs),
@@ -506,6 +525,11 @@ impl Survey {
     /// whole population.
     pub fn settle(&mut self, settled: HashMap<MutantId, Outcome>) {
         self.settled = settled;
+    }
+
+    /// Restricts discovery to the exact mutant identities named by an earlier report.
+    pub fn retain_only(&mut self, mutants: HashSet<MutantId>) {
+        self.only_mutants = Some(mutants);
     }
 
     /// The workspace packages that have files worth mutating, in a stable order.
@@ -605,6 +629,10 @@ impl Survey {
 
                 diff.touches(&mutant.file, start, end)
             });
+        }
+
+        if let Some(only) = self.only_mutants.as_ref() {
+            mutants.retain(|mutant| only.contains(&mutant.id));
         }
 
         // A mutant an earlier run already settled takes the verdict that run gave it and stops
@@ -3489,6 +3517,23 @@ mod tests {
         .expect("the fixture workspace must survey")
     }
 
+    #[test]
+    fn survey_retains_cargos_resolved_target_directory() {
+        let (_directory, root) = workspace();
+        let target = root.join("configured-target");
+
+        fs::create_dir_all(root.join(".cargo")).expect("cargo configuration directory");
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = '{}'\n", target.as_str()),
+        )
+        .expect("cargo configuration");
+
+        let survey = survey(&root, SelectArgs::default());
+
+        assert_eq!(survey.target, target);
+    }
+
     /// A malformed suppression directive is a mistake in the user's own source, and it has to stop
     /// the scan with the same named error `suppress::directives` itself would report, rather than
     /// being swallowed by the parallel scan and the mutant simply going unsuppressed with nothing
@@ -4257,6 +4302,35 @@ mod tests {
             "{:?}",
             scanned.mutants
         );
+    }
+
+    #[test]
+    fn an_exact_mutant_filter_retains_only_the_requested_identity() {
+        let (_directory, root) = workspace();
+        let mut survey = survey(
+            &root,
+            SelectArgs {
+                packages: vec!["core".to_owned()],
+                ..SelectArgs::default()
+            },
+        );
+        let selection = Selection::parse("all").expect("every mutator resolves");
+        let mut ordinals = 0;
+        let first = survey.scan(None, &selection, &mut ordinals).expect("the fixture must scan");
+        let wanted = first.mutants.first().expect("the fixture yields a mutant").id.clone();
+
+        let mut retained = HashSet::default();
+        let _inserted = retained.insert(wanted.clone());
+        survey.retain_only(retained);
+
+        let mut ordinals = 0;
+        let filtered = survey
+            .scan(None, &selection, &mut ordinals)
+            .expect("the filtered fixture must scan");
+
+        assert_eq!(filtered.mutants.len(), 1, "{:?}", filtered.mutants);
+        assert_eq!(filtered.mutants[0].id, wanted);
+        assert_eq!(ordinals, 1);
     }
 
     #[test]

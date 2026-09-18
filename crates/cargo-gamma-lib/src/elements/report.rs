@@ -1058,11 +1058,11 @@ mod tests {
 
     use camino::Utf8PathBuf;
 
-    use super::super::digest::{Digest, settled_mutants, settled_verdict};
+    use super::super::digest::{Digest, settled_mutants, settled_verdict, surviving_mutants};
     use super::*;
     use crate::discover::TargetFile;
     use crate::fixtures;
-    use crate::model::{Channel, Suppression};
+    use crate::model::{Channel, MUTANT_ID_VERSION, MutantId, Suppression};
 
     fn mutant(outcome: Outcome, span: Range<usize>) -> Mutant {
         Mutant {
@@ -2013,6 +2013,52 @@ mod tests {
 
         assert!(settled.contains("stalled"), "{settled:?}");
         assert!(!settled.contains("starved"), "{settled:?}");
+    }
+
+    #[test]
+    fn survivor_selection_excludes_other_verdicts_and_resource_outcomes() {
+        let template = fixtures::mutant_result();
+        let mut report = fixtures::report_with(None, 0, vec![template.clone()]);
+        let file = report.files.values_mut().next().expect("the fixture has a file");
+        file.mutants = [
+            ("survivor", "Survived", None),
+            ("killed", "Killed", Some("failed `test`")),
+            ("timeout", "Survived", Some("timed out: exceeded its budget")),
+            ("out-of-memory", "Survived", Some("out of memory: exceeded its ceiling")),
+        ]
+        .into_iter()
+        .map(|(id, status, reason)| MutantResult {
+            id: id.into(),
+            status: status.into(),
+            status_reason: reason.map(str::to_owned),
+            ..template.clone()
+        })
+        .collect();
+
+        let survivors = surviving_mutants(&report).expect("the cargo-gamma report is compatible");
+        let ids: Vec<&str> = survivors.iter().map(MutantId::as_str).collect();
+
+        assert_eq!(ids, ["survivor"]);
+    }
+
+    #[test]
+    fn survivor_selection_rejects_an_incompatible_identity_scheme() {
+        let mut report = fixtures::report_with(None, 0, Vec::new());
+        report.config.as_mut().expect("the fixture has run metadata").mutant_id_version = Some(MUTANT_ID_VERSION + 1);
+
+        let error = surviving_mutants(&report).expect_err("another identity scheme cannot select current mutants");
+
+        assert!(error.contains("mutant-ID scheme"), "{error}");
+    }
+
+    #[test]
+    fn survivor_selection_rejects_another_report_producer() {
+        let mut report = fixtures::report();
+        report.framework.name = "another-tool".to_owned();
+
+        let error = surviving_mutants(&report).expect_err("another producer cannot select cargo-gamma mutants");
+
+        assert!(error.contains("another-tool"), "{error}");
     }
 
     #[test]

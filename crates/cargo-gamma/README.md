@@ -161,6 +161,16 @@ your test suite. In other words, it points out a weakness in your test suite.
 Once you know what all the surviving mutants are in your codebase, your next task is to add more tests to
 your test suite to kill those mutants.
 
+After adding those tests, use the completed run’s JSON report to check only the mutants that
+genuinely survived:
+
+```bash
+cargo gamma run --only-survivors-from target/cargo-gamma/gamma-report.json
+```
+
+Mutant identities remain stable when only tests change. Timeout and memory-limit outcomes are
+not selected, even though the report format represents them as survived.
+
 ### Mutators
 
 `cargo-gamma` supports a large set of mutators. These are selected to represent real-world errors that can

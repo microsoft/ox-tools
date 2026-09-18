@@ -24,7 +24,7 @@ use super::test_binary::{
     Reachability, TestBinary, TestScope, admits_target, build_packages, calibrate, oracle_packages, reaches, reaching_packages, restrict,
     unmatched_test, workload,
 };
-use super::workspace::{Workspace, gamma_base};
+use super::workspace::{Workspace, campaign_base};
 use crate::discover::{CompileFailTarget, Plan, Survey, compile_fail_advice};
 use crate::error::error;
 use crate::estimate::project;
@@ -87,7 +87,7 @@ pub(crate) fn run_with_locks(
     // neither read nor written by anything before the sweep: each is a guess about the test suite,
     // checked by running a test, and there is nothing to check before there are binaries to check
     // it with.
-    let base = gamma_base(&survey.root, config.cache_dir.as_deref());
+    let base = campaign_base(&survey.root, &survey.target, config.cache_dir.as_deref());
     let incremental = config.incremental.is_enabled();
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     let narrowed = !config.whole_test_binaries;
@@ -150,7 +150,14 @@ pub(crate) fn run_with_locks(
     }
 
     let work = workload(&plan.mutants, &reach, narrowed.then_some(&census));
-    let projection = project(&plan.mutants, work, built.session.baseline_wall, built.session.build, config.jobs);
+    let projection = project(
+        &plan.mutants,
+        work,
+        built.session.baseline_wall,
+        built.session.build,
+        config.jobs,
+        config.confirm,
+    );
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     announce_measurement(events, &plan, &built.session, &projection);
@@ -765,7 +772,7 @@ fn measure_with_locks(
     // workspace can spend as much duplicating itself as compiling, and the aggregate cannot say
     // which.
     let copy_started = Instant::now();
-    let mut work = Workspace::prepare_with_locks(&plan.root, config, events, locks)?;
+    let mut work = Workspace::prepare_with_locks(&plan.root, &survey.target, config, events, locks)?;
     let copy = copy_started.elapsed();
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
@@ -1071,7 +1078,7 @@ fn load_ordering_hints(survey: &Survey, config: &Config) -> crate::HashSet<crate
         return crate::HashSet::default();
     }
 
-    let base = gamma_base(&survey.root, config.cache_dir.as_deref());
+    let base = campaign_base(&survey.root, &survey.target, config.cache_dir.as_deref());
     let record = crate::discover::RunRecord::load(&base);
     let checked_in = crate::discover::Hints::load(&survey.root);
 

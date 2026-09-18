@@ -717,6 +717,64 @@ fn population(dir: &TempDir) -> Vec<(String, String)> {
         .collect()
 }
 
+#[test]
+fn a_survivor_report_selects_only_its_genuine_survivor_identities() {
+    let dir = workspace(SUBJECT);
+    let prior = dir.path().join("prior-report.json");
+    let prior_arg = prior.to_str().expect("the report path is UTF-8");
+    let (listed, listing) = invoke(&dir, &["list", "mutants", "--json-report", prior_arg]);
+
+    assert_eq!(listed, EXIT_OK, "{}", listing.err());
+
+    let mut report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&prior).expect("the population report exists")).expect("the population report is JSON");
+    let survivor = report["files"]
+        .as_object()
+        .expect("the report has files")
+        .values()
+        .flat_map(|file| file["mutants"].as_array().expect("the file has mutants"))
+        .next()
+        .expect("the fixture yields mutants")["id"]
+        .as_str()
+        .expect("the mutant has an id")
+        .to_owned();
+
+    for mutant in report["files"]
+        .as_object_mut()
+        .expect("the report has files")
+        .values_mut()
+        .flat_map(|file| file["mutants"].as_array_mut().expect("the file has mutants"))
+    {
+        let status = if mutant["id"].as_str() == Some(survivor.as_str()) {
+            "Survived"
+        } else {
+            "Killed"
+        };
+
+        mutant["status"] = serde_json::Value::String(status.to_owned());
+    }
+
+    fs::write(&prior, serde_json::to_vec(&report).expect("the report serializes")).expect("the prior report is writable");
+
+    let (code, host) = invoke(&dir, &["run", "--dry-run", "--only-survivors-from", prior_arg]);
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+
+    let selected: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-report.json")).expect("the dry-run report exists"),
+    )
+    .expect("the dry-run report is JSON");
+    let selected_ids = selected["files"]
+        .as_object()
+        .expect("the selected report has files")
+        .values()
+        .flat_map(|file| file["mutants"].as_array().expect("the selected file has mutants"))
+        .map(|mutant| mutant["id"].as_str().expect("the selected mutant has an id"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(selected_ids, [survivor]);
+}
+
 /// Writes a run record naming the first mutant unviable and the second one killed by a named test.
 ///
 /// Written as text rather than through the tool so that the on-disk shape of the record is pinned

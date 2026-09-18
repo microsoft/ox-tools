@@ -20,16 +20,19 @@ effective value. The top-level boundary maps help and success to `0`, usage to
 
 ## Scratch layout
 
-The coordinator synchronizes sources, vendors the dependency-free guard
-runtime, and places Cargo artifacts and campaign state under the selected cache
-base. The default base is selected from a stable physical workspace identity;
-published reports remain under the artifact directory rather than reusable
-cache state.
+The coordinator synchronizes sources and vendors the dependency-free guard
+runtime under an external per-workspace scratch base. By default, Cargo
+artifacts and campaign state live under
+`<resolved-target>/cargo-gamma/cache/<workspace-identity>`. An explicit cache
+directory keeps the all-in-one layout. Published reports remain under the
+artifact directory rather than reusable cache state.
 
 The default cache name is a pinned BLAKE3-derived physical-workspace identity
-under the platform cache home. Ownership markers and process-held locks prevent
-two workspaces or commands from sharing mutable state accidentally. An explicit
-cache directory is validated before use and must be empty when first claimed.
+used by both locations. The stable process-held lock remains under the platform
+cache home, so deleting the Cargo target cannot create a second lock domain.
+Ownership markers prevent two workspaces from sharing mutable state
+accidentally. An explicit cache directory is validated before use and must be
+empty when first claimed.
 
 Completed runs always publish JSON, self-contained HTML, SARIF, Markdown
 performance advice, and a versioned diagnostics bundle. Before a build,

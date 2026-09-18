@@ -83,7 +83,7 @@ pub struct Session {
     /// The test binaries that were run.
     pub binaries: Vec<TestBinary>,
 
-    /// Where the run put everything it kept on disk.
+    /// Where the run put its Cargo artifacts and reusable campaign state.
     ///
     /// The path rather than the size, because the size is a walk of a directory holding every build
     /// artifact of every round, and only the diagnostics dump ever prints it. See

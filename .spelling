@@ -933,3 +933,4 @@ closers
 unmanaged
 SHA
 upserts
+EWMA
