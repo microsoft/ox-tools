@@ -360,7 +360,12 @@ if ($args -contains 'bolero' -and $args -contains 'list') {
 }
 if ($args -contains 'llvm-cov' -and $args -contains 'report' -and $env:FAKE_LLVM_COV_REPORT_206) {
     $quote = if ($env:FAKE_LLVM_COV_SINGLE_QUOTES) { [char]39 } else { [char]34 }
-    $command = "$quote$($env:FAKE_LLVM_COV_PATH)$quote export -format=lcov -instr-profile=fake.profdata -object fake-object.exe"
+    $arguments = if ($env:FAKE_LLVM_COV_SINGLE_QUOTES) {
+        "'-format=lcov' '-instr-profile=fake.profdata' '-object' 'fake-object.exe'"
+    } else {
+        '-format=lcov -instr-profile=fake.profdata -object fake-object.exe'
+    }
+    $command = "$quote$($env:FAKE_LLVM_COV_PATH)$quote export $arguments"
     if ($env:FAKE_LLVM_COV_MULTILINE) {
         $command = $command.Replace(' -object', "`n-object")
     }
@@ -2400,7 +2405,10 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
          Add-Content -LiteralPath $env:FAKE_LLVM_COV_LOG -Value ($Remaining -join ' ')\n\
          $response = $Remaining | Where-Object { $_.StartsWith('@') } | Select-Object -First 1\n\
          if (-not $response) { exit 2 }\n\
-         Add-Content -LiteralPath $env:FAKE_LLVM_COV_RESPONSE_LOG -Value (Get-Content -LiteralPath $response.Substring(1) -Raw)\n\
+         $responseContent = Get-Content -LiteralPath $response.Substring(1) -Raw\n\
+         if ($responseContent -match \"'\") { exit 3 }\n\
+         if ($responseContent -notmatch '-instr-profile=fake.profdata') { exit 4 }\n\
+         Add-Content -LiteralPath $env:FAKE_LLVM_COV_RESPONSE_LOG -Value $responseContent\n\
          Write-Output 'TN:'\n\
          if ($env:FAKE_LLVM_COV_EXIT) { exit [int]$env:FAKE_LLVM_COV_EXIT }\n\
          exit 0\n",
@@ -2430,7 +2438,11 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
     assert_eq!(invocations.lines().count(), 2, "invocations:\n{invocations}");
     assert_eq!(invocations.matches("export @").count(), 2, "invocations:\n{invocations}");
     let responses = fs::read_to_string(&response_log).unwrap();
-    assert_eq!(responses.matches("-object fake-object.exe").count(), 2, "responses:\n{responses}");
+    assert_eq!(
+        responses.matches("\"-object\" \"fake-object.exe\"").count(),
+        2,
+        "responses:\n{responses}"
+    );
     for config in ["all-features", "no-default"] {
         let report = tmp.path().join(format!("target/coverage/lcov-{config}.info"));
         assert_eq!(fs::read_to_string(report).unwrap().trim(), "TN:");
