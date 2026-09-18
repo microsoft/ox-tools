@@ -77,7 +77,9 @@ therefore covers the complete descendant tree.
   kill is transferred to a shared detached reaper rather than handed to an
   indefinite `wait` or Drop path. The reaper polls all retained leaders so one
   survivor cannot block collection of the others, remains alive while its queue
-  is empty, and accepts each handle only after its thread is known to exist.
+  is empty, and accepts each handle only after its thread is known to exist. A
+  handoff rechecks that state under the queue lock and retries startup if a
+  previous loop exited between the readiness check and transfer.
   Callers handing over children created outside `PreparedCommand` can preflight
   the same durable thread; if a direct handoff must start it and startup fails,
   the failure returns ownership of the unqueued child. The containment handles
@@ -85,9 +87,13 @@ therefore covers the complete descendant tree.
   the leader follows the same handoff before the observation error is returned,
   because an observation failure does not prove the child was reaped. If the
   detached reaper itself later receives an interrupted observation, it keeps the
-  child queued and retries. Any other observation error emits a warning to stderr
-  and permanently stops tracking that child. The released handle may leave a
-  zombie on Unix until this process exits.
+  child queued and retries. Any other observation error emits a warning to
+  stderr and permanently stops tracking that child. Warning formatting happens
+  while the queue is locked, but the fallible stderr write happens after
+  releasing the lock and its error is discarded. Every loop exit or unwind
+  clears the running state and notifies waiters, allowing a later
+  `ensure_reaper` or `reap_later` call to restart it. The released handle may
+  leave a zombie on Unix until this process exits.
 - Sealed containment uses a boundary that descendants cannot leave. A host that
   offers no sealed boundary at all silently uses best-effort process-group
   containment for an unmetered launch; absence of a warning does not establish

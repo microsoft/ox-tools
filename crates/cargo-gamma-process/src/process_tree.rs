@@ -8,7 +8,7 @@ use core::time::Duration;
 use std::io;
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -45,7 +45,9 @@ static CHILD_REAPER_READY: Condvar = Condvar::new();
 /// Ensures the shared detached child reaper is ready before a child is spawned.
 ///
 /// The reaper is process-wide and remains alive after its queue becomes empty,
-/// sleeping on a condition variable until another child is handed off.
+/// sleeping on a condition variable until another child is handed off. If its
+/// loop exits or unwinds, readiness is cleared and a later call starts a
+/// replacement.
 ///
 /// # Errors
 ///
@@ -97,22 +99,31 @@ pub fn ensure_reaper() -> io::Result<()> {
 /// The reaper polls every retained child rather than blocking on one, so a
 /// leader that survives termination cannot prevent unrelated leaders from
 /// being collected. Interrupted observations are retried. Any other observation
-/// error emits a warning to stderr and permanently stops tracking that child.
-/// On Unix, the child may then remain a zombie until this process exits.
+/// error emits a best-effort warning to stderr outside the global queue lock and
+/// permanently stops tracking that child. Diagnostic write failures are
+/// ignored. On Unix, the child may then remain a zombie until this process
+/// exits. The handoff retries if the previous reaper loop exits while readiness
+/// is being checked.
 ///
 /// # Errors
 ///
 /// Returns [`ReapFailure`] when the shared reaper could not be started. The
 /// failure retains the child handle so the caller can recover ownership.
 pub fn reap_later(child: Child) -> Result<(), ReapFailure> {
-    if let Err(cause) = ensure_reaper() {
-        return Err(ReapFailure { cause, child });
-    }
+    loop {
+        if let Err(cause) = ensure_reaper() {
+            return Err(ReapFailure { cause, child });
+        }
 
-    let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    reaper.children.push(child);
-    CHILD_REAPER_READY.notify_one();
-    Ok(())
+        let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if reaper.running {
+            reaper.children.push(child);
+            CHILD_REAPER_READY.notify_one();
+            return Ok(());
+        }
+        // The previous loop exited between ensure_reaper's observation and
+        // this handoff. Retry so the child is queued only behind a live loop.
+    }
 }
 
 /// A failed detached-reaper handoff that retains ownership of the child.
@@ -149,18 +160,26 @@ impl std::error::Error for ReapFailure {
 }
 
 fn child_reaper_loop() {
-    let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    while reaper.starting {
-        reaper = CHILD_REAPER_READY.wait(reaper).unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut startup = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    while startup.starting {
+        startup = CHILD_REAPER_READY.wait(startup).unwrap_or_else(std::sync::PoisonError::into_inner);
     }
+    drop(startup);
+
+    let _running = ReaperRunningGuard;
+    let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     loop {
         while reaper.children.is_empty() {
             reaper = CHILD_REAPER_READY.wait(reaper).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
 
+        let mut warnings = Vec::new();
         reaper.children.retain_mut(|child| {
             let id = child.id();
-            retain_reaper_child(id, child.try_wait())
+            retain_reaper_child(id, child.try_wait(), &mut warnings)
+        });
+        reaper = report_reaper_warnings(reaper, warnings, |warning| {
+            emit_reaper_warning_to(io::stderr().lock(), warning);
         });
         if reaper.children.is_empty() {
             continue;
@@ -173,16 +192,49 @@ fn child_reaper_loop() {
     }
 }
 
-fn retain_reaper_child(id: u32, observation: io::Result<Option<ExitStatus>>) -> bool {
+struct ReaperRunningGuard;
+
+impl Drop for ReaperRunningGuard {
+    fn drop(&mut self) {
+        let mut reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        reaper.running = false;
+        CHILD_REAPER_READY.notify_all();
+    }
+}
+
+fn retain_reaper_child(id: u32, observation: io::Result<Option<ExitStatus>>, warnings: &mut Vec<String>) -> bool {
     match observation {
         Ok(None) => true,
         Ok(Some(_status)) => false,
         Err(error) if error.kind() == io::ErrorKind::Interrupted => true,
         Err(error) => {
-            eprintln!("warning: detached child reaper stopped tracking process {id} after observation failed: {error}");
+            warnings.push(format!(
+                "warning: detached child reaper stopped tracking process {id} after observation failed: {error}"
+            ));
             false
         }
     }
+}
+
+fn report_reaper_warnings(
+    reaper: MutexGuard<'static, ChildReaper>,
+    warnings: Vec<String>,
+    mut report: impl FnMut(&str),
+) -> MutexGuard<'static, ChildReaper> {
+    let mut warnings = warnings.into_iter();
+    let Some(first) = warnings.next() else {
+        return reaper;
+    };
+    drop(reaper);
+    report(&first);
+    for warning in warnings {
+        report(&warning);
+    }
+    CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn emit_reaper_warning_to(mut destination: impl io::Write, message: &str) {
+    let _ignored = writeln!(destination, "{message}");
 }
 
 #[cfg(test)]
@@ -1840,7 +1892,7 @@ mod tests {
     use core::mem;
     use std::error::Error as _;
     #[cfg(unix)]
-    use std::io::{BufRead as _, Write as _};
+    use std::io::BufRead as _;
     use std::{env, fs};
 
     use camino::Utf8Path;
@@ -1849,6 +1901,21 @@ mod tests {
     use crate::testing;
 
     static REAPER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct FailingDiagnosticWriter {
+        attempted: Arc<AtomicBool>,
+    }
+
+    impl io::Write for FailingDiagnosticWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            self.attempted.store(true, Ordering::Release);
+            Err(io::Error::other("injected diagnostic failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     struct PausedReader {
         reads: usize,
@@ -1910,15 +1977,20 @@ mod tests {
 
     #[test]
     fn detached_reaper_drops_unobservable_children() {
-        assert!(retain_reaper_child(17, Ok(None)));
+        let mut warnings = Vec::new();
+        assert!(retain_reaper_child(17, Ok(None), &mut warnings));
         assert!(retain_reaper_child(
             17,
             Err(io::Error::new(io::ErrorKind::Interrupted, "wait interrupted")),
+            &mut warnings,
         ));
         assert!(!retain_reaper_child(
             17,
             Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid child handle")),
+            &mut warnings,
         ));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("invalid child handle"));
     }
 
     struct FailingReader;
@@ -2668,6 +2740,78 @@ mod tests {
         let after_idle_id = after_idle.id();
         reap_later(after_idle).expect("hand a child to the idle shared reaper");
         wait_for_reaper_to_collect(after_idle_id, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn reaper_diagnostics_release_the_lock_and_an_unwind_can_restart() {
+        isolated_run(
+            "a_reaper_diagnostic_releases_the_lock_and_an_unwind_can_restart",
+            "the reaper restarted after a diagnostic unwind",
+        );
+    }
+
+    #[test]
+    fn a_reaper_diagnostic_releases_the_lock_and_an_unwind_can_restart() {
+        if env::var_os(ISOLATED_CHILD).is_none() {
+            return;
+        }
+
+        let diagnostic_attempted = Arc::new(AtomicBool::new(false));
+        emit_reaper_warning_to(
+            FailingDiagnosticWriter {
+                attempted: Arc::clone(&diagnostic_attempted),
+            },
+            "injected warning",
+        );
+        assert!(
+            diagnostic_attempted.load(Ordering::Acquire),
+            "the fallible diagnostic path did not attempt the stderr write"
+        );
+
+        CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running = true;
+        let (reporting, reported) = std::sync::mpsc::sync_channel(0);
+        let (release, released) = std::sync::mpsc::sync_channel(0);
+        let blocked_reporter = thread::spawn(move || {
+            let _running = ReaperRunningGuard;
+            let reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _reaper = report_reaper_warnings(reaper, vec!["blocked warning".to_owned()], |_warning| {
+                reporting.send(()).expect("the lock probe is waiting");
+                released.recv().expect("the lock probe releases the diagnostic");
+            });
+        });
+        reported
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the diagnostic callback started");
+        assert!(
+            CHILD_REAPER.try_lock().is_ok(),
+            "a blocked diagnostic writer retained the global reaper lock"
+        );
+        release.send(()).expect("release the blocked diagnostic");
+        blocked_reporter.join().expect("the diagnostic reporter exits");
+        assert!(!reaper_running(), "loop exit did not reset the running state");
+
+        CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running = true;
+        let panicked = std::panic::catch_unwind(|| {
+            let _running = ReaperRunningGuard;
+            let reaper = CHILD_REAPER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _reaper = report_reaper_warnings(reaper, vec!["panicking warning".to_owned()], |_warning| {
+                panic!("injected diagnostic panic");
+            });
+        });
+        assert!(panicked.is_err(), "the diagnostic panic was not injected");
+        assert!(!reaper_running(), "diagnostic unwind left the reaper marked running");
+        assert!(
+            CHILD_REAPER.try_lock().is_ok(),
+            "diagnostic unwind left the global reaper lock unavailable"
+        );
+
+        ensure_reaper().expect("a later caller restarts the reaper");
+        let child = spawn_reaper_probe(50);
+        let child_id = child.id();
+        reap_later(child).expect("the restarted reaper accepts a child");
+        wait_for_reaper_to_collect(child_id, Duration::from_secs(2));
+
+        println!("the reaper restarted after a diagnostic unwind");
     }
 
     #[test]

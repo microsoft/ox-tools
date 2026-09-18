@@ -285,7 +285,11 @@ floor. Missing values, a member requiring a newer compiler, or a non-Rust
 semantic version is a configuration error. Lower member minima are valid. This
 matches the meaning of one compiler selected for a complete workspace; it is
 not a per-package toolchain matrix. The validation is lazy: commands that do
-not contain the placeholder do not require a workspace Rust version.
+not contain the placeholder do not require a workspace Rust version, and a
+resolved plan with no invocations does not resolve or validate the value even
+when the template contains the placeholder. Placeholder mode validation still
+runs before that no-op decision, so misuse remains an exit-2 usage error on an
+empty set.
 
 Targets run in package-name order and then target-name order. A target matching
 more than one requested kind runs once. No matching targets is a successful
@@ -315,7 +319,13 @@ no-op.
   block in deterministic plan order. Fail-fast stops launching new work after
   the first observed failure and waits for already-running children;
   `--keep-going` launches the complete plan. The final failure is chosen by
-  plan order, not scheduler timing. A worker panic is converted into an
+  plan order, not scheduler timing. Requested parallelism does not by itself
+  select this captured mode: when plan-size or process-capacity capping leaves
+  an effective worker count of one, cargo-each uses the sequential path and the
+  child inherits stdin, stdout, and stderr. With a genuinely parallel effective
+  worker count, child stdin is disconnected (`null`) so workers cannot race to
+  consume the caller's input; stdout and stderr are captured for deterministic
+  emission. A worker panic is converted into an
   infrastructure-failure outcome; each worker has a dedicated completion
   channel, so an unexpected exit is observable as disconnection rather than
   leaving the scheduler blocked forever. A worker-thread launch failure is
@@ -337,9 +347,13 @@ no-op.
   EOF. Complete output is preserved when both pipes close within that grace.
   If a background or escaped descendant keeps a pipe open, capture stops
   retaining new bytes, cancels and joins the readiness-polling reader within a
-  bounded grace, emits the partial bytes already buffered, and reports an
-  explicit infrastructure failure rather than hanging, silently truncating, or
-  accumulating detached reader threads.
+  bounded grace, emits the partial bytes already buffered when their capture
+  mutex is immediately available, and reports an explicit infrastructure
+  failure rather than hanging, silently succeeding, or accumulating detached
+  reader threads. If cancellation expires while a reader is stalled inside a
+  spill operation with that mutex held, cargo-each detaches the reader and uses
+  a nonblocking acquisition; unavailable partial bytes are reported explicitly
+  instead of defeating the drain bound.
 - **Timeouts terminate trees.** A timed-out command is a failure. cargo-each
   terminates the child process tree rather than only the immediate process, so
   compiler or test descendants cannot continue mutating the target directory

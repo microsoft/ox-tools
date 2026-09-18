@@ -75,6 +75,28 @@ pub(crate) struct BuildOptions<'a> {
 }
 
 impl Plan {
+    /// Validate plan-wide configuration and report whether it produces no
+    /// invocations without expanding placeholders.
+    ///
+    /// This lets callers preserve usage validation while deferring lazy
+    /// workspace-scoped values until the resolved selection is known to
+    /// produce work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EachError`] under the same invalid `chdir` and placeholder
+    /// combinations as [`Self::build`].
+    pub(crate) fn is_empty(members: &[&Member], command: &[String], options: BuildOptions<'_>) -> Result<bool, EachError> {
+        validate_build(command, options)?;
+        Ok(match options.mode {
+            Mode::PerPackage | Mode::Once => members.is_empty(),
+            Mode::PerTarget => !members
+                .iter()
+                .flat_map(|member| &member.targets)
+                .any(|target| target_matches(target, options.target_kinds, options.target_required_features)),
+        })
+    }
+
     /// Build the plan.
     ///
     /// `chdir` runs each per-package or per-target invocation from the member's
@@ -93,6 +115,10 @@ impl Plan {
     /// Returns [`EachError`] if `chdir` is combined with [`Mode::Once`], or if
     /// a placeholder in `command` is used in the wrong mode.
     pub(crate) fn build(members: &[&Member], command: &[String], options: BuildOptions<'_>) -> Result<Self, EachError> {
+        if Self::is_empty(members, command, options)? {
+            return Ok(Self { invocations: Vec::new() });
+        }
+
         let BuildOptions {
             mode,
             chdir,
@@ -101,17 +127,6 @@ impl Plan {
             target_required_features,
             workspace_rust_version,
         } = options;
-        if chdir && mode == Mode::Once {
-            return Err(ChdirConflictsWithOnceError::new().into());
-        }
-        // Validate placeholder/mode consistency up front — before the
-        // empty-set short-circuit — so a misused template (e.g. `{name}` under
-        // `--once`) is a usage error even when the selection resolves to no
-        // members, rather than silently passing until some tier is non-empty.
-        validate_placeholders(command, mode)?;
-        if members.is_empty() {
-            return Ok(Self { invocations: Vec::new() });
-        }
 
         let invocations = match mode {
             Mode::PerPackage => members
@@ -137,12 +152,7 @@ impl Plan {
                     member
                         .targets
                         .iter()
-                        .filter(|target| {
-                            target.kinds.iter().any(|kind| target_kinds.contains(kind))
-                                && target_required_features
-                                    .iter()
-                                    .all(|feature| target.required_features.contains(feature))
-                        })
+                        .filter(|target| target_matches(target, target_kinds, target_required_features))
                         .map(|target| {
                             let placeholders = Placeholders::Target {
                                 name: member.name.clone(),
@@ -176,6 +186,26 @@ impl Plan {
 
         Ok(Self { invocations })
     }
+}
+
+fn validate_build(command: &[String], options: BuildOptions<'_>) -> Result<(), EachError> {
+    if options.chdir && options.mode == Mode::Once {
+        return Err(ChdirConflictsWithOnceError::new().into());
+    }
+    // Validate placeholder/mode consistency before any empty-set short-circuit
+    // so an invalid template never depends on whether a computed tier has work.
+    validate_placeholders(command, options.mode)
+}
+
+fn target_matches(
+    target: &crate::workspace::MemberTarget,
+    target_kinds: &BTreeSet<TargetKind>,
+    target_required_features: &BTreeSet<String>,
+) -> bool {
+    target.kinds.iter().any(|kind| target_kinds.contains(kind))
+        && target_required_features
+            .iter()
+            .all(|feature| target.required_features.contains(feature))
 }
 
 /// The `{packages}` expansion: `--workspace` for the whole workspace, else an

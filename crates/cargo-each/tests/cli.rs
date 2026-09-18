@@ -166,7 +166,7 @@ fn compile_execution_probe(directory: &Path) -> PathBuf {
         r#"
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::process::{self, Command};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -234,6 +234,11 @@ fn main() {
             writeln!(stderr, "{name}:stderr").expect("write stderr header");
             stderr.write_all(&vec![stderr_byte; size]).expect("write large stderr");
             process::exit(if name == "alpha" { 7 } else { 0 });
+        }
+        "stdin" => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input).expect("read stdin");
+            println!("{}:stdin:{input}", args[2]);
         }
         "timeout-fail-fast" => {
             if args[2] == "alpha" {
@@ -431,7 +436,7 @@ fn present_empty_package_file_is_an_explicit_empty_selection() {
     each(&manifest)
         .arg("--package-file")
         .arg(packages)
-        .args(["--dry-run", "--", "echo", "{name}"])
+        .args(["--dry-run", "--", "echo", "{name}:{workspace-rust-version}"])
         .assert()
         .success()
         .stdout(predicate::str::is_empty())
@@ -530,9 +535,38 @@ fn package_file_input_errors_fail_loudly() {
 fn none_is_a_successful_noop() {
     let (_tmp, manifest) = fixture();
     each(&manifest)
-        .args(["--none", "--once", "--dry-run", "--", "cargo", "test", "{packages}"])
+        .args([
+            "--none",
+            "--once",
+            "--dry-run",
+            "--",
+            "cargo",
+            "test",
+            "{packages}",
+            "{workspace-rust-version}",
+        ])
         .assert()
         .success()
+        .stderr(predicate::str::contains("nothing to do"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn empty_filtered_selection_skips_workspace_rust_version_resolution() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--filter",
+            "metadata:does-not-exist",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}:{workspace-rust-version}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("nothing to do"));
 }
 
@@ -543,7 +577,7 @@ fn none_with_misused_placeholder_is_a_usage_error() {
     // usage error (exit 2), not a silent no-op.
     let (_tmp, manifest) = fixture();
     each(&manifest)
-        .args(["--none", "--once", "--dry-run", "--", "echo", "{name}"])
+        .args(["--none", "--once", "--dry-run", "--", "echo", "{name}", "{workspace-rust-version}"])
         .assert()
         .failure()
         .code(2)
@@ -1373,6 +1407,40 @@ fn default_jobs_runs_one_invocation_at_a_time() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn requested_parallelism_with_one_invocation_preserves_inherited_stdin() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    each(&manifest)
+        .args(["-p", "alpha", "--jobs", "2", "--"])
+        .arg(probe)
+        .args(["stdin", "{name}"])
+        .write_stdin("inherited-input")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("alpha:stdin:inherited-input"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn genuinely_parallel_children_receive_null_stdin() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    each(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--jobs", "2", "--"])
+        .arg(probe)
+        .args(["stdin", "{name}"])
+        .write_stdin("must-not-reach-children")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("alpha:stdin:\n")
+                .and(predicate::str::contains("beta:stdin:\n"))
+                .and(predicate::str::contains("must-not-reach-children").not()),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn parallel_output_is_buffered_in_plan_order() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
@@ -1509,7 +1577,7 @@ fn parallel_open_descendant_pipe_returns_after_bounded_drain() {
         .arg("each")
         .arg("--manifest-path")
         .arg(&manifest)
-        .args(["-p", "alpha", "--jobs", "2", "--"])
+        .args(["-p", "alpha", "-p", "beta", "--jobs", "2", "--"])
         .arg(probe)
         .arg("stubborn-background-parent")
         .arg(&marker);

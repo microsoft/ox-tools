@@ -115,13 +115,16 @@
 //! member) is a **successful no-op**: `cargo-each` prints a one-line note and
 //! exits 0. This is what lets callers drop bespoke nothing-to-do guards.
 //! Workspace Rust-version validation is lazy: it runs only when the command
-//! uses `{workspace-rust-version}`, then requires every member's resolved
-//! minimum to be present and no newer than the root floor.
+//! uses `{workspace-rust-version}` and the resolved plan has work, then requires
+//! every member's resolved minimum to be present and no newer than the root
+//! floor. Placeholder mode validation still runs before an empty-plan no-op.
 //!
-//! With `--jobs > 1`, including when `auto` resolves above one, the effective
-//! worker count is capped by the plan size and scheduler capacity. Each
-//! invocation's output is buffered and complete blocks are emitted in
-//! deterministic plan order. Fail-fast stops launching after the first
+//! The effective worker count is the requested `--jobs` value capped by plan
+//! size and scheduler capacity. An effective count of one uses sequential
+//! execution with inherited stdin, stdout, and stderr even when the requested
+//! value was larger. A genuinely parallel count disconnects child stdin and
+//! buffers stdout and stderr; complete blocks are emitted in deterministic
+//! plan order. Fail-fast stops launching after the first
 //! observed failure, waits for running work, and chooses the final failure by
 //! plan order. `--keep-going` runs the complete plan. Worker panics and
 //! unexpected worker-channel disconnections become infrastructure-failure
@@ -136,7 +139,10 @@
 //! Reader failures are observed while the child is running and trigger bounded
 //! termination. Output drain is bounded after every completion: readers get
 //! one second to observe EOF, then readiness-polling capture is cancelled and
-//! joined while partial bytes become an explicit infrastructure failure.
+//! joined while partial bytes become an explicit infrastructure failure. If a
+//! cancelled reader remains stalled while holding its capture mutex, output
+//! recovery is nonblocking and any unavailable partial bytes are reported
+//! rather than extending the drain bound.
 //! Timed-out tree termination likewise gets a bounded 250 ms leader-reap grace,
 //! after which the leader handle moves to a shared detached reaper so no wait
 //! or Drop path can defeat the timeout without abandoning reap ownership.

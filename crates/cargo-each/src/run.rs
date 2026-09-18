@@ -10,7 +10,7 @@ use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe, UnwindSafe};
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, TryLockError, mpsc};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
@@ -23,7 +23,7 @@ use crate::error::{InvalidTargetKindError, JobsConflictWithOnceError};
 use crate::filter::Predicate;
 use crate::plan::{BuildOptions, Invocation, Mode, PackagesExpansion, Plan};
 use crate::select::Selection;
-use crate::substitute::{uses_workspace_rust_version, validate_placeholders};
+use crate::substitute::uses_workspace_rust_version;
 use crate::workspace::{Member, Workspace};
 
 #[cfg(test)]
@@ -64,9 +64,19 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         return Err(JobsConflictWithOnceError::new()).into_app_err("invalid execution configuration");
     }
 
-    // Validate mode-specific tokens before resolving the lazy workspace token
-    // so a malformed command reports its direct usage error first.
-    validate_placeholders(&args.command, mode).into_app_err("failed to build command plan")?;
+    let mut build_options = BuildOptions {
+        mode,
+        chdir: args.chdir,
+        packages,
+        target_kinds: &target_kinds,
+        target_required_features: &target_required_features,
+        workspace_rust_version: None,
+    };
+    if Plan::is_empty(&members, &args.command, build_options).into_app_err("failed to build command plan")? {
+        eprintln!("cargo each: selection resolved to no work; nothing to do");
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let workspace_rust_version = if uses_workspace_rust_version(&args.command) {
         Some(
             workspace
@@ -76,25 +86,9 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     } else {
         None
     };
+    build_options.workspace_rust_version = workspace_rust_version.as_deref();
 
-    let plan = Plan::build(
-        &members,
-        &args.command,
-        BuildOptions {
-            mode,
-            chdir: args.chdir,
-            packages,
-            target_kinds: &target_kinds,
-            target_required_features: &target_required_features,
-            workspace_rust_version: workspace_rust_version.as_deref(),
-        },
-    )
-    .into_app_err("failed to build command plan")?;
-
-    if plan.invocations.is_empty() {
-        eprintln!("cargo each: selection resolved to no work; nothing to do");
-        return Ok(ExitCode::SUCCESS);
-    }
+    let plan = Plan::build(&members, &args.command, build_options).into_app_err("failed to build command plan")?;
 
     if args.dry_run {
         for inv in &plan.invocations {
@@ -103,6 +97,7 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
                 None => println!("{}", shell_join(&inv.argv)),
             }
         }
+
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -146,11 +141,17 @@ fn parse_target_kinds(kinds: &[String]) -> Result<BTreeSet<TargetKind>, AppError
 }
 
 fn execute(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: Option<Duration>) -> Result<ExitCode, AppError> {
-    if jobs.get() == 1 {
+    let worker_count = effective_worker_count(jobs, plan.invocations.len(), cargo_gamma_process::capacity());
+    if worker_count.get() == 1 {
         Ok(execute_sequential(plan, keep_going, timeout))
     } else {
-        execute_parallel(plan, keep_going, jobs, timeout)
+        execute_parallel(plan, keep_going, worker_count, timeout)
     }
+}
+
+fn effective_worker_count(requested: NonZeroUsize, plan_size: usize, process_capacity: usize) -> NonZeroUsize {
+    NonZeroUsize::new(requested.get().min(plan_size).min(process_capacity.max(1)))
+        .expect("execution receives a nonempty plan and process capacity is clamped to at least one")
 }
 
 fn execute_sequential(plan: &Plan, keep_going: bool, timeout: Option<Duration>) -> ExitCode {
@@ -200,16 +201,15 @@ fn execute_sequential_with(
     if any_failed { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
-fn execute_parallel(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: Option<Duration>) -> Result<ExitCode, AppError> {
+fn execute_parallel(plan: &Plan, keep_going: bool, worker_count: NonZeroUsize, timeout: Option<Duration>) -> Result<ExitCode, AppError> {
     let invocations = plan.invocations.clone();
-    let worker_count = jobs.get().min(invocations.len()).min(cargo_gamma_process::capacity().max(1));
     let mut pending: VecDeque<(usize, Invocation)> = invocations.iter().cloned().enumerate().collect();
-    let mut workers = Vec::with_capacity(worker_count);
+    let mut workers = Vec::with_capacity(worker_count.get());
     let mut outcomes = Vec::with_capacity(invocations.len());
     let mut stop_launching = false;
 
     loop {
-        while !stop_launching && workers.len() < worker_count {
+        while !stop_launching && workers.len() < worker_count.get() {
             let Some((index, invocation)) = pending.pop_front() else {
                 break;
             };
@@ -1033,22 +1033,46 @@ fn finish_output_reader(mut reader: OutputReader, stream: &str, grace: Duration,
         drop(reader.thread);
     }
 
-    match reader.output.lock() {
-        Ok(mut captured) => CapturedStream {
-            output: std::mem::replace(&mut *captured, CapturedOutput::empty()),
-            failure,
-        },
-        Err(poisoned) => {
-            let mut captured = poisoned.into_inner();
-            CapturedStream {
-                output: std::mem::replace(&mut *captured, CapturedOutput::empty()),
-                failure: Some(match failure {
-                    Some(failure) => format!("{failure}; child {stream} capture buffer was poisoned"),
-                    None => format!("child {stream} capture buffer was poisoned"),
-                }),
+    let output = take_reader_output(&reader.output, stream, thread_finished, &mut failure);
+    CapturedStream { output, failure }
+}
+
+fn take_reader_output(output: &Mutex<CapturedOutput>, stream: &str, thread_finished: bool, failure: &mut Option<String>) -> CapturedOutput {
+    let mut captured = if thread_finished {
+        match output.lock() {
+            Ok(captured) => captured,
+            Err(poisoned) => {
+                append_failure(failure, format!("child {stream} capture buffer was poisoned"));
+                poisoned.into_inner()
             }
         }
-    }
+    } else {
+        match output.try_lock() {
+            Ok(captured) => captured,
+            Err(TryLockError::Poisoned(poisoned)) => {
+                append_failure(failure, format!("child {stream} capture buffer was poisoned"));
+                poisoned.into_inner()
+            }
+            Err(TryLockError::WouldBlock) => {
+                append_failure(
+                    failure,
+                    format!(
+                        "child {stream} capture buffer remained locked after reader cancellation; \
+                         partial output could not be recovered without exceeding the drain bound"
+                    ),
+                );
+                return CapturedOutput::empty();
+            }
+        }
+    };
+    std::mem::replace(&mut *captured, CapturedOutput::empty())
+}
+
+fn append_failure(failure: &mut Option<String>, additional: String) {
+    *failure = Some(match failure.take() {
+        Some(failure) => format!("{failure}; {additional}"),
+        None => additional,
+    });
 }
 
 fn reader_failure(completion: &ReaderCompletion, stream: &str, grace: Duration, boundary: &str) -> Option<String> {
@@ -1358,18 +1382,18 @@ mod tests {
     use std::process::{Command, ExitCode, ExitStatus, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use std::{io, thread};
 
     use super::{
         BufferedOutcome, CapturedOutput, CapturedProcess, CapturedStream, Invocation, InvocationResult, OutputEmitError, OutputReader,
         Plan, ReaderCompletion, RunningWorker, SpillFile, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
-        combine_captured_output, display_duration, emit_buffered, emit_buffered_to, execute_parallel, exit_byte, failure_stops_launching,
-        finish_ordinary_termination_with, finish_ordinary_wait_with, finish_output_reader, finish_wait_with_cleanup, panic_description,
-        parallel_failure_exit_code, run_captured, run_captured_with_spawner, run_streamed, run_streamed_with_timeout,
-        run_streamed_with_timeout_with, spawn_if_sealed, spawn_output_reader, spawn_output_reader_with, spawn_tree, spawn_worker,
-        terminate_ordinary_child, terminate_ordinary_with, wait_for_captured_process, wait_for_tree, wait_for_tree_with,
-        wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
+        combine_captured_output, display_duration, effective_worker_count, emit_buffered, emit_buffered_to, execute_parallel, exit_byte,
+        failure_stops_launching, finish_ordinary_termination_with, finish_ordinary_wait_with, finish_output_reader,
+        finish_wait_with_cleanup, panic_description, parallel_failure_exit_code, run_captured, run_captured_with_spawner, run_streamed,
+        run_streamed_with_timeout, run_streamed_with_timeout_with, spawn_if_sealed, spawn_output_reader, spawn_output_reader_with,
+        spawn_tree, spawn_worker, terminate_ordinary_child, terminate_ordinary_with, wait_for_captured_process, wait_for_tree,
+        wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
     };
 
     const ORDINARY_BOUNDARY: &str = "ordinary process tree";
@@ -1392,6 +1416,29 @@ mod tests {
 
     struct PendingPipe {
         dropped: Option<mpsc::Sender<()>>,
+    }
+
+    struct DropSignalReader {
+        bytes: Option<&'static [u8]>,
+        dropped: Option<mpsc::Sender<()>>,
+    }
+
+    impl io::Read for DropSignalReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let Some(bytes) = self.bytes.take() else {
+                return Ok(0);
+            };
+            buf[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    impl Drop for DropSignalReader {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.dropped.take() {
+                let _receiver_gone = dropped.send(());
+            }
+        }
     }
 
     impl io::Read for PendingPipe {
@@ -1725,6 +1772,17 @@ mod tests {
     }
 
     #[test]
+    fn effective_worker_count_caps_requested_parallelism() {
+        let four = NonZeroUsize::new(4).expect("literal four is nonzero");
+        assert_eq!(effective_worker_count(four, 1, 8), NonZeroUsize::MIN);
+        assert_eq!(
+            effective_worker_count(four, 8, 2),
+            NonZeroUsize::new(2).expect("literal two is nonzero")
+        );
+        assert_eq!(effective_worker_count(four, 8, 0), NonZeroUsize::MIN);
+    }
+
+    #[test]
     fn sequential_timeout_policy_distinguishes_fail_fast_from_keep_going() {
         let plan = Plan {
             invocations: vec![invocation(&["first"]), invocation(&["second"])],
@@ -1972,6 +2030,53 @@ mod tests {
         let failure = captured.failure.expect("failed cancellation must be reported");
         assert!(failure.contains("reader did not stop"), "{failure}");
         assert!(!failure.contains("remained open"), "{failure}");
+    }
+
+    #[test]
+    fn cancellation_does_not_wait_for_a_reader_holding_the_capture_mutex() {
+        let (factory_started, factory_is_started) = mpsc::sync_channel(0);
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let factory_release = Arc::clone(&release);
+        let (reader_dropped, reader_is_dropped) = mpsc::channel();
+        let reader = spawn_output_reader_with(
+            DropSignalReader {
+                bytes: Some(b"stalled append"),
+                dropped: Some(reader_dropped),
+            },
+            "stalled-append-reader",
+            0,
+            Box::new(move || {
+                factory_started.send(()).expect("the finisher waits for the stalled append");
+                let (lock, condition) = &*factory_release;
+                let mut released = lock.lock().expect("the test owns the release mutex without panicking");
+                while !*released {
+                    released = condition.wait(released).expect("the test owns the release mutex without panicking");
+                }
+                Ok(Box::new(io::Cursor::new(Vec::new())) as Box<dyn SpillFile>)
+            }),
+        )
+        .expect("create stalled append reader");
+        factory_is_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the reader entered spill creation while holding the capture mutex");
+
+        let started = Instant::now();
+        let mut captured = finish_output_reader(reader, "stdout", Duration::ZERO, ORDINARY_BOUNDARY);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "capture cleanup blocked on the stalled output mutex"
+        );
+        assert!(output_bytes(&mut captured.output).is_empty());
+        let failure = captured.failure.expect("the unavailable partial output must be explicit");
+        assert!(failure.contains("reader did not stop"), "{failure}");
+        assert!(failure.contains("capture buffer remained locked"), "{failure}");
+
+        let (lock, condition) = &*release;
+        *lock.lock().expect("the test owns the release mutex without panicking") = true;
+        condition.notify_all();
+        reader_is_dropped
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the cancelled detached reader exits after the stalled append is released");
     }
 
     #[test]

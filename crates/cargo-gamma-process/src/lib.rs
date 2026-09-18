@@ -66,6 +66,10 @@
 //! [`Command::output`](std::process::Command::output). It drains stdout and stderr concurrently,
 //! then sweeps descendants before waiting for inherited pipe handles to close.
 //!
+//! Bounded termination can transfer a still-running leader to a shared detached reaper. The reaper
+//! writes observation warnings outside its global queue lock through a fallible stderr path, and
+//! any loop exit or unwind clears readiness state so a later handoff can start a replacement.
+//!
 //! A terminal delivers `Ctrl-C` to the whole foreground process group, so a child sharing this
 //! process's group dies with it automatically while a child leading its own group does not. Windows
 //! normally preserves that guarantee through a dedicated job that dies with its last handle. Unix
