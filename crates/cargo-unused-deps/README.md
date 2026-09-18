@@ -13,70 +13,93 @@
 
 </div>
 
-A Cargo subcommand that reports uninherited workspace dependencies.
+A Cargo subcommand that finds unused dependencies.
 
-A workspace root declares a dependency catalog that members draw from with
-`dep = { workspace = true }`. Nothing requires an entry to be drawn from, so
-an entry nobody inherits stays in the manifest forever: it never enters the
-dependency graph, and no build fails because of it. It still carries a
-version requirement, so it keeps attracting dependency-bump traffic and keeps
-misleading readers about what the workspace depends on.
+It answers three questions that usually take two other tools and still leave
+a gap:
 
-Unused-dependency tools resolve the crate graph and ask which *declared*
-dependencies go unused, so an entry that no member declares is invisible to
-them. This tool answers the prior question – is the entry inherited at all?
-– from the manifests alone, which makes it free of false positives and cheap
-enough to run on every pull request.
+* **Catalog.** Which `[workspace.dependencies]` entries does no member
+  inherit? Inheritance is written in the manifest, so this needs no compiler
+  and cannot produce a false positive.
+* **Unused.** Which declared dependencies did no compiled unit load?
+* **Misplaced.** Which `[dependencies]` entries only development units load,
+  and therefore belong in `[dev-dependencies]`?
+
+The last two are answered by rustc itself, through the
+`unused_crate_dependencies` lint, aggregated across every unit of a package:
+a dependency is unused only when every unit that had it in scope said so.
+Doctests are included, which no other tool manages – rustdoc discards the
+compiler’s output for them, so this binary stands in for the compiler rustdoc uses
+and keeps a copy.
+
+## Requirements
+
+Package-level checks require a nightly toolchain because compiling doctests
+without running them is unstable. The catalog-only invocation with no package
+selector is manifest-only and runs on stable.
 
 ## Usage
 
-Run in a Cargo workspace:
+Run every check across a Cargo workspace:
+
+```bash
+cargo +nightly unused-deps --workspace
+```
+
+Restrict the compiled evidence the way cargo does, which is what lets an
+impact-scoped pipeline pass its own package list straight through:
+
+```bash
+cargo +nightly unused-deps --package my-crate --package other-crate
+```
+
+Run only the workspace-global catalog check by omitting package selection:
 
 ```bash
 cargo unused-deps
 ```
 
-Remove what it finds:
+Remove the catalog entries nobody inherits:
 
 ```bash
-cargo unused-deps --fix
+cargo +nightly unused-deps --fix
 ```
 
-`--manifest-path` points at an explicit workspace root manifest, defaulting
-to the `Cargo.toml` in the current directory. A manifest with no
-`[workspace]` table declares no catalog and passes with a note;
-`--require-workspace` turns that into an error for callers that know they
-are pointing at a root manifest.
+`--manifest-path` points at an explicit workspace root, defaulting to the
+`Cargo.toml` in the current directory. A manifest with no `[workspace]` table
+declares no catalog, so that check passes with a note while the rest still
+run; `--require-workspace` turns it into an error instead.
+
+Package selection scopes the compiled evidence only. The catalog check always
+reads every member, because “no member inherits this entry” is only true if
+every member was consulted. With no `--package` or `--workspace`, no package
+is compiled and only that catalog check runs.
 
 ## Configuration
 
-An entry kept on purpose is exempted in the workspace manifest:
+A dependency kept on purpose is exempted in the workspace manifest:
 
 ```toml
 [workspace.metadata.unused-deps]
 allowed = ["kept-on-purpose"]
+
+[package.metadata.unused-deps]
+allowed = ["package-local-side-effect"]
 ```
 
-An `allowed` name that suppresses no unused catalog entry is reported as a
-stale allow-list entry, on stderr, without failing the run.
+A workspace-level `allowed` name declared by neither the catalog nor any
+member is reported as stale without failing the run. The lists are also the
+answer for a dependency linked for its side effects and never named – an
+allocator or `-sys` shim – where “unused” is literally true and
+operationally wrong.
 
 ## Fixing
 
-`--fix` edits only the workspace root manifest, and does so carefully.
-
-The replacement is written to a temporary file in the manifest’s own
-directory and renamed over the original, so the manifest is never truncated
-in place. The rename carries the permissions of the manifest it replaces.
-A symlinked manifest is resolved first, so the rename lands on the file the
-link points at rather than replacing the link.
-
-Before the rename Cargo re-resolves the workspace member set, then the root
-manifest and every original member manifest are re-read and compared against
-the bytes used by detection. A workspace change that arrives while
-`cargo metadata` or manifest scanning runs is therefore detected and the fix
-abandoned. The checks narrow that window rather than closing it: a change
-landing between the comparisons and the rename can still be overwritten or
-invalidated by the catalog change.
+`--fix` covers the catalog only. It replaces the manifest atomically – a
+temporary file in the same directory, renamed over the original, carrying the
+permissions of the manifest it replaces and following a symlinked manifest to
+its target – and refuses to write at all if the file changed after it was
+read, so a concurrent edit is never clobbered.
 
 Comments on a removed entry are carried to the next surviving entry, which
 keeps a group header attached to the group it introduces. A note about one
@@ -85,6 +108,10 @@ is reported on stderr: check that carried text still describes the entry it
 landed on. Comments that cannot be placed – the removal emptied the table,
 or left a trailing survivor with nothing to append to – are reported as
 dropped.
+
+Removing a dependency a crate declares is not automated: the evidence is
+strong enough to fail a build and ask a human, not strong enough to edit code
+paths nobody compiled.
 
 ## Installation
 
@@ -95,12 +122,11 @@ cargo install cargo-unused-deps
 ## Example output
 
 ```text
-❌ Found 2 unused workspace dependencies in Cargo.toml:
+✅ All 70 workspace dependencies in Cargo.toml are inherited by one of 10 members.
+❌ Found 1 dependency problem:
 
-  - once_cell
-  - smallvec
-
-Re-run with --fix to remove what is listed above.
+  my-crate [dependencies] once_cell: no compiled unit loaded it.
+      remove it, or gate the declaration to where it is used.
 ```
 
 

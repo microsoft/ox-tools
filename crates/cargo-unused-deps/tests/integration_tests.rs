@@ -208,9 +208,9 @@ fn honors_the_allow_list_and_reports_stale_entries() {
     let root = concat!(
         "[workspace]\nmembers = [\"member\"]\n\n",
         "[workspace.metadata.unused-deps]\nallowed = [\"kept\", \"stale\"]\n\n",
-        "[workspace.dependencies]\nkept = \"1\"\nstale = \"1\"\n",
+        "[workspace.dependencies]\nkept = \"1\"\n",
     );
-    let dir = workspace(root, &[("member", "[dependencies]\nstale = { workspace = true }\n")]);
+    let dir = workspace(root, &[("member", "")]);
     let manifest = dir.path().join("Cargo.toml");
 
     let (success, stdout, stderr) = outcome(&run(&manifest, &[]));
@@ -218,7 +218,7 @@ fn honors_the_allow_list_and_reports_stale_entries() {
     assert!(success, "an allowed entry does not fail the run: {stderr}");
     assert!(stdout.contains("explicitly allowed"), "unexpected stdout: {stdout}");
     assert!(
-        stderr.contains("'stale' is allowed but is inherited or not declared"),
+        stderr.contains("'stale' is allowed but is not declared by the workspace or any member"),
         "unexpected stderr: {stderr}"
     );
     assert!(

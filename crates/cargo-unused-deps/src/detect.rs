@@ -10,7 +10,11 @@ use anyhow::{Context, Result, anyhow};
 use toml_edit::{DocumentMut, Item, TableLike, Value};
 
 /// Dependency tables a member manifest can inherit workspace dependencies from.
-const DEP_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+const DEP_TABLES: [(&str, Section); 3] = [
+    ("dependencies", Section::Normal),
+    ("dev-dependencies", Section::Development),
+    ("build-dependencies", Section::Build),
+];
 
 /// Key under `[workspace.metadata]` holding this tool's configuration.
 const METADATA_KEY: &str = "unused-deps";
@@ -45,6 +49,9 @@ pub struct Inheritance {
     /// Catalog keys inherited by at least one member.
     pub keys: BTreeSet<String>,
 
+    /// Dependency keys declared by at least one member.
+    pub declarations: BTreeSet<String>,
+
     /// Manifest inputs whose contents support that conclusion.
     pub inputs: Vec<ManifestInput>,
 }
@@ -58,15 +65,88 @@ pub struct ManifestInput {
     pub contents: String,
 }
 
+/// Which manifest table declared a dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    /// `[dependencies]`, including its `[target.'cfg(…)']` forms.
+    Normal,
+
+    /// `[dev-dependencies]`, including its `[target.'cfg(…)']` forms.
+    Development,
+
+    /// `[build-dependencies]`, including its `[target.'cfg(…)']` forms.
+    Build,
+}
+
+/// One dependency a member declares.
+#[derive(Debug, Clone)]
+pub struct Declared {
+    /// The declaration's key, as written.
+    pub name: String,
+
+    /// Where it was declared.
+    pub section: Section,
+
+    /// Target-table predicate, or none for an unconditional declaration.
+    pub target: Option<String>,
+}
+
+impl Declared {
+    /// The name rustc uses for the crate, which is the key with hyphens
+    /// replaced. Diagnostics are matched on this form.
+    pub fn extern_name(&self) -> String {
+        self.name.replace('-', "_")
+    }
+}
+
+/// Every dependency a member manifest declares, in every section and target table.
+pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
+    let mut declared = Vec::new();
+
+    for (table, section) in DEP_TABLES {
+        if let Some(item) = doc.get(table).and_then(Item::as_table_like) {
+            collect_declared(item, section, None, &mut declared);
+        }
+    }
+
+    if let Some(targets) = doc.get("target").and_then(Item::as_table_like) {
+        for (target_name, target) in targets.iter().filter_map(|(name, target)| Some((name, target.as_table_like()?))) {
+            for (table, section) in DEP_TABLES {
+                if let Some(item) = target.get(table).and_then(Item::as_table_like) {
+                    collect_declared(item, section, Some(target_name), &mut declared);
+                }
+            }
+        }
+    }
+
+    declared
+}
+
+/// Record one dependency table's declarations.
+fn collect_declared(table: &dyn TableLike, section: Section, target: Option<&str>, into: &mut Vec<Declared>) {
+    for (key, _) in table.iter() {
+        into.push(Declared {
+            name: key.to_owned(),
+            section,
+            target: target.map(str::to_owned),
+        });
+    }
+}
+
 /// Read a manifest's text.
 pub fn read_manifest_text(path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
+    std::fs::read_to_string(path).context(format!("failed to read {}", path.display()))
 }
 
 /// Parse manifest text that came from `path`.
 pub fn parse_manifest(text: &str, path: &Path) -> Result<DocumentMut> {
-    text.parse::<DocumentMut>()
-        .with_context(|| format!("failed to parse {}", path.display()))
+    text.parse::<DocumentMut>().context(format!("failed to parse {}", path.display()))
+}
+
+/// Read and parse a manifest.
+pub fn read_manifest(path: &Path) -> Result<DocumentMut> {
+    let text = read_manifest_text(path)?;
+    parse_manifest(&text, path)
 }
 
 /// Classify a parsed manifest.
@@ -101,19 +181,36 @@ pub fn catalog(manifest: &DocumentMut) -> Result<Catalog> {
         .and_then(Item::as_table_like)
         .and_then(|config| config.get("allowed"));
 
+    let allowed = allowed_names(configured, &format!("workspace.metadata.{METADATA_KEY}"))?;
+
+    Ok(Catalog::Workspace(WorkspaceCatalog { declared, allowed }))
+}
+
+/// Read package-local source-finding suppressions.
+pub fn package_allowed(manifest: &DocumentMut) -> Result<BTreeSet<String>> {
+    let configured = manifest
+        .get("package")
+        .and_then(Item::as_table_like)
+        .and_then(|package| package.get("metadata"))
+        .and_then(Item::as_table_like)
+        .and_then(|metadata| metadata.get(METADATA_KEY))
+        .and_then(Item::as_table_like)
+        .and_then(|config| config.get("allowed"));
+
+    allowed_names(configured, &format!("package.metadata.{METADATA_KEY}"))
+}
+
+/// Parse one metadata scope's allowed dependency names.
+fn allowed_names(configured: Option<&Item>, scope: &str) -> Result<BTreeSet<String>> {
     let mut allowed = BTreeSet::new();
-    for value in array_of(configured, "allowed")? {
-        let name = value.as_str().ok_or_else(|| {
-            anyhow!(
-                "[workspace.metadata.{METADATA_KEY}] allowed must contain only strings, found {}",
-                value.type_name()
-            )
-        })?;
+    for value in array_of(configured, scope, "allowed")? {
+        let name = value
+            .as_str()
+            .ok_or_else(|| anyhow!("[{scope}] allowed must contain only strings, found {}", value.type_name()))?;
 
         allowed.insert(name.to_owned());
     }
-
-    Ok(Catalog::Workspace(WorkspaceCatalog { declared, allowed }))
+    Ok(allowed)
 }
 
 /// The values of a configured array, or none when the key is absent.
@@ -121,15 +218,13 @@ pub fn catalog(manifest: &DocumentMut) -> Result<Catalog> {
 /// A present value of any other type is an error rather than a silent empty
 /// list: a mis-typed key that behaves like an absent one is indistinguishable
 /// from configuration that does not work.
-fn array_of<'a>(configured: Option<&'a Item>, key: &str) -> Result<impl Iterator<Item = &'a Value>> {
+fn array_of<'a>(configured: Option<&'a Item>, scope: &str, key: &str) -> Result<impl Iterator<Item = &'a Value>> {
     let array = match configured {
         None => None,
-        Some(item) => Some(item.as_array().ok_or_else(|| {
-            anyhow!(
-                "[workspace.metadata.{METADATA_KEY}] {key} must be an array, found {}",
-                item.type_name()
-            )
-        })?),
+        Some(item) => Some(
+            item.as_array()
+                .ok_or_else(|| anyhow!("[{scope}] {key} must be an array, found {}", item.type_name()))?,
+        ),
     };
 
     Ok(array.into_iter().flatten())
@@ -142,24 +237,30 @@ fn array_of<'a>(configured: Option<&'a Item>, key: &str) -> Result<impl Iterator
 /// inheriting nothing, which would turn a read error into false accusations.
 pub fn inherited(members: &[PathBuf]) -> Result<Inheritance> {
     let mut keys = BTreeSet::new();
+    let mut declarations = BTreeSet::new();
     let mut inputs = Vec::with_capacity(members.len());
 
     for member in members {
         let contents = read_manifest_text(member)?;
         let doc = parse_manifest(&contents, member)?;
         collect_inherited(&doc, &mut keys);
+        declarations.extend(declared_dependencies(&doc).into_iter().map(|dependency| dependency.name));
         inputs.push(ManifestInput {
             path: member.clone(),
             contents,
         });
     }
 
-    Ok(Inheritance { keys, inputs })
+    Ok(Inheritance {
+        keys,
+        declarations,
+        inputs,
+    })
 }
 
 /// Record every catalog key a single manifest inherits.
 fn collect_inherited(doc: &DocumentMut, inherited: &mut BTreeSet<String>) {
-    for name in DEP_TABLES {
+    for (name, _) in DEP_TABLES {
         if let Some(table) = doc.get(name).and_then(Item::as_table_like) {
             collect_from_dep_table(table, inherited);
         }
@@ -171,7 +272,7 @@ fn collect_inherited(doc: &DocumentMut, inherited: &mut BTreeSet<String>) {
     };
 
     for target in targets.iter().filter_map(|(_, target)| target.as_table_like()) {
-        for name in DEP_TABLES {
+        for (name, _) in DEP_TABLES {
             if let Some(table) = target.get(name).and_then(Item::as_table_like) {
                 collect_from_dep_table(table, inherited);
             }
@@ -211,10 +312,11 @@ fn inherits_from_workspace(spec: &Item) -> bool {
 /// Split the catalog into unused entries and stale allow-list entries.
 ///
 /// An entry is unused when no member inherits it and the allow-list does not
-/// exempt it; an allow-list entry is stale when it suppresses nothing.
+/// exempt it; an allow-list entry is stale when neither the catalog nor any
+/// member declares its name.
 ///
 /// Declaration order is preserved so the report reads alongside the manifest.
-pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
+pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>, declarations: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
     let uninherited: Vec<String> = catalog
         .declared
         .iter()
@@ -227,7 +329,42 @@ pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>) -> (V
         .filter(|name| !catalog.allowed.contains(name.as_str()))
         .cloned()
         .collect();
-    let stale = catalog.allowed.iter().filter(|name| !uninherited.contains(name)).cloned().collect();
+    let stale = catalog
+        .allowed
+        .iter()
+        .filter(|name| !catalog.declared.contains(name) && !declarations.contains(name.as_str()))
+        .cloned()
+        .collect();
 
     (unused, stale)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Section, declared_dependencies};
+
+    #[test]
+    fn declarations_include_target_specific_sections() {
+        let manifest = r#"
+[dependencies]
+normal = "1"
+
+[target.'cfg(windows)'.dev-dependencies]
+development = "1"
+
+[target.'cfg(unix)'.build-dependencies]
+build = "1"
+"#
+        .parse()
+        .expect("fixture manifest is valid");
+
+        let declared = declared_dependencies(&manifest);
+        assert_eq!(declared.len(), 3);
+        assert_eq!(declared[0].section, Section::Normal);
+        assert_eq!(declared[0].target, None);
+        assert_eq!(declared[1].section, Section::Development);
+        assert_eq!(declared[1].target.as_deref(), Some("cfg(windows)"));
+        assert_eq!(declared[2].section, Section::Build);
+        assert_eq!(declared[2].target.as_deref(), Some("cfg(unix)"));
+    }
 }

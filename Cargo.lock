@@ -439,7 +439,6 @@ dependencies = [
  "cargo-aprz-lib",
  "mimalloc",
  "mutants",
- "ohno",
  "tokio",
 ]
 
@@ -696,11 +695,13 @@ dependencies = [
 
 [[package]]
 name = "cargo-unused-deps"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cargo_metadata",
  "clap",
+ "mutants",
+ "serde_json",
  "tempfile",
  "toml_edit 0.25.13+spec-1.1.0",
 ]

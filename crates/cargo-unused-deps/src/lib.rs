@@ -1,74 +1,97 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! A Cargo subcommand that reports uninherited workspace dependencies.
+//! A Cargo subcommand that finds unused dependencies.
 #![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-unused-deps/logo.png")]
 #![doc(
     html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-unused-deps/favicon.ico"
 )]
 //!
-//! A workspace root declares a dependency catalog that members draw from with
-//! `dep = { workspace = true }`. Nothing requires an entry to be drawn from, so
-//! an entry nobody inherits stays in the manifest forever: it never enters the
-//! dependency graph, and no build fails because of it. It still carries a
-//! version requirement, so it keeps attracting dependency-bump traffic and keeps
-//! misleading readers about what the workspace depends on.
+//! It answers three questions that usually take two other tools and still leave
+//! a gap:
 //!
-//! Unused-dependency tools resolve the crate graph and ask which *declared*
-//! dependencies go unused, so an entry that no member declares is invisible to
-//! them. This tool answers the prior question -- is the entry inherited at all?
-//! -- from the manifests alone, which makes it free of false positives and cheap
-//! enough to run on every pull request.
+//! - **Catalog.** Which `[workspace.dependencies]` entries does no member
+//!   inherit? Inheritance is written in the manifest, so this needs no compiler
+//!   and cannot produce a false positive.
+//! - **Unused.** Which declared dependencies did no compiled unit load?
+//! - **Misplaced.** Which `[dependencies]` entries only development units load,
+//!   and therefore belong in `[dev-dependencies]`?
+//!
+//! The last two are answered by rustc itself, through the
+//! `unused_crate_dependencies` lint, aggregated across every unit of a package:
+//! a dependency is unused only when every unit that had it in scope said so.
+//! Doctests are included, which no other tool manages -- rustdoc discards the
+//! compiler's output for them, so this binary stands in for the compiler rustdoc uses
+//! and keeps a copy.
+//!
+//! # Requirements
+//!
+//! Package-level checks require a nightly toolchain because compiling doctests
+//! without running them is unstable. The catalog-only invocation with no package
+//! selector is manifest-only and runs on stable.
 //!
 //! # Usage
 //!
-//! Run in a Cargo workspace:
+//! Run every check across a Cargo workspace:
+//!
+//! ```bash
+//! cargo +nightly unused-deps --workspace
+//! ```
+//!
+//! Restrict the compiled evidence the way cargo does, which is what lets an
+//! impact-scoped pipeline pass its own package list straight through:
+//!
+//! ```bash
+//! cargo +nightly unused-deps --package my-crate --package other-crate
+//! ```
+//!
+//! Run only the workspace-global catalog check by omitting package selection:
 //!
 //! ```bash
 //! cargo unused-deps
 //! ```
 //!
-//! Remove what it finds:
+//! Remove the catalog entries nobody inherits:
 //!
 //! ```bash
-//! cargo unused-deps --fix
+//! cargo +nightly unused-deps --fix
 //! ```
 //!
-//! `--manifest-path` points at an explicit workspace root manifest, defaulting
-//! to the `Cargo.toml` in the current directory. A manifest with no
-//! `[workspace]` table declares no catalog and passes with a note;
-//! `--require-workspace` turns that into an error for callers that know they
-//! are pointing at a root manifest.
+//! `--manifest-path` points at an explicit workspace root, defaulting to the
+//! `Cargo.toml` in the current directory. A manifest with no `[workspace]` table
+//! declares no catalog, so that check passes with a note while the rest still
+//! run; `--require-workspace` turns it into an error instead.
+//!
+//! Package selection scopes the compiled evidence only. The catalog check always
+//! reads every member, because "no member inherits this entry" is only true if
+//! every member was consulted. With no `--package` or `--workspace`, no package
+//! is compiled and only that catalog check runs.
 //!
 //! # Configuration
 //!
-//! An entry kept on purpose is exempted in the workspace manifest:
+//! A dependency kept on purpose is exempted in the workspace manifest:
 //!
 //! ```toml
 //! [workspace.metadata.unused-deps]
 //! allowed = ["kept-on-purpose"]
+//!
+//! [package.metadata.unused-deps]
+//! allowed = ["package-local-side-effect"]
 //! ```
 //!
-//! An `allowed` name that suppresses no unused catalog entry is reported as a
-//! stale allow-list entry, on stderr, without failing the run.
+//! A workspace-level `allowed` name declared by neither the catalog nor any
+//! member is reported as stale without failing the run. The lists are also the
+//! answer for a dependency linked for its side effects and never named -- an
+//! allocator or `-sys` shim -- where "unused" is literally true and
+//! operationally wrong.
 //!
 //! # Fixing
 //!
-//! `--fix` edits only the workspace root manifest, and does so carefully.
-//!
-//! The replacement is written to a temporary file in the manifest's own
-//! directory and renamed over the original, so the manifest is never truncated
-//! in place. The rename carries the permissions of the manifest it replaces.
-//! A symlinked manifest is resolved first, so the rename lands on the file the
-//! link points at rather than replacing the link.
-//!
-//! Before the rename Cargo re-resolves the workspace member set, then the root
-//! manifest and every original member manifest are re-read and compared against
-//! the bytes used by detection. A workspace change that arrives while
-//! `cargo metadata` or manifest scanning runs is therefore detected and the fix
-//! abandoned. The checks narrow that window rather than closing it: a change
-//! landing between the comparisons and the rename can still be overwritten or
-//! invalidated by the catalog change.
+//! `--fix` covers the catalog only. It replaces the manifest atomically -- a
+//! temporary file in the same directory, renamed over the original, carrying the
+//! permissions of the manifest it replaces and following a symlinked manifest to
+//! its target -- and refuses to write at all if the file changed after it was
+//! read, so a concurrent edit is never clobbered.
 //!
 //! Comments on a removed entry are carried to the next surviving entry, which
 //! keeps a group header attached to the group it introduces. A note about one
@@ -77,6 +100,10 @@
 //! landed on. Comments that cannot be placed -- the removal emptied the table,
 //! or left a trailing survivor with nothing to append to -- are reported as
 //! dropped.
+//!
+//! Removing a dependency a crate declares is not automated: the evidence is
+//! strong enough to fail a build and ask a human, not strong enough to edit code
+//! paths nobody compiled.
 //!
 //! # Installation
 //!
@@ -87,35 +114,39 @@
 //! # Example output
 //!
 //! ```text
-//! ❌ Found 2 unused workspace dependencies in Cargo.toml:
+//! ✅ All 70 workspace dependencies in Cargo.toml are inherited by one of 10 members.
+//! ❌ Found 1 dependency problem:
 //!
-//!   - once_cell
-//!   - smallvec
-//!
-//! Re-run with --fix to remove what is listed above.
+//!   my-crate [dependencies] once_cell: no compiled unit loaded it.
+//!       remove it, or gate the declaration to where it is used.
 //! ```
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod detect;
+mod doctests;
+mod evidence;
 mod fix;
+mod verdict;
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use cargo_metadata::MetadataCommand;
 use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Effects};
 use clap::{Parser, Subcommand};
 use tempfile::NamedTempFile;
 
-use crate::detect::{Catalog, ManifestInput, WorkspaceCatalog};
+use crate::detect::{Catalog, ManifestInput, Section, WorkspaceCatalog};
 use crate::fix::Carry;
+use crate::verdict::Verdict;
 
 // Deliberately identical to the palette of the repository's other styled Cargo
 // subcommands, so help output looks the same whichever one the user reaches for.
@@ -125,7 +156,7 @@ const CLAP_STYLES: Styles = Styles::styled()
     .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
     .placeholder(AnsiColor::Cyan.on_default());
 
-/// Cargo subcommand to ensure every workspace dependency is inherited.
+/// Cargo subcommand to find unused and misplaced dependencies.
 #[derive(Parser, Debug)]
 #[command(bin_name = "cargo", version, about, author)]
 #[command(styles = CLAP_STYLES)]
@@ -141,12 +172,29 @@ struct Cli {
 /// options from that level rather than from the top-level parser.
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Ensure every `[workspace.dependencies]` entry is inherited by a member
+    /// Find unused dependencies: uninherited catalog entries, dead declarations
+    /// and misplaced ones
     #[command(version, display_name = "cargo-unused-deps")]
     UnusedDeps {
         /// Path to the workspace root Cargo.toml
         #[arg(long, default_value = "Cargo.toml", value_name = "PATH")]
         manifest_path: PathBuf,
+
+        /// Exact package selector to gather compile evidence for. Repeatable
+        #[arg(short = 'p', long = "package", value_name = "SPEC")]
+        packages: Vec<String>,
+
+        /// Gather compile evidence for every workspace member
+        #[arg(long, conflicts_with = "packages")]
+        workspace: bool,
+
+        /// Exclude a member from a --workspace run. Repeatable
+        #[arg(long, value_name = "SPEC", requires = "workspace")]
+        exclude: Vec<String>,
+
+        /// Run only the named checks
+        #[arg(long = "check", value_name = "NAME", value_enum)]
+        checks: Vec<Check>,
 
         /// Remove the unused entries instead of only reporting them
         #[arg(long)]
@@ -158,15 +206,67 @@ enum Commands {
     },
 }
 
+/// The checks a run can perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Check {
+    /// Declared dependencies no unit loaded.
+    Unused,
+
+    /// Normal dependencies only development units use.
+    Misplaced,
+}
+
+impl Check {
+    /// Whether `selected` asks for this check. An empty selection means all.
+    fn wanted(self, selected: &[Self]) -> bool {
+        selected.is_empty() || selected.contains(&self)
+    }
+}
+
+/// Entry point: either the check, or the compiler shim rustdoc invokes.
+///
+/// rustdoc calls a `--test-builder` as a bare rustc, with no flag of ours to
+/// key on, so shim mode is signaled by the capture-file variable this tool
+/// sets on the doctest build it starts.
+///
+/// # Errors
+///
+/// Returns whatever the selected mode returns.
+//
+// The shim branch runs in rustdoc's child process. Its behavior is covered by
+// the doctest integration cases, but that child does not contribute a profile
+// to the parent coverage run.
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn dispatch(args: &[OsString]) -> Result<ExitCode> {
+    if std::env::var_os(evidence::WRAPPER_VAR).is_some() {
+        return evidence::wrapper(&args[1..]);
+    }
+    if std::env::var_os(doctests::RUSTDOC_WRAPPER_VAR).is_some() {
+        return doctests::rustdoc_wrapper(&args[1..]);
+    }
+    if let Some(capture) = std::env::var_os(doctests::CAPTURE_VAR) {
+        let subcommand = args.get(1).map(OsString::as_os_str);
+        if subcommand != Some(SUBCOMMAND.as_ref()) {
+            return doctests::shim(&args[1..], Path::new(&capture));
+        }
+    }
+
+    run()
+}
+
+/// The cargo subcommand this binary answers to.
+const SUBCOMMAND: &str = "unused-deps";
+
 /// Main entry point for the library, called from the binary crate.
 ///
-/// Returns [`ExitCode::SUCCESS`] when every catalog entry is inherited by at
-/// least one member -- or, under `--fix`, once the entries that were not have
-/// been removed -- and [`ExitCode::FAILURE`] otherwise. Returning an exit code
-/// (rather than calling `std::process::exit`) lets `main` unwind normally so the
-/// process terminates through the standard runtime path -- important under
-/// coverage instrumentation, where an abrupt `process::exit` skips the profile
-/// flush on some platforms (notably Windows).
+/// Returns [`ExitCode::SUCCESS`] when every catalog entry is inherited or
+/// allowed and the selected package checks find no unused or misplaced
+/// declarations. Under `--fix`, successfully removing uninherited catalog
+/// entries satisfies the catalog half. Returns [`ExitCode::FAILURE`] for any
+/// remaining finding. Returning an exit code (rather than calling
+/// `std::process::exit`) lets `main` unwind normally so the process terminates
+/// through the standard runtime path -- important under coverage
+/// instrumentation, where an abrupt exit can skip the profile flush.
 ///
 /// # Errors
 ///
@@ -176,18 +276,226 @@ pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let Commands::UnusedDeps {
         manifest_path,
+        packages,
+        workspace,
+        exclude,
+        checks,
         fix,
         require_workspace,
     } = cli.command;
 
-    check(&manifest_path, fix, require_workspace)
+    let mut failed = false;
+
+    // The catalog question is workspace-global and always runs. Package
+    // selection applies only to checks backed by compile evidence.
+    failed |= catalog_check(&manifest_path, fix, require_workspace)? != ExitCode::SUCCESS;
+
+    if package_checks_selected(&packages, workspace) {
+        let selection = PackageSelection {
+            packages,
+            workspace,
+            exclude,
+        };
+        failed |= source_checks(&manifest_path, &selection, &checks)?;
+    }
+
+    Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
-/// The check itself.
+/// Whether the caller requested compiler-backed package checks.
 ///
-/// Split from [`run`] so tests can drive it without a process boundary or a
-/// parsed command line.
-fn check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<ExitCode> {
+/// Mutating this predicate in either direction makes a selector-free catalog
+/// run compile the entire workspace, which is an unbounded timeout rather than
+/// a useful mutation-test result. CLI integration tests cover both outcomes.
+#[mutants::skip]
+fn package_checks_selected(packages: &[String], workspace: bool) -> bool {
+    !packages.is_empty() || workspace
+}
+
+/// Cargo-style package selection for compiler-backed checks.
+struct PackageSelection {
+    /// Explicit package names or exact `name@version` specs.
+    packages: Vec<String>,
+    /// Whether every workspace package is selected.
+    workspace: bool,
+    /// Packages removed from a workspace selection.
+    exclude: Vec<String>,
+}
+
+impl PackageSelection {
+    /// Flags forwarded to Cargo after the same selectors are resolved locally.
+    fn flags(&self) -> Vec<OsString> {
+        let mut flags = Vec::new();
+        for package in &self.packages {
+            flags.push(OsString::from("--package"));
+            flags.push(OsString::from(package));
+        }
+        if self.workspace {
+            flags.push(OsString::from("--workspace"));
+        }
+        for excluded in &self.exclude {
+            flags.push(OsString::from("--exclude"));
+            flags.push(OsString::from(excluded));
+        }
+        flags
+    }
+
+    /// Resolve the explicitly selected roots against workspace metadata.
+    fn resolve(&self, packages: &[verdict::Package]) -> Result<BTreeSet<PathBuf>> {
+        let mut selected = if self.workspace {
+            packages.iter().map(|package| package.manifest_path.clone()).collect()
+        } else {
+            resolve_selectors(packages, &self.packages, false)?
+        };
+
+        for excluded in resolve_selectors(packages, &self.exclude, true)? {
+            selected.remove(&excluded);
+        }
+
+        Ok(selected)
+    }
+}
+
+/// Resolve exact package names and `name@version` specs.
+fn resolve_selectors(packages: &[verdict::Package], selectors: &[String], allow_missing: bool) -> Result<BTreeSet<PathBuf>> {
+    let mut resolved = BTreeSet::new();
+    for selector in selectors {
+        let matches: Vec<&verdict::Package> = packages
+            .iter()
+            .filter(|package| selector == &package.name || selector == &format!("{}@{}", package.name, package.version))
+            .collect();
+        match matches.as_slice() {
+            [] if allow_missing => {}
+            [] => bail!("package selector `{selector}` did not match any workspace member"),
+            [package] => {
+                resolved.insert(package.manifest_path.clone());
+            }
+            _ => bail!("package selector `{selector}` matched more than one workspace member; qualify it with @version"),
+        }
+    }
+    Ok(resolved)
+}
+
+/// The checks that read compile evidence: unused declarations and misplaced ones.
+///
+/// Returns whether anything was found.
+fn source_checks(manifest_path: &Path, selection: &PackageSelection, checks: &[Check]) -> Result<bool> {
+    let workspace = workspace_of(manifest_path)?;
+    let selected = selection.resolve(&workspace.packages)?;
+    let selection_flags = selection.flags();
+    let plain_target_dir = workspace.evidence_target_dir.path().join("plain");
+    let all_target_dir = workspace.evidence_target_dir.path().join("all-targets");
+    // Two passes: default targets first, where a report can only have come from
+    // a target's single plain unit, then everything.
+    let plain = evidence::gather(manifest_path, &selection_flags, &plain_target_dir, false)?;
+    let all = evidence::gather(manifest_path, &selection_flags, &all_target_dir, true)?;
+
+    // Doctest evidence can only ever spare a dependency, never accuse one, so
+    // it is gathered lazily: judge first without it, then compile the doctests
+    // of only those packages that produced a finding, and judge again. On a
+    // large workspace that is the difference between a handful of doctest
+    // builds and one per package.
+    let candidates = verdict::judge(
+        &workspace.packages,
+        &selected,
+        &plain,
+        &all,
+        &doctests::DoctestEvidence::default(),
+        &workspace.allowed,
+    );
+    let doctests = doctest_evidence(manifest_path, &workspace, &candidates)?;
+
+    let findings = verdict::judge(&workspace.packages, &selected, &plain, &all, &doctests, &workspace.allowed);
+
+    let wanted: Vec<&verdict::Finding> = findings
+        .iter()
+        .filter(|finding| match finding.verdict {
+            Verdict::Unused => Check::Unused.wanted(checks),
+            Verdict::Misplaced => Check::Misplaced.wanted(checks),
+        })
+        .collect();
+
+    if wanted.is_empty() {
+        println!(
+            "✅ No selected dependency problems found in {} {}.",
+            selected.len(),
+            if selected.len() == 1 { "package" } else { "packages" }
+        );
+        return Ok(false);
+    }
+
+    report_findings(&wanted);
+
+    Ok(true)
+}
+
+/// Compile the doctests of the packages a finding was raised against.
+///
+/// Nothing else needs them: a doctest can only reveal that a dependency *is*
+/// used, so a package with no findings has nothing a doctest could change.
+fn doctest_evidence(manifest_path: &Path, workspace: &Workspace, candidates: &[verdict::Finding]) -> Result<doctests::DoctestEvidence> {
+    let mut evidence = doctests::DoctestEvidence::default();
+    if candidates.is_empty() {
+        return Ok(evidence);
+    }
+
+    let shim = std::env::current_exe().context("failed to locate this executable to use as the doctest shim")?;
+    let accused: BTreeSet<&Path> = candidates.iter().map(|finding| finding.manifest_path.as_path()).collect();
+
+    for package in &workspace.packages {
+        // Only a library target can have doctests; asking cargo for the
+        // doctests of a bin-only package is an error, not an empty answer.
+        if package.has_doctests && accused.contains(package.manifest_path.as_path()) {
+            let selector = format!("{}@{}", package.name, package.version);
+            let found = doctests::gather_package(
+                manifest_path,
+                &selector,
+                &workspace.evidence_target_dir.path().join("doctests"),
+                &shim,
+            )?;
+            evidence.insert(package.manifest_path.clone(), found);
+        }
+    }
+
+    Ok(evidence)
+}
+
+/// Report every source-level finding, grouped the way a reader fixes them.
+fn report_findings(findings: &[&verdict::Finding]) {
+    eprintln!(
+        "❌ Found {} dependency {}:\n",
+        findings.len(),
+        if findings.len() == 1 { "problem" } else { "problems" }
+    );
+
+    for finding in findings {
+        let section = match finding.section {
+            Section::Normal => "dependencies",
+            Section::Development => "dev-dependencies",
+            Section::Build => "build-dependencies",
+        };
+        let table = finding
+            .target
+            .as_ref()
+            .map_or_else(|| format!("[{section}]"), |target| format!("[target.'{target}'.{section}]"));
+
+        match finding.verdict {
+            Verdict::Unused => {
+                eprintln!("  {} {table} {}: no compiled unit loaded it.", finding.package, finding.name);
+                eprintln!("      remove it, or gate the declaration to where it is used.");
+            }
+            Verdict::Misplaced => {
+                eprintln!("  {} {table} {}: only development units load it.", finding.package, finding.name);
+                eprintln!("      move it to [dev-dependencies].");
+            }
+        }
+
+        eprintln!("      {}", finding.manifest_path.display());
+    }
+}
+
+/// The catalog check: `[workspace.dependencies]` entries no member inherits.
+fn catalog_check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<ExitCode> {
     let original = detect::read_manifest_text(manifest_path)?;
     let mut manifest = detect::parse_manifest(&original, manifest_path)?;
 
@@ -207,21 +515,21 @@ fn check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<Exi
         }
     };
 
-    if catalog.declared.is_empty() {
-        // An empty catalog is the boundary where *every* allowed name
-        // suppresses nothing, so the stale report is due here too.
-        let (_, stale) = detect::partition(&catalog, &BTreeSet::new());
-        report_stale(&stale);
-
+    if catalog.declared.is_empty() && catalog.allowed.is_empty() {
         println!("✅ {} declares no workspace dependencies.", manifest_path.display());
         return Ok(ExitCode::SUCCESS);
     }
 
     let members = members_of(manifest_path)?;
     let inheritance = detect::inherited(&members)?;
-    let (unused, stale) = detect::partition(&catalog, &inheritance.keys);
+    let (unused, stale) = detect::partition(&catalog, &inheritance.keys, &inheritance.declarations);
 
     report_stale(&stale);
+
+    if catalog.declared.is_empty() {
+        println!("✅ {} declares no workspace dependencies.", manifest_path.display());
+        return Ok(ExitCode::SUCCESS);
+    }
 
     if unused.is_empty() {
         report_clean(manifest_path, &catalog, &inheritance.keys, members.len());
@@ -295,8 +603,7 @@ fn write_back(manifest_path: &Path, original: &str, member_inputs: &[ManifestInp
     );
 
     for input in member_inputs {
-        let current =
-            fs::read_to_string(&input.path).with_context(|| format!("failed to re-read {} before writing", input.path.display()))?;
+        let current = fs::read_to_string(&input.path).context(format!("failed to re-read {} before writing", input.path.display()))?;
         ensure!(
             current == input.contents,
             "{} changed on disk while the check was running; not writing",
@@ -328,7 +635,7 @@ fn members_of(manifest_path: &Path) -> Result<Vec<PathBuf>> {
         .manifest_path(manifest_path)
         .no_deps()
         .exec()
-        .with_context(|| format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
+        .context(format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
 
     Ok(metadata
         .workspace_packages()
@@ -351,11 +658,74 @@ fn verify_members_unchanged(manifest_path: &Path, expected: &[PathBuf]) -> Resul
     Ok(())
 }
 
-/// Report allow-list entries that suppressed nothing.
+/// Report workspace allow-list entries declared nowhere.
 fn report_stale(stale: &[String]) {
     for name in stale {
-        eprintln!("⚠️ '{name}' is allowed but is inherited or not declared; the allow-list entry can be removed.");
+        eprintln!("⚠️ '{name}' is allowed but is not declared by the workspace or any member; the allow-list entry can be removed.");
     }
+}
+
+/// The workspace as the source-level checks need it.
+struct Workspace {
+    /// Every member, with what it declares.
+    packages: Vec<verdict::Package>,
+
+    /// Names exempted workspace-wide.
+    allowed: BTreeSet<String>,
+
+    /// Where the evidence build writes, kept apart from the shared cache
+    /// because the lint flag changes the build fingerprint.
+    evidence_target_dir: tempfile::TempDir,
+}
+
+/// Read every member's declarations, the workspace allow-list, and where to build.
+fn workspace_of(manifest_path: &Path) -> Result<Workspace> {
+    let metadata = MetadataCommand::new()
+        .manifest_path(manifest_path)
+        .no_deps()
+        .exec()
+        .context(format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
+
+    let mut packages = Vec::new();
+    for package in metadata.workspace_packages() {
+        let path = package.manifest_path.clone().into_std_path_buf();
+        let document = detect::read_manifest(&path)?;
+
+        packages.push(verdict::Package {
+            name: package.name.to_string(),
+            version: package.version.to_string(),
+            declared: detect::declared_dependencies(&document),
+            allowed: detect::package_allowed(&document)?,
+            has_doctests: package.targets.iter().any(|target| {
+                target.kind.iter().any(|kind| {
+                    matches!(
+                        kind.to_string().as_str(),
+                        "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro"
+                    )
+                })
+            }),
+            manifest_path: path,
+        });
+    }
+
+    let root = detect::read_manifest(manifest_path)?;
+    let allowed = match detect::catalog(&root)? {
+        Catalog::Workspace(catalog) => catalog.allowed,
+        Catalog::NotAWorkspace => BTreeSet::new(),
+    };
+
+    let evidence_root = metadata.target_directory.into_std_path_buf().join("unused-deps");
+    fs::create_dir_all(&evidence_root).context(format!("failed to create {}", evidence_root.display()))?;
+    let evidence_target_dir = tempfile::Builder::new()
+        .prefix("run-")
+        .tempdir_in(&evidence_root)
+        .context(format!("failed to create an evidence directory under {}", evidence_root.display()))?;
+
+    Ok(Workspace {
+        packages,
+        allowed,
+        evidence_target_dir,
+    })
 }
 
 /// Report comments that moved off a removed entry.
@@ -417,6 +787,70 @@ fn entries(count: usize) -> &'static str {
 /// Pluralize `line` for `count`.
 fn lines(count: usize) -> &'static str {
     if count == 1 { "line" } else { "lines" }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use std::collections::BTreeSet;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use super::{Check, PackageSelection, resolve_selectors, verdict};
+
+    #[test]
+    fn check_filtering_selects_only_requested_findings() {
+        assert!(Check::Unused.wanted(&[]));
+        assert!(Check::Unused.wanted(&[Check::Unused]));
+        assert!(!Check::Unused.wanted(&[Check::Misplaced]));
+    }
+
+    #[test]
+    fn package_selection_forwards_every_cargo_flag() {
+        let selection = PackageSelection {
+            packages: vec!["alpha@1.0.0".to_owned()],
+            workspace: false,
+            exclude: Vec::new(),
+        };
+        assert_eq!(selection.flags(), [OsString::from("--package"), OsString::from("alpha@1.0.0")]);
+
+        let workspace = PackageSelection {
+            packages: Vec::new(),
+            workspace: true,
+            exclude: vec!["beta@1.0.0".to_owned()],
+        };
+        assert_eq!(
+            workspace.flags(),
+            [
+                OsString::from("--workspace"),
+                OsString::from("--exclude"),
+                OsString::from("beta@1.0.0"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ambiguous_package_names_require_a_version() {
+        let packages = [("one", "1.0.0"), ("two", "2.0.0")].map(|(path, version)| verdict::Package {
+            name: "same".to_owned(),
+            version: version.to_owned(),
+            manifest_path: PathBuf::from(path),
+            declared: Vec::new(),
+            allowed: BTreeSet::new(),
+            has_doctests: false,
+        });
+
+        let error = resolve_selectors(&packages, &["same".to_owned()], false).expect_err("ambiguous selectors must fail");
+        assert!(error.to_string().contains("matched more than one workspace member"));
+    }
+
+    #[test]
+    fn missing_exclusions_are_ignored_locally_for_cargo_to_warn_about() {
+        assert!(
+            resolve_selectors(&[], &["optional".to_owned()], true)
+                .expect("missing excludes are allowed")
+                .is_empty()
+        );
+    }
 }
 
 #[cfg(test)]

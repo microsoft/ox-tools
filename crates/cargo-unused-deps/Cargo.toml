@@ -3,8 +3,8 @@
 
 [package]
 name = "cargo-unused-deps"
-description = "A Cargo subcommand that reports [workspace.dependencies] entries no workspace member inherits"
-version = "0.1.0"
+description = "A Cargo subcommand that finds unused and misplaced dependencies"
+version = "0.2.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "ci"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
@@ -32,6 +32,8 @@ path = "src/main.rs"
 anyhow = { workspace = true, features = ["std"] }
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["std", "derive", "color", "help", "error-context", "usage"] }
+mutants = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }
 toml_edit = { workspace = true }
 

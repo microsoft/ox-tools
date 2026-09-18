@@ -36,7 +36,6 @@ path = "src/main.rs"
 cargo-aprz-lib = { workspace = true }
 mimalloc = { workspace = true }
 mutants = { workspace = true }
-ohno = { workspace = true, features = ["app-err"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 # >>> anvil-managed: anvil-lints
