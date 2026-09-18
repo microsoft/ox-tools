@@ -5275,15 +5275,9 @@ anvil-container *command:
             foreach ($name in $names) {
                 $candidate = Join-Path $directory $name
                 if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
-                if (-not $IsWindows) {
-                    # FileInfo.UnixMode is unavailable on the PowerShell 7.0
-                    # floor, so ask the host directly whether this regular file
-                    # is executable.
-                    & /usr/bin/test -f $candidate
-                    if ($LASTEXITCODE -ne 0) { continue }
-                    & /usr/bin/test -x $candidate
-                    if ($LASTEXITCODE -ne 0) { continue }
-                }
+                # Process.Start below is the portable executable check. A Unix
+                # file without execute permission fails there and falls through
+                # anonymously without requiring an external `test` utility.
                 return [IO.Path]::GetFullPath($candidate)
             }
         }
@@ -5391,16 +5385,26 @@ anvil-container *command:
                     $targets.Add([string[]]@($nested.Groups[1].Value))
                 }
             }
-            $githubTokenFromGh = [regex]::IsMatch(
-                $plan, '(?m)(^|[\s''"])--github-token-from-gh($|[\s''"])'
+            # Bind consent, explicit-token precedence, and endpoint selection
+            # to the same planned command. Distinct opted-in commands are
+            # ambiguous because the container can forward only one token, so
+            # fail closed and let each inner command run anonymously.
+            $optedInCommands = @(
+                $plan -split '\r?\n' |
+                    Where-Object {
+                        [regex]::IsMatch($_, '(^|[\s''"])--github-token-from-gh($|[\s''"])')
+                    } |
+                    Select-Object -Unique
             )
-            $hasExplicitGitHubToken = [regex]::IsMatch(
-                $plan, '(?m)(^|[\s''"])--github-token(?:=|$|[\s''"])'
-            )
-            if ($githubTokenFromGh) {
+            if ($optedInCommands.Count -eq 1) {
+                $optedInCommand = $optedInCommands[0]
+                $githubTokenFromGh = $true
+                $hasExplicitGitHubToken = [regex]::IsMatch(
+                    $optedInCommand, '(^|[\s''"])--github-token(?:=|$|[\s''"])'
+                )
                 $githubUrlMatch = [regex]::Match(
-                    $plan,
-                    '(?m)(?:^|[\s''"])--github-url(?:=|\s+)(?:''([^'']*)''|"([^"]*)"|([^\s''"]+))'
+                    $optedInCommand,
+                    '(?:^|[\s''"])--github-url(?:=|\s+)(?:''([^'']*)''|"([^"]*)"|([^\s''"]+))'
                 )
                 if ($githubUrlMatch.Success) {
                     foreach ($group in 1..3) {

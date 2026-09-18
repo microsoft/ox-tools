@@ -828,8 +828,9 @@ mod tests {
         assert!(RECIPE.contains("$extension -ieq '.COM' -or $extension -ieq '.EXE'"));
         assert!(!RECIPE.contains("$extension -ieq '.BAT'"));
         assert!(!RECIPE.contains("$extension -ieq '.CMD'"));
-        assert!(RECIPE.contains("& /usr/bin/test -f $candidate"));
-        assert!(RECIPE.contains("& /usr/bin/test -x $candidate"));
+        assert!(RECIPE.contains("Test-Path -LiteralPath $candidate -PathType Leaf"));
+        assert!(RECIPE.contains("$started = $process.Start()"));
+        assert!(!RECIPE.contains("/usr/bin/test"));
     }
 
     #[test]

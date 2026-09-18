@@ -402,10 +402,12 @@ is — exact parity with a native run, where every process the shell spawns can 
 GitHub CLI discovery is different: it manufactures a credential the developer did not export, and PID 1's environment
 is inherited by every build script and proc macro in the container. The driver therefore invokes
 `gh auth token --hostname <host>` only when the containerized command explicitly opts in with
-`--github-token-from-gh`. A direct command opts in through an exact argv occurrence. A `just` command opts in when the
-switch occurs as an exact argument in its expanded `just --dry-run <target>` plan. An explicit `--github-token` in the
-same command or plan suppresses the host `gh` lookup, as does a nonblank exported `GITHUB_TOKEN`. The no-command
-interactive form never derives a token.
+`--github-token-from-gh`. A direct command opts in through an exact argv occurrence. A `just` command opts in only when
+its expanded `just --dry-run <target>` plan contains one unique command with the exact switch; consent, an explicit
+token, and `--github-url` are parsed from that same command. Multiple distinct opted-in commands are ambiguous because
+the container can forward only one token, so they run anonymously. An explicit `--github-token` in the opted-in command
+suppresses the host `gh` lookup, as does a nonblank exported `GITHUB_TOKEN`. The no-command interactive form never
+derives a token.
 
 `<host>` follows cargo-aprz's effective endpoint: `--github-url` in the direct argv or expanded plan wins over
 `APRZ_GITHUB_URL`, and no override means `github.com`. The environment override is forwarded into the container so
@@ -414,9 +416,10 @@ rather than querying an unrelated login; the inner command retains responsibilit
 address.
 
 This wrapper lookup exists only because the image has no gh CLI of its own. It applies the same process boundary as
-native cargo-aprz: explicit nonempty `PATH` entries only, resolved to an absolute executable; `.COM` and `.EXE` only
-in Windows `PATHEXT` order, excluding functions, aliases, batch files and PowerShell shims; and a regular executable
-file on Unix. The executable is launched directly with an argument vector and no shell, with stdin closed, stderr
+native cargo-aprz: explicit nonempty `PATH` entries only, resolved to an absolute regular file; `.COM` and `.EXE` only
+in Windows `PATHEXT` order, excluding functions, aliases, batch files and PowerShell shims. On Unix, direct process
+startup is the executable-permission check, so no external filesystem-test utility is required. The executable is
+launched directly with an argument vector and no shell, with stdin closed, stderr
 captured and discarded, stdout captured as strict UTF-8, and the rejected blank `GITHUB_TOKEN` removed from its
 environment. A missing executable, nonzero result, blank or invalid output, or ten-second deadline continues
 anonymously. Deadline expiry terminates the complete process tree.

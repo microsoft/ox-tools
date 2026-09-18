@@ -531,6 +531,14 @@ fn path_with_fake_bin(root: &Path) -> OsString {
     std::env::join_paths(paths).unwrap()
 }
 
+fn test_pwsh() -> PathBuf {
+    let executable = if cfg!(windows) { "pwsh.exe" } else { "pwsh" };
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join(executable))
+        .find(|candidate| candidate.is_file())
+        .expect("pwsh was checked by tools_available")
+}
+
 fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Command {
     let mut command = Command::new("just");
     command
@@ -615,7 +623,7 @@ fn run_container_github_credential_probe_with_timeout(
         fs::remove_file(&log).unwrap();
     }
 
-    let mut command = Command::new("pwsh");
+    let mut command = Command::new(test_pwsh());
     command
         .args(["-NoProfile", "-Command", &script])
         .current_dir(root)
@@ -2675,6 +2683,7 @@ fn aprz_does_not_opt_into_github_cli_credential_discovery() {
 fn container_github_cli_discovery_is_opt_in_host_aware_and_preserves_precedence() {
     const PROBE: &str = "[script(\"pwsh\", \"-NoProfile\")]\n\
         enterprise-probe:\n    \
+        & cargo aprz deps --github-url https://unrelated.plan.test/api/v3\n    \
         & cargo aprz deps --github-url https://github.plan.test/api/v3 --github-token-from-gh\n";
 
     if !tools_available() {
