@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.10.0"
-catalog_checksum = "sha256:bdb1a42753806ce00fe1d6f2737a804439ba012ba477e511e2879e35d3d6c4d0"
+catalog_checksum = "sha256:b0ddc2a44542f124d32c4f9c7ce9e67401d8694dc6b43b05663c08dab8f5a0e0"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -289,7 +289,7 @@ checksum = "sha256:b91854c7f0e6d14c74751f607d2c0e3dfcefef55f5178bbafae59d47e577a
 [[region]]
 host = "Cargo.toml"
 id = "anvil-workspace-lints"
-checksum = "sha256:8a5e8ddf0e06b2c95f7aae84878ea47f791c3451d783a446ff4d290eb5eebbe8"
+checksum = "sha256:8745485a19a7f5ac9f11f75fa7af5a7845faedf7b91a4f831f869513449a287e"
 
 [[region]]
 host = "Justfile"

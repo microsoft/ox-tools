@@ -539,6 +539,8 @@ clippy.unused_result_ok = "warn"
 clippy.unwrap_used = "warn"
 
 # --- clippy: opinionated suppressions of category-enabled lints ------------
+# Literal braces are valid data in templates and structured-logging messages.
+clippy.literal_string_with_formatting_args = "allow"
 clippy.missing_const_for_fn = "allow"
 clippy.multiple_crate_versions = "allow"
 clippy.option_if_let_else = "allow"

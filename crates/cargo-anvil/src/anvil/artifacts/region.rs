@@ -298,6 +298,7 @@ mod tests {
             "clippy.unnecessary_safety_doc = \"warn\"",
             "clippy.unneeded_field_pattern = \"warn\"",
             "clippy.unused_result_ok = \"warn\"",
+            "clippy.literal_string_with_formatting_args = \"allow\"",
             "clippy.redundant_pub_crate = \"allow\"",
             "clippy.should_panic_without_expect = \"allow\"",
         ] {

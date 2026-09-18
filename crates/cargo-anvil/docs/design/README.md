@@ -310,10 +310,12 @@ Detail on each host:
   becomes `anvil-lints` and contains a single `[lints]` table with the same
   dotted-key layout. The catalog favors broadly applicable, low-false-positive
   diagnostics. It warns on empty braced structs whose unit form is clearer
-  (`empty_structs_with_brackets`). Documentation completeness, whether production
-  code may panic, and whether crate-internal APIs may use `pub` remain repository
-  policy: `missing_docs`, `clippy::panic`, and `unreachable_pub` are not catalog
-  defaults and adopters can add them outside the managed region.
+  (`empty_structs_with_brackets`) and allows literal strings with formatting-like
+  braces because templates and structured-logging messages legitimately carry such
+  text. Documentation completeness, whether production code may panic, and whether
+  crate-internal APIs may use `pub` remain repository policy: `missing_docs`,
+  `clippy::panic`, and `unreachable_pub` are not catalog defaults and adopters can
+  add them outside the managed region.
 - **`deny.toml`** — one managed region per top-level section (`[advisories]`, `[licenses]`,
   `[bans]`, `[sources]`) carrying the tool's baseline license/advisory rules. The bans baseline
   rejects wildcard registry requirements while allowing versionless path or Git
