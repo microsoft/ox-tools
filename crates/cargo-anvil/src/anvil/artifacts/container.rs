@@ -783,9 +783,14 @@ mod tests {
     }
 
     #[test]
-    fn a_host_token_is_forwarded_by_name_without_exposing_its_value() {
-        assert!(RECIPE.contains("$ghToken = Invoke-AnvilGhToken $ghExecutable $githubHostname"));
-        assert!(RECIPE.contains("@('auth', 'token', '--hostname', $Hostname)"));
+    fn a_host_token_is_resolved_as_the_recipe_does_and_forwarded_by_name() {
+        // anvil-aprz is in scheduled-advisories, and unauthenticated it does not merely
+        // warn: `cargo aprz deps` sleeps until the hourly quota resets, so a
+        // containerized tier blocks for up to an hour. The driver therefore
+        // resolves a token the same way the recipe does natively -- the
+        // environment first, then the gh CLI -- so both paths authenticate for
+        // the same developers.
+        assert!(RECIPE.contains("gh auth token --hostname github.com"));
         assert!(RECIPE.contains("$forwardedEnv += 'GITHUB_TOKEN'"));
         assert!(RECIPE.contains("$runArgs += @('-e', 'GITHUB_TOKEN')"));
         // By name, never by value: `-e NAME=VALUE` would put the credential on
@@ -796,41 +801,10 @@ mod tests {
         assert!(RECIPE.contains("$hookEnv += 'GITHUB_TOKEN'"));
         // An exported token is left alone rather than re-derived; scoping of
         // the derived one is asserted in its own test below.
-        assert!(RECIPE.contains("if (-not $hasEnvironmentGitHubToken)"));
+        assert!(RECIPE.contains("if (-not $env:GITHUB_TOKEN -and (Get-Command gh"));
         // Forwarding by name only works if the engine can see the name, so a
         // WSL engine needs it bridged -- otherwise `-e NAME` forwards nothing.
         assert!(RECIPE.contains("$engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0"));
-    }
-
-    #[test]
-    fn host_github_cli_discovery_is_direct_bounded_and_non_interactive() {
-        assert!(RECIPE.contains("$ghExecutable = Resolve-AnvilGhExecutable"));
-        assert!(RECIPE.contains("$start.FileName = $Executable"));
-        assert!(RECIPE.contains("$start.ArgumentList.Add($argument)"));
-        assert!(RECIPE.contains("$start.UseShellExecute = $false"));
-        assert!(RECIPE.contains("$start.RedirectStandardInput = $true"));
-        assert!(RECIPE.contains("$start.RedirectStandardOutput = $true"));
-        assert!(RECIPE.contains("$start.RedirectStandardError = $true"));
-        assert!(RECIPE.contains("$process.WaitForExit($TimeoutMilliseconds)"));
-        assert!(RECIPE.contains("[int]$TimeoutMilliseconds = 10000"));
-        assert!(RECIPE.contains("$process.Kill($true)"));
-        assert!(RECIPE.contains("$start.Environment.Remove('GITHUB_TOKEN')"));
-        assert!(!RECIPE.contains("Get-Command gh"));
-        assert!(!RECIPE.contains("& gh "));
-        assert!(!RECIPE.contains("(gh "));
-    }
-
-    #[test]
-    fn host_github_cli_resolution_uses_only_direct_path_executables() {
-        assert!(RECIPE.contains("$path = [Environment]::GetEnvironmentVariable('PATH')"));
-        assert!(RECIPE.contains("if ([string]::IsNullOrEmpty($entry)) { continue }"));
-        assert!(RECIPE.contains("[IO.Path]::GetFullPath($candidate)"));
-        assert!(RECIPE.contains("$extension -ieq '.COM' -or $extension -ieq '.EXE'"));
-        assert!(!RECIPE.contains("$extension -ieq '.BAT'"));
-        assert!(!RECIPE.contains("$extension -ieq '.CMD'"));
-        assert!(RECIPE.contains("Test-Path -LiteralPath $candidate -PathType Leaf"));
-        assert!(RECIPE.contains("$started = $process.Start()"));
-        assert!(!RECIPE.contains("/usr/bin/test"));
     }
 
     #[test]
@@ -917,46 +891,37 @@ mod tests {
     }
 
     #[test]
-    fn a_derived_token_requires_explicit_command_intent() {
+    fn a_derived_token_is_scoped_to_a_command_that_reads_it() {
         // Forwarding an exported GITHUB_TOKEN is exact parity: natively it is
         // visible to every process the shell spawns too. Minting one from `gh`
         // is not -- PID 1's environment reaches every build script and proc
-        // macro -- so it happens only after the exact opt-in switch appears in
-        // direct argv or an expanded Just plan.
+        // macro, where natively the recipe mints it in its own process -- so it
+        // happens only for a command whose plan reads the variable.
         // Each search covers the whole recipe, so the comparison below is the
         // thing under test. Bounding a search by an earlier match makes the
         // ordering true by construction and the assertion vacuous.
-        let derive = RECIPE
-            .find("$ghToken = Invoke-AnvilGhToken $ghExecutable $githubHostname")
-            .expect("the host-aware gh fallback must exist");
-        let guard = RECIPE
-            .find("if ($githubTokenFromGh -and -not $hasExplicitGitHubToken")
-            .expect("the derive must require consent and no explicit token");
+        let derive = RECIPE.find("gh auth token --hostname").expect("the gh fallback must exist");
+        let guard = RECIPE.find("if ($needsToken)").expect("the derive must be guarded");
         let plan = RECIPE
-            .find("--github-token-from-gh($|")
-            .expect("the plan must recognize the exact opt-in switch");
-        let direct = RECIPE
-            .find("$argv -contains '--github-token-from-gh'")
-            .expect("direct commands must recognize an exact argv occurrence");
+            .find("$plan -match 'GITHUB_TOKEN'")
+            .expect("the plan must decide whether a token is needed");
         let dry_run = RECIPE.find("--dry-run @target").expect("the plan must come from just");
         assert!(
-            dry_run < plan && plan < guard && direct < guard && guard < derive,
-            "compute explicit intent before resolving or invoking gh"
+            dry_run < plan && plan < guard && guard < derive,
+            "compute the plan, match it, guard on it, then derive"
         );
         // Through the launching binary, like every other nested call: a bare
         // `just` here fails silently when the caller invoked it by absolute
         // path, and an empty plan reads as "no token needed".
         assert!(!RECIPE.contains("(just --dry-run"));
         assert!(RECIPE.contains(r"}}' --dry-run @target"));
-        // The switch, not a check name or ambient-variable read, is the
-        // contract. Interactive execution has no argv and therefore no opt-in.
+        // The predicate is the variable, not the name of a check, so a catalog
+        // that adds another GitHub-authenticated check is covered for free.
         assert!(!RECIPE.contains("$plan -match 'aprz'"));
-        assert!(!RECIPE.contains("$plan -match 'GITHUB_TOKEN'"));
-        assert!(RECIPE.contains("if ($argv.Count -gt 0 -and $argv[0] -eq 'just')"));
-        // Explicit credentials remain authoritative even when opt-in is also
-        // present, for both direct and planned commands.
-        assert!(RECIPE.contains("$_ -eq '--github-token' -or $_.StartsWith('--github-token=')"));
-        assert!(RECIPE.contains("--github-token(?:=|$|"));
+        // An interactive session has no command to plan, and can run anything.
+        assert!(RECIPE.contains("$needsToken = $argv.Count -eq 0"));
+        // Only `just` can be planned, so nothing else earns a minted credential.
+        assert!(RECIPE.contains("if (-not $needsToken -and $argv[0] -eq 'just')"));
     }
 
     #[test]
@@ -982,8 +947,8 @@ mod tests {
         // `just --dry-run` prints the bodies just runs itself. The unscoped tier
         // wrapper runs its tier as a child process instead, so a plan of
         // `anvil-scheduled` is the wrapper alone and reveals none of the checks
-        // under it. Following the launched targets lets a recipe under that
-        // wrapper explicitly opt into --github-token-from-gh.
+        // under it -- including anvil-aprz, whose GITHUB_TOKEN is what stops it
+        // sleeping on the advisory API's unauthenticated rate limit.
         assert!(
             RECIPE.contains(r#"[regex]::Matches($step, "'(_anvil-[^'\s]+)'")"#),
             "the plan must follow each nested target the wrapper names"

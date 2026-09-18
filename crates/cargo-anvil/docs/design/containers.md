@@ -104,7 +104,7 @@ try { just anvil-container just anvil-fmt } finally { Remove-Item Env:ANVIL_CONT
 | `ANVIL_CONTAINER_NO_RESOLVE=1` | Skip the resolve hook (§7.3), so a query never pulls. |
 | `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild with `--no-cache` even when the tag resolves. Skips the resolve hook too (§7.3). |
 | `ANVIL_IN_CONTAINER=1` | Set inside the image. Makes a nested invocation execute natively (§5.4). |
-| `GITHUB_TOKEN` | Forwarded into the run when exported. When the command explicitly opts into GitHub CLI discovery, it may instead be derived from the host gh CLI (§5.3). |
+| `GITHUB_TOKEN` | Forwarded into the run. Taken from the host environment, or derived from the gh CLI for a target that reads it (§5.3). |
 
 `NO_REBUILD` is evaluated independently of `NO_CACHE`, so the two compose: `anvil-container-status` sets `NO_REBUILD`
 and `NO_RESOLVE` together and answers from local state alone. When `NO_REBUILD` stops a build the reference is still
@@ -396,42 +396,24 @@ otherwise the engine leaves it as `/`, and anything falling back to `$HOME` writ
 
 ### 5.3 Environment
 
-The run passes `ANVIL_IN_CONTAINER=1` (§5.4). An **exported** `GITHUB_TOKEN` is forwarded by name whatever the target
-is — exact parity with a native run, where every process the shell spawns can already read it.
+The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and forwards `GITHUB_TOKEN` by name, resolved the way the recipe resolves
+it natively: the environment first, then the gh CLI's stored token. `anvil-aprz` runs in the `scheduled-advisories` group and
+queries the GitHub advisory API, which allows 60 requests an hour unauthenticated and then sleeps until the quota
+resets, so a tier needs the token to terminate rather than merely to run quickly.
 
-GitHub CLI discovery is different: it manufactures a credential the developer did not export, and PID 1's environment
-is inherited by every build script and proc macro in the container. The driver therefore invokes
-`gh auth token --hostname <host>` only when the containerized command explicitly opts in with
-`--github-token-from-gh`. A direct command opts in through an exact argv occurrence. A `just` command opts in only when
-its expanded `just --dry-run <target>` plan contains one unique command with the exact switch; consent, an explicit
-token, and `--github-url` are parsed from that same command. Multiple distinct opted-in commands are ambiguous because
-the container can forward only one token, so they run anonymously. An explicit `--github-token` in the opted-in command
-suppresses the host `gh` lookup, as does a nonblank exported `GITHUB_TOKEN`. The no-command interactive form never
-derives a token.
-
-`<host>` follows cargo-aprz's effective endpoint: `--github-url` in the direct argv or expanded plan wins over
-`APRZ_GITHUB_URL`, and no override means `github.com`. The environment override is forwarded into the container so
-the host lookup and the process using its token keep the same endpoint. An invalid override suppresses host discovery
-rather than querying an unrelated login; the inner command retains responsibility for reporting its invalid service
-address.
-
-This wrapper lookup exists only because the image has no gh CLI of its own. It applies the same process boundary as
-native cargo-aprz: explicit nonempty `PATH` entries only, resolved to an absolute regular file; `.COM` and `.EXE` only
-in Windows `PATHEXT` order, excluding functions, aliases, batch files and PowerShell shims. On Unix, direct process
-startup is the executable-permission check, so no external filesystem-test utility is required. The executable is
-launched directly with an argument vector and no shell, with stdin closed, stderr
-captured and discarded, stdout captured as strict UTF-8, and the rejected blank `GITHUB_TOKEN` removed from its
-environment. A missing executable, nonzero result, blank or invalid output, or ten-second deadline continues
-anonymously. Deadline expiry terminates the complete process tree.
-
-Native cargo-aprz performs discovery only when its switch is present and selects the gh login from its effective
-GitHub endpoint, including GitHub Enterprise overrides. The generated `anvil-aprz` recipe does not pass the switch,
-so it uses an exported `GITHUB_TOKEN` when available and otherwise runs anonymously without invoking the host gh CLI.
+The two sources are not treated alike. An **exported** `GITHUB_TOKEN` is forwarded whatever the target is — that is
+exact parity, since a native run exposes it to every process the shell spawns too. A token **derived** from the gh CLI
+is a credential the developer never put in this environment, and PID 1's environment is inherited by every build script
+and proc macro in the container, where natively `anvil-aprz` would mint it inside its own process. So it is derived
+only when the target's plan (`just --dry-run <target>`) reads `GITHUB_TOKEN`, or when there is no target at all: an
+interactive session can run anything, and refusing there would reintroduce the stall the token exists to prevent. The
+predicate is the variable rather than the name of a check, so a catalog that adds another GitHub-authenticated check is
+covered without touching the driver.
 
 A plan covers the bodies `just` runs itself, not the body of a recipe that one of them launches as a child process.
 The unscoped tier wrapper (§`helpers.just`) launches its tier that way, so planning `anvil-scheduled` shows the wrapper
 alone. The driver therefore follows each nested target a plan names, until nothing new appears; without that, a wrapped
-tier would hide an explicit `--github-token-from-gh` in one of its checks.
+tier reads as needing nothing and `anvil-aprz` runs unauthenticated inside an image that has no `gh` of its own.
 
 It also forwards the recipe contract's own inputs when they are set — `PR_TITLE`, `BASE_REF`, `GITHUB_BASE_REF`,
 `SYSTEM_PULLREQUEST_TARGETBRANCH`, `ANVIL_IMPACT` and `ANVIL_MIRI_JOBS` — because a check that reads one
