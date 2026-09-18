@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.11.0"
-catalog_checksum = "sha256:8faddf3d64368d24368a805d03d0e51a102fe5d6060a920c89208495e6930911"
+catalog_checksum = "sha256:4bd4b5329075f104c5830e767c6f79e5eed6c1de72370b9836603488a359bcdb"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -288,8 +288,18 @@ checksum = "sha256:b91854c7f0e6d14c74751f607d2c0e3dfcefef55f5178bbafae59d47e577a
 
 [[region]]
 host = "Cargo.toml"
-id = "anvil-workspace-lints"
-checksum = "sha256:8745485a19a7f5ac9f11f75fa7af5a7845faedf7b91a4f831f869513449a287e"
+id = "anvil-workspace-clippy-lints"
+checksum = "sha256:cf78b123235b694a8222e499e7ba91729de9325d1de3f5275e58a85880fabc4e"
+
+[[region]]
+host = "Cargo.toml"
+id = "anvil-workspace-rust-lints"
+checksum = "sha256:ade16a15a1ecfbe6a8f98aca044266f570a7e658bef51f4b3f6e23d8ebd14798"
+
+[[region]]
+host = "Cargo.toml"
+id = "anvil-workspace-rustdoc-lints"
+checksum = "sha256:5040c38d64a80ddedc2c51d25881841a1670de77e68bbd14b67ac66fd0062091"
 
 [[region]]
 host = "Justfile"

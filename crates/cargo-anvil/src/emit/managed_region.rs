@@ -27,8 +27,8 @@ use crate::decision::Decision;
 use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
 use crate::region::{
-    CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_region, insert_after_region, managed_region_ids,
-    mask_retiring_managed_regions, start_region_offset, text_newline, upsert_region_with_newline,
+    CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_region, insert_after_region, lint_region_placement,
+    managed_region_ids, mask_retiring_managed_regions, start_region_offset, text_newline, upsert_region_with_newline,
 };
 
 /// What the reader should do about a refused region.
@@ -369,6 +369,7 @@ fn splice(
         base
     };
 
+    let placement = lint_region_placement(region_id, Some(base)).unwrap_or(placement);
     let spliced = upsert_region_with_newline(base, region_id, rendered_body, syntax, placement, newline)
         .map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?;
     insert_after_region(&spliced, region_id, &residue, syntax)

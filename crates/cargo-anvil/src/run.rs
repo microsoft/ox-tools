@@ -26,7 +26,9 @@ use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
-use crate::region::{CommentSyntax, MarkerRepair, RegionPlacement, find_region, managed_region_ids, remove_region, repair_markers};
+use crate::region::{
+    CommentSyntax, MarkerRepair, RegionPlacement, find_region, lint_region_placement, managed_region_ids, remove_region, repair_markers,
+};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -706,6 +708,9 @@ fn region_placement(region_id: &str, current: Option<&str>) -> RegionPlacement {
         // its trailing user settings must still follow Hunspell.quirks. An
         // empty block establishes no table context; append replacements instead.
         return RegionPlacement::At(old.start_line.start);
+    }
+    if let Some(placement) = lint_region_placement(region_id, current) {
+        return placement;
     }
     RegionPlacement::End
 }
@@ -1615,7 +1620,13 @@ mod tests {
         }
 
         let root_manifest = fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
-        assert!(root_manifest.contains("# >>> anvil-managed: anvil-workspace-lints"));
+        for region in [
+            "anvil-workspace-rust-lints",
+            "anvil-workspace-rustdoc-lints",
+            "anvil-workspace-clippy-lints",
+        ] {
+            assert!(root_manifest.contains(&format!("# >>> anvil-managed: {region}")));
+        }
         let member_manifest = fs::read_to_string(tmp.path().join("crates/alpha/Cargo.toml")).unwrap();
         assert!(member_manifest.contains("# >>> anvil-managed: anvil-lints"));
         assert!(member_manifest.contains("workspace = true"));

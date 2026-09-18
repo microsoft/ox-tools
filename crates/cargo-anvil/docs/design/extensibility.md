@@ -22,7 +22,8 @@ front-end binary. Every tool built on the engine emits the *same* fixed namespac
 - sidecar manifest `.anvil.lock`
 - review-sibling suffix `.anvil-proposed`
 - managed-region sentinels `# >>> anvil-managed: <id>` … `# <<< anvil-managed: <id>`
-- region IDs `anvil-imports`, `anvil-workspace-lints`, `anvil-lints`
+- region IDs such as `anvil-imports`, `anvil-workspace-rust-lints`,
+  `anvil-rust-lints`, and `anvil-lints`
 - recipe-name prefix `anvil-` (`anvil-pr`, `anvil-clippy`, …)
 
 That shared vocabulary is a feature: it signals "this content is managed by the anvil engine —
@@ -208,8 +209,12 @@ pub mod artifacts {
     // Managed regions spliced into user-composed host files.
     pub mod region {
         pub fn justfile_imports() -> Artifact;   // Justfile / anvil-imports
-        pub fn workspace_lints() -> Artifact;    // Cargo.toml (workspace) / anvil-workspace-lints
-        pub fn single_crate_lints() -> Artifact; // Cargo.toml (single crate) / anvil-lints
+        pub fn workspace_rust_lints() -> Artifact;
+        pub fn workspace_rustdoc_lints() -> Artifact;
+        pub fn workspace_clippy_lints() -> Artifact;
+        pub fn single_crate_rust_lints() -> Artifact;
+        pub fn single_crate_rustdoc_lints() -> Artifact;
+        pub fn single_crate_clippy_lints() -> Artifact;
         pub fn member_lints() -> Artifact;       // <member>/Cargo.toml / anvil-lints
         pub fn deny_advisories() -> Artifact;    // deny.toml / anvil-deny-advisories
         pub fn deny_licenses() -> Artifact;      // deny.toml / anvil-deny-licenses
@@ -305,13 +310,13 @@ crate's `Cargo.toml` just adds one artifact:
 and the engine replicates it across all members, tracks each in `.anvil.lock`, and reconciles
 drift per member — no per-fork engine changes.
 
-> Note anvil's own lint regions are modeled as three separate artifacts under this scheme, with no
-> region-id-specific engine logic: a `WorkspaceCargoToml` region carrying `[workspace.lints]`
-> (`anvil-workspace-lints`), a `SingleCrateCargoToml` region carrying the full `[lints]` catalog
-> (`anvil-lints`), and an `EachMemberManifest` member stub (`anvil-lints`). In a workspace the
-> first and third emit; in a single-crate repo only the second does (it has no workspace members),
-> so the full catalog lands directly in the root `[lints]`. Which set applies is purely a property
-> of the selectors on the built-in artifacts, transparent to forks.
+> Note anvil's own lint regions are modeled as seven separate artifacts under this scheme, with no
+> region-id-specific engine logic: three `WorkspaceCargoToml` regions carrying the Rust, rustdoc,
+> and Clippy `[workspace.lints.<namespace>]` tables; three `SingleCrateCargoToml` equivalents under
+> `[lints.<namespace>]`; and an `EachMemberManifest` member stub (`anvil-lints`). In a workspace the
+> workspace trio and member stub emit; in a single-crate repo only the single-crate trio does.
+> Which set applies is purely a property of the selectors on the built-in artifacts, transparent
+> to forks.
 
 > **On-disk casing.** Host paths and owned-file paths are canonical (`Justfile`, `Cargo.toml`), but
 > the engine resolves each against the repo case-insensitively and reuses whatever casing already
