@@ -1892,7 +1892,7 @@ mod tests {
     use core::mem;
     use std::error::Error as _;
     #[cfg(unix)]
-    use std::io::BufRead as _;
+    use std::io::{BufRead as _, Write as _};
     use std::{env, fs};
 
     use camino::Utf8Path;

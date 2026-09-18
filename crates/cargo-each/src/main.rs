@@ -121,8 +121,8 @@
 //!
 //! The effective worker count is the requested `--jobs` value capped by plan
 //! size and scheduler capacity. An effective count of one uses sequential
-//! execution with inherited stdin, stdout, and stderr even when the requested
-//! value was larger. A genuinely parallel count disconnects child stdin and
+//! execution with inherited standard input, output, and error even when the
+//! requested value was larger. A genuinely parallel count disconnects child input and
 //! buffers stdout and stderr; complete blocks are emitted in deterministic
 //! plan order. Fail-fast stops launching after the first
 //! observed failure, waits for running work, and chooses the final failure by

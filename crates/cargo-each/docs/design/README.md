@@ -322,10 +322,10 @@ no-op.
   plan order, not scheduler timing. Requested parallelism does not by itself
   select this captured mode: when plan-size or process-capacity capping leaves
   an effective worker count of one, cargo-each uses the sequential path and the
-  child inherits stdin, stdout, and stderr. With a genuinely parallel effective
-  worker count, child stdin is disconnected (`null`) so workers cannot race to
-  consume the caller's input; stdout and stderr are captured for deterministic
-  emission. A worker panic is converted into an
+  child inherits standard input, output, and error. With a genuinely parallel
+  effective worker count, child standard input is disconnected (`null`) so
+  workers cannot race to consume the caller's input; output and error are
+  captured for deterministic emission. A worker panic is converted into an
   infrastructure-failure outcome; each worker has a dedicated completion
   channel, so an unexpected exit is observable as disconnection rather than
   leaving the scheduler blocked forever. A worker-thread launch failure is
