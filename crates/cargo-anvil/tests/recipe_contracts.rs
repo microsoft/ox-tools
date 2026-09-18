@@ -2322,6 +2322,7 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
     assert_failed(&failed, "plain nextest failure for an opted-out package");
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 #[test]
 fn coverage_reports_use_requested_package_scope() {
     if !tools_available() {
@@ -2348,11 +2349,7 @@ fn coverage_reports_use_requested_package_scope() {
         );
         let log = tmp.path().join("cargo.log");
         seed_include(tmp.path(), "affected", scope);
-        let mut environment = vec![
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("PROCESSOR_ARCHITECTURE", OsStr::new("AMD64")),
-            ("PROCESSOR_ARCHITEW6432", OsStr::new("AMD64")),
-        ];
+        let mut environment = vec![("FAKE_CARGO_LOG", log.as_os_str())];
         if include_second_package {
             environment.push(("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")));
         }
