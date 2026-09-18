@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-17
+## [0.2.0] - 2026-09-18
 
 - ✨ Features
 
@@ -12,6 +12,7 @@
 
 - 🐛 Bug Fixes
 
+  - report target declaration context
   - isolate evidence runs
   - normalize doctest diagnostics
   - make evidence collection authoritative
@@ -28,6 +29,7 @@
 
 - 📚 Documentation
 
+  - refresh release notes
   - refresh release notes
   - refresh release notes
   - refresh 0.2.0 changelog
