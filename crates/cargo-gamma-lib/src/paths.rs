@@ -271,7 +271,18 @@ mod tests {
         let link = tree.join("link");
         fs::create_dir_all(&outside).expect("outside");
         fs::create_dir_all(&tree).expect("tree");
-        std::os::windows::fs::symlink_dir(&outside, &link).expect("directory link");
+        if let Err(cause) = std::os::windows::fs::symlink_dir(&outside, &link) {
+            if cause.kind() == std::io::ErrorKind::PermissionDenied
+                && crate::testing::standing_down(
+                    "Windows link resolution and containment",
+                    "creating directory links requires Developer Mode or symbolic-link privilege",
+                )
+            {
+                return;
+            }
+
+            panic!("create directory link: {cause}");
+        }
 
         assert_eq!(
             physical(&link.join("future/file")).expect("link resolution"),
@@ -287,7 +298,18 @@ mod tests {
         let (_directory, root) = root();
         for index in 0..=40 {
             let next = (index + 1) % 41;
-            std::os::windows::fs::symlink_file(format!("link-{next}"), root.join(format!("link-{index}"))).expect("file link");
+            if let Err(cause) = std::os::windows::fs::symlink_file(format!("link-{next}"), root.join(format!("link-{index}"))) {
+                if cause.kind() == std::io::ErrorKind::PermissionDenied
+                    && crate::testing::standing_down(
+                        "Windows excessive-link detection",
+                        "creating file links requires Developer Mode or symbolic-link privilege",
+                    )
+                {
+                    return;
+                }
+
+                panic!("create file link: {cause}");
+            }
         }
 
         let failure = physical(&root.join("link-0")).expect_err("the link chain is cyclic");

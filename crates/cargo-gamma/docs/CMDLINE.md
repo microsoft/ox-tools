@@ -208,6 +208,7 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
+| `--only-survivors-from` | `<PATH>` | Run only mutants that genuinely survived in this cargo-gamma report. |
 
 **Cargo features**
 
@@ -386,6 +387,7 @@ cargo gamma suppress [OPTIONS] [-- <TEST_ARGS>...]
 | `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
+| `--only-survivors-from` | `<PATH>` | Run only mutants that genuinely survived in this cargo-gamma report. |
 
 **Cargo features**
 

@@ -81,9 +81,9 @@ pub use verdict::READERS;
 #[cfg(loom)]
 pub(crate) use verdict::run_loom_models;
 #[cfg(any(test, feature = "internals"))]
-pub(crate) use workspace::production_gamma_base;
+pub(crate) use workspace::production_campaign_base;
 #[doc(inline)]
-pub use workspace::{Workspace, clean_cache, footprint, gamma_base, scratch_tree};
+pub use workspace::{Workspace, campaign_base, clean_cache, footprint, gamma_base, scratch_tree};
 #[cfg(any(test, feature = "internals"))]
 pub(crate) use workspace::{absolute as absolute_test_path, cache_lock_identity};
 pub(crate) use workspace::{claim_cache, claim_workspace};

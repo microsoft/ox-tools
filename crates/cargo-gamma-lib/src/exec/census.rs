@@ -455,7 +455,7 @@ impl Census {
     /// reaches it".
     ///
     /// [`reaching`]: Census::reaching
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(super) fn examined(binary: &Utf8Path, site: u32, reached: usize, total: usize) -> Self {
         Self::fixture(binary, site, reached, total, true)
     }
@@ -498,8 +498,10 @@ impl Census {
             times: vec![Duration::from_millis(1); total],
             complete,
         };
-        let set_index = reach.intern_set(indices);
-        let _previous2 = reach.reached.insert(site, set_index);
+        if !indices.is_empty() {
+            let set_index = reach.intern_set(indices);
+            let _previous = reach.reached.insert(site, set_index);
+        }
         reach.finish();
 
         let mut census = Self::default();

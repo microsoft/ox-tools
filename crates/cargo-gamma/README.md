@@ -161,6 +161,16 @@ your test suite. In other words, it points out a weakness in your test suite.
 Once you know what all the surviving mutants are in your codebase, your next task is to add more tests to
 your test suite to kill those mutants.
 
+After adding those tests, use the completed run’s JSON report to check only the mutants that
+genuinely survived:
+
+```bash
+cargo gamma run --only-survivors-from target/cargo-gamma/gamma-report.json
+```
+
+Mutant identities remain stable when only tests change. Timeout and memory-limit outcomes are
+not selected, even though the report format represents them as survived.
+
 ### Mutators
 
 `cargo-gamma` supports a large set of mutators. These are selected to represent real-world errors that can
@@ -377,19 +387,22 @@ A run computes each mutant’s budget from the unmutated suite, so a fast suite 
 is paid for exactly once, so a build that never finishes costs the whole run; `--build-timeout` and
 `--build-timeout-multiplier` bound it, and a build that outstays its budget is stopped.
 
-The workspace is copied to `workspace/` under cargo-gamma’s cache before anything is rewritten,
-and Cargo artifacts stay beside it in `target/` so repeated runs compile incrementally.
-`--cache-dir` moves the reusable state: it gets the copy off a slow or network filesystem. The
-path names the cache itself and must be empty on first use; cargo-gamma marks it as belonging to
-that workspace and refuses to let another workspace adopt or share it. A workspace-specific lock
-in cargo-gamma’s default external cache serializes commands targeting the same original
-workspace, while a second lock protects redirected cache state.
+The workspace is copied to `workspace/` under cargo-gamma’s external scratch area before
+anything is rewritten. By default, Cargo artifacts and campaign state live under
+`<resolved-target>/cargo-gamma/cache/<workspace-id>/`, so repeated runs compile incrementally,
+shared Cargo target directories keep workspaces separate, and `cargo clean` can reclaim the
+potentially large build cache. `--cache-dir` retains the all-in-one layout and moves the
+synchronized workspace, build artifacts, and campaign state together. The path names the cache
+itself and must be empty on first use; cargo-gamma marks it as belonging to that workspace and
+refuses to let another workspace adopt or share it. A workspace-specific lock in cargo-gamma’s
+default external scratch area serializes commands targeting the same original workspace, while
+a second lock protects redirected cache state.
 
-`cargo gamma clean` deletes the workspace-specific cache after taking the same lock as a run.
-It leaves published reports under `target/cargo-gamma`, checked-in hints and source suppressions
-untouched.
+`cargo gamma clean` deletes the workspace-specific external scratch and target-resident campaign
+cache after taking the same lock as a run. It leaves published reports under
+`target/cargo-gamma`, checked-in hints and source suppressions untouched.
 
-As soon as a measured run acquires that directory, it truncates its `gamma-progress.log`. Every
+As soon as a measured run acquires its campaign cache, it truncates `gamma-progress.log`. Every
 mutant verdict is appended and flushed there as it
 arrives, using the console’s outcome-line format but without color or redraw escapes. Unlike the
 console, the journal includes ordinary killed mutants as well as survivors, timeouts, memory exhaustion,

@@ -7,24 +7,33 @@ use super::cli::{CleanArgs, FeatureArgs};
 use super::dispatch::EXIT_OK;
 use super::host::Host;
 use crate::discover::load_metadata;
-use crate::exec::{clean_cache, gamma_base};
+use crate::exec::{campaign_base, clean_cache, gamma_base};
 use crate::report::{Styler, encode_controls};
 
-/// Deletes the external cache belonging to the resolved workspace.
+/// Deletes the cache belonging to the resolved workspace.
 pub(super) fn clean<H: Host>(host: &mut H, args: &CleanArgs, styler: Styler) -> crate::Result<i32> {
     let metadata = load_metadata(&args.dir, &FeatureArgs::default())?;
     let root = camino::Utf8Path::new(metadata.workspace_root.as_str());
-    let base = gamma_base(root, None);
-    let cleaned = clean_cache(root)?;
+    let target = camino::Utf8Path::new(metadata.target_directory.as_str());
+    let base = campaign_base(root, target, None);
+    let scratch = gamma_base(root, None);
+    let cleaned = clean_cache(root, target)?;
 
     if cleaned {
-        writeln!(host.error(), "{} `{}`", styler.verb("Cleaned"), encode_controls(base.as_str()))?;
+        writeln!(
+            host.error(),
+            "{} `{}` and `{}`",
+            styler.verb("Cleaned"),
+            encode_controls(base.as_str()),
+            encode_controls(scratch.as_str())
+        )?;
     } else {
         writeln!(
             host.error(),
-            "{} no cached data under `{}`",
+            "{} no cached data under `{}` or `{}`",
             styler.verb("Finished"),
-            encode_controls(base.as_str())
+            encode_controls(base.as_str()),
+            encode_controls(scratch.as_str())
         )?;
     }
 

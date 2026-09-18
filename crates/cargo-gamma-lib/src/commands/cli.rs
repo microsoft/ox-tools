@@ -593,6 +593,14 @@ pub struct RunArgs {
     #[command(flatten)]
     pub select: SelectArgs,
 
+    /// Run only mutants that genuinely survived in this cargo-gamma report.
+    ///
+    /// Stable mutant identities are rediscovered from the current source, so adding tests does not
+    /// make the report stale. Mutants that timed out or exceeded their memory limit are not genuine
+    /// survivors and are not selected.
+    #[arg(long, value_name = "PATH", help_heading = "Selecting what to mutate")]
+    pub only_survivors_from: Option<Utf8PathBuf>,
+
     /// How the build and the baseline are measured.
     #[command(flatten)]
     pub measure: MeasureArgs,
@@ -1027,6 +1035,17 @@ mod tests {
     #[test]
     fn no_sharding_arguments_means_no_shard() {
         assert_eq!(SelectArgs::default().shard().unwrap(), None);
+    }
+
+    #[test]
+    fn a_survivor_report_path_is_a_run_option() {
+        let cli =
+            Cli::try_parse_from(["cargo-gamma", "run", "--only-survivors-from", "previous.json"]).expect("survivor report path parses");
+        let Command::Run(args) = cli.command else {
+            panic!("the run subcommand was parsed as something else");
+        };
+
+        assert_eq!(args.only_survivors_from, Some(Utf8PathBuf::from("previous.json")));
     }
 
     /// The command line no longer requires the two together, because the file supplies one of them

@@ -87,8 +87,9 @@ pub struct Config {
     /// Keep the scratch tree after the run instead of deleting it.
     pub leak_dirs: bool,
 
-    /// Where to put reusable workspace and build state. `None` uses an isolated cache base
-    /// outside the workspace's Cargo-configuration ancestor chain.
+    /// Where to put reusable workspace and build state. `None` keeps the copied workspace outside
+    /// its Cargo-configuration ancestor chain and puts build and campaign state under Cargo's
+    /// resolved target directory.
     pub cache_dir: Option<Utf8PathBuf>,
 
     /// Copy files the ignore rules exclude, not only the ones git tracks.

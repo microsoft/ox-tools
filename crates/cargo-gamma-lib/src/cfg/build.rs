@@ -26,6 +26,7 @@ use crate::HashMap;
 /// Resolves whether Cargo Gamma can safely interpose outside Cargo's outer rustc wrapper.
 ///
 /// A compiler-wrapper configuration and whether Cargo Gamma may safely interpose around it.
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RustcWrapperChain {
     /// A configuration-file wrapper may be relative to the declaring file, so interposition must
     /// stand down rather than risk launching a different executable from the workspace root.
@@ -35,25 +36,37 @@ pub(crate) enum RustcWrapperChain {
 }
 
 pub(crate) fn rustc_wrapper_chain(root: &Utf8Path) -> RustcWrapperChain {
-    let environment = env::var_os("RUSTC_WRAPPER")
-        .filter(|path| !path.is_empty())
-        .or_else(|| env::var_os("CARGO_BUILD_RUSTC_WRAPPER").filter(|path| !path.is_empty()));
+    rustc_wrapper_chain_in(root, environment_wrapper(|name| env::var_os(name)), &Environment::ambient())
+}
 
-    if environment.is_some() {
-        return RustcWrapperChain::Interpose(environment);
+fn environment_wrapper(mut get: impl FnMut(&str) -> Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
+    get("RUSTC_WRAPPER")
+        .filter(|path| !path.is_empty())
+        .or_else(|| get("CARGO_BUILD_RUSTC_WRAPPER").filter(|path| !path.is_empty()))
+}
+
+fn rustc_wrapper_chain_in(root: &Utf8Path, outer: Option<std::ffi::OsString>, environment: &Environment) -> RustcWrapperChain {
+    if outer.is_some() {
+        return RustcWrapperChain::Interpose(outer);
     }
 
-    let config = CargoConfig::load(root, &Environment::ambient());
+    let config = CargoConfig::load(root, environment);
     let configured_environment = config
         .keys(&["env"])
         .iter()
         .any(|name| name == "RUSTC_WRAPPER" || name == "CARGO_BUILD_RUSTC_WRAPPER");
 
-    if configured_environment || config.string(&["build", "rustc-wrapper"]).is_some() {
+    if configured_environment || has_configured_wrapper(&config) {
         RustcWrapperChain::StandDown
     } else {
         RustcWrapperChain::Interpose(None)
     }
+}
+
+fn has_configured_wrapper(config: &CargoConfig) -> bool {
+    ["rustc-wrapper", "rustc-workspace-wrapper"]
+        .into_iter()
+        .any(|key| config.string(&["build", key]).is_some())
 }
 
 /// How many `inherits` hops a profile chain may take before it is called malformed.
@@ -1010,6 +1023,70 @@ mod tests {
         let (_directory, root) = tree(&[]);
 
         assert!(Build::settings_in(&root, &empty(&root)).is_empty());
+    }
+
+    #[test]
+    fn ambient_rustc_wrappers_are_preserved_with_rustc_wrapper_taking_precedence() {
+        let rustc = environment_wrapper(|name| match name {
+            "RUSTC_WRAPPER" => Some(std::ffi::OsString::from("rustc-wrapper")),
+            "CARGO_BUILD_RUSTC_WRAPPER" => Some(std::ffi::OsString::from("cargo-wrapper")),
+            _other => None,
+        });
+        let cargo = environment_wrapper(|name| match name {
+            "CARGO_BUILD_RUSTC_WRAPPER" => Some(std::ffi::OsString::from("cargo-wrapper")),
+            _other => None,
+        });
+
+        assert_eq!(rustc, Some(std::ffi::OsString::from("rustc-wrapper")));
+        assert_eq!(cargo, Some(std::ffi::OsString::from("cargo-wrapper")));
+    }
+
+    #[test]
+    fn an_ambient_wrapper_is_interposed_without_consulting_cargo_configuration() {
+        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\nrustc-wrapper = \"configured\"\n")]);
+        let outer = std::ffi::OsString::from("ambient");
+
+        assert_eq!(
+            rustc_wrapper_chain_in(&root, Some(outer.clone()), &empty(&root)),
+            RustcWrapperChain::Interpose(Some(outer))
+        );
+    }
+
+    #[test]
+    fn wrapper_configuration_requires_interposition_to_stand_down() {
+        for key in ["rustc-wrapper", "rustc-workspace-wrapper"] {
+            let text = format!("[build]\n{key} = \"relative-wrapper\"\n");
+            let files = [(".cargo/config.toml", text.as_str())];
+            let (_directory, root) = tree(&files);
+
+            assert_eq!(
+                rustc_wrapper_chain_in(&root, None, &empty(&root)),
+                RustcWrapperChain::StandDown,
+                "{key} was not recognized"
+            );
+        }
+
+        for key in ["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"] {
+            let text = format!("[env]\n{key} = \"relative-wrapper\"\n");
+            let files = [(".cargo/config.toml", text.as_str())];
+            let (_directory, root) = tree(&files);
+
+            assert_eq!(
+                rustc_wrapper_chain_in(&root, None, &empty(&root)),
+                RustcWrapperChain::StandDown,
+                "{key} was not recognized"
+            );
+        }
+    }
+
+    #[test]
+    fn no_wrapper_configuration_allows_direct_interposition() {
+        let (_directory, root) = tree(&[]);
+
+        assert_eq!(
+            rustc_wrapper_chain_in(&root, None, &empty(&root)),
+            RustcWrapperChain::Interpose(None)
+        );
     }
 
     #[test]

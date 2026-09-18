@@ -46,7 +46,10 @@ verdicts, incremental reuse, reporting, and command dispatch.
 - The private rustc-wrapper entry point preserves the wrapped compiler's
   representable process exit code, and the executable returns that `ExitCode`
   directly to Cargo. Launch failures and processes without a representable
-  exit code become failure; successful captures remain success.
+  exit code become failure; successful captures remain success. Compiler
+  capture stands down when Cargo configuration declares `build.rustc-wrapper`
+  or `build.rustc-workspace-wrapper`, because a relative configured path cannot
+  be moved safely into the scratch workspace.
 - The agreement tests use `cargo-gamma-attrs-impl` through a versionless path
   dev-dependency. Cargo omits that test-only edge from published packages, so
   it adds no downstream dependency or release-order constraint.
@@ -54,6 +57,12 @@ verdicts, incremental reuse, reporting, and command dispatch.
 
 Replaceable facade, cache, supervision, and test mechanics are recorded in the
 [implementation guide](../IMPLEMENTATION.md).
+
+The default storage layout keeps the synchronized source, vendored runtime, and
+stable workspace lock under the platform cache home. Cargo artifacts, census
+data, and reusable campaign records live under
+`<resolved-target>/cargo-gamma/cache/<workspace-identity>`. An explicit
+`--cache-dir` keeps all of those entries together at the selected path.
 
 ## Public contract
 

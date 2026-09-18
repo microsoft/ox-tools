@@ -44,9 +44,9 @@ pub use shard::shard_of;
 #[cfg(test)]
 #[doc(inline)]
 pub use survey::plan;
-pub(crate) use survey::plan_for_build;
 #[doc(inline)]
 pub use survey::{Scanned, Survey, load_metadata};
+pub(crate) use survey::{plan_for_build, plan_for_build_with_target};
 #[doc(inline)]
 pub use target_file::TargetFile;
 pub(crate) use workspace_snapshot::WorkspaceSnapshot;

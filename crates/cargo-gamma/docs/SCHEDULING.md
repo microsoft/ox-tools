@@ -100,6 +100,13 @@ During the successful Cargo preflight, cargo-gamma installs itself as a
 - marks an invocation opaque when an external dependency cannot be associated
   with a concrete artifact path.
 
+If Cargo configuration declares either `build.rustc-wrapper` or
+`build.rustc-workspace-wrapper`, cargo-gamma conservatively stands down from
+compiler interposition. A relative configured wrapper is resolved from the
+configuration that declared it, and moving that path into the scratch
+workspace could invoke a different program. Package-level reachability remains
+the safe fallback when exact compiler capture is unavailable.
+
 Cargo's JSON `compiler-artifact` messages independently identify each package,
 target kind, target source, executable, and emitted artifact. Cargo-gamma
 associates a test artifact with a compiler capture only when:
@@ -348,6 +355,14 @@ order supplies deterministic package-fair, longest-work-first secondary
 priority, but workers no longer claim it through a fixed cursor. A worker asks
 the scheduler for an assignment only when it is ready to run one.
 
+Each package keeps an ordered queue of its currently eligible candidates, and
+the global frontier contains only the best candidate from each package.
+Selection reads the first global entry instead of rescanning all mutants.
+Claims and completions rekey only candidates in the affected source file;
+package-turn fairness updates only that package's global entry. Claimed work is
+removed permanently, and a separate remaining count distinguishes an exhausted
+sweep from a cold same-item tail that is waiting for its scout.
+
 For unhinted work the scheduler ranks distance first:
 
 1. an item in a file with no active mutant;
@@ -375,6 +390,15 @@ timeout.
 
 **Output:** immutable work metadata and a synchronized assignment-time
 scheduler tracking remaining work and active file/item reservations.
+
+The same immutable work metadata seeds the live completion estimate. Worker
+assignment and completion events let it distinguish queued work from in-flight
+residuals. It calibrates exact, selected, hinted, whole-binary, and uncovered
+predictions against recent killed, full-suite, and resource-limited outcomes,
+then places the remaining costs across the configured worker lanes. The
+progress display therefore reports a range for the projected wall-time tail
+rather than scaling completed-mutant count, which would be biased whenever
+cheap or expensive work is scheduled first.
 
 ## 8. Testing one mutant
 
