@@ -359,7 +359,8 @@ if ($args -contains 'bolero' -and $args -contains 'list') {
     exit [int]$env:FAKE_BOLERO_LIST_EXIT
 }
 if ($args -contains 'llvm-cov' -and $args -contains 'report' -and $env:FAKE_LLVM_COV_REPORT_206) {
-    $command = "$([char]34)$($env:FAKE_LLVM_COV_PATH)$([char]34) export -format=lcov -instr-profile=fake.profdata -object fake-object.exe"
+    $quote = if ($env:FAKE_LLVM_COV_SINGLE_QUOTES) { [char]39 } else { [char]34 }
+    $command = "$quote$($env:FAKE_LLVM_COV_PATH)$quote export -format=lcov -instr-profile=fake.profdata -object fake-object.exe"
     if ($env:FAKE_LLVM_COV_MULTILINE) {
         $command = $command.Replace(' -object', "`n-object")
     }
@@ -2412,6 +2413,7 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")),
             ("FAKE_LLVM_COV_REPORT_206", OsStr::new("1")),
             ("FAKE_LLVM_COV_MULTILINE", OsStr::new("1")),
+            ("FAKE_LLVM_COV_SINGLE_QUOTES", OsStr::new("1")),
             ("FAKE_LLVM_COV_PATH", llvm_cov.as_os_str()),
             ("FAKE_LLVM_COV_LOG", llvm_cov_log.as_os_str()),
             ("FAKE_LLVM_COV_RESPONSE_LOG", response_log.as_os_str()),
@@ -2455,6 +2457,12 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
         ],
     );
     assert_failed(&failed, "failed response-file fallback");
+    let invocations = fs::read_to_string(&llvm_cov_log).unwrap();
+    assert_eq!(
+        invocations.lines().count(),
+        3,
+        "both quote styles must reach llvm-cov:\n{invocations}"
+    );
     let failed_report = tmp.path().join("target/coverage/lcov-all-features.info");
     assert!(!failed_report.exists(), "failed response-file fallback must remove partial report");
     assert!(
