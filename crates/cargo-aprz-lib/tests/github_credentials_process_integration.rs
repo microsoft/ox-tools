@@ -68,6 +68,8 @@ fn run_discovers_an_enterprise_token_through_the_production_process_path() {
     let bin = temp.path().join("bin");
     compile_fake_gh(&bin);
     let gh_log = temp.path().join("gh.log");
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())))
+        .expect("the fake gh directory and inherited PATH form a valid search path");
     let mut command = Command::new(std::env::current_exe().expect("the integration test knows its executable"));
     command
         .args([
@@ -76,7 +78,7 @@ fn run_discovers_an_enterprise_token_through_the_production_process_path() {
             "helper_run_discovers_an_enterprise_token_through_the_production_process_path",
             "--nocapture",
         ])
-        .env("PATH", bin)
+        .env("PATH", path)
         .env("GITHUB_TOKEN", " \t ")
         .env("FAKE_GH_LOG", &gh_log);
     if cfg!(windows) {
