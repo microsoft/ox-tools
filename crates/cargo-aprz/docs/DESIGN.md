@@ -83,15 +83,15 @@ continues anonymously without resolving the effective hostname, searching
 When enabled, the `gh` fallback is convenience, not a prerequisite. A missing
 executable, missing login, nonzero `gh auth token` result, blank output, or
 non-UTF-8 output continues anonymously and retains the provider's existing
-rate-limit behavior. An explicit option is authoritative, as is a nonblank
-environment token; cargo-aprz never invokes `gh` when either applies, even when
-the switch is present. Environment values are trimmed; an empty or
-whitespace-only `GITHUB_TOKEN` is treated as absent so explicitly authorized,
-host-aware `gh` discovery can continue. On Unix, an environment value can also
-contain non-UTF-8 bytes; such a value is likewise unusable as an HTTP credential
-and treated as absent. A rejected value is removed from the `gh` child
-environment so the CLI can consult its authenticated account instead of
-treating the environment override as authoritative.
+rate-limit behavior. A nonblank explicit option is authoritative, as is a
+nonblank environment token; cargo-aprz never invokes `gh` when either applies,
+even when the switch is present. Explicit and environment values are trimmed;
+empty or whitespace-only values are treated as absent so later configured
+sources can continue. On Unix, an environment value can also contain non-UTF-8
+bytes; such a value is likewise unusable as an HTTP credential and treated as
+absent. A rejected environment value is removed from the `gh` child environment
+so the CLI can consult its authenticated account instead of treating the
+environment override as authoritative.
 
 The command is spawned directly without a shell. Its stdout is trimmed and used
 only as the request credential; it is never logged, cached, included in an

@@ -98,8 +98,12 @@ where
     OutputFuture: Future<Output = io::Result<GhCommandOutput>>,
 {
     if let Some(token) = explicit {
-        log::trace!(target: LOG_TARGET, "GitHub credential source: --github-token");
-        return Some(token.clone());
+        let token = token.expose_secret().trim();
+        if !token.is_empty() {
+            log::trace!(target: LOG_TARGET, "GitHub credential source: --github-token");
+            return Some(GitHubToken(token.to_owned()));
+        }
+        log::trace!(target: LOG_TARGET, "GitHub credential source --github-token is blank; continuing credential discovery");
     }
 
     if let Some(token) = read_environment() {
@@ -389,6 +393,27 @@ mod tests {
         assert_eq!(selected.expose_secret(), "explicit-secret");
         assert!(!environment_read.get(), "an explicit token suppresses environment lookup");
         assert!(!gh_called.get(), "an explicit token suppresses gh");
+    }
+
+    #[tokio::test]
+    async fn blank_explicit_token_continues_credential_discovery() {
+        let explicit = token(" \r\n\t ");
+        let gh_called = Cell::new(false);
+        let selected = discover_with(
+            Some(&explicit),
+            true,
+            &Endpoints::default(),
+            || Some(OsString::from("environment-secret")),
+            |_| {
+                gh_called.set(true);
+                std::future::ready(Ok(successful(b"gh-secret")))
+            },
+        )
+        .await
+        .expect("the environment token is selected after a blank explicit token");
+
+        assert_eq!(selected.expose_secret(), "environment-secret");
+        assert!(!gh_called.get(), "the environment token still suppresses gh");
     }
 
     #[tokio::test]
