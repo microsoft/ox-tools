@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex, TryLockError, mpsc};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
-use cargo_gamma_process::{InterruptiblePipe, MemoryRequest, PreparedCommand, ProcessTree, ensure_reaper, prepare, reap_later};
+use cargo_gamma_process::{
+    InterruptiblePipe, MemoryRequest, PreparedCommand, ProcessTree, ensure_reaper, prepare, reap_later, retain_for_reaper_retry,
+};
 use cargo_metadata::TargetKind;
 use ohno::{AppError, IntoAppError};
 
@@ -614,54 +616,34 @@ impl CapturedProcess {
     }
 }
 
-#[mutants::skip] // Thin Child adapter; the generic helper below carries and directly tests every ownership branch.
-fn finish_ordinary_termination(child: Child, result: io::Result<ExitStatus>) -> io::Result<ExitStatus> {
-    finish_ordinary_termination_with(child, result, Child::try_wait, reap_later)
-}
-
-fn finish_ordinary_termination_with<T, E>(
-    mut control: T,
-    result: io::Result<ExitStatus>,
-    observe: impl FnOnce(&mut T) -> io::Result<Option<ExitStatus>>,
-    reap: impl FnOnce(T) -> Result<(), E>,
-) -> io::Result<ExitStatus>
-where
-    E: fmt::Display,
-{
-    match observe(&mut control) {
+fn finish_ordinary_termination(mut child: Child, result: io::Result<ExitStatus>) -> io::Result<ExitStatus> {
+    match child.try_wait() {
         Ok(Some(_status)) => result,
-        Ok(None) | Err(_) => match reap(control) {
+        Ok(None) | Err(_) => match reap_later(child) {
             Ok(()) => result,
-            Err(reaper) => match result {
-                Ok(_status) => Err(io::Error::other(format!(
-                    "the detached child reaper could not be started: {reaper}"
-                ))),
-                Err(error) => Err(io::Error::new(
-                    error.kind(),
-                    format!("{error}; the detached child reaper could not be started: {reaper}"),
-                )),
-            },
+            Err(failure) => {
+                let (reaper, child) = failure.into_parts();
+                retain_for_reaper_retry(child);
+                match result {
+                    Ok(_status) => Err(io::Error::other(format!(
+                        "the detached child reaper could not be started: {reaper}"
+                    ))),
+                    Err(error) => Err(io::Error::new(
+                        error.kind(),
+                        format!("{error}; the detached child reaper could not be started: {reaper}"),
+                    )),
+                }
+            }
         },
     }
 }
 
-#[mutants::skip] // Thin Child adapter; the generic helper below carries and directly tests every ownership branch.
-fn finish_ordinary_wait(child: Child, outcome: TreeOutcome) -> TreeOutcome {
-    finish_ordinary_wait_with(child, outcome, Child::try_wait, reap_later)
-}
-
-fn finish_ordinary_wait_with<T, E>(
-    mut control: T,
-    mut outcome: TreeOutcome,
-    observe: impl FnOnce(&mut T) -> io::Result<Option<ExitStatus>>,
-    reap: impl FnOnce(T) -> Result<(), E>,
-) -> TreeOutcome
-where
-    E: fmt::Display,
-{
-    if !matches!(observe(&mut control), Ok(Some(_status)))
-        && let Err(error) = reap(control)
+fn finish_ordinary_wait(mut child: Child, mut outcome: TreeOutcome) -> TreeOutcome {
+    if !matches!(child.try_wait(), Ok(Some(_status)))
+        && let Err(failure) = reap_later(child)
     {
+        let (error, child) = failure.into_parts();
+        retain_for_reaper_retry(child);
         outcome.result = add_infrastructure_failure(outcome.result, format!("the detached child reaper could not be started: {error}"));
     }
     outcome
@@ -1385,14 +1367,17 @@ mod tests {
     use std::time::{Duration, Instant};
     use std::{io, thread};
 
+    use cargo_gamma_process::ensure_reaper;
+    use cargo_gamma_process::faults::{self, Fault};
+
     use super::{
         BufferedOutcome, CapturedOutput, CapturedProcess, CapturedStream, Invocation, InvocationResult, OutputEmitError, OutputReader,
         Plan, ReaderCompletion, RunningWorker, SpillFile, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
         combine_captured_output, display_duration, effective_worker_count, emit_buffered, emit_buffered_to, execute_parallel, exit_byte,
-        failure_stops_launching, finish_ordinary_termination_with, finish_ordinary_wait_with, finish_output_reader,
-        finish_wait_with_cleanup, panic_description, parallel_failure_exit_code, run_captured, run_captured_with_spawner, run_streamed,
-        run_streamed_with_timeout, run_streamed_with_timeout_with, spawn_if_sealed, spawn_output_reader, spawn_output_reader_with,
-        spawn_tree, spawn_worker, terminate_ordinary_child, terminate_ordinary_with, wait_for_captured_process, wait_for_tree,
+        failure_stops_launching, finish_ordinary_termination, finish_ordinary_wait, finish_output_reader, finish_wait_with_cleanup,
+        panic_description, parallel_failure_exit_code, run_captured, run_captured_with_spawner, run_streamed, run_streamed_with_timeout,
+        run_streamed_with_timeout_with, spawn_if_sealed, spawn_output_reader, spawn_output_reader_with, spawn_tree, spawn_worker,
+        take_reader_output, terminate_ordinary_child, terminate_ordinary_with, wait_for_captured_process, wait_for_tree,
         wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
     };
 
@@ -1606,13 +1591,25 @@ mod tests {
     }
 
     fn sleeping_test_command() -> Command {
+        sleeping_test_command_for(Duration::from_secs(30))
+    }
+
+    fn sleeping_test_command_for(duration: Duration) -> Command {
         let mut command = Command::new(std::env::current_exe().expect("the test binary knows its path"));
         let _ = command
             .args(["--exact", "run::tests::ordinary_child_sleep_probe", "--nocapture"])
-            .env("CARGO_EACH_ORDINARY_CHILD_PROBE", "1")
+            .env("CARGO_EACH_ORDINARY_CHILD_PROBE", duration.as_millis().to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command
+    }
+
+    fn wait_for_reaper_owner_to_release(id: u32) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while faults::reaper_owns(id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!faults::reaper_owns(id), "the detached reaper did not release child {id}");
     }
 
     fn spawn_ordinary_capture(mut command: Command) -> Result<CapturedProcess, String> {
@@ -1891,52 +1888,75 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_child_handoff_preserves_primary_and_reaper_failures() {
-        let status = finish_ordinary_termination_with((), Ok(successful_status()), |()| Ok(None), |()| Ok::<(), io::Error>(()))
-            .expect("a successful handoff preserves the termination status");
-        assert!(status.success());
-
-        let error = finish_ordinary_termination_with(
-            (),
-            Ok(successful_status()),
-            |()| Ok(None),
-            |()| Err(io::Error::other("reaper unavailable")),
+    #[cfg_attr(miri, ignore = "spawns ordinary child processes")]
+    fn ordinary_child_handoffs_retain_a_bounded_reap_owner() {
+        ensure_reaper().expect("preflight the production reaper");
+        let handed_off = sleeping_test_command_for(Duration::from_millis(500))
+            .spawn()
+            .expect("spawn successful handoff probe");
+        let handed_off_id = handed_off.id();
+        let error = finish_ordinary_termination(
+            handed_off,
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "primary cleanup failed")),
         )
-        .expect_err("a failed handoff must replace a successful cleanup result");
-        assert!(error.to_string().contains("reaper unavailable"), "{error}");
+        .expect_err("a successful handoff preserves the primary cleanup error");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(faults::reaper_owns(handed_off_id), "the successful handoff lost its wait owner");
 
-        let error = finish_ordinary_termination_with(
-            (),
+        let successful_cleanup = sleeping_test_command_for(Duration::from_millis(500))
+            .spawn()
+            .expect("spawn successful-cleanup handoff probe");
+        let successful_cleanup_id = successful_cleanup.id();
+        let _failed_start = faults::arm(Fault::ReaperStart);
+        let error = finish_ordinary_termination(successful_cleanup, Ok(successful_status()))
+            .expect_err("a failed handoff replaces a successful cleanup result");
+        assert!(error.to_string().contains("reaper thread start failed"), "{error}");
+        assert!(
+            faults::reaper_owns(successful_cleanup_id),
+            "the successful-cleanup handoff lost its wait owner"
+        );
+
+        let termination_child = sleeping_test_command_for(Duration::from_millis(350))
+            .spawn()
+            .expect("spawn termination handoff probe");
+        let termination_id = termination_child.id();
+        let _failed_start = faults::arm(Fault::ReaperStart);
+        let started = Instant::now();
+        let error = finish_ordinary_termination(
+            termination_child,
             Err(io::Error::new(io::ErrorKind::PermissionDenied, "termination failed")),
-            |()| Err(io::Error::other("observation failed")),
-            |()| Err(io::Error::other("reaper unavailable")),
         )
-        .expect_err("the termination and handoff failures must both be retained");
+        .expect_err("the failed cleanup and handoff must be reported");
+        assert!(started.elapsed() < Duration::from_millis(200), "failed handoff blocked its caller");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("termination failed"), "{error}");
-        assert!(error.to_string().contains("reaper unavailable"), "{error}");
+        assert!(error.to_string().contains("reaper thread start failed"), "{error}");
+        assert!(
+            faults::reaper_owns(termination_id),
+            "the failed termination handoff lost its wait owner"
+        );
 
-        let outcome = finish_ordinary_wait_with(
-            (),
-            TreeOutcome::new(InvocationResult::Exited(successful_status())),
-            |()| Ok(None),
-            |()| Err(io::Error::other("wait reaper unavailable")),
+        let wait_child = sleeping_test_command_for(Duration::from_millis(350))
+            .spawn()
+            .expect("spawn wait handoff probe");
+        let wait_id = wait_child.id();
+        let _failed_start = faults::arm(Fault::ReaperStart);
+        let started = Instant::now();
+        let outcome = finish_ordinary_wait(wait_child, TreeOutcome::new(InvocationResult::Exited(successful_status())));
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "failed wait handoff blocked its caller"
         );
         assert!(
-            result_infrastructure_message(outcome.result).contains("wait reaper unavailable"),
-            "a post-wait handoff failure must become infrastructure failure"
+            result_infrastructure_message(outcome.result).contains("reaper thread start failed"),
+            "a post-wait handoff failure must become an infrastructure failure"
         );
+        assert!(faults::reaper_owns(wait_id), "the failed wait handoff lost its wait owner");
 
-        let outcome = finish_ordinary_wait_with(
-            (),
-            TreeOutcome::new(InvocationResult::Exited(successful_status())),
-            |()| Ok(Some(successful_status())),
-            |()| -> io::Result<()> { panic!("an already reaped child must not be handed off") },
-        );
-        let InvocationResult::Exited(status) = outcome.result else {
-            panic!("an already reaped child must preserve its exit status");
-        };
-        assert!(status.success());
+        wait_for_reaper_owner_to_release(handed_off_id);
+        wait_for_reaper_owner_to_release(successful_cleanup_id);
+        wait_for_reaper_owner_to_release(termination_id);
+        wait_for_reaper_owner_to_release(wait_id);
     }
 
     #[test]
@@ -2077,6 +2097,20 @@ mod tests {
         reader_is_dropped
             .recv_timeout(Duration::from_secs(1))
             .expect("the cancelled detached reader exits after the stalled append is released");
+    }
+
+    #[test]
+    fn detached_output_recovery_preserves_a_poisoned_available_buffer() {
+        let output = poisoned_buffer();
+        let mut failure = None;
+
+        let mut captured = take_reader_output(&output, "stdout", false, &mut failure);
+
+        assert_eq!(output_bytes(&mut captured), b"poisoned bytes");
+        assert!(
+            failure.is_some_and(|failure| failure.contains("capture buffer was poisoned")),
+            "the detached poisoned-buffer branch did not report its infrastructure failure"
+        );
     }
 
     #[test]
@@ -2237,8 +2271,9 @@ mod tests {
 
     #[test]
     fn ordinary_child_sleep_probe() {
-        if std::env::var_os("CARGO_EACH_ORDINARY_CHILD_PROBE").is_some() {
-            thread::sleep(Duration::from_secs(30));
+        if let Some(duration) = std::env::var_os("CARGO_EACH_ORDINARY_CHILD_PROBE") {
+            let millis = duration.to_string_lossy().parse().expect("the parent passes a millisecond count");
+            thread::sleep(Duration::from_millis(millis));
         }
     }
 
@@ -2478,6 +2513,30 @@ mod tests {
             Err("injected timed-stream spawn failure".to_owned())
         });
         assert!(result_infrastructure_message(spawn_failure).contains("injected timed-stream spawn failure"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns a contained child process")]
+    fn captured_runner_uses_the_production_timeout_spawner() {
+        let mut outcome = run_captured(&invocation(&["rustc", "--version"]), Some(Duration::from_secs(2)));
+
+        match &outcome.result {
+            InvocationResult::Exited(status) => {
+                assert!(status.success());
+                assert!(
+                    String::from_utf8(output_bytes(&mut outcome.stdout))
+                        .expect("rustc output is UTF-8")
+                        .contains("rustc")
+                );
+            }
+            InvocationResult::Infrastructure(message) => {
+                assert!(
+                    message.contains("timeout requires sealed process-tree containment"),
+                    "unexpected production timeout-spawn failure: {message}"
+                );
+            }
+            InvocationResult::TimedOut(duration) => panic!("rustc --version timed out after {duration:?}"),
+        }
     }
 
     #[test]

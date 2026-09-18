@@ -66,9 +66,11 @@
 //! [`Command::output`](std::process::Command::output). It drains stdout and stderr concurrently,
 //! then sweeps descendants before waiting for inherited pipe handles to close.
 //!
-//! Bounded termination can transfer a still-running leader to a shared detached reaper. The reaper
-//! writes observation warnings outside its global queue lock through a fallible stderr path, and
-//! any loop exit or unwind clears readiness state so a later handoff can start a replacement.
+//! Bounded termination can transfer a still-running leader to a shared detached reaper. A failed
+//! handoff moves the recovered child into a separate process-wide retry queue rather than restoring
+//! it to a blocking Drop path. The reaper writes observation warnings outside its global queue lock
+//! through a fallible stderr path, and any loop exit or unwind preserves retained handles for a
+//! later replacement.
 //!
 //! A terminal delivers `Ctrl-C` to the whole foreground process group, so a child sharing this
 //! process's group dies with it automatically while a child leading its own group does not. Windows
@@ -84,7 +86,7 @@ pub use memory_usage::MemoryUsage;
 #[doc(inline)]
 pub use process_tree::{
     OutputError, PreparedCommand, ProcessTree, ReapFailure, SpawnFailure, SpawnedCommand, capacity, containment, ensure_reaper, output,
-    prepare, reap_later,
+    prepare, reap_later, retain_for_reaper_retry,
 };
 
 mod memory_request;

@@ -51,6 +51,12 @@ pub fn arm_late(fault: Fault, delay: Duration) -> Armed {
     ripe_at(fault, Instant::now() + delay)
 }
 
+/// Reports whether the process-wide reaper or its retry queue owns `id`.
+#[must_use]
+pub fn reaper_owns(id: u32) -> bool {
+    crate::process_tree::reaper_contains(id)
+}
+
 fn ripe_at(fault: Fault, ripe: Instant) -> Armed {
     ARMED.with_borrow_mut(|armed| armed.push((fault, ripe)));
 

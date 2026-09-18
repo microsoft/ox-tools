@@ -28,6 +28,7 @@ toml = { workspace = true, features = ["parse", "serde"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
+cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
 predicates = { workspace = true }
 
 # >>> anvil-managed: anvil-lints

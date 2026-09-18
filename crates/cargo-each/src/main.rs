@@ -134,7 +134,10 @@
 //! background descendants. Each output stream retains at most 1 MiB in memory
 //! before spilling to a unique system-temporary file owned by the invocation
 //! outcome; spill failures are infrastructure failures and spill files are
-//! removed by RAII after deterministic plan-order emission.
+//! removed by RAII after deterministic plan-order emission. If a later
+//! ordinary-child reaper handoff fails, cargo-each explicitly recovers the
+//! child and transfers it to the process-wide retry queue; no returning cleanup
+//! or local Drop path waits for it without a bound.
 //!
 //! Reader failures are observed while the child is running and trigger bounded
 //! termination. Output drain is bounded after every completion: readers get

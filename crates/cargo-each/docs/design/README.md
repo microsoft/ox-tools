@@ -340,6 +340,14 @@ no-op.
   so every success, failure, and panic path removes it through RAII. Spill
   creation, write, seek, or read failures are infrastructure failures; output
   is never intentionally truncated on a successful path.
+- **Failed ordinary-child handoffs preserve ownership.** Captured parallel
+  children are preflighted against the detached reaper before spawn. If a later
+  bounded cleanup still cannot hand a live ordinary child to that reaper,
+  cargo-each explicitly recovers both the error and `Child` from
+  `ReapFailure`, transfers the handle to the process-wide retry queue, and
+  reports the infrastructure failure. The retry queue is drained by the live
+  reaper or its next successful restart; neither the cleanup return nor a local
+  Drop path performs an unbounded wait.
 - **Output capture and drain are bounded.** Reader failures are observed while
   the leader is still running; cargo-each terminates the invocation and reports
   the infrastructure failure instead of waiting indefinitely with an
