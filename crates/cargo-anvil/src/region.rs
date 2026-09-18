@@ -592,6 +592,21 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
     boundaries.extend(protected.iter().map(|range| range.start));
     boundaries.sort_unstable();
 
+    if let Some(adoption) = adopt_dotted_child_assignments(text, &managed, &candidates, &boundaries, &protected) {
+        return adoption;
+    }
+    let legacy_masked = mask_legacy_lint_region_to_header(text, syntax);
+    if legacy_masked != masked
+        && let Some(legacy_candidates) = headed_tables(&legacy_masked)
+    {
+        let mut legacy_boundaries: Vec<usize> = legacy_candidates.iter().map(|table| table.header.start).collect();
+        legacy_boundaries.extend(protected.iter().map(|range| range.start));
+        legacy_boundaries.sort_unstable();
+        if let Some(adoption) = adopt_dotted_child_assignments(text, &managed, &legacy_candidates, &legacy_boundaries, &protected) {
+            return adoption;
+        }
+    }
+
     let mut deletions: Vec<ByteRange> = Vec::new();
     let mut residue = String::new();
 
@@ -599,6 +614,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         if candidate.array_of_tables {
             continue;
         }
+
         let Some(managed_values) = managed
             .iter()
             .find(|table| !table.array_of_tables && table.path == candidate.path)
@@ -659,6 +675,173 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         text: out,
         residue: tidy_residue(&residue, text_newline(text)),
     }
+}
+
+fn mask_legacy_lint_region_to_header(text: &str, syntax: CommentSyntax) -> String {
+    let mut masked = mask_managed_regions(text, syntax).into_bytes();
+    for (id, header) in [("anvil-workspace-lints", "[workspace.lints]"), ("anvil-lints", "[lints]")] {
+        let Ok(Some(region)) = find_region(text, id, syntax) else {
+            continue;
+        };
+        let Some(relative) = region.body_str().find(header) else {
+            continue;
+        };
+        let start = region.body.start + relative;
+        let end = start + header.len();
+        masked[start..end].copy_from_slice(&text.as_bytes()[start..end]);
+    }
+    String::from_utf8(masked).expect("masking preserves UTF-8 and only restores original UTF-8 slices")
+}
+
+pub(crate) fn lint_region_placement(region_id: &str, current: Option<&str>) -> Option<RegionPlacement> {
+    const WORKSPACE: &[&str] = &[
+        "anvil-workspace-rust-lints",
+        "anvil-workspace-rustdoc-lints",
+        "anvil-workspace-clippy-lints",
+    ];
+    const SINGLE_CRATE: &[&str] = &["anvil-rust-lints", "anvil-rustdoc-lints", "anvil-clippy-lints"];
+    let order = if WORKSPACE.contains(&region_id) {
+        WORKSPACE
+    } else if SINGLE_CRATE.contains(&region_id) {
+        SINGLE_CRATE
+    } else {
+        return None;
+    };
+    let Some(text) = current else {
+        return Some(RegionPlacement::End);
+    };
+    if matches!(find_region(text, region_id, CommentSyntax::Hash), Ok(Some(_))) {
+        return Some(RegionPlacement::End);
+    }
+    let position = order
+        .iter()
+        .position(|candidate| *candidate == region_id)
+        .expect("region membership was established above");
+    for successor in &order[position + 1..] {
+        if let Ok(Some(region)) = find_region(text, successor, CommentSyntax::Hash) {
+            return Some(RegionPlacement::At(region.start_line.start));
+        }
+    }
+
+    let retiring: BTreeSet<String> = ["anvil-workspace-lints", "anvil-lints"].into_iter().map(str::to_owned).collect();
+    let parseable = mask_retiring_managed_regions(text, CommentSyntax::Hash, &retiring);
+    let before_profiles = headed_tables(&parseable).and_then(|tables| {
+        tables
+            .into_iter()
+            .filter(|table| table.path.first().is_some_and(|root| root == "patch" || root == "profile"))
+            .map(|table| table.header.start)
+            .min()
+    });
+    let before_legacy = retiring
+        .iter()
+        .filter_map(|id| find_region(text, id, CommentSyntax::Hash).ok().flatten())
+        .map(|region| region.start_line.start)
+        .min();
+    Some(RegionPlacement::At(
+        before_profiles.into_iter().chain(before_legacy).min().unwrap_or(text.len()),
+    ))
+}
+
+/// Move dotted assignments from a headed parent table into a managed child
+/// table. For example, introducing `[workspace.lints.rust]` must turn an
+/// existing `rust.missing_docs = "warn"` under `[workspace.lints]` into the
+/// bare `missing_docs = "warn"` residue that follows the new region.
+fn adopt_dotted_child_assignments(
+    text: &str,
+    managed: &[HeadedTable],
+    candidates: &[HeadedTable],
+    boundaries: &[usize],
+    protected: &[ByteRange],
+) -> Option<TomlAdoption> {
+    let [managed] = managed else {
+        return None;
+    };
+    let (namespace, parent_path) = managed.path.split_last()?;
+    let candidate = candidates
+        .iter()
+        .find(|table| !table.array_of_tables && table.path == parent_path)?;
+    let end = boundary_after(boundaries, candidate.header.start, text.len());
+    let mut deletions = Vec::new();
+    let mut residue = String::new();
+
+    for entry in candidate
+        .entries
+        .iter()
+        .filter(|entry| entry.path.first().is_some_and(|segment| segment == namespace))
+    {
+        let start = protected
+            .iter()
+            .find(|range| range.start <= entry.span.start && entry.span.start < range.end)
+            .map_or(entry.span.start, |range| range.end);
+        let relative_path = &entry.path[1..];
+        match managed.values.get(relative_path) {
+            Some(managed_value) if *managed_value == entry.value => {}
+            Some(managed_value) => {
+                return Some(TomlAdoption::Conflict {
+                    table: candidate.path.join("."),
+                    key: candidate
+                        .path
+                        .iter()
+                        .chain(entry.path.iter())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("."),
+                    managed: managed_value.clone(),
+                    hand_written: entry.value.clone(),
+                });
+            }
+            None => {
+                let source = &text[start..entry.span.end.min(end)];
+                let Some(bare) = strip_dotted_namespace(source, namespace) else {
+                    return Some(TomlAdoption::Unchanged);
+                };
+                residue.push_str(&bare);
+            }
+        }
+        deletions.push(ByteRange {
+            start,
+            end: entry.span.end.min(end),
+        });
+    }
+
+    if deletions.is_empty() {
+        return None;
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for range in deletions {
+        out.push_str(&text[cursor..range.start]);
+        cursor = range.end;
+    }
+    out.push_str(&text[cursor..]);
+    Some(TomlAdoption::Adopted {
+        text: out,
+        residue: tidy_residue(&residue, text_newline(text)),
+    })
+}
+
+fn strip_dotted_namespace(source: &str, namespace: &str) -> Option<String> {
+    let prefixes = [format!("{namespace}."), format!("\"{namespace}\"."), format!("'{namespace}'.")];
+    let (offset, prefix_len) = source
+        .split_inclusive('\n')
+        .scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.len();
+            Some((start, line))
+        })
+        .find_map(|(start, line)| {
+            let indentation = line.len() - line.trim_start().len();
+            prefixes
+                .iter()
+                .find(|prefix| line[indentation..].starts_with(prefix.as_str()))
+                .map(|prefix| (start + indentation, prefix.len()))
+        })?;
+
+    let mut out = String::with_capacity(source.len() - prefix_len);
+    out.push_str(&source[..offset]);
+    out.push_str(&source[offset + prefix_len..]);
+    Some(out)
 }
 
 /// Trim the blank lines that bounded the residue inside the table it came

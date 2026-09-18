@@ -14,16 +14,21 @@ use super::justfile;
 use crate::catalog::{Artifact, HostSelector, RegionId, RegionSpec};
 use crate::region::CommentSyntax;
 
-/// Region id for the workspace-scope lints (multi-crate workspaces).
-const WORKSPACE_LINTS_REGION_ID: &str = "anvil-workspace-lints";
+const WORKSPACE_RUST_LINTS_REGION_ID: &str = "anvil-workspace-rust-lints";
+const WORKSPACE_RUSTDOC_LINTS_REGION_ID: &str = "anvil-workspace-rustdoc-lints";
+const WORKSPACE_CLIPPY_LINTS_REGION_ID: &str = "anvil-workspace-clippy-lints";
+const RUST_LINTS_REGION_ID: &str = "anvil-rust-lints";
+const RUSTDOC_LINTS_REGION_ID: &str = "anvil-rustdoc-lints";
+const CLIPPY_LINTS_REGION_ID: &str = "anvil-clippy-lints";
 
 /// Region id for crate-scope lints — used both for single-crate repos (full
 /// catalog) and for each member of a multi-crate workspace (`workspace =
 /// true`).
 const CRATE_LINTS_REGION_ID: &str = "anvil-lints";
 
-/// Embedded body of the lint catalog, in dotted-key form (no table header).
-const LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-lints-body.toml");
+const RUST_LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-rust-lints.toml");
+const RUSTDOC_LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-rustdoc-lints.toml");
+const CLIPPY_LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-clippy-lints.toml");
 
 /// Embedded body of a workspace-member lints region.
 const MEMBER_LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-member-lints.toml");
@@ -97,24 +102,26 @@ const CLIPPY_BODY: &str = include_str!("../../../templates/regions/clippy.toml")
 /// Embedded body of the `.gitattributes` managed region.
 const GITATTRIBUTES_BODY: &str = include_str!("../../../templates/regions/gitattributes");
 
-/// Render the body of the workspace-scope lints region: `[workspace.lints]`
-/// header followed by the embedded catalog.
 #[must_use]
-fn render_workspace_lints_body() -> String {
-    let mut out = String::with_capacity(LINTS_BODY.len() + 32);
-    out.push_str("[workspace.lints]\n");
-    out.push_str(LINTS_BODY);
+fn render_lints_body(scope: &str, namespace: &str, body: &str) -> String {
+    let mut out = String::with_capacity(scope.len() + namespace.len() + body.len() + 8);
+    out.push('[');
+    out.push_str(scope);
+    out.push('.');
+    out.push_str(namespace);
+    out.push_str("]\n");
+    out.push_str(body);
     out
 }
 
-/// Render the body of the single-crate lints region: `[lints]` header
-/// followed by the embedded catalog.
 #[must_use]
-fn render_single_crate_lints_body() -> String {
-    let mut out = String::with_capacity(LINTS_BODY.len() + 16);
-    out.push_str("[lints]\n");
-    out.push_str(LINTS_BODY);
-    out
+fn lint_region(host: HostSelector, id: &'static str, scope: &str, namespace: &str, body: &str) -> Artifact {
+    Artifact::region(RegionSpec {
+        host,
+        id: RegionId::new(id),
+        body: render_lints_body(scope, namespace, body),
+        syntax: CommentSyntax::Hash,
+    })
 }
 
 /// Build a single-path `Hash`-syntax region artifact.
@@ -137,35 +144,70 @@ pub fn justfile_imports() -> Artifact {
     )
 }
 
-/// Root `Cargo.toml` / `anvil-workspace-lints`.
-///
-/// The workspace-scope lint catalog under `[workspace.lints]`. Emitted only
-/// in a multi-crate workspace; the [`HostSelector::WorkspaceCargoToml`] host
-/// skips it in a single-crate repo.
 #[must_use]
-pub fn workspace_lints() -> Artifact {
-    Artifact::region(RegionSpec {
-        host: HostSelector::WorkspaceCargoToml,
-        id: RegionId::new(WORKSPACE_LINTS_REGION_ID),
-        body: render_workspace_lints_body(),
-        syntax: CommentSyntax::Hash,
-    })
+pub fn workspace_rust_lints() -> Artifact {
+    lint_region(
+        HostSelector::WorkspaceCargoToml,
+        WORKSPACE_RUST_LINTS_REGION_ID,
+        "workspace.lints",
+        "rust",
+        RUST_LINTS_BODY,
+    )
 }
 
-/// Root `Cargo.toml` / `anvil-lints`.
-///
-/// The full lint catalog under `[lints]`. Emitted only in a single-crate
-/// repo; the [`HostSelector::SingleCrateCargoToml`] host skips it in a
-/// workspace, where the catalog lives under `[workspace.lints]` and members
-/// inherit it.
 #[must_use]
-pub fn single_crate_lints() -> Artifact {
-    Artifact::region(RegionSpec {
-        host: HostSelector::SingleCrateCargoToml,
-        id: RegionId::new(CRATE_LINTS_REGION_ID),
-        body: render_single_crate_lints_body(),
-        syntax: CommentSyntax::Hash,
-    })
+pub fn workspace_rustdoc_lints() -> Artifact {
+    lint_region(
+        HostSelector::WorkspaceCargoToml,
+        WORKSPACE_RUSTDOC_LINTS_REGION_ID,
+        "workspace.lints",
+        "rustdoc",
+        RUSTDOC_LINTS_BODY,
+    )
+}
+
+#[must_use]
+pub fn workspace_clippy_lints() -> Artifact {
+    lint_region(
+        HostSelector::WorkspaceCargoToml,
+        WORKSPACE_CLIPPY_LINTS_REGION_ID,
+        "workspace.lints",
+        "clippy",
+        CLIPPY_LINTS_BODY,
+    )
+}
+
+#[must_use]
+pub fn single_crate_rust_lints() -> Artifact {
+    lint_region(
+        HostSelector::SingleCrateCargoToml,
+        RUST_LINTS_REGION_ID,
+        "lints",
+        "rust",
+        RUST_LINTS_BODY,
+    )
+}
+
+#[must_use]
+pub fn single_crate_rustdoc_lints() -> Artifact {
+    lint_region(
+        HostSelector::SingleCrateCargoToml,
+        RUSTDOC_LINTS_REGION_ID,
+        "lints",
+        "rustdoc",
+        RUSTDOC_LINTS_BODY,
+    )
+}
+
+#[must_use]
+pub fn single_crate_clippy_lints() -> Artifact {
+    lint_region(
+        HostSelector::SingleCrateCargoToml,
+        CLIPPY_LINTS_REGION_ID,
+        "lints",
+        "clippy",
+        CLIPPY_LINTS_BODY,
+    )
 }
 
 /// `<member>/Cargo.toml` / `anvil-lints` — the per-member `workspace = true`
@@ -258,23 +300,23 @@ mod tests {
     use crate::region::{TomlAdoption, adopt_unmanaged_toml_tables, upsert_region};
 
     #[test]
-    fn embedded_catalog_uses_dotted_keys() {
-        for line in LINTS_BODY.lines() {
+    fn embedded_catalog_uses_bare_keys() {
+        for line in [RUST_LINTS_BODY, RUSTDOC_LINTS_BODY, CLIPPY_LINTS_BODY]
+            .into_iter()
+            .flat_map(str::lines)
+        {
             let trimmed = line.trim_start();
-            assert!(
-                !trimmed.starts_with('['),
-                "unexpected table header in cargo-lints-body.toml: {line}"
-            );
+            assert!(!trimmed.starts_with('['), "unexpected table header in lint body: {line}");
         }
-        assert!(LINTS_BODY.contains("rust.unsafe_op_in_unsafe_fn = \"warn\""));
-        assert!(LINTS_BODY.contains("clippy.unwrap_used = \"warn\""));
+        assert!(RUST_LINTS_BODY.contains("unsafe_op_in_unsafe_fn = \"warn\""));
+        assert!(CLIPPY_LINTS_BODY.contains("unwrap_used = \"warn\""));
     }
 
     #[test]
     fn catalog_intentionally_omits_contested_lints() {
-        for needle in ["rust.missing_docs", "clippy.expect_used", "clippy.panic "] {
+        for needle in ["missing_docs =", "unreachable_pub =", "expect_used =", "panic ="] {
             assert!(
-                !LINTS_BODY.contains(needle),
+                !format!("{RUST_LINTS_BODY}{RUSTDOC_LINTS_BODY}{CLIPPY_LINTS_BODY}").contains(needle),
                 "catalog now contains '{needle}'; if intentional, update the catalog-omission test"
             );
         }
@@ -288,6 +330,7 @@ mod tests {
             "clippy.deref_by_slicing = \"warn\"",
             "clippy.empty_drop = \"warn\"",
             "clippy.empty_enum_variants_with_brackets = \"warn\"",
+            "clippy.empty_structs_with_brackets = \"warn\"",
             "clippy.fn_to_numeric_cast_any = \"warn\"",
             "clippy.if_then_some_else_none = \"warn\"",
             "clippy.multiple_unsafe_ops_per_block = \"warn\"",
@@ -297,43 +340,41 @@ mod tests {
             "clippy.unnecessary_safety_doc = \"warn\"",
             "clippy.unneeded_field_pattern = \"warn\"",
             "clippy.unused_result_ok = \"warn\"",
+            "clippy.literal_string_with_formatting_args = \"allow\"",
             "clippy.redundant_pub_crate = \"allow\"",
             "clippy.should_panic_without_expect = \"allow\"",
         ] {
-            assert!(LINTS_BODY.contains(needle), "catalog missing consensus lint '{needle}'");
+            assert!(
+                CLIPPY_LINTS_BODY.contains(needle.trim_start_matches("clippy.")),
+                "catalog missing consensus lint '{needle}'"
+            );
         }
     }
 
     #[test]
     fn catalog_declares_llvm_cov_cfgs_for_unexpected_cfgs_lint() {
         assert!(
-            LINTS_BODY.contains("rust.unexpected_cfgs"),
+            RUST_LINTS_BODY.contains("unexpected_cfgs"),
             "catalog must declare rust.unexpected_cfgs to pre-allow llvm-cov's coverage cfgs"
         );
         assert!(
-            LINTS_BODY.contains("'cfg(coverage,coverage_nightly)'"),
+            RUST_LINTS_BODY.contains("'cfg(coverage,coverage_nightly)'"),
             "catalog's unexpected_cfgs check-cfg list must include coverage,coverage_nightly"
         );
     }
 
     #[test]
-    fn workspace_body_prepends_workspace_lints_header() {
-        let body = render_workspace_lints_body();
-        assert!(body.starts_with("[workspace.lints]\n"));
-        assert!(body.contains("clippy.pedantic = { level = \"warn\", priority = -1 }"));
+    fn workspace_bodies_open_namespace_subtables() {
+        assert!(render_lints_body("workspace.lints", "rust", RUST_LINTS_BODY).starts_with("[workspace.lints.rust]\n"));
+        assert!(
+            render_lints_body("workspace.lints", "clippy", CLIPPY_LINTS_BODY).contains("pedantic = { level = \"warn\", priority = -1 }")
+        );
     }
 
     #[test]
-    fn single_crate_body_prepends_lints_header() {
-        let body = render_single_crate_lints_body();
-        assert!(body.starts_with("[lints]\n"));
-        assert!(body.contains("clippy.unwrap_used = \"warn\""));
-        for line in body.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with('[') {
-                assert_eq!(trimmed, "[lints]", "unexpected table header in single-crate body: {line}");
-            }
-        }
+    fn single_crate_bodies_open_namespace_subtables() {
+        assert!(render_lints_body("lints", "rustdoc", RUSTDOC_LINTS_BODY).starts_with("[lints.rustdoc]\n"));
+        assert!(render_lints_body("lints", "clippy", CLIPPY_LINTS_BODY).contains("unwrap_used = \"warn\""));
     }
 
     #[test]
@@ -343,10 +384,23 @@ mod tests {
     }
 
     #[test]
-    fn dotted_key_body_parses_as_valid_toml_when_appended_to_workspace() {
+    fn namespace_bodies_compose_as_valid_workspace_toml() {
         let host = "[workspace]\nmembers = [\"crates/a\"]\n";
-        let region_body = render_workspace_lints_body();
-        let spliced = upsert_region(host, WORKSPACE_LINTS_REGION_ID, &region_body, CommentSyntax::Hash).unwrap();
+        let spliced = [
+            (WORKSPACE_RUST_LINTS_REGION_ID, "rust", RUST_LINTS_BODY),
+            (WORKSPACE_RUSTDOC_LINTS_REGION_ID, "rustdoc", RUSTDOC_LINTS_BODY),
+            (WORKSPACE_CLIPPY_LINTS_REGION_ID, "clippy", CLIPPY_LINTS_BODY),
+        ]
+        .into_iter()
+        .try_fold(host.to_owned(), |text, (id, namespace, body)| {
+            upsert_region(
+                &text,
+                id,
+                &render_lints_body("workspace.lints", namespace, body),
+                CommentSyntax::Hash,
+            )
+        })
+        .unwrap();
         let _: toml_edit::DocumentMut = spliced.parse().expect("spliced TOML must be valid");
     }
 

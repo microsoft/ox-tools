@@ -255,7 +255,7 @@ repo/
 ├── Justfile                                       managed-region: anvil-imports
 ├── justfiles/anvil/                               owned (see local.md)
 ├── .anvil/container/                              owned — the container image definition (see containers.md)
-├── Cargo.toml                                     managed-region: anvil-workspace-lints (or anvil-lints in single-crate)
+├── Cargo.toml                                     managed-regions: anvil-{workspace-,}{rust,rustdoc,clippy}-lints
 ├── crates/<member>/Cargo.toml                     managed-region: anvil-lints (one per workspace member)
 ├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
 ├── rustfmt.toml                                   managed-region: anvil-rustfmt
@@ -296,19 +296,25 @@ Detail on each host:
   credentials. `justfiles/` holds `.just` recipes and nothing else, so these
   live in a tool-owned directory of their own; see
   [containers.md](./containers.md).
-- **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries the
-  `anvil-workspace-lints` region containing a single `[workspace.lints]` table whose
-  rust/clippy/rustdoc entries are written in dotted-key form
-  (`rust.unsafe_op_in_unsafe_fn = "warn"`, `clippy.unwrap_used = "warn"`, etc.). This
-  form is chosen because TOML forbids re-declaring a table header — if anvil wrote
-  `[workspace.lints.clippy]` inside the region, users couldn't add another
-  `[workspace.lints.clippy]` block elsewhere in the file. With dotted keys, users
-  append new lints in the same scope right after the closing sentinel; see §7. Each
-  member `Cargo.toml` carries an `anvil-lints` region with exactly
+- **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries separate
+  `anvil-workspace-rust-lints`, `anvil-workspace-rustdoc-lints`, and
+  `anvil-workspace-clippy-lints` regions. Each opens its explicit
+  `[workspace.lints.<namespace>]` table and contains bare lint names. Users append
+  repository-specific bare lint keys immediately after the corresponding closing
+  sentinel, before the next table header. This gives `cargo sort --grouped` a stable
+  sorting unit for each namespace without mixing managed and repository-owned keys.
+  Each member `Cargo.toml` carries an `anvil-lints` region with exactly
   `[lints]\nworkspace = true`. The emitter uses `toml-edit` for round-trip-safe
-  manipulation. In a single-crate repo (no `[workspace]` table), the workspace region
-  becomes `anvil-lints` and contains a single `[lints]` table with the same
-  dotted-key layout.
+  manipulation. In a single-crate repo (no `[workspace]` table), the root manifest
+  instead carries `anvil-rust-lints`, `anvil-rustdoc-lints`, and
+  `anvil-clippy-lints` regions under `[lints.<namespace>]`. The catalog favors broadly
+  applicable, low-false-positive diagnostics. It warns on empty braced structs whose unit form is clearer
+  (`empty_structs_with_brackets`) and allows literal strings with formatting-like
+  braces because templates and structured-logging messages legitimately carry such
+  text. Documentation completeness, whether production code may panic, and whether
+  crate-internal APIs may use `pub` remain repository policy: `missing_docs`,
+  `clippy::panic`, and `unreachable_pub` are not catalog defaults and adopters can
+  add them outside the managed region.
 - **`deny.toml`** — one managed region per top-level section (`[advisories]`, `[licenses]`,
   `[bans]`, `[sources]`) carrying the tool's baseline license/advisory rules. The bans baseline
   rejects wildcard registry requirements while allowing versionless path or Git
