@@ -103,22 +103,22 @@ where
     }
 
     if let Some(token) = read_environment() {
-        let Ok(token) = token.into_string() else {
+        if let Ok(token) = token.into_string() {
+            let token = token.trim();
+            if !token.is_empty() {
+                log::trace!(target: LOG_TARGET, "GitHub credential source: {GITHUB_TOKEN_ENV}");
+                return Some(GitHubToken(token.to_owned()));
+            }
             log::trace!(
                 target: LOG_TARGET,
-                "GitHub credential source {GITHUB_TOKEN_ENV} is not valid UTF-8; using anonymous access"
+                "GitHub credential source {GITHUB_TOKEN_ENV} is blank; continuing credential discovery"
             );
-            return None;
-        };
-        let token = token.trim();
-        if !token.is_empty() {
-            log::trace!(target: LOG_TARGET, "GitHub credential source: {GITHUB_TOKEN_ENV}");
-            return Some(GitHubToken(token.to_owned()));
+        } else {
+            log::trace!(
+                target: LOG_TARGET,
+                "GitHub credential source {GITHUB_TOKEN_ENV} is not valid UTF-8; continuing credential discovery"
+            );
         }
-        log::trace!(
-            target: LOG_TARGET,
-            "GitHub credential source {GITHUB_TOKEN_ENV} is blank; continuing credential discovery"
-        );
     }
 
     if !github_token_from_gh {
@@ -432,6 +432,29 @@ mod tests {
             assert!(selected.is_none());
             assert!(!gh_called.get(), "gh must remain disabled for environment value {environment:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn non_utf8_environment_token_continues_to_gh_when_enabled() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let gh_called = Cell::new(false);
+        let selected = discover_with(
+            None,
+            true,
+            &Endpoints::default(),
+            || Some(OsString::from_vec(vec![0xff])),
+            |_| {
+                gh_called.set(true);
+                std::future::ready(Ok(successful(b"gh-secret")))
+            },
+        )
+        .await
+        .expect("an unusable environment token falls through to gh");
+
+        assert_eq!(selected.expose_secret(), "gh-secret");
+        assert!(gh_called.get());
     }
 
     #[tokio::test]

@@ -164,11 +164,12 @@
 //! 4. anonymous access
 //!
 //! The host passed to `gh` comes from the effective GitHub service URL, including
-//! `--github-url` or `APRZ_GITHUB_URL` overrides for GitHub Enterprise. Missing
-//! or blank credentials and a `gh` lookup that exceeds its finite deadline are
-//! ignored and retain the existing anonymous rate-limit behavior. Without
-//! `--github-token-from-gh`, `cargo-aprz` never searches for or invokes `gh`.
-//! Codeberg credentials continue to use `--codeberg-token` or `CODEBERG_TOKEN`.
+//! `--github-url` or `APRZ_GITHUB_URL` overrides for GitHub Enterprise. Missing,
+//! blank, or non-UTF-8 credentials and a `gh` lookup that exceeds its finite
+//! deadline are ignored and retain the existing anonymous rate-limit behavior.
+//! Without `--github-token-from-gh`, `cargo-aprz` never searches for or invokes
+//! `gh`. Codeberg credentials continue to use `--codeberg-token` or
+//! `CODEBERG_TOKEN`.
 //!
 //! ## Reports
 //!
