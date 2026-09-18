@@ -107,17 +107,6 @@ and the child process is awaited asynchronously with a ten-second deadline.
 Expiry terminates the child and continues anonymously, so credential discovery
 does not block an async runtime worker indefinitely.
 
-Containerized opt-in applies the same process contract on the host because the
-generated image does not contain `gh`: absolute resolution from explicit,
-nonempty `PATH` entries; direct executable images only on Windows and regular
-executable files on Unix; direct argument-vector launch with stdin and stderr
-suppressed and strict UTF-8 stdout captured; the rejected blank environment
-token removed; and a ten-second deadline that terminates the complete process
-tree. Missing, unsuccessful, timed-out, blank, and invalid-output lookups all
-continue anonymously. The container driver derives the same effective hostname
-and forwards `APRZ_GITHUB_URL` with a discovered token so the inner provider
-cannot target a different endpoint.
-
 ## Cache storage
 
 Provider data is stored beneath a platform-specific cache root, partitioned by
