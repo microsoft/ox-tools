@@ -182,6 +182,7 @@ clippy.deref_by_slicing = "warn"
 clippy.disallowed_script_idents = "warn"
 clippy.empty_drop = "warn"
 clippy.empty_enum_variants_with_brackets = "warn"
+clippy.empty_structs_with_brackets = "warn"
 clippy.fn_to_numeric_cast_any = "warn"
 clippy.if_then_some_else_none = "warn"
 clippy.map_err_ignore = "warn"
@@ -210,9 +211,8 @@ clippy.wildcard_imports = "allow"
 # --- clippy: catalog entries this project adds outside the managed region ---
 # The dotted-key form above keeps `[workspace.lints]` open, so these extend the
 # same scope without editing the anvil-managed block and provoking its drift
-# detector. They complete the `M-STATIC-VERIFICATION` catalog, which names all
-# three: https://microsoft.github.io/rust-guidelines/guidelines/universal/#M-STATIC-VERIFICATION
-clippy.empty_structs_with_brackets = "warn"
+# detector. They complete the `M-STATIC-VERIFICATION` catalog:
+# https://microsoft.github.io/rust-guidelines/guidelines/universal/#M-STATIC-VERIFICATION
 clippy.too_long_first_doc_paragraph = "warn"
 # The guideline's own opt-out: a structured-logging call site legitimately
 # passes a literal holding `{field}` placeholders for the logger to expand.

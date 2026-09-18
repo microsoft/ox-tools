@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn catalog_intentionally_omits_contested_lints() {
-        for needle in ["rust.missing_docs", "clippy.expect_used", "clippy.panic "] {
+        for needle in ["rust.missing_docs", "rust.unreachable_pub", "clippy.expect_used", "clippy.panic "] {
             assert!(
                 !LINTS_BODY.contains(needle),
                 "catalog now contains '{needle}'; if intentional, update the catalog-omission test"
@@ -288,6 +288,7 @@ mod tests {
             "clippy.deref_by_slicing = \"warn\"",
             "clippy.empty_drop = \"warn\"",
             "clippy.empty_enum_variants_with_brackets = \"warn\"",
+            "clippy.empty_structs_with_brackets = \"warn\"",
             "clippy.fn_to_numeric_cast_any = \"warn\"",
             "clippy.if_then_some_else_none = \"warn\"",
             "clippy.multiple_unsafe_ops_per_block = \"warn\"",

@@ -308,7 +308,12 @@ Detail on each host:
   `[lints]\nworkspace = true`. The emitter uses `toml-edit` for round-trip-safe
   manipulation. In a single-crate repo (no `[workspace]` table), the workspace region
   becomes `anvil-lints` and contains a single `[lints]` table with the same
-  dotted-key layout.
+  dotted-key layout. The catalog favors broadly applicable, low-false-positive
+  diagnostics. It warns on empty braced structs whose unit form is clearer
+  (`empty_structs_with_brackets`). Documentation completeness, whether production
+  code may panic, and whether crate-internal APIs may use `pub` remain repository
+  policy: `missing_docs`, `clippy::panic`, and `unreachable_pub` are not catalog
+  defaults and adopters can add them outside the managed region.
 - **`deny.toml`** — one managed region per top-level section (`[advisories]`, `[licenses]`,
   `[bans]`, `[sources]`) carrying the tool's baseline license/advisory rules. The bans baseline
   rejects wildcard registry requirements while allowing versionless path or Git
