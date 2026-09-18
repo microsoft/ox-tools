@@ -62,14 +62,14 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
     ))?;
 
     let coverage_scratch = TemporaryDirectory::create(&workspace.target_dir.join("coverage-gate"))?;
-    let coverage_target_dir = coverage_scratch.path().join("cargo-target");
+    let coverage_target_root = coverage_scratch.path().join("cargo-target");
     let execution = CollectionExecution {
         workspace: &workspace,
         selection: &selection,
         args: &collection,
         #[cfg(windows)]
         scratch_dir: coverage_scratch.path(),
-        coverage_target_dir: &coverage_target_dir,
+        coverage_target_root: &coverage_target_root,
         target: &effective_target.triple,
         tools: &tools,
         quiet: args.quiet,
@@ -128,7 +128,7 @@ struct CollectionExecution<'a> {
     args: &'a CollectionArgs,
     #[cfg(windows)]
     scratch_dir: &'a Path,
-    coverage_target_dir: &'a Path,
+    coverage_target_root: &'a Path,
     target: &'a str,
     tools: &'a ToolPrograms,
     quiet: bool,
@@ -459,7 +459,6 @@ fn collect_configuration(execution: &CollectionExecution<'_>, configuration: Fea
         .coverage_dir
         .join(format!("lcov-{}.info", configuration.artifact_name()));
 
-    run_clean(execution.workspace, execution.coverage_target_dir, execution.tools, execution.quiet)?;
     run_nextest(execution, configuration)?;
     run_report(execution, configuration, &lcov_path)?;
     Ok(lcov_path)
@@ -474,22 +473,19 @@ fn cargo_command(workspace: &WorkspaceInfo, tools: &ToolPrograms) -> Command {
 fn coverage_command(workspace: &WorkspaceInfo, coverage_target_dir: &Path, tools: &ToolPrograms) -> Command {
     let mut command = cargo_command(workspace, tools);
     command
+        .env("CARGO_TARGET_DIR", coverage_target_dir)
         .env("CARGO_LLVM_COV_TARGET_DIR", coverage_target_dir)
         .env("CARGO_LLVM_COV_BUILD_DIR", coverage_target_dir);
     command
 }
 
-fn run_clean(workspace: &WorkspaceInfo, coverage_target_dir: &Path, tools: &ToolPrograms, quiet: bool) -> Result<(), AppError> {
-    let mut command = coverage_command(workspace, coverage_target_dir, tools);
-    command.args(["llvm-cov", "clean", "--workspace"]);
-    if quiet {
-        command.stdout(Stdio::null());
-    }
-    run_status(&mut command, "cargo llvm-cov clean")
+fn configuration_target_dir(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> PathBuf {
+    execution.coverage_target_root.join(configuration.artifact_name())
 }
 
 fn run_nextest(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration) -> Result<(), AppError> {
-    let mut command = coverage_command(execution.workspace, execution.coverage_target_dir, execution.tools);
+    let target_dir = configuration_target_dir(execution, configuration);
+    let mut command = coverage_command(execution.workspace, &target_dir, execution.tools);
     command.args(["llvm-cov", "nextest", "--no-report"]);
     append_package_selection(&mut command, execution.selection);
     append_nextest_options(&mut command, execution.args, configuration, execution.target);
@@ -529,9 +525,10 @@ fn prefixed_path_argument(prefix: &str, path: &Path) -> OsString {
 }
 
 fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, lcov_path: &Path) -> Result<(), AppError> {
-    #[cfg(not(windows))]
-    let _ = configuration;
-    let mut command = coverage_command(execution.workspace, execution.coverage_target_dir, execution.tools);
+    let target_dir = configuration_target_dir(execution, configuration);
+    let mut command = coverage_command(execution.workspace, &target_dir, execution.tools);
+    #[cfg(windows)]
+    command.env_remove("MSYSTEM");
     command.args(["llvm-cov", "report", "--lcov", "--output-path"]).arg(lcov_path);
     append_package_selection(&mut command, execution.selection);
     command.arg("--target").arg(execution.target);
@@ -548,10 +545,17 @@ fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfigu
     }
 
     #[cfg(windows)]
-    if let Some(arguments) = command_too_long_response_arguments(&String::from_utf8_lossy(&output.stderr)) {
+    if output
+        .stderr
+        .windows("(os error 206)".len())
+        .any(|window| window == b"(os error 206)")
+    {
         forward_output(&output, execution.quiet)?;
+        let stderr =
+            std::str::from_utf8(&output.stderr).into_app_err("cargo-llvm-cov's Windows command-too-long diagnostic was not UTF-8")?;
+        let arguments = command_too_long_response_arguments(stderr)?;
         eprintln!("coverage-gate: cargo-llvm-cov could not launch llvm-cov directly; retrying its export through an LLVM response file");
-        return run_windows_report_fallback(execution, configuration, lcov_path, arguments);
+        return run_windows_report_fallback(execution, configuration, lcov_path, &arguments);
     }
 
     if is_no_coverage_data(&String::from_utf8_lossy(&output.stderr)) {
@@ -589,17 +593,134 @@ fn is_no_coverage_data(stderr: &str) -> bool {
 }
 
 #[cfg(any(windows, test))]
-fn command_too_long_response_arguments(stderr: &str) -> Option<&str> {
+fn command_too_long_response_arguments(stderr: &str) -> Result<Vec<String>, AppError> {
     if !stderr.contains("(os error 206)") {
-        return None;
+        return Err(AppError::new("cargo-llvm-cov did not report Windows error 206"));
     }
-    let command = stderr
-        .split_once("could not execute process `")?
-        .1
-        .split_once("` (never executed)")?
+    let after_prefix = stderr
+        .split_once("could not execute process `")
+        .ok_or_else(|| {
+            AppError::new("cargo-llvm-cov's Windows command-too-long diagnostic did not contain the expected process-error prefix")
+        })?
+        .1;
+    let command = after_prefix
+        .rsplit_once("` (never executed)")
+        .ok_or_else(|| {
+            AppError::new("cargo-llvm-cov's Windows command-too-long diagnostic did not contain the expected process-error suffix")
+        })?
         .0;
-    let arguments = command.split_once(" export ")?.1;
-    (!arguments.is_empty()).then_some(arguments)
+    let argv = parse_windows_command_line(command)?;
+    if argv.len() < 3 || argv[0].is_empty() || argv[1] != "export" {
+        return Err(AppError::new(
+            "cargo-llvm-cov's Windows command-too-long diagnostic did not contain an llvm-cov export command",
+        ));
+    }
+    Ok(argv.into_iter().skip(2).collect())
+}
+
+#[cfg(any(windows, test))]
+fn parse_windows_command_line(command: &str) -> Result<Vec<String>, AppError> {
+    if command.contains('\0') {
+        return Err(AppError::new(
+            "cargo-llvm-cov's Windows command-too-long diagnostic contained a null byte",
+        ));
+    }
+
+    let mut chars = command.chars().peekable();
+    let mut arguments = Vec::new();
+    loop {
+        while chars.peek().is_some_and(char::is_ascii_whitespace) {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+
+        let mut argument = String::new();
+        let mut quoted = false;
+        loop {
+            let mut backslashes = String::new();
+            while matches!(chars.peek(), Some('\\')) {
+                backslashes.push(chars.next().expect("peeked backslash remains available"));
+            }
+
+            if matches!(chars.peek(), Some('"')) {
+                chars.next();
+                let mut pairs = backslashes.as_bytes().chunks_exact(2);
+                argument.extend(pairs.by_ref().map(|_| '\\'));
+                if pairs.remainder().is_empty() {
+                    quoted = !quoted;
+                } else {
+                    argument.push('"');
+                }
+                continue;
+            }
+
+            argument.push_str(&backslashes);
+            let Some(&character) = chars.peek() else {
+                break;
+            };
+            if quoted {
+                argument.push(chars.next().expect("peeked quoted character remains available"));
+                continue;
+            }
+            if character.is_ascii_whitespace() {
+                break;
+            }
+            argument.push(chars.next().expect("peeked command character remains available"));
+        }
+        if quoted {
+            return Err(AppError::new(
+                "cargo-llvm-cov's Windows command-too-long diagnostic contained an unterminated quoted argument",
+            ));
+        }
+        arguments.push(argument);
+    }
+
+    Ok(arguments)
+}
+
+#[cfg(any(windows, test))]
+fn windows_response_contents(arguments: &[String]) -> Result<Vec<u8>, AppError> {
+    if arguments.is_empty() {
+        return Err(AppError::new(
+            "cargo-llvm-cov's Windows command-too-long diagnostic contained no export arguments",
+        ));
+    }
+
+    let mut response = String::new();
+    for argument in arguments {
+        if argument.contains('\0') {
+            return Err(AppError::new(
+                "cargo-llvm-cov's Windows command-too-long diagnostic contained a null byte",
+            ));
+        }
+        quote_windows_argument(argument, &mut response);
+        response.push('\n');
+    }
+    Ok(response.into_bytes())
+}
+
+#[cfg(any(windows, test))]
+fn quote_windows_argument(argument: &str, output: &mut String) {
+    output.push('"');
+    let mut backslashes = String::new();
+    for character in argument.chars() {
+        if character == '\\' {
+            backslashes.push(character);
+            continue;
+        }
+        output.push_str(&backslashes);
+        if character == '"' {
+            output.push_str(&backslashes);
+            output.push('\\');
+        }
+        backslashes.clear();
+        output.push(character);
+    }
+    output.push_str(&backslashes);
+    output.push_str(&backslashes);
+    output.push('"');
 }
 
 #[cfg(windows)]
@@ -613,26 +734,45 @@ fn run_windows_report_fallback(
     execution: &CollectionExecution<'_>,
     configuration: FeatureConfiguration,
     lcov_path: &Path,
-    arguments: &str,
+    arguments: &[String],
 ) -> Result<(), AppError> {
+    let response_contents = windows_response_contents(arguments)?;
     let response = TemporaryPath::write(
         execution.scratch_dir,
         &format!("{}-objects.rsp", configuration.artifact_name()),
-        arguments.as_bytes(),
+        &response_contents,
     )?;
-    let output = fs::File::create(lcov_path).into_app_err(format!(
-        "failed to create LCOV file `{}` for response-file retry",
-        lcov_path.display()
-    ))?;
+    let output_dir = lcov_path
+        .parent()
+        .ok_or_else(|| AppError::new(format!("LCOV path `{}` has no parent directory", lcov_path.display())))?;
+    let (staged, output_file) = TemporaryPath::create(output_dir, &format!("{}-fallback.info", configuration.artifact_name()))?;
     let llvm_cov = discover_llvm_cov(execution.tools)?;
     let mut command = Command::new(llvm_cov);
     command
         .current_dir(&execution.workspace.root)
         .arg("export")
         .arg(prefixed_path_argument("@", response.path()))
-        .stdout(Stdio::from(output));
-    run_status(&mut command, "llvm-cov export response-file fallback")?;
-    response.cleanup()
+        .stdout(Stdio::from(output_file))
+        .stderr(Stdio::piped());
+    let display = command_display(&command);
+    let output = command.output().into_app_err(format!("failed to execute `{display}`"))?;
+    if output.status.success() {
+        forward_output(&output, execution.quiet)?;
+        return staged.publish(lcov_path);
+    }
+    if is_no_coverage_data(&String::from_utf8_lossy(&output.stderr)) {
+        forward_stdout(&output, execution.quiet)?;
+        fs::write(staged.path(), []).into_app_err(format!("failed to write empty staged LCOV file `{}`", staged.path().display()))?;
+        staged.publish(lcov_path)?;
+        eprintln!("coverage-gate: llvm-cov found no coverable objects during response-file retry; evaluating an empty LCOV report");
+        return Ok(());
+    }
+
+    forward_output(&output, execution.quiet)?;
+    Err(AppError::new(format!(
+        "llvm-cov export response-file fallback failed: `{display}` exited with {}",
+        output.status
+    )))
 }
 
 #[cfg(windows)]
@@ -698,12 +838,7 @@ impl TemporaryPath {
     }
 
     fn write(directory: &Path, label: &str, contents: &[u8]) -> Result<Self, AppError> {
-        let temporary = Self::new(directory, label);
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(temporary.path())
-            .into_app_err(format!("failed to create temporary file `{}`", temporary.path().display()))?;
+        let (temporary, mut file) = Self::create(directory, label)?;
         file.write_all(contents)
             .into_app_err(format!("failed to write temporary file `{}`", temporary.path().display()))?;
         file.sync_all()
@@ -711,15 +846,28 @@ impl TemporaryPath {
         Ok(temporary)
     }
 
+    fn create(directory: &Path, label: &str) -> Result<(Self, fs::File), AppError> {
+        let temporary = Self::new(directory, label);
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temporary.path())
+            .into_app_err(format!("failed to create temporary file `{}`", temporary.path().display()))?;
+        Ok((temporary, file))
+    }
+
     fn path(&self) -> &Path {
         &self.path
     }
 
-    #[mutants::skip] // Returning Ok drops `self`, whose Drop performs the same successful removal.
-    fn cleanup(mut self) -> Result<(), AppError> {
-        let cleanup = fs::remove_file(&self.path).into_app_err(format!("failed to remove temporary file `{}`", self.path.display()));
+    fn publish(mut self, target: &Path) -> Result<(), AppError> {
+        fs::rename(&self.path, target).into_app_err(format!(
+            "failed to publish staged coverage report `{}` to `{}`",
+            self.path.display(),
+            target.display()
+        ))?;
         self.armed = false;
-        cleanup
+        Ok(())
     }
 }
 
@@ -957,20 +1105,57 @@ mod tests {
     }
 
     #[test]
-    fn command_too_long_parser_preserves_upstream_export_arguments() {
+    fn command_too_long_parser_preserves_windows_export_arguments() {
         let stderr = concat!(
             "error: failed to generate report: could not execute process `",
             "\"C:\\Program Files\\Rust\\llvm-cov.exe\" export -format=lcov ",
-            "-object \"target\\object one.exe\" ",
-            "-ignore-filename-regex \"UPSTREAM_DEFAULTS\"",
-            "` (never executed): The filename or extension is too long. (os error 206)"
+            "-object \"C:\\coverage objects\\say \\\"quoted\\\"\\object.exe\" ",
+            "-ignore-filename-regex UPSTREAM_DEFAULTS",
+            "` (never executed): The filename or extension is too long. (os error 206)",
         );
         let arguments = command_too_long_response_arguments(stderr).expect("Windows error 206 export");
-        assert!(arguments.starts_with("-format=lcov"));
-        assert!(arguments.contains("-object \"target\\object one.exe\""));
-        assert!(arguments.contains("-ignore-filename-regex \"UPSTREAM_DEFAULTS\""));
-        assert!(command_too_long_response_arguments("unrelated error").is_none());
-        assert!(command_too_long_response_arguments("could not execute process `llvm-cov show` (never executed) (os error 206)").is_none());
+        assert_eq!(
+            arguments,
+            [
+                "-format=lcov",
+                "-object",
+                r#"C:\coverage objects\say "quoted"\object.exe"#,
+                "-ignore-filename-regex",
+                "UPSTREAM_DEFAULTS",
+            ]
+        );
+
+        let response = windows_response_contents(&arguments).expect("encode response file");
+        assert_eq!(
+            parse_windows_command_line(std::str::from_utf8(&response).expect("response is UTF-8")).expect("parse response file"),
+            arguments
+        );
+        assert_eq!(
+            command_too_long_response_arguments(
+                "could not execute process `llvm-cov export only-argument` (never executed) (os error 206)"
+            )
+            .expect("one export argument is valid"),
+            ["only-argument"]
+        );
+    }
+
+    #[test]
+    fn command_too_long_parser_rejects_ambiguous_diagnostics() {
+        for diagnostic in [
+            "unrelated error",
+            "report failed (os error 206)",
+            "could not execute process `llvm-cov export arg (os error 206)",
+            "could not execute process ` export arg` (never executed) (os error 206)",
+            "could not execute process `llvm-cov show arg` (never executed) (os error 206)",
+            "could not execute process `llvm-cov show` (never executed) (os error 206)",
+            "could not execute process `llvm-cov export \"unterminated` (never executed) (os error 206)",
+            "could not execute process `llvm-cov export` (never executed) (os error 206)",
+            "could not execute process `llvm-cov export arg\0` (never executed) (os error 206)",
+        ] {
+            command_too_long_response_arguments(diagnostic).expect_err("ambiguous diagnostic must fail");
+        }
+        windows_response_contents(&[]).expect_err("an empty response file must fail");
+        windows_response_contents(&["bad\0argument".to_owned()]).expect_err("null bytes must fail");
     }
 
     #[test]
@@ -995,26 +1180,35 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn temporary_response_file_writes_and_cleans_up() {
+    fn temporary_response_file_writes_and_cleans_up_on_drop() {
         let tmp = tempdir().expect("tempdir");
         let temporary = TemporaryPath::write(tmp.path(), "response", b"complete bytes").expect("write temporary response");
         let path = temporary.path().to_path_buf();
 
         assert_eq!(fs::read(&path).expect("read temporary response"), b"complete bytes");
-        temporary.cleanup().expect("clean temporary response");
+        drop(temporary);
         assert!(!path.exists());
     }
 
     #[test]
     #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
-    fn temporary_response_drop_removes_the_file() {
+    fn temporary_publication_replaces_only_with_completed_file() {
         let tmp = tempdir().expect("tempdir");
-        let path = {
-            let temporary = TemporaryPath::write(tmp.path(), "response", b"temporary").expect("write temporary response");
-            temporary.path().to_path_buf()
-        };
+        let target = tmp.path().join("lcov.info");
+        fs::write(&target, b"previous").expect("write previous report");
+        TemporaryPath::write(tmp.path(), "completed", b"completed")
+            .expect("write staged report")
+            .publish(&target)
+            .expect("publish completed report");
+        assert_eq!(fs::read(&target).expect("read published report"), b"completed");
 
-        assert!(!path.exists());
+        let blocked_target = tmp.path().join("directory");
+        fs::create_dir(&blocked_target).expect("create blocking directory");
+        let staged = TemporaryPath::write(tmp.path(), "blocked", b"partial").expect("write blocked report");
+        let staged_path = staged.path().to_path_buf();
+        staged.publish(&blocked_target).expect_err("publication over a directory must fail");
+        assert!(blocked_target.is_dir());
+        assert!(!staged_path.exists(), "failed publication must clean its staging file");
     }
 
     #[test]

@@ -14,25 +14,31 @@ The optional `run` mode keeps collection and evaluation separated internally:
    collection and evaluation cover the workspace.
 2. Collection uses the invoking environment's Cargo and rustc, honoring
    inherited `CARGO`, `RUSTC`, `RUSTUP_TOOLCHAIN`, `PATH`, and related
-   variables. One effective target is resolved from explicit `--target` or the
+   variables, with the report-only Windows `MSYSTEM` exception described
+   below. One effective target is resolved from explicit `--target` or the
    rustc host. The resolved target is supplied explicitly to collection and
    evaluation, so `CARGO_BUILD_TARGET` and Cargo `build.target` cannot select a
    different collection target. Instrumented runs validate that the effective
-   Cargo and rustc are nightly and that cargo-llvm-cov is 0.9.0 or newer.
-   Host discovery output is reused for rustc validation. Version 0.9.0 is
-   required because it introduced `--workspace` support for the `report`
-   subcommand used by the default selection.
-3. Each feature configuration gets an isolated clean, instrumented
+   Cargo and rustc are nightly and that cargo-llvm-cov is 0.9.0 or newer. Host
+   discovery output is reused for rustc validation. Version 0.9.0 is required
+   because it introduced `--workspace` support for the `report` subcommand used
+   by the default selection.
+3. Each feature configuration gets a fresh private, instrumented
    `cargo llvm-cov nextest --no-report --locked` run. Both instrumented and
    plain-nextest no-gate paths pass `--no-tests=pass`, allowing packages with a
    valid zero-test harness to continue to report generation, and both pass
    `--locked`. Nextest and Cargo retain their ordinary output, including
    rendered compiler diagnostics; the collector does not request or filter
    machine-readable Cargo messages.
-   The instrumented target is unique per invocation beneath
-   `target/coverage-gate/` and is removed by an RAII guard on every return
-   path. Concurrent runs therefore cannot clean or merge each other's
-   profiles.
+   The instrumented target is unique per configuration beneath a
+   per-invocation `target/coverage-gate/` scratch directory and is removed by
+   an RAII guard on every return path. Because every target starts empty, the
+   collector does not run `cargo llvm-cov clean`; it never deletes shared
+   cargo-llvm-cov reports, trybuild targets, UI test targets, or ordinary Cargo
+   target state. The child also receives `CARGO_TARGET_DIR` pointing at that
+   private directory, so metadata-derived trybuild, UI, and report paths do not
+   cross configuration or invocation boundaries. Configurations and concurrent
+   invocations therefore cannot merge each other's profiles.
    After evaluation, a pure combiner gives evaluation errors precedence over
    cleanup errors, preserves nonzero rendered verdicts with an explicit cleanup
    warning, and converts a passing evaluation plus cleanup failure into an
@@ -41,12 +47,24 @@ The optional `run` mode keeps collection and evaluation separated internally:
 4. `cargo llvm-cov report --lcov` receives the same package and target
    selection. cargo-llvm-cov therefore owns raw-profile merging, ordinary and
    nested trybuild object discovery, build-directory handling, and its full
-   default filename filter. On Windows command-line overflow only, the
-   collector replays cargo-llvm-cov's complete failed export arguments through
-   an LLVM response file.
+   default filename filter. On Windows, the report child has `MSYSTEM` removed
+   so any command-line-overflow diagnostic uses deterministic Windows
+   argument quoting. On error 206 only, the collector parses that diagnostic,
+   validates the `llvm-cov export` shape, and re-quotes the arguments for an
+   LLVM response file without invoking a shell.
 5. Each report is written directly to its stable per-configuration path under
    `--coverage-dir`, then that same path is passed to the ordinary in-process
-   evaluator. `no-default-features` maps to `lcov-no-default.info`.
+   evaluator. The Windows response-file retry is the exception: because LLVM
+   exports to stdout, it writes a sibling temporary file, captures stderr, and
+   renames the temporary file over the stable path only after successful
+   export or the valid paired no-data conversion. Other retry failures preserve
+   a previously completed stable artifact. `no-default-features` maps to
+   `lcov-no-default.info`.
+
+Instrumented target isolation does not serialize or duplicate stable
+`--coverage-dir` artifacts. Concurrent invocations that select the same
+coverage directory are unsupported; callers give them distinct directories
+when they need simultaneous collection.
 
 Coverage policy never changes collection routing: all-zero, mixed, and
 positive-threshold selections all use the same instrumented path. A successful
@@ -67,10 +85,11 @@ routing decision precedes nightly Cargo, nightly rustc, and cargo-llvm-cov
 validation; an omitted target still requires one `rustc -vV` call to discover
 the host, while an explicit target needs none.
 
-All child stderr is inherited or captured and immediately forwarded when
-Windows overflow detection requires inspection. Normal collection stdout is
-inherited. `--quiet` redirects or drops each stdout channel while leaving
-errors and summary-file rendering intact.
+Child stderr is inherited or captured and forwarded. The recognized paired
+no-data diagnostic is consumed and replaced by the collector's empty-report
+message on both ordinary and response-file report paths. Normal collection
+stdout is inherited. `--quiet` redirects or drops each stdout channel while
+leaving errors and summary-file rendering intact.
 
 ## Diagnostic pipeline
 

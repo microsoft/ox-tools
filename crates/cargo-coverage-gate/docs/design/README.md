@@ -405,26 +405,36 @@ For each requested feature configuration, `run`:
 1. resolves one effective Rust target from explicit `--target` or the rustc
    host and uses it for no-coverage matching, test execution, reporting, and
    policy evaluation;
-2. allocates a unique per-invocation coverage target beneath
-   Cargo's target directory and cleans that isolated state;
+2. allocates a fresh private coverage target for each feature configuration
+   beneath a unique per-invocation scratch directory;
 3. invokes cargo-llvm-cov with nextest, `--no-report`, `--no-tests=pass`, and
    `--locked` for the selected package set;
 4. invokes `cargo llvm-cov report --lcov` for the same package and target
    selection, delegating raw-profile merging, ordinary and nested trybuild
    object discovery, and the complete default filename exclusions to
    cargo-llvm-cov;
-5. writes that report directly to its stable consumer path under
-   `--coverage-dir` and passes the same path to the ordinary evaluator.
+5. ordinarily writes that report directly to its stable consumer path under
+   `--coverage-dir` and passes the same path to the evaluator.
 
 The selected package set is resolved to exact `name@version` specs before
 subprocess execution. With no selection options, the collector passes
 `--workspace`.
 
-Concurrent invocations never share instrumented build/profile state: each uses
-`target/coverage-gate/run-<pid>-<nonce>/cargo-target` (under Cargo's resolved
-target directory) and removes the whole private directory on success or
-failure. LCOV consumer paths under `--coverage-dir` are stable and are not
-duplicated for evaluation.
+Feature configurations and concurrent invocations never share instrumented
+build/profile state: each configuration uses
+`target/coverage-gate/run-<pid>-<nonce>/cargo-target/<configuration>` (under
+Cargo's resolved target directory). A private target starts empty, so `run`
+does not invoke `cargo llvm-cov clean`; it removes only the enclosing
+per-invocation scratch directory on success or failure. Shared cargo-llvm-cov
+HTML/text reports, trybuild targets, UI test targets, and ordinary Cargo target
+state are never cleanup inputs. `CARGO_TARGET_DIR` is set to the same private
+configuration directory as cargo-llvm-cov's target and build overrides, so
+metadata-derived trybuild, UI, and report paths are private as well.
+
+LCOV consumer paths under `--coverage-dir` remain stable. Instrumented-state
+isolation does not provide concurrent-writer semantics for those paths:
+callers must not run simultaneous invocations against the same
+`--coverage-dir`.
 
 Scratch cleanup has explicit result precedence. An evaluation error remains the
 primary error and carries any cleanup failure as additional context. A rendered
@@ -435,11 +445,21 @@ the evaluation outcome.
 
 cargo-llvm-cov normally launches LLVM with its discovered object set and full
 filename filter. If that launch exceeds the Windows command-line limit,
-`run` extracts cargo-llvm-cov's complete failed `llvm-cov export` argument
-list and retries it through an LLVM response file. This preserves upstream
-object discovery and exclusions instead of maintaining a second,
-necessarily incomplete implementation. The response file lives in the private
-target and is removed with that target.
+`run` retries through an LLVM response file. The `cargo llvm-cov report` child
+has `MSYSTEM` removed so cargo-llvm-cov renders the failed command with the
+Windows argument dialect. `run` parses that diagnostic as data, validates that
+it describes an `llvm-cov export`, and re-quotes each argument for LLVM's
+Windows response-file tokenizer; it never executes the diagnostic as shell
+syntax. This preserves upstream object discovery and exclusions instead of
+maintaining a second, necessarily incomplete implementation.
+
+The exceptional response-file export writes to a temporary file beside the
+stable LCOV path and captures stderr. A successful export is renamed over the
+stable path. The same complete paired no-coverage-data diagnostic used by the
+ordinary report path publishes a valid empty file. Every other fallback
+failure removes the temporary file, leaves any previously completed stable
+artifact unchanged, and exits `2`. The response file lives in per-invocation
+scratch and is removed with that scratch.
 
 Failure in any collection phase is operational failure, not missing coverage,
 and exits `2`. A successful, structurally valid empty LCOV export continues to
@@ -782,10 +802,11 @@ precision cannot weaken the configured threshold — see §10.5.
 Evaluation reads `Cargo.toml` files and coverage lcov tracefiles and writes only
 the selected summary file. `run` additionally writes beneath
 `--coverage-dir`, executes cargo-llvm-cov, nextest, Cargo, rustc, and LLVM, and
-deletes only temporary response files and isolated coverage state those tools
-created. cargo-coverage-gate itself performs no network calls or privileged
-operations. Its Cargo and nextest children follow the caller's Cargo
-configuration and may fetch locked dependencies when they are not cached.
+deletes only temporary response/staging files and its per-invocation coverage
+scratch. It never invokes workspace-wide cargo-llvm-cov cleanup.
+cargo-coverage-gate itself performs no network calls or privileged operations.
+Its Cargo and nextest children follow the caller's Cargo configuration and may
+fetch locked dependencies when they are not cached.
 The effective target is the deliberate exception: `run` always supplies
 `--target <triple>`, so `CARGO_BUILD_TARGET` and Cargo `build.target`
 configuration cannot select a different collection target. Callers that
@@ -806,7 +827,9 @@ Child processes receive arguments directly rather than through a shell.
 Package selectors are resolved against workspace metadata before execution;
 they are never interpreted as command fragments. Collection uses the
 environment's effective Cargo and rustc and inherits `RUSTUP_TOOLCHAIN`,
-`PATH`, and other caller configuration unchanged.
+`PATH`, and other caller configuration unchanged, except that Windows removes
+`MSYSTEM` from the `cargo llvm-cov report` child to make its diagnostic
+argument dialect deterministic.
 
 ### 10.3 Monorepo / multi-workspace
 

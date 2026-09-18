@@ -156,6 +156,19 @@
 //! `--quiet` suppresses all collection and verdict stdout while preserving
 //! stderr diagnostics and summary output.
 //!
+//! Every feature configuration uses a fresh target beneath private
+//! per-invocation scratch, so collection never runs workspace-wide
+//! `cargo llvm-cov clean` or deletes shared report and test artifacts. Ordinary
+//! Cargo and cargo-llvm-cov target variables point at that same private
+//! configuration directory, including metadata-derived test paths. Ordinary
+//! reports write directly to their stable `--coverage-dir` path. On Windows
+//! error 206, the report child uses deterministic Windows quoting and the
+//! validated `llvm-cov export` arguments are retried through a response file.
+//! That exceptional export is staged beside the stable path and published only
+//! after success or a valid no-data conversion. Concurrent collection must use
+//! distinct coverage directories; private profile isolation does not serialize
+//! stable artifact writers.
+//!
 //! `--lcov` may be repeated; the tracefiles are merged at the line level
 //! (line sets combined, coverage retained when any input has a hit) so multiple feature-config exports
 //! (`--all-features`, `--no-default-features`) can be gated together

@@ -88,13 +88,7 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
     }
 
     if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "clean") {
-        if env::var_os("FAKE_FAIL_CLEAN").is_some() {
-            return Err("requested coverage clean failure".to_owned());
-        }
-        if env::var_os("FAKE_CLEAN_STDOUT").is_some() {
-            println!("coverage-clean-stdout");
-        }
-        return Ok(());
+        return Err("cargo llvm-cov clean must not run against isolated collection state".to_owned());
     }
 
     if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "nextest") {
@@ -120,17 +114,35 @@ fn run_cargo(args: &[std::ffi::OsString]) -> Result<(), String> {
         }
     }
     if args.first().is_some_and(|arg| arg == "llvm-cov") && args.iter().any(|arg| arg == "report") {
+        if env::var_os("FAKE_EXPECT_REPORT_MSYSTEM_REMOVED").is_some() && env::var_os("MSYSTEM").is_some() {
+            return Err("cargo llvm-cov report inherited MSYSTEM".to_owned());
+        }
         if env::var_os("FAKE_REPORT_STDOUT").is_some() {
             println!("report-stdout");
         }
         if env::var_os("FAKE_NO_PROFILE").is_some() {
             return Err("no raw profiles found".to_owned());
         }
+        let target_dir =
+            PathBuf::from(env::var_os("CARGO_LLVM_COV_TARGET_DIR").ok_or_else(|| "coverage target directory is not set".to_owned())?);
+        if !target_dir.join("fake.profraw").is_file() {
+            return Err(format!("no raw profiles found in {}", target_dir.display()));
+        }
         if env::var_os("FAKE_REPORT_COMMAND_TOO_LONG").is_some() {
             let llvm_cov = env::var("LLVM_COV").map_err(|error| error.to_string())?;
             let object = env::var("FAKE_COVERAGE_OBJECT").map_err(|error| error.to_string())?;
+            let command = render_windows_command_line(&[
+                &llvm_cov,
+                "export",
+                "-format=lcov",
+                "-instr-profile=fake.profdata",
+                "-object",
+                &object,
+                "-ignore-filename-regex",
+                "UPSTREAM_DEFAULTS",
+            ]);
             eprintln!(
-                "error: failed to generate report: could not execute process `\"{llvm_cov}\" export -format=lcov -instr-profile=\"fake.profdata\" -object \"{object}\" -ignore-filename-regex \"UPSTREAM_DEFAULTS\"` (never executed): The filename or extension is too long. (os error 206)"
+                "error: failed to generate report: could not execute process `{command}` (never executed): The filename or extension is too long. (os error 206)"
             );
             return Err("requested command-too-long report failure".to_owned());
         }
@@ -213,8 +225,30 @@ fn run_cov(args: &[std::ffi::OsString]) -> Result<(), String> {
         .ok_or_else(|| "llvm-cov did not receive a response file".to_owned())?;
     let response_contents = fs::read_to_string(response).map_err(|error| error.to_string())?;
     let response_log = env::var_os("FAKE_RESPONSE_LOG").ok_or_else(|| "FAKE_RESPONSE_LOG is not set".to_owned())?;
-    fs::write(response_log, response_contents).map_err(|error| error.to_string())?;
+    fs::write(response_log, &response_contents).map_err(|error| error.to_string())?;
+    let response_arguments = parse_windows_command_line(&response_contents)?;
+    let expected_object = env::var("FAKE_COVERAGE_OBJECT").map_err(|error| error.to_string())?;
+    if string_value_after(&response_arguments, "-object") != Some(expected_object.as_str()) {
+        return Err(format!(
+            "response file did not preserve coverage object; expected {expected_object:?}, got {response_arguments:?}"
+        ));
+    }
+    if string_value_after(&response_arguments, "-ignore-filename-regex") != Some("UPSTREAM_DEFAULTS") {
+        return Err(format!(
+            "response file did not preserve upstream filename exclusions: {response_arguments:?}"
+        ));
+    }
 
+    if env::var_os("FAKE_FALLBACK_NO_COVERAGE_DATA").is_some() {
+        eprintln!("error: failed to load coverage: 'empty': no coverage data found");
+        eprintln!("error: could not load coverage information");
+        return Err("requested fallback no-coverage-data failure".to_owned());
+    }
+    if env::var_os("FAKE_FAIL_FALLBACK").is_some() {
+        print!("partial fallback output");
+        eprintln!("requested response-file export failure");
+        return Err("requested response-file export failure".to_owned());
+    }
     print!("{}", fake_lcov()?);
     Ok(())
 }
@@ -242,6 +276,90 @@ fn value_after<'a>(args: &'a [std::ffi::OsString], expected: &str) -> Option<&'a
     args.windows(2)
         .find(|pair| pair[0] == expected)
         .map(|pair| Path::new(&pair[1]))
+}
+
+fn string_value_after<'a>(args: &'a [String], expected: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find(|pair| pair[0] == expected)
+        .map(|pair| pair[1].as_str())
+}
+
+fn render_windows_command_line(arguments: &[&str]) -> String {
+    arguments
+        .iter()
+        .map(|argument| quote_windows_argument(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_windows_argument(argument: &str) -> String {
+    if !argument.is_empty() && !argument.chars().any(|character| matches!(character, '"' | '\t' | '\n' | ' ')) {
+        return argument.to_owned();
+    }
+
+    let mut escaped = String::from("\"");
+    let mut backslashes = 0;
+    for character in argument.chars() {
+        if character == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        if character == '"' {
+            escaped.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+        } else {
+            escaped.extend(std::iter::repeat_n('\\', backslashes));
+        }
+        backslashes = 0;
+        escaped.push(character);
+    }
+    escaped.extend(std::iter::repeat_n('\\', backslashes * 2));
+    escaped.push('"');
+    escaped
+}
+
+fn parse_windows_command_line(command: &str) -> Result<Vec<String>, String> {
+    let chars = command.chars().collect::<Vec<_>>();
+    let mut arguments = Vec::new();
+    let mut offset = 0;
+    while offset < chars.len() {
+        while offset < chars.len() && matches!(chars[offset], ' ' | '\t' | '\r' | '\n') {
+            offset += 1;
+        }
+        if offset == chars.len() {
+            break;
+        }
+
+        let mut argument = String::new();
+        let mut quoted = false;
+        loop {
+            let mut backslashes = 0;
+            while offset < chars.len() && chars[offset] == '\\' {
+                backslashes += 1;
+                offset += 1;
+            }
+            if offset < chars.len() && chars[offset] == '"' {
+                argument.extend(std::iter::repeat_n('\\', backslashes / 2));
+                if backslashes % 2 == 0 {
+                    quoted = !quoted;
+                } else {
+                    argument.push('"');
+                }
+                offset += 1;
+                continue;
+            }
+            argument.extend(std::iter::repeat_n('\\', backslashes));
+            if offset == chars.len() || (!quoted && matches!(chars[offset], ' ' | '\t' | '\r' | '\n')) {
+                break;
+            }
+            argument.push(chars[offset]);
+            offset += 1;
+        }
+        if quoted {
+            return Err("response file contained an unterminated quoted argument".to_owned());
+        }
+        arguments.push(argument);
+    }
+    Ok(arguments)
 }
 
 fn log(name: &str, args: &[std::ffi::OsString]) -> Result<(), String> {

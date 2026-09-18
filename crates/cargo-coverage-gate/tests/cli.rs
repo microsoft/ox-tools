@@ -768,8 +768,20 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
     );
 
     let log = fs::read_to_string(tool_log).expect("read fake tool log");
-    assert_eq!(log.matches("cargo\tllvm-cov\tclean\t--workspace").count(), 2, "{log}");
+    assert!(!log.contains("cargo\tllvm-cov\tclean"), "{log}");
     assert_eq!(log.matches("cargo\tllvm-cov\tnextest\t--no-report").count(), 2, "{log}");
+    let configuration_targets = log
+        .lines()
+        .filter(|line| line.contains("llvm-cov\tnextest"))
+        .filter_map(|line| line.split('\t').find_map(|field| field.strip_prefix("COVERAGE_TARGET=")))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        configuration_targets.len(),
+        2,
+        "each configuration needs fresh profile state:\n{log}"
+    );
+    assert!(configuration_targets.iter().any(|target| target.ends_with("all-features")), "{log}");
+    assert!(configuration_targets.iter().any(|target| target.ends_with("no-default")), "{log}");
     assert!(log.contains("--all-features"), "{log}");
     assert!(log.contains("--no-default-features"), "{log}");
     assert!(log.contains("--package\talpha@0.1.0"), "{log}");
@@ -795,24 +807,87 @@ fn run_delegates_both_configurations_to_cargo_llvm_cov_report_and_evaluates() {
 #[test]
 #[cfg(windows)]
 #[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
-fn windows_report_overflow_replays_upstream_export_arguments_through_a_response_file() {
+fn windows_report_overflow_reparses_windows_arguments_with_msystem_set() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
-    let object = tmp.path().join("object with spaces.exe");
-    fs::write(&object, b"object").expect("write fake object");
+    let object = PathBuf::from(r#"C:\coverage objects\say "quoted"\test-object.exe"#);
     let tools = FakeCoverageTools::compile();
+    let coverage_dir = tmp.path().join("coverage");
+    fs::create_dir(&coverage_dir).expect("create coverage directory");
+    let lcov_path = coverage_dir.join("lcov-all-features.info");
+    fs::write(&lcov_path, b"previous LCOV").expect("write previous LCOV");
 
     fake_collection_command(tmp.path(), &tools, &object)
+        .env("MSYSTEM", "MINGW64")
+        .env("FAKE_EXPECT_REPORT_MSYSTEM_REMOVED", "1")
         .env("FAKE_REPORT_COMMAND_TOO_LONG", "1")
         .assert()
         .success()
         .stderr(predicate::str::contains("retrying its export through an LLVM response file"));
 
     let response = fs::read_to_string(tmp.path().join("response.log")).expect("read response log");
-    assert!(response.contains("-object"), "{response}");
-    assert!(response.contains("object with spaces.exe"), "{response}");
-    assert!(response.contains("-ignore-filename-regex \"UPSTREAM_DEFAULTS\""), "{response}");
-    assert!(tmp.path().join("coverage/lcov-all-features.info").is_file());
+    assert!(
+        response.contains(r#""C:\coverage objects\say \"quoted\"\test-object.exe""#),
+        "{response}"
+    );
+    assert!(response.contains("\"-ignore-filename-regex\"\n\"UPSTREAM_DEFAULTS\""), "{response}");
+    assert!(
+        fs::read_to_string(lcov_path).expect("read published LCOV").starts_with("TN:"),
+        "successful fallback must replace the stable artifact"
+    );
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn windows_report_overflow_converts_paired_no_data_before_publication() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(tmp.path(), &[("alpha", "expect-no-coverable-lines = true")]);
+    let object = PathBuf::from(r"C:\coverage objects\empty.exe");
+    let tools = FakeCoverageTools::compile();
+    let coverage_dir = tmp.path().join("coverage");
+    fs::create_dir(&coverage_dir).expect("create coverage directory");
+    let lcov_path = coverage_dir.join("lcov-all-features.info");
+    fs::write(&lcov_path, b"previous LCOV").expect("write previous LCOV");
+
+    fake_collection_command(tmp.path(), &tools, &object)
+        .env("FAKE_REPORT_COMMAND_TOO_LONG", "1")
+        .env("FAKE_FALLBACK_NO_COVERAGE_DATA", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("EMPTY"))
+        .stderr(predicate::str::contains("evaluating an empty LCOV report"))
+        .stderr(predicate::str::contains("could not load coverage information").not());
+
+    assert_eq!(fs::read(lcov_path).expect("read empty LCOV"), b"");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn windows_report_overflow_failure_preserves_stable_artifact() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
+    let object = PathBuf::from(r"C:\coverage objects\failing.exe");
+    let tools = FakeCoverageTools::compile();
+    let coverage_dir = tmp.path().join("coverage");
+    fs::create_dir(&coverage_dir).expect("create coverage directory");
+    let lcov_path = coverage_dir.join("lcov-all-features.info");
+    fs::write(&lcov_path, b"completed LCOV").expect("write completed LCOV");
+
+    fake_collection_command(tmp.path(), &tools, &object)
+        .env("FAKE_REPORT_COMMAND_TOO_LONG", "1")
+        .env("FAKE_FAIL_FALLBACK", "1")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("response-file fallback failed"))
+        .stderr(predicate::str::contains("requested response-file export failure"));
+
+    assert_eq!(
+        fs::read(lcov_path).expect("read preserved LCOV"),
+        b"completed LCOV",
+        "failed fallback must not publish partial stdout"
+    );
 }
 
 #[test]
@@ -849,6 +924,35 @@ fn concurrent_runs_use_isolated_coverage_targets_and_clean_them() {
     assert!(targets.iter().all(|target| !target.exists()), "isolated targets must be cleaned");
     assert!(first_coverage.join("lcov-all-features.info").is_file());
     assert!(second_coverage.join("lcov-all-features.info").is_file());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn collection_preserves_shared_coverage_and_test_artifacts() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
+    let object = tmp.path().join(format!("test-object{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&object, b"object").expect("write fake object");
+    let sentinels = [
+        tmp.path().join("target/llvm-cov/html/sentinel"),
+        tmp.path().join("target/llvm-cov/text/sentinel"),
+        tmp.path().join("target/tests/trybuild/sentinel"),
+        tmp.path().join("tests/target/sentinel"),
+        tmp.path().join("target/ui/sentinel"),
+    ];
+    for sentinel in &sentinels {
+        fs::create_dir_all(sentinel.parent().expect("sentinel has a parent")).expect("create shared artifact directory");
+        fs::write(sentinel, b"keep").expect("write shared artifact sentinel");
+    }
+
+    let tools = FakeCoverageTools::compile();
+    fake_collection_command(tmp.path(), &tools, &object).assert().success();
+
+    for sentinel in sentinels {
+        assert_eq!(fs::read(&sentinel).expect("read shared artifact sentinel"), b"keep");
+    }
+    let log = fs::read_to_string(tmp.path().join("tools.log")).expect("read fake tool log");
+    assert!(!log.contains("cargo\tllvm-cov\tclean"), "{log}");
 }
 
 #[test]
@@ -941,7 +1045,6 @@ fn run_reports_an_unusable_coverage_directory() {
 #[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
 fn run_reports_collection_and_upstream_report_failures() {
     for (variable, expected) in [
-        ("FAKE_FAIL_CLEAN", "cargo llvm-cov clean failed"),
         ("FAKE_FAIL_NEXTEST", "llvm-cov nextest --no-report"),
         ("FAKE_NO_PROFILE", "cargo llvm-cov report failed"),
     ] {
@@ -969,13 +1072,11 @@ fn run_preserves_nextest_output_and_rendered_compiler_diagnostics() {
     let tools = FakeCoverageTools::compile();
 
     fake_collection_command(tmp.path(), &tools, &object)
-        .env("FAKE_CLEAN_STDOUT", "1")
         .env("FAKE_NEXTEST_TEXT", "1")
         .env("FAKE_COMPILER_MESSAGE", "1")
         .env("FAKE_REPORT_STDOUT", "1")
         .assert()
         .success()
-        .stdout(predicate::str::contains("coverage-clean-stdout"))
         .stdout(predicate::str::contains("non-JSON nextest output"))
         .stdout(predicate::str::contains("fake compiler diagnostic"))
         .stdout(predicate::str::contains("report-stdout"));
@@ -1233,7 +1334,6 @@ fn quiet_suppresses_all_collection_stdout_and_still_writes_summary() {
         .arg("--quiet")
         .arg("--summary-file")
         .arg(&summary)
-        .env("FAKE_CLEAN_STDOUT", "1")
         .env("FAKE_NEXTEST_TEXT", "1")
         .env("FAKE_COMPILER_MESSAGE", "1")
         .env("FAKE_REPORT_STDOUT", "1")
