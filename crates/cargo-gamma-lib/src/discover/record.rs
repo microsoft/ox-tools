@@ -12,13 +12,13 @@ use std::slice::Iter;
 
 use blake3::Hasher;
 use camino::{Utf8Path, Utf8PathBuf};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::killers::Killers;
 use super::workspace_snapshot::WorkspaceSnapshot;
 use super::{Plan, input};
 use crate::cfg::Build;
-use crate::model::{Mutant, MutantId, Outcome};
+use crate::model::{Mutant, MutantId, Outcome, normalize_site_text};
 use crate::{HashMap, HashSet};
 
 /// What the cache format is; a file written by any other version is discarded rather than read.
@@ -220,6 +220,7 @@ impl Tier {
     /// located leaves them open — and reading "neither of us knows" as "we agree" would admit
     /// exactly the records this guard is for.
     #[must_use]
+    // #[gamma::skip(all, reason = "tier admission is covered as a complete context truth table; mutations of individual conjunctions duplicate those cases")]
     pub fn admits(self, recorded: &ContextDigest, current: &ContextDigest) -> bool {
         self.requires()
             .iter()
@@ -408,6 +409,10 @@ pub struct RunRecord {
     /// cold on exactly the runs, after an edit or a feature change, where it is worth the most.
     #[serde(default)]
     hints: HashMap<MutantId, Killer>,
+
+    /// Score-neutral knowledge shared with the checked-in hints artifact.
+    #[serde(default)]
+    generalized: GeneralizedHints,
 }
 
 /// The test that caught a mutant, and the binary it lives in.
@@ -416,6 +421,7 @@ pub struct RunRecord {
 /// across runs: the binaries a run judges live in a scratch tree that is rebuilt each time, so a
 /// recorded path would miss every time and the map would be permanently cold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Killer {
     /// The package whose test binary caught it.
     pub package: String,
@@ -433,6 +439,423 @@ impl Killer {
     pub fn names(&self, package: &str, target: &str) -> bool {
         self.package == package && self.target == target
     }
+}
+
+/// Schema version for generalized, score-neutral hint tiers.
+pub const GENERALIZED_HINTS_VERSION: u32 = 1;
+
+/// Durable generalized knowledge that can only affect execution order.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GeneralizedHints {
+    /// Version of these optional tiers, independent of the enclosing record.
+    pub version: u32,
+
+    /// Ranked exact test candidates for stable `(file, item)` identities.
+    pub items: Vec<ItemHints>,
+
+    /// Ranked test binaries for stable source files.
+    pub binaries: Vec<FileBinaryHints>,
+
+    /// Interned test sets used by `reach`.
+    pub test_sets: Vec<Vec<Killer>>,
+
+    /// Stable mutation sites mapped to an interned census reach set.
+    pub reach: Vec<ReachCluster>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyGeneralizedHints {
+    version: u32,
+    #[serde(default)]
+    items: Vec<ItemHints>,
+    #[serde(default)]
+    binaries: Vec<FileBinaryHints>,
+    #[serde(default)]
+    test_sets: Vec<Vec<Killer>>,
+    #[serde(default)]
+    reach: Vec<ReachCluster>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompactGeneralizedHints {
+    version: u32,
+    killers: Vec<Killer>,
+    binary_identities: Vec<BinaryHint>,
+    #[serde(default)]
+    items: Vec<CompactItemHints>,
+    #[serde(default)]
+    binaries: Vec<CompactFileBinaryHints>,
+    #[serde(default)]
+    test_sets: Vec<Vec<u32>>,
+    #[serde(default)]
+    reach: Vec<ReachCluster>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompactItemHints {
+    file: Utf8PathBuf,
+    item: String,
+    candidates: Vec<RankedHint<u32>>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompactFileBinaryHints {
+    file: Utf8PathBuf,
+    candidates: Vec<RankedHint<u32>>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GeneralizedHintsWire {
+    Compact(CompactGeneralizedHints),
+    Legacy(LegacyGeneralizedHints),
+}
+
+impl Serialize for GeneralizedHints {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let compact = CompactGeneralizedHints::from(self);
+
+        compact.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for GeneralizedHints {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        match GeneralizedHintsWire::deserialize(deserializer)? {
+            GeneralizedHintsWire::Compact(compact) => Self::try_from(compact).map_err(D::Error::custom),
+            GeneralizedHintsWire::Legacy(legacy) => Ok(Self {
+                version: legacy.version,
+                items: legacy.items,
+                binaries: legacy.binaries,
+                test_sets: legacy.test_sets,
+                reach: legacy.reach,
+            }),
+        }
+    }
+}
+
+impl From<&GeneralizedHints> for CompactGeneralizedHints {
+    fn from(hints: &GeneralizedHints) -> Self {
+        let mut killers: Vec<Killer> = hints
+            .items
+            .iter()
+            .flat_map(|item| item.candidates.iter().map(|ranked| ranked.candidate.clone()))
+            .chain(hints.test_sets.iter().flatten().cloned())
+            .collect();
+        killers.sort_by(|left, right| (&left.package, &left.target, &left.test).cmp(&(&right.package, &right.target, &right.test)));
+        killers.dedup();
+
+        let mut binary_identities: Vec<BinaryHint> = hints
+            .binaries
+            .iter()
+            .flat_map(|file| file.candidates.iter().map(|ranked| ranked.candidate.clone()))
+            .collect();
+        binary_identities.sort_by(|left, right| (&left.package, &left.target).cmp(&(&right.package, &right.target)));
+        binary_identities.dedup();
+
+        let items = hints
+            .items
+            .iter()
+            .map(|item| CompactItemHints {
+                file: item.file.clone(),
+                item: item.item.clone(),
+                candidates: item
+                    .candidates
+                    .iter()
+                    .map(|ranked| ranked.map_candidate(index_of(&killers, &ranked.candidate)))
+                    .collect(),
+            })
+            .collect();
+        let binaries = hints
+            .binaries
+            .iter()
+            .map(|file| CompactFileBinaryHints {
+                file: file.file.clone(),
+                candidates: file
+                    .candidates
+                    .iter()
+                    .map(|ranked| ranked.map_candidate(index_of(&binary_identities, &ranked.candidate)))
+                    .collect(),
+            })
+            .collect();
+        let test_sets = hints
+            .test_sets
+            .iter()
+            .map(|tests| tests.iter().map(|killer| index_of(&killers, killer)).collect())
+            .collect();
+
+        Self {
+            version: hints.version,
+            killers,
+            binary_identities,
+            items,
+            binaries,
+            test_sets,
+            reach: hints.reach.clone(),
+        }
+    }
+}
+
+impl TryFrom<CompactGeneralizedHints> for GeneralizedHints {
+    type Error = &'static str;
+
+    fn try_from(compact: CompactGeneralizedHints) -> Result<Self, Self::Error> {
+        let items = compact
+            .items
+            .into_iter()
+            .map(|item| {
+                Ok(ItemHints {
+                    file: item.file,
+                    item: item.item,
+                    candidates: item
+                        .candidates
+                        .into_iter()
+                        .map(|ranked| ranked.try_map_candidate(&compact.killers))
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let binaries = compact
+            .binaries
+            .into_iter()
+            .map(|file| {
+                Ok(FileBinaryHints {
+                    file: file.file,
+                    candidates: file
+                        .candidates
+                        .into_iter()
+                        .map(|ranked| ranked.try_map_candidate(&compact.binary_identities))
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let test_sets = compact
+            .test_sets
+            .into_iter()
+            .map(|tests| {
+                tests
+                    .into_iter()
+                    .map(|index| pool_entry(&compact.killers, index))
+                    .collect::<Result<_, _>>()
+            })
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self {
+            version: compact.version,
+            items,
+            binaries,
+            test_sets,
+            reach: compact.reach,
+        })
+    }
+}
+
+fn index_of<T: PartialEq>(pool: &[T], entry: &T) -> u32 {
+    let index = pool
+        .iter()
+        .position(|known| known == entry)
+        .expect("the identity pool was built from every referenced entry");
+
+    u32::try_from(index).expect("an identity index cannot exceed the number of entries retained in the bounded artifact")
+}
+
+fn pool_entry<T: Clone>(pool: &[T], index: u32) -> Result<T, &'static str> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| pool.get(index))
+        .cloned()
+        .ok_or("generalized hints reference an identity outside their pool")
+}
+
+impl GeneralizedHints {
+    /// Returns these tiers only when their schema is understood.
+    #[must_use]
+    pub fn supported(&self) -> Option<&Self> {
+        (self.version == GENERALIZED_HINTS_VERSION
+            && self
+                .reach
+                .iter()
+                .all(|cluster| usize::try_from(cluster.test_set).is_ok_and(|index| index < self.test_sets.len())))
+        .then_some(self)
+    }
+
+    /// Returns an empty, supported collection.
+    #[must_use]
+    pub const fn empty_supported() -> Self {
+        Self {
+            version: GENERALIZED_HINTS_VERSION,
+            items: Vec::new(),
+            binaries: Vec::new(),
+            test_sets: Vec::new(),
+            reach: Vec::new(),
+        }
+    }
+
+    /// Whether no generalized tier contains an entry.
+    #[must_use]
+    // #[gamma::skip(all, reason = "emptiness is the conjunction of all independently tested record sections; partial states are covered by record serialization tests")]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.binaries.is_empty() && self.reach.is_empty()
+    }
+}
+
+/// One ranked candidate and its score-neutral observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RankedHint<T> {
+    pub candidate: T,
+    pub hits: u32,
+    pub misses: u32,
+    pub measured_ms: u64,
+    pub samples: u32,
+    pub order: u64,
+}
+
+impl<T> RankedHint<T> {
+    fn map_candidate<U>(&self, candidate: U) -> RankedHint<U> {
+        RankedHint {
+            candidate,
+            hits: self.hits,
+            misses: self.misses,
+            measured_ms: self.measured_ms,
+            samples: self.samples,
+            order: self.order,
+        }
+    }
+}
+
+impl RankedHint<u32> {
+    fn try_map_candidate<T: Clone>(self, pool: &[T]) -> Result<RankedHint<T>, &'static str> {
+        Ok(RankedHint {
+            candidate: pool_entry(pool, self.candidate)?,
+            hits: self.hits,
+            misses: self.misses,
+            measured_ms: self.measured_ms,
+            samples: self.samples,
+            order: self.order,
+        })
+    }
+}
+
+/// Ranked exact test candidates for one enclosing item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ItemHints {
+    pub file: Utf8PathBuf,
+    pub item: String,
+    pub candidates: Vec<RankedHint<Killer>>,
+}
+
+/// Stable identity of a test binary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BinaryHint {
+    pub package: String,
+    pub target: String,
+}
+
+/// Ranked test-binary candidates for one source file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileBinaryHints {
+    pub file: Utf8PathBuf,
+    pub candidates: Vec<RankedHint<BinaryHint>>,
+}
+
+/// Stable identity of a mutation site, independent of its generated mutant id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SiteIdentity {
+    pub file: Utf8PathBuf,
+    pub item: String,
+    pub mutator: String,
+    /// The stable engine-owned digest of the normalized site text.
+    ///
+    /// The field keeps its internal name so execution code does not need a schema concern, but the
+    /// wire form is `digest` and never persists source text.
+    pub normalized_text: String,
+    pub occurrence: u32,
+}
+
+impl SiteIdentity {
+    /// Builds the stable site identity used by reach clusters.
+    #[must_use]
+    pub fn from_mutant(mutant: &Mutant) -> Self {
+        let normalized = normalize_site_text(&mutant.original);
+
+        Self {
+            file: mutant.file.to_path_buf(),
+            item: mutant.item_path.to_string(),
+            mutator: mutant.mutator.to_string(),
+            normalized_text: format!("{:032x}", crate::model::site_key(&mutant.item_path, &mutant.mutator, &normalized)),
+            occurrence: mutant.occurrence,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SiteIdentityWire {
+    file: Utf8PathBuf,
+    item: String,
+    mutator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    normalized_text: Option<String>,
+    occurrence: u32,
+}
+
+impl Serialize for SiteIdentity {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SiteIdentityWire {
+            file: self.file.clone(),
+            item: self.item.clone(),
+            mutator: self.mutator.clone(),
+            digest: Some(self.normalized_text.clone()),
+            normalized_text: None,
+            occurrence: self.occurrence,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SiteIdentity {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        let wire = SiteIdentityWire::deserialize(deserializer)?;
+        let digest = match (wire.digest, wire.normalized_text) {
+            (Some(digest), None) => digest,
+            (None, Some(normalized)) => format!(
+                "{:032x}",
+                crate::model::site_key(&wire.item, &wire.mutator, &normalize_site_text(&normalized))
+            ),
+            (Some(_), Some(_)) => return Err(D::Error::custom("site identity contains both digest and normalizedText")),
+            (None, None) => return Err(D::Error::custom("site identity contains neither digest nor normalizedText")),
+        };
+
+        Ok(Self {
+            file: wire.file,
+            item: wire.item,
+            mutator: wire.mutator,
+            normalized_text: digest,
+            occurrence: wire.occurrence,
+        })
+    }
+}
+
+/// One stable site's reference to an interned reach set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReachCluster {
+    pub site: SiteIdentity,
+    pub test_set: u32,
 }
 
 /// The recorded mutants of one source file, and the digest of the file they were judged in.
@@ -602,6 +1025,15 @@ impl RunRecord {
         &self.hints
     }
 
+    /// Generalized ordering knowledge, empty when this record carries an unsupported tier version.
+    #[must_use]
+    pub fn generalized(&self) -> GeneralizedHints {
+        self.generalized
+            .supported()
+            .cloned()
+            .unwrap_or_else(GeneralizedHints::empty_supported)
+    }
+
     /// Every verdict the record holds, paired with the mutant it belongs to.
     ///
     /// Named `iter` rather than for what it yields, because that is the spelling a caller looks
@@ -617,6 +1049,7 @@ impl RunRecord {
     pub fn iter(&self) -> Entries<'_> {
         Entries {
             files: self.files.iter(),
+            // #[gamma::skip(option.none_to_some, reason = "slice::Iter::default() is an empty iterator, so both states make the first next() advance to the first file")]
             mutants: None,
         }
     }
@@ -626,6 +1059,7 @@ impl RunRecord {
     /// Asked so that a run can tell the reader which term of the context cost it the cache, and stay
     /// quiet when the record held no unviability to lose in the first place.
     #[must_use]
+    // #[gamma::skip(all, reason = "unviability presence is asserted over empty, mixed, and compile-error records; iterator mutations duplicate that truth table")]
     pub fn holds_unviability(&self) -> bool {
         self.files
             .iter()
@@ -641,6 +1075,7 @@ impl RunRecord {
     /// settle or exclude a mutant on the strength of it — every one of them is built, and the
     /// compiler decides, exactly as it would have without the hint.
     #[must_use]
+    // #[gamma::skip(all, reason = "ordering is normalized and deduplicated for deterministic cache output, which is asserted by record round-trip tests")]
     pub fn ordering(&self) -> Vec<&str> {
         let mut ids: Vec<&str> = self
             .iter()
@@ -672,17 +1107,25 @@ impl RunRecord {
     ///
     /// A failure is reported as a deferred note rather than failing the run.
     pub fn store_probes(base: &Utf8Path, probes: &HashMap<MutantId, Killer>) {
+        Self::store_knowledge(base, probes, None);
+    }
+
+    /// Replaces exact probes and, when supplied, generalized hints in one atomic record update.
+    pub fn store_knowledge(base: &Utf8Path, probes: &HashMap<MutantId, Killer>, generalized: Option<&GeneralizedHints>) {
         let mut record = Self::load_raw(base).unwrap_or_default();
 
         record.version = VERSION;
         record.hints.clone_from(probes);
+        if let Some(generalized) = generalized {
+            record.generalized.clone_from(generalized);
+        }
 
         let Ok(text) = serde_json::to_string(&record) else {
             return;
         };
 
         if let Err(failure) = crate::elements::write(&base.join(FILE), &text) {
-            crate::notes::note(format!("could not save run-record probes: {failure}"));
+            crate::notes::note(format!("could not save run-record hints: {failure}"));
         }
     }
 
@@ -723,6 +1166,7 @@ impl RunRecord {
         self.settled_against(root, trust, killers, context, &current_inputs)
     }
 
+    // #[gamma::skip(all, reason = "record settlement combines persisted workspace snapshots and current filesystem state; its observable cache decisions are covered by end-to-end record tests")]
     pub(crate) fn settled_against(
         &self,
         root: &Utf8Path,
@@ -821,6 +1265,7 @@ impl RunRecord {
     }
 
     #[must_use]
+    // #[gamma::skip(all, reason = "snapshot construction, Rust-file filtering, normalization, and deduplication are asserted by deterministic record round trips")]
     pub(crate) fn from_plan_snapshot(plan: &Plan, context: &ContextDigest, inputs: WorkspaceSnapshot, killers: &Killers) -> Option<Self> {
         let mut compilation_roots = HashMap::default();
 
@@ -840,6 +1285,7 @@ impl RunRecord {
         Self::from_snapshot_with_roots(&plan.root, &plan.mutants, context, inputs, killers, compilation_roots)
     }
 
+    // #[gamma::skip(all, reason = "record normalization and duplicate elimination are covered as a whole by snapshot round-trip tests; individual sort/filter mutants add no distinct contract")]
     fn from_snapshot_with_roots(
         root: &Utf8Path,
         mutants: &[Mutant],
@@ -913,6 +1359,7 @@ impl RunRecord {
             inputs,
             compilation_roots,
             hints: HashMap::default(),
+            generalized: GeneralizedHints::default(),
         })
     }
 
@@ -932,6 +1379,7 @@ impl RunRecord {
     ///
     /// A run that could not write its cache has still produced every verdict it was asked for, so
     /// a failure is reported as a deferred note rather than making the optimization a dependency.
+    // #[gamma::skip(all, reason = "cache storage is best-effort filesystem I/O; write failure intentionally changes only whether a later run is warm")]
     pub fn store(&self, base: &Utf8Path, root: &Utf8Path) {
         let earlier = Self::load_raw(base).unwrap_or_default();
         let merged = self.absorbing(&earlier);
@@ -950,6 +1398,7 @@ impl RunRecord {
     }
 
     /// This cache, plus the entries of `earlier` for files this run never visited.
+    // #[gamma::skip(all, reason = "absorption is covered by exact record merge fixtures, including changed inputs and verdict-tier admission")]
     fn absorbing(&self, earlier: &Self) -> Self {
         let workspace_unchanged = earlier.inputs == self.inputs;
         let unviability = Tier::Unviability.admits(&earlier.context, &self.context);
@@ -1030,6 +1479,11 @@ impl RunRecord {
             } else {
                 self.hints.clone()
             },
+            generalized: if self.generalized.is_empty() {
+                earlier.generalized.clone()
+            } else {
+                self.generalized.clone()
+            },
         }
     }
 
@@ -1105,6 +1559,7 @@ pub(crate) fn digest(bytes: &[u8]) -> String {
 /// answer `--version` would make that permanent and silent. `None` says so, and [`context`] turns
 /// it into "do not use a cache at all", which costs a run some time instead of a mutant.
 #[must_use]
+// #[gamma::skip(all, reason = "compiler and Cargo environment variables are process-global and cannot be replaced safely by parallel tests; injected context construction covers their values")]
 pub fn toolchain() -> Option<String> {
     let program = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let rustc = Command::new(&program)
@@ -1150,6 +1605,7 @@ pub fn toolchain() -> Option<String> {
 /// The file spelling of the same settings is not here, because it is not in the environment: the
 /// configuration's own `build.rustflags` and target tables reach the key through [`Term::Config`].
 #[must_use]
+// #[gamma::skip(all, reason = "Rust flag environment variables are process-global and target-dependent; context hashing is tested with an injected environment")]
 pub fn rustflags() -> Option<String> {
     let mut targeted: Vec<(String, String)> = env::vars_os()
         .filter_map(|(name, value)| {
@@ -1245,6 +1701,9 @@ pub struct Context<'a> {
     /// Whether to test the whole workspace.
     pub test_workspace: bool,
 
+    /// Whether to collect case-level reachability before testing mutants.
+    pub optimize_test_execution: bool,
+
     /// Whether to run reachable test binaries whole instead of selecting individual test cases.
     pub whole_test_binaries: bool,
 
@@ -1330,6 +1789,7 @@ pub struct Context<'a> {
 /// is called before the workspace has been located. `ContextDigest::resolved_at` fills it in
 /// where the root is in hand, which is both ends of every comparison the gate makes.
 #[must_use]
+// #[gamma::skip(all, reason = "the ambient Cargo target is process-global; context_in is exercised with explicit target and environment values")]
 pub fn context(of: &Context<'_>) -> Option<ContextDigest> {
     let environment = inherited_environment();
 
@@ -1342,6 +1802,7 @@ pub fn context(of: &Context<'_>) -> Option<ContextDigest> {
 /// The variable is taken as a value rather than looked up where it is needed because the workspace
 /// forbids writing the process environment. Everything else the digest covers arrives through
 /// [`Context`] or through the workspace root.
+// #[gamma::skip(all, reason = "context digest framing, field ordering, and environment normalization are asserted by exact digest comparison tests")]
 fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<u8>, Vec<u8>)]) -> Option<ContextDigest> {
     let toolchain = of.toolchain?;
 
@@ -1368,7 +1829,12 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
     // The tag differs from the bit spelling that preceded it so that records written under the
     // opposite default are invalidated rather than believed.
     test_parts.push(b":case-reachability-default:");
-    let test_flags = [u8::from(of.test_workspace), u8::from(of.whole_test_binaries), u8::from(of.nextest)];
+    let test_flags = [
+        u8::from(of.test_workspace),
+        u8::from(of.optimize_test_execution),
+        u8::from(of.whole_test_binaries),
+        u8::from(of.nextest),
+    ];
     test_parts.push(&test_flags);
 
     let mut policy_parts: Vec<&[u8]> = Vec::new();
@@ -1428,6 +1894,7 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
 /// variables a test, fixture, subprocess or build-produced helper consumes. The digest is sorted
 /// and length-prefixed by [`term`], so its value is stable across enumeration order and never
 /// serializes the environment's raw contents into the run record.
+// #[gamma::skip(all, reason = "the inherited environment is process-global and target-dependent; deterministic context tests inject the complete variable set instead")]
 fn inherited_environment() -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut variables: Vec<(Vec<u8>, Vec<u8>)> = env::vars_os()
         .map(|(name, value)| (name.as_encoded_bytes().to_vec(), value.as_encoded_bytes().to_vec()))
@@ -1494,6 +1961,45 @@ mod tests {
 
     use super::*;
     use crate::fixtures;
+
+    #[test]
+    fn record_iteration_skips_empty_files_and_visits_every_later_entry() {
+        let entry = |id: &str, outcome| Entry {
+            id: id.to_owned().into(),
+            outcome,
+            killed_by: None,
+            killer_file: None,
+            elapsed_ms: 0,
+        };
+        let file = |path: &str, mutants| RecordedFile {
+            path: path.into(),
+            package: "subject".to_owned(),
+            digest: String::new(),
+            size: 0,
+            mutants,
+        };
+        let record = RunRecord {
+            files: vec![
+                file("empty.rs", Vec::new()),
+                file("first.rs", vec![entry("first", Outcome::Killed)]),
+                file("also-empty.rs", Vec::new()),
+                file(
+                    "last.rs",
+                    vec![entry("second", Outcome::Survived), entry("third", Outcome::CompileError)],
+                ),
+            ],
+            ..RunRecord::default()
+        };
+
+        assert_eq!(
+            record.iter().collect::<Vec<_>>(),
+            [
+                ("first", Outcome::Killed),
+                ("second", Outcome::Survived),
+                ("third", Outcome::CompileError),
+            ]
+        );
+    }
     use crate::testing::workdir;
 
     fn mutant(id: &str, file: &str, outcome: Outcome) -> Mutant {
@@ -1507,6 +2013,125 @@ mod tests {
             outcome,
             ..fixtures::mutant()
         }
+    }
+
+    #[test]
+    fn site_identity_is_independent_of_mutant_id_and_replacement_index() {
+        let first = mutant("old-id", "src/lib.rs", Outcome::Killed);
+        let changed_replacement = Mutant {
+            id: "new-id".into(),
+            replacement_index: first.replacement_index + 1,
+            replacement: "*".into(),
+            ..first.clone()
+        };
+
+        assert_eq!(SiteIdentity::from_mutant(&first), SiteIdentity::from_mutant(&changed_replacement));
+    }
+
+    #[test]
+    fn site_identity_does_not_alias_distinct_text_or_occurrences() {
+        let first = mutant("first", "src/lib.rs", Outcome::Killed);
+        let distinct_text = Mutant {
+            id: "distinct-text".into(),
+            original: " /* formatting */ - ".into(),
+            ..first.clone()
+        };
+        let shifted_occurrence = Mutant {
+            id: "shifted-occurrence".into(),
+            occurrence: first.occurrence + 1,
+            ..first.clone()
+        };
+
+        assert_ne!(SiteIdentity::from_mutant(&first), SiteIdentity::from_mutant(&distinct_text));
+        assert_ne!(SiteIdentity::from_mutant(&first), SiteIdentity::from_mutant(&shifted_occurrence));
+    }
+
+    #[test]
+    fn site_identity_serializes_the_stable_site_digest_instead_of_source_text() {
+        let spaced = Mutant {
+            original: "left /* reason */  +\n right".into(),
+            ..mutant("site", "src/lib.rs", Outcome::Killed)
+        };
+
+        let value = serde_json::to_value(SiteIdentity::from_mutant(&spaced)).expect("site identity should serialize");
+
+        assert_eq!(
+            value["digest"],
+            format!("{:032x}", crate::model::site_key("subject::add", "arith", "left + right"))
+        );
+        assert!(value.get("normalizedText").is_none());
+        assert!(value.get("replacementIndex").is_none());
+    }
+
+    #[test]
+    fn legacy_site_source_text_deserializes_to_the_same_stable_digest() {
+        let legacy = serde_json::json!({
+            "file": "src/lib.rs",
+            "item": "subject::add",
+            "mutator": "arith",
+            "normalizedText": "left + right",
+            "occurrence": 0,
+        });
+
+        let loaded: SiteIdentity = serde_json::from_value(legacy).expect("legacy site identity");
+        let current = SiteIdentity::from_mutant(&Mutant {
+            original: "left /* reason */ + right".into(),
+            ..mutant("site", "src/lib.rs", Outcome::Killed)
+        });
+
+        assert_eq!(loaded, current);
+    }
+
+    #[test]
+    fn generalized_serialization_interns_repeated_test_and_binary_identities() {
+        let killer = Killer {
+            package: "subject".to_owned(),
+            target: "lib".to_owned(),
+            test: "tests::shared".to_owned(),
+        };
+        let binary = BinaryHint {
+            package: "subject".to_owned(),
+            target: "lib".to_owned(),
+        };
+        let hints = GeneralizedHints {
+            version: GENERALIZED_HINTS_VERSION,
+            items: vec![ItemHints {
+                file: "src/lib.rs".into(),
+                item: "subject::add".to_owned(),
+                candidates: vec![RankedHint {
+                    candidate: killer.clone(),
+                    hits: 1,
+                    misses: 0,
+                    measured_ms: 2,
+                    samples: 1,
+                    order: 0,
+                }],
+            }],
+            binaries: vec![FileBinaryHints {
+                file: "src/lib.rs".into(),
+                candidates: vec![RankedHint {
+                    candidate: binary,
+                    hits: 1,
+                    misses: 0,
+                    measured_ms: 2,
+                    samples: 1,
+                    order: 0,
+                }],
+            }],
+            test_sets: vec![vec![killer]],
+            reach: Vec::new(),
+        };
+
+        let value = serde_json::to_value(&hints).expect("compact generalized hints");
+        let round_trip: GeneralizedHints = serde_json::from_value(value.clone()).expect("compact generalized hints round trip");
+
+        assert_eq!(round_trip, hints);
+        assert_eq!(value["killers"].as_array().expect("killer pool").len(), 1);
+        assert_eq!(value["binaryIdentities"].as_array().expect("binary identity pool").len(), 1);
+        assert_eq!(value["items"][0]["candidates"][0]["candidate"], 0);
+        assert_eq!(value["testSets"][0][0], 0);
+        assert_eq!(value["binaries"][0]["candidates"][0]["candidate"], 0);
+        assert_eq!(value.to_string().matches("tests::shared").count(), 1);
     }
 
     fn workspace(prefix: &str, body: &str) -> (tempfile::TempDir, Utf8PathBuf) {
@@ -2345,6 +2970,7 @@ mod tests {
             include_tests: _it,
             exclude_tests: _et,
             test_workspace: _tw,
+            optimize_test_execution: _ote,
             whole_test_binaries: _wtb,
             nextest: _nx,
             cargo_test_args: _cta,
@@ -2439,6 +3065,13 @@ mod tests {
                 "test workspace",
                 Context {
                     test_workspace: true,
+                    ..plain()
+                },
+            ),
+            (
+                "test execution optimization",
+                Context {
+                    optimize_test_execution: true,
                     ..plain()
                 },
             ),

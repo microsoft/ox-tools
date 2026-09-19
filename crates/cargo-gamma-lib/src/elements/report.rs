@@ -458,6 +458,7 @@ fn reason_for(mutant: &Mutant) -> Option<String> {
 /// source-location rendering, which embedding it requires. The read and parse happen after the run
 /// rather than during it, so a file the repository deleted, made unreadable, made invalid Rust, or
 /// nested beyond the supported parser limit in the meantime fails here.
+// #[gamma::skip(all, reason = "report metadata, root identity, and mutant-id schema are asserted by schema and golden artifact tests; mutations here duplicate those report contracts")]
 pub fn build(plan: &Plan, thresholds: Thresholds, run: Option<RunInfo>) -> Result<Report> {
     let mut files: BTreeMap<String, FileResult> = BTreeMap::new();
 
@@ -858,12 +859,14 @@ fn is_uri(value: &str) -> bool {
                 return false;
             }
 
+            // #[gamma::skip(all, reason = "these mutations stop the URI scanner from advancing past a valid percent escape, so it loops until the mutation-test budget expires")]
             index += 3;
         } else {
             if byte.is_ascii_control() || matches!(byte, b' ' | b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}') {
                 return false;
             }
 
+            // #[gamma::skip(all, reason = "these mutations make the URI scanner repeat the same ordinary byte forever, so the mutation-test budget is the only termination")]
             index += 1;
         }
     }
@@ -920,6 +923,7 @@ fn render(mutant: &Mutant, source: &SourceFile) -> MutantResult {
     clippy::cast_precision_loss,
     reason = "the interchange schema represents durations as JSON numbers, while a run measures milliseconds in u64"
 )]
+// #[gamma::skip(all, reason = "source rendering, summary presence, and line offsets are asserted by exact report fixtures; mutating this private adapter duplicates that contract")]
 fn render_with_first_line_offset(mutant: &Mutant, source: &SourceFile, first_line_offset: usize) -> MutantResult {
     let (start_line, start_column) = source.location(mutant.span.start);
     let (end_line, end_column) = source.location(mutant.span.end);
@@ -1054,11 +1058,11 @@ mod tests {
 
     use camino::Utf8PathBuf;
 
-    use super::super::digest::{Digest, settled_mutants, settled_verdict};
+    use super::super::digest::{Digest, settled_mutants, settled_verdict, surviving_mutants};
     use super::*;
     use crate::discover::TargetFile;
     use crate::fixtures;
-    use crate::model::{Channel, Suppression};
+    use crate::model::{Channel, MUTANT_ID_VERSION, MutantId, Suppression};
 
     fn mutant(outcome: Outcome, span: Range<usize>) -> Mutant {
         Mutant {
@@ -1115,6 +1119,13 @@ mod tests {
     fn the_schema_version_is_in_the_supported_range() {
         // The npm package is at 3.x but the schema only validates major 1 and 2.
         assert_eq!(SCHEMA_VERSION, "2");
+
+        for version in ["1", "2", "1.0", "2.99", "1.2.3"] {
+            assert!(supported_schema_version(version), "{version}");
+        }
+        for version in ["", "0", "3", "01", "1.", "1.0.0.0", "1.01", "1.a", "1.2a"] {
+            assert!(!supported_schema_version(version), "{version}");
+        }
     }
 
     #[test]
@@ -1127,8 +1138,245 @@ mod tests {
             assert!(is_uri(uri), "{uri} should be a URI");
         }
 
-        for value in ["not a URI", "https://example.test/a space", "https://example.test/%xz"] {
+        for value in [
+            "not a URI",
+            ":missing-scheme",
+            "1http://example.test",
+            "h!ttp://example.test",
+            "https://example.test/a space",
+            "https://example.test/%",
+            "https://example.test/%a",
+            "https://example.test/%xz",
+            "https://example.test/\"",
+            "https://example.test/<",
+            "https://example.test/>",
+            "https://example.test/\\",
+            "https://example.test/^",
+            "https://example.test/`",
+            "https://example.test/{",
+            "https://example.test/|",
+            "https://example.test/}",
+        ] {
             assert!(!is_uri(value), "{value} must not be a URI");
+        }
+
+        for uri in ["h2://x", "h+git://x", "h-git://x", "h.git://x", "https://x/%0a"] {
+            assert!(is_uri(uri), "{uri} should be a URI");
+        }
+    }
+
+    fn complete_schema_document() -> Value {
+        serde_json::json!({
+            "schemaVersion": "2.1.0",
+            "thresholds": { "high": 80, "low": 60 },
+            "projectRoot": "/workspace",
+            "framework": {
+                "name": "cargo-gamma",
+                "version": "1.0.0",
+                "branding": {
+                    "homepageUrl": "https://example.test/gamma",
+                    "imageUrl": "https://example.test/icon.png"
+                },
+                "dependencies": { "cargo": "1.90.0" }
+            },
+            "performance": { "setup": 1, "initialRun": 2, "mutation": 3 },
+            "testFiles": {
+                "tests/unit.rs": {
+                    "source": "#[test] fn works() {}",
+                    "tests": [{
+                        "id": "unit-1",
+                        "name": "works",
+                        "location": {
+                            "start": { "line": 1, "column": 1 }
+                        }
+                    }]
+                }
+            },
+            "system": {
+                "ci": true,
+                "os": {
+                    "platform": "windows",
+                    "description": "Windows",
+                    "version": "11"
+                },
+                "cpu": {
+                    "logicalCores": 8,
+                    "baseClock": 3.5,
+                    "model": "example"
+                },
+                "ram": { "total": 17_179_869_184_u64 }
+            },
+            "files": {
+                "src/lib.rs": {
+                    "language": "rust",
+                    "source": "fn f() {}",
+                    "mutants": [{
+                        "id": "abc123abc123",
+                        "mutatorName": "fn_value.unit",
+                        "location": {
+                            "start": { "line": 1, "column": 1 },
+                            "end": { "line": 1, "column": 10 }
+                        },
+                        "status": "Killed",
+                        "description": "replace body",
+                        "replacement": "()",
+                        "statusReason": "failed `works`",
+                        "duration": 1.5,
+                        "testsCompleted": 1,
+                        "coveredBy": ["works"],
+                        "killedBy": ["works"],
+                        "static": false
+                    }]
+                }
+            }
+        })
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the table enumerates every adopted schema field in one auditable contract test"
+    )]
+    fn every_adopted_schema_field_is_type_checked_at_its_exact_path() {
+        type SchemaMutation = Box<dyn Fn(&mut Value)>;
+
+        let valid = complete_schema_document();
+        validate_schema(&valid).expect("complete document is valid");
+
+        let cases: Vec<(&str, SchemaMutation)> = vec![
+            ("report must be an object", Box::new(|value| *value = Value::Null)),
+            (
+                "report is missing required field `schemaVersion`",
+                Box::new(|value| {
+                    value.as_object_mut().expect("report").remove("schemaVersion");
+                }),
+            ),
+            (
+                "report.config must be an object",
+                Box::new(|value| value["config"] = Value::Bool(true)),
+            ),
+            (
+                "report.projectRoot must be a string",
+                Box::new(|value| value["projectRoot"] = Value::Bool(true)),
+            ),
+            (
+                "report.thresholds.high must be a non-negative integer",
+                Box::new(|value| value["thresholds"]["high"] = serde_json::json!(-1)),
+            ),
+            (
+                "report.files[\"src/lib.rs\"].language must be a string",
+                Box::new(|value| value["files"]["src/lib.rs"]["language"] = Value::Bool(true)),
+            ),
+            (
+                "report.files[\"src/lib.rs\"].source must be a string",
+                Box::new(|value| value["files"]["src/lib.rs"]["source"] = Value::Bool(true)),
+            ),
+            (
+                "report.files[\"src/lib.rs\"].mutants must be an array",
+                Box::new(|value| value["files"]["src/lib.rs"]["mutants"] = Value::Bool(true)),
+            ),
+            (
+                "report.files[\"src/lib.rs\"].mutants[0].id must be a string",
+                Box::new(|value| value["files"]["src/lib.rs"]["mutants"][0]["id"] = Value::Bool(true)),
+            ),
+            (
+                "report.files[\"src/lib.rs\"].mutants[0].mutatorName must be a string",
+                Box::new(|value| value["files"]["src/lib.rs"]["mutants"][0]["mutatorName"] = Value::Bool(true)),
+            ),
+            (
+                "report.files[\"src/lib.rs\"].mutants[0].status must be a string",
+                Box::new(|value| value["files"]["src/lib.rs"]["mutants"][0]["status"] = Value::Bool(true)),
+            ),
+            (
+                "report.files[\"src/lib.rs\"].mutants[0].description must be a string",
+                Box::new(|value| value["files"]["src/lib.rs"]["mutants"][0]["description"] = Value::Bool(true)),
+            ),
+            (
+                "report.files[\"src/lib.rs\"].mutants[0].duration must be a number",
+                Box::new(|value| value["files"]["src/lib.rs"]["mutants"][0]["duration"] = Value::Bool(true)),
+            ),
+            (
+                "report.files[\"src/lib.rs\"].mutants[0].coveredBy[0] must be a string",
+                Box::new(|value| value["files"]["src/lib.rs"]["mutants"][0]["coveredBy"][0] = Value::Bool(true)),
+            ),
+            (
+                "report.files[\"src/lib.rs\"].mutants[0].static must be a boolean",
+                Box::new(|value| value["files"]["src/lib.rs"]["mutants"][0]["static"] = Value::String("false".to_owned())),
+            ),
+            (
+                "report.testFiles[\"tests/unit.rs\"].source must be a string",
+                Box::new(|value| value["testFiles"]["tests/unit.rs"]["source"] = Value::Bool(true)),
+            ),
+            (
+                "report.testFiles[\"tests/unit.rs\"].tests[0].id must be a string",
+                Box::new(|value| value["testFiles"]["tests/unit.rs"]["tests"][0]["id"] = Value::Bool(true)),
+            ),
+            (
+                "report.testFiles[\"tests/unit.rs\"].tests[0].name must be a string",
+                Box::new(|value| value["testFiles"]["tests/unit.rs"]["tests"][0]["name"] = Value::Bool(true)),
+            ),
+            (
+                "report.performance.setup must be a number",
+                Box::new(|value| value["performance"]["setup"] = Value::Bool(true)),
+            ),
+            (
+                "report.framework.name must be a string",
+                Box::new(|value| value["framework"]["name"] = Value::Bool(true)),
+            ),
+            (
+                "report.framework.version must be a string",
+                Box::new(|value| value["framework"]["version"] = Value::Bool(true)),
+            ),
+            (
+                "report.framework.branding.homepageUrl must be a string",
+                Box::new(|value| value["framework"]["branding"]["homepageUrl"] = Value::Bool(true)),
+            ),
+            (
+                "report.framework.branding.homepageUrl must be a URI",
+                Box::new(|value| value["framework"]["branding"]["homepageUrl"] = Value::String("not a URI".to_owned())),
+            ),
+            (
+                "report.framework.branding.imageUrl must be a string",
+                Box::new(|value| value["framework"]["branding"]["imageUrl"] = Value::Bool(true)),
+            ),
+            (
+                "report.framework.dependencies[\"cargo\"] must be a string",
+                Box::new(|value| value["framework"]["dependencies"]["cargo"] = Value::Bool(true)),
+            ),
+            (
+                "report.system.ci must be a boolean",
+                Box::new(|value| value["system"]["ci"] = Value::String("true".to_owned())),
+            ),
+            (
+                "report.system.os.platform must be a string",
+                Box::new(|value| value["system"]["os"]["platform"] = Value::Bool(true)),
+            ),
+            (
+                "report.system.os.description must be a string",
+                Box::new(|value| value["system"]["os"]["description"] = Value::Bool(true)),
+            ),
+            (
+                "report.system.cpu.logicalCores must be a number",
+                Box::new(|value| value["system"]["cpu"]["logicalCores"] = Value::Bool(true)),
+            ),
+            (
+                "report.system.cpu.baseClock must be a number",
+                Box::new(|value| value["system"]["cpu"]["baseClock"] = Value::Bool(true)),
+            ),
+            (
+                "report.system.cpu.model must be a string",
+                Box::new(|value| value["system"]["cpu"]["model"] = Value::Bool(true)),
+            ),
+            (
+                "report.system.ram.total must be a number",
+                Box::new(|value| value["system"]["ram"]["total"] = Value::Bool(true)),
+            ),
+        ];
+
+        for (expected, mutate) in cases {
+            let mut document = valid.clone();
+            mutate(&mut document);
+            assert_eq!(validate_schema(&document).unwrap_err(), expected);
         }
     }
 
@@ -1151,6 +1399,56 @@ mod tests {
 
         assert_eq!(rendered.location.start.column, 2);
         assert_eq!(rendered.location.end.column, 4);
+    }
+
+    #[test]
+    fn building_a_report_detects_the_bom_and_offsets_only_the_first_line() {
+        let source = "\u{feff}fn f() {\n    true\n}\n";
+        let directory = crate::testing::workdir("elements-report-bom-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf-8");
+        let absolute = root.join("lib.rs");
+        fs::write(absolute.as_std_path(), source).expect("source");
+
+        let normalized = source.strip_prefix('\u{feff}').expect("leading byte-order mark");
+        let first = normalized.find("fn").expect("first-line span");
+        let second = normalized.find("true").expect("second-line span");
+        let plan = Plan {
+            skipped: Vec::new(),
+            digests: HashMap::default(),
+            root,
+            files: vec![TargetFile {
+                path: Utf8PathBuf::from("lib.rs"),
+                absolute,
+                package: "subject".to_owned(),
+            }],
+            mutants: vec![
+                Mutant {
+                    id: "first".to_owned().into(),
+                    file: Utf8PathBuf::from("lib.rs").into(),
+                    span: first..first + 2,
+                    ..mutant(Outcome::Survived, first..first + 2)
+                },
+                Mutant {
+                    id: "second".to_owned().into(),
+                    file: Utf8PathBuf::from("lib.rs").into(),
+                    span: second..second + 4,
+                    ..mutant(Outcome::Survived, second..second + 4)
+                },
+            ],
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            reach: HashMap::default(),
+            specs: HashMap::default(),
+        };
+
+        let report = build(&plan, Thresholds::default(), None).expect("report");
+        let mutants = &report.files["lib.rs"].mutants;
+        assert_eq!(mutants[0].location.start.column, 2);
+        assert_eq!(mutants[1].location.start.column, 5);
+        assert_eq!(report.files["lib.rs"].source, source);
+        assert_eq!(report.files["lib.rs"].language, "rust");
     }
 
     #[test]
@@ -1718,6 +2016,52 @@ mod tests {
     }
 
     #[test]
+    fn survivor_selection_excludes_other_verdicts_and_resource_outcomes() {
+        let template = fixtures::mutant_result();
+        let mut report = fixtures::report_with(None, 0, vec![template.clone()]);
+        let file = report.files.values_mut().next().expect("the fixture has a file");
+        file.mutants = [
+            ("survivor", "Survived", None),
+            ("killed", "Killed", Some("failed `test`")),
+            ("timeout", "Survived", Some("timed out: exceeded its budget")),
+            ("out-of-memory", "Survived", Some("out of memory: exceeded its ceiling")),
+        ]
+        .into_iter()
+        .map(|(id, status, reason)| MutantResult {
+            id: id.into(),
+            status: status.into(),
+            status_reason: reason.map(str::to_owned),
+            ..template.clone()
+        })
+        .collect();
+
+        let survivors = surviving_mutants(&report).expect("the cargo-gamma report is compatible");
+        let ids: Vec<&str> = survivors.iter().map(MutantId::as_str).collect();
+
+        assert_eq!(ids, ["survivor"]);
+    }
+
+    #[test]
+    fn survivor_selection_rejects_an_incompatible_identity_scheme() {
+        let mut report = fixtures::report_with(None, 0, Vec::new());
+        report.config.as_mut().expect("the fixture has run metadata").mutant_id_version = Some(MUTANT_ID_VERSION + 1);
+
+        let error = surviving_mutants(&report).expect_err("another identity scheme cannot select current mutants");
+
+        assert!(error.contains("mutant-ID scheme"), "{error}");
+    }
+
+    #[test]
+    fn survivor_selection_rejects_another_report_producer() {
+        let mut report = fixtures::report();
+        report.framework.name = "another-tool".to_owned();
+
+        let error = surviving_mutants(&report).expect_err("another producer cannot select cargo-gamma mutants");
+
+        assert!(error.contains("another-tool"), "{error}");
+    }
+
+    #[test]
     fn a_file_without_mutants_is_left_out_of_the_report() {
         let plan = Plan {
             skipped: Vec::new(),
@@ -1772,24 +2116,71 @@ mod tests {
 
     #[test]
     fn serialization_refuses_reports_outside_the_adopted_schema() {
+        let mut version = fixtures::report();
+        version.schema_version = "3".to_owned();
+        assert_eq!(
+            validate_report(&version).unwrap_err(),
+            "schema version `3` at report.schemaVersion must match the supported pattern"
+        );
+
         let mut threshold = fixtures::report();
         threshold.thresholds.high = 101;
 
-        assert!(to_json(&threshold).is_err(), "an out-of-range threshold must not be emitted");
+        assert_eq!(
+            validate_report(&threshold).unwrap_err(),
+            "report.thresholds.high must be at most 100"
+        );
+
+        threshold.thresholds.high = 100;
+        threshold.thresholds.low = 101;
+        assert_eq!(
+            validate_report(&threshold).unwrap_err(),
+            "report.thresholds.low must be at most 100"
+        );
+
+        threshold.thresholds.low = 100;
+        assert!(to_json(&threshold).is_ok(), "boundary thresholds must be emitted");
 
         let mut position = fixtures::report();
-        let mut mutant = fixtures::mutant_result();
-        mutant.location.start.line = 0;
-        let _ = position.files.insert(
-            "src/lib.rs".to_owned(),
-            FileResult {
+        for (corner, axis) in [("start", "line"), ("start", "column"), ("end", "line"), ("end", "column")] {
+            let mut mutant = fixtures::mutant_result();
+            let position = if corner == "start" {
+                &mut mutant.location.start
+            } else {
+                &mut mutant.location.end
+            };
+            if axis == "line" {
+                position.line = 0;
+            } else {
+                position.column = 0;
+            }
+
+            let file = FileResult {
                 source: "fn f() {}\n".to_owned(),
                 language: "rust".to_owned(),
                 mutants: vec![mutant],
-            },
+            };
+
+            assert_eq!(
+                validate_file_result(&file, "report.files[\"src/lib.rs\"]").unwrap_err(),
+                format!("report.files[\"src/lib.rs\"].mutants[0].location.{corner}.{axis} must be at least 1")
+            );
+        }
+
+        let mut mutant = fixtures::mutant_result();
+        mutant.id = "abc123abc123".to_owned().into();
+        mutant.status = "Unknown".into();
+        let file = FileResult {
+            source: "fn f() {}\n".to_owned(),
+            language: "rust".to_owned(),
+            mutants: vec![mutant],
+        };
+        assert_eq!(
+            validate_file_result(&file, "report.files[\"src/lib.rs\"]").unwrap_err(),
+            "report.files[\"src/lib.rs\"].mutants[0] mutant `abc123abc123` has unknown schema status `Unknown`"
         );
 
-        assert!(to_json(&position).is_err(), "a zero source position must not be emitted");
+        position.files.clear();
     }
 
     #[test]

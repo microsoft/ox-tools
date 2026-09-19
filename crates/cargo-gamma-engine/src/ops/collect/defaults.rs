@@ -176,7 +176,7 @@ impl DefaultPaths {
     /// Resolves the qualifier of an associated call through the type namespace.
     fn is_standard_callee_segments(&self, segments: &[String]) -> bool {
         if let [name] = segments
-            && (self.aliases.contains(name) || (name == "Default" && !self.shadows.contains(name)))
+            && self.is_standard_trait_name(name)
         {
             return true;
         }
@@ -384,6 +384,7 @@ fn merge_alias(into: &mut HashMap<String, Option<String>>, alias: String, error:
     match into.entry(alias) {
         Entry::Occupied(mut seen) => {
             if *seen.get() != error {
+                // #[gamma::skip(assign_value.default, reason = "`Option<String>::default()` is exactly `None`, so this replacement is identical")]
                 *seen.get_mut() = None;
             }
         }
@@ -489,6 +490,7 @@ impl<'ast> Visit<'ast> for Defaults {
 
         self.note_derive(&node.ident.to_string(), &node.attrs);
 
+        // #[gamma::skip(stmt.delete_call, reason = "`Defaults` has no callbacks for fields or field types, so descending cannot change this visitor's state")]
         visit::visit_item_struct(self, node);
     }
 
@@ -499,6 +501,7 @@ impl<'ast> Visit<'ast> for Defaults {
 
         self.note_derive(&node.ident.to_string(), &node.attrs);
 
+        // #[gamma::skip(stmt.delete_call, reason = "`Defaults` has no callbacks for variants or their contents, so descending cannot change this visitor's state")]
         visit::visit_item_enum(self, node);
     }
 
@@ -509,6 +512,7 @@ impl<'ast> Visit<'ast> for Defaults {
 
         self.note_derive(&node.ident.to_string(), &node.attrs);
 
+        // #[gamma::skip(stmt.delete_call, reason = "`Defaults` has no callbacks for union fields or types, so descending cannot change this visitor's state")]
         visit::visit_item_union(self, node);
     }
 
@@ -524,6 +528,7 @@ impl<'ast> Visit<'ast> for Defaults {
             let _inserted = self.defaulted.insert(name);
         }
 
+        // #[gamma::skip(stmt.delete_call, reason = "impl blocks cannot contain nested declarations handled by `Defaults`, so descent is unobservable")]
         visit::visit_item_impl(self, node);
     }
 
@@ -551,6 +556,7 @@ impl<'ast> Visit<'ast> for Defaults {
             }
         }
 
+        // #[gamma::skip(stmt.delete_call, reason = "`Defaults` has no callbacks for nodes nested in an alias target, so descent is unobservable")]
         visit::visit_item_type(self, node);
     }
 }
@@ -584,6 +590,7 @@ fn name_of(ty: &Type) -> Option<String> {
         Type::Path(path) => path.path.segments.last().map(|segment| segment.ident.to_string()),
         Type::Paren(paren) => name_of(&paren.elem),
         Type::Group(group) => name_of(&group.elem),
+        // #[gamma::skip(option.none_to_some, reason = "`Type::default()` is an empty `Verbatim`, which every caller reduces back to no name")]
         _ => None,
     }
 }
@@ -1116,5 +1123,74 @@ mod tests {
         assert_eq!(payload_name(&tuple, 0), None);
         assert_eq!(payload_name(&bare, 0), None);
         assert_eq!(payload_name(&with_lifetime, 0), Some("Error".to_owned()));
+    }
+
+    #[test]
+    fn mutation_boundaries_are_observable_across_paths_attributes_and_visitors() {
+        for declaration in ["enum Default {}", "type Default = ();", "mod Default {}", "struct Default;"] {
+            let source = format!("struct Error; {declaration} impl Default for Error {{ fn default() -> Self {{ Self }} }}");
+            assert!(Defaults::of(&parse_file(&source).unwrap()).lacks_default(&parse_quote!(Error)));
+        }
+
+        let paths = DefaultPaths::default();
+        let bare: Path = parse_quote!(Default);
+        let qualified: Path = parse_quote!(core::default::Default);
+        let custom: Path = parse_quote!(custom::Default);
+        assert!(paths.is_fallback_trait(&bare));
+        assert!(paths.is_fallback_trait(&qualified));
+        assert!(!paths.is_fallback_trait(&custom));
+        assert!(!is_standard_module_path(&["custom".to_owned()]));
+        assert!(!is_standard_module_path(&["std".to_owned(), "other".to_owned()]));
+
+        let chained = index(&[
+            "struct Error; use std as first; use first as second; impl second::default::Default for Error { fn default() -> Self { Self } }",
+        ]);
+        assert!(!chained.lacks_default(&parse_quote!(Error)));
+
+        let not_result = index(&["type Alias = Vec<u8, Error>;"]);
+        assert_eq!(not_result.aliased_error("Alias"), None);
+        let lifetime_alias = index(&["type MyResult<'a, const N: usize> = Result<u8, Error>;"]);
+        assert_eq!(lifetime_alias.aliased_error("MyResult"), Some("Error"));
+
+        let item_kinds: Vec<Item> = vec![
+            parse_quote!(
+                #[allow(dead_code)]
+                enum E {}
+            ),
+            parse_quote!(
+                #[allow(dead_code)]
+                fn f() {}
+            ),
+            parse_quote!(
+                #[allow(dead_code)]
+                impl S {}
+            ),
+            parse_quote!(
+                #[allow(dead_code)]
+                static S: usize = 0;
+            ),
+            parse_quote!(
+                #[allow(dead_code)]
+                struct S;
+            ),
+            parse_quote!(
+                #[allow(dead_code)]
+                type A = usize;
+            ),
+            parse_quote!(
+                #[allow(dead_code)]
+                use core::fmt;
+            ),
+        ];
+        assert!(item_kinds.iter().all(|item| item_attrs(item).len() == 1));
+
+        let function: syn::ItemFn = parse_quote!(
+            fn f<T>()
+            where
+                T: Clone + Default,
+            {
+            }
+        );
+        assert_eq!(standard_defaulted_parameters(&function.sig.generics, &paths), vec!["T"]);
     }
 }

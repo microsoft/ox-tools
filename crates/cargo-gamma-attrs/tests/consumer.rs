@@ -40,7 +40,7 @@ fn killed(bytes: &[u8]) -> u32 {
 
 #[test]
 fn expect_killed_leaves_the_annotated_item_callable() {
-    assert_eq!(killed(b"abc"), killed(b"abc"));
+    assert_eq!(killed(b"abc"), 96_354);
     assert_ne!(killed(b"abc"), killed(b"abd"));
 }
 

@@ -70,6 +70,10 @@ pub(super) fn compile_fail_targets(metadata: &Metadata) -> Vec<CompileFailTarget
         }
     }
 
+    normalized(found)
+}
+
+fn normalized(mut found: Vec<CompileFailTarget>) -> Vec<CompileFailTarget> {
     found.sort_by(|left, right| left.target.cmp(&right.target));
     found.dedup();
     found
@@ -171,6 +175,13 @@ mod tests {
             text.contains("--exclude-test router_compile_fail --exclude-test feature_gates"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn discovered_targets_are_sorted_and_deduplicated() {
+        let found = normalized(vec![target("zeta"), target("alpha"), target("zeta")]);
+
+        assert_eq!(found, [target("alpha"), target("zeta")]);
     }
 
     /// The warning must not exclude anything, only say what would.

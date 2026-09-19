@@ -931,3 +931,6 @@ symlinked
 uninherited
 closers
 unmanaged
+SHA
+upserts
+EWMA

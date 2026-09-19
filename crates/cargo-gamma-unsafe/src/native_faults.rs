@@ -48,6 +48,9 @@ pub(crate) enum NativeCall {
     /// The completion port cannot be checked for a memory-limit notification.
     CompletionStatus,
 
+    /// The completion port reports a job-memory-limit notification.
+    MemoryLimitMessage,
+
     /// The job refuses the child it was created for.
     AssignProcess,
 
@@ -74,17 +77,21 @@ pub(crate) fn fired(call: NativeCall) -> bool {
     })
 }
 
+fn disarm(call: NativeCall) {
+    ARMED.with_borrow_mut(|armed| {
+        if let Some(at) = armed.iter().position(|candidate| *candidate == call) {
+            let _spent = armed.remove(at);
+        }
+    });
+}
+
 /// Keeps one fault armed until it fires or this guard is dropped.
 #[derive(Debug)]
 pub(crate) struct Armed(NativeCall);
 
 impl Drop for Armed {
     fn drop(&mut self) {
-        ARMED.with_borrow_mut(|armed| {
-            if let Some(at) = armed.iter().position(|candidate| *candidate == self.0) {
-                let _spent = armed.remove(at);
-            }
-        });
+        disarm(self.0);
     }
 }
 
@@ -118,6 +125,15 @@ mod tests {
 
         assert!(!fired(NativeCall::ResumeThread));
         assert!(fired(NativeCall::OpenThread));
+    }
+
+    #[test]
+    fn faults_do_not_displace_each_other() {
+        let _snapshot = arm(NativeCall::Snapshot);
+        let _resume = arm(NativeCall::ResumeThread);
+
+        assert!(fired(NativeCall::ResumeThread));
+        assert!(fired(NativeCall::Snapshot));
     }
 
     #[test]
