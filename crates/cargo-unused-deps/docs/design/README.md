@@ -252,6 +252,12 @@ no source parsing, and no false positives. It is invisible to both tools above b
 an uninherited entry never enters any crate's dependency graph. See
 [the catalog design](./workspace-catalog.md).
 
+Feature definitions also carry manifest-level use. A dependency referenced through
+`dep:name`, `name/feature`, or `name?/feature` is required even when crate source never
+names it. A bare feature member names an implicit optional-dependency feature only when
+no explicit feature shadows that name. These declarations are excluded from source
+findings before compiler evidence is judged.
+
 ### Also evaluated, and not used
 
 **`cargo machete`** walks every `.rs` file and regex-matches each dependency's name.

@@ -90,7 +90,7 @@ pub fn judge(
         }
 
         for declared in &package.declared {
-            if declared.feature_forwarded || allowed.contains(&declared.name) || package.allowed.contains(&declared.name) {
+            if declared.feature_referenced || allowed.contains(&declared.name) || package.allowed.contains(&declared.name) {
                 continue;
             }
 

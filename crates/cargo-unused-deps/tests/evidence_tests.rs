@@ -209,23 +209,25 @@ fn inactive_target_dependencies_are_not_reported() {
 }
 
 #[test]
-fn optional_feature_forwarders_are_not_reported() {
+fn dependencies_required_by_features_are_not_reported() {
     let fixture = Fixture::new(
-        &["forwarded"],
+        &["forwarded", "required", "bare"],
         concat!(
-            "[dependencies]\nforwarded = { path = \"../forwarded\", optional = true }\n\n",
-            "[features]\napi = [\"forwarded/forwarded-feature\"]\n",
+            "[dependencies]\n",
+            "forwarded = { path = \"../forwarded\", optional = true }\n",
+            "required = { path = \"../required\" }\n",
+            "bare = { path = \"../bare\", optional = true }\n\n",
+            "[features]\napi = [\"forwarded/forwarded-feature\", \"required/required-feature\", \"bare\"]\n",
         ),
         "pub fn go() {}\n",
     );
-    fs::write(
-        fixture.dir.path().join("forwarded/Cargo.toml"),
-        concat!(
-            "[package]\nname = \"forwarded\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
-            "[features]\nforwarded-feature = []\n",
-        ),
-    )
-    .expect("failed to add the forwarded feature");
+    for (name, feature) in [("forwarded", "forwarded-feature"), ("required", "required-feature")] {
+        fs::write(
+            fixture.dir.path().join(name).join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\n{feature} = []\n"),
+        )
+        .expect("failed to add the forwarded feature");
+    }
 
     let output = command()
         .arg("unused-deps")
@@ -237,7 +239,7 @@ fn optional_feature_forwarders_are_not_reported() {
 
     assert!(
         output.status.success(),
-        "a feature-forwarding optional dependency is load-bearing: {}",
+        "dependencies referenced by features are load-bearing: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

@@ -90,8 +90,8 @@ pub struct Declared {
     /// Target-table predicate, or none for an unconditional declaration.
     pub target: Option<String>,
 
-    /// Whether the optional dependency exists to forward another crate's feature.
-    pub feature_forwarded: bool,
+    /// Whether a feature definition requires this dependency declaration.
+    pub feature_referenced: bool,
 }
 
 impl Declared {
@@ -105,11 +105,11 @@ impl Declared {
 /// Every dependency a member manifest declares, in every section and target table.
 pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
     let mut declared = Vec::new();
-    let feature_dependencies = feature_dependencies(doc);
+    let feature_references = feature_references(doc);
 
     for (table, section) in DEP_TABLES {
         if let Some(item) = doc.get(table).and_then(Item::as_table_like) {
-            collect_declared(item, section, None, &feature_dependencies, &mut declared);
+            collect_declared(item, section, None, &feature_references, &mut declared);
         }
     }
 
@@ -117,7 +117,7 @@ pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
         for (target_name, target) in targets.iter().filter_map(|(name, target)| Some((name, target.as_table_like()?))) {
             for (table, section) in DEP_TABLES {
                 if let Some(item) = target.get(table).and_then(Item::as_table_like) {
-                    collect_declared(item, section, Some(target_name), &feature_dependencies, &mut declared);
+                    collect_declared(item, section, Some(target_name), &feature_references, &mut declared);
                 }
             }
         }
@@ -131,7 +131,7 @@ fn collect_declared(
     table: &dyn TableLike,
     section: Section,
     target: Option<&str>,
-    feature_dependencies: &BTreeSet<String>,
+    feature_references: &FeatureReferences,
     into: &mut Vec<Declared>,
 ) {
     for (key, spec) in table.iter() {
@@ -139,23 +139,42 @@ fn collect_declared(
             name: key.to_owned(),
             section,
             target: target.map(str::to_owned),
-            feature_forwarded: is_optional(spec) && feature_dependencies.contains(key),
+            feature_referenced: feature_references.explicit.contains(key)
+                || (is_optional(spec) && feature_references.implicit_optional.contains(key)),
         });
     }
 }
 
-/// Dependency keys explicitly referenced by feature definitions.
-fn feature_dependencies(doc: &DocumentMut) -> BTreeSet<String> {
-    doc.get("features")
-        .and_then(Item::as_table_like)
-        .into_iter()
-        .flat_map(TableLike::iter)
+/// Dependency references carried by the feature table.
+#[derive(Default)]
+struct FeatureReferences {
+    /// Unambiguous `dep:name`, `name/feature`, and `name?/feature` references.
+    explicit: BTreeSet<String>,
+    /// Bare names that can denote an implicit optional-dependency feature.
+    implicit_optional: BTreeSet<String>,
+}
+
+fn feature_references(doc: &DocumentMut) -> FeatureReferences {
+    let Some(features) = doc.get("features").and_then(Item::as_table_like) else {
+        return FeatureReferences::default();
+    };
+    let feature_names: BTreeSet<&str> = features.iter().map(|(name, _)| name).collect();
+    let mut references = FeatureReferences::default();
+
+    for value in features
+        .iter()
         .filter_map(|(_, feature)| feature.as_array())
         .flatten()
         .filter_map(Value::as_str)
-        .filter_map(feature_dependency)
-        .map(str::to_owned)
-        .collect()
+    {
+        if let Some(name) = feature_dependency(value) {
+            references.explicit.insert(name.to_owned());
+        } else if !value.contains('/') && !feature_names.contains(value) {
+            references.implicit_optional.insert(value.to_owned());
+        }
+    }
+
+    references
 }
 
 /// Extract a dependency key from `dep:name`, `name/feature`, or `name?/feature`.
@@ -404,7 +423,7 @@ build = "1"
         assert_eq!(declared.len(), 3);
         assert_eq!(declared[0].section, Section::Normal);
         assert_eq!(declared[0].target, None);
-        assert!(!declared[0].feature_forwarded);
+        assert!(!declared[0].feature_referenced);
         assert_eq!(declared[1].section, Section::Development);
         assert_eq!(declared[1].target.as_deref(), Some("cfg(windows)"));
         assert_eq!(declared[2].section, Section::Build);
@@ -412,26 +431,42 @@ build = "1"
     }
 
     #[test]
-    fn optional_feature_forwarders_are_identified() {
+    fn dependencies_required_by_features_are_identified() {
         let manifest = r#"
 [dependencies]
 required = "1"
+bare_required = "1"
 plain = { version = "1", optional = true }
 explicit = { version = "1", optional = true }
 forwarded = { version = "1", optional = true }
 weak = { version = "1", optional = true }
+bare = { version = "1", optional = true }
+shadowed = { version = "1", optional = true }
 
 [features]
-api = ["required/std", "dep:explicit", "forwarded/derive", "weak?/std"]
+api = ["required/std", "bare_required", "dep:explicit", "forwarded/derive", "weak?/std", "bare", "shadowed"]
+shadowed = []
 "#
         .parse()
         .expect("fixture manifest is valid");
 
         let declared = declared_dependencies(&manifest);
-        assert!(!declared[0].feature_forwarded, "a required dependency is not an optional forwarder");
-        assert!(!declared[1].feature_forwarded);
-        assert!(declared[2].feature_forwarded);
-        assert!(declared[3].feature_forwarded);
-        assert!(declared[4].feature_forwarded);
+        assert!(declared[0].feature_referenced, "required dependency features need the declaration");
+        assert!(
+            !declared[1].feature_referenced,
+            "a bare required dependency is not an implicit optional feature"
+        );
+        assert!(!declared[2].feature_referenced);
+        assert!(declared[3].feature_referenced);
+        assert!(declared[4].feature_referenced);
+        assert!(declared[5].feature_referenced);
+        assert!(
+            declared[6].feature_referenced,
+            "bare implicit optional feature enables the dependency"
+        );
+        assert!(
+            !declared[7].feature_referenced,
+            "a same-named explicit feature shadows the implicit optional feature"
+        );
     }
 }
