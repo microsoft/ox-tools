@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-18
+## [0.2.0] - 2026-09-21
 
 - ✨ Features
 
@@ -12,6 +12,7 @@
 
 - 🐛 Bug Fixes
 
+  - handle feature-forwarding dependencies
   - report target declaration context
   - isolate evidence runs
   - normalize doctest diagnostics
@@ -29,6 +30,7 @@
 
 - 📚 Documentation
 
+  - refresh release notes
   - refresh release notes
   - refresh release notes
   - refresh release notes
