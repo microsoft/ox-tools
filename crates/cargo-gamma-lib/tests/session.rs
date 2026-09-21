@@ -115,14 +115,23 @@ fn cargo_runtime_environment_is_present() {
         "CARGO_PKG_RUST_VERSION",
         "CARGO_BIN_EXE_subject-cli",
         "OUT_DIR",
-        "RUSTUP_HOME",
-        "RUSTUP_TOOLCHAIN",
-        "RUSTUP_TOOLCHAIN_SOURCE",
-        "RUST_RECURSION_COUNT",
         "SUBJECT_BUILD_VALUE",
     ];
     for name in required {
         assert!(std::env::var_os(name).is_some(), "{name} was not set");
+    }
+
+    // Standalone toolchains provide Cargo's environment without rustup's variables.
+    if RUSTUP_AVAILABLE {
+        for name in [
+            "RUSTUP_HOME",
+            "RUSTUP_TOOLCHAIN",
+            "RUSTUP_TOOLCHAIN_SOURCE",
+            "RUST_RECURSION_COUNT",
+        ] {
+            assert!(std::env::var_os(name).is_some(), "{name} was not set");
+        }
+        assert!(std::path::Path::new(&std::env::var_os("RUSTUP_HOME").unwrap()).is_dir());
     }
 
     assert_eq!(std::env::var("CARGO_PKG_NAME").unwrap(), "subject");
@@ -146,7 +155,6 @@ fn cargo_runtime_environment_is_present() {
     assert!(std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).is_dir());
     assert!(std::path::Path::new(&std::env::var_os("CARGO").unwrap()).is_file());
     assert!(std::path::Path::new(&std::env::var_os("CARGO_HOME").unwrap()).is_dir());
-    assert!(std::path::Path::new(&std::env::var_os("RUSTUP_HOME").unwrap()).is_dir());
 
     let profile = cargo_binary
         .parent()
@@ -332,8 +340,17 @@ fn environment_workspace() -> TempDir {
     fs::write(root.join("src/lib.rs"), SUBJECT).expect("could not write the library");
     fs::write(root.join("src/bin/subject-cli.rs"), "fn main() {}\n").expect("could not write the binary");
 
+    let rustup_available = Command::new("rustup")
+        .args(["show", "active-toolchain"])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|output| output.status.success());
     fs::create_dir_all(root.join("tests")).expect("could not create tests");
-    fs::write(root.join("tests/environment.rs"), ENVIRONMENT_TEST).expect("could not write the integration test");
+    fs::write(
+        root.join("tests/environment.rs"),
+        format!("const RUSTUP_AVAILABLE: bool = {rustup_available};\n{ENVIRONMENT_TEST}"),
+    )
+    .expect("could not write the integration test");
 
     dir
 }
