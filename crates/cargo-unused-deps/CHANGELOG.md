@@ -12,6 +12,7 @@
 
 - 🐛 Bug Fixes
 
+  - preserve feature dependency declarations
   - handle feature-forwarding dependencies
   - report target declaration context
   - isolate evidence runs
@@ -30,6 +31,7 @@
 
 - 📚 Documentation
 
+  - refresh release notes
   - refresh release notes
   - refresh release notes
   - refresh release notes
