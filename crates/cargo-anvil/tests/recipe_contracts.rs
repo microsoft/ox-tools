@@ -367,7 +367,8 @@ if ($args -contains 'llvm-cov' -and $args -contains 'report' -and $env:FAKE_LLVM
     }
     $command = "$quote$($env:FAKE_LLVM_COV_PATH)$quote export $arguments"
     if ($env:FAKE_LLVM_COV_MULTILINE) {
-        $command = $command.Replace(' -object', "`n-object")
+        $objectArgument = if ($env:FAKE_LLVM_COV_SINGLE_QUOTES) { " '-object'" } else { ' -object' }
+        $command = $command.Replace($objectArgument, "`n$($objectArgument.TrimStart())")
     }
     Write-Output (
         "error: failed to generate report: could not execute process $([char]96)$command$([char]96) " +
@@ -2378,6 +2379,10 @@ fn coverage_reports_use_requested_package_scope() {
 
 #[cfg(all(windows, not(target_arch = "aarch64")))]
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end fixture covers successful and failed response-file retries"
+)]
 fn windows_coverage_report_retries_error_206_with_response_file() {
     if !tools_available() {
         return;
@@ -2439,9 +2444,9 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
     assert_eq!(invocations.matches("export @").count(), 2, "invocations:\n{invocations}");
     let responses = fs::read_to_string(&response_log).unwrap();
     assert_eq!(
-        responses.matches("\"-object\" \"fake-object.exe\"").count(),
+        responses.matches("\n\"-object\" \"fake-object.exe\"").count(),
         2,
-        "responses:\n{responses}"
+        "both reports must preserve the multiline command shape:\n{responses}"
     );
     for config in ["all-features", "no-default"] {
         let report = tmp.path().join(format!("target/coverage/lcov-{config}.info"));
