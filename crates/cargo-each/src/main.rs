@@ -79,11 +79,10 @@
 //! per-target work. Omitting it runs exactly one invocation at a time; `auto`
 //! resolves once to the machine's available parallelism. Detection failure is
 //! reported explicitly without falling back. `--timeout <DURATION>` terminates
-//! each invocation and its process tree independently (`250ms`, `30s`, or
-//! `2m`).
-//! Timeouts require sealed process-tree containment; on a host that only
-//! offers best-effort containment, cargo-each reports an unsupported
-//! infrastructure failure before starting the child.
+//! each invocation's Windows job object or Unix process group independently
+//! (`250ms`, `30s`, or `2m`). Unix descendants can escape a process group by
+//! starting a new session, so timeout cleanup is best-effort for those escaped
+//! descendants.
 //! `--chdir` runs each per-package or per-target command from that member crate
 //! root; `--dry-run` prints commands without running them.
 //!
@@ -120,7 +119,7 @@
 //! floor. Placeholder mode validation still runs before an empty-plan no-op.
 //!
 //! The effective worker count is the requested `--jobs` value capped by plan
-//! size and scheduler capacity. An effective count of one uses sequential
+//! size. An effective count of one uses sequential
 //! execution with inherited standard input, output, and error even when the
 //! requested value was larger. A genuinely parallel count disconnects child input and
 //! buffers stdout and stderr; complete blocks are emitted in deterministic
@@ -130,25 +129,25 @@
 //! unexpected worker-channel disconnections become infrastructure-failure
 //! outcomes instead of blocking the scheduler. Worker launch failures retain
 //! output already collected at earlier plan indices. Without `--timeout`,
-//! parallel commands retain ordinary direct-child semantics and do not kill
-//! background descendants. Each output stream retains at most 1 MiB in memory
+//! parallel commands are launched in a job or process group, but cargo-each
+//! observes only the leader and does not kill background descendants. Each
+//! output stream retains at most 1 MiB in memory
 //! before spilling to a unique system-temporary file owned by the invocation
 //! outcome; spill failures are infrastructure failures and spill files are
-//! removed by RAII after deterministic plan-order emission. If a later
-//! ordinary-child reaper handoff fails, cargo-each explicitly recovers the
-//! child and transfers it to the process-wide retry queue; no returning cleanup
-//! or local Drop path waits for it without a bound.
+//! removed by RAII after deterministic plan-order emission.
 //!
 //! Reader failures are observed while the child is running and trigger bounded
 //! termination. Output drain is bounded after every completion: readers get
-//! one second to observe EOF, then readiness-polling capture is cancelled and
-//! joined while partial bytes become an explicit infrastructure failure. If a
-//! cancelled reader remains stalled while holding its capture mutex, output
-//! recovery is nonblocking and any unavailable partial bytes are reported
-//! rather than extending the drain bound.
-//! Timed-out tree termination likewise gets a bounded 250 ms leader-reap grace,
-//! after which the leader handle moves to a shared detached reaper so no wait
-//! or Drop path can defeat the timeout without abandoning reap ownership.
+//! one second to observe EOF, then cargo-each stops retaining bytes and gives
+//! each reader a bounded join opportunity. A reader blocked in a pipe read is
+//! detached and may remain until an escaped or background descendant closes
+//! the pipe. Partial output is recovered only through a nonblocking capture
+//! mutex acquisition; unavailable bytes and every detached-reader case are
+//! explicit infrastructure failures.
+//! Timed-out group termination gets a bounded 250 ms reap grace. If the group
+//! still has not completed, its handle moves to a detached cargo-each reaper
+//! thread whose blocking wait cannot delay the caller; failure to start that
+//! thread is also reported as an infrastructure failure.
 //! Child commands inherit `PATH` explicitly. On Windows this makes relative
 //! program lookup honor the inherited `PATH` order instead of preferring an
 //! unrelated executable beside `cargo-each`.

@@ -41,12 +41,9 @@ therefore covers the complete descendant tree.
   with the operating-system error so the caller can classify a transient
   resource-related spawn failure, back off, and retry; permanent launch failures
   are propagated. Success yields a distinct bundle coupling the child to its
-  boundary. Before creating that child, spawn also ensures the process-wide
-  detached reaper thread is running. A reaper thread-start failure therefore
-  returns the unchanged preparation before a repository-controlled process
-  exists. Adoption consumes the successful bundle, so a successful launch
-  cannot be reused to create an earlier sibling awaiting adoption; abandoning
-  the bundle before adoption terminates and reaps the child.
+  boundary. Adoption consumes that bundle, so a successful launch cannot be
+  reused to create an earlier sibling awaiting adoption; abandoning the bundle
+  before adoption terminates and reaps the child.
 - The contained `output` convenience mirrors `Command::output`: it disconnects
   stdin and captures stdout and stderr. Both pipes are drained concurrently
   while the child runs, avoiding pipe-capacity deadlocks. When the leader exits,
@@ -71,38 +68,6 @@ therefore covers the complete descendant tree.
   nested assignment, the spawn is rejected: an inherited job does not provide a
   handle through which this process can later terminate the child's descendants.
   Failure to create a job is likewise a refusal rather than a degraded launch.
-- Callers with an external deadline use bounded termination. It signals the
-  same process-tree boundary as ordinary termination but polls the leader only
-  for the caller-provided grace. A leader that remains running after a failed
-  kill is transferred to a shared detached reaper rather than handed to an
-  indefinite `wait` or Drop path. The reaper polls all retained leaders so one
-  survivor cannot block collection of the others, remains alive while its queue
-  is empty, and accepts each handle only after its thread is known to exist. A
-  handoff rechecks that state under the queue lock and retries startup if a
-  previous loop exited between the readiness check and transfer.
-  Callers handing over children created outside `PreparedCommand` can preflight
-  the same durable thread; if a direct handoff must start it and startup fails,
-  the failure returns ownership of the unqueued child. A caller that cannot
-  retain the child locally without making its own Drop path blocking transfers
-  it to a separate process-wide retry queue after explicitly recovering it from
-  `ReapFailure`. That queue owns the handle without claiming a live reaper: the
-  current loop drains it when available, or the next successful startup drains
-  it after an earlier startup failure. `ProcessTree::terminate_bounded` uses
-  this fallback and never restores a live child into itself, so its later Drop
-  remains bounded. The containment handles remain owned until the
-  `ProcessTree` itself is dropped. An error while polling the leader follows the
-  same handoff before the observation error is returned, because an observation
-  failure does not prove the child was reaped. If the detached reaper itself
-  later receives an interrupted observation, it keeps the child queued and
-  retries. Any other observation error emits a warning to stderr and
-  permanently stops tracking that child. Warning formatting happens while the
-  queue is locked, but the fallible stderr write happens after releasing the
-  lock and its error is discarded. Every loop exit or unwind moves retained
-  active children back to the retry queue, clears the running state, and
-  notifies waiters. If any child remains, the lifecycle guard immediately
-  starts a replacement reaper; a handoff accepted while diagnostics were
-  outside the lock therefore never depends on an unrelated later caller. The
-  released handle may leave a zombie on Unix until this process exits.
 - Sealed containment uses a boundary that descendants cannot leave. A host that
   offers no sealed boundary at all silently uses best-effort process-group
   containment for an unmetered launch; absence of a warning does not establish

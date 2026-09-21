@@ -24,19 +24,6 @@ pub enum Fault {
 
     /// Terminating a contained subtree reports a cleanup failure.
     Terminate,
-
-    /// The direct leader and surrounding subtree refuse the termination
-    /// signal, leaving the leader running.
-    Kill,
-
-    /// The termination request reports success without signalling the leader.
-    Linger,
-
-    /// Observing the leader after termination returns an operating-system error.
-    Observe,
-
-    /// Starting the shared detached child reaper is refused.
-    ReaperStart,
 }
 
 /// Arms `fault` on this thread until the returned value is dropped.
@@ -49,12 +36,6 @@ pub fn arm(fault: Fault) -> Armed {
 #[must_use = "the fault is disarmed as soon as this is dropped"]
 pub fn arm_late(fault: Fault, delay: Duration) -> Armed {
     ripe_at(fault, Instant::now() + delay)
-}
-
-/// Reports whether the process-wide reaper or its retry queue owns `id`.
-#[must_use]
-pub fn reaper_owns(id: u32) -> bool {
-    crate::process_tree::reaper_contains(id)
 }
 
 fn ripe_at(fault: Fault, ripe: Instant) -> Armed {
@@ -120,10 +101,6 @@ mod tests {
         assert!(!fired(Fault::Boundary));
         assert!(!fired(Fault::Window));
         assert!(!fired(Fault::Terminate));
-        assert!(!fired(Fault::Kill));
-        assert!(!fired(Fault::Linger));
-        assert!(!fired(Fault::Observe));
-        assert!(!fired(Fault::ReaperStart));
     }
 
     #[test]

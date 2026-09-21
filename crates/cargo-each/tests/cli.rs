@@ -111,13 +111,6 @@ fn each(manifest: &Path) -> Command {
     cmd
 }
 
-const TIMEOUT_REFUSAL: &str =
-    "timeout requires sealed process-tree containment, but this host only provides best-effort containment; the child was not started";
-
-fn is_timeout_refusal(output: &std::process::Output) -> bool {
-    String::from_utf8_lossy(&output.stderr).contains(TIMEOUT_REFUSAL)
-}
-
 fn rust_version_fixture(root_floor: Option<&str>, members: &[(&str, Option<&str>)]) -> (TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
@@ -1617,16 +1610,9 @@ fn sequential_timeout_fail_fast_does_not_run_later_members() {
         .arg(&later_marker)
         .output()
         .expect("run cargo-each timeout fail-fast");
-    if is_timeout_refusal(&output) {
-        assert!(!later_marker.exists(), "pre-spawn refusal must not launch any member");
-    } else {
-        assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
-    }
-    assert!(
-        !later_marker.exists(),
-        "fail-fast or pre-spawn refusal must not launch the later member"
-    );
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
+    assert!(!later_marker.exists(), "fail-fast must not launch the later member");
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -1642,24 +1628,17 @@ fn sequential_timeout_keep_going_runs_later_members() {
         .arg(&later_marker)
         .output()
         .expect("run cargo-each timeout keep-going");
-    if is_timeout_refusal(&output) {
-        assert!(
-            !later_marker.exists(),
-            "unsealed containment must refuse every timed child before spawn"
-        );
-    } else {
-        assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 1s"));
-        assert!(
-            later_marker.exists(),
-            "--keep-going must launch the member after a timed-out invocation"
-        );
-    }
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 1s"));
+    assert!(
+        later_marker.exists(),
+        "--keep-going must launch the member after a timed-out invocation"
+    );
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
-fn timeout_terminates_the_complete_process_tree() {
+fn timeout_kills_an_ordinary_descendant_in_the_process_group() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
     let marker = tmp.path().join("grandchild-survived");
@@ -1670,13 +1649,11 @@ fn timeout_terminates_the_complete_process_tree() {
         .arg(&marker)
         .output()
         .expect("run cargo-each tree timeout");
-    if !is_timeout_refusal(&output) {
-        assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-        assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
-    }
+    assert_eq!(output.status.code(), Some(1), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("timed out after 50ms"));
     std::thread::sleep(std::time::Duration::from_millis(700));
     assert!(
         !marker.exists(),
-        "a timed-out grandchild must be terminated, and an unsupported timed child must never start"
+        "a timed-out ordinary descendant must be terminated with its process group"
     );
 }

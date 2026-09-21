@@ -17,9 +17,9 @@ homepage.workspace = true
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-each"
 
 [dependencies]
-cargo-gamma-process = { workspace = true }
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+command-group = "=5.0.1"
 mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 serde_json = { workspace = true, features = ["std"] }
@@ -28,7 +28,6 @@ toml = { workspace = true, features = ["parse", "serde"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
-cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
 predicates = { workspace = true }
 
 # >>> anvil-managed: anvil-lints

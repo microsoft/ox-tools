@@ -931,7 +931,6 @@ symlinked
 uninherited
 closers
 unmanaged
-interruptible
 nonblocking
 SHA
 upserts

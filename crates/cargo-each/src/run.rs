@@ -8,16 +8,14 @@ use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::num::NonZeroUsize;
 use std::panic::{self, AssertUnwindSafe, UnwindSafe};
-use std::process::{Child, ChildStderr, ChildStdout, Command, ExitCode, ExitStatus, Stdio};
+use std::process::{ChildStderr, ChildStdout, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError, mpsc};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
-use cargo_gamma_process::{
-    InterruptiblePipe, MemoryRequest, PreparedCommand, ProcessTree, ensure_reaper, prepare, reap_later, retain_for_reaper_retry,
-};
 use cargo_metadata::TargetKind;
+use command_group::{CommandGroup as _, GroupChild};
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::EachArgs;
@@ -143,7 +141,7 @@ fn parse_target_kinds(kinds: &[String]) -> Result<BTreeSet<TargetKind>, AppError
 }
 
 fn execute(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: Option<Duration>) -> Result<ExitCode, AppError> {
-    let worker_count = effective_worker_count(jobs, plan.invocations.len(), cargo_gamma_process::capacity());
+    let worker_count = effective_worker_count(jobs, plan.invocations.len());
     if worker_count.get() == 1 {
         Ok(execute_sequential(plan, keep_going, timeout))
     } else {
@@ -151,9 +149,8 @@ fn execute(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: Option<Du
     }
 }
 
-fn effective_worker_count(requested: NonZeroUsize, plan_size: usize, process_capacity: usize) -> NonZeroUsize {
-    NonZeroUsize::new(requested.get().min(plan_size).min(process_capacity.max(1)))
-        .expect("execution receives a nonempty plan and process capacity is clamped to at least one")
+fn effective_worker_count(requested: NonZeroUsize, plan_size: usize) -> NonZeroUsize {
+    NonZeroUsize::new(requested.get().min(plan_size)).expect("execution receives a nonempty plan")
 }
 
 fn execute_sequential(plan: &Plan, keep_going: bool, timeout: Option<Duration>) -> ExitCode {
@@ -346,25 +343,33 @@ fn run_streamed(invocation: &Invocation) -> InvocationResult {
 }
 
 fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration) -> InvocationResult {
-    run_streamed_with_timeout_with(invocation, timeout, spawn_sealed_tree)
+    run_streamed_with_timeout_with(invocation, timeout, spawn_group)
 }
 
 fn run_streamed_with_timeout_with(
     invocation: &Invocation,
     timeout: Duration,
-    spawn: impl FnOnce(Command) -> Result<ProcessTree, String>,
+    spawn: impl FnOnce(Command) -> Result<GroupChild, String>,
 ) -> InvocationResult {
     let (program, command) = match command_for(invocation) {
         Ok(command) => command,
         Err(message) => return InvocationResult::Infrastructure(message),
     };
-    let mut tree = match spawn(command) {
+    let tree = match spawn(command) {
         Ok(tree) => tree,
         Err(error) => {
             return InvocationResult::Infrastructure(format!("failed to spawn `{program}`: {error}"));
         }
     };
-    wait_for_tree(&mut tree, timeout).result
+    wait_for_process(
+        tree,
+        Some(timeout),
+        GroupChild::try_wait,
+        || None,
+        terminate_group_bounded,
+        "observe child process group",
+    )
+    .result
 }
 
 fn run_captured(invocation: &Invocation, timeout: Option<Duration>) -> BufferedOutcome {
@@ -374,86 +379,86 @@ fn run_captured(invocation: &Invocation, timeout: Option<Duration>) -> BufferedO
         "injected worker panic"
     );
 
-    run_captured_with_spawner(invocation, timeout, |command| {
-        spawn_sealed_tree(command).map(CapturedProcess::Contained)
-    })
+    run_captured_with(
+        invocation,
+        timeout,
+        spawn_group,
+        spawn_child_stdout_reader,
+        spawn_child_stderr_reader,
+    )
 }
 
-fn run_captured_with_spawner(
+fn run_captured_with(
     invocation: &Invocation,
     timeout: Option<Duration>,
-    timed_spawner: impl FnOnce(Command) -> Result<CapturedProcess, String>,
+    spawner: impl FnOnce(Command) -> Result<GroupChild, String>,
+    stdout_spawner: impl FnOnce(ChildStdout, &'static str) -> io::Result<OutputReader>,
+    stderr_spawner: impl FnOnce(ChildStderr, &'static str) -> io::Result<OutputReader>,
 ) -> BufferedOutcome {
     let (program, mut command) = match command_for(invocation) {
         Ok(command) => command,
         Err(message) => return BufferedOutcome::infrastructure(message),
     };
     let _ = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let process = match timeout {
-        Some(_) => timed_spawner(command),
-        None => ensure_reaper()
-            .and_then(|()| command.spawn())
-            .map(|child| CapturedProcess::Ordinary(Some(child)))
-            .map_err(|error| error.to_string()),
-    };
-    let mut process = match process {
+    let mut process = match spawner(command) {
         Ok(process) => process,
         Err(error) => {
             return BufferedOutcome::infrastructure(format!("failed to spawn `{program}`: {error}"));
         }
     };
-    let drain_boundary = process.drain_boundary();
-    let capture_fault = capture_fault(invocation);
-
-    let stdout = if capture_fault == Some(CaptureFault::MissingStdout) {
-        None
-    } else {
-        process.take_stdout()
-    };
+    let stdout = process.inner().stdout.take();
     let Some(stdout) = stdout else {
-        let cleanup = process.terminate_bounded();
+        let cleanup = terminate_group_bounded(process);
         return BufferedOutcome::infrastructure(with_cleanup_failure("failed to capture child stdout".to_owned(), &cleanup));
     };
-    let mut stdout_reader = match if capture_fault == Some(CaptureFault::StdoutReader) {
-        Err(io::Error::other("injected stdout reader failure"))
-    } else {
-        spawn_child_stdout_reader(stdout, "cargo-each-stdout")
-    } {
+    let mut stdout_reader = match stdout_spawner(stdout, "cargo-each-stdout") {
         Ok(reader) => reader,
         Err(error) => {
-            let cleanup = process.terminate_bounded();
+            let cleanup = terminate_group_bounded(process);
             return BufferedOutcome::infrastructure(with_cleanup_failure(format!("failed to create stdout reader: {error}"), &cleanup));
         }
     };
-    let stderr = if capture_fault == Some(CaptureFault::MissingStderr) {
-        None
-    } else {
-        process.take_stderr()
-    };
+    let stderr = process.inner().stderr.take();
     let Some(stderr) = stderr else {
-        let cleanup = process.terminate_bounded();
-        return BufferedOutcome::from_reader_failure("failed to capture child stderr".to_owned(), stdout_reader, &cleanup, drain_boundary);
+        let cleanup = terminate_group_bounded(process);
+        return BufferedOutcome::from_reader_failure("failed to capture child stderr".to_owned(), stdout_reader, &cleanup);
     };
-    let mut stderr_reader = match if capture_fault == Some(CaptureFault::StderrReader) {
-        Err(io::Error::other("injected stderr reader failure"))
-    } else {
-        spawn_child_stderr_reader(stderr, "cargo-each-stderr")
-    } {
+    let mut stderr_reader = match stderr_spawner(stderr, "cargo-each-stderr") {
         Ok(reader) => reader,
         Err(error) => {
-            let cleanup = process.terminate_bounded();
-            return BufferedOutcome::from_reader_failure(
-                format!("failed to create stderr reader: {error}"),
-                stdout_reader,
-                &cleanup,
-                drain_boundary,
-            );
+            let cleanup = terminate_group_bounded(process);
+            return BufferedOutcome::from_reader_failure(format!("failed to create stderr reader: {error}"), stdout_reader, &cleanup);
         }
     };
 
-    let process_outcome = process.wait(timeout, capture_fault, &mut stdout_reader, &mut stderr_reader);
-    drop(process);
-    let (stdout, stderr) = finish_output_readers(stdout_reader, stderr_reader, OUTPUT_DRAIN_GRACE, drain_boundary);
+    let observe_group = timeout.is_some();
+    let process_outcome = wait_for_process(
+        process,
+        timeout,
+        move |process| {
+            if observe_group {
+                process.try_wait()
+            } else {
+                process.inner().try_wait()
+            }
+        },
+        || {
+            let failure = [stdout_reader.take_failure("stdout"), stderr_reader.take_failure("stderr")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("; ");
+            (!failure.is_empty()).then_some(failure)
+        },
+        terminate_group_bounded,
+        if observe_group {
+            "observe child process group"
+        } else {
+            "observe child process leader"
+        },
+    );
+    let boundary = if observe_group { "process group" } else { "process leader" };
+    let (stdout, stderr) = finish_output_readers(stdout_reader, stderr_reader, OUTPUT_DRAIN_GRACE, boundary);
     combine_captured_output(stdout, stderr, process_outcome.result)
 }
 
@@ -499,182 +504,31 @@ fn command_for(invocation: &Invocation) -> Result<(&str, Command), String> {
     Ok((program, command))
 }
 
-#[cfg(test)]
-fn spawn_tree(command: Command) -> Result<ProcessTree, String> {
-    let prepared = prepare_tree(command)?;
-    spawn_prepared_tree(prepared)
+fn spawn_group(mut command: Command) -> Result<GroupChild, String> {
+    command.group_spawn().map_err(|error| error.to_string())
 }
 
-fn spawn_sealed_tree(command: Command) -> Result<ProcessTree, String> {
-    let prepared = prepare_tree(command)?;
-    spawn_if_sealed(prepared, PreparedCommand::sealed, spawn_prepared_tree)
-}
-
-fn prepare_tree(command: Command) -> Result<PreparedCommand, String> {
-    prepare(command, MemoryRequest::default()).map_err(|error| format!("could not prepare process-tree containment: {error}"))
-}
-
-fn spawn_prepared_tree(prepared: PreparedCommand) -> Result<ProcessTree, String> {
-    let spawned = prepared.spawn().map_err(|failure| failure.to_string())?;
-    ProcessTree::adopt(spawned).map_err(|error| format!("could not adopt child into process-tree containment: {error}"))
-}
-
-fn spawn_if_sealed<T, O>(prepared: T, sealed: impl FnOnce(&T) -> bool, spawn: impl FnOnce(T) -> Result<O, String>) -> Result<O, String> {
-    if !sealed(&prepared) {
-        return Err(
-            "timeout requires sealed process-tree containment, but this host only provides best-effort containment; the child was not started"
-                .to_owned(),
-        );
-    }
-    spawn(prepared)
-}
-
-enum CapturedProcess {
-    Ordinary(Option<Child>),
-    Contained(ProcessTree),
-}
-
-impl CapturedProcess {
-    fn drain_boundary(&self) -> &'static str {
-        match self {
-            Self::Ordinary(_) => "ordinary process tree",
-            Self::Contained(_) => "contained process tree",
-        }
-    }
-
-    fn take_stdout(&mut self) -> Option<ChildStdout> {
-        match self {
-            Self::Ordinary(child) => child.as_mut()?.stdout.take(),
-            Self::Contained(tree) => tree.take_stdout(),
-        }
-    }
-
-    fn take_stderr(&mut self) -> Option<ChildStderr> {
-        match self {
-            Self::Ordinary(child) => child.as_mut()?.stderr.take(),
-            Self::Contained(tree) => tree.take_stderr(),
-        }
-    }
-
-    fn terminate_bounded(&mut self) -> io::Result<ExitStatus> {
-        match self {
-            Self::Ordinary(child) => {
-                let mut child = child
-                    .take()
-                    .ok_or_else(|| io::Error::other("ordinary child was already reaped or detached"))?;
-                let result = terminate_ordinary_child(&mut child, TERMINATION_GRACE);
-                finish_ordinary_termination(child, result)
-            }
-            Self::Contained(tree) => tree.terminate_bounded(TERMINATION_GRACE),
-        }
-    }
-
-    fn wait(
-        &mut self,
-        timeout: Option<Duration>,
-        capture_fault: Option<CaptureFault>,
-        stdout: &mut OutputReader,
-        stderr: &mut OutputReader,
-    ) -> TreeOutcome {
-        match (self, timeout) {
-            (Self::Ordinary(child), None) => {
-                let Some(mut child) = child.take() else {
-                    return TreeOutcome::new(InvocationResult::Infrastructure(
-                        "ordinary child was already reaped or detached".to_owned(),
-                    ));
-                };
-                let outcome = wait_for_captured_process(
-                    &mut child,
-                    None,
-                    stdout,
-                    stderr,
-                    "wait for child process",
-                    |child| {
-                        if capture_fault == Some(CaptureFault::WaitFailure) {
-                            Err(io::Error::other("injected child wait failure"))
-                        } else {
-                            child.try_wait()
-                        }
-                    },
-                    |child| terminate_ordinary_child(child, TERMINATION_GRACE),
-                );
-                finish_ordinary_wait(child, outcome)
-            }
-            (Self::Contained(tree), Some(timeout)) => wait_for_captured_process(
-                tree,
-                Some(timeout),
-                stdout,
-                stderr,
-                "observe child process tree",
-                ProcessTree::observe,
-                |tree| tree.terminate_bounded(TERMINATION_GRACE),
-            ),
-            (Self::Ordinary(_), Some(_)) | (Self::Contained(_), None) => TreeOutcome::new(InvocationResult::Infrastructure(
-                "internal capture mode did not match timeout configuration".to_owned(),
-            )),
-        }
-    }
-}
-
-fn finish_ordinary_termination(mut child: Child, result: io::Result<ExitStatus>) -> io::Result<ExitStatus> {
-    match child.try_wait() {
-        Ok(Some(_status)) => result,
-        Ok(None) | Err(_) => match reap_later(child) {
-            Ok(()) => result,
-            Err(failure) => {
-                let (reaper, child) = failure.into_parts();
-                retain_for_reaper_retry(child);
-                match result {
-                    Ok(_status) => Err(io::Error::other(format!(
-                        "the detached child reaper could not be started: {reaper}"
-                    ))),
-                    Err(error) => Err(io::Error::new(
-                        error.kind(),
-                        format!("{error}; the detached child reaper could not be started: {reaper}"),
-                    )),
-                }
-            }
-        },
-    }
-}
-
-fn finish_ordinary_wait(mut child: Child, mut outcome: TreeOutcome) -> TreeOutcome {
-    if !matches!(child.try_wait(), Ok(Some(_status)))
-        && let Err(failure) = reap_later(child)
-    {
-        let (error, child) = failure.into_parts();
-        retain_for_reaper_retry(child);
-        outcome.result = add_infrastructure_failure(outcome.result, format!("the detached child reaper could not be started: {error}"));
-    }
-    outcome
-}
-
-fn wait_for_captured_process<T>(
-    control: &mut T,
+fn wait_for_process<T>(
+    mut control: T,
     timeout: Option<Duration>,
-    stdout: &mut OutputReader,
-    stderr: &mut OutputReader,
-    operation: &str,
     mut observe: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
-    mut terminate: impl FnMut(&mut T) -> io::Result<ExitStatus>,
+    mut reader_failure: impl FnMut() -> Option<String>,
+    terminate: impl FnOnce(T) -> io::Result<ExitStatus>,
+    operation: &str,
 ) -> TreeOutcome {
     let started = Instant::now();
+    let mut terminate = Some(terminate);
     loop {
-        let reader_failure = [stdout.take_failure("stdout"), stderr.take_failure("stderr")]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("; ");
-        if !reader_failure.is_empty() {
-            let cleanup = terminate(control);
+        if let Some(reader_failure) = reader_failure() {
+            let cleanup = terminate.take().expect("termination is consumed only on a returning branch")(control);
             return TreeOutcome::new(InvocationResult::Infrastructure(with_cleanup_failure(reader_failure, &cleanup)));
         }
 
-        match observe(control) {
+        match observe(&mut control) {
             Ok(Some(status)) => return TreeOutcome::new(InvocationResult::Exited(status)),
             Ok(None) => {}
             Err(error) => {
-                let cleanup = terminate(control);
+                let cleanup = terminate.take().expect("termination is consumed only on a returning branch")(control);
                 return TreeOutcome::new(InvocationResult::Infrastructure(with_cleanup_failure(
                     format!("failed to {operation}: {error}"),
                     &cleanup,
@@ -685,10 +539,10 @@ fn wait_for_captured_process<T>(
         if let Some(timeout) = timeout
             && timeout.checked_sub(started.elapsed()).is_none()
         {
-            return match terminate(control) {
+            return match terminate.take().expect("termination is consumed only on a returning branch")(control) {
                 Ok(_) => TreeOutcome::new(InvocationResult::TimedOut(timeout)),
                 Err(error) => TreeOutcome::new(InvocationResult::Infrastructure(format!(
-                    "invocation timed out after {}; process-tree termination failed: {error}",
+                    "invocation timed out after {}; process-group termination failed: {error}",
                     display_duration(timeout)
                 ))),
             };
@@ -701,58 +555,73 @@ fn wait_for_captured_process<T>(
     }
 }
 
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn finish_wait_with_cleanup<T>(
-    control: &mut T,
-    waited: io::Result<ExitStatus>,
-    cleanup: impl FnOnce(&mut T) -> io::Result<ExitStatus>,
-) -> TreeOutcome {
-    match waited {
-        Ok(status) => TreeOutcome::new(InvocationResult::Exited(status)),
+fn terminate_group_bounded(child: GroupChild) -> io::Result<ExitStatus> {
+    terminate_group_with(
+        child,
+        TERMINATION_GRACE,
+        GroupChild::kill,
+        GroupChild::try_wait,
+        detach_group_reaper,
+    )
+}
+
+fn terminate_group_with<T>(
+    mut child: T,
+    grace: Duration,
+    kill: impl FnOnce(&mut T) -> io::Result<()>,
+    mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    detach: impl FnOnce(T) -> io::Result<()>,
+) -> io::Result<ExitStatus> {
+    let kill_error = kill(&mut child).err();
+    let observed = poll_process_exit(&mut child, grace, &mut try_wait);
+    match observed {
+        Ok(Some(status)) => match kill_error {
+            Some(error) => Err(error),
+            None => Ok(status),
+        },
+        Ok(None) => {
+            let reaper = detach(child);
+            let message = kill_error.map_or_else(
+                || format!("process group did not exit within {} ms after termination", grace.as_millis()),
+                |error| {
+                    format!(
+                        "{error}; process group did not exit within {} ms after termination",
+                        grace.as_millis()
+                    )
+                },
+            );
+            Err(io::Error::new(io::ErrorKind::WouldBlock, with_reaper_handoff(&message, &reaper)))
+        }
         Err(error) => {
-            let cleanup = cleanup(control);
-            TreeOutcome::new(InvocationResult::Infrastructure(with_cleanup_failure(
-                format!("failed to wait for child process: {error}"),
-                &cleanup,
-            )))
+            let reaper = detach(child);
+            Err(io::Error::new(
+                error.kind(),
+                with_reaper_handoff(&format!("failed to observe process group after termination: {error}"), &reaper),
+            ))
         }
     }
 }
 
-fn terminate_ordinary_child(child: &mut Child, grace: Duration) -> io::Result<ExitStatus> {
-    terminate_ordinary_with(child, grace, Child::kill, Child::try_wait)
+fn detach_group_reaper(mut child: GroupChild) -> io::Result<()> {
+    thread::Builder::new()
+        .name("cargo-each-process-reaper".to_owned())
+        .spawn(move || {
+            let _ignored = child.wait();
+        })
+        .map(drop)
 }
 
-fn terminate_ordinary_with<T>(
-    control: &mut T,
-    grace: Duration,
-    kill: impl FnOnce(&mut T) -> io::Result<()>,
-    mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
-) -> io::Result<ExitStatus> {
-    let kill_error = kill(control).err();
-    let Some(status) = poll_child_exit(control, grace, &mut try_wait)? else {
-        let message = kill_error.map_or_else(
-            || format!("ordinary child did not exit within {} ms after termination", grace.as_millis()),
-            |error| {
-                format!(
-                    "{error}; ordinary child did not exit within {} ms after termination",
-                    grace.as_millis()
-                )
-            },
-        );
-        return Err(io::Error::new(io::ErrorKind::WouldBlock, message));
-    };
-    match kill_error {
-        Some(error) => Err(error),
-        None => Ok(status),
+fn with_reaper_handoff(message: &str, reaper: &io::Result<()>) -> String {
+    match reaper {
+        Ok(()) => format!("{message}; the process group was moved to a detached reaper thread"),
+        Err(error) => format!("{message}; failed to start the detached process-group reaper: {error}"),
     }
 }
 
-fn poll_child_exit<T>(
+fn poll_process_exit<T>(
     control: &mut T,
     grace: Duration,
-    try_wait: &mut impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
 ) -> io::Result<Option<ExitStatus>> {
     let started = Instant::now();
     loop {
@@ -766,104 +635,9 @@ fn poll_child_exit<T>(
     }
 }
 
-fn wait_for_tree(tree: &mut ProcessTree, timeout: Duration) -> TreeOutcome {
-    wait_for_tree_with(tree, timeout, ProcessTree::observe, |tree| {
-        tree.terminate_bounded(TERMINATION_GRACE)
-    })
-}
-
-fn wait_for_tree_with<T>(
-    control: &mut T,
-    timeout: Duration,
-    mut observe: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
-    mut terminate: impl FnMut(&mut T) -> io::Result<ExitStatus>,
-) -> TreeOutcome {
-    let started = Instant::now();
-    loop {
-        match observe(control) {
-            Ok(Some(status)) => return TreeOutcome::new(InvocationResult::Exited(status)),
-            Ok(None) => {}
-            Err(error) => {
-                let cleanup = terminate(control);
-                return match cleanup {
-                    Ok(_) => TreeOutcome::new(InvocationResult::Infrastructure(format!(
-                        "failed to observe child process tree: {error}"
-                    ))),
-                    Err(cleanup) => TreeOutcome::new(InvocationResult::Infrastructure(format!(
-                        "failed to observe child process tree: {error}; cleanup also failed: {cleanup}"
-                    ))),
-                };
-            }
-        }
-        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
-            return match terminate(control) {
-                Ok(_) => TreeOutcome::new(InvocationResult::TimedOut(timeout)),
-                Err(error) => TreeOutcome::new(InvocationResult::Infrastructure(format!(
-                    "invocation timed out after {}; process-tree termination failed: {error}",
-                    display_duration(timeout)
-                ))),
-            };
-        };
-        thread::sleep(remaining.min(Duration::from_millis(10)));
-    }
-}
-
-#[cfg(test)]
-fn wait_for_tree_without_timeout_with<T>(
-    control: &mut T,
-    mut observe: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
-    mut terminate: impl FnMut(&mut T) -> io::Result<ExitStatus>,
-) -> TreeOutcome {
-    loop {
-        match observe(control) {
-            Ok(Some(status)) => return TreeOutcome::new(InvocationResult::Exited(status)),
-            Ok(None) => thread::sleep(Duration::from_millis(10)),
-            Err(error) => {
-                let cleanup = terminate(control);
-                return match cleanup {
-                    Ok(_) => TreeOutcome::new(InvocationResult::Infrastructure(format!(
-                        "failed to observe child process tree: {error}"
-                    ))),
-                    Err(cleanup) => TreeOutcome::new(InvocationResult::Infrastructure(format!(
-                        "failed to observe child process tree: {error}; cleanup also failed: {cleanup}"
-                    ))),
-                };
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CaptureFault {
-    MissingStdout,
-    StdoutReader,
-    MissingStderr,
-    StderrReader,
-    WaitFailure,
-}
-
-fn capture_fault(invocation: &Invocation) -> Option<CaptureFault> {
-    #[cfg(test)]
-    {
-        match invocation.label.as_deref() {
-            Some("__cargo_each_missing_stdout") => Some(CaptureFault::MissingStdout),
-            Some("__cargo_each_stdout_reader_failure") => Some(CaptureFault::StdoutReader),
-            Some("__cargo_each_missing_stderr") => Some(CaptureFault::MissingStderr),
-            Some("__cargo_each_stderr_reader_failure") => Some(CaptureFault::StderrReader),
-            Some("__cargo_each_wait_failure") => Some(CaptureFault::WaitFailure),
-            _ => None,
-        }
-    }
-    #[cfg(not(test))]
-    {
-        let _ = invocation;
-        None
-    }
-}
-
 fn spawn_child_stdout_reader(stream: ChildStdout, name: &'static str) -> io::Result<OutputReader> {
     spawn_output_reader_inner(
-        InterruptiblePipe::stdout(stream)?,
+        stream,
         name,
         OUTPUT_MEMORY_LIMIT,
         Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
@@ -872,7 +646,7 @@ fn spawn_child_stdout_reader(stream: ChildStdout, name: &'static str) -> io::Res
 
 fn spawn_child_stderr_reader(stream: ChildStderr, name: &'static str) -> io::Result<OutputReader> {
     spawn_output_reader_inner(
-        InterruptiblePipe::stderr(stream)?,
+        stream,
         name,
         OUTPUT_MEMORY_LIMIT,
         Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
@@ -1083,7 +857,7 @@ fn finish_output_readers(stdout: OutputReader, stderr: OutputReader, grace: Dura
 fn with_cleanup_failure<T>(message: String, cleanup: &io::Result<T>) -> String {
     match cleanup {
         Ok(_) => message,
-        Err(error) => format!("{message}; process-tree cleanup also failed: {error}"),
+        Err(error) => format!("{message}; process-group cleanup also failed: {error}"),
     }
 }
 
@@ -1301,10 +1075,10 @@ impl BufferedOutcome {
         }
     }
 
-    fn from_reader_failure<T>(message: String, stdout_reader: OutputReader, cleanup: &io::Result<T>, boundary: &str) -> Self {
+    fn from_reader_failure<T>(message: String, stdout_reader: OutputReader, cleanup: &io::Result<T>) -> Self {
         let message = with_cleanup_failure(message, cleanup);
         combine_captured_output(
-            finish_output_reader(stdout_reader, "stdout", OUTPUT_DRAIN_GRACE, boundary),
+            finish_output_reader(stdout_reader, "stdout", OUTPUT_DRAIN_GRACE, "process group"),
             CapturedStream {
                 output: CapturedOutput::empty(),
                 failure: None,
@@ -1362,45 +1136,135 @@ mod tests {
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt as _;
     use std::process::{Command, ExitCode, ExitStatus, Stdio};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
     use std::time::{Duration, Instant};
     use std::{io, thread};
 
-    use cargo_gamma_process::ensure_reaper;
-    use cargo_gamma_process::faults::{self, Fault};
-
     use super::{
-        BufferedOutcome, CapturedOutput, CapturedProcess, CapturedStream, Invocation, InvocationResult, OutputEmitError, OutputReader,
-        Plan, ReaderCompletion, RunningWorker, SpillFile, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
-        combine_captured_output, display_duration, effective_worker_count, emit_buffered, emit_buffered_to, execute_parallel, exit_byte,
-        failure_stops_launching, finish_ordinary_termination, finish_ordinary_wait, finish_output_reader, finish_wait_with_cleanup,
-        panic_description, parallel_failure_exit_code, run_captured, run_captured_with_spawner, run_streamed, run_streamed_with_timeout,
-        run_streamed_with_timeout_with, spawn_if_sealed, spawn_output_reader, spawn_output_reader_with, spawn_tree, spawn_worker,
-        take_reader_output, terminate_ordinary_child, terminate_ordinary_with, wait_for_captured_process, wait_for_tree,
-        wait_for_tree_with, wait_for_tree_without_timeout_with, wait_for_worker, with_cleanup_failure,
+        BufferedOutcome, CapturedOutput, CapturedStream, Invocation, InvocationResult, OutputEmitError, OutputReader, Plan,
+        ReaderCompletion, RunningWorker, SpillFile, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
+        add_infrastructure_failure, combine_captured_output, detach_group_reaper, display_duration, effective_worker_count,
+        emit_buffered_to, execute_parallel, exit_byte, failure_stops_launching, finish_output_reader, panic_description,
+        parallel_failure_exit_code, poll_process_exit, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
+        run_streamed_with_timeout_with, spawn_child_stderr_reader, spawn_child_stdout_reader, spawn_group, spawn_output_reader,
+        spawn_output_reader_with, spawn_worker, take_reader_output, terminate_group_bounded, terminate_group_with, wait_for_process,
+        wait_for_worker, with_cleanup_failure, with_reaper_handoff,
     };
 
-    const ORDINARY_BOUNDARY: &str = "ordinary process tree";
-    const CONTAINED_BOUNDARY: &str = "contained process tree";
+    const LEADER_BOUNDARY: &str = "process leader";
+    const GROUP_BOUNDARY: &str = "process group";
 
-    struct StubbornPipe {
-        read: bool,
+    fn invocation(argv: &[&str]) -> Invocation {
+        Invocation {
+            label: None,
+            argv: argv.iter().map(|value| (*value).to_owned()).collect(),
+            work_dir: None,
+        }
+    }
+
+    fn successful_status() -> ExitStatus {
+        ExitStatus::from_raw(0)
+    }
+
+    #[cfg(unix)]
+    fn failed_status(code: i32) -> ExitStatus {
+        ExitStatus::from_raw(code << 8)
+    }
+
+    #[cfg(windows)]
+    fn failed_status(code: i32) -> ExitStatus {
+        ExitStatus::from_raw(u32::try_from(code).expect("test exit code is nonnegative"))
+    }
+
+    fn result_infrastructure_message(result: InvocationResult) -> String {
+        let InvocationResult::Infrastructure(message) = result else {
+            panic!("the test expects an infrastructure outcome");
+        };
+        message
+    }
+
+    fn infrastructure_message(outcome: BufferedOutcome) -> String {
+        result_infrastructure_message(outcome.result)
+    }
+
+    fn output_bytes(output: &mut CapturedOutput) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        match output.emit_to(&mut bytes) {
+            Ok(()) => bytes,
+            Err(OutputEmitError::Source(error) | OutputEmitError::Destination(error)) => {
+                panic!("captured test output cannot be read: {error}")
+            }
+        }
+    }
+
+    fn captured(bytes: &[u8], failure: Option<&str>) -> CapturedStream {
+        CapturedStream {
+            output: CapturedOutput::Memory(bytes.to_vec()),
+            failure: failure.map(str::to_owned),
+        }
+    }
+
+    struct FakeProcess {
+        observations: VecDeque<io::Result<Option<ExitStatus>>>,
+        termination: Option<io::Result<ExitStatus>>,
+    }
+
+    impl FakeProcess {
+        fn observe(&mut self) -> io::Result<Option<ExitStatus>> {
+            self.observations.pop_front().unwrap_or(Ok(None))
+        }
+
+        fn terminate(mut self) -> io::Result<ExitStatus> {
+            self.termination
+                .take()
+                .unwrap_or_else(|| Err(io::Error::other("unexpected termination")))
+        }
+    }
+
+    struct PendingReader {
+        dropped: Option<mpsc::Sender<()>>,
+    }
+
+    impl io::Read for PendingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        }
+    }
+
+    impl Drop for PendingReader {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.dropped.take() {
+                let _receiver_gone = dropped.send(());
+            }
+        }
+    }
+
+    struct BlockingReader {
+        first_read: bool,
         blocked: Option<mpsc::Sender<()>>,
         finished: mpsc::Sender<()>,
         release: Arc<(Mutex<bool>, Condvar)>,
     }
 
-    struct FailingReader;
-
-    impl io::Read for FailingReader {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("injected read failure"))
+    impl io::Read for BlockingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.first_read {
+                self.first_read = true;
+                let bytes = b"captured-before-detach";
+                buf[..bytes.len()].copy_from_slice(bytes);
+                return Ok(bytes.len());
+            }
+            if let Some(blocked) = self.blocked.take() {
+                let _receiver_gone = blocked.send(());
+            }
+            let (lock, condition) = &*self.release;
+            let mut released = lock.lock().expect("the test owns the release mutex without panicking");
+            while !*released {
+                released = condition.wait(released).expect("the test owns the release mutex without panicking");
+            }
+            let _receiver_gone = self.finished.send(());
+            Ok(0)
         }
-    }
-
-    struct PendingPipe {
-        dropped: Option<mpsc::Sender<()>>,
     }
 
     struct DropSignalReader {
@@ -1426,17 +1290,62 @@ mod tests {
         }
     }
 
-    impl io::Read for PendingPipe {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::from(io::ErrorKind::WouldBlock))
+    struct LateDataReader {
+        started: Option<mpsc::Sender<()>>,
+        finished: Option<mpsc::Sender<()>>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl io::Read for LateDataReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                let _receiver_gone = started.send(());
+            }
+            let (lock, condition) = &*self.release;
+            let mut released = lock.lock().expect("the test owns the release mutex without panicking");
+            while !*released {
+                released = condition.wait(released).expect("the test owns the release mutex without panicking");
+            }
+            let bytes = b"late data";
+            buf[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
         }
     }
 
-    impl Drop for PendingPipe {
+    impl Drop for LateDataReader {
         fn drop(&mut self) {
-            if let Some(dropped) = self.dropped.take() {
-                let _receiver_gone = dropped.send(());
+            if let Some(finished) = self.finished.take() {
+                let _receiver_gone = finished.send(());
             }
+        }
+    }
+
+    struct InterruptedThenData {
+        interrupted: bool,
+        emitted: bool,
+    }
+
+    impl io::Read for InterruptedThenData {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            if self.emitted {
+                return Ok(0);
+            }
+            self.emitted = true;
+            let bytes = b"after interrupt";
+            buf[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    struct FailingReader;
+
+    impl io::Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected read failure"))
         }
     }
 
@@ -1446,14 +1355,6 @@ mod tests {
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
             panic!("injected reader panic");
         }
-    }
-
-    struct EofThenPanicReader {
-        reached_eof: bool,
-    }
-
-    struct InterruptedThenDataReader {
-        state: u8,
     }
 
     struct ChunkedReader {
@@ -1475,18 +1376,6 @@ mod tests {
         cursor: io::Cursor<Vec<u8>>,
         fail_write: bool,
         fail_read: bool,
-    }
-
-    struct FailingWriter;
-
-    impl io::Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("injected destination write failure"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
     }
 
     impl io::Write for FaultySpill {
@@ -1519,554 +1408,512 @@ mod tests {
         }
     }
 
-    impl io::Read for InterruptedThenDataReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            match self.state {
-                0 => {
-                    self.state = 1;
-                    Err(io::Error::from(io::ErrorKind::Interrupted))
-                }
-                1 => {
-                    self.state = 2;
-                    let content = b"after interrupt";
-                    buf[..content.len()].copy_from_slice(content);
-                    Ok(content.len())
-                }
-                _ => Ok(0),
-            }
+    struct FailingWriter;
+
+    impl io::Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected destination write failure"))
         }
-    }
 
-    impl io::Read for EofThenPanicReader {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            assert!(!self.reached_eof, "the output reader must stop after the first EOF");
-            self.reached_eof = true;
-            Ok(0)
-        }
-    }
-
-    struct LateDataPipe {
-        started: Option<mpsc::Sender<()>>,
-        finished: Option<mpsc::Sender<()>>,
-        release: Arc<(Mutex<bool>, Condvar)>,
-    }
-
-    impl io::Read for LateDataPipe {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if let Some(started) = self.started.take() {
-                let _receiver_gone = started.send(());
-            }
-            let (lock, condition) = &*self.release;
-            let mut released = lock.lock().expect("the test owns the release mutex without panicking");
-            while !*released {
-                released = condition.wait(released).expect("the test owns the release mutex without panicking");
-            }
-            let content = b"late data";
-            buf[..content.len()].copy_from_slice(content);
-            Ok(content.len())
-        }
-    }
-
-    impl Drop for LateDataPipe {
-        fn drop(&mut self) {
-            if let Some(finished) = self.finished.take() {
-                let _receiver_gone = finished.send(());
-            }
-        }
-    }
-
-    fn invocation(argv: &[&str]) -> Invocation {
-        Invocation {
-            label: None,
-            argv: argv.iter().map(|value| (*value).to_owned()).collect(),
-            work_dir: None,
-        }
-    }
-
-    fn labelled_invocation(label: &str, argv: &[&str]) -> Invocation {
-        Invocation {
-            label: Some(label.to_owned()),
-            ..invocation(argv)
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 
     fn sleeping_test_command() -> Command {
-        sleeping_test_command_for(Duration::from_secs(30))
-    }
-
-    fn sleeping_test_command_for(duration: Duration) -> Command {
         let mut command = Command::new(std::env::current_exe().expect("the test binary knows its path"));
         let _ = command
-            .args(["--exact", "run::tests::ordinary_child_sleep_probe", "--nocapture"])
-            .env("CARGO_EACH_ORDINARY_CHILD_PROBE", duration.as_millis().to_string())
+            .args(["--exact", "run::tests::child_sleep_probe", "--nocapture"])
+            .env("CARGO_EACH_CHILD_SLEEP_MS", "30000")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         command
     }
 
-    fn wait_for_reaper_owner_to_release(id: u32) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while faults::reaper_owns(id) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!faults::reaper_owns(id), "the detached reaper did not release child {id}");
-    }
-
-    fn spawn_ordinary_capture(mut command: Command) -> Result<CapturedProcess, String> {
-        command
-            .spawn()
-            .map(|child| CapturedProcess::Ordinary(Some(child)))
-            .map_err(|error| error.to_string())
-    }
-
-    fn result_infrastructure_message(result: InvocationResult) -> String {
-        let InvocationResult::Infrastructure(message) = result else {
-            panic!("the test expects an infrastructure outcome");
-        };
-        message
-    }
-
-    struct FakeProcess {
-        observations: VecDeque<io::Result<Option<ExitStatus>>>,
-        termination: Option<io::Result<ExitStatus>>,
-    }
-
-    struct FakeOrdinaryChild {
-        kill_error: Option<io::Error>,
-        observations: VecDeque<io::Result<Option<ExitStatus>>>,
-    }
-
-    impl FakeOrdinaryChild {
-        fn kill_child(&mut self) -> io::Result<()> {
-            match self.kill_error.take() {
-                Some(error) => Err(error),
-                None => Ok(()),
-            }
-        }
-
-        fn try_wait_child(&mut self) -> io::Result<Option<ExitStatus>> {
-            self.observations.pop_front().unwrap_or(Ok(None))
-        }
-    }
-
-    impl FakeProcess {
-        fn observe(&mut self) -> io::Result<Option<ExitStatus>> {
-            self.observations.pop_front().unwrap_or(Ok(None))
-        }
-
-        fn terminate(&mut self) -> io::Result<ExitStatus> {
-            self.termination
-                .take()
-                .unwrap_or_else(|| Err(io::Error::other("unexpected termination")))
-        }
-    }
-
-    fn successful_status() -> ExitStatus {
-        ExitStatus::from_raw(0)
-    }
-
-    #[cfg(unix)]
-    fn failed_status(code: i32) -> ExitStatus {
-        ExitStatus::from_raw(code << 8)
-    }
-
-    #[cfg(windows)]
-    fn failed_status(code: i32) -> ExitStatus {
-        ExitStatus::from_raw(u32::try_from(code).expect("test exit code is nonnegative"))
-    }
-
-    fn infrastructure_message(outcome: BufferedOutcome) -> String {
-        result_infrastructure_message(outcome.result)
-    }
-
-    fn captured(bytes: &[u8], failure: Option<&str>) -> CapturedStream {
-        CapturedStream {
-            output: CapturedOutput::Memory(bytes.to_vec()),
-            failure: failure.map(str::to_owned),
-        }
-    }
-
-    fn output_bytes(output: &mut CapturedOutput) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        match output.emit_to(&mut bytes) {
-            Ok(()) => bytes,
-            Err(OutputEmitError::Source(error) | OutputEmitError::Destination(error)) => {
-                panic!("captured test output cannot be read: {error}")
-            }
-        }
-    }
-
-    fn poisoned_buffer() -> Arc<Mutex<CapturedOutput>> {
-        let bytes = Arc::new(Mutex::new(CapturedOutput::Memory(b"poisoned bytes".to_vec())));
-        let poisoned = Arc::clone(&bytes);
-        let _panic = thread::spawn(move || {
-            let _guard = poisoned.lock().expect("the fresh capture mutex is available");
-            panic!("poison capture buffer");
-        })
-        .join();
-        bytes
-    }
-
-    impl io::Read for StubbornPipe {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if !self.read {
-                self.read = true;
-                let content = b"captured-before-timeout";
-                buf[..content.len()].copy_from_slice(content);
-                return Ok(content.len());
-            }
-
-            if let Some(blocked) = self.blocked.take() {
-                let _receiver_gone = blocked.send(());
-            }
-            let (lock, condition) = &*self.release;
-            let mut released = lock.lock().expect("the test owns the release mutex without panicking");
-            while !*released {
-                released = condition.wait(released).expect("the test owns the release mutex without panicking");
-            }
-            let _receiver_gone = self.finished.send(());
-            Ok(0)
+    #[test]
+    fn child_sleep_probe() {
+        if let Some(duration) = std::env::var_os("CARGO_EACH_CHILD_SLEEP_MS") {
+            let millis = duration.to_string_lossy().parse().expect("the parent passes milliseconds");
+            thread::sleep(Duration::from_millis(millis));
         }
     }
 
     #[test]
-    fn signal_terminated_child_maps_to_one() {
+    fn exit_codes_and_durations_follow_the_cli_contract() {
         assert_eq!(exit_byte(None), 1);
-    }
-
-    #[test]
-    fn in_range_codes_pass_through() {
-        assert_eq!(exit_byte(Some(1)), 1);
-        assert_eq!(exit_byte(Some(2)), 2);
-        assert_eq!(exit_byte(Some(255)), 255);
-    }
-
-    #[test]
-    fn wide_codes_reduce_to_low_byte() {
+        assert_eq!(exit_byte(Some(7)), 7);
         assert_eq!(exit_byte(Some(259)), 3);
-        assert_eq!(exit_byte(Some(257)), 1);
-    }
-
-    #[test]
-    fn nonzero_code_with_zero_low_byte_maps_to_one() {
         assert_eq!(exit_byte(Some(256)), 1);
-        assert_eq!(exit_byte(Some(512)), 1);
-    }
-
-    #[test]
-    fn durations_have_compact_diagnostics() {
         assert_eq!(display_duration(Duration::from_millis(250)), "250ms");
         assert_eq!(display_duration(Duration::from_secs(30)), "30s");
         assert_eq!(display_duration(Duration::from_mins(2)), "2m");
     }
 
     #[test]
-    fn failure_launch_policy_distinguishes_fail_fast_from_keep_going() {
+    fn worker_count_and_launch_policy_are_plan_bounded() {
+        let four = NonZeroUsize::new(4).expect("literal four is nonzero");
+        assert_eq!(effective_worker_count(four, 1), NonZeroUsize::MIN);
+        assert_eq!(effective_worker_count(four, 8), four);
         assert!(failure_stops_launching(false, true));
         assert!(!failure_stops_launching(false, false));
         assert!(!failure_stops_launching(true, true));
-        assert!(!failure_stops_launching(true, false));
     }
 
     #[test]
-    fn effective_worker_count_caps_requested_parallelism() {
-        let four = NonZeroUsize::new(4).expect("literal four is nonzero");
-        assert_eq!(effective_worker_count(four, 1, 8), NonZeroUsize::MIN);
-        assert_eq!(
-            effective_worker_count(four, 8, 2),
-            NonZeroUsize::new(2).expect("literal two is nonzero")
-        );
-        assert_eq!(effective_worker_count(four, 8, 0), NonZeroUsize::MIN);
-    }
-
-    #[test]
-    fn sequential_timeout_policy_distinguishes_fail_fast_from_keep_going() {
+    fn sequential_and_parallel_failures_preserve_their_taxonomy() {
         let plan = Plan {
             invocations: vec![invocation(&["first"]), invocation(&["second"])],
         };
-        let mut fail_fast_results = VecDeque::from([
+        let mut results = VecDeque::from([
             InvocationResult::TimedOut(Duration::from_millis(50)),
             InvocationResult::Exited(successful_status()),
         ]);
-        let mut fail_fast_calls = 0;
+        let mut calls = 0;
         let fail_fast = super::execute_sequential_with(&plan, false, Some(Duration::from_millis(50)), |_, timeout| {
             assert_eq!(timeout, Some(Duration::from_millis(50)));
-            fail_fast_calls += 1;
-            fail_fast_results.pop_front().expect("one result per launched invocation")
+            calls += 1;
+            results.pop_front().expect("one result per launched invocation")
         });
         assert_eq!(fail_fast, ExitCode::from(1));
-        assert_eq!(fail_fast_calls, 1, "fail-fast must stop after the timeout");
-
-        let mut keep_going_results = VecDeque::from([
-            InvocationResult::TimedOut(Duration::from_millis(50)),
-            InvocationResult::Exited(successful_status()),
-        ]);
-        let mut keep_going_calls = 0;
-        let keep_going = super::execute_sequential_with(&plan, true, None, |_, timeout| {
-            assert_eq!(timeout, None);
-            keep_going_calls += 1;
-            keep_going_results.pop_front().expect("one result per launched invocation")
-        });
-        assert_eq!(keep_going, ExitCode::from(1));
-        assert_eq!(keep_going_calls, 2, "keep-going must launch after a timeout");
-
-        let infrastructure = super::execute_sequential_with(
-            &Plan {
-                invocations: vec![invocation(&["only"])],
-            },
-            false,
-            None,
-            |_, _| InvocationResult::Infrastructure("injected infrastructure failure".to_owned()),
-        );
-        assert_eq!(infrastructure, ExitCode::from(2));
-    }
-
-    #[test]
-    fn parallel_failure_exit_codes_preserve_failure_class() {
+        assert_eq!(calls, 1);
         assert_eq!(
             parallel_failure_exit_code(&InvocationResult::Exited(failed_status(7))),
             ExitCode::from(7)
         );
         assert_eq!(
-            parallel_failure_exit_code(&InvocationResult::TimedOut(Duration::from_secs(1))),
-            ExitCode::from(1)
-        );
-        assert_eq!(
             parallel_failure_exit_code(&InvocationResult::Infrastructure("capture failed".to_owned())),
             ExitCode::from(2)
         );
+        assert_eq!(
+            parallel_failure_exit_code(&InvocationResult::TimedOut(Duration::from_secs(1))),
+            ExitCode::from(1)
+        );
     }
 
     #[test]
-    fn cancellation_joins_a_reader_waiting_for_pipe_readiness() {
-        let (dropped_tx, dropped_rx) = mpsc::channel();
-        let reader = spawn_output_reader(PendingPipe { dropped: Some(dropped_tx) }, "pending-test-pipe")
-            .expect("the readiness-polling reader can be created");
+    fn scheduler_surfaces_worker_launch_failures_in_both_policies() {
+        let fail_fast = Plan {
+            invocations: vec![invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), invocation(&["rustc", "--version"])],
+        };
+        let code = execute_parallel(&fail_fast, false, NonZeroUsize::new(2).expect("literal two is nonzero"), None)
+            .expect("worker launch failure is an invocation outcome");
+        assert_eq!(code, ExitCode::from(2));
 
-        let captured = finish_output_reader(reader, "stdout", Duration::from_millis(25), ORDINARY_BOUNDARY);
-
-        dropped_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("cancellation drops the pipe before the bounded finish returns");
-        let failure = captured
-            .failure
-            .expect("an open pipe past the drain grace is an infrastructure failure");
-        assert!(failure.contains("remained open"), "{failure}");
-        assert!(!failure.contains("did not stop"), "{failure}");
+        let keep_going = Plan {
+            invocations: vec![invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), invocation(&["rustc", "--version"])],
+        };
+        let code = execute_parallel(&keep_going, true, NonZeroUsize::new(2).expect("literal two is nonzero"), None)
+            .expect("keep-going retains worker launch failures");
+        assert_eq!(code, ExitCode::from(1));
     }
 
     #[test]
-    fn reader_failure_terminates_an_untimed_running_process() {
-        let mut process = FakeProcess {
-            observations: VecDeque::from([Ok(Some(successful_status()))]),
+    fn process_waiting_handles_completion_timeout_and_cleanup_failures() {
+        let completed = FakeProcess {
+            observations: VecDeque::from([Ok(None), Ok(Some(successful_status()))]),
+            termination: None,
+        };
+        let outcome = wait_for_process(
+            completed,
+            None,
+            FakeProcess::observe,
+            || None,
+            FakeProcess::terminate,
+            "observe fake process",
+        );
+        assert!(matches!(outcome.result, InvocationResult::Exited(status) if status.success()));
+
+        let timed_out = FakeProcess {
+            observations: VecDeque::from([Ok(None)]),
             termination: Some(Ok(successful_status())),
         };
-        let mut stdout = spawn_output_reader(FailingReader, "early-failing-reader").expect("create failing stdout reader");
-        let mut stderr = spawn_output_reader(io::empty(), "empty-stderr-reader").expect("create empty stderr reader");
-        stdout.reported = Some(
-            stdout
-                .completion
-                .recv_timeout(Duration::from_secs(1))
-                .expect("the injected read failure is ready before process observation"),
-        );
-
-        let outcome = wait_for_captured_process(
-            &mut process,
-            None,
-            &mut stdout,
-            &mut stderr,
-            "observe fake process",
+        let outcome = wait_for_process(
+            timed_out,
+            Some(Duration::ZERO),
             FakeProcess::observe,
+            || None,
             FakeProcess::terminate,
+            "observe fake process",
         );
+        assert!(matches!(outcome.result, InvocationResult::TimedOut(duration) if duration.is_zero()));
 
+        let failed = FakeProcess {
+            observations: VecDeque::from([Err(io::Error::other("observation failed"))]),
+            termination: Some(Err(io::Error::other("cleanup failed"))),
+        };
+        let outcome = wait_for_process(
+            failed,
+            None,
+            FakeProcess::observe,
+            || None,
+            FakeProcess::terminate,
+            "observe fake process",
+        );
         let message = result_infrastructure_message(outcome.result);
-        assert!(message.contains("injected read failure"), "{message}");
-        assert!(process.termination.is_none(), "reader failure must trigger process cleanup");
-        let _stdout = finish_output_reader(stdout, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
-        let _stderr = finish_output_reader(stderr, "stderr", Duration::from_secs(1), ORDINARY_BOUNDARY);
+        assert!(message.contains("observation failed"));
+        assert!(message.contains("cleanup failed"));
+
+        let failed_timeout_cleanup = FakeProcess {
+            observations: VecDeque::from([Ok(None)]),
+            termination: Some(Err(io::Error::other("timeout cleanup failed"))),
+        };
+        let outcome = wait_for_process(
+            failed_timeout_cleanup,
+            Some(Duration::ZERO),
+            FakeProcess::observe,
+            || None,
+            FakeProcess::terminate,
+            "observe fake process",
+        );
+        assert!(result_infrastructure_message(outcome.result).contains("timeout cleanup failed"));
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "spawns ordinary child processes")]
-    fn ordinary_child_handoffs_retain_a_bounded_reap_owner() {
-        ensure_reaper().expect("preflight the production reaper");
-        let handed_off = sleeping_test_command_for(Duration::from_millis(500))
-            .spawn()
-            .expect("spawn successful handoff probe");
-        let handed_off_id = handed_off.id();
-        let error = finish_ordinary_termination(
-            handed_off,
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "primary cleanup failed")),
+    fn reader_failure_terminates_the_process_through_the_local_wait_seam() {
+        let process = FakeProcess {
+            observations: VecDeque::from([Ok(None)]),
+            termination: Some(Ok(successful_status())),
+        };
+        let outcome = wait_for_process(
+            process,
+            None,
+            FakeProcess::observe,
+            || Some("failed to read child stdout".to_owned()),
+            FakeProcess::terminate,
+            "observe fake process",
+        );
+        assert!(result_infrastructure_message(outcome.result).contains("failed to read child stdout"));
+    }
+
+    #[test]
+    fn bounded_polling_stops_on_exit_error_or_deadline() {
+        let mut exited = VecDeque::from([Ok(None), Ok(Some(successful_status()))]);
+        let status = poll_process_exit(&mut exited, Duration::from_secs(1), |observations| {
+            observations.pop_front().expect("the fake has enough observations")
+        })
+        .expect("polling succeeds")
+        .expect("the fake exits");
+        assert!(status.success());
+
+        let mut failed = VecDeque::from([Err(io::Error::other("poll failed"))]);
+        let error = poll_process_exit(&mut failed, Duration::from_secs(1), |observations| {
+            observations.pop_front().expect("the fake has one observation")
+        })
+        .expect_err("polling failure propagates");
+        assert!(error.to_string().contains("poll failed"));
+
+        let mut running = ();
+        assert!(
+            poll_process_exit(&mut running, Duration::ZERO, |()| Ok(None))
+                .expect("deadline is not an I/O failure")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bounded_group_termination_reports_every_local_failure_shape() {
+        let status = successful_status();
+        let kill_error = terminate_group_with(
+            (),
+            Duration::from_secs(1),
+            |()| Err(io::Error::new(io::ErrorKind::PermissionDenied, "kill failed")),
+            move |()| Ok(Some(status)),
+            |()| Ok(()),
         )
-        .expect_err("a successful handoff preserves the primary cleanup error");
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(faults::reaper_owns(handed_off_id), "the successful handoff lost its wait owner");
+        .expect_err("a kill error is not hidden by later completion");
+        assert_eq!(kill_error.kind(), io::ErrorKind::PermissionDenied);
 
-        let successful_cleanup = sleeping_test_command_for(Duration::from_millis(500))
-            .spawn()
-            .expect("spawn successful-cleanup handoff probe");
-        let successful_cleanup_id = successful_cleanup.id();
-        let _failed_start = faults::arm(Fault::ReaperStart);
-        let error = finish_ordinary_termination(successful_cleanup, Ok(successful_status()))
-            .expect_err("a failed handoff replaces a successful cleanup result");
-        assert!(error.to_string().contains("reaper thread start failed"), "{error}");
-        assert!(
-            faults::reaper_owns(successful_cleanup_id),
-            "the successful-cleanup handoff lost its wait owner"
-        );
+        let deadline = terminate_group_with((), Duration::ZERO, |()| Ok(()), |()| Ok(None), |()| Ok(()))
+            .expect_err("an unreaped group reaches the deadline");
+        assert_eq!(deadline.kind(), io::ErrorKind::WouldBlock);
+        assert!(deadline.to_string().contains("detached reaper thread"));
 
-        let termination_child = sleeping_test_command_for(Duration::from_millis(350))
-            .spawn()
-            .expect("spawn termination handoff probe");
-        let termination_id = termination_child.id();
-        let _failed_start = faults::arm(Fault::ReaperStart);
-        let started = Instant::now();
-        let error = finish_ordinary_termination(
-            termination_child,
-            Err(io::Error::new(io::ErrorKind::PermissionDenied, "termination failed")),
+        let failed_handoff = terminate_group_with(
+            (),
+            Duration::ZERO,
+            |()| Err(io::Error::other("kill failed")),
+            |()| Ok(None),
+            |()| Err(io::Error::other("reaper failed")),
         )
-        .expect_err("the failed cleanup and handoff must be reported");
-        assert!(started.elapsed() < Duration::from_millis(200), "failed handoff blocked its caller");
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(error.to_string().contains("termination failed"), "{error}");
-        assert!(error.to_string().contains("reaper thread start failed"), "{error}");
-        assert!(
-            faults::reaper_owns(termination_id),
-            "the failed termination handoff lost its wait owner"
-        );
+        .expect_err("kill and handoff failures are both reported");
+        assert!(failed_handoff.to_string().contains("kill failed"));
+        assert!(failed_handoff.to_string().contains("reaper failed"));
 
-        let wait_child = sleeping_test_command_for(Duration::from_millis(350))
-            .spawn()
-            .expect("spawn wait handoff probe");
-        let wait_id = wait_child.id();
-        let _failed_start = faults::arm(Fault::ReaperStart);
+        let failed_observation = terminate_group_with(
+            (),
+            Duration::from_secs(1),
+            |()| Ok(()),
+            |()| Err(io::Error::other("observation failed")),
+            |()| Ok(()),
+        )
+        .expect_err("post-kill observation failure is reported");
+        assert!(failed_observation.to_string().contains("observation failed"));
+        assert!(failed_observation.to_string().contains("detached reaper thread"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns process groups")]
+    fn real_group_execution_observes_completion_and_timeout() {
+        let success = run_streamed_with_timeout(&invocation(&["rustc", "--version"]), Duration::from_secs(5));
+        assert!(matches!(success, InvocationResult::Exited(status) if status.success()));
+
+        let group = spawn_group(sleeping_test_command()).expect("spawn sleeping process group");
         let started = Instant::now();
-        let outcome = finish_ordinary_wait(wait_child, TreeOutcome::new(InvocationResult::Exited(successful_status())));
-        assert!(
-            started.elapsed() < Duration::from_millis(200),
-            "failed wait handoff blocked its caller"
-        );
-        assert!(
-            result_infrastructure_message(outcome.result).contains("reaper thread start failed"),
-            "a post-wait handoff failure must become an infrastructure failure"
-        );
-        assert!(faults::reaper_owns(wait_id), "the failed wait handoff lost its wait owner");
+        let error = terminate_group_bounded(group).expect("killed process group is reaped");
+        assert!(!error.success());
+        assert!(started.elapsed() < Duration::from_secs(2));
 
-        wait_for_reaper_owner_to_release(handed_off_id);
-        wait_for_reaper_owner_to_release(successful_cleanup_id);
-        wait_for_reaper_owner_to_release(termination_id);
-        wait_for_reaper_owner_to_release(wait_id);
+        let mut quick = Command::new("rustc");
+        let _ = quick.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
+        let group = spawn_group(quick).expect("spawn quick process group");
+        detach_group_reaper(group).expect("detach the local process-group reaper");
     }
 
     #[test]
-    fn captured_wait_classifies_timeout_cleanup_results() {
-        for (termination, expected) in [
-            (Ok(successful_status()), None),
-            (Err(io::Error::other("timeout cleanup failed")), Some("timeout cleanup failed")),
-        ] {
-            let mut process = FakeProcess {
-                observations: VecDeque::from([Ok(None)]),
-                termination: Some(termination),
-            };
-            let mut stdout = spawn_output_reader(io::empty(), "timeout-empty-stdout").expect("create empty stdout reader");
-            let mut stderr = spawn_output_reader(io::empty(), "timeout-empty-stderr").expect("create empty stderr reader");
+    #[cfg_attr(miri, ignore = "spawns and captures process groups")]
+    fn captured_runner_uses_group_control_and_keeps_output() {
+        let mut untimed = run_captured(&invocation(&["rustc", "--version"]), None);
+        assert!(matches!(untimed.result, InvocationResult::Exited(status) if status.success()));
+        assert!(
+            String::from_utf8(output_bytes(&mut untimed.stdout))
+                .expect("rustc output is UTF-8")
+                .contains("rustc")
+        );
 
-            let outcome = wait_for_captured_process(
-                &mut process,
-                Some(Duration::ZERO),
-                &mut stdout,
-                &mut stderr,
-                "observe fake process",
-                FakeProcess::observe,
-                FakeProcess::terminate,
-            );
-            match expected {
-                None => assert!(matches!(outcome.result, InvocationResult::TimedOut(duration) if duration.is_zero())),
-                Some(expected) => assert!(result_infrastructure_message(outcome.result).contains(expected)),
-            }
-            let _stdout = finish_output_reader(stdout, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
-            let _stderr = finish_output_reader(stderr, "stderr", Duration::from_secs(1), ORDINARY_BOUNDARY);
-        }
+        let timed = run_captured(&invocation(&["rustc", "--version"]), Some(Duration::from_secs(5)));
+        assert!(matches!(timed.result, InvocationResult::Exited(status) if status.success()));
     }
 
     #[test]
-    fn reader_completion_observation_is_idempotent() {
-        let (sender, completion) = mpsc::channel::<ReaderCompletion>();
-        drop(sender);
-        let mut reader = OutputReader {
-            thread: thread::spawn(|| {}),
+    fn direct_runners_report_empty_and_unspawnable_commands() {
+        let empty = invocation(&[]);
+        assert!(matches!(run_streamed(&empty), InvocationResult::Infrastructure(message) if message.contains("empty argument vector")));
+        assert!(infrastructure_message(run_captured(&empty, None)).contains("empty argument vector"));
+        assert!(matches!(
+            run_streamed_with_timeout(&empty, Duration::from_secs(1)),
+            InvocationResult::Infrastructure(message) if message.contains("empty argument vector")
+        ));
+
+        let missing = invocation(&["__cargo_each_missing_program_for_unit_test__"]);
+        assert!(matches!(run_streamed(&missing), InvocationResult::Infrastructure(message) if message.contains("failed to spawn")));
+        assert!(infrastructure_message(run_captured(&missing, None)).contains("failed to spawn"));
+
+        let injected = run_streamed_with_timeout_with(&invocation(&["rustc", "--version"]), Duration::from_secs(1), |_| {
+            Err("injected group spawn failure".to_owned())
+        });
+        assert!(matches!(
+            injected,
+            InvocationResult::Infrastructure(message) if message.contains("injected group spawn failure")
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns process groups with injected capture seams")]
+    fn captured_setup_failures_use_local_reader_and_process_seams() {
+        let invocation = invocation(&["rustc", "--version"]);
+
+        let missing_stdout = run_captured_with(
+            &invocation,
+            None,
+            |command| {
+                let mut group = spawn_group(command)?;
+                drop(group.inner().stdout.take());
+                Ok(group)
+            },
+            spawn_child_stdout_reader,
+            spawn_child_stderr_reader,
+        );
+        assert!(infrastructure_message(missing_stdout).contains("failed to capture child stdout"));
+
+        let stdout_reader = run_captured_with(
+            &invocation,
+            None,
+            spawn_group,
+            |_stream, _name| Err(io::Error::other("injected stdout reader failure")),
+            spawn_child_stderr_reader,
+        );
+        assert!(infrastructure_message(stdout_reader).contains("injected stdout reader failure"));
+
+        let missing_stderr = run_captured_with(
+            &invocation,
+            None,
+            |command| {
+                let mut group = spawn_group(command)?;
+                drop(group.inner().stderr.take());
+                Ok(group)
+            },
+            spawn_child_stdout_reader,
+            spawn_child_stderr_reader,
+        );
+        assert!(infrastructure_message(missing_stderr).contains("failed to capture child stderr"));
+
+        let stderr_reader = run_captured_with(&invocation, None, spawn_group, spawn_child_stdout_reader, |_stream, _name| {
+            Err(io::Error::other("injected stderr reader failure"))
+        });
+        assert!(infrastructure_message(stderr_reader).contains("injected stderr reader failure"));
+    }
+
+    #[test]
+    fn output_reader_retries_interrupts_and_reports_failures() {
+        let interrupted = spawn_output_reader(
+            InterruptedThenData {
+                interrupted: false,
+                emitted: false,
+            },
+            "interrupted-reader",
+        )
+        .expect("spawn interrupted reader");
+        let mut interrupted = finish_output_reader(interrupted, "stdout", Duration::from_secs(1), GROUP_BOUNDARY);
+        assert_eq!(output_bytes(&mut interrupted.output), b"after interrupt");
+        assert!(interrupted.failure.is_none());
+
+        let failed = spawn_output_reader(FailingReader, "failing-reader").expect("spawn failing reader");
+        let failed = finish_output_reader(failed, "stdout", Duration::from_secs(1), GROUP_BOUNDARY);
+        assert!(failed.failure.is_some_and(|failure| failure.contains("injected read failure")));
+
+        let panicked = spawn_output_reader(PanickingReader, "panicking-reader").expect("spawn panicking reader");
+        let panicked = finish_output_reader(panicked, "stderr", Duration::from_secs(1), GROUP_BOUNDARY);
+        assert!(panicked.failure.is_some_and(|failure| failure.contains("injected reader panic")));
+    }
+
+    #[test]
+    fn reader_finish_reports_post_completion_panics_and_failed_cancellation() {
+        let (sender, completion) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            sender.send(ReaderCompletion::Finished(Ok(()))).expect("the receiver remains alive");
+            panic!("panic after completion");
+        });
+        let reader = OutputReader {
+            thread,
             completion,
             output: Arc::new(Mutex::new(CapturedOutput::empty())),
-            retaining: Arc::new(AtomicBool::new(true)),
+            retaining: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             reported: None,
             failure_claimed: false,
         };
+        let failure = finish_output_reader(reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY)
+            .failure
+            .expect("the join panic is reported");
+        assert!(failure.contains("panic after completion"));
 
-        assert!(
-            reader
-                .take_failure("stdout")
-                .is_some_and(|failure| failure.contains("without reporting completion"))
-        );
-        assert!(reader.take_failure("stdout").is_none());
-        let captured = finish_output_reader(reader, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
-        assert!(captured.failure.is_none(), "the process outcome already claimed the reader failure");
-    }
+        let (failed_sender, failed_completion) = mpsc::channel();
+        let failed_thread = thread::spawn(move || {
+            failed_sender
+                .send(ReaderCompletion::Finished(Err(io::Error::other("read failed"))))
+                .expect("the receiver remains alive");
+            panic!("panic after failed completion");
+        });
+        let failed_reader = OutputReader {
+            thread: failed_thread,
+            completion: failed_completion,
+            output: Arc::new(Mutex::new(CapturedOutput::empty())),
+            retaining: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            reported: None,
+            failure_claimed: false,
+        };
+        let failure = finish_output_reader(failed_reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY)
+            .failure
+            .expect("read and join failures are reported");
+        assert!(failure.contains("read failed"));
+        assert!(failure.contains("panic after failed completion"));
 
-    #[test]
-    fn reader_finish_reports_join_panics_and_failed_cancellation() {
-        for completion in [
-            ReaderCompletion::Finished(Ok(())),
-            ReaderCompletion::Finished(Err(io::Error::other("reported read failure"))),
-        ] {
-            let (sender, receiver) = mpsc::channel();
-            let thread = thread::spawn(move || {
-                sender.send(completion).expect("the synthetic completion receiver remains alive");
-                panic!("panic after reader completion");
-            });
-            let reader = OutputReader {
-                thread,
-                completion: receiver,
-                output: Arc::new(Mutex::new(CapturedOutput::empty())),
-                retaining: Arc::new(AtomicBool::new(true)),
-                reported: None,
-                failure_claimed: false,
-            };
-            let captured = finish_output_reader(reader, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
-            let failure = captured.failure.expect("the join panic must be reported");
-            assert!(failure.contains("panic after reader completion"), "{failure}");
-        }
-
-        let (_sender, completion) = mpsc::channel();
+        let (sender, completion) = mpsc::channel::<ReaderCompletion>();
         let reader = OutputReader {
             thread: thread::spawn(|| {}),
             completion,
             output: Arc::new(Mutex::new(CapturedOutput::empty())),
-            retaining: Arc::new(AtomicBool::new(true)),
+            retaining: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             reported: None,
             failure_claimed: true,
         };
-        let captured = finish_output_reader(reader, "stderr", Duration::ZERO, ORDINARY_BOUNDARY);
-        let failure = captured.failure.expect("failed cancellation must be reported");
-        assert!(failure.contains("reader did not stop"), "{failure}");
-        assert!(!failure.contains("remained open"), "{failure}");
+        let failure = finish_output_reader(reader, "stderr", Duration::ZERO, LEADER_BOUNDARY)
+            .failure
+            .expect("failed cancellation is reported");
+        assert!(failure.contains("reader did not stop"));
+        drop(sender);
     }
 
     #[test]
-    fn cancellation_does_not_wait_for_a_reader_holding_the_capture_mutex() {
+    fn disconnected_reader_completion_is_reported_by_the_finisher() {
+        let (sender, completion) = mpsc::channel::<ReaderCompletion>();
+        drop(sender);
+        let reader = OutputReader {
+            thread: thread::spawn(|| {}),
+            completion,
+            output: Arc::new(Mutex::new(CapturedOutput::empty())),
+            retaining: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            reported: None,
+            failure_claimed: false,
+        };
+        let failure = finish_output_reader(reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY)
+            .failure
+            .expect("disconnection is reported");
+        assert!(failure.contains("without reporting completion"));
+    }
+
+    #[test]
+    fn cancellable_reader_stops_within_the_join_grace() {
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let reader = spawn_output_reader(PendingReader { dropped: Some(dropped_tx) }, "pending-reader").expect("spawn pending reader");
+        let captured = finish_output_reader(reader, "stdout", Duration::from_millis(25), LEADER_BOUNDARY);
+        dropped_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the polling reader observes capture cancellation");
+        let failure = captured.failure.expect("an open pipe is an infrastructure failure");
+        assert!(failure.contains("remained open"));
+        assert!(!failure.contains("did not stop"));
+    }
+
+    #[test]
+    fn blocking_reader_is_detached_and_partial_output_is_recovered_without_blocking() {
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (blocked_tx, blocked_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let reader = spawn_output_reader(
+            BlockingReader {
+                first_read: false,
+                blocked: Some(blocked_tx),
+                finished: finished_tx,
+                release: Arc::clone(&release),
+            },
+            "blocking-reader",
+        )
+        .expect("spawn blocking reader");
+        blocked_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the reader reaches its blocking read");
+
+        let started = Instant::now();
+        let mut captured = finish_output_reader(reader, "stdout", Duration::from_millis(25), LEADER_BOUNDARY);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(output_bytes(&mut captured.output), b"captured-before-detach");
+        let failure = captured.failure.expect("detachment is an infrastructure failure");
+        assert!(failure.contains("remained open"));
+        assert!(failure.contains("did not stop"));
+
+        let (lock, condition) = &*release;
+        *lock.lock().expect("the test owns the release mutex without panicking") = true;
+        condition.notify_all();
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the detached reader exits after the pipe closes");
+    }
+
+    #[test]
+    fn detached_reader_never_blocks_on_a_locked_capture_buffer() {
         let (factory_started, factory_is_started) = mpsc::sync_channel(0);
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let factory_release = Arc::clone(&release);
-        let (reader_dropped, reader_is_dropped) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
         let reader = spawn_output_reader_with(
             DropSignalReader {
                 bytes: Some(b"stalled append"),
-                dropped: Some(reader_dropped),
+                dropped: Some(dropped_tx),
             },
-            "stalled-append-reader",
+            "locked-buffer-reader",
             0,
             Box::new(move || {
-                factory_started.send(()).expect("the finisher waits for the stalled append");
+                factory_started.send(()).expect("the finisher waits for spill creation");
                 let (lock, condition) = &*factory_release;
                 let mut released = lock.lock().expect("the test owns the release mutex without panicking");
                 while !*released {
@@ -2075,728 +1922,158 @@ mod tests {
                 Ok(Box::new(io::Cursor::new(Vec::new())) as Box<dyn SpillFile>)
             }),
         )
-        .expect("create stalled append reader");
+        .expect("spawn locked-buffer reader");
         factory_is_started
             .recv_timeout(Duration::from_secs(1))
-            .expect("the reader entered spill creation while holding the capture mutex");
+            .expect("the reader holds the capture mutex");
 
         let started = Instant::now();
-        let mut captured = finish_output_reader(reader, "stdout", Duration::ZERO, ORDINARY_BOUNDARY);
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "capture cleanup blocked on the stalled output mutex"
-        );
+        let mut captured = finish_output_reader(reader, "stdout", Duration::ZERO, LEADER_BOUNDARY);
+        assert!(started.elapsed() < Duration::from_millis(500));
         assert!(output_bytes(&mut captured.output).is_empty());
-        let failure = captured.failure.expect("the unavailable partial output must be explicit");
-        assert!(failure.contains("reader did not stop"), "{failure}");
-        assert!(failure.contains("capture buffer remained locked"), "{failure}");
+        let failure = captured.failure.expect("unavailable partial bytes are explicit");
+        assert!(failure.contains("capture buffer remained locked"));
 
         let (lock, condition) = &*release;
         *lock.lock().expect("the test owns the release mutex without panicking") = true;
         condition.notify_all();
-        reader_is_dropped
+        dropped_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("the cancelled detached reader exits after the stalled append is released");
+            .expect("the detached reader exits after spill creation resumes");
     }
 
     #[test]
-    fn detached_output_recovery_preserves_a_poisoned_available_buffer() {
-        let output = poisoned_buffer();
-        let mut failure = None;
-
-        let mut captured = take_reader_output(&output, "stdout", false, &mut failure);
-
-        assert_eq!(output_bytes(&mut captured), b"poisoned bytes");
-        assert!(
-            failure.is_some_and(|failure| failure.contains("capture buffer was poisoned")),
-            "the detached poisoned-buffer branch did not report its infrastructure failure"
-        );
-    }
-
-    #[test]
-    fn normal_completion_does_not_join_a_stubborn_descendant_pipe() {
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        let (blocked_tx, blocked_rx) = mpsc::channel();
-        let (reader_finished_tx, reader_finished_rx) = mpsc::channel();
-        let reader = spawn_output_reader(
-            StubbornPipe {
-                read: false,
-                blocked: Some(blocked_tx),
-                finished: reader_finished_tx,
-                release: Arc::clone(&release),
-            },
-            "stubborn-test-pipe",
-        )
-        .expect("the test reader thread can be created");
-        blocked_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the reader reaches the simulated descendant's open pipe");
-
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let finisher = thread::spawn(move || {
-            let result = finish_output_reader(reader, "stdout", Duration::from_millis(25), ORDINARY_BOUNDARY);
-            let _receiver_gone = finished_tx.send(result);
-        });
-        let result = finished_rx.recv_timeout(Duration::from_millis(500));
-
-        let (lock, condition) = &*release;
-        *lock.lock().expect("the test owns the release mutex without panicking") = true;
-        condition.notify_all();
-
-        let mut captured = result.expect("normal completion must not wait for an escaped descendant to close its pipe");
-        finisher.join().expect("the bounded finisher thread does not panic");
-        reader_finished_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the detached reader exits after the test releases its simulated pipe");
-        assert_eq!(output_bytes(&mut captured.output), b"captured-before-timeout");
-        assert!(
-            captured.failure.as_deref().is_some_and(|failure| failure.contains("remained open")),
-            "grace expiry must be an explicit infrastructure failure"
-        );
-    }
-
-    #[test]
-    fn unproven_cleanup_discards_data_that_arrives_after_capture_stops() {
+    fn data_arriving_after_capture_cancellation_is_discarded() {
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let (started_tx, started_rx) = mpsc::channel();
-        let (reader_finished_tx, reader_finished_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
         let reader = spawn_output_reader(
-            LateDataPipe {
+            LateDataReader {
                 started: Some(started_tx),
-                finished: Some(reader_finished_tx),
+                finished: Some(finished_tx),
                 release: Arc::clone(&release),
             },
-            "late-data-test-pipe",
+            "late-data-reader",
         )
-        .expect("create late-data reader");
+        .expect("spawn late-data reader");
         started_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("the late-data reader starts its blocking read");
+            .expect("the reader blocks before producing data");
 
-        let mut captured = finish_output_reader(reader, "stdout", Duration::from_millis(25), ORDINARY_BOUNDARY);
+        let mut captured = finish_output_reader(reader, "stdout", Duration::ZERO, LEADER_BOUNDARY);
         assert!(output_bytes(&mut captured.output).is_empty());
         assert!(captured.failure.is_some());
 
         let (lock, condition) = &*release;
         *lock.lock().expect("the test owns the release mutex without panicking") = true;
         condition.notify_all();
-        reader_finished_rx
+        finished_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("the detached reader discards late data and exits");
     }
 
     #[test]
-    fn worker_panic_becomes_an_outcome_without_deadlocking_the_scheduler() {
-        let plan = Plan {
-            invocations: vec![Invocation {
-                label: Some("panic-probe".to_owned()),
-                argv: vec![WORKER_PANIC_TEST_PROGRAM.to_owned()],
-                work_dir: None,
-            }],
-        };
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let scheduler = thread::spawn(move || {
-            let result = execute_parallel(&plan, false, NonZeroUsize::new(2).expect("literal two is nonzero"), None);
-            let exit_two = result.is_ok_and(|code| code == ExitCode::from(2));
-            let _receiver_gone = finished_tx.send(exit_two);
-        });
-
-        assert!(
-            finished_rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("the panic-safe worker reports before the scheduler deadline"),
-            "a worker panic must become an infrastructure exit"
-        );
-        scheduler.join().expect("the scheduler handles the worker panic without panicking");
-    }
-
-    #[test]
-    fn disconnected_worker_channel_becomes_an_infrastructure_outcome() {
-        let (sender, receiver) = mpsc::channel::<BufferedOutcome>();
-        drop(sender);
-        let thread = thread::spawn(|| {});
-        let outcome = wait_for_worker(&mut vec![RunningWorker {
-            index: 4,
-            receiver,
-            thread,
-        }])
-        .expect("the disconnected worker is observable");
-        assert_eq!(outcome.index, 4);
-        let InvocationResult::Infrastructure(message) = outcome.outcome.result else {
-            panic!("a disconnected worker must produce an infrastructure outcome");
-        };
-        assert!(message.contains("without reporting"));
-    }
-
-    #[test]
-    fn worker_panic_descriptions_preserve_string_payloads() {
-        let borrowed: Box<dyn std::any::Any + Send> = Box::new("borrowed panic");
-        let owned: Box<dyn std::any::Any + Send> = Box::new("owned panic".to_owned());
-        let other: Box<dyn std::any::Any + Send> = Box::new(7_u8);
-        assert_eq!(panic_description(borrowed.as_ref()), "borrowed panic");
-        assert_eq!(panic_description(owned.as_ref()), "owned panic");
-        assert_eq!(panic_description(other.as_ref()), "non-string panic payload");
-    }
-
-    #[test]
-    fn cleanup_failure_context_preserves_both_outcomes() {
-        assert_eq!(with_cleanup_failure("primary".to_owned(), &Ok::<_, io::Error>(())), "primary");
-        assert_eq!(
-            with_cleanup_failure("primary".to_owned(), &Err::<(), _>(io::Error::other("cleanup"))),
-            "primary; process-tree cleanup also failed: cleanup"
-        );
-    }
-
-    #[test]
-    fn ordinary_termination_polls_until_successful_reap() {
-        let mut child = FakeOrdinaryChild {
-            kill_error: None,
-            observations: VecDeque::from([Ok(None), Ok(Some(successful_status()))]),
-        };
-
-        let cleanup = terminate_ordinary_with(
-            &mut child,
-            Duration::from_secs(1),
-            FakeOrdinaryChild::kill_child,
-            FakeOrdinaryChild::try_wait_child,
-        );
-
-        assert!(cleanup.as_ref().is_ok_and(ExitStatus::success));
-        assert!(child.observations.is_empty(), "termination returned after only one immediate poll");
-        assert_eq!(
-            with_cleanup_failure("capture setup failed".to_owned(), &cleanup),
-            "capture setup failed"
-        );
-    }
-
-    #[test]
-    fn ordinary_child_sleep_probe() {
-        if let Some(duration) = std::env::var_os("CARGO_EACH_ORDINARY_CHILD_PROBE") {
-            let millis = duration.to_string_lossy().parse().expect("the parent passes a millisecond count");
-            thread::sleep(Duration::from_millis(millis));
-        }
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns and terminates a child process")]
-    fn ordinary_termination_kills_polls_and_reaps_a_real_child() {
-        let mut child = sleeping_test_command().spawn().expect("spawn ordinary child probe");
-
-        let cleanup = terminate_ordinary_child(&mut child, Duration::from_secs(1));
-
-        let status = cleanup.expect("a successfully killed child must be reaped within the grace");
-        assert!(!status.success(), "a killed child must not report successful completion");
-        assert!(
-            child.try_wait().expect("the reaped child remains observable").is_some(),
-            "bounded termination returned without reaping the child"
-        );
-    }
-
-    #[test]
-    fn ordinary_termination_reports_deadline_kill_and_observation_failures() {
-        let mut deadline = FakeOrdinaryChild {
-            kill_error: None,
-            observations: VecDeque::from([Ok(None)]),
-        };
-        let error = terminate_ordinary_with(
-            &mut deadline,
-            Duration::ZERO,
-            FakeOrdinaryChild::kill_child,
-            FakeOrdinaryChild::try_wait_child,
-        )
-        .expect_err("an unreaped child reaches the deadline");
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-
-        let mut failed_kill_deadline = FakeOrdinaryChild {
-            kill_error: Some(io::Error::new(io::ErrorKind::PermissionDenied, "kill failed")),
-            observations: VecDeque::from([Ok(None)]),
-        };
-        let error = terminate_ordinary_with(
-            &mut failed_kill_deadline,
-            Duration::ZERO,
-            FakeOrdinaryChild::kill_child,
-            FakeOrdinaryChild::try_wait_child,
-        )
-        .expect_err("a failed kill with an unreaped child reaches the deadline");
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-        assert!(error.to_string().contains("kill failed"));
-
-        let mut failed_kill = FakeOrdinaryChild {
-            kill_error: Some(io::Error::new(io::ErrorKind::PermissionDenied, "kill failed")),
-            observations: VecDeque::from([Ok(Some(successful_status()))]),
-        };
-        let error = terminate_ordinary_with(
-            &mut failed_kill,
-            Duration::from_secs(1),
-            FakeOrdinaryChild::kill_child,
-            FakeOrdinaryChild::try_wait_child,
-        )
-        .expect_err("reaping must not hide a failed kill");
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-
-        let mut failed_observation = FakeOrdinaryChild {
-            kill_error: None,
-            observations: VecDeque::from([Err(io::Error::other("observation failed"))]),
-        };
-        let error = terminate_ordinary_with(
-            &mut failed_observation,
-            Duration::from_secs(1),
-            FakeOrdinaryChild::kill_child,
-            FakeOrdinaryChild::try_wait_child,
-        )
-        .expect_err("try_wait failure must be preserved");
-        assert!(error.to_string().contains("observation failed"));
-    }
-
-    #[test]
-    fn wait_error_runs_bounded_cleanup_and_preserves_both_errors() {
-        let mut cleaned = false;
-        let outcome = finish_wait_with_cleanup(&mut cleaned, Err(io::Error::other("wait failed")), |cleaned| {
-            *cleaned = true;
-            Ok(successful_status())
-        });
-        assert!(cleaned, "wait failure did not invoke bounded cleanup");
-        let message = result_infrastructure_message(outcome.result);
-        assert!(message.contains("wait failed"));
-        assert!(!message.contains("cleanup also failed"));
-
-        let mut attempted = false;
-        let outcome = finish_wait_with_cleanup(&mut attempted, Err(io::Error::other("wait failed")), |attempted| {
-            *attempted = true;
-            Err(io::Error::other("cleanup failed"))
-        });
-        assert!(attempted, "failed cleanup was not attempted");
-        let message = result_infrastructure_message(outcome.result);
-        assert!(message.contains("wait failed"));
-        assert!(message.contains("cleanup also failed: cleanup failed"));
-    }
-
-    #[test]
-    fn unsealed_timeout_is_refused_before_spawn() {
-        struct FakePrepared {
-            sealed: bool,
-        }
-
-        let spawned = Arc::new(AtomicBool::new(false));
-        let spawn_observed = Arc::clone(&spawned);
-        let error = spawn_if_sealed(
-            FakePrepared { sealed: false },
-            |prepared| prepared.sealed,
-            move |_prepared| {
-                spawn_observed.store(true, Ordering::SeqCst);
-                Ok::<_, String>(())
-            },
-        )
-        .expect_err("an unsealed timeout launch must be refused");
-
-        assert!(
-            !spawned.load(Ordering::SeqCst),
-            "the child spawn path ran despite unsealed containment"
-        );
-        assert!(error.contains("timeout requires sealed process-tree containment"));
-        assert!(error.contains("child was not started"));
-
-        let spawned = Arc::new(AtomicBool::new(false));
-        let spawn_observed = Arc::clone(&spawned);
-        spawn_if_sealed(
-            FakePrepared { sealed: true },
-            |prepared| prepared.sealed,
-            move |_prepared| {
-                spawn_observed.store(true, Ordering::SeqCst);
-                Ok::<_, String>(())
-            },
-        )
-        .expect("sealed containment permits the spawn");
-        assert!(spawned.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn panicked_worker_without_a_report_becomes_an_infrastructure_outcome() {
-        let (sender, receiver) = mpsc::channel::<BufferedOutcome>();
-        drop(sender);
-        let thread = thread::spawn(|| panic!("panic before reporting"));
-        let outcome = wait_for_worker(&mut vec![RunningWorker {
-            index: 5,
-            receiver,
-            thread,
-        }])
-        .expect("the panicked worker is observable");
-        let InvocationResult::Infrastructure(message) = outcome.outcome.result else {
-            panic!("a panicked worker must produce an infrastructure outcome");
-        };
-        assert!(message.contains("panic before reporting"));
-    }
-
-    #[test]
-    fn panic_after_a_worker_report_overrides_the_report() {
-        let (sender, receiver) = mpsc::channel();
-        let thread = thread::spawn(move || {
-            sender
-                .send(BufferedOutcome::infrastructure("premature report".to_owned()))
-                .expect("the scheduler receiver remains alive");
-            panic!("panic after reporting");
-        });
-        let outcome = wait_for_worker(&mut vec![RunningWorker {
-            index: 6,
-            receiver,
-            thread,
-        }])
-        .expect("the reported worker is observable");
-        let InvocationResult::Infrastructure(message) = outcome.outcome.result else {
-            panic!("a worker panic must override its premature report");
-        };
-        assert!(message.contains("panic after reporting"));
-        assert!(wait_for_worker(&mut Vec::new()).is_none());
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns child processes through the scheduler")]
-    fn worker_spawn_failures_are_reported_during_initial_and_replacement_launches() {
-        let initial = Plan {
-            invocations: vec![invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM])],
-        };
-        let code = execute_parallel(&initial, false, NonZeroUsize::new(2).expect("literal two is nonzero"), None)
-            .expect("worker launch failure is represented as an invocation outcome");
-        assert_eq!(code, ExitCode::from(2));
-
-        let replacement = Plan {
-            invocations: vec![invocation(&["rustc", "--version"]), invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM])],
-        };
-        let code = execute_parallel(&replacement, false, NonZeroUsize::new(1).expect("literal one is nonzero"), None)
-            .expect("replacement launch failure is emitted after the completed outcome");
-        assert_eq!(code, ExitCode::from(2));
-
-        let keep_going = Plan {
-            invocations: vec![invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), invocation(&["rustc", "--version"])],
-        };
-        let code = execute_parallel(&keep_going, true, NonZeroUsize::new(1).expect("literal one is nonzero"), None)
-            .expect("keep-going continues after a worker launch outcome");
-        assert_eq!(code, ExitCode::from(1));
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns a child process through the worker")]
-    fn worker_spawn_injection_only_rejects_the_named_program() {
-        let worker = spawn_worker(0, invocation(&["rustc", "--version"]), None).expect("ordinary worker launch must succeed");
-        let outcome = wait_for_worker(&mut vec![worker]).expect("ordinary worker reports its outcome");
-        let InvocationResult::Exited(status) = outcome.outcome.result else {
-            panic!("the ordinary worker must execute rustc");
-        };
-        assert!(status.success());
-
-        let error = spawn_worker(1, invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), None)
-            .expect_err("the named test program injects worker spawn failure");
-        assert!(error.to_string().contains("injected worker spawn failure"));
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns child processes")]
-    fn direct_runners_report_empty_and_unspawnable_commands() {
-        let empty = invocation(&[]);
-        assert!(result_infrastructure_message(run_streamed(&empty)).contains("empty argument vector"));
-        assert!(result_infrastructure_message(run_streamed_with_timeout(&empty, Duration::from_secs(1))).contains("empty argument vector"));
-        assert!(infrastructure_message(run_captured(&empty, None)).contains("empty argument vector"));
-
-        let missing = invocation(&["cargo-each-no-such-program-for-unit-test"]);
-        assert!(result_infrastructure_message(run_streamed(&missing)).contains("failed to spawn"));
-        assert!(result_infrastructure_message(run_streamed_with_timeout(&missing, Duration::from_secs(1))).contains("failed to spawn"));
-        assert!(infrastructure_message(run_captured(&missing, None)).contains("failed to spawn"));
-
-        let InvocationResult::Exited(status) =
-            run_streamed_with_timeout_with(&invocation(&["rustc", "--version"]), Duration::from_secs(2), spawn_tree)
-        else {
-            panic!("the timed streamed runner must execute rustc");
-        };
-        assert!(status.success());
-
-        let spawn_failure = run_streamed_with_timeout_with(&invocation(&["rustc", "--version"]), Duration::from_secs(2), |_command| {
-            Err("injected timed-stream spawn failure".to_owned())
-        });
-        assert!(result_infrastructure_message(spawn_failure).contains("injected timed-stream spawn failure"));
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns a contained child process")]
-    fn captured_runner_uses_the_production_timeout_spawner() {
-        let mut outcome = run_captured(&invocation(&["rustc", "--version"]), Some(Duration::from_secs(2)));
-
-        match &outcome.result {
-            InvocationResult::Exited(status) => {
-                assert!(status.success());
-                assert!(
-                    String::from_utf8(output_bytes(&mut outcome.stdout))
-                        .expect("rustc output is UTF-8")
-                        .contains("rustc")
-                );
-            }
-            InvocationResult::Infrastructure(message) => {
-                assert!(
-                    message.contains("timeout requires sealed process-tree containment"),
-                    "unexpected production timeout-spawn failure: {message}"
-                );
-            }
-            InvocationResult::TimedOut(duration) => panic!("rustc --version timed out after {duration:?}"),
-        }
-    }
-
-    #[test]
-    fn captured_output_combines_every_reader_result_shape() {
-        let mut success = combine_captured_output(
-            captured(b"stdout", None),
-            captured(b"stderr", None),
-            InvocationResult::Infrastructure("primary".to_owned()),
-        );
-        assert_eq!(output_bytes(&mut success.stdout), b"stdout");
-        assert_eq!(output_bytes(&mut success.stderr), b"stderr");
-        assert_eq!(infrastructure_message(success), "primary");
-
-        let mut stdout_failed = combine_captured_output(
-            captured(b"partial stdout", Some("stdout failed")),
-            captured(b"stderr", None),
-            InvocationResult::Infrastructure("primary".to_owned()),
-        );
-        assert_eq!(output_bytes(&mut stdout_failed.stdout), b"partial stdout");
-        assert_eq!(output_bytes(&mut stdout_failed.stderr), b"stderr");
-        assert_eq!(infrastructure_message(stdout_failed), "primary; stdout failed");
-
-        let mut stderr_failed = combine_captured_output(
-            captured(b"stdout", None),
-            captured(b"partial stderr", Some("stderr failed")),
-            InvocationResult::Infrastructure("primary".to_owned()),
-        );
-        assert_eq!(output_bytes(&mut stderr_failed.stdout), b"stdout");
-        assert_eq!(output_bytes(&mut stderr_failed.stderr), b"partial stderr");
-        assert_eq!(infrastructure_message(stderr_failed), "primary; stderr failed");
-
-        let mut both_failed = combine_captured_output(
-            captured(b"partial stdout", Some("stdout failed")),
-            captured(b"partial stderr", Some("stderr failed")),
-            InvocationResult::Infrastructure("primary".to_owned()),
-        );
-        assert_eq!(output_bytes(&mut both_failed.stdout), b"partial stdout");
-        assert_eq!(output_bytes(&mut both_failed.stderr), b"partial stderr");
-        assert_eq!(infrastructure_message(both_failed), "primary; stdout failed; stderr failed");
-
-        let timed_out = combine_captured_output(
-            captured(b"partial stdout", Some("stdout still open")),
-            captured(b"", None),
-            InvocationResult::TimedOut(Duration::from_secs(2)),
-        );
-        assert_eq!(
-            infrastructure_message(timed_out),
-            "invocation timed out after 2s; stdout still open"
-        );
-
-        let exited = combine_captured_output(
-            captured(b"partial stdout", Some("stdout still open")),
-            captured(b"", None),
-            InvocationResult::Exited(successful_status()),
-        );
-        assert_eq!(infrastructure_message(exited), "stdout still open");
-    }
-
-    #[test]
-    fn output_reader_surfaces_read_and_panic_failures() {
-        let failed = spawn_output_reader(FailingReader, "failing-reader").expect("create failing reader");
-        let failed = finish_output_reader(failed, "stdout", Duration::from_secs(1), CONTAINED_BOUNDARY);
-        assert!(
-            failed
-                .failure
-                .as_deref()
-                .is_some_and(|failure| failure.contains("injected read failure"))
-        );
-
-        let panicked = spawn_output_reader(PanickingReader, "panicking-reader").expect("create panicking reader");
-        let panicked = finish_output_reader(panicked, "stderr", Duration::from_secs(1), CONTAINED_BOUNDARY);
-        assert!(
-            panicked
-                .failure
-                .as_deref()
-                .is_some_and(|failure| failure.contains("injected reader panic"))
-        );
-
-        let eof = spawn_output_reader(EofThenPanicReader { reached_eof: false }, "eof-reader").expect("create EOF reader");
-        let mut eof = finish_output_reader(eof, "stdout", Duration::from_secs(1), CONTAINED_BOUNDARY);
-        assert!(output_bytes(&mut eof.output).is_empty());
-        assert!(eof.failure.is_none());
-
-        let interrupted =
-            spawn_output_reader(InterruptedThenDataReader { state: 0 }, "interrupted-reader").expect("create interrupted reader");
-        let mut interrupted = finish_output_reader(interrupted, "stdout", Duration::from_secs(1), CONTAINED_BOUNDARY);
-        assert_eq!(output_bytes(&mut interrupted.output), b"after interrupt");
-        assert!(interrupted.failure.is_none());
-
-        let (completion_sender, completion) = mpsc::channel();
-        let sealed_timeout = OutputReader {
-            thread: thread::spawn(|| {}),
-            completion,
-            output: Arc::new(Mutex::new(CapturedOutput::empty())),
-            retaining: Arc::new(AtomicBool::new(true)),
-            reported: None,
-            failure_claimed: false,
-        };
-        let sealed_timeout = finish_output_reader(sealed_timeout, "stdout", Duration::ZERO, CONTAINED_BOUNDARY);
-        drop(completion_sender);
-        assert!(
-            sealed_timeout
-                .failure
-                .as_deref()
-                .is_some_and(|failure| failure.contains("contained process tree"))
-        );
-
-        let (completion_sender, completion) = mpsc::channel::<ReaderCompletion>();
-        drop(completion_sender);
-        let disconnected = OutputReader {
-            thread: thread::spawn(|| {}),
-            completion,
-            output: Arc::new(Mutex::new(CapturedOutput::empty())),
-            retaining: Arc::new(AtomicBool::new(true)),
-            reported: None,
-            failure_claimed: false,
-        };
-        let disconnected = finish_output_reader(disconnected, "stderr", Duration::from_secs(1), ORDINARY_BOUNDARY);
-        assert!(
-            disconnected
-                .failure
-                .as_deref()
-                .is_some_and(|failure| failure.contains("without reporting completion"))
-        );
-
-        for completion_result in [
-            ReaderCompletion::Finished(Ok(())),
-            ReaderCompletion::Finished(Err(io::Error::other("read failed"))),
-        ] {
-            let (completion_sender, completion) = mpsc::channel();
-            completion_sender
-                .send(completion_result)
-                .expect("the synthetic reader completion receiver is alive");
-            let poisoned = OutputReader {
-                thread: thread::spawn(|| {}),
-                completion,
-                output: poisoned_buffer(),
-                retaining: Arc::new(AtomicBool::new(true)),
-                reported: None,
-                failure_claimed: false,
-            };
-            let mut poisoned = finish_output_reader(poisoned, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
-            assert_eq!(output_bytes(&mut poisoned.output), b"poisoned bytes");
-            assert!(
-                poisoned
-                    .failure
-                    .as_deref()
-                    .is_some_and(|failure| failure.contains("capture buffer was poisoned"))
-            );
-        }
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "creates a named system-temporary spill file")]
-    fn output_spills_after_threshold_and_cleans_up_with_its_outcome() {
+    fn output_spills_after_the_memory_limit_and_cleans_up_by_raii() {
         let named = tempfile::NamedTempFile::new().expect("create named spill file");
         let path = named.path().to_path_buf();
         let mut named = Some(named);
         let reader = spawn_output_reader_with(
             ChunkedReader {
-                chunks: VecDeque::from([b"abcd".to_vec(), b"efgh".to_vec()]),
+                chunks: VecDeque::from([b"abcd".to_vec(), b"efgh".to_vec(), b"ijkl".to_vec()]),
             },
-            "spill-threshold-reader",
+            "spill-reader",
             4,
-            Box::new(move || Ok(Box::new(named.take().expect("the capture creates at most one spill file")) as Box<dyn SpillFile>)),
+            Box::new(move || Ok(Box::new(named.take().expect("capture creates one spill")) as Box<dyn SpillFile>)),
         )
-        .expect("create threshold reader");
-        let mut captured = finish_output_reader(reader, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
-
+        .expect("spawn spill reader");
+        let mut captured = finish_output_reader(reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY);
         assert!(captured.output.is_spilled());
-        assert!(path.exists(), "the spill must live while its outcome owns it");
-        assert_eq!(output_bytes(&mut captured.output), b"abcdefgh");
-
+        assert_eq!(output_bytes(&mut captured.output), b"abcdefghijkl");
+        assert!(path.exists());
         drop(captured);
-        assert!(!path.exists(), "dropping the outcome must remove its spill file");
+        assert!(!path.exists());
     }
 
     #[test]
-    fn spill_create_and_write_failures_preserve_memory_and_become_infrastructure_failures() {
-        for (factory, expected) in [
-            (
-                Box::new(|| Err(io::Error::other("injected spill create failure"))) as super::SpillFactory,
-                "injected spill create failure",
-            ),
-            (
-                Box::new(|| {
-                    Ok(Box::new(FaultySpill {
-                        cursor: io::Cursor::new(Vec::new()),
-                        fail_write: true,
-                        fail_read: false,
-                    }) as Box<dyn SpillFile>)
-                }) as super::SpillFactory,
-                "injected spill write failure",
-            ),
-        ] {
-            let reader = spawn_output_reader_with(
-                ChunkedReader {
-                    chunks: VecDeque::from([b"abc".to_vec(), b"def".to_vec()]),
-                },
-                "failing-spill-reader",
-                4,
-                factory,
-            )
-            .expect("create failing spill reader");
-            let mut captured_stream = finish_output_reader(reader, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
-            assert_eq!(output_bytes(&mut captured_stream.output), b"abc");
-            let outcome = combine_captured_output(captured_stream, captured(b"", None), InvocationResult::Exited(successful_status()));
+    fn output_at_the_memory_limit_does_not_create_a_spill() {
+        let mut output = CapturedOutput::empty();
+        let mut spill_factory: super::SpillFactory = Box::new(|| panic!("output at the limit must stay in memory"));
 
-            assert!(infrastructure_message(outcome).contains(expected));
-        }
+        output.append(b"abcd", 4, &mut spill_factory).expect("in-memory append succeeds");
+
+        assert!(!output.is_spilled());
+        assert_eq!(output_bytes(&mut output), b"abcd");
     }
 
     #[test]
-    fn spill_read_failure_becomes_an_infrastructure_failure_during_emission() {
+    fn spill_failures_become_infrastructure_failures() {
         let reader = spawn_output_reader_with(
-            io::Cursor::new(b"abcdefgh".to_vec()),
-            "read-failing-spill",
+            ChunkedReader {
+                chunks: VecDeque::from([b"abc".to_vec(), b"def".to_vec()]),
+            },
+            "write-failing-spill",
             4,
             Box::new(|| {
                 Ok(Box::new(FaultySpill {
                     cursor: io::Cursor::new(Vec::new()),
-                    fail_write: false,
-                    fail_read: true,
+                    fail_write: true,
+                    fail_read: false,
                 }) as Box<dyn SpillFile>)
             }),
         )
-        .expect("create read-failing spill reader");
-        let captured_stream = finish_output_reader(reader, "stdout", Duration::from_secs(1), ORDINARY_BOUNDARY);
-        assert!(captured_stream.output.is_spilled());
-        let mut outcome = combine_captured_output(captured_stream, captured(b"", None), InvocationResult::Exited(successful_status()));
+        .expect("spawn write-failing reader");
+        let captured_stream = finish_output_reader(reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY);
+        let outcome = combine_captured_output(captured_stream, captured(b"", None), InvocationResult::Exited(successful_status()));
+        assert!(infrastructure_message(outcome).contains("injected spill write failure"));
 
-        emit_buffered(&invocation(&["probe"]), &mut outcome).expect("destination output remains writable");
-
-        assert!(infrastructure_message(outcome).contains("injected spill read failure"));
-    }
-
-    #[test]
-    fn stderr_spill_read_and_destination_write_failures_are_reported() {
-        let read_failing_spill = || {
-            CapturedOutput::Spill(Box::new(FaultySpill {
+        let mut outcome = BufferedOutcome {
+            stdout: CapturedOutput::Spill(Box::new(FaultySpill {
                 cursor: io::Cursor::new(Vec::new()),
                 fail_write: false,
                 fail_read: true,
-            }))
-        };
-        let mut outcome = BufferedOutcome {
-            stdout: CapturedOutput::empty(),
-            stderr: read_failing_spill(),
+            })),
+            stderr: CapturedOutput::empty(),
             result: InvocationResult::Exited(successful_status()),
         };
         emit_buffered_to(&invocation(&["probe"]), &mut outcome, &mut Vec::new(), &mut Vec::new()).expect("destinations remain writable");
-        assert!(infrastructure_message(outcome).contains("failed to read spilled child stderr"));
+        assert!(infrastructure_message(outcome).contains("injected spill read failure"));
 
-        let mut stdout_failure = BufferedOutcome {
+        let mut stderr_outcome = BufferedOutcome {
+            stdout: CapturedOutput::empty(),
+            stderr: CapturedOutput::Spill(Box::new(FaultySpill {
+                cursor: io::Cursor::new(Vec::new()),
+                fail_write: false,
+                fail_read: true,
+            })),
+            result: InvocationResult::Exited(successful_status()),
+        };
+        emit_buffered_to(&invocation(&["probe"]), &mut stderr_outcome, &mut Vec::new(), &mut Vec::new())
+            .expect("destinations remain writable");
+        assert!(infrastructure_message(stderr_outcome).contains("injected spill read failure"));
+    }
+
+    #[test]
+    fn capture_and_emission_preserve_all_failure_context() {
+        for (stdout, stderr, expected) in [
+            (captured(b"out", Some("stdout failed")), captured(b"err", None), "stdout failed"),
+            (captured(b"out", None), captured(b"err", Some("stderr failed")), "stderr failed"),
+            (
+                captured(b"out", Some("stdout failed")),
+                captured(b"err", Some("stderr failed")),
+                "stdout failed; stderr failed",
+            ),
+        ] {
+            let outcome = combine_captured_output(stdout, stderr, InvocationResult::Exited(successful_status()));
+            assert_eq!(infrastructure_message(outcome), expected);
+        }
+
+        let mut outcome = BufferedOutcome {
             stdout: CapturedOutput::Memory(b"stdout".to_vec()),
             stderr: CapturedOutput::empty(),
             result: InvocationResult::Exited(successful_status()),
         };
-        let error = emit_buffered_to(&invocation(&["probe"]), &mut stdout_failure, &mut FailingWriter, &mut Vec::new())
-            .expect_err("stdout destination failure must propagate");
+        let error = emit_buffered_to(&invocation(&["probe"]), &mut outcome, &mut FailingWriter, &mut Vec::new())
+            .expect_err("destination failure propagates");
         assert!(error.to_string().contains("injected destination write failure"));
 
         let mut stderr_failure = BufferedOutcome {
@@ -2805,249 +2082,196 @@ mod tests {
             result: InvocationResult::Exited(successful_status()),
         };
         let error = emit_buffered_to(&invocation(&["probe"]), &mut stderr_failure, &mut Vec::new(), &mut FailingWriter)
-            .expect_err("stderr destination failure must propagate");
+            .expect_err("stderr destination failure propagates");
         assert!(error.to_string().contains("injected destination write failure"));
 
-        for (result, diagnostic) in [
-            (InvocationResult::TimedOut(Duration::from_millis(250)), "timed out after 250ms"),
-            (
-                InvocationResult::Infrastructure("capture infrastructure failed".to_owned()),
-                "capture infrastructure failed",
-            ),
+        for result in [
+            InvocationResult::TimedOut(Duration::from_millis(10)),
+            InvocationResult::Infrastructure("infrastructure".to_owned()),
         ] {
-            let mut outcome = BufferedOutcome {
+            let mut diagnostic = BufferedOutcome {
                 stdout: CapturedOutput::empty(),
                 stderr: CapturedOutput::empty(),
                 result,
             };
             let mut stderr = Vec::new();
-            emit_buffered_to(&invocation(&["probe"]), &mut outcome, &mut Vec::new(), &mut stderr)
-                .expect("memory destinations remain writable");
-            assert!(String::from_utf8(stderr).expect("diagnostics are UTF-8").contains(diagnostic));
+            emit_buffered_to(&invocation(&["probe"]), &mut diagnostic, &mut Vec::new(), &mut stderr).expect("memory output succeeds");
+            assert!(!stderr.is_empty());
         }
     }
 
     #[test]
-    fn reader_setup_failure_preserves_cleanup_and_reader_errors() {
-        let successful_reader =
-            spawn_output_reader(io::Cursor::new(b"partial".to_vec()), "successful-reader").expect("create successful reader");
+    fn infrastructure_failure_merging_preserves_primary_context() {
+        assert!(matches!(
+            add_infrastructure_failure(InvocationResult::Exited(successful_status()), String::new()),
+            InvocationResult::Exited(status) if status.success()
+        ));
+        assert_eq!(
+            result_infrastructure_message(add_infrastructure_failure(
+                InvocationResult::TimedOut(Duration::from_millis(10)),
+                "drain failed".to_owned(),
+            )),
+            "invocation timed out after 10ms; drain failed"
+        );
+        assert_eq!(
+            result_infrastructure_message(add_infrastructure_failure(
+                InvocationResult::Infrastructure("wait failed".to_owned()),
+                "drain failed".to_owned(),
+            )),
+            "wait failed; drain failed"
+        );
+    }
+
+    #[test]
+    fn reader_setup_failure_keeps_partial_output_and_cleanup_context() {
+        let reader = spawn_output_reader(io::Cursor::new(b"partial".to_vec()), "partial-reader").expect("spawn partial reader");
         let mut outcome = BufferedOutcome::from_reader_failure(
             "stderr unavailable".to_owned(),
-            successful_reader,
-            &Ok::<_, io::Error>(()),
-            ORDINARY_BOUNDARY,
+            reader,
+            &Err::<(), _>(io::Error::other("cleanup failed")),
         );
         assert_eq!(output_bytes(&mut outcome.stdout), b"partial");
-        assert_eq!(infrastructure_message(outcome), "stderr unavailable");
-
-        let failing_reader = spawn_output_reader(FailingReader, "failing-reader").expect("create failing reader");
-        let outcome = BufferedOutcome::from_reader_failure(
-            "stderr unavailable".to_owned(),
-            failing_reader,
-            &Err::<(), _>(io::Error::other("cleanup failed")),
-            ORDINARY_BOUNDARY,
-        );
         let message = infrastructure_message(outcome);
         assert!(message.contains("stderr unavailable"));
         assert!(message.contains("cleanup failed"));
+    }
 
-        let failing_reader = spawn_output_reader(FailingReader, "failing-reader").expect("create failing reader");
-        let outcome = BufferedOutcome::from_reader_failure(
-            "stderr unavailable".to_owned(),
-            failing_reader,
-            &Ok::<_, io::Error>(()),
-            ORDINARY_BOUNDARY,
+    #[test]
+    fn reader_state_reports_disconnection_and_never_repeats_a_failure() {
+        let (sender, completion) = mpsc::channel::<ReaderCompletion>();
+        drop(sender);
+        let mut reader = OutputReader {
+            thread: thread::spawn(|| {}),
+            completion,
+            output: Arc::new(Mutex::new(CapturedOutput::empty())),
+            retaining: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            reported: None,
+            failure_claimed: false,
+        };
+        assert!(
+            reader
+                .take_failure("stdout")
+                .is_some_and(|failure| failure.contains("without reporting completion"))
         );
-        assert!(infrastructure_message(outcome).contains("injected read failure"));
+        assert!(reader.take_failure("stdout").is_none());
+        assert!(
+            finish_output_reader(reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY)
+                .failure
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn detached_output_recovery_uses_only_nonblocking_mutex_acquisition() {
+        let output = Arc::new(Mutex::new(CapturedOutput::Memory(b"partial".to_vec())));
+        let held = output.lock().expect("the fresh capture mutex is available");
+        let mut failure = None;
+        let mut captured = take_reader_output(&output, "stdout", false, &mut failure);
+        assert!(output_bytes(&mut captured).is_empty());
+        assert!(failure.is_some_and(|message| message.contains("partial output could not be recovered")));
+        drop(held);
+    }
+
+    #[test]
+    fn poisoned_capture_buffers_are_recovered_in_joined_and_detached_modes() {
+        fn poisoned_output() -> Arc<Mutex<CapturedOutput>> {
+            let output = Arc::new(Mutex::new(CapturedOutput::Memory(b"poisoned".to_vec())));
+            let poisoned = Arc::clone(&output);
+            let _panic = thread::spawn(move || {
+                let _guard = poisoned.lock().expect("the fresh mutex is available");
+                panic!("poison output");
+            })
+            .join();
+            output
+        }
+
+        for thread_finished in [true, false] {
+            let output = poisoned_output();
+            let mut failure = None;
+            let mut captured = take_reader_output(&output, "stdout", thread_finished, &mut failure);
+            assert_eq!(output_bytes(&mut captured), b"poisoned");
+            assert!(failure.is_some_and(|message| message.contains("capture buffer was poisoned")));
+        }
+    }
+
+    #[test]
+    fn worker_panics_and_disconnects_become_infrastructure_outcomes() {
+        let plan = Plan {
+            invocations: vec![Invocation {
+                label: Some("panic-probe".to_owned()),
+                argv: vec![WORKER_PANIC_TEST_PROGRAM.to_owned()],
+                work_dir: None,
+            }],
+        };
+        let code = execute_parallel(&plan, false, NonZeroUsize::new(2).expect("literal two is nonzero"), None)
+            .expect("worker panic is represented as an outcome");
+        assert_eq!(code, ExitCode::from(2));
+
+        let (sender, receiver) = mpsc::channel::<BufferedOutcome>();
+        drop(sender);
+        let outcome = wait_for_worker(&mut vec![RunningWorker {
+            index: 4,
+            receiver,
+            thread: thread::spawn(|| {}),
+        }])
+        .expect("disconnection is observable");
+        assert_eq!(outcome.index, 4);
+        assert!(result_infrastructure_message(outcome.outcome.result).contains("without reporting"));
+
+        let (sender, receiver) = mpsc::channel();
+        let outcome = wait_for_worker(&mut vec![RunningWorker {
+            index: 5,
+            receiver,
+            thread: thread::spawn(move || {
+                sender
+                    .send(BufferedOutcome::infrastructure("premature".to_owned()))
+                    .expect("the receiver remains alive");
+                panic!("panic after report");
+            }),
+        }])
+        .expect("reported panic is observable");
+        assert!(result_infrastructure_message(outcome.outcome.result).contains("panic after report"));
+
+        let (sender, receiver) = mpsc::channel::<BufferedOutcome>();
+        drop(sender);
+        let outcome = wait_for_worker(&mut vec![RunningWorker {
+            index: 6,
+            receiver,
+            thread: thread::spawn(|| panic!("panic before report")),
+        }])
+        .expect("unreported panic is observable");
+        assert!(result_infrastructure_message(outcome.outcome.result).contains("panic before report"));
+    }
+
+    #[test]
+    fn worker_spawn_errors_are_local_and_scheduler_visible() {
+        let error =
+            spawn_worker(0, invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), None).expect_err("the local seam rejects only its sentinel");
+        assert!(error.to_string().contains("injected worker spawn failure"));
+
+        let worker = spawn_worker(1, invocation(&["rustc", "--version"]), None).expect("ordinary program launches");
+        let outcome = wait_for_worker(&mut vec![worker]).expect("ordinary worker reports");
+        assert_eq!(outcome.index, 1);
+        assert!(!outcome.outcome.result.failed());
+    }
+
+    #[test]
+    fn helper_diagnostics_preserve_cleanup_and_reaper_context() {
+        assert_eq!(with_cleanup_failure("primary".to_owned(), &Ok::<_, io::Error>(())), "primary");
+        assert_eq!(
+            with_cleanup_failure("primary".to_owned(), &Err::<(), _>(io::Error::other("cleanup"))),
+            "primary; process-group cleanup also failed: cleanup"
+        );
+        assert!(with_reaper_handoff("deadline", &Ok(())).contains("detached reaper"));
+        assert!(with_reaper_handoff("deadline", &Err(io::Error::other("thread unavailable"))).contains("thread unavailable"));
+        assert_eq!(panic_description(&"borrowed panic"), "borrowed panic");
+        assert_eq!(panic_description(&"owned panic".to_owned()), "owned panic");
+        assert_eq!(panic_description(&7_u8), "non-string panic payload");
     }
 
     #[test]
     fn tree_outcome_retains_the_invocation_result() {
         let outcome = TreeOutcome::new(InvocationResult::Infrastructure("outcome".to_owned()));
-        assert_eq!(
-            infrastructure_message(BufferedOutcome {
-                stdout: CapturedOutput::empty(),
-                stderr: CapturedOutput::empty(),
-                result: outcome.result,
-            }),
-            "outcome"
-        );
-    }
-
-    #[test]
-    fn process_waiting_classifies_observation_and_cleanup_failures() {
-        let mut cleaned = FakeProcess {
-            observations: VecDeque::from([Err(io::Error::other("observe failed"))]),
-            termination: Some(Ok(successful_status())),
-        };
-        let outcome = wait_for_tree_with(&mut cleaned, Duration::from_secs(1), FakeProcess::observe, FakeProcess::terminate);
-        assert!(result_infrastructure_message(outcome.result).contains("observe failed"));
-
-        let mut uncleaned = FakeProcess {
-            observations: VecDeque::from([Err(io::Error::other("observe failed"))]),
-            termination: Some(Err(io::Error::other("cleanup failed"))),
-        };
-        let outcome = wait_for_tree_without_timeout_with(&mut uncleaned, FakeProcess::observe, FakeProcess::terminate);
-        let message = result_infrastructure_message(outcome.result);
-        assert!(message.contains("observe failed"));
-        assert!(message.contains("cleanup failed"));
-
-        let mut timed_uncleaned = FakeProcess {
-            observations: VecDeque::from([Err(io::Error::other("timed observe failed"))]),
-            termination: Some(Err(io::Error::other("timed cleanup failed"))),
-        };
-        let outcome = wait_for_tree_with(
-            &mut timed_uncleaned,
-            Duration::from_secs(1),
-            FakeProcess::observe,
-            FakeProcess::terminate,
-        );
-        let message = result_infrastructure_message(outcome.result);
-        assert!(message.contains("timed observe failed"));
-        assert!(message.contains("timed cleanup failed"));
-
-        let mut untimed_cleaned = FakeProcess {
-            observations: VecDeque::from([Err(io::Error::other("untimed observe failed"))]),
-            termination: Some(Ok(successful_status())),
-        };
-        let outcome = wait_for_tree_without_timeout_with(&mut untimed_cleaned, FakeProcess::observe, FakeProcess::terminate);
-        assert!(result_infrastructure_message(outcome.result).contains("untimed observe failed"));
-
-        let mut completed = FakeProcess {
-            observations: VecDeque::from([Ok(None), Ok(Some(successful_status()))]),
-            termination: None,
-        };
-        let outcome = wait_for_tree_without_timeout_with(&mut completed, FakeProcess::observe, FakeProcess::terminate);
-        let InvocationResult::Exited(status) = outcome.result else {
-            panic!("untimed waiting must return the completed status");
-        };
-        assert!(status.success());
-    }
-
-    #[test]
-    fn timed_process_waiting_covers_completion_and_failed_termination() {
-        let mut completed = FakeProcess {
-            observations: VecDeque::from([Ok(Some(successful_status()))]),
-            termination: None,
-        };
-        let outcome = wait_for_tree_with(&mut completed, Duration::from_secs(1), FakeProcess::observe, FakeProcess::terminate);
-        let InvocationResult::Exited(status) = outcome.result else {
-            panic!("a completed process must retain its exit status");
-        };
-        assert!(status.success());
-
-        let mut timed_out = FakeProcess {
-            observations: VecDeque::from([Ok(None)]),
-            termination: Some(Ok(successful_status())),
-        };
-        let outcome = wait_for_tree_with(&mut timed_out, Duration::ZERO, FakeProcess::observe, FakeProcess::terminate);
-        assert!(matches!(outcome.result, InvocationResult::TimedOut(duration) if duration.is_zero()));
-
-        let mut uncleaned = FakeProcess {
-            observations: VecDeque::from([Ok(None)]),
-            termination: Some(Err(io::Error::other("termination failed"))),
-        };
-        let outcome = wait_for_tree_with(&mut uncleaned, Duration::ZERO, FakeProcess::observe, FakeProcess::terminate);
-        assert!(result_infrastructure_message(outcome.result).contains("termination failed"));
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns a contained child process")]
-    fn process_tree_control_delegates_real_observation_and_termination() {
-        let mut command = Command::new("rustc");
-        let _ = command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
-        let mut tree = spawn_tree(command).expect("spawn contained rustc probe");
-        let outcome = wait_for_tree(&mut tree, Duration::from_secs(2));
-        let InvocationResult::Exited(status) = outcome.result else {
-            panic!("the contained rustc probe must exit before its deadline");
-        };
-        assert!(status.success());
-
-        let mut tree = spawn_tree(sleeping_test_command()).expect("spawn contained sleep probe");
-        let outcome = wait_for_tree(&mut tree, Duration::ZERO);
-        assert!(matches!(outcome.result, InvocationResult::TimedOut(duration) if duration.is_zero()));
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns and captures a contained child process")]
-    fn captured_contained_process_delegates_pipes_and_waiting() {
-        let mut outcome = run_captured_with_spawner(&invocation(&["rustc", "--version"]), Some(Duration::from_secs(2)), |command| {
-            spawn_tree(command).map(CapturedProcess::Contained)
-        });
-        let InvocationResult::Exited(status) = outcome.result else {
-            panic!("the captured contained rustc probe must exit");
-        };
-        assert!(status.success());
-        assert!(
-            String::from_utf8(output_bytes(&mut outcome.stdout))
-                .expect("rustc output is UTF-8")
-                .contains("rustc")
-        );
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns ordinary and contained child processes")]
-    fn captured_runner_reports_stream_setup_failures() {
-        for (label, expected) in [
-            ("__cargo_each_missing_stdout", "failed to capture child stdout"),
-            ("__cargo_each_stdout_reader_failure", "injected stdout reader failure"),
-            ("__cargo_each_missing_stderr", "failed to capture child stderr"),
-            ("__cargo_each_stderr_reader_failure", "injected stderr reader failure"),
-            ("__cargo_each_wait_failure", "injected child wait failure"),
-        ] {
-            let outcome = run_captured(&labelled_invocation(label, &["rustc", "--version"]), None);
-            assert!(infrastructure_message(outcome).contains(expected), "{label}");
-        }
-
-        for (label, expected) in [
-            ("__cargo_each_missing_stdout", "failed to capture child stdout"),
-            ("__cargo_each_stdout_reader_failure", "injected stdout reader failure"),
-            ("__cargo_each_missing_stderr", "failed to capture child stderr"),
-            ("__cargo_each_stderr_reader_failure", "injected stderr reader failure"),
-        ] {
-            let outcome = run_captured_with_spawner(
-                &labelled_invocation(label, &["rustc", "--version"]),
-                Some(Duration::from_secs(1)),
-                spawn_ordinary_capture,
-            );
-            assert!(infrastructure_message(outcome).contains(expected), "contained {label}");
-        }
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "spawns ordinary and contained child processes")]
-    fn captured_process_rejects_mismatched_timeout_modes() {
-        let mut ordinary_command = Command::new("rustc");
-        let _ = ordinary_command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
-        let mut ordinary = CapturedProcess::Ordinary(Some(ordinary_command.spawn().expect("spawn ordinary rustc")));
-        let mut stdout = spawn_output_reader(io::empty(), "ordinary-empty-stdout").expect("spawn empty stdout reader");
-        let mut stderr = spawn_output_reader(io::empty(), "ordinary-empty-stderr").expect("spawn empty stderr reader");
-        assert_eq!(ordinary.drain_boundary(), "ordinary process tree");
-        assert!(
-            result_infrastructure_message(ordinary.wait(Some(Duration::from_secs(1)), None, &mut stdout, &mut stderr).result)
-                .contains("did not match timeout configuration")
-        );
-        let first_wait = ordinary.wait(None, None, &mut stdout, &mut stderr);
-        let InvocationResult::Exited(status) = first_wait.result else {
-            panic!("the ordinary child must be reaped by the matching wait mode");
-        };
-        assert!(status.success());
-        assert!(
-            result_infrastructure_message(ordinary.wait(None, None, &mut stdout, &mut stderr).result)
-                .contains("already reaped or detached")
-        );
-
-        let mut contained = CapturedProcess::Contained(spawn_tree(sleeping_test_command()).expect("spawn contained sleep probe"));
-        assert_eq!(contained.drain_boundary(), "contained process tree");
-        assert!(
-            result_infrastructure_message(contained.wait(None, None, &mut stdout, &mut stderr).result)
-                .contains("did not match timeout configuration")
-        );
-        let outcome = contained.wait(Some(Duration::ZERO), None, &mut stdout, &mut stderr);
-        assert!(matches!(outcome.result, InvocationResult::TimedOut(duration) if duration.is_zero()));
-        assert!(
-            contained.terminate_bounded().is_err(),
-            "a fabricated successful second termination must not be accepted"
-        );
+        assert_eq!(result_infrastructure_message(outcome.result), "outcome");
     }
 }

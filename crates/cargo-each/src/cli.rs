@@ -101,10 +101,9 @@ pub(crate) struct EachArgs {
     #[arg(long, default_value_t = NonZeroUsize::MIN, value_name = "N|auto", value_parser = parse_jobs)]
     pub(crate) jobs: NonZeroUsize,
 
-    /// Terminate each invocation and its process tree after this duration.
-    /// Requires sealed process-tree containment; unsupported hosts fail before
-    /// starting the child. Accepts a positive integer followed by `ms`, `s`,
-    /// or `m`.
+    /// Terminate each invocation's Windows job or Unix process group after this
+    /// duration. Unix descendants can escape by starting a new session. Accepts
+    /// a positive integer followed by `ms`, `s`, or `m`.
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     pub(crate) timeout: Option<Duration>,
 

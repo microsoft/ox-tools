@@ -250,8 +250,8 @@ filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 | `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
 | `--target-required-feature <FEATURE>` | In per-target mode, retain targets whose `required-features` contains `FEATURE`. Repeatable; values are AND-combined. Requires `--each-target`. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
-| `--jobs <N\|auto>` | Run at most the positive integer `N` per-package or per-target commands concurrently. When omitted, the default is exactly `1`. `auto` resolves once during CLI parsing via `std::thread::available_parallelism()`; detection failure is an explicit usage error with no fallback. The effective worker count remains capped by the plan size and scheduler capacity. With `--once`, resolved values other than `1` are a usage error. |
-| `--timeout <DURATION>` | Terminate an invocation and its child process tree when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. Requires sealed process-tree containment; unsupported hosts fail before the child starts. No timeout by default. |
+| `--jobs <N\|auto>` | Run at most the positive integer `N` per-package or per-target commands concurrently. When omitted, the default is exactly `1`. `auto` resolves once during CLI parsing via `std::thread::available_parallelism()`; detection failure is an explicit usage error with no fallback. The effective worker count remains capped by the plan size. With `--once`, resolved values other than `1` are a usage error. |
+| `--timeout <DURATION>` | Terminate an invocation's Windows job object or Unix process group when it exceeds the positive duration, such as `30s` or `2m`. Applies independently to every invocation, including `--once`. Unix descendants can escape by starting a new session, so termination is best-effort for those escaped descendants. No timeout by default. |
 | `--chdir` | Run each per-package or per-target command from that member's crate root (the directory containing its `Cargo.toml`) instead of the caller's CWD. Combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
 | `--manifest-path <PATH>` | Workspace root `Cargo.toml`. Defaults to auto-detection from CWD. |
 | `--dry-run` | Print the fully-substituted commands that *would* run, one per line, without executing. |
@@ -314,13 +314,13 @@ no-op.
   invocation. A positive integer requests that fixed limit; `auto` resolves
   exactly once during CLI parsing to the machine's available parallelism and
   fails explicitly if detection is unavailable. The scheduler caps every
-  request by the plan size and its process capacity. With an effective job
+  request by the plan size. With an effective job
   count above one, output from each invocation is buffered and emitted as one
   block in deterministic plan order. Fail-fast stops launching new work after
   the first observed failure and waits for already-running children;
   `--keep-going` launches the complete plan. The final failure is chosen by
   plan order, not scheduler timing. Requested parallelism does not by itself
-  select this captured mode: when plan-size or process-capacity capping leaves
+  select this captured mode: when plan-size capping leaves
   an effective worker count of one, cargo-each uses the sequential path and the
   child inherits standard input, output, and error. With a genuinely parallel
   effective worker count, child standard input is disconnected (`null`) so
@@ -331,48 +331,40 @@ no-op.
   leaving the scheduler blocked forever. A worker-thread launch failure is
   represented as an infrastructure outcome at that invocation's plan index,
   so output already collected from earlier invocations is still emitted.
-  Without `--timeout`, parallel commands use the ordinary direct-child
-  lifecycle:
-  cargo-each waits for the launched leader but does not contain or kill
-  background descendants. Buffering is memory-bounded per stream: after 1 MiB,
+  Without `--timeout`, parallel commands are still launched in a Windows job
+  or Unix process group, but cargo-each observes only the launched leader and
+  does not kill background descendants. Buffering is memory-bounded per stream:
+  after 1 MiB,
   output spills to a unique file in the system temporary directory. The
   invocation outcome owns that file through deterministic plan-order emission,
   so every success, failure, and panic path removes it through RAII. Spill
   creation, write, seek, or read failures are infrastructure failures; output
   is never intentionally truncated on a successful path.
-- **Failed ordinary-child handoffs preserve ownership.** Captured parallel
-  children are preflighted against the detached reaper before spawn. If a later
-  bounded cleanup still cannot hand a live ordinary child to that reaper,
-  cargo-each explicitly recovers both the error and `Child` from
-  `ReapFailure`, transfers the handle to the process-wide retry queue, and
-  reports the infrastructure failure. The retry queue is drained by the live
-  reaper or its next successful restart; neither the cleanup return nor a local
-  Drop path performs an unbounded wait.
 - **Output capture and drain are bounded.** Reader failures are observed while
   the leader is still running; cargo-each terminates the invocation and reports
   the infrastructure failure instead of waiting indefinitely with an
   unconsumed pipe. After leader completion, readers get one second to observe
   EOF. Complete output is preserved when both pipes close within that grace.
   If a background or escaped descendant keeps a pipe open, capture stops
-  retaining new bytes, cancels and joins the readiness-polling reader within a
-  bounded grace, emits the partial bytes already buffered when their capture
-  mutex is immediately available, and reports an explicit infrastructure
-  failure rather than hanging, silently succeeding, or accumulating detached
-  reader threads. If cancellation expires while a reader is stalled inside a
-  spill operation with that mutex held, cargo-each detaches the reader and uses
-  a nonblocking acquisition; unavailable partial bytes are reported explicitly
-  instead of defeating the drain bound.
-- **Timeouts terminate trees.** A timed-out command is a failure. cargo-each
-  terminates the child process tree rather than only the immediate process, so
-  compiler or test descendants cannot continue mutating the target directory
-  after cargo-each returns. Termination gets a bounded 250 ms grace to reap the
-  leader. If signalling fails and the leader is still running at that deadline,
-  its handle is transferred to a shared detached reaper so neither termination
-  nor Drop can defeat the invocation timeout while the leader still has a
-  wait/reap owner; cargo-each reports the infrastructure failure. A timeout is
-  accepted only when launch preparation reports a sealed cgroup or job
-  boundary. On a host with best-effort process-group containment, cargo-each
-  reports that timeout is unsupported and does not spawn the command.
+  retaining new bytes and gives the reader a bounded join opportunity. A
+  blocking pipe read cannot be forcibly interrupted without platform-specific
+  unsafe code, so a reader that does not finish is detached and may remain
+  until the escaped or background descendant closes the pipe. cargo-each emits
+  partial bytes only when their capture mutex is immediately available and
+  reports an explicit infrastructure failure, including when partial bytes
+  cannot be recovered without blocking. It never blocks on that mutex after
+  detaching a reader.
+- **Timeouts terminate jobs or process groups.** A timed-out command is a
+  failure. `command-group` creates a job object on Windows and a process group
+  on Unix. cargo-each kills that boundary, polls completion with bounded sleeps,
+  and allows 250 ms for the group to finish. If it still has not completed, the
+  `GroupChild` moves to a detached cargo-each-local reaper thread whose
+  blocking wait cannot delay the caller. A failed kill, observation, bounded
+  reap, or reaper-thread launch is an infrastructure failure. Unix process
+  groups are not sealed containment: a descendant can escape by creating a new
+  session, and timeout cleanup is best-effort for such descendants. An escaped
+  descendant can also keep an inherited output pipe open, in which case the
+  bounded drain behavior above applies.
 - **Child executable resolution follows `PATH`.** `cargo-each` explicitly
   copies an inherited `PATH` onto every child command. This is equivalent to
   ordinary inheritance on other platforms and makes Windows resolve a relative
