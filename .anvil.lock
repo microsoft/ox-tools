@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.12.0"
-catalog_checksum = "sha256:4bd4b5329075f104c5830e767c6f79e5eed6c1de72370b9836603488a359bcdb"
+catalog_checksum = "sha256:c1d74799d088a92d84970f41ec399a717872967d7e91bc1077c2ce31a097d1fc"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -141,7 +141,7 @@ checksum = "sha256:bab029c5ca3be78fcea2d6af02763a0e0640722dfe1431a0eaa541801a981
 
 [[file]]
 path = "justfiles/anvil/checks/miri-tree-borrows.just"
-checksum = "sha256:ea3349941fd3cf3811bce48a679490fe466dddafdb6d0955c1f5471155669f79"
+checksum = "sha256:65f7a333394fc9ce48a54c281b6b87b28cc622710fb5c985cdd5292921da490e"
 
 [[file]]
 path = "justfiles/anvil/checks/miri.just"
@@ -309,7 +309,7 @@ checksum = "sha256:f8affd59b69c7083c2f3b6f593c63672116dda974c1e661dcb66a4412eb3e
 [[region]]
 host = "clippy.toml"
 id = "anvil-clippy"
-checksum = "sha256:aba0733632eac4cb54c4768db578fe1f7b7cfe730aa0d7dc13e2828c9062d67d"
+checksum = "sha256:0c37975f24d538358d792626e32d67a043c3a892d076ddf90267ce6757b3245b"
 
 [[region]]
 host = "crates/automation/Cargo.toml"

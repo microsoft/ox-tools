@@ -717,7 +717,7 @@ pub(crate) fn lint_region_placement(region_id: &str, current: Option<&str>) -> O
         .iter()
         .position(|candidate| *candidate == region_id)
         .expect("region membership was established above");
-    for successor in &order[position + 1..] {
+    for successor in order.iter().skip(position).skip(1) {
         if let Ok(Some(region)) = find_region(text, successor, CommentSyntax::Hash) {
             return Some(RegionPlacement::At(region.start_line.start));
         }
@@ -771,7 +771,7 @@ fn adopt_dotted_child_assignments(
     {
         let start = protected
             .iter()
-            .find(|range| range.start <= entry.span.start && entry.span.start < range.end)
+            .find(|range| (range.start..range.end).contains(&entry.span.start))
             .map_or(entry.span.start, |range| range.end);
         let relative_path = &entry.path[1..];
         match managed.values.get(relative_path) {
@@ -792,9 +792,8 @@ fn adopt_dotted_child_assignments(
             }
             None => {
                 let source = &text[start..entry.span.end.min(end)];
-                let Some(bare) = strip_dotted_namespace(source, namespace) else {
-                    return Some(TomlAdoption::Unchanged);
-                };
+                let bare = strip_dotted_namespace(source, namespace)
+                    .expect("the parsed entry starts with the namespace selected by the filter above");
                 residue.push_str(&bare);
             }
         }
@@ -2450,5 +2449,94 @@ mod tests {
             "the region under consideration is left readable:\n{masked}"
         );
         assert!(!masked.contains("yanked = \"deny\""), "the other region is blanked:\n{masked}");
+    }
+
+    #[test]
+    fn legacy_lint_mask_restores_only_a_nonleading_table_header() {
+        let text = "# >>> anvil-managed: anvil-workspace-lints\n\
+                    # old catalog\n\
+                    [workspace.lints]\n\
+                    rust.unsafe_code = \"warn\"\n\
+                    # <<< anvil-managed: anvil-workspace-lints\n";
+        let masked = mask_legacy_lint_region_to_header(text, SYN);
+
+        assert!(
+            masked.contains("[workspace.lints]"),
+            "the parent table remains parseable:\n{masked}"
+        );
+        assert!(!masked.contains("# old catalog"), "other legacy content stays masked:\n{masked}");
+        assert!(!masked.contains("rust.unsafe_code"), "managed assignments stay masked:\n{masked}");
+    }
+
+    #[test]
+    fn legacy_lint_mask_ignores_a_region_without_its_expected_parent_header() {
+        let text = "# >>> anvil-managed: anvil-workspace-lints\n\
+                    [workspace.metadata]\n\
+                    policy = true\n\
+                    # <<< anvil-managed: anvil-workspace-lints\n";
+
+        assert_eq!(mask_legacy_lint_region_to_header(text, SYN), mask_managed_regions(text, SYN));
+    }
+
+    #[test]
+    fn lint_region_placement_uses_the_next_namespace_and_canonical_table_boundary() {
+        let clippy = "# >>> anvil-managed: anvil-workspace-clippy-lints\n\
+                      [workspace.lints.clippy]\n\
+                      # <<< anvil-managed: anvil-workspace-clippy-lints\n";
+        let with_profile = format!("{clippy}\n[profile.release]\nlto = true\n");
+
+        assert_eq!(
+            lint_region_placement("anvil-workspace-rustdoc-lints", Some(&with_profile)),
+            Some(RegionPlacement::At(0)),
+            "rustdoc belongs before the existing Clippy region"
+        );
+        assert_eq!(
+            lint_region_placement("anvil-workspace-clippy-lints", Some(&with_profile)),
+            Some(RegionPlacement::End),
+            "an existing region updates in place"
+        );
+        assert_eq!(
+            lint_region_placement("anvil-workspace-rust-lints", Some("[profile.release]\nlto = true\n")),
+            Some(RegionPlacement::At(0)),
+            "the first lint table precedes Cargo profiles"
+        );
+        assert_eq!(lint_region_placement("unrelated", Some(&with_profile)), None);
+        assert_eq!(
+            lint_region_placement("anvil-rust-lints", None),
+            Some(RegionPlacement::End),
+            "a new host appends its first region"
+        );
+    }
+
+    #[test]
+    fn differing_dotted_child_assignment_is_a_conflict() {
+        let adoption = adopt_unmanaged_toml_tables(
+            "[workspace.lints]\nrust.unsafe_op_in_unsafe_fn = \"deny\"\n",
+            "[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"warn\"\n",
+            SYN,
+        );
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Conflict {
+                table: "workspace.lints".to_owned(),
+                key: "workspace.lints.rust.unsafe_op_in_unsafe_fn".to_owned(),
+                managed: "\"warn\"".to_owned(),
+                hand_written: "\"deny\"".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn dotted_namespace_stripping_preserves_leading_trivia_and_quoted_namespaces() {
+        assert_eq!(
+            strip_dotted_namespace("\n# policy\n  \"rust\".missing_docs = \"warn\"\n", "rust"),
+            Some("\n# policy\n  missing_docs = \"warn\"\n".to_owned())
+        );
+        assert_eq!(
+            strip_dotted_namespace("'rust'.missing_docs = \"warn\"\n", "rust"),
+            Some("missing_docs = \"warn\"\n".to_owned())
+        );
+        assert_eq!(strip_dotted_namespace("clippy.panic = \"warn\"\n", "rust"), None);
     }
 }
