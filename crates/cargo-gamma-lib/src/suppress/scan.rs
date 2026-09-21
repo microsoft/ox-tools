@@ -256,3 +256,38 @@ fn directive_source(body: &str) -> Option<String> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directives_are_sorted_across_attribute_and_comment_channels() {
+        let file = SourceFile::parse(
+            "src/lib.rs",
+            "fn first(a: i32, b: i32) -> i32 {\n    // #[gamma::skip(arith)]\n    a + b\n}\n#[gamma::skip(arith)]\nfn second(a: i32, b: i32) -> i32 { a - b }\n"
+                .to_owned(),
+        )
+        .expect("source parses");
+
+        let found = directives(&file).expect("directives parse");
+        let starts: Vec<usize> = found.iter().map(|directive| directive.scope.start).collect();
+
+        assert_eq!(starts.len(), 2);
+        assert!(starts.windows(2).all(|pair| pair[0] < pair[1]), "{starts:?}");
+    }
+
+    #[test]
+    fn an_unrelated_cfg_attr_entry_does_not_hide_a_later_gamma_directive() {
+        let file = SourceFile::parse(
+            "src/lib.rs",
+            "#[cfg_attr(test, inline, gamma::skip(arith))]\nfn f(a: i32, b: i32) -> i32 { a + b }\n".to_owned(),
+        )
+        .expect("source parses");
+
+        let found = directives_for(&file, &CfgSet::unconditional()).expect("directive parses");
+
+        assert_eq!(found.len(), 1);
+        assert!(found[0].intent.is_some());
+    }
+}

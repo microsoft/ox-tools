@@ -534,7 +534,10 @@ fn merged_tests(reports: &[&(String, Report)]) -> Option<usize> {
     reports
         .iter()
         .map(|(_, report)| report.config.as_ref()?.tests)
-        .try_fold(usize::MAX, |lowest, tests| tests.map(|tests| lowest.min(tests)))
+        .try_fold(None, |lowest, tests| {
+            tests.map(|tests| Some(lowest.map_or(tests, |lowest: usize| lowest.min(tests))))
+        })
+        .flatten()
         .filter(|_| !reports.is_empty())
 }
 
@@ -563,7 +566,7 @@ fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, f
         .map(|(_, report)| report)?;
 
     let mut provenance = MergeProvenance::default();
-    let mut newest = 0;
+    let mut newest = u64::MIN;
 
     let merged_files = files
         .into_iter()
@@ -739,6 +742,35 @@ mod tests {
         assert!(merged.identity_incompatible.is_empty());
         assert_eq!(merged.valid, 2);
         assert_eq!(merged.detected, 1);
+    }
+
+    #[test]
+    fn an_unstamped_report_has_exactly_the_current_identity_version() {
+        let unstamped = fixtures::report();
+
+        assert_eq!(identity_version(&unstamped), MUTANT_ID_VERSION);
+    }
+
+    #[test]
+    fn incompatible_input_names_are_reported_in_stable_order() {
+        let legacy = |id: &str| {
+            let mut report = report(None, 100, vec![mutant(id, 1, "Survived")]);
+            report.config.as_mut().expect("config").mutant_id_version = Some(MUTANT_ID_VERSION - 1);
+            report
+        };
+        let current = report(None, 200, vec![mutant("current", 1, "Killed")]);
+
+        let merged = merge(
+            &[
+                ("zeta".to_owned(), legacy("zeta")),
+                ("current".to_owned(), current),
+                ("alpha".to_owned(), legacy("alpha")),
+            ],
+            300,
+            None,
+        );
+
+        assert_eq!(merged.identity_incompatible, ["alpha", "zeta"]);
     }
 
     #[test]
@@ -932,6 +964,18 @@ mod tests {
         assert_eq!(merged.stale, 1);
         assert_eq!(merged.fresh, 0);
         assert_eq!(merged.valid, 1);
+    }
+
+    #[test]
+    fn a_verdict_exactly_on_the_freshness_boundary_is_still_fresh() {
+        let merged = merge(
+            &[("a".to_owned(), report(None, 100, vec![mutant("aaa", 1, "Survived")]))],
+            200,
+            Some(100),
+        );
+
+        assert_eq!(merged.fresh, 1);
+        assert_eq!(merged.stale, 0);
     }
 
     #[test]
@@ -1256,6 +1300,63 @@ mod tests {
         assert_eq!(config.tests, None);
         assert_eq!(config.not_built, Some(5));
         assert_eq!(config.dropped_test_packages, ["broken", "extra", "later", "slow"]);
+    }
+
+    #[test]
+    fn metadata_aggregation_distinguishes_zero_one_and_maximum_values() {
+        let configured = |tests, not_built| {
+            let mut report = report(None, 0, vec![mutant("id", 1, "Killed")]);
+            let config = report.config.as_mut().expect("config");
+            config.tests = tests;
+            config.not_built = not_built;
+            report
+        };
+        let maximum = configured(Some(usize::MAX), Some(0));
+        let maximum_named = ("maximum".to_owned(), maximum);
+        let maximum_refs = [&maximum_named];
+        assert_eq!(merged_tests(&maximum_refs), Some(usize::MAX));
+        assert_eq!(merged_not_built(&maximum_refs), None);
+
+        let one = configured(Some(1), Some(1));
+        let one_named = ("one".to_owned(), one);
+        let one_refs = [&one_named];
+        assert_eq!(merged_not_built(&one_refs), Some(1));
+    }
+
+    #[test]
+    fn merged_started_at_is_the_newest_source_or_verdict_provenance() {
+        let merged_at = |source_at, verdict_at| {
+            let mut input = report(None, 0, vec![mutant("aaa", 1, "Killed")]);
+            let config = input.config.as_mut().expect("config");
+            let mut provenance = MergeProvenance::default();
+            let _ = provenance.sources.insert(
+                "src/lib.rs".to_owned(),
+                SourceProvenance {
+                    started_at: source_at,
+                    origin: "source".to_owned(),
+                    lineage: String::new(),
+                },
+            );
+            let _ = provenance.verdicts.insert(
+                "aaa".to_owned(),
+                VerdictProvenance {
+                    started_at: verdict_at,
+                    origin: "verdict".to_owned(),
+                    lineage: String::new(),
+                },
+            );
+            config.merge_provenance = Some(provenance);
+
+            merge(&[("input".to_owned(), input)], 400, None)
+                .report
+                .and_then(|report| report.config)
+                .expect("merged config")
+                .started_at
+        };
+
+        assert_eq!(merged_at(300, 200), 300);
+        assert_eq!(merged_at(200, 300), 300);
+        assert_eq!(merged_at(0, 0), 0);
     }
 
     #[test]

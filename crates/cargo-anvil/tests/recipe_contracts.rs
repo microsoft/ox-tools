@@ -2343,6 +2343,54 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
     assert_failed(&failed, "plain nextest failure for an opted-out package");
 }
 
+#[cfg(not(target_arch = "aarch64"))]
+#[test]
+fn coverage_reports_use_requested_package_scope() {
+    if !tools_available() {
+        return;
+    }
+
+    for (scope, expected, include_second_package) in [
+        ("--package measured@0.1.0", "llvm-cov report --package measured@0.1.0 --lcov", true),
+        ("--workspace", "llvm-cov report --workspace --lcov", false),
+    ] {
+        let tmp = fixture(
+            &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
+            &[
+                "anvil-component-nightly-llvm-tools-validate-prereqs",
+                "anvil-tool-cargo-llvm-cov-validate-prereqs",
+                "anvil-tool-cargo-nextest-validate-prereqs",
+                "anvil-tool-cargo-coverage-gate-validate-prereqs",
+                "anvil-component-nightly-llvm-tools-install",
+                "anvil-tool-cargo-llvm-cov-install installer",
+                "anvil-tool-cargo-nextest-install installer",
+                "anvil-tool-cargo-coverage-gate-install installer",
+                "anvil-impact",
+            ],
+        );
+        let log = tmp.path().join("cargo.log");
+        seed_include(tmp.path(), "affected", scope);
+        let mut environment = vec![("FAKE_CARGO_LOG", log.as_os_str())];
+        if include_second_package {
+            environment.push(("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")));
+        }
+        let output = run_just(tmp.path(), &["anvil-llvm-cov"], &environment);
+        assert!(
+            output.status.success(),
+            "coverage path for {scope} should succeed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let calls = fs::read_to_string(&log).unwrap();
+        let reports: Vec<_> = calls.lines().filter(|call| call.contains("llvm-cov report")).collect();
+        assert_eq!(reports.len(), 2, "calls for {scope}:\n{calls}");
+        assert!(
+            reports.iter().all(|call| call.contains(expected)),
+            "coverage reports must match the requested {scope} scope:\n{calls}"
+        );
+    }
+}
+
 #[cfg(all(windows, not(target_arch = "aarch64")))]
 #[test]
 fn windows_coverage_report_retries_error_206_with_response_file() {

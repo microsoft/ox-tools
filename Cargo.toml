@@ -73,6 +73,7 @@ predicates = { version = "3.1.4", default-features = false }
 proc-macro2 = { version = "1.0.107", default-features = false }
 # 0.0.349 includes a parser fixture that crashes CodeQL 2.26.4; retry the bump with a newer CodeQL release.
 ra_ap_syntax = { version = "0.0.331", default-features = false }
+rallocator = { version = "0.1.0", default-features = false }
 reflink-copy = { version = "0.1.30", default-features = false }
 regex = { version = "1.13.1", default-features = false }
 reqwest = { version = "0.13.4", default-features = false }
@@ -89,6 +90,7 @@ rustdoc-types-v55 = { package = "rustdoc-types", version = "0.55.0", default-fea
 rustdoc-types-v56 = { package = "rustdoc-types", version = "0.56.0", default-features = false }
 rustdoc-types-v57 = { package = "rustdoc-types", version = "0.57.4", default-features = false }
 rustsec = { version = "0.33.0", default-features = false }
+saphyr-parser = { version = "0.0.12", default-features = false }
 seatbelt = { version = "0.8.0", default-features = false }
 semver = { version = "1.0.28", default-features = false }
 serde = { version = "1.0.229", default-features = false }
@@ -113,6 +115,7 @@ walkdir = { version = "2.5.0", default-features = false }
 windows = { version = "0.62.2", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }
 wiremock = { version = "0.6.5", default-features = false }
+yaml_serde = { version = "0.10.7", default-features = false }
 zstd = { version = "0.14.0", default-features = false }
 
 # >>> anvil-managed: anvil-workspace-lints

@@ -128,8 +128,12 @@ fn item_count(order: &Order) -> u32 { 0 }
 fn shipping_zone(order: &Order) -> Zone { Zone::Domestic }
 ```
 
-A function returning `impl Trait` gets no mutant, and neither does anything evaluated in a `const` context — both are explained under "What the catalog deliberately omits" in the README. A site that
-gets no mutant, or the wrong one, can [state the value itself](#stating-the-value-yourself).
+A function returning a non-iterator `impl Trait` gets no mutant, and neither does anything evaluated
+in a `const` context — both are explained under
+[What the catalog deliberately omits](#what-the-catalog-deliberately-omits). A site that gets no
+mutant, or the wrong one, can [state the value itself](#stating-the-value-yourself). A function
+returning `impl Iterator` is the exception: the schema wraps original and replacement iterators in
+its shared `Either` type, as described below.
 
 ### `relational`
 
@@ -730,9 +734,11 @@ types, so it is absent — as is dropping a `filter`, which would turn `Filter<I
 `sort` and `dedup` return `()` and work in place, so they are reached by deleting the statement
 instead.
 
-**A function returning `impl Iterator` gets no return-value mutants at all.** An `impl Trait` return
-is a single concrete type chosen by the body, so `Empty<T>`, `Once<T>` and whatever the author
-actually wrote are three different types that cannot be two arms of one `if`.
+**A non-iterator `impl Trait` return gets no return-value mutants.** An `impl Trait` return is a
+single concrete type chosen by the body, so an arbitrary replacement and whatever the author
+actually wrote cannot be two arms of one `if`. `impl Iterator` is the supported exception because
+the schema can wrap both concrete iterator types in `gamma_rt::Either`; the synthesis rules below
+describe the bounds that wrapper preserves.
 
 **The perturbation mutators only fire where the source says the value is a number.** `+ 1` and
 `- 1` need an integer, and without type resolution the only evidence available is what the source

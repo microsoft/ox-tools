@@ -31,7 +31,7 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
     // its normalized text, computed once per span rather than once per candidate — every mutator
     // offered at a site re-derives the same identity component from the same bytes otherwise, and a
     // site with several replacements pays for the normalization as many times as it has mutants.
-    let mut sites: HashMap<core::ops::Range<usize>, (Arc<MutationSite>, Arc<CompactString>)> = HashMap::default();
+    let mut sites: HashMap<core::ops::Range<usize>, (Arc<MutationSite>, CompactString)> = HashMap::default();
 
     let mut definitions = Vec::with_capacity(candidates.len());
 
@@ -49,13 +49,12 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
                     column,
                     original,
                 }),
-                Arc::new(normalized),
+                normalized,
             )
         });
         let site = Arc::clone(site);
-        let normalized = Arc::clone(normalized);
 
-        let key = site_key(&candidate.item_path, candidate.mutator, &normalized);
+        let key = site_key(&candidate.item_path, candidate.mutator, normalized);
         let site_key = (key, candidate.span.clone());
         let index = if let Some(index) = site_occurrences.get(&site_key) {
             *index
@@ -72,7 +71,7 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
                 &file.path,
                 &candidate.item_path,
                 candidate.mutator,
-                &normalized,
+                normalized,
                 SiteIndex::new(index, candidate.replacement_index),
                 (candidate.mutator == "fn_value.err_with").then_some(candidate.replacement.as_str()),
             ),

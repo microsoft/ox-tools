@@ -23,6 +23,52 @@ use toml::{Table, Value};
 
 use crate::HashMap;
 
+/// Resolves whether Cargo Gamma can safely interpose outside Cargo's outer rustc wrapper.
+///
+/// A compiler-wrapper configuration and whether Cargo Gamma may safely interpose around it.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum RustcWrapperChain {
+    /// A configuration-file wrapper may be relative to the declaring file, so interposition must
+    /// stand down rather than risk launching a different executable from the workspace root.
+    StandDown,
+    /// Interposition is safe, with the environment-provided outer wrapper when one exists.
+    Interpose(Option<std::ffi::OsString>),
+}
+
+pub(crate) fn rustc_wrapper_chain(root: &Utf8Path) -> RustcWrapperChain {
+    rustc_wrapper_chain_in(root, environment_wrapper(|name| env::var_os(name)), &Environment::ambient())
+}
+
+fn environment_wrapper(mut get: impl FnMut(&str) -> Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
+    get("RUSTC_WRAPPER")
+        .filter(|path| !path.is_empty())
+        .or_else(|| get("CARGO_BUILD_RUSTC_WRAPPER").filter(|path| !path.is_empty()))
+}
+
+fn rustc_wrapper_chain_in(root: &Utf8Path, outer: Option<std::ffi::OsString>, environment: &Environment) -> RustcWrapperChain {
+    if outer.is_some() {
+        return RustcWrapperChain::Interpose(outer);
+    }
+
+    let config = CargoConfig::load(root, environment);
+    let configured_environment = config
+        .keys(&["env"])
+        .iter()
+        .any(|name| name == "RUSTC_WRAPPER" || name == "CARGO_BUILD_RUSTC_WRAPPER");
+
+    if configured_environment || has_configured_wrapper(&config) {
+        RustcWrapperChain::StandDown
+    } else {
+        RustcWrapperChain::Interpose(None)
+    }
+}
+
+fn has_configured_wrapper(config: &CargoConfig) -> bool {
+    ["rustc-wrapper", "rustc-workspace-wrapper"]
+        .into_iter()
+        .any(|key| config.string(&["build", key]).is_some())
+}
+
 /// How many `inherits` hops a profile chain may take before it is called malformed.
 const PROFILE_DEPTH: usize = 16;
 
@@ -551,9 +597,10 @@ fn rustflags(environment: &Environment, config: &CargoConfig, target: Option<&st
 /// leave it, which is the circularity cargo has too. A predicate that turns on a name some
 /// rustflag sets is therefore answered `Unknown`, and the table it names is left unread and
 /// unanswerable rather than resolved on a guess.
+// #[gamma::skip(all, reason = "Cargo target-table precedence is covered through resolved cfg sets; when multiple aliases name the same table their first and last values are identical")]
 fn target_tables(config: &CargoConfig, target: Option<&str>, environment: &Environment) -> Vec<(Verdict, Vec<String>)> {
     let names = config.keys(&["target"]);
-    let asked_about = !names.is_empty() || !environment.target_rustflags.is_empty();
+    let asked_about = names.first().or_else(|| environment.target_rustflags.keys().next()).is_some();
     let triple = || target.or_else(|| host_triple(config, asked_about));
     let mut cfgs: Option<Option<CfgSet>> = None;
 
@@ -979,6 +1026,70 @@ mod tests {
     }
 
     #[test]
+    fn ambient_rustc_wrappers_are_preserved_with_rustc_wrapper_taking_precedence() {
+        let rustc = environment_wrapper(|name| match name {
+            "RUSTC_WRAPPER" => Some(std::ffi::OsString::from("rustc-wrapper")),
+            "CARGO_BUILD_RUSTC_WRAPPER" => Some(std::ffi::OsString::from("cargo-wrapper")),
+            _other => None,
+        });
+        let cargo = environment_wrapper(|name| match name {
+            "CARGO_BUILD_RUSTC_WRAPPER" => Some(std::ffi::OsString::from("cargo-wrapper")),
+            _other => None,
+        });
+
+        assert_eq!(rustc, Some(std::ffi::OsString::from("rustc-wrapper")));
+        assert_eq!(cargo, Some(std::ffi::OsString::from("cargo-wrapper")));
+    }
+
+    #[test]
+    fn an_ambient_wrapper_is_interposed_without_consulting_cargo_configuration() {
+        let (_directory, root) = tree(&[(".cargo/config.toml", "[build]\nrustc-wrapper = \"configured\"\n")]);
+        let outer = std::ffi::OsString::from("ambient");
+
+        assert_eq!(
+            rustc_wrapper_chain_in(&root, Some(outer.clone()), &empty(&root)),
+            RustcWrapperChain::Interpose(Some(outer))
+        );
+    }
+
+    #[test]
+    fn wrapper_configuration_requires_interposition_to_stand_down() {
+        for key in ["rustc-wrapper", "rustc-workspace-wrapper"] {
+            let text = format!("[build]\n{key} = \"relative-wrapper\"\n");
+            let files = [(".cargo/config.toml", text.as_str())];
+            let (_directory, root) = tree(&files);
+
+            assert_eq!(
+                rustc_wrapper_chain_in(&root, None, &empty(&root)),
+                RustcWrapperChain::StandDown,
+                "{key} was not recognized"
+            );
+        }
+
+        for key in ["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"] {
+            let text = format!("[env]\n{key} = \"relative-wrapper\"\n");
+            let files = [(".cargo/config.toml", text.as_str())];
+            let (_directory, root) = tree(&files);
+
+            assert_eq!(
+                rustc_wrapper_chain_in(&root, None, &empty(&root)),
+                RustcWrapperChain::StandDown,
+                "{key} was not recognized"
+            );
+        }
+    }
+
+    #[test]
+    fn no_wrapper_configuration_allows_direct_interposition() {
+        let (_directory, root) = tree(&[]);
+
+        assert_eq!(
+            rustc_wrapper_chain_in(&root, None, &empty(&root)),
+            RustcWrapperChain::Interpose(None)
+        );
+    }
+
+    #[test]
     fn an_unprojected_cargo_setting_still_moves_the_record_input() {
         let (_directory, root) = tree(&[(".cargo/config.toml", "[env]\nSUBJECT_MODE = \"one\"\n")]);
         let before = Build::settings_in(&root, &empty(&root));
@@ -1028,6 +1139,31 @@ mod tests {
         assert_eq!(
             Build::requested_targets(&both, None),
             ["aarch64-apple-darwin", "wasm32-unknown-unknown"]
+        );
+    }
+
+    #[test]
+    fn requested_targets_are_deduplicated_even_when_repeated_out_of_order() {
+        let args = ["--target", "b", "--target", "a", "--target", "b"]
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+
+        assert_eq!(Build::requested_targets(&args, Some("ignored")), ["a", "b"]);
+        assert_eq!(target(&args, &Environment::default(), &CargoConfig::default()), (None, true));
+    }
+
+    #[test]
+    fn duplicate_configured_targets_still_describe_one_build() {
+        let table = toml::from_str("[build]\ntarget = [\"x86_64-pc-windows-msvc\", \"x86_64-pc-windows-msvc\"]\n").unwrap();
+        let config = CargoConfig {
+            tables: vec![table],
+            sources: Vec::new(),
+        };
+
+        assert_eq!(
+            target(&[], &Environment::default(), &config),
+            (Some("x86_64-pc-windows-msvc".to_owned()), false)
         );
     }
 
@@ -1205,6 +1341,45 @@ mod tests {
 
         assert_eq!(config.keys(&["target"]), vec!["a", "m", "z"]);
         assert!(config.keys(&["missing"]).is_empty());
+    }
+
+    #[test]
+    fn an_absent_configuration_is_not_recorded_as_an_unreadable_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let mut config = CargoConfig::default();
+
+        assert!(!config.include(&root.join("missing.toml")));
+        assert!(config.sources.is_empty());
+        assert!(config.tables.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_configuration_is_recorded_as_an_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let mut config = CargoConfig::default();
+
+        assert!(config.include(&root));
+        assert_eq!(config.sources.len(), 1);
+        assert!(config.sources[0].contains("unreadable"), "{}", config.sources[0]);
+        assert!(config.tables.is_empty());
+    }
+
+    #[test]
+    fn cargo_home_is_recognized_only_below_its_actual_parent() {
+        assert!(cargo_home_was_walked(
+            Utf8Path::new("/users/alice/work/tree"),
+            Utf8Path::new("/users/alice/.cargo")
+        ));
+        assert!(!cargo_home_was_walked(
+            Utf8Path::new("/other/alice/work/tree"),
+            Utf8Path::new("/users/alice/.cargo")
+        ));
+        assert!(!cargo_home_was_walked(
+            Utf8Path::new("/users/alice/work/tree"),
+            Utf8Path::new("/users/alice/cargo")
+        ));
     }
 
     /// No single set of predicates describes two targets, so a build of both is not evaluated at

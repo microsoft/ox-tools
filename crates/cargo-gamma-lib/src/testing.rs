@@ -21,11 +21,12 @@
     reason = "test scaffolding, not production code"
 )]
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::fmt;
 use core::panic::AssertUnwindSafe;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
@@ -48,6 +49,103 @@ type Pauses = OnceLock<Mutex<crate::HashMap<Utf8PathBuf, PauseChannels>>>;
 
 static CACHE_ADOPTION_PAUSES: Pauses = OnceLock::new();
 static WORKSPACE_PREPARATION_PAUSES: Pauses = OnceLock::new();
+
+thread_local! {
+    /// The cache home owned by the integration-test workspace on this thread.
+    static CACHE_HOME: RefCell<Option<Utf8PathBuf>> = const { RefCell::new(None) };
+}
+
+/// The environment variable inherited by nested Cargo Gamma processes in tests.
+pub(crate) const CACHE_HOME_VAR: &str = "CARGO_GAMMA_TEST_CACHE_HOME";
+
+/// Runs the command-line entry point with its default cache inside the selected test workspace.
+///
+/// Integration tests compile this library as a dependency, so `cfg(test)` does not reach its
+/// production cache resolver. The unsupported `internals` feature exposes this wrapper instead:
+/// it finds the same `--dir` the command will parse and establishes a thread-local cache home
+/// before dispatch. No process-global environment is changed, so parallel tests remain sound.
+pub fn run<H, A, S>(host: &mut H, args: A) -> i32
+where
+    H: Host,
+    A: IntoIterator<Item = S>,
+    S: Into<OsString>,
+{
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let root = selected_root(&args);
+
+    with_cache_home(&root, || crate::commands::run(host, args))
+}
+
+/// Returns the campaign-cache base an integration test gets for `root`.
+pub fn gamma_base(root: &Utf8Path) -> Utf8PathBuf {
+    with_cache_home(root, || crate::exec::campaign_base(root, &root.join("target"), None))
+}
+
+/// Returns where a normal production process would keep target-resident campaign state for `root`.
+///
+/// Tests use this only to prove that a fixture did not touch the user's platform cache.
+pub fn production_gamma_base(root: &Utf8Path) -> Utf8PathBuf {
+    crate::exec::production_campaign_base(root, &root.join("target"))
+}
+
+/// The active private cache home, when this process is executing test scaffolding.
+pub(crate) fn cache_home(root: &Utf8Path) -> Option<Utf8PathBuf> {
+    let active = CACHE_HOME.with(|home| home.borrow().clone());
+
+    active.or_else(|| cfg!(test).then(|| owned_cache_home(root)))
+}
+
+/// Adds the private cache home to a child command without changing this process's environment.
+pub(crate) fn inherit_cache_home(command: &mut Command, home: Option<&Utf8Path>) {
+    if let Some(home) = home {
+        let _ = command.env(CACHE_HOME_VAR, home.as_std_path());
+    }
+}
+
+fn selected_root(args: &[OsString]) -> Utf8PathBuf {
+    let command_args = &args[..args.iter().position(|argument| argument == "--").unwrap_or(args.len())];
+    let split = command_args
+        .windows(2)
+        .find(|pair| pair[0] == "--dir" || pair[0] == "-d")
+        .and_then(|pair| Utf8PathBuf::from_path_buf(pair[1].clone().into()).ok());
+
+    split
+        .or_else(|| {
+            command_args.iter().find_map(|argument| {
+                let argument = argument.to_str()?;
+                let value = argument.strip_prefix("--dir=").or_else(|| argument.strip_prefix("-d="))?;
+
+                Some(Utf8PathBuf::from(value))
+            })
+        })
+        .unwrap_or_else(|| Utf8PathBuf::from("."))
+}
+
+pub(crate) fn with_cache_home<T>(root: &Utf8Path, operation: impl FnOnce() -> T) -> T {
+    with_cache_home_at(owned_cache_home(root), operation)
+}
+
+/// Runs one test operation with an exact, already-owned private cache home.
+pub(crate) fn with_cache_home_at<T>(home: Utf8PathBuf, operation: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Utf8PathBuf>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CACHE_HOME.with(|home| {
+                let _current = home.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = CACHE_HOME.with(|active| active.replace(Some(home)));
+    let _restore = Restore(previous);
+
+    operation()
+}
+
+fn owned_cache_home(root: &Utf8Path) -> Utf8PathBuf {
+    crate::exec::absolute_test_path(root).join("target/cargo-gamma-test-cache")
+}
 
 /// A deterministic pause at a registered command boundary.
 #[derive(Debug)]
@@ -575,6 +673,7 @@ pub fn test_binary(path: &str) -> crate::exec::TestBinary {
         package_id: String::new(),
         target: String::new(),
         manifest_dir: Utf8PathBuf::new(),
+        linked_sources: None,
         baseline: Duration::ZERO,
         budget: None,
         tests: None,
@@ -595,6 +694,12 @@ pub struct Recorder {
     /// How many mutants were announced.
     pub mutants: usize,
 
+    /// Number of workload entries and worker lanes announced for the sweep.
+    pub sweep_plan: Option<(usize, usize)>,
+
+    /// Run-local ordinals announced as workers started them.
+    pub mutant_starts: Vec<(u32, core::time::Duration)>,
+
     /// Every warning the run raised, in order.
     pub warnings: Vec<String>,
 }
@@ -610,6 +715,14 @@ impl crate::exec::Events for Recorder {
 
     fn mutant(&mut self, _mutant: &crate::model::Mutant) {
         self.mutants = self.mutants.saturating_add(1);
+    }
+
+    fn sweep_planned(&mut self, work: &[crate::estimate::MutationWork], jobs: usize) {
+        self.sweep_plan = Some((work.len(), jobs));
+    }
+
+    fn mutant_started(&mut self, ordinal: u32, elapsed: core::time::Duration) {
+        self.mutant_starts.push((ordinal, elapsed));
     }
 }
 
@@ -920,6 +1033,31 @@ mod tests {
         assert_eq!(sink.env("OTHER"), None);
     }
 
+    #[test]
+    fn integration_dispatch_finds_every_supported_directory_spelling_and_defaults_safely() {
+        let split = [OsString::from("cargo-gamma"), OsString::from("--dir"), OsString::from("split")];
+        let long_joined = [OsString::from("cargo-gamma"), OsString::from("--dir=long")];
+        let short_joined = [OsString::from("cargo-gamma"), OsString::from("-d=short")];
+        let forwarded_split = [
+            OsString::from("cargo-gamma"),
+            OsString::from("--"),
+            OsString::from("--dir"),
+            OsString::from("forwarded"),
+        ];
+        let forwarded_joined = [
+            OsString::from("cargo-gamma"),
+            OsString::from("--"),
+            OsString::from("--dir=forwarded"),
+        ];
+
+        assert_eq!(selected_root(&split), "split");
+        assert_eq!(selected_root(&long_joined), "long");
+        assert_eq!(selected_root(&short_joined), "short");
+        assert_eq!(selected_root(&forwarded_split), ".");
+        assert_eq!(selected_root(&forwarded_joined), ".");
+        assert_eq!(selected_root(&[OsString::from("cargo-gamma")]), ".");
+    }
+
     /// Every stream of a broken host fails, on both write and flush.
     #[test]
     fn a_broken_host_fails_every_write_and_every_flush() {
@@ -1116,6 +1254,7 @@ pub mod advise_fixture {
             package_id: format!("path+file:///w/{package}#0.0.0"),
             target: target.to_owned(),
             manifest_dir: Utf8PathBuf::from(format!("/w/{package}")),
+            linked_sources: None,
             baseline: Duration::from_secs(baseline),
             tests,
             budget: None,

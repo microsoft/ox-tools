@@ -36,10 +36,7 @@ impl Selection {
     /// An empty set.
     #[must_use]
     pub fn empty() -> Self {
-        Self {
-            names: HashSet::default(),
-            errors: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Sets the caller-supplied `Err(...)` payloads that `fn_value.err_with` will use.
@@ -48,12 +45,10 @@ impl Selection {
     /// hand-rolled error enums do not. Naming values here is how those functions get an error
     /// mutant at all, so supplying any also turns the mutator on.
     pub fn set_errors(&mut self, errors: Vec<String>) {
-        if errors.is_empty() {
-            self.errors = errors;
-            return;
+        if !errors.is_empty() {
+            let _ = self.names.insert(ERR_WITH);
         }
 
-        let _ = self.names.insert(ERR_WITH);
         self.errors = errors;
     }
 
@@ -237,13 +232,13 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_error_list_does_not_enable_the_error_mutator() {
-        let mut selection = Selection::everything();
+    fn clearing_error_payloads_does_not_disable_an_enabled_error_mutator() {
+        let mut selection = Selection::empty();
 
-        selection.drop_errors();
+        selection.set_errors(vec!["Error::Old".to_owned()]);
         selection.set_errors(Vec::new());
 
-        assert!(!selection.contains(ERR_WITH));
+        assert!(selection.contains(ERR_WITH));
         assert!(selection.errors().is_empty());
     }
 }

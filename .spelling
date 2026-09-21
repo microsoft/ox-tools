@@ -935,3 +935,6 @@ doctest
 doctests
 stdin
 superset
+SHA
+upserts
+EWMA

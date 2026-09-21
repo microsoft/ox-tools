@@ -21,7 +21,7 @@ all-features = true
 
 [dependencies]
 cargo-gamma-lib = { workspace = true }
-mimalloc = { workspace = true }
+rallocator = { workspace = true }
 terminal_size = { workspace = true }
 
 [dev-dependencies]

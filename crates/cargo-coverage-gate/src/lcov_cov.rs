@@ -27,6 +27,7 @@
 //!
 //! [lcov]: https://github.com/linux-test-project/lcov
 
+use std::collections::BTreeMap;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -57,6 +58,8 @@ pub(crate) struct FileReport {
     pub(crate) uncovered_lines: Vec<u32>,
 }
 
+type LineCoverage = BTreeMap<(String, PathBuf), BTreeMap<u32, bool>>;
+
 impl CoverageReport {
     /// Parse an lcov tracefile from a string.
     ///
@@ -71,9 +74,9 @@ impl CoverageReport {
 
     /// Parse and merge one or more lcov tracefiles.
     ///
-    /// Each input is parsed independently and merged at the line level
-    /// (per-line execution counts are summed, so a line is covered if it
-    /// was hit in *any* input and the line set is the union across inputs).
+    /// Each input is parsed independently and merged at the line level. The
+    /// line set is the union across inputs, and a line is covered if it was hit
+    /// in any input.
     /// This matches `cargo-llvm-cov`'s own profdata merge: feeding the
     /// `--all-features` and `--no-default-features` lcovs here yields the
     /// same per-file line coverage as a single merged report, without
@@ -88,22 +91,13 @@ impl CoverageReport {
     /// lcov tracefile.
     #[ohno::enrich_err("failed to parse lcov tracefile")]
     pub(crate) fn from_strs(inputs: &[&str]) -> Result<Self, CoverageGateError> {
-        let mut merged: Option<lcov::Report> = None;
+        let mut merged = LineCoverage::new();
         for input in inputs {
             let reader = lcov::Reader::new(input.as_bytes());
             let report = lcov::Report::from_reader(reader).map_err(ParseLcovError::from)?;
-            match &mut merged {
-                None => merged = Some(report),
-                // `merge_lossy` sums per-line counts and unions the line
-                // sets, ignoring checksum conflicts. The inputs are
-                // different feature configs of the *same* sources, so a
-                // strict `merge` would only differ by erroring on a
-                // checksum mismatch that cannot meaningfully occur here;
-                // the lossy variant is the robust choice.
-                Some(acc) => acc.merge_lossy(report),
-            }
+            merge_line_coverage(&mut merged, report);
         }
-        Ok(Self::from_lcov_report(merged.unwrap_or_default()))
+        Ok(Self::from_line_coverage(merged))
     }
 
     /// Parse an lcov tracefile from a file on disk.
@@ -116,29 +110,31 @@ impl CoverageReport {
     #[ohno::enrich_err("failed to read lcov tracefile `{}`", path.display())]
     pub(crate) fn from_path(path: &Path) -> Result<Self, CoverageGateError> {
         let report = lcov::Report::from_file(path).map_err(|e| ReadLcovError::caused_by(path.display().to_string(), e))?;
-        Ok(Self::from_lcov_report(report))
+        let mut merged = LineCoverage::new();
+        merge_line_coverage(&mut merged, report);
+        Ok(Self::from_line_coverage(merged))
     }
 
-    fn from_lcov_report(report: lcov::Report) -> Self {
-        let mut files = Vec::with_capacity(report.sections.len());
-        for (key, section) in report.sections {
+    fn from_line_coverage(merged: LineCoverage) -> Self {
+        let mut files = Vec::with_capacity(merged.len());
+        for ((_, filename), lines) in merged {
             let mut total: u32 = 0;
             let mut covered: u32 = 0;
-            let mut coverable_lines = Vec::with_capacity(section.lines.len());
+            let mut coverable_lines = Vec::with_capacity(lines.len());
             let mut uncovered_lines = Vec::new();
-            for (key, data) in &section.lines {
+            for (line, is_covered) in lines {
                 total = total.saturating_add(1);
-                coverable_lines.push(key.line);
-                if data.count > 0 {
+                coverable_lines.push(line);
+                if is_covered {
                     covered = covered.saturating_add(1);
                 } else {
-                    uncovered_lines.push(key.line);
+                    uncovered_lines.push(line);
                 }
             }
             sort_line_numbers(&mut coverable_lines);
             sort_line_numbers(&mut uncovered_lines);
             files.push(FileReport {
-                filename: key.source_file,
+                filename,
                 lines_total: total,
                 lines_covered: covered,
                 coverable_lines,
@@ -147,6 +143,19 @@ impl CoverageReport {
         }
         files.sort_by(|a, b| a.filename.cmp(&b.filename));
         Self { files }
+    }
+}
+
+fn merge_line_coverage(merged: &mut LineCoverage, report: lcov::Report) {
+    for (section_key, section) in report.sections {
+        let lines = merged.entry((section_key.test_name, section_key.source_file)).or_default();
+        for (line_key, data) in section.lines {
+            let is_covered = data.count > 0;
+            lines
+                .entry(line_key.line)
+                .and_modify(|covered| *covered |= is_covered)
+                .or_insert(is_covered);
+        }
     }
 }
 
@@ -232,7 +241,7 @@ end_of_record
     }
 
     #[test]
-    fn from_strs_merges_line_counts_and_unions_lines() {
+    fn from_strs_unions_line_coverage() {
         // Two configs of the SAME file: config A covers lines 1,2 (line 3
         // missed); config B covers line 3 (and instruments line 4, which it
         // misses). Merged: union of lines {1,2,3,4}, covered where hit in
@@ -261,6 +270,29 @@ end_of_record
         assert_eq!(f.lines_covered, 3, "covered if hit in either config");
         assert_eq!(f.coverable_lines, vec![1, 2, 3, 4]);
         assert_eq!(f.uncovered_lines, vec![4]);
+    }
+
+    #[test]
+    fn from_strs_does_not_overflow_execution_counts() {
+        let config_a = "\
+TN:
+SF:/repo/crates/alpha/src/lib.rs
+DA:1,18446744073709551615
+DA:2,0
+end_of_record
+";
+        let config_b = "\
+TN:
+SF:/repo/crates/alpha/src/lib.rs
+DA:1,1
+DA:2,0
+end_of_record
+";
+        let report = CoverageReport::from_strs(&[config_a, config_b]).expect("merge parses");
+        let f = &report.files[0];
+        assert_eq!(f.lines_total, 2);
+        assert_eq!(f.lines_covered, 1, "positive counts remain covered without arithmetic");
+        assert_eq!(f.uncovered_lines, vec![2]);
     }
 
     #[test]

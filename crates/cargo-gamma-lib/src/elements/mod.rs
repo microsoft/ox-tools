@@ -13,6 +13,7 @@ mod digest;
 mod publication;
 mod report;
 
+pub(crate) use digest::surviving_mutants;
 #[doc(inline)]
 pub use digest::{Digest, FileDigest, FrameworkDigest, MutantDigest, settled_mutants};
 pub(crate) use publication::{Publication, remove_if_unchanged, write_if_unchanged, write_streamed};

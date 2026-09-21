@@ -1,12 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use core::time::Duration;
+
 use camino::Utf8Path;
 
 use super::session::Session;
 use crate::Result;
 use crate::discover::Plan;
-use crate::estimate::Estimate;
+use crate::estimate::{Estimate, MutationWork};
 use crate::model::Mutant;
 
 /// Progress notifications, so this module needs to know nothing about terminals.
@@ -83,6 +85,12 @@ pub trait Events {
     /// A mutant finished.
     fn mutant(&mut self, mutant: &Mutant);
 
+    /// The sweep has fixed its queue and measured the work represented by every pending mutant.
+    fn sweep_planned(&mut self, _work: &[MutationWork], _jobs: usize) {}
+
+    /// A worker began evaluating one mutant at the given offset from the start of the sweep.
+    fn mutant_started(&mut self, _ordinal: u32, _elapsed: Duration) {}
+
     /// The fixed cost is paid, the tree compiles, and the first mutant is about to be tested.
     ///
     /// The only moment at which a projection of the run is both possible and useful: everything
@@ -93,8 +101,6 @@ pub trait Events {
 
 #[cfg(test)]
 mod tests {
-    use core::time::Duration;
-
     use camino::Utf8PathBuf;
 
     use super::*;
@@ -149,12 +155,21 @@ mod tests {
             jobs: 1,
             worst: Duration::ZERO,
         };
+        let work = [MutationWork::new(
+            7,
+            crate::estimate::WorkKind::Whole,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            crate::exec::CONFIRM_FACTOR,
+        )];
 
         events.begin("Doing", "Done", "the thing");
         events.end(", done");
         events.complete("the result");
         events.outcome(", noted");
         events.measured(&plan, &session, &estimate);
+        events.sweep_planned(&work, 3);
+        events.mutant_started(7, Duration::from_millis(9));
         events.mutant(&mutant());
 
         // Implementors only have to provide the primitive rendering hooks; the default helpers
@@ -169,6 +184,8 @@ mod tests {
             ]
         );
         assert_eq!(events.mutants, 1);
+        assert_eq!(events.sweep_plan, Some((1, 3)));
+        assert_eq!(events.mutant_starts, [(7, Duration::from_millis(9))]);
     }
 
     /// The one hook with no default has to be routed by the implementor, not by the trait.

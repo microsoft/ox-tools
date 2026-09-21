@@ -143,6 +143,7 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures;
 
     fn plan(specs: &[(&str, &str, &str)]) -> Plan {
         Plan {
@@ -214,5 +215,57 @@ mod tests {
         let plan = plan(&[]);
 
         assert_eq!(plan.spec(Utf8Path::new("/tree"), "lonely"), "lonely");
+    }
+
+    #[test]
+    fn absorbing_a_scan_conserves_every_count_and_collection() {
+        let mut plan = plan(&[]);
+        let mut mutant = fixtures::mutant();
+        mutant.file = Utf8PathBuf::from("z.rs").into();
+        let scanned = super::super::Scanned {
+            mutants: vec![mutant],
+            suppressed: 2,
+            idle: Vec::new(),
+            sharded_out: 3,
+            settled_out: 4,
+            skipped: vec!["src/broken.rs: could not parse".to_owned()],
+            digests: std::iter::once((Utf8PathBuf::from("z.rs"), "digest".to_owned())).collect(),
+        };
+
+        plan.absorb(scanned);
+
+        assert_eq!(plan.mutants.len(), 1);
+        assert_eq!(plan.suppressed, 2);
+        assert_eq!(plan.sharded_out, 3);
+        assert_eq!(plan.settled_out, 4);
+        assert_eq!(plan.skipped, ["src/broken.rs: could not parse"]);
+        assert_eq!(plan.digests[Utf8Path::new("z.rs")], "digest");
+    }
+
+    #[test]
+    fn report_order_uses_file_span_then_mutator() {
+        let mut plan = plan(&[]);
+        let make = |file: &str, start: usize, mutator: &str| {
+            let mut mutant = fixtures::mutant();
+            mutant.file = Utf8PathBuf::from(file).into();
+            mutant.span = start..start + 1;
+            mutant.mutator = mutator.to_owned().into();
+            mutant
+        };
+        plan.mutants = vec![
+            make("b.rs", 1, "z"),
+            make("a.rs", 3, "z"),
+            make("a.rs", 1, "z"),
+            make("a.rs", 1, "a"),
+        ];
+
+        plan.sort();
+
+        let order: Vec<(&str, usize, &str)> = plan
+            .mutants
+            .iter()
+            .map(|mutant| (mutant.file.as_str(), mutant.span.start, mutant.mutator.as_ref()))
+            .collect();
+        assert_eq!(order, [("a.rs", 1, "a"), ("a.rs", 1, "z"), ("a.rs", 3, "z"), ("b.rs", 1, "z")]);
     }
 }

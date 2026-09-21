@@ -20,15 +20,23 @@ pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
     } else {
         args.lcov.clone()
     };
+    evaluate_paths(args, &lcov_paths, &args.packages, args.target.as_deref())
+}
+
+pub(crate) fn evaluate_paths(
+    args: &CoverageGateArgs,
+    lcov_paths: &[PathBuf],
+    gated_packages: &[String],
+    target: Option<&str>,
+) -> Result<ExitCode, AppError> {
     let mut lcov_texts: Vec<String> = Vec::with_capacity(lcov_paths.len());
-    for path in &lcov_paths {
+    for path in lcov_paths {
         let text = fs::read_to_string(path).into_app_err(format!("failed to read lcov tracefile `{}`", path.display()))?;
         lcov_texts.push(text);
     }
     let lcov_refs: Vec<&str> = lcov_texts.iter().map(String::as_str).collect();
 
-    let report =
-        evaluate_many_for_target(&lcov_refs, None, &args.packages, args.target.as_deref()).into_app_err("failed to evaluate coverage")?;
+    let report = evaluate_many_for_target(&lcov_refs, None, gated_packages, target).into_app_err("failed to evaluate coverage")?;
 
     write_text_output(&report, args.quiet).into_app_err("failed to write verdict to stdout")?;
 
@@ -38,6 +46,14 @@ pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
 
     let code = u8::try_from(report.verdict().as_exit_code()).expect("Verdict::as_exit_code only ever produces values in 0..=2");
     Ok(ExitCode::from(code))
+}
+
+pub(crate) fn write_no_gate_summary(args: &CoverageGateArgs, result: &str) -> Result<(), AppError> {
+    if let Some(path) = summary_target(args) {
+        fs::write(&path, format!("### coverage-gate\n\n**Result:** {result}.\n"))
+            .into_app_err(format!("failed to write summary file `{}`", path.display()))?;
+    }
+    Ok(())
 }
 
 fn write_text_output(report: &EvaluatedReport, quiet: bool) -> io::Result<()> {
@@ -65,6 +81,7 @@ fn summary_target(args: &CoverageGateArgs) -> Option<PathBuf> {
     if let Some(p) = &args.summary_file {
         return Some(p.clone());
     }
+
     for var in ["GITHUB_STEP_SUMMARY", "COVERAGE_GATE_SUMMARY"] {
         if let Some(v) = env::var_os(var)
             && !v.is_empty()

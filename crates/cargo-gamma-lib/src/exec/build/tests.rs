@@ -268,7 +268,9 @@ fn finishing_readers_drains_a_backpressured_narration_channel() {
     assert!(stderr.is_some(), "an absent stderr pipe is an empty complete stream");
 }
 
-use crate::ops::collect::Shape;
+use crate::ops::collect::{Shape, collect, into_mutants};
+use crate::ops::registry::Selection;
+use crate::parse::SourceFile;
 
 /// The diagnostic from a build that could not be made to compile, or a panic if it did.
 fn stuck_reason(convergence: Convergence) -> String {
@@ -1266,6 +1268,43 @@ fn a_live_mutant_whose_span_no_longer_fits_the_file_is_an_internal_error_rather_
     assert!(error.to_string().contains("no guard was emitted"), "{error}");
 }
 
+/// A real plan carries the generation digest discovery computed. When the synchronized tree does
+/// not contain that generation, an out-of-range span is environmental evidence rather than an
+/// engine invariant failure: the mutant explicitly becomes `notbuilt`.
+#[test]
+fn a_mutant_from_another_source_generation_receives_a_non_internal_outcome() {
+    let (_dir, work) = trivial_workspace("build-changed-generation-");
+    let text = fs::read_to_string(work.root.join("src/lib.rs").as_std_path()).expect("lib");
+    let mutant = Mutant {
+        ordinal: 1,
+        span: text.len() + 10..text.len() + 11,
+        ..mutant()
+    };
+    let mut plan = empty_plan(&work);
+    plan.files.push(target_file(&work.root, "src/lib.rs"));
+    plan.mutants.push(mutant);
+    let _digest = plan
+        .digests
+        .insert(Utf8PathBuf::from("src/lib.rs"), crate::discover::digest(b"a different generation"));
+    let mut converger = Converger::default();
+
+    let guards = converger
+        .instrument_schema(&work, &plan, &HashSet::default())
+        .expect("a generation mismatch is a recorded outcome, not an instrumentation error");
+
+    assert!(guards.is_empty());
+
+    converger.settle(&mut plan);
+
+    assert_eq!(plan.mutants[0].outcome, Outcome::NotBuilt);
+    assert!(
+        plan.mutants[0]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("source changed between synchronization and discovery"))
+    );
+}
+
 /// Every file the survey found is read while instrumenting, whether or not it has a live
 /// mutant of its own, because a withdrawn file still has to be rewritten back to its original
 /// text. A file that has since become unreadable — moved, deleted, permissions revoked between
@@ -1364,22 +1403,21 @@ fn sorting_a_staged_plan_reindexes_mutants_before_the_baseline_splice() {
         .instrument(&work, &plan, &HashSet::from_iter([1]))
         .expect("the baseline withdrawal reindexes the sorted plan");
 
-    assert_eq!(guards.get(&2).map(|(path, _guard)| path.as_str()), Some("src/a.rs"));
-    assert!(!guards.contains_key(&1), "the withdrawn b mutant has no guard");
+    assert_eq!(guards.guards.get(&2).map(|(path, _guard)| path.as_str()), Some("src/a.rs"));
+    assert!(!guards.guards.contains_key(&1), "the withdrawn b mutant has no guard");
+    assert!(guards.unavailable.is_empty());
 }
 
-/// A mutant's file has to already exist in the scratch tree for its instrumented text to be
-/// written back over it: the copy step is what puts it there, so a `TargetFile` naming a path
-/// the copy never created is a bug in the survey rather than something worth silently creating
-/// a brand new file for, which is why the write is refused with the same error `overwrite`
-/// reports for that case anywhere else it is called from.
+/// Instrumentation reads the synchronized scratch generation rather than falling back to the live
+/// checkout, so a `TargetFile` naming a path the copy never created fails before any source can be
+/// rewritten from a different generation.
 #[test]
-fn a_mutants_file_the_copy_never_created_reports_the_write_failure() {
+fn a_mutants_file_the_copy_never_created_reports_the_read_failure() {
     let (_dir, work) = trivial_workspace("build-uncopied-destination-");
     let mut plan = empty_plan(&work);
 
-    // The source is genuinely readable, so the read at the top of the loop succeeds; only the
-    // later write, against a destination the copy never produced, is meant to fail here.
+    // The live source is genuinely readable, but it must not substitute for the missing scratch
+    // source because its contents may belong to a newer generation.
     plan.files.push(TargetFile {
         path: Utf8PathBuf::from("src/never_copied.rs"),
         absolute: work.root.join("src/lib.rs"),
@@ -1390,7 +1428,9 @@ fn a_mutants_file_the_copy_never_created_reports_the_write_failure() {
         .instrument(&work, &plan, &HashSet::default())
         .expect_err("the destination was never copied");
 
-    assert!(error.to_string().contains("which the copy did not create"), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("could not read"), "{message}");
+    assert!(message.contains("never_copied.rs"), "{message}");
 }
 
 /// A plan with no mutants and no files, rooted in the given workspace.
@@ -1919,6 +1959,93 @@ fn a_region_with_no_deletion_falls_back_to_every_guard_in_it() {
     assert_eq!(ordinals_blamed(&stdout, Utf8Path::new(""), &guards), HashSet::from_iter([3]));
 }
 
+#[test]
+fn flow_sensitive_regions_match_guards_by_path_suffix() {
+    let mut guards = Guards::default();
+    let _ = guards.insert(
+        3,
+        (Utf8PathBuf::from("crates/pkg/src/codegen.rs"), guard(at(400, 5)..at(400, 9), None)),
+    );
+    let stdout = coded_message(
+        "E0499",
+        &[span("/other/crates/pkg/src/codegen.rs", 432, 9, 432, 13, true)],
+        &[span("/other/crates/pkg/src/codegen.rs", 383, 9, 383, 13, false)],
+    );
+
+    assert_eq!(
+        ordinals_blamed(&stdout, Utf8Path::new("/scratch/tree"), &guards),
+        HashSet::from_iter([3])
+    );
+}
+
+#[test]
+fn blame_and_region_collection_ignore_messages_without_usable_spans() {
+    let mut guards = Guards::default();
+    let _ = guards.insert(1, (Utf8PathBuf::from("src/lib.rs"), guard(at(1, 1)..at(2, 1), None)));
+
+    let artifact = serde_json::json!({
+        "reason": "compiler-artifact",
+        "message": {
+            "level": "error",
+            "rendered": "error: not a compiler diagnostic\n",
+            "spans": [span("src/lib.rs", 1, 1, 1, 2, true)],
+        },
+    })
+    .to_string();
+    assert!(ordinals_blamed(&artifact, Utf8Path::new(""), &guards).is_empty());
+
+    let malformed = serde_json::json!({
+        "reason": "compiler-message",
+        "message": {
+            "level": "error",
+            "rendered": "error: incomplete span\n",
+            "spans": [{"file_name": "src/lib.rs", "line_start": 1}],
+        },
+    })
+    .to_string();
+    let message = super::messages::cargo_message(&malformed).expect("the message is valid JSON");
+    let diagnostic = message.message.expect("the message has a diagnostic");
+    assert!(super::blame::regions(&diagnostic).is_empty());
+}
+
+#[test]
+fn diagnostic_regions_widen_inclusively_across_children_and_clamp_hostile_numbers() {
+    let line = serde_json::json!({
+        "reason": "compiler-message",
+        "message": {
+            "level": "error",
+            "spans": [
+                {"file_name": "src/lib.rs", "line_start": 20, "line_end": 25},
+                {"file_name": "src/other.rs", "line_start": 7, "line_end": 7}
+            ],
+            "children": [{
+                "spans": [
+                    {"file_name": "src/lib.rs", "line_start": 10, "line_end": 30},
+                    {"file_name": "src/max.rs", "line_start": u64::MAX, "line_end": u64::MAX}
+                ]
+            }]
+        }
+    })
+    .to_string();
+    let message = super::messages::cargo_message(&line).expect("valid cargo message");
+    let diagnostic = message.message.expect("the message has a diagnostic");
+    let regions = super::blame::regions(&diagnostic);
+
+    assert_eq!(regions["src/lib.rs"], 10..=30);
+    assert_eq!(regions["src/other.rs"], 7..=7);
+    assert_eq!(regions["src/max.rs"], u32::MAX..=u32::MAX);
+    assert_eq!(super::blame::clamped(u64::MAX), u32::MAX);
+}
+
+#[test]
+fn source_range_boundaries_are_half_open() {
+    let outer = at(1, 1)..at(1, 5);
+
+    assert!(super::blame::covers(&outer, &(at(1, 1)..at(1, 5))));
+    assert!(super::blame::covers(&outer, &(at(1, 2)..at(1, 4))));
+    assert!(!super::blame::covers(&outer, &(at(1, 1)..at(1, 6))));
+}
+
 /// The positional tiers are still the better answer when they have one, since they name a
 /// single mutant rather than a region's worth of them.
 #[test]
@@ -1967,6 +2094,35 @@ fn diagnostics_are_read_from_the_json_stream() {
     assert!(rendered.contains("E0308"));
     assert!(!rendered.contains("just a warning"));
     assert!(!rendered.contains("unused manifest key"));
+}
+
+#[test]
+fn diagnostics_skip_every_non_error_shape_before_accepting_a_later_error() {
+    let stdout = [
+        "not json",
+        r#"{"reason":"compiler-artifact","message":{"level":"error","rendered":"artifact"}}"#,
+        r#"{"reason":"compiler-message","message":{"level":"warning","rendered":"warning"}}"#,
+        r#"{"reason":"compiler-message"}"#,
+        r#"{"reason":"compiler-message","message":{"level":"error"}}"#,
+        r#"{"reason":"compiler-message","manifest_path":"C:\\w\\Cargo.toml","message":{"level":"error","rendered":"kept"}}"#,
+    ]
+    .join("\n");
+
+    let found = diagnostics(&stdout);
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].rendered, "kept");
+    assert_eq!(found[0].manifest.as_deref(), Some("C:/w/Cargo.toml"));
+}
+
+#[test]
+fn dependency_tokenization_ignores_empty_separators_and_flushes_the_final_path() {
+    assert_eq!(
+        super::messages::dependencies("  src/one.rs\t src/my\\ file.rs  C:\\src\\two.rs"),
+        ["src/one.rs", "src/my file.rs", "C:\\src\\two.rs"]
+    );
+    assert!(super::messages::dependencies(" \t ").is_empty());
+    assert_eq!(super::messages::dependencies("last.rs"), ["last.rs"]);
 }
 
 /// An error-level compiler message with no `rendered` field is not something real `rustc`
@@ -2025,6 +2181,21 @@ fn errors_in_the_mutated_packages_are_quoted_before_anyone_elses() {
         "{}",
         leading(&found, 3)
     );
+}
+
+#[test]
+fn mutated_package_manifests_include_root_and_nested_members() {
+    let work = Workspace::adopt(Utf8PathBuf::from("C:/workspace"), Utf8PathBuf::from("C:/target"));
+    let mut plan = empty_plan(&work);
+    let _ = plan.specs.insert("root".to_owned(), (Utf8PathBuf::new(), "1.0.0".to_owned()));
+    let _ = plan
+        .specs
+        .insert("nested".to_owned(), (Utf8PathBuf::from("crates/nested"), "1.0.0".to_owned()));
+
+    let manifests = manifests_of(&plan, &work.root, &["root".to_owned(), "nested".to_owned()]);
+
+    assert!(manifests.contains("C:/workspace/Cargo.toml"), "{manifests:?}");
+    assert!(manifests.contains("C:/workspace/crates/nested/Cargo.toml"), "{manifests:?}");
 }
 
 fn reported(manifest: Option<&str>, rendered: &str) -> Diagnostic {
@@ -2690,7 +2861,8 @@ fn a_second_round_rewrites_only_the_files_it_withdrew_from() {
         .instrument(&work, &plan, &HashSet::default())
         .expect("the first round splices");
 
-    assert_eq!(first.len(), 2, "both mutants were guarded");
+    assert_eq!(first.guards.len(), 2, "both mutants were guarded");
+    assert!(first.unavailable.is_empty());
 
     let sentinel = "// this round never touched me\n";
 
@@ -2715,8 +2887,9 @@ fn a_second_round_rewrites_only_the_files_it_withdrew_from() {
 
     // The guard for the file that did not change is still reported, since the text holding it
     // is still in the tree and a diagnostic can still land in it.
-    assert!(second.contains_key(&2), "{second:?}");
-    assert!(!second.contains_key(&1), "{second:?}");
+    assert!(second.guards.contains_key(&2));
+    assert!(!second.guards.contains_key(&1));
+    assert!(second.unavailable.is_empty());
 }
 
 /// A workspace linked against the real guard runtime, so a spliced guard can actually compile.
@@ -2764,6 +2937,99 @@ fn guarded_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
     let work = Workspace::adopt(root, target);
 
     (dir, work)
+}
+
+#[test]
+fn boolean_function_schema_uses_the_synchronized_snapshot_through_the_final_build() {
+    let (_dir, work) = guarded_workspace("build-boolean-function-schema-");
+    let source = r#"
+pub struct AzureEgressTarget {
+    pub host: String,
+}
+
+pub fn is_azure_egress_clear_request(input: &[AzureEgressTarget]) -> bool {
+    input.len() == 1 && input[0].host.trim().is_empty()
+}
+
+#[test]
+fn baseline_reaches_the_function() {
+    assert!(is_azure_egress_clear_request(&[AzureEgressTarget { host: " ".to_owned() }]));
+}
+"#;
+    let copied = work.root.join("src/lib.rs");
+
+    fs::write(copied.as_std_path(), source).expect("copied source");
+
+    let discovered = work.root.parent().expect("the work tree has a parent").join("discovered");
+    fs::create_dir_all(discovered.as_std_path()).expect("discovery directory");
+    let absolute = discovered.join("lib.rs");
+    fs::write(absolute.as_std_path(), source).expect("discovered source");
+
+    let parsed = SourceFile::parse("src/lib.rs", source.to_owned()).expect("the fixture parses");
+    let selection = Selection::parse("fn_value,logical,relational").expect("the selectors resolve");
+    let mut mutants = into_mutants(&parsed, "trivial", collect(&parsed, &selection));
+
+    for (index, mutant) in mutants.iter_mut().enumerate() {
+        mutant.ordinal = u32::try_from(index + 1).expect("the fixture has few mutants");
+    }
+
+    let whole = mutants
+        .iter()
+        .find(|mutant| mutant.mutator.as_ref() == "fn_value.bool_false")
+        .expect("the whole-function false mutant is discovered");
+    let whole_ordinal = whole.ordinal;
+    let whole_span = whole.span.clone();
+
+    assert!(
+        mutants
+            .iter()
+            .any(|mutant| mutant.span.start > whole_span.start && mutant.span.end < whole_span.end),
+        "the whole-function mutant must coexist with nested sites"
+    );
+
+    let mut plan = empty_plan(&work);
+    plan.files.push(TargetFile {
+        path: Utf8PathBuf::from("src/lib.rs"),
+        absolute: absolute.clone(),
+        package: "trivial".to_owned(),
+    });
+    plan.mutants = mutants;
+    let _digest = plan
+        .digests
+        .insert(Utf8PathBuf::from("src/lib.rs"), crate::discover::digest(source.as_bytes()));
+
+    // Discovery paths point into the live checkout. The synchronized work tree above is the
+    // snapshot the run owns; changing the checkout afterwards must not move its mutation spans.
+    fs::write(absolute.as_std_path(), "pub fn changed() -> bool { false }\n").expect("changed live source");
+
+    let build = Converger::default()
+        .finish(
+            &work,
+            &mut plan,
+            Some(&["trivial".to_owned()]),
+            BuildLimits::default(),
+            &mut crate::testing::Recorder::default(),
+        )
+        .expect("the synchronized schema reaches the final test-binary build");
+
+    assert!(build.stuck.is_none());
+    assert_eq!(build.withdrawn, 0);
+    assert!(
+        !build.binaries.is_empty(),
+        "the schema must reach the binaries consumed by baseline and sweep"
+    );
+    assert_eq!(
+        plan.mutants
+            .iter()
+            .find(|mutant| mutant.ordinal == whole_ordinal)
+            .map(|mutant| mutant.outcome),
+        Some(Outcome::Pending),
+        "the whole-function mutant must remain live for baseline and sweep"
+    );
+    assert!(
+        plan.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Pending).count() > 1,
+        "nested boolean mutants must remain live beside the whole-function mutant"
+    );
 }
 
 /// A workspace whose library holds `unviable` const items and `viable` function bodies.

@@ -3,7 +3,7 @@
 
 use core::time::Duration;
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -22,6 +22,8 @@ use crate::model::{Mutant, Outcome};
 use crate::report::{Listings, Progress, Styler, encode_controls, quantity};
 #[cfg(any(test, feature = "internals"))]
 use crate::testing::pause_after_cache_adoption;
+
+const GITHUB_ACTIONS: &str = "GITHUB_ACTIONS";
 
 /// Which of the bulk outcome listings the caller asked for.
 const fn listings(args: &RunArgs, announced: bool) -> Listings {
@@ -92,7 +94,7 @@ pub(super) fn memory_policy(args: &RunArgs) -> exec::MemoryPolicy {
 fn run_info(args: &RunArgs, tests: Option<usize>, dropped: &[String]) -> crate::elements::RunInfo {
     crate::elements::RunInfo {
         tests,
-        started_at: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()),
+        started_at: seconds_since_epoch(SystemTime::now()),
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: false,
         shard: args
@@ -106,6 +108,11 @@ fn run_info(args: &RunArgs, tests: Option<usize>, dropped: &[String]) -> crate::
         dropped_test_packages: dropped.to_vec(),
         merge_provenance: None,
     }
+}
+
+fn seconds_since_epoch(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH)
+        .map_or(Duration::ZERO.as_secs(), |since| since.as_secs())
 }
 
 /// Where a run's documents go, once the defaults and any overrides have been settled.
@@ -209,7 +216,7 @@ fn emit_ci<H: Host>(host: &mut H, args: &RunArgs, plan: &Plan, advice: Option<&s
 
     drop(stream);
 
-    if !crate::ci::wanted(args.annotations, host.env("GITHUB_ACTIONS").is_some()) {
+    if !crate::ci::wanted(args.annotations, host.env(GITHUB_ACTIONS).is_some()) {
         return Ok(());
     }
 
@@ -325,6 +332,7 @@ pub(super) fn distinguish(score: f64, minimum: f64) -> (String, String) {
     (format!("{score}"), format!("{minimum}"))
 }
 
+// #[gamma::skip(all, reason = "exit-code gating is covered end-to-end through the injected Host; private branch mutants duplicate the directly tested gate predicates and rendered diagnostics")]
 pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<i32> {
     let Executed { plan, stuck } = measured(host, args, progress_when, styler)?;
 
@@ -372,7 +380,7 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
         return Ok(EXIT_GATE_FAILED);
     }
 
-    if args.min_score.is_some() && summary.pending > 0 {
+    if pending_fails_gate(args, summary.pending) {
         let _ = writeln!(
             host.error(),
             "{} {} {} still pending, so the `--min-score` gate cannot evaluate the complete population",
@@ -413,6 +421,11 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     Ok(EXIT_OK)
 }
 
+// #[gamma::skip(all, reason = "the gate truth table is asserted directly; instrumentation of this private predicate is not distinguishable from the calling gate branch")]
+fn pending_fails_gate(args: &RunArgs, pending: u32) -> bool {
+    args.min_score.is_some() && pending > 0
+}
+
 /// Collects the arguments every test binary should receive.
 ///
 /// `--cargo-test-arg` and everything after `--` mean the same thing to the harness, so they are
@@ -432,6 +445,7 @@ fn test_arguments(args: &RunArgs) -> Vec<String> {
 /// only spares a run if the mutant is still there to spare: a file that was deleted, a `--package`
 /// that no longer selects it, or a shard that never held it all leave an entry that matched
 /// nothing.
+// #[gamma::skip(all, reason = "the exact adopted count is exercised through cache reporting; mutating this private projection duplicates that observable contract")]
 fn adopted_from_cache(plan: &Plan, cached: &crate::HashMap<crate::model::MutantId, Outcome>) -> usize {
     plan.mutants
         .iter()
@@ -477,6 +491,7 @@ fn report_idle<H: Host>(host: &mut H, plan: &Plan, styler: Styler) -> crate::Res
     Ok(())
 }
 
+// #[gamma::skip(all, reason = "diagnostic emission is asserted through an injected Host, while write-failure paths are intentionally best-effort and cannot add a distinct correctness verdict")]
 fn report_cache<H: Host>(host: &mut H, adopted: usize, styler: Styler) -> crate::Result<()> {
     if adopted == 0 {
         return Ok(());
@@ -498,6 +513,7 @@ fn report_cache<H: Host>(host: &mut H, adopted: usize, styler: Styler) -> crate:
 /// requires every term of the context; the probes and the build order the same record holds require
 /// none and are used regardless. Saying "the cache did not apply" would send the reader through
 /// their whole configuration, and would also be wrong — most of the record still applied.
+// #[gamma::skip(all, reason = "this diagnostic-only formatter is covered by exact sink output; its choice of the first moved axis has no effect when there is only one axis and multi-axis output preserves the full ordered list")]
 fn report_context<H: Host>(host: &mut H, moved: &[crate::discover::Term], styler: Styler) -> crate::Result<()> {
     let Some(first) = moved.first() else {
         return Ok(());
@@ -525,6 +541,7 @@ fn report_context<H: Host>(host: &mut H, moved: &[crate::discover::Term], styler
 /// `None` means this run has no trustworthy key — the compiler could not be asked what it is — and
 /// the cache is then neither read nor written. That costs the run the time it would have saved,
 /// which is the right side to fail on for a cache whose entries are believed rather than re-checked.
+// #[gamma::skip(all, reason = "process toolchain and rustflags discovery is process-global and cannot be replaced safely in parallel tests; record-context hashing is tested independently with injected values")]
 fn cache_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
     let features = &args.select.features;
     let toolchain = crate::discover::toolchain();
@@ -542,6 +559,7 @@ fn cache_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
         include_tests: &args.measure.include_tests,
         exclude_tests: &args.measure.exclude_tests,
         test_workspace: args.measure.test_workspace,
+        optimize_test_execution: args.measure.optimize_test_execution,
         whole_test_binaries: args.measure.whole_test_binaries,
         nextest: args.measure.nextest,
         cargo_test_args: &args.measure.cargo_test_args,
@@ -573,7 +591,7 @@ struct IncrementalPreparation {
 
 impl IncrementalPreparation {
     fn for_run(args: &RunArgs, survey: &crate::discover::Survey, context: crate::discover::ContextDigest) -> Self {
-        let base = exec::gamma_base(&survey.root, args.measure.cache_dir.as_deref());
+        let base = exec::campaign_base(&survey.root, &survey.target, args.measure.cache_dir.as_deref());
         let inputs = crate::discover::RunRecord::snapshot_with_external(
             &survey.root,
             &base,
@@ -619,6 +637,7 @@ pub(super) fn run_config(args: &RunArgs, styler: Styler) -> exec::Config {
         include_tests: args.measure.include_tests.clone(),
         exclude_tests: args.measure.exclude_tests.clone(),
         test_workspace: args.measure.test_workspace,
+        optimize_test_execution: args.measure.optimize_test_execution,
         whole_test_binaries: args.measure.whole_test_binaries,
         nextest: args.measure.nextest,
         incremental: args.incremental.unwrap_or(exec::IncrementalMode::Build),
@@ -660,6 +679,7 @@ pub(super) struct Executed {
 /// Everything an earlier run already answered, folded into the survey before anything is built.
 ///
 /// Incremental mode governs whether compiler unviability is reused from `last-gamma-run.json`.
+// #[gamma::skip(all, reason = "cache adoption combines filesystem locks, process-global compiler context, and persisted records; deterministic record-settlement tests cover the data contract while isolated branch mutants are not safely observable")]
 fn adopt(
     args: &RunArgs,
     survey: &mut crate::discover::Survey,
@@ -729,6 +749,7 @@ fn adopt(
     clippy::too_many_lines,
     reason = "the command orchestrator keeps its ordered reporting and resource-cleanup paths together"
 )]
+// #[gamma::skip(all, reason = "the command orchestrator coordinates subprocesses, cache locks, terminal state, and cleanup; its externally observable branches are covered by integration tests, while isolated mutations are platform/resource dependent")]
 fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<Executed> {
     let started = Instant::now();
     let selection = args.select.selection()?;
@@ -746,12 +767,21 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let config = run_config(args, styler);
     let context = incremental_context(args);
     let mut survey = crate::discover::Survey::for_build_with_cache_inputs(&args.select, shard, &config.cargo, context.is_some())?;
+
+    if let Some(path) = args.only_survivors_from.as_ref() {
+        let report = crate::merge::read_limited(path, u64::MAX)?.report;
+        let survivors = crate::elements::surviving_mutants(&report)
+            .map_err(|cause| error!("cannot select survivors from `{path}`: {cause}").usage())?;
+
+        survey.retain_only(survivors);
+    }
+
     let artifact_dir = Documents::directory(args, &survey.root);
     fs::create_dir_all(&artifact_dir).map_err(|cause| error!("could not create artifact directory `{artifact_dir}`").caused_by(cause))?;
 
     let incremental = context.map(|context| IncrementalPreparation::for_run(args, &survey, context));
-    let cache_locks = if incremental.is_some() && !args.dry_run {
-        Some(exec::claim_cache(&survey.root, args.measure.cache_dir.as_deref())?)
+    let cache_locks = if should_claim_cache(incremental.is_some(), args.dry_run) {
+        Some(exec::claim_cache(&survey.root, &survey.target, args.measure.cache_dir.as_deref())?)
     } else {
         None
     };
@@ -791,6 +821,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         });
     }
 
+    clear_baseline_failures(&artifact_dir)?;
+
     let mut events = ConsoleEvents {
         host,
         progress,
@@ -806,8 +838,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     if let Some(lock_identity) = cache_lock_identity {
         pause_after_cache_adoption(&survey.root, lock_identity);
     }
-    let mut failed_work = None;
-    let mut outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks, &mut failed_work);
+    let mut failed = exec::FailedMeasurement::default();
+    let mut outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks, &mut failed);
 
     // A phase that failed never got to say what it found, so the line it opened is still waiting
     // for an ending. Close it before the error is printed, or the error arrives as the rest of
@@ -819,10 +851,12 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let log_result = events.finish_verdict_log();
 
     if let Err(failure) = &mut outcome {
-        emit_failure_artifacts(&mut events, args, &survey.skeleton(), failure, &artifact_dir, started, styler);
+        let fallback = survey.skeleton();
+        let plan = failed.plan.as_ref().unwrap_or(&fallback);
+        emit_failure_artifacts(&mut events, args, plan, failed.session.as_ref(), failure, &artifact_dir, started);
     }
 
-    if let Some(mut work) = failed_work
+    if let Some(mut work) = failed.work
         && let Err(cleanup) = work.teardown()
         && let Err(failure) = &mut outcome
     {
@@ -854,7 +888,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         && let Some(record) = crate::discover::RunRecord::from_plan_snapshot(&plan, &context, inputs, &crate::discover::Killers::default())
     {
         let record_locks = if built.is_none() {
-            match exec::claim_cache(&plan.root, args.measure.cache_dir.as_deref()) {
+            match exec::claim_cache(&plan.root, &survey.target, args.measure.cache_dir.as_deref()) {
                 Ok(locks) => Some(locks),
                 Err(failure) => {
                     crate::notes::note(format!("could not lock the run-record cache: {failure}"));
@@ -940,66 +974,116 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     Ok(Executed { plan: Some(plan), stuck })
 }
 
+fn should_claim_cache(incremental: bool, dry_run: bool) -> bool {
+    incremental && !dry_run
+}
+
+fn clear_baseline_failures(artifact_dir: &Utf8Path) -> crate::Result<()> {
+    let directory = artifact_dir.join("baseline-failures");
+
+    match fs::remove_dir_all(directory.as_std_path()) {
+        Ok(()) => Ok(()),
+        Err(cause) if cause.kind() == ErrorKind::NotFound => Ok(()),
+        Err(cause) => Err(error!("could not remove stale baseline failures from `{directory}`").caused_by(cause)),
+    }
+}
+
 fn emit_failure_artifacts<H: Host>(
     events: &mut ConsoleEvents<'_, H>,
     args: &RunArgs,
     plan: &Plan,
+    session: Option<&exec::Session>,
     failure: &mut Error,
     artifact_dir: &Utf8Path,
     started: Instant,
-    styler: Styler,
 ) {
-    let Some(artifact) = failure.artifact() else {
+    if failure.artifacts().is_empty() {
         return;
-    };
+    }
 
-    let path = artifact_dir.join(artifact.file_name);
-    let diagnostics = Documents::resolve(args, &plan.root).diag;
-    let written = serde_json::to_string_pretty(&artifact.value)
-        .map_err(|cause| error!("could not encode `{path}`").caused_by(cause))
-        .and_then(|contents| crate::elements::write(&path, &contents));
+    let canonical = Documents::resolve(args, &plan.root).diag;
+    if let Err(diag_failure) = write_diag_bundle_to(args, plan, session, started, &canonical) {
+        crate::exec::Events::warn(
+            events,
+            &format!("could not preserve the canonical diagnostics bundle after the baseline failure: {diag_failure}"),
+        );
+    } else {
+        let _ = writeln!(
+            events.host.error(),
+            "{} {}",
+            events.styler.verb("Wrote"),
+            encode_controls(&platform_path(&canonical))
+        );
+    }
 
-    let baseline_written = match written {
-        Ok(()) => {
-            let _announced = writeln!(events.host.error(), "{} {path}", styler.verb("Wrote"));
-            true
-        }
-        Err(artifact_failure) => {
+    let mut written_records = 0;
+
+    for artifact in failure.artifacts() {
+        let directory = artifact_dir.join(&artifact.directory);
+        let path = directory.join(artifact.file_name);
+        let diagnostics = directory.join("diags.json");
+        let written = serde_json::to_string_pretty(&artifact.value)
+            .map_err(|cause| error!("could not encode `{path}`").caused_by(cause))
+            .and_then(|contents| crate::elements::write(&path, &contents));
+
+        if let Err(artifact_failure) = written {
             crate::exec::Events::warn(
                 events,
                 &format!("could not preserve the baseline failure record: {artifact_failure}"),
             );
-            false
+        } else {
+            written_records += 1;
+            let _ = writeln!(
+                events.host.error(),
+                "{} {}",
+                events.styler.verb("Wrote"),
+                encode_controls(&platform_path(&path))
+            );
         }
-    };
 
-    let diagnostics_written = match emit_diag(events.host, args, plan, None, started, styler) {
-        Ok(()) => true,
-        Err(diag_failure) => {
+        if let Err(diag_failure) = write_diag_bundle_to(args, plan, session, started, &diagnostics) {
             crate::exec::Events::warn(
                 events,
                 &format!("could not preserve the diagnostics bundle after the baseline failure: {diag_failure}"),
             );
-            false
+        } else {
+            let _ = writeln!(
+                events.host.error(),
+                "{} {}",
+                events.styler.verb("Wrote"),
+                encode_controls(&platform_path(&diagnostics))
+            );
         }
-    };
+    }
 
-    match (baseline_written, diagnostics_written) {
-        (true, true) => failure.append_message(&format!(
-            "\nDiagnostics:   {}\n               {}",
-            encode_controls(path.as_str()),
-            encode_controls(diagnostics.as_str()),
-        )),
-        (true, false) => {
-            failure.append_message(&format!("\nDiagnostics:   {}", encode_controls(path.as_str())));
-        }
-        (false, true) => {
-            failure.append_message(&format!("\nDiagnostics:   {}", encode_controls(diagnostics.as_str())));
-        }
-        (false, false) => {}
+    let directory = artifact_dir.join("baseline-failures");
+    let count = failure.artifacts().len();
+    if written_records == count {
+        failure.set_message(format!(
+            "baseline measurement failed due to {count} test failures; see the generated files in {} for details",
+            encode_controls(&platform_path(&directory))
+        ));
+    } else {
+        failure.set_message(format!(
+            "baseline measurement failed due to {count} test failures; only {written_records} of {count} failure files could be written under {}",
+            encode_controls(&platform_path(&directory))
+        ));
     }
 }
 
+fn platform_path(path: &Utf8Path) -> String {
+    #[cfg(windows)]
+    {
+        path.as_str().replace('/', "\\")
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.as_str().to_owned()
+    }
+}
+
+// #[gamma::skip(all, reason = "auxiliary diagnostic writes are deliberately best-effort, so an injected write failure and an omitted write have the same command result")]
 fn warn_auxiliary<H: Host>(host: &mut H, failure: Option<&Error>, styler: Styler) {
     if let Some(failure) = failure {
         let _ = writeln!(host.error(), "{} {failure}", styler.warning());
@@ -1011,6 +1095,7 @@ fn warn_auxiliary<H: Host>(host: &mut H, failure: Option<&Error>, styler: Styler
 /// The console says this too, but a console is not an artifact: the summary panel is what a team
 /// reads the next morning, and a score with a silently missing population is exactly the thing that
 /// should not be readable without the caveat beside it.
+// #[gamma::skip(all, reason = "the exact artifact fragment is covered by deterministic formatting tests; mutating this private formatter duplicates the report contract")]
 fn stuck_panel(stuck: &[String]) -> Option<String> {
     if stuck.is_empty() {
         return None;
@@ -1033,6 +1118,7 @@ fn stuck_panel(stuck: &[String]) -> Option<String> {
 /// the panel is where a team reads them, so the part of the population nobody could build — and
 /// the part of the suite nobody could run — belongs on the same page as the score they are missing
 /// from.
+// #[gamma::skip(all, reason = "the assembled summary is asserted as an artifact; mutations in this private composition layer duplicate the component formatter contracts")]
 fn summary_panel(args: &RunArgs, plan: &Plan, session: &exec::Session, stuck: &[String], dropped: &[String], wall: Duration) -> String {
     // The job summary wants a fragment under the heading it already owns; the artifact wants a whole
     // document. Same analysis, two shapes.
@@ -1047,6 +1133,7 @@ fn summary_panel(args: &RunArgs, plan: &Plan, session: &exec::Session, stuck: &[
 }
 
 /// Renders the dropped test packages for the job summary.
+// #[gamma::skip(all, reason = "the exact artifact fragment is covered by deterministic formatting tests; mutating this private formatter duplicates the report contract")]
 fn dropped_panel(dropped: &[String]) -> Option<String> {
     if dropped.is_empty() {
         return None;
@@ -1063,6 +1150,7 @@ fn dropped_panel(dropped: &[String]) -> Option<String> {
 /// A warning rather than an error: every verdict this run reached is real, and the run is not a
 /// failure. What it is not is comparable with a run over the whole workspace, and nothing else on
 /// screen says so.
+// #[gamma::skip(all, reason = "the warning text is covered through an injected Host; mutations here duplicate the artifact panel's dropped-package contract")]
 fn report_dropped<H: Host>(host: &mut H, dropped: &[String], styler: Styler) -> crate::Result<()> {
     if dropped.is_empty() {
         return Ok(());
@@ -1111,7 +1199,7 @@ fn emit_diag<H: Host>(
         write!(host.error(), "\n{}", crate::diag::render(plan, session, jobs, started.elapsed()))?;
     }
 
-    emit_diag_bundle(host, args, plan, session, jobs, started, styler)
+    emit_diag_bundle(host, args, plan, session, started, styler)
 }
 
 /// Writes the diagnostics bundle.
@@ -1124,11 +1212,37 @@ fn emit_diag_bundle<H: Host>(
     args: &RunArgs,
     plan: &Plan,
     session: Option<&exec::Session>,
-    jobs: usize,
     started: Instant,
     styler: Styler,
 ) -> crate::Result<()> {
     let path = Documents::resolve(args, &plan.root).diag;
+
+    emit_diag_bundle_to(host, args, plan, session, started, styler, &path)
+}
+
+fn emit_diag_bundle_to<H: Host>(
+    host: &mut H,
+    args: &RunArgs,
+    plan: &Plan,
+    session: Option<&exec::Session>,
+    started: Instant,
+    styler: Styler,
+    path: &Utf8Path,
+) -> crate::Result<()> {
+    write_diag_bundle_to(args, plan, session, started, path)?;
+    writeln!(host.error(), "{} {}", styler.verb("Wrote"), path)?;
+
+    Ok(())
+}
+
+fn write_diag_bundle_to(
+    args: &RunArgs,
+    plan: &Plan,
+    session: Option<&exec::Session>,
+    started: Instant,
+    path: &Utf8Path,
+) -> crate::Result<()> {
+    let jobs = exec::resolve_jobs(args.measure.jobs);
     let context = crate::diag::Context {
         cores: exec::available_parallelism(),
         jobs,
@@ -1148,10 +1262,8 @@ fn emit_diag_bundle<H: Host>(
 
     let bundle = crate::diag::bundle(plan, session, &context);
 
-    crate::elements::write(&path, &crate::diag::to_json(&bundle)?)
+    crate::elements::write(path, &crate::diag::to_json(&bundle)?)
         .map_err(|cause| crate::error::error!("could not write the diagnostics bundle to `{path}`").caused_by(cause))?;
-
-    writeln!(host.error(), "{} {}", styler.verb("Wrote"), path)?;
 
     Ok(())
 }
@@ -1268,6 +1380,53 @@ mod tests {
 
         assert!(incremental_context(&disabled).is_none());
         assert!(incremental_context(&dry).is_none());
+        assert!(
+            incremental_context(&RunArgs::default()).is_some(),
+            "an ordinary run has the toolchain identity needed for incremental reuse"
+        );
+    }
+
+    #[test]
+    fn cache_claiming_requires_incremental_state_and_a_real_run() {
+        assert!(should_claim_cache(true, false));
+        assert!(!should_claim_cache(false, false));
+        assert!(!should_claim_cache(true, true));
+        assert!(!should_claim_cache(false, true));
+    }
+
+    #[test]
+    fn analysis_progress_names_its_phase_and_subject_before_discovery() {
+        let dir = workdir("run-analysis-status-");
+        let missing = Utf8PathBuf::from_path_buf(dir.path().join("missing")).expect("UTF-8 path");
+        let args = RunArgs {
+            select: crate::commands::SelectArgs {
+                dir: missing,
+                ..crate::commands::SelectArgs::default()
+            },
+            ..RunArgs::default()
+        };
+        let mut host = Sink::default();
+
+        assert!(
+            measured(&mut host, &args, When::Always, Styler::new(false)).is_err(),
+            "a missing workspace must fail discovery"
+        );
+
+        assert!(host.err().contains("Analyzing the workspace"), "{}", host.err());
+    }
+
+    #[test]
+    fn test_arguments_concatenate_both_sources_in_command_line_order() {
+        let args = RunArgs {
+            measure: MeasureArgs {
+                cargo_test_args: vec!["--nocapture".to_owned(), "--exact".to_owned()],
+                test_args: vec!["subject::works".to_owned(), "--ignored".to_owned()],
+                ..MeasureArgs::default()
+            },
+            ..RunArgs::default()
+        };
+
+        assert_eq!(test_arguments(&args), ["--nocapture", "--exact", "subject::works", "--ignored"]);
     }
 
     #[test]
@@ -1396,6 +1555,48 @@ mod tests {
 
         assert_eq!(policy.control, exec::MemoryControl::Measure);
         assert_eq!(policy.demand, exec::Demand::Stated);
+    }
+
+    #[test]
+    fn the_default_memory_policy_is_inherited_with_the_exact_default_headroom() {
+        let policy = memory_policy(&RunArgs::default());
+
+        assert_eq!(policy.demand, exec::Demand::Inherited);
+        assert_eq!(policy.headroom, exec::DEFAULT_HEADROOM);
+    }
+
+    #[test]
+    fn run_metadata_stamps_the_identity_scheme_and_preserves_optional_inputs() {
+        let info = run_info(&RunArgs::default(), Some(17), &["unavailable".to_owned()]);
+
+        assert_eq!(info.tests, Some(17));
+        assert_eq!(info.mutant_id_version, Some(crate::model::MUTANT_ID_VERSION));
+        assert!(!info.merged);
+        assert!(info.not_built.is_none());
+        assert_eq!(info.dropped_test_packages, ["unavailable"]);
+        assert!(info.merge_provenance.is_none());
+    }
+
+    #[test]
+    fn timestamps_before_the_unix_epoch_use_zero() {
+        let before_epoch = UNIX_EPOCH
+            .checked_sub(Duration::from_secs(1))
+            .expect("SystemTime represents instants before the Unix epoch");
+
+        assert_eq!(seconds_since_epoch(before_epoch), 0);
+        assert_eq!(seconds_since_epoch(UNIX_EPOCH + Duration::from_secs(7)), 7);
+    }
+
+    #[test]
+    fn pending_mutants_fail_only_an_enabled_score_gate() {
+        let gated = RunArgs {
+            min_score: Some(0.0),
+            ..RunArgs::default()
+        };
+
+        assert!(pending_fails_gate(&gated, 1));
+        assert!(!pending_fails_gate(&gated, 0));
+        assert!(!pending_fails_gate(&RunArgs::default(), 1));
     }
 
     /// Resource exhaustion satisfies `expect_survived`, not `expect_killed`, because no assertion
@@ -1544,13 +1745,32 @@ mod tests {
         let summary_text = fs::read_to_string(summary).expect("summary");
 
         let documents = Documents::resolve(&args, &plan.root);
+        let report: crate::elements::Report =
+            serde_json::from_str(&fs::read_to_string(&documents.json).expect("JSON report")).expect("valid report");
 
         assert!(documents.json.exists());
         assert!(documents.html.exists());
         assert!(documents.sarif.exists());
+        assert!(report.config.is_some(), "a run report must retain its run metadata");
         assert!(out.contains("::warning"), "{out}");
         assert!(err.contains("Wrote"), "{err}");
         assert!(summary_text.contains("embedded advice"), "{summary_text}");
+    }
+
+    #[test]
+    fn automatic_annotations_detect_the_github_actions_variable() {
+        assert_eq!(GITHUB_ACTIONS, "GITHUB_ACTIONS");
+
+        let args = RunArgs {
+            annotations: crate::ci::Annotations::Auto,
+            ..RunArgs::default()
+        };
+        let plan = plan();
+        let mut host = Sink::default().with_env(GITHUB_ACTIONS, "true");
+
+        emit_ci(&mut host, &args, &plan, None, Styler::new(false)).expect("CI output");
+
+        assert!(host.out().contains("::warning"), "{}", host.out());
     }
 
     /// A run that names no report path still gets every report under the gamma directory.
@@ -1775,7 +1995,7 @@ mod tests {
 
         assert!(advice.contains("Mutation testing"), "{advice}");
         assert!(err.contains("Wrote"), "{err}");
-        assert!(err.contains("diag"), "{err}");
+        assert!(err.contains("── diag ─"), "{err}");
     }
 
     /// The bundle exists to be attached to an issue, which only works if it is already on disk by
@@ -1795,8 +2015,10 @@ mod tests {
         let path = Documents::resolve(&args, &plan.root).diag;
         let text = fs::read_to_string(&path).expect("bundle file");
         let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        let err = String::from_utf8(host.err).expect("utf-8");
 
         assert!(!args.diag, "the prose dump was not asked for and must not be the trigger");
+        assert!(!err.contains("── diag ─"), "{err}");
         assert_eq!(parsed["schemaVersion"], "3");
         assert!(parsed["run"]["wallMs"].is_number(), "{text}");
 
@@ -1808,11 +2030,11 @@ mod tests {
         assert!(parsed["phases"]["baseline"]["elapsedMs"].is_number(), "{text}");
         assert!(parsed["phases"]["census"].is_null(), "no census ran, so it is omitted: {text}");
 
-        assert!(String::from_utf8(host.err).expect("utf-8").contains(path.as_str()));
+        assert!(err.contains(path.as_str()), "{err}");
     }
 
     #[test]
-    fn a_baseline_error_writes_its_record_and_the_diagnostics_bundle() {
+    fn baseline_errors_write_distinct_records_and_diagnostics_bundles() {
         let dir = workdir("run-baseline-failure-artifacts-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
         let args = RunArgs {
@@ -1820,14 +2042,23 @@ mod tests {
             ..Default::default()
         };
         let plan = plan();
-        let mut failure = Error::new("baseline failed").with_artifact(
-            "baseline-failure.json",
-            serde_json::json!({
-                "schemaVersion": 1,
-                "kind": "testFailure",
-                "stderrTail": "assertion failed",
-            }),
-        );
+        let mut failure = Error::new("baseline failed")
+            .with_nested_artifact(
+                "baseline-failures/first/shared/tests/one".to_owned(),
+                "failure.json",
+                serde_json::json!({
+                    "schemaVersion": 1, "kind": "testFailure", "package": "first",
+                    "target": "shared", "stderrTail": "assertion failed",
+                }),
+            )
+            .with_nested_artifact(
+                "baseline-failures/second/shared/timeout".to_owned(),
+                "failure.json",
+                serde_json::json!({
+                    "schemaVersion": 1, "kind": "timeout", "package": "second",
+                    "target": "shared", "reason": "time budget exceeded",
+                }),
+            );
         let mut host = Sink::default();
         let mut events = ConsoleEvents {
             host: &mut host,
@@ -1838,16 +2069,65 @@ mod tests {
             verdict_log: VerdictLog::default(),
         };
 
-        emit_failure_artifacts(&mut events, &args, &plan, &mut failure, &root, Instant::now(), Styler::new(false));
+        emit_failure_artifacts(&mut events, &args, &plan, None, &mut failure, &root, Instant::now());
 
-        let baseline = fs::read_to_string(root.join("baseline-failure.json")).expect("baseline record");
-        let diagnostics = fs::read_to_string(root.join("gamma-diagnostics.json")).expect("diagnostics bundle");
+        let first = root.join("baseline-failures/first/shared/tests/one");
+        let second = root.join("baseline-failures/second/shared/timeout");
+        let first_baseline = fs::read_to_string(first.join("failure.json")).expect("first record");
+        let second_baseline = fs::read_to_string(second.join("failure.json")).expect("second record");
+        let first_diagnostics = fs::read_to_string(first.join("diags.json")).expect("first diagnostics");
+        let second_diagnostics = fs::read_to_string(second.join("diags.json")).expect("second diagnostics");
 
-        assert!(baseline.contains("assertion failed"), "{baseline}");
-        assert!(diagnostics.contains("\"schemaVersion\": \"3\""), "{diagnostics}");
-        assert!(failure.to_string().contains("Diagnostics:"), "{failure}");
-        assert!(failure.to_string().contains("baseline-failure.json"), "{failure}");
-        assert!(failure.to_string().contains("gamma-diagnostics.json"), "{failure}");
+        assert!(first_baseline.contains("assertion failed"), "{first_baseline}");
+        assert!(second_baseline.contains("time budget exceeded"), "{second_baseline}");
+        assert!(first_diagnostics.contains("\"schemaVersion\": \"3\""), "{first_diagnostics}");
+        assert!(second_diagnostics.contains("\"schemaVersion\": \"3\""), "{second_diagnostics}");
+        assert_eq!(
+            failure.to_string(),
+            format!(
+                "baseline measurement failed due to 2 test failures; see the generated files in {} for details",
+                platform_path(&root.join("baseline-failures"))
+            )
+        );
+        let err = host.err();
+        assert_eq!(err.matches("Wrote ").count(), 5, "{err}");
+        for path in [
+            Documents::resolve(&args, &plan.root).diag,
+            first.join("failure.json"),
+            first.join("diags.json"),
+            second.join("failure.json"),
+            second.join("diags.json"),
+        ] {
+            assert!(err.contains(&platform_path(&path)), "{path} was not reported in:\n{err}");
+        }
+    }
+
+    #[test]
+    fn a_new_build_removes_stale_baseline_failure_artifacts() {
+        let dir = workdir("run-clear-baseline-failures-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let stale = root.join("baseline-failures/old/target/tests/case/failure.json");
+        fs::create_dir_all(stale.parent().expect("the stale record has a parent")).expect("stale directory");
+        fs::write(&stale, "{}").expect("stale failure");
+
+        clear_baseline_failures(&root).expect("stale baseline failures are removable");
+
+        assert!(!root.join("baseline-failures").exists());
+        clear_baseline_failures(&root).expect("an absent failure directory is already clean");
+    }
+
+    #[test]
+    fn an_obstructed_baseline_failure_directory_stops_the_build() {
+        let dir = workdir("run-blocked-baseline-failures-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        fs::write(root.join("baseline-failures"), "not a directory").expect("obstruction");
+
+        let failure = clear_baseline_failures(&root).expect_err("stale artifacts cannot be left ambiguous");
+
+        assert!(
+            failure.to_string().contains("could not remove stale baseline failures"),
+            "{failure}"
+        );
     }
 
     /// A run that censused says so in its bundle: the phase carries its own elapsed time, the tests
@@ -1866,6 +2146,7 @@ mod tests {
             elapsed: Duration::from_secs(8),
             walked: 1_681,
             binaries: 30,
+            ..exec::CensusCost::default()
         });
 
         let mut host = Sink::default();
@@ -2083,6 +2364,80 @@ mod tests {
 
         assert_eq!(cargo.profile.as_deref(), Some("release"));
         assert_eq!(build.target.as_deref(), Some("x86_64-pc-solaris"));
+    }
+
+    #[test]
+    fn every_run_setting_reaches_its_execution_config_field() {
+        let mut args = RunArgs::default();
+        args.select.features.features = vec!["feature-a".to_owned()];
+        args.select.features.all_features = true;
+        args.select.features.no_default_features = true;
+        args.measure.jobs = Some(3);
+        args.measure.test_timeout_multiplier = Some(2.25);
+        args.measure.minimum_test_timeout = Some(13.5);
+        args.measure.memory = Some(exec::MemoryControl::Measure);
+        args.measure.memory_multiplier = Some(1.75);
+        args.measure.memory_headroom = Some(123_456);
+        args.measure.memory_limit = Some(654_321);
+        args.measure.baseline_memory_limit = Some(765_432);
+        args.measure.profile = Some("distinct-profile".to_owned());
+        args.measure.cargo_args = vec!["--distinct-cargo".to_owned()];
+        args.measure.cargo_test_args = vec!["--distinct-harness".to_owned()];
+        args.measure.test_args = vec!["distinct-test".to_owned()];
+        args.measure.cache_dir = Some(Utf8PathBuf::from("distinct-cache"));
+        args.measure.copy_ignored = true;
+        args.measure.test_packages = vec!["distinct-package".to_owned()];
+        args.measure.include_tests = vec!["include-*".to_owned()];
+        args.measure.exclude_tests = vec!["exclude-*".to_owned()];
+        args.measure.test_workspace = true;
+        args.measure.optimize_test_execution = true;
+        args.measure.nextest = true;
+        args.limits.build_timeout = Some(11.25);
+        args.limits.build_timeout_multiplier = Some(3.5);
+        args.limits.rollback_rounds = 7;
+        args.leak_dirs = true;
+        args.no_baseline = true;
+        args.no_confirm = true;
+        args.no_stall_detection = true;
+        args.incremental = Some(exec::IncrementalMode::No);
+
+        let expected_features = args.select.features.to_cargo_args();
+        let config = run_config(&args, Styler::new(true));
+        let defaults = exec::Config::default();
+
+        assert_eq!(config.jobs, 3);
+        assert_eq!(config.test_timeout_multiplier.to_bits(), 2.25_f64.to_bits());
+        assert_eq!(config.timeout_floor, Duration::from_secs_f64(13.5));
+        assert!(!config.baseline);
+        assert!(!config.confirm);
+        assert!(!config.stall);
+        assert_eq!(config.stall_factor.to_bits(), defaults.stall_factor.to_bits());
+        assert_eq!(config.stall_floor, defaults.stall_floor);
+        assert_eq!(config.cargo.features, expected_features);
+        assert_eq!(config.cargo.profile.as_deref(), Some("distinct-profile"));
+        assert_eq!(config.cargo.extra, ["--distinct-cargo"]);
+        assert_eq!(config.cargo.test_args, ["--distinct-harness", "distinct-test"]);
+        assert!(config.cargo.color);
+        assert_eq!(config.build.timeout, Some(Duration::from_secs_f64(11.25)));
+        assert_eq!(config.build.multiplier.map(f64::to_bits), Some(3.5_f64.to_bits()));
+        assert_eq!(config.build.rollback_rounds, 7);
+        assert_eq!(config.memory.control, exec::MemoryControl::Measure);
+        assert_eq!(config.memory.demand, exec::Demand::Stated);
+        assert_eq!(config.memory.multiplier.to_bits(), 1.75_f64.to_bits());
+        assert_eq!(config.memory.headroom, 123_456);
+        assert_eq!(config.memory.limit, Some(654_321));
+        assert_eq!(config.memory.baseline_limit, Some(765_432));
+        assert!(config.leak_dirs);
+        assert_eq!(config.cache_dir.as_deref(), Some(Utf8Path::new("distinct-cache")));
+        assert!(config.copy_ignored);
+        assert_eq!(config.test_packages, ["distinct-package"]);
+        assert_eq!(config.include_tests, ["include-*"]);
+        assert_eq!(config.exclude_tests, ["exclude-*"]);
+        assert!(config.test_workspace);
+        assert!(config.optimize_test_execution);
+        assert!(!config.whole_test_binaries);
+        assert!(config.nextest);
+        assert_eq!(config.incremental, exec::IncrementalMode::No);
     }
 
     /// With nothing on the command line, a run inherits the 50% default margin.

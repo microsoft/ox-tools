@@ -32,7 +32,7 @@ impl Edit {
     /// suppression into a whitespace diff that every reviewer has to look at twice.
     #[must_use]
     pub fn render(&self, indent: &str, date: &str, ending: &str) -> String {
-        let selectors = self.mutators.iter().cloned().collect::<Vec<_>>().join(", ");
+        let selectors = self.mutators.iter().map(String::as_str).collect::<Vec<_>>().join(", ");
 
         format!(
             "{indent}// #[gamma::skip({selectors}, tag = \"{tag}\", reason = \"written by cargo gamma suppress {date}\")]{ending}",
