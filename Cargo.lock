@@ -528,6 +528,7 @@ dependencies = [
  "mutants",
  "ohno",
  "predicates",
+ "semver",
  "serde_json",
  "tempfile",
 ]
