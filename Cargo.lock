@@ -505,7 +505,7 @@ dependencies = [
  "tar",
  "tempfile",
  "terminal_size",
- "tick",
+ "tick 0.7.0",
  "tokio",
  "toml",
  "url",
@@ -640,7 +640,7 @@ dependencies = [
  "serde_json",
  "syn 3.0.4",
  "tempfile",
- "tick",
+ "tick 0.7.0",
  "toml",
  "toml_edit 0.25.13+spec-1.1.0",
  "walkdir",
@@ -3290,6 +3290,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "performables"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb1748f935e30422ad6011fcb465dacb05f5a5e248cb57cf45af6cfd309c7fcd"
+dependencies = [
+ "thread_aware_core",
+]
+
+[[package]]
 name = "petgraph"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4124,8 +4133,8 @@ dependencies = [
  "fastrand",
  "layered",
  "recoverable",
- "thread_aware",
- "tick",
+ "thread_aware 0.11.0",
+ "tick 0.6.0",
 ]
 
 [[package]]
@@ -4603,6 +4612,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "thread_aware"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f2d8f0aa7bc71a23d3d7a29f3fa900ba9c8eaa77f4dd26555d5971876965f1"
+dependencies = [
+ "thread_aware_core",
+]
+
+[[package]]
+name = "thread_aware_core"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "666b23e2beda781541846ca49f41f3913681de55052d97d85443cddaeebb6d79"
+
+[[package]]
 name = "thread_local"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4618,9 +4642,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8b890df44ed42f77de97f2aa630091bf96fac578ca2a93953e8aee926ebcba"
 dependencies = [
  "futures-core",
- "jiff",
  "pin-project-lite",
- "thread_aware",
+ "thread_aware 0.11.0",
+]
+
+[[package]]
+name = "tick"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4113fd2019bd88cdf4d718962b35d128558765719e1bde7dd0755187878131f5"
+dependencies = [
+ "futures-core",
+ "jiff",
+ "performables",
+ "pin-project-lite",
+ "thread_aware 0.12.0",
  "tokio",
 ]
 
