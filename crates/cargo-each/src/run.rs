@@ -524,18 +524,6 @@ fn wait_for_process<T>(
             return TreeOutcome::new(InvocationResult::Infrastructure(with_cleanup_failure(reader_failure, &cleanup)));
         }
 
-        match observe(&mut control) {
-            Ok(Some(status)) => return TreeOutcome::new(InvocationResult::Exited(status)),
-            Ok(None) => {}
-            Err(error) => {
-                let cleanup = terminate.take().expect("termination is consumed only on a returning branch")(control);
-                return TreeOutcome::new(InvocationResult::Infrastructure(with_cleanup_failure(
-                    format!("failed to {operation}: {error}"),
-                    &cleanup,
-                )));
-            }
-        }
-
         if let Some(timeout) = timeout
             && timeout.checked_sub(started.elapsed()).is_none()
         {
@@ -546,6 +534,18 @@ fn wait_for_process<T>(
                     display_duration(timeout)
                 ))),
             };
+        }
+
+        match observe(&mut control) {
+            Ok(Some(status)) => return TreeOutcome::new(InvocationResult::Exited(status)),
+            Ok(None) => {}
+            Err(error) => {
+                let cleanup = terminate.take().expect("termination is consumed only on a returning branch")(control);
+                return TreeOutcome::new(InvocationResult::Infrastructure(with_cleanup_failure(
+                    format!("failed to {operation}: {error}"),
+                    &cleanup,
+                )));
+            }
         }
 
         let pause = timeout
@@ -1536,6 +1536,23 @@ mod tests {
             "observe fake process",
         );
         assert!(matches!(outcome.result, InvocationResult::TimedOut(duration) if duration.is_zero()));
+
+        let late_success = FakeProcess {
+            observations: VecDeque::from([Ok(None), Ok(Some(successful_status()))]),
+            termination: Some(Ok(successful_status())),
+        };
+        let outcome = wait_for_process(
+            late_success,
+            Some(Duration::from_millis(1)),
+            FakeProcess::observe,
+            || None,
+            FakeProcess::terminate,
+            "observe fake process",
+        );
+        assert!(
+            matches!(outcome.result, InvocationResult::TimedOut(duration) if duration == Duration::from_millis(1)),
+            "completion observed after the deadline must not win the race"
+        );
 
         let failed = FakeProcess {
             observations: VecDeque::from([Err(io::Error::other("observation failed"))]),
