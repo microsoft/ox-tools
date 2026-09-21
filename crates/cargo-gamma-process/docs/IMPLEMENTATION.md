@@ -44,8 +44,10 @@ for another attempt. Any other observation error writes a warning to stderr and
 permanently releases that child handle. The write is fallible, its error is
 discarded, and it occurs outside the queue mutex. A lifecycle guard clears the
 running state, returns active handles to the retry queue, and wakes readiness
-waiters whenever the loop exits or unwinds, so later callers can start a
-replacement. On Unix, the child may remain a zombie until this process exits.
+waiters whenever the loop exits or unwinds. When retained handles remain, the
+guard immediately starts a replacement, closing the window in which a handoff
+could observe the old loop as running while diagnostics were outside the lock.
+On Unix, the child may remain a zombie until this process exits.
 
 ## Platform composition
 

@@ -6,61 +6,16 @@ deleted; this file is not a changelog or a record of rejected work.
 ## Contents
 
 ### Performance
-- [P1](#p1) — Publish killers found after a file-learning fallback
-- [P2](#p2) — Compare equal files correctly across short reads
 - [P3](#p3) — Amortize per-mutant process launch with a fork server
 
 ### Features
 - [F2](#f2) — Checkpoint and resume long-running campaigns
 - [F3](#f3) — Native fork-server test harness as a `cargo test`/nextest replacement
 
-### Documentation
-- [D1](#d1) — Correct the cgroup watch-state documentation
-
 ### Testing
 - [T1](#t1) — Isolate tests from the production interrupt registry
 
 ## Performance
-
-<a id="p1"></a>
-### P1 — Publish killers found after a file-learning fallback
-
-**Area:** `cargo-gamma-lib::exec::sweep` · **Priority:** Low · **Effort:** Small
-
-When a worker times out waiting for another file learner, or sees `Learning::Exhausted`, it runs
-the full ordered judgement itself. Unlike the hinted and designated-learner paths, these fallback
-paths return without publishing a killer they discover. Later mutants in the same file therefore
-repeat the full binary order even though this run already found a reusable probe.
-
-- `crates/cargo-gamma-lib/src/exec/sweep.rs:746-749` and
-  `crates/cargo-gamma-lib/src/exec/sweep.rs:788-790` — the two normal paths publish or complete
-  learning
-- `crates/cargo-gamma-lib/src/exec/sweep.rs:762-784` — timeout and exhausted-state fallbacks return
-  their judgement without either operation
-
-**Done when:** every fallback judgement publishes a newly found killer without overwriting an
-already learned one, and a regression test starts from `InProgress`, forces the bounded wait to
-expire, returns a killing judgement, and observes `Learning::Learned`.
-
----
-
-<a id="p2"></a>
-### P2 — Compare equal files correctly across short reads
-
-**Area:** `cargo-gamma-lib::exec::sync` · **Priority:** Low · **Effort:** Small
-
-`same_contents` reads two files independently and treats unequal read lengths as unequal file
-contents. `Read::read` may legally return a short non-EOF result, so identical files on a
-filesystem that gives different chunk sizes can be needlessly recopied, changing timestamps and
-invalidating Cargo fingerprints.
-
-- `crates/cargo-gamma-lib/src/exec/sync.rs:308-330` — independent reads are compared as though both
-  must fill equally sized chunks
-
-**Done when:** comparison handles independent short reads without misaligning bytes, and a unit
-test uses two readers with different chunk schedules over identical content.
-
----
 
 <a id="p3"></a>
 ### P3 — Amortize per-mutant process launch with a fork server
@@ -69,11 +24,11 @@ test uses two readers with different chunk schedules over identical content.
 **Effort:** Large
 
 The design accepts per-mutant process launch as an unavoidable floor: "process launch remains
-per mutant... activating several mutants together would confound causality" (`docs/DESIGN.md:835`
-in the "Costs and limitations" section). For workspaces with many small, fast-running tests, that
-launch/link/static-init cost dominates both the census walk (one subprocess per `(binary, test)`
-pair) and the mutant sweep, and currently cannot be amortized: no machinery in this crate reuses
-a warm process across launches.
+per mutant... activating several mutants together would confound causality" (the
+"Costs and limitations" section of `docs/DESIGN.md`). For workspaces with many small, fast-running
+tests, that launch/link/static-init cost dominates both the census walk (one subprocess per sampled
+scope, including every subdivision) and the mutant sweep (one per selected binary or probe), and
+currently cannot be amortized: no machinery in this crate reuses a warm process across launches.
 
 A fork-server model can remove that floor without weakening isolation: install a pre-main
 constructor (the existing hook point already used for guard installation) that, in the runtime
@@ -84,20 +39,23 @@ mutant ordinal can be set by direct memory write in the child (inherited via cop
 env/argv needed); libtest-driven test selection needs the fork server's constructor to run before
 std's argv-capturing constructor so each child's argv can be patched before libtest reads it.
 
-- `crates/cargo-gamma-rt/src/runtime.rs:1708` (`install()`) and the `.init_array`/
-  `__DATA,__mod_init_func`/`.CRT$XCU` link-section statics around it (`runtime.rs:1725-1892`) —
+- `crates/cargo-gamma-rt/src/runtime.rs:1736` (`install()`) and the `.init_array`/
+  `__DATA,__mod_init_func`/`.CRT$XCU` link-section statics around it —
   the existing pre-main constructor mechanism to extend
 - `crates/cargo-gamma-lib/src/exec/census.rs` (`walk_with`) and
   `crates/cargo-gamma-lib/src/exec/sweep.rs` — the two call sites that currently launch one fresh
-  process per `(binary, test)` or per mutant
-- `crates/cargo-gamma/docs/DESIGN.md:835` — the documented limitation this would relax
+  process per sampled scope or mutant/binary attempt
+- `crates/cargo-gamma/docs/DESIGN.md` — the documented limitation this would relax
 
 **Done when:** census and sweep launches on Linux reuse a warm forked process instead of a fresh
-`execve` per launch, with measured wall-clock improvement on a many-small-tests workspace, and a
+`execve` per launch, a test proves the forked child observes no repeated dynamic-link or
+static-init work (e.g. a constructor-run counter stays at one across many forked launches), and a
 documented, tested fallback to today's spawn-per-launch behavior on platforms without `fork()`
 (Windows) or without a dynamic loader step (statically linked binaries).
 
-**See also:** F3 (shares the same fork-server engine)
+**See also:** F3 (shares the same fork-server engine). Landing this changes the per-launch cost
+used by census admission and subdivision, assignment-time cost estimates, and learning-value
+priority; revisit those heuristics' thresholds once this ships.
 
 ---
 
@@ -169,25 +127,6 @@ their primary test runner.
 
 ---
 
-## Documentation
-
-<a id="d1"></a>
-### D1 — Correct the cgroup watch-state documentation
-
-**Area:** `cargo-gamma-unsafe::cgroup` · **Priority:** Low · **Effort:** Trivial
-
-The documentation on `Cgroup::is_watched` says the method records a published kill descriptor,
-but the method only queries whether a watch exists. That description belongs to `watched_at`,
-whose current one-line documentation omits the descriptor-lifetime invariant.
-
-- `crates/cargo-gamma-unsafe/src/cgroup.rs:794-805` — the two adjacent methods carry each other's
-  intended descriptions
-
-**Done when:** `is_watched` documents its boolean query and `watched_at` documents publication and
-lifetime ownership.
-
----
-
 ## Testing
 
 <a id="t1"></a>
@@ -212,10 +151,10 @@ later tests also inherit interrupt state they did not arrange.
 - `crates/cargo-gamma-unsafe/src/interrupt.rs:469-471` and
   `crates/cargo-gamma-unsafe/src/interrupt.rs:575-581` — production paths supply a real
   `kill(-group, SIGKILL)`
-- `crates/cargo-gamma-unsafe/src/interrupt.rs:755-769` — tests call the production handler against
+- `crates/cargo-gamma-unsafe/src/interrupt.rs:755-777` — tests call the production handler against
   the global registry
-- `crates/cargo-gamma-unsafe/src/cgroup.rs:913-914` and
-  `crates/cargo-gamma-unsafe/src/cgroup.rs:966-1050` — cgroup tests register IDs 41 and 42 through
+- `crates/cargo-gamma-unsafe/src/cgroup.rs:932-933` and
+  `crates/cargo-gamma-unsafe/src/cgroup.rs:976-1080` — cgroup tests register IDs 41 and 42 through
   that registry
 
 **Done when:** handler tests mutate only an isolated registry or run in child processes, cgroup

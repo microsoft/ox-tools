@@ -84,6 +84,9 @@ pub struct Config {
     /// Let tests from every workspace package judge mutants they can reach.
     pub test_workspace: Option<bool>,
 
+    /// Run the experimental case-level reachability census.
+    pub optimize_test_execution: Option<bool>,
+
     /// Run every selected test in each reachable test binary instead of selecting cases by reachability.
     pub whole_test_binaries: Option<bool>,
 
@@ -324,6 +327,7 @@ impl Config {
         args.measure.cargo_test_args.extend(self.cargo_test_args.iter().cloned());
         args.measure.test_packages.extend(self.test_packages.iter().cloned());
         args.measure.test_workspace = args.measure.test_workspace || self.test_workspace.unwrap_or(false);
+        args.measure.optimize_test_execution = args.measure.optimize_test_execution || self.optimize_test_execution.unwrap_or(false);
         args.measure.whole_test_binaries = args.measure.whole_test_binaries || self.whole_test_binaries.unwrap_or(false);
         args.measure.include_tests.extend(self.include_tests.iter().cloned());
         args.measure.exclude_tests.extend(self.exclude_tests.iter().cloned());
@@ -336,6 +340,14 @@ impl Config {
                 !self.test_packages.is_empty(),
                 "test-workspace",
                 self.test_workspace == Some(true),
+            ));
+        }
+        if args.measure.optimize_test_execution && args.measure.whole_test_binaries {
+            return Err(contradiction(
+                "optimize-test-execution",
+                self.optimize_test_execution == Some(true),
+                "whole-test-binaries",
+                self.whole_test_binaries == Some(true),
             ));
         }
 
@@ -433,6 +445,41 @@ mod tests {
             dir: dir.to_path_buf(),
             ..SelectArgs::default()
         }
+    }
+
+    #[test]
+    fn cargo_discovery_receives_the_profile_and_extra_arguments() {
+        let config = Config {
+            profile: Some("release".to_owned()),
+            cargo_args: vec!["--locked".to_owned(), "--offline".to_owned()],
+            ..Config::default()
+        };
+
+        let options = config.cargo_options();
+
+        assert_eq!(options.profile.as_deref(), Some("release"));
+        assert_eq!(options.extra, ["--locked", "--offline"]);
+    }
+
+    #[test]
+    fn absent_feature_settings_do_not_enable_cargo_features() {
+        let mut select = SelectArgs::default();
+
+        Config::default().apply_selection(&mut select).expect("defaults do not contradict");
+
+        assert!(!select.features.all_features);
+        assert!(!select.features.no_default_features);
+    }
+
+    #[test]
+    fn absent_boolean_run_settings_leave_their_branches_disabled() {
+        let mut args = RunArgs::default();
+
+        Config::default().apply(&mut args).expect("defaults do not contradict");
+
+        assert!(!args.measure.nextest);
+        assert!(!args.no_baseline);
+        assert!(!args.no_confirm);
     }
 
     /// `packages` in the file and `--workspace` on the command line both reach `selected_packages`,
@@ -689,6 +736,30 @@ mod tests {
         config.apply(&mut args).expect("the merged settings do not contradict one another");
 
         assert!(args.measure.whole_test_binaries);
+    }
+
+    #[test]
+    fn test_execution_optimization_in_the_file_selects_the_same_mode_as_the_flag() {
+        let config = Config::parse("optimize-test-execution = true\n").expect("the documented equivalence must hold");
+        let mut args = RunArgs::default();
+
+        config.apply(&mut args).expect("the settings are compatible");
+
+        assert!(args.measure.optimize_test_execution);
+    }
+
+    #[test]
+    fn whole_binaries_and_test_execution_optimization_are_contradictory() {
+        let config = Config::parse("whole-test-binaries = true\n").expect("parses");
+        let mut args = RunArgs::default();
+        args.measure.optimize_test_execution = true;
+
+        let error = config
+            .apply(&mut args)
+            .expect_err("one mode selects cases and the other forbids doing so");
+
+        assert!(error.to_string().contains("optimize-test-execution"), "{error}");
+        assert!(error.to_string().contains("whole-test-binaries"), "{error}");
     }
 
     #[test]
@@ -1001,6 +1072,32 @@ mod tests {
     }
 
     #[test]
+    fn foreign_project_detection_distinguishes_every_marker_combination() {
+        let detected = |foreign: bool, native: bool| {
+            let dir = TempDir::new().expect("a temporary directory");
+            let path = Utf8Path::from_path(dir.path()).expect("path is not UTF-8");
+
+            if foreign {
+                fs::create_dir_all(path.join(".cargo")).expect("could not create .cargo");
+                fs::write(path.join(FOREIGN_PATH), "foreign").expect("could not write the foreign marker");
+            }
+            if native {
+                fs::write(path.join(RELATIVE_PATH), "native").expect("could not write the native marker");
+            }
+
+            Config::foreign_present(path)
+        };
+
+        assert!(!detected(false, false), "no markers are not a foreign configuration");
+        assert!(detected(true, false), "the foreign marker alone must be noticed");
+        assert!(!detected(false, true), "the native marker alone is not foreign");
+        assert!(
+            !detected(true, true),
+            "a native configuration makes the foreign marker non-actionable"
+        );
+    }
+
+    #[test]
     fn a_config_that_cannot_be_read_is_an_error_rather_than_the_defaults() {
         // Only an absent file means "this project has no configuration". Anything else — a
         // directory in its place, a permission problem — has to be reported, because silently
@@ -1036,6 +1133,7 @@ mod tests {
             packages: vec!["package-from-the-file".to_owned()],
             test_packages: vec!["test-package-from-the-file".to_owned()],
             test_workspace: Some(false),
+            optimize_test_execution: Some(false),
             whole_test_binaries: Some(true),
             include_tests: vec!["included-test-from-the-file".to_owned()],
             exclude_tests: vec!["excluded-test-from-the-file".to_owned()],
@@ -1108,6 +1206,7 @@ mod tests {
         assert_eq!(args.measure.cargo_test_args, ["--cargo-test-argument-from-the-file"]);
         assert_eq!(args.measure.test_packages, ["test-package-from-the-file"]);
         assert!(!args.measure.test_workspace, "the file said false, so nothing may turn it on");
+        assert!(!args.measure.optimize_test_execution);
         assert!(args.measure.whole_test_binaries);
         assert_eq!(args.measure.include_tests, ["included-test-from-the-file"]);
         assert_eq!(args.measure.exclude_tests, ["excluded-test-from-the-file"]);

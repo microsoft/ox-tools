@@ -933,3 +933,6 @@ closers
 unmanaged
 interruptible
 nonblocking
+SHA
+upserts
+EWMA

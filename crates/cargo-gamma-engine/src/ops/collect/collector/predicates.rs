@@ -145,10 +145,10 @@ impl<'ast> Visit<'ast> for ValueBreak<'_> {
 /// Returns whether the source positively says an expression is text rather than a number.
 ///
 /// The mirror of `is_known_numeric`, and it exists because that one has to answer from evidence
-/// that is sometimes circumstantial — a screaming-case name, a field name some other struct
-/// declared, a name used as an index once elsewhere in the file. Text is the case where the source
-/// says so outright, and `+ 1` against it is `E0369` every time: a build that is thrown away, a
-/// share of a rollback round paid, and nothing measured.
+/// that is sometimes circumstantial — a field name some other struct declared, or a name used as
+/// an index once elsewhere in the file. Text is the case where the source says so outright, and
+/// `+ 1` against it is `E0369` every time: a build that is thrown away, a share of a rollback round
+/// paid, and nothing measured.
 ///
 /// An allowlist again, and deliberately a short one. A plain path whose type is a caller's struct
 /// is not decidable here and is not attempted; what is decidable is a value the source constructed
@@ -253,10 +253,6 @@ pub(super) fn is_numeric_receiver(method: &str) -> bool {
             | "to_le_bytes"
             | "to_be_bytes"
     )
-}
-
-pub(super) fn is_constant_case(name: &str) -> bool {
-    name.chars().any(|character| character.is_ascii_uppercase()) && !name.chars().any(char::is_lowercase)
 }
 
 /// Returns whether a type's name says its associated functions produce a number.
@@ -579,6 +575,18 @@ pub(super) fn is_numeric_binding(ty: &Type) -> bool {
     }
 }
 
+/// Returns whether a written-down type is an unsigned integer.
+///
+/// This is intentionally narrower than [`is_numeric_binding`]: it is used only where replacing
+/// an unsuffixed zero with `-1` is known not to type-check.
+pub(super) fn is_unsigned_binding(ty: &Type) -> bool {
+    match ty {
+        Type::Reference(reference) => is_unsigned_binding(&reference.elem),
+
+        _ => matches!(resolve_type(ty), Kind::Unsigned),
+    }
+}
+
 /// Returns the type a called path is qualified by, which is the segment before the function name.
 ///
 /// `Vec::new` is qualified by `Vec` and `usize::from` by `usize`; a bare `helper()` is qualified by
@@ -701,6 +709,13 @@ mod tests {
         });
 
         assert!(loop_produces_value(&node));
+
+        let through_while: ExprLoop = parse_quote!('outer: loop {
+            while ready {
+                break 'outer 11;
+            }
+        });
+        assert!(loop_produces_value(&through_while));
     }
 
     /// Textuality is decided only from syntax, so every syntax form that states "this is text"
@@ -784,5 +799,190 @@ mod tests {
         let reference: Type = parse_quote!(&Result<u8, Error>);
 
         assert!(payload(&reference, 0).is_none());
+    }
+
+    #[test]
+    fn expression_shape_predicates_have_exact_positive_and_negative_cases() {
+        for expression in [
+            parse_quote!(1),
+            parse_quote!(VALUE),
+            parse_quote!([1, -2]),
+            parse_quote!((1, VALUE)),
+            parse_quote!([1; 2]),
+            parse_quote!(&(-1)),
+        ] {
+            assert!(is_promotable(&expression), "{expression:?}");
+        }
+        for expression in [
+            parse_quote!([1, call()]),
+            parse_quote!((1, call())),
+            parse_quote!(!true),
+            parse_quote!(call()),
+        ] {
+            assert!(!is_promotable(&expression), "{expression:?}");
+        }
+
+        assert!(binds_a_pattern(&parse_quote!(let Some(value) = option)));
+        assert!(binds_a_pattern(&parse_quote!(ready && (let Some(value) = option))));
+        assert!(!binds_a_pattern(&parse_quote!(ready + (let Some(value) = option))));
+        assert!(!binds_a_pattern(&parse_quote!(ready || matches!(option, Some(_)))));
+        assert_eq!(boolean_literal(&parse_quote!((true))), Some(true));
+        assert_eq!(boolean_literal(&parse_quote!(value)), None);
+        assert!(is_integer_zero_literal(&parse_quote!((0u8))));
+        assert!(!is_integer_zero_literal(&parse_quote!(0.0)));
+        assert!(!is_integer_zero_literal(&parse_quote!(1)));
+    }
+
+    #[test]
+    fn loop_value_detection_respects_labels_shadowing_and_boundaries() {
+        let cases: [(ExprLoop, bool); 5] = [
+            (
+                parse_quote!(loop {
+                    break 1;
+                }),
+                true,
+            ),
+            (
+                parse_quote!(loop {
+                    loop {
+                        break 1;
+                    }
+                }),
+                false,
+            ),
+            (
+                parse_quote!('outer: loop {
+                    loop {
+                        break 'outer 1;
+                    }
+                }),
+                true,
+            ),
+            (
+                parse_quote!('outer: loop {
+                    'outer: loop {
+                        break 'outer 1;
+                    }
+                }),
+                false,
+            ),
+            (
+                parse_quote!(loop {
+                    let _closure = || {
+                        break 1;
+                    };
+                }),
+                false,
+            ),
+        ];
+
+        for (node, expected) in cases {
+            assert_eq!(loop_produces_value(&node), expected, "{node:?}");
+        }
+
+        let state_restored_between_siblings: ExprLoop = parse_quote!('outer: loop {
+            'outer: while false {
+                break;
+            }
+            while false {}
+            break 'outer 9;
+        });
+        assert!(loop_produces_value(&state_restored_between_siblings));
+    }
+
+    #[test]
+    fn textual_numeric_and_pattern_classifiers_use_the_written_shape() {
+        assert!(is_textual(&parse_quote!(std::format!("x"))));
+        assert!(is_textual(&parse_quote!(String::from("a") + "b")));
+        assert!(is_textual(&parse_quote!("a" + suffix)));
+        assert!(is_textual(&parse_quote!(prefix + "b")));
+        assert!(is_textual(&parse_quote!((String::from("a")))));
+        assert!(!is_textual(&parse_quote!(module::format)));
+        assert!(!is_textual(&parse_quote!(1 + 2)));
+        assert!(!is_textual(&parse_quote!(1.max(2))));
+
+        assert!(is_numeric_type("NonZeroUsize"));
+        assert!(!is_numeric_type("Duration"));
+        assert!(returns_numeric("subsec_nanos"));
+        assert!(!returns_numeric("checked_add"));
+        assert!(is_numeric_receiver("to_be_bytes"));
+        assert!(!is_numeric_receiver("max"));
+        assert!(is_capacity_call("try_reserve_exact"));
+        assert!(!is_capacity_call("resize"));
+        assert!(is_diagnostic_message("expect_err", 1));
+        assert!(!is_diagnostic_message("expect_err", 2));
+
+        assert!(is_catch_all(&parse_quote!(_)));
+        assert!(is_catch_all(&parse_quote!((other))));
+        assert!(!is_catch_all(&parse_quote!(Some(other))));
+        assert!(!is_catch_all(&parse_quote!(name @ Some(_))));
+        assert!(!is_catch_all(&parse_quote!(None)));
+    }
+
+    #[test]
+    fn divergence_and_pattern_helpers_cover_each_recursive_form() {
+        for expression in [
+            parse_quote!(return 1),
+            parse_quote!(break),
+            parse_quote!(continue),
+            parse_quote!(std::panic!()),
+            parse_quote!(loop {}),
+            parse_quote!(({ return 1 })),
+            parse_quote!(unsafe { return 1 }),
+            parse_quote!(if ready { return 1 } else { panic!() }),
+            parse_quote!(match value {
+                Some(_) => return 1,
+                None => panic!(),
+            }),
+        ] {
+            assert!(diverges(&expression), "{expression:?}");
+        }
+        for expression in [
+            parse_quote!(loop {
+                break;
+            }),
+            parse_quote!(if ready {
+                return 1;
+            }),
+            parse_quote!(match value {}),
+            parse_quote!(match value {
+                Some(_) => return 1,
+                None => 0,
+            }),
+            parse_quote!({
+                return 1;
+                0
+            }),
+            parse_quote!(if ready { return 1 } else { 0 }),
+            parse_quote!(if ready { 0 } else { return 1 }),
+        ] {
+            assert!(!diverges(&expression), "{expression:?}");
+        }
+
+        assert_eq!(declared_name(&parse_quote!(value)), Some("value".to_owned()));
+        assert_eq!(declared_name(&parse_quote!((value))), None);
+        let typed: Stmt = parse_quote!(let value: usize;);
+        let Stmt::Local(typed) = typed else {
+            panic!("the fixture is a local statement");
+        };
+        assert_eq!(declared_name(&typed.pat), Some("value".to_owned()));
+        assert_eq!(declared_name(&parse_quote!(value @ Some(_))), None);
+        assert_eq!(declared_name(&parse_quote!(_)), None);
+    }
+
+    #[test]
+    fn default_and_return_classification_require_exact_call_and_type_shapes() {
+        let defaults = default_paths("");
+        let defaulted = vec!["T".to_owned()];
+
+        assert!(is_default_call(&parse_quote!(T::default()), &defaults, &defaulted));
+        assert!(!is_default_call(&parse_quote!(T::default(value)), &defaults, &defaulted));
+        assert!(!is_default_call(&parse_quote!(module::T::default()), &defaults, &defaulted));
+        assert!(!is_default_call(&parse_quote!(T::Assoc::default()), &defaults, &defaulted));
+        assert!(!is_default_call(&parse_quote!(default()), &defaults, &defaulted));
+
+        assert!(is_numeric_return(&parse_quote!(-> usize)));
+        assert!(!is_numeric_return(&parse_quote!(-> String)));
+        assert!(!is_numeric_return(&ReturnType::Default));
     }
 }

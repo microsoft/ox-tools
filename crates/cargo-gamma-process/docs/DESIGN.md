@@ -99,9 +99,10 @@ therefore covers the complete descendant tree.
   queue is locked, but the fallible stderr write happens after releasing the
   lock and its error is discarded. Every loop exit or unwind moves retained
   active children back to the retry queue, clears the running state, and
-  notifies waiters, allowing a later `ensure_reaper` or `reap_later` call to
-  restart it. The released handle may leave a zombie on Unix until this process
-  exits.
+  notifies waiters. If any child remains, the lifecycle guard immediately
+  starts a replacement reaper; a handoff accepted while diagnostics were
+  outside the lock therefore never depends on an unrelated later caller. The
+  released handle may leave a zombie on Unix until this process exits.
 - Sealed containment uses a boundary that descendants cannot leave. A host that
   offers no sealed boundary at all silently uses best-effort process-group
   containment for an unmetered launch; absence of a warning does not establish

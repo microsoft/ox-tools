@@ -59,6 +59,7 @@ impl VerdictLog {
         *self = Self::Failed { path, cause };
     }
 
+    // #[gamma::skip(all, reason = "finish only flushes an optional best-effort diagnostic log; absent logs and already-flushed buffers have the same command result")]
     pub(super) fn finish(&mut self) -> crate::Result<()> {
         let previous = core::mem::take(self);
 

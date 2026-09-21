@@ -25,3 +25,14 @@ distinguished from live ownership.
 Private backend functions isolate Win32 calls from the ownership algorithms.
 Unit tests inject per-thread failures at selected calls while retaining the same
 job, process, completion-port, and handle lifetimes as production.
+
+## Interruptible child pipes
+
+`InterruptiblePipe` owns a `ChildStdout` or `ChildStderr`, so callers cannot
+retain an independently blocking copy through this API. Unix construction adds
+`O_NONBLOCK` to the descriptor's shared open-file description; reads propagate
+data and EOF normally and return `WouldBlock` while no data is ready. Windows
+uses `PeekNamedPipe` to distinguish pending data, a closed writer, and a
+readiness error before delegating to `Read`. Platforms with neither Unix
+nonblocking descriptors nor Windows anonymous-pipe readiness return
+`Unsupported` during construction.

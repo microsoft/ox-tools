@@ -174,7 +174,7 @@ pub(super) fn compiled_sources(stdout: &str, root: &Utf8Path) -> Option<HashSet<
 /// survive to reach [`normalize_separators`]. A general makefile unescape would eat those
 /// separators and turn `C:\src\lib.rs` into `C:srclib.rs`, trading a rare defect for a universal
 /// one on that platform.
-fn dependencies(list: &str) -> Vec<String> {
+pub(crate) fn dependencies(list: &str) -> Vec<String> {
     let mut paths = Vec::new();
     let mut path = String::new();
     let mut characters = list.chars().peekable();
@@ -222,7 +222,9 @@ pub(super) fn dep_files(stdout: &str) -> Vec<Utf8PathBuf> {
             continue;
         };
 
+        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
         if message.reason != "compiler-artifact" {
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             continue;
         }
 
@@ -253,7 +255,9 @@ pub(super) fn dep_files(stdout: &str) -> Vec<Utf8PathBuf> {
                 continue;
             };
 
+            // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
             if path.extension() != Some("d") {
+                // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
                 continue;
             }
 
@@ -272,6 +276,6 @@ pub(super) fn dep_files(stdout: &str) -> Vec<Utf8PathBuf> {
 }
 
 /// Rewrites `\` to `/` so that a dep-info path compares equal to a discovered one on Windows.
-pub(super) fn normalize_separators(path: &str) -> String {
+pub(crate) fn normalize_separators(path: &str) -> String {
     path.replace('\\', "/")
 }

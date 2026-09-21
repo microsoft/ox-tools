@@ -112,12 +112,11 @@
 //! acquire the startup environment is different: the runtime emits [`ENVIRONMENT_ERROR_MARKER`]
 //! and exits, so the parent cannot mistake a mutant that never activated for a survivor.
 //!
-//! That distinction covers [`CENSUS_VAR`] as well as [`ACTIVE_VAR`]. An unset census variable is an
-//! ordinary process, but a census variable this process could not *read* is a startup failure, not
-//! an absent one: treating it as absence would run the mutant named by [`ACTIVE_VAR`], produce no
-//! census file, and report a baseline failure the run would read as a verdict about that mutant. A
-//! read interrupted by a signal is retried rather than counted as a failure, since an interruption
-//! is not evidence of anything.
+//! That distinction covers [`CENSUS_VAR`] as well as [`ACTIVE_VAR`]. With no active mutant it
+//! requests a baseline census; alongside a positive active ordinal it records whether that active
+//! guard was reached without changing mutant selection. A variable this process could not *read*
+//! is a startup failure, not an absent one. A read interrupted by a signal is retried rather than
+//! counted as a failure, since an interruption is not evidence of anything.
 //!
 //! Two further failure shapes exist because "captured, but wrong" is worse than either of the
 //! above:

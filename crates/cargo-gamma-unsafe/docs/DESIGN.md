@@ -30,6 +30,12 @@ crate's dependency graph and must remain dependency-free.
   closes it. A safe caller has no way to release it late, twice, or not at all.
 - Linux controller delegation moves only cargo-gamma itself and refuses a
   cgroup shared with any other process.
+- Child stdout and stderr capture uses interruptible pipe reads. On Unix, the
+  owned child descriptor is switched to nonblocking mode and an unavailable
+  read reports `WouldBlock`; EOF remains a successful zero-byte read. On
+  Windows, anonymous-pipe readiness and closure are observed with
+  `PeekNamedPipe` before the ordinary read. Other hosts reject construction as
+  unsupported rather than exposing an uninterruptible safe wrapper.
 - Policy and limit calculation remain in `cargo-gamma-lib`; this crate only
   reports and applies platform capabilities. For example, choosing a memory
   ceiling is testable arithmetic in `cargo-gamma-lib`; this crate answers only
