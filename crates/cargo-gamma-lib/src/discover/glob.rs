@@ -71,6 +71,7 @@ pub(super) fn normalize_separators(text: &str) -> String {
 }
 
 fn normalized(text: &str) -> Cow<'_, str> {
+    // #[gamma::skip(cond.always_true, reason = "on a Windows mutation run cfg!(windows) is already true; non-Windows builds exercise the opposite branch")]
     if cfg!(windows) {
         Cow::Owned(text.replace('\\', "/"))
     } else {

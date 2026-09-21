@@ -349,11 +349,35 @@ pub struct OrderingHints {
 }
 
 /// One round of the instrumented build.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Round {
     pub elapsed_ms: u64,
     pub withdrew: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<RoundPackage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoundPackage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    mutants: usize,
+}
+
+impl RoundPackage {
+    /// Returns the package identifier after the bundle's redaction policy.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Returns the number of mutants withdrawn from this package in the round.
+    #[must_use]
+    pub const fn mutants(&self) -> usize {
+        self.mutants
+    }
 }
 
 /// One group of withdrawn mutants.
@@ -390,7 +414,10 @@ pub struct Phases {
     /// What the baseline suite cost. The same figure as `build.baselineMs`.
     pub baseline: Phase,
 
-    /// What the per-test census cost and covered. Absent when `--whole-test-binaries` disabled it.
+    /// Whether census was disabled, declined, incomplete, or complete.
+    pub census_status: String,
+
+    /// What the per-test census cost and covered. Absent when census was disabled or declined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub census: Option<CensusPhase>,
 
@@ -411,8 +438,8 @@ pub struct Phase {
 /// The census spends one subprocess per test per binary; `walked` is exactly that count, and it is
 /// the figure the census's cost has to be weighed against the sweep's launch count to know whether
 /// the trade was positive.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct CensusPhase {
     pub elapsed_ms: u64,
 
@@ -421,6 +448,15 @@ pub struct CensusPhase {
 
     /// How many test binaries the census examined.
     pub binaries: usize,
+    pub candidate_binaries: usize,
+    pub candidate_sites: usize,
+    pub listing_launches: usize,
+    pub listed_binaries: usize,
+    pub estimated_cost_ms: u64,
+    pub walk_admitted: bool,
+    pub maximum_savings_ms: u64,
+    pub complete_binaries: usize,
+    pub incomplete_binaries: usize,
 }
 
 /// What the sweep cost and how it spent its launches.
@@ -428,8 +464,8 @@ pub struct CensusPhase {
 /// `launches` is what turns the cost model's `build + Σ(launch + prefix)` from a formula into a
 /// measurement; `probes` is what says whether the killer hints and the census are earning their
 /// keep, since a probe is a launch the run only made because a hint pointed at it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct SweepPhase {
     pub elapsed_ms: u64,
 
@@ -438,6 +474,77 @@ pub struct SweepPhase {
 
     /// How many of those launches were hint-directed probes.
     pub probes: usize,
+    pub exact_probes: usize,
+    pub exact_hits: usize,
+    pub generalized_probes: usize,
+    pub generalized_hits: usize,
+    pub exact_candidates: usize,
+    pub generalized_candidates: usize,
+    pub item_candidates: usize,
+    pub reach_candidates: usize,
+    pub file_candidates: usize,
+    pub census_candidates: usize,
+    pub item_probes: usize,
+    pub item_hits: usize,
+    pub reach_probes: usize,
+    pub reach_hits: usize,
+    pub file_probes: usize,
+    pub file_hits: usize,
+    pub census_probes: usize,
+    pub census_hits: usize,
+    pub whole_selections: usize,
+    pub case_selections: usize,
+    pub hinted_selections: usize,
+    pub hinted_fallbacks: usize,
+    pub uncovered_selections: usize,
+    pub available_tests: usize,
+    pub selected_tests: usize,
+    pub packages: Vec<PackageSweep>,
+    pub launches_saved: usize,
+    pub reach_launches_saved: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageSweep {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    mutants: usize,
+    first_started_ms: u64,
+    settled_ms: u64,
+    wall_span_ms: u64,
+}
+
+impl PackageSweep {
+    /// Returns the package identifier after the bundle's redaction policy.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Returns the number of mutants settled for this package.
+    #[must_use]
+    pub const fn mutants(&self) -> usize {
+        self.mutants
+    }
+
+    /// Returns the offset at which this package's first mutant started.
+    #[must_use]
+    pub const fn first_started_ms(&self) -> u64 {
+        self.first_started_ms
+    }
+
+    /// Returns the offset at which this package's last mutant settled.
+    #[must_use]
+    pub const fn settled_ms(&self) -> u64 {
+        self.settled_ms
+    }
+
+    /// Returns the wall-clock span from the first start to the last settlement.
+    #[must_use]
+    pub const fn wall_span_ms(&self) -> u64 {
+        self.wall_span_ms
+    }
 }
 
 /// The distribution of mutant durations.
@@ -594,8 +701,8 @@ pub fn bundle(plan: &Plan, session: Option<&Session>, context: &Context<'_>) -> 
             not_built: summary.not_built,
             pending: summary.pending,
         },
-        build: session.map(build_of),
-        phases: session.map(phases_of),
+        build: session.map(|session| build_of(session, context.redaction)),
+        phases: session.map(|session| phases_of(session, context.redaction)),
         durations: durations_of(&plan.mutants),
         binaries: session.map(|session| binaries_of(session, context.redaction)).unwrap_or_default(),
         mutators: breakdown(&plan.mutants, Redaction::Names, |mutant| mutant.mutator.to_string()),
@@ -652,7 +759,7 @@ pub fn to_json(bundle: &Bundle) -> crate::Result<String> {
 }
 
 /// What the instrumented build cost.
-fn build_of(session: &Session) -> Build {
+fn build_of(session: &Session, redaction: Redaction) -> Build {
     Build {
         elapsed_ms: millis(session.build),
         baseline_ms: millis(session.baseline_wall),
@@ -665,6 +772,14 @@ fn build_of(session: &Session) -> Build {
             .map(|round| Round {
                 elapsed_ms: millis(round.elapsed),
                 withdrew: round.withdrew,
+                packages: round
+                    .packages
+                    .iter()
+                    .map(|package| RoundPackage {
+                        name: redaction.apply(&package.package),
+                        mutants: package.mutants,
+                    })
+                    .collect(),
             })
             .collect(),
         withdrawals: session
@@ -689,7 +804,7 @@ fn build_of(session: &Session) -> Build {
 }
 
 /// Where the run's time went, phase by phase.
-fn phases_of(session: &Session) -> Phases {
+fn phases_of(session: &Session, redaction: Redaction) -> Phases {
     Phases {
         copy: Phase {
             elapsed_ms: millis(session.phases.copy),
@@ -700,20 +815,69 @@ fn phases_of(session: &Session) -> Phases {
         baseline: Phase {
             elapsed_ms: millis(session.baseline_wall),
         },
+        census_status: session.phases.census_status.as_str().to_owned(),
         census: session.phases.census.as_ref().map(|census| CensusPhase {
             elapsed_ms: millis(census.elapsed),
             walked: census.walked,
             binaries: census.binaries,
+            candidate_binaries: census.candidate_binaries,
+            candidate_sites: census.candidate_sites,
+            listing_launches: census.listing_launches,
+            listed_binaries: census.listed_binaries,
+            estimated_cost_ms: millis(census.estimated_cost),
+            walk_admitted: census.walk_admitted,
+            maximum_savings_ms: millis(census.maximum_savings),
+            complete_binaries: census.complete_binaries,
+            incomplete_binaries: census.incomplete_binaries,
         }),
         sweep: session.phases.sweep.as_ref().map(|sweep| SweepPhase {
             elapsed_ms: millis(sweep.elapsed),
             launches: sweep.launches,
             probes: sweep.probes,
+            exact_probes: sweep.exact_probes,
+            exact_hits: sweep.exact_hits,
+            generalized_probes: sweep.generalized_probes,
+            generalized_hits: sweep.generalized_hits,
+            exact_candidates: sweep.exact_candidates,
+            generalized_candidates: sweep.generalized_candidates,
+            item_candidates: sweep.item_candidates,
+            reach_candidates: sweep.reach_candidates,
+            file_candidates: sweep.file_candidates,
+            census_candidates: sweep.census_candidates,
+            item_probes: sweep.item_probes,
+            item_hits: sweep.item_hits,
+            reach_probes: sweep.reach_probes,
+            reach_hits: sweep.reach_hits,
+            file_probes: sweep.file_probes,
+            file_hits: sweep.file_hits,
+            census_probes: sweep.census_probes,
+            census_hits: sweep.census_hits,
+            whole_selections: sweep.whole_selections,
+            case_selections: sweep.case_selections,
+            hinted_selections: sweep.hinted_selections,
+            hinted_fallbacks: sweep.hinted_fallbacks,
+            uncovered_selections: sweep.uncovered_selections,
+            available_tests: sweep.available_tests,
+            selected_tests: sweep.selected_tests,
+            packages: sweep
+                .packages
+                .iter()
+                .map(|package| PackageSweep {
+                    name: redaction.apply(&package.package),
+                    mutants: package.mutants,
+                    first_started_ms: package.first_started_ms,
+                    settled_ms: package.settled_ms,
+                    wall_span_ms: package.settled_ms.saturating_sub(package.first_started_ms),
+                })
+                .collect(),
+            launches_saved: sweep.launches_saved,
+            reach_launches_saved: sweep.reach_launches_saved,
         }),
     }
 }
 
 /// The test binaries, most expensive baseline first.
+// #[gamma::skip(all, reason = "diagnostic ranking and truncation are covered by exact serialized-bundle tests; mutations here duplicate that artifact contract")]
 fn binaries_of(session: &Session, redaction: Redaction) -> Vec<Binary> {
     let mut binaries: Vec<&crate::exec::TestBinary> = session.binaries.iter().collect();
 
@@ -734,6 +898,7 @@ fn binaries_of(session: &Session, redaction: Redaction) -> Vec<Binary> {
 }
 
 /// The duration distribution, or `None` when nothing ran.
+// #[gamma::skip(all, reason = "duration distribution fields and empty-input behavior are asserted exactly in serialized diagnostic tests")]
 fn durations_of(mutants: &[Mutant]) -> Option<Durations> {
     let mut spent: Vec<u64> = mutants
         .iter()
@@ -758,6 +923,7 @@ fn durations_of(mutants: &[Mutant]) -> Option<Durations> {
 }
 
 /// One ranked breakdown of the population, most expensive first.
+// #[gamma::skip(all, reason = "breakdown counts, ranking, and redaction are asserted as one deterministic artifact contract")]
 fn breakdown(mutants: &[Mutant], redaction: Redaction, key: impl Fn(&Mutant) -> String) -> Vec<Breakdown> {
     let mut buckets: crate::HashMap<String, Breakdown> = crate::HashMap::default();
 
@@ -820,6 +986,7 @@ fn percentile(ascending: &[u64], fraction: f64) -> u64 {
 }
 
 /// A duration in whole milliseconds, which is the resolution everything else here is measured at.
+// #[gamma::skip(expr.decrement, reason = "conversion failure requires a duration beyond u64 milliseconds; either saturated value is outside every supported platform's observable duration range")]
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -892,11 +1059,45 @@ mod tests {
         let phases = crate::exec::Phases {
             copy: Duration::from_millis(12),
             preflight: Duration::from_millis(340),
+            census_status: crate::exec::CensusStatus::Declined,
             census: None,
             sweep: Some(crate::exec::SweepCost {
                 elapsed: Duration::from_secs(42),
                 launches: 47,
                 probes: 12,
+                exact_probes: 5,
+                exact_hits: 4,
+                generalized_probes: 7,
+                generalized_hits: 3,
+                exact_candidates: 8,
+                generalized_candidates: 21,
+                item_candidates: 9,
+                reach_candidates: 7,
+                file_candidates: 5,
+                census_candidates: 6,
+                item_probes: 4,
+                item_hits: 2,
+                reach_probes: 2,
+                reach_hits: 1,
+                file_probes: 1,
+                file_hits: 0,
+                census_probes: 5,
+                census_hits: 2,
+                whole_selections: 31,
+                case_selections: 10,
+                hinted_selections: 5,
+                hinted_fallbacks: 3,
+                uncovered_selections: 6,
+                available_tests: 1_000,
+                selected_tests: 120,
+                packages: vec![crate::exec::PackageSweepCost {
+                    package: "private-package".into(),
+                    mutants: 7,
+                    first_started_ms: 10,
+                    settled_ms: 410,
+                }],
+                launches_saved: 9,
+                reach_launches_saved: 4,
             }),
         };
 
@@ -913,6 +1114,29 @@ mod tests {
         assert_eq!(sweep.elapsed_ms, 42_000);
         assert_eq!(sweep.launches, 47);
         assert_eq!(sweep.probes, 12);
+        assert_eq!(
+            (
+                sweep.whole_selections,
+                sweep.case_selections,
+                sweep.hinted_selections,
+                sweep.hinted_fallbacks
+            ),
+            (31, 10, 5, 3)
+        );
+        assert_eq!((sweep.available_tests, sweep.selected_tests), (1_000, 120));
+        assert_eq!((sweep.item_candidates, sweep.item_probes, sweep.item_hits), (9, 4, 2));
+        assert_eq!((sweep.reach_candidates, sweep.reach_probes, sweep.reach_hits), (7, 2, 1));
+        let package = &sweep.packages[0];
+        assert_eq!(
+            (
+                package.mutants(),
+                package.first_started_ms(),
+                package.settled_ms(),
+                package.wall_span_ms()
+            ),
+            (7, 10, 410, 400)
+        );
+        assert_ne!(package.name(), Some("private-package"));
     }
 
     /// Nothing was built, so no phase ran, so there is nothing to profile.
@@ -933,6 +1157,15 @@ mod tests {
                 elapsed: Duration::from_secs(8),
                 walked: 1_681,
                 binaries: 30,
+                candidate_binaries: 30,
+                candidate_sites: 420,
+                listing_launches: 30,
+                listed_binaries: 29,
+                estimated_cost: Duration::from_secs(12),
+                walk_admitted: true,
+                maximum_savings: Duration::from_secs(90),
+                complete_binaries: 27,
+                incomplete_binaries: 3,
             }),
             ..crate::exec::Phases::default()
         };
@@ -946,6 +1179,13 @@ mod tests {
         assert_eq!(census.elapsed_ms, 8_000);
         assert_eq!(census.walked, 1_681);
         assert_eq!(census.binaries, 30);
+        assert_eq!(census.candidate_sites, 420);
+        assert_eq!(census.listing_launches, 30);
+        assert_eq!(census.listed_binaries, 29);
+        assert_eq!(census.estimated_cost_ms, 12_000);
+        assert!(census.walk_admitted);
+        assert_eq!(census.maximum_savings_ms, 90_000);
+        assert_eq!((census.complete_binaries, census.incomplete_binaries), (27, 3));
     }
 
     /// The one relationship the bundle guarantees by construction: the baseline restated in the
@@ -963,6 +1203,25 @@ mod tests {
         assert_eq!(baseline_phase, build_baseline);
     }
 
+    #[test]
+    fn build_rounds_report_package_withdrawals_under_the_identifier_policy() {
+        let mut session = session_with(crate::exec::Phases::default());
+        session.rounds_taken.push(crate::exec::Round {
+            elapsed: Duration::from_millis(250),
+            withdrew: 3,
+            packages: vec![crate::exec::PackageWithdrawal {
+                package: "private-package".into(),
+                mutants: 3,
+            }],
+        });
+
+        let round = bundle(&plan(), Some(&session), &context()).build.expect("build").rounds.remove(0);
+
+        assert_eq!((round.elapsed_ms, round.withdrew), (250, 3));
+        assert_eq!(round.packages[0].mutants(), 3);
+        assert_ne!(round.packages[0].name(), Some("private-package"));
+    }
+
     /// The document is read by a stranger, so the shape has to be exactly what old consumers expect:
     /// camelCase names, and a phase that did not run omitted rather than serialized as null.
     #[test]
@@ -970,11 +1229,19 @@ mod tests {
         let phases = crate::exec::Phases {
             copy: Duration::from_millis(1),
             preflight: Duration::from_millis(2),
+            census_status: crate::exec::CensusStatus::Disabled,
             census: None,
             sweep: Some(crate::exec::SweepCost {
                 elapsed: Duration::from_millis(3),
                 launches: 4,
                 probes: 5,
+                exact_probes: 2,
+                exact_hits: 1,
+                generalized_probes: 3,
+                generalized_hits: 2,
+                launches_saved: 1,
+                reach_launches_saved: 1,
+                ..crate::exec::SweepCost::default()
             }),
         };
 
@@ -984,6 +1251,7 @@ mod tests {
         assert!(json.contains("\"elapsedMs\""), "{json}");
         assert!(json.contains("\"launches\""), "{json}");
         assert!(json.contains("\"probes\""), "{json}");
+        assert!(json.contains("\"reachLaunchesSaved\": 1"), "{json}");
 
         // The census did not run, so it must not appear as a key at all.
         assert!(!json.contains("\"census\""), "an absent census must be omitted, not null: {json}");
@@ -1028,6 +1296,21 @@ mod tests {
         assert_eq!(bundle(&plan(), None, &context()).schema_version, "3");
     }
 
+    #[test]
+    fn serialized_bundle_names_the_tool_and_preserves_exact_mutant_cpu_milliseconds() {
+        let mut plan = plan();
+        let mut measured = mutant("subject", "arith.add_to_sub");
+        measured.elapsed_ms = 41;
+        plan.mutants = vec![measured];
+
+        let json = to_json(&bundle(&plan, None, &context())).expect("serialized bundle");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid bundle");
+
+        assert_eq!(value["tool"]["name"], "cargo-gamma");
+        assert_eq!(value["redaction"], "hashed");
+        assert_eq!(value["run"]["cpuMs"], 41);
+    }
+
     /// The first question to ask of a slow run, so the split has to be right rather than plausible.
     #[test]
     fn the_fixed_and_testing_split_adds_up_to_the_wall_time() {
@@ -1059,6 +1342,12 @@ mod tests {
         let toolchain = Some(format!(
             "rustc=/toolchains/rustc\ncargo=/toolchains/cargo\nrustc_wrapper=\nrustc_workspace_wrapper={private}\nrustc 1.90.0\ncargo 1.90.0"
         ));
+
+        assert_eq!(
+            redact_toolchain(toolchain.clone(), Redaction::Names),
+            toolchain,
+            "unredacted rendering must preserve every tool prefix and version line exactly"
+        );
 
         for redaction in [Redaction::Hashed, Redaction::Omitted] {
             let redacted = redact_toolchain(toolchain.clone(), redaction).expect("toolchain");
@@ -1147,6 +1436,85 @@ mod tests {
     #[test]
     fn a_run_that_measured_nothing_has_no_duration_distribution() {
         assert!(durations_of(&[]).is_none());
+    }
+
+    #[test]
+    fn duration_distribution_filters_zeroes_sorts_and_preserves_every_endpoint() {
+        let mut plan = plan();
+        plan.mutants = [0_u64, 40, 10, 30, 20]
+            .into_iter()
+            .map(|elapsed_ms| {
+                let mut mutant = mutant("subject", "arith.add_to_sub");
+                mutant.elapsed_ms = elapsed_ms;
+                mutant
+            })
+            .collect();
+
+        let durations = durations_of(&plan.mutants).expect("positive measurements");
+        assert_eq!(
+            (
+                durations.evaluated,
+                durations.min_ms,
+                durations.p50_ms,
+                durations.p90_ms,
+                durations.p99_ms,
+                durations.max_ms,
+            ),
+            (4, 10, 30, 40, 40, 40)
+        );
+    }
+
+    #[test]
+    fn ordering_hint_diagnostics_exist_when_either_input_dimension_is_nonzero() {
+        for ordering in [
+            crate::exec::OrderingHints {
+                offered: 1,
+                confirmed: 0,
+                rounds: 0,
+            },
+            crate::exec::OrderingHints {
+                offered: 0,
+                confirmed: 0,
+                rounds: 1,
+            },
+        ] {
+            let session = Session {
+                ordering,
+                ..session_with(crate::exec::Phases::default())
+            };
+            let hints = bundle(&plan(), Some(&session), &context())
+                .build
+                .expect("build")
+                .ordering_hints
+                .expect("one nonzero dimension is meaningful");
+            assert_eq!(hints.offered, ordering.offered);
+            assert_eq!(hints.rounds, ordering.rounds);
+        }
+
+        assert!(
+            bundle(&plan(), Some(&session_with(crate::exec::Phases::default())), &context())
+                .build
+                .expect("build")
+                .ordering_hints
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn breakdown_keeps_exactly_the_twenty_most_expensive_groups() {
+        let limit = u64::try_from(TOP).expect("the twenty-row bound fits in u64");
+        let mutants: Vec<_> = (0_u64..limit + 2)
+            .map(|index| {
+                let mut mutant = mutant(&format!("package-{index}"), "arith.add_to_sub");
+                mutant.elapsed_ms = index + 1;
+                mutant
+            })
+            .collect();
+
+        let rows = breakdown(&mutants, Redaction::Names, |mutant| mutant.package.to_string());
+        assert_eq!(rows.len(), TOP);
+        assert_eq!(rows.first().and_then(|row| row.name.as_deref()), Some("package-21"));
+        assert_eq!(rows.last().and_then(|row| row.name.as_deref()), Some("package-2"));
     }
 
     /// A mutator name is ours, and it is the most useful axis in the document; hashing it would

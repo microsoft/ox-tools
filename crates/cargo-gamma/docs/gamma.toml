@@ -164,11 +164,16 @@
 #
 # test-workspace = true
 
-# Disable the default case-level reachability census and run each reachable test binary whole.
+# Experimentally measure case-level reachability before testing mutants.
 # Default: false.
 #
-# Use this for suites whose reachability depends on threads, clocks, randomness or hash iteration
-# order. It does not override package or target filters.
+# The command-line equivalent is `--optimize-test-execution`. The census runs only when its
+# economic gate predicts that case selection can repay the additional listing and sampling work.
+#
+# optimize-test-execution = false
+
+# Explicitly suppress case-level selection and run each reachable test binary whole.
+# This conflicts with optimize-test-execution.
 #
 # whole-test-binaries = false
 

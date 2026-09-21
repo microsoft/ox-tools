@@ -93,6 +93,7 @@ struct PhaseOne<'cfg> {
 impl<'ast> Visit<'ast> for PhaseOne<'_> {
     fn visit_attribute(&mut self, node: &'ast Attribute) {
         self.audit.on_attribute(node);
+        // #[gamma::skip(stmt.delete_call, reason = "syn attributes contain an opaque token stream and no recursively visitable Rust nodes, so this continuation has no observable work")]
         visit::visit_attribute(self, node);
     }
 
@@ -186,6 +187,7 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
 
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
         self.walk.on_item_use(node);
+        // #[gamma::skip(stmt.delete_call, reason = "a use tree contains no expressions, attributes, function items, or declarations consumed by either fused visitor")]
         visit::visit_item_use(self, node);
     }
 
@@ -227,5 +229,182 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
     fn visit_expr_for_loop(&mut self, node: &'ast ExprForLoop) {
         self.walk.on_expr_for_loop(node);
         visit::visit_expr_for_loop(self, node);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_source(source: &str, selection: &str, cfg: &CfgSet) -> Result<Indexes> {
+        let file = SourceFile::parse("fixture.rs", source.to_owned()).expect("the fixture parses");
+        let selection = Selection::parse(selection).expect("the selectors resolve");
+
+        run(&file, &selection, cfg)
+    }
+
+    #[test]
+    fn the_fused_walk_visits_every_indexed_and_audited_item_kind() {
+        let indexes = run_source(
+            r"
+                use std::vec::Vec;
+
+                struct Record {
+                    count: usize,
+                }
+
+                const LIMIT: usize = 1;
+                static FLOOR: usize = 0;
+
+                trait Measure {
+                    const STEP: usize;
+                    fn read(&self) -> usize;
+                }
+
+                impl Record {
+                    const CAPACITY: usize = 2;
+                    fn value(&self) -> usize {
+                        self.count + LIMIT
+                    }
+                }
+
+                fn collect(record: &Record) -> usize {
+                    for index in 0..record.count {
+                        let _ = Vec::<usize>::new()[index + record.value()];
+                    }
+                    let _width = record.count + LIMIT;
+                    record.value().saturating_add(FLOOR)
+                }
+            ",
+            "expr.increment,arith.add_to_sub,fn_value.default",
+            &CfgSet::unconditional(),
+        )
+        .expect("the fixture has no stated-value fault");
+
+        assert_eq!(indexes.constants.get("LIMIT"), Some(&true));
+        assert_eq!(indexes.constants.get("FLOOR"), Some(&true));
+        assert_eq!(indexes.constants.get("STEP"), Some(&true));
+        assert_eq!(indexes.constants.get("CAPACITY"), Some(&true));
+        assert_eq!(indexes.fields.get("count"), Some(&true));
+        assert_eq!(indexes.imports.get("Vec"), Some(&Some(vec!["std".to_owned(), "vec".to_owned()])));
+        assert!(indexes.numeric_uses.names.contains("index"));
+    }
+
+    #[test]
+    fn every_gate_excludes_invalid_stated_values_in_inactive_code() {
+        let source = r"
+            #[cfg(any())]
+            #[gamma::value(0, 1)]
+            fn item() {}
+
+            struct Record {
+                #[cfg(any())]
+                #[gamma::value(0, 1)]
+                field: usize,
+            }
+
+            impl Record {
+                #[cfg(any())]
+                #[gamma::value(0, 1)]
+                fn implementation(&self) {}
+            }
+
+            trait Measure {
+                #[cfg(any())]
+                #[gamma::value(0, 1)]
+                fn declaration(&self) {}
+            }
+
+            fn body(value: Option<usize>) {
+                #[cfg(any())]
+                #[gamma::value(0, 1)]
+                let skipped = 1;
+
+                match value {
+                    #[cfg(any())]
+                    #[gamma::value(0, 1)]
+                    Some(number) => number,
+                    _ => 0,
+                };
+            }
+        ";
+
+        run_source(source, "all", &CfgSet::parse("unix")).expect("attributes on every inactive syntax level are ignored");
+    }
+
+    #[test]
+    fn active_attributes_and_nested_functions_are_audited() {
+        assert!(
+            run_source(
+                "fn outer() { #[gamma::value(0, 1)] fn inner() -> usize { 2 } }",
+                "all",
+                &CfgSet::unconditional(),
+            )
+            .is_err(),
+            "the recursive descent must reach and audit a nested function"
+        );
+        assert!(
+            run_source(
+                "struct S; impl S { #[gamma::value(0, 1)] fn f(&self) -> usize { 2 } }",
+                "all",
+                &CfgSet::unconditional(),
+            )
+            .is_err(),
+            "implementation methods are audited"
+        );
+        assert!(
+            run_source(
+                "trait T { #[gamma::value(0, 1)] fn f(&self) -> usize { 2 } }",
+                "all",
+                &CfgSet::unconditional(),
+            )
+            .is_err(),
+            "trait methods are audited"
+        );
+
+        for source in [
+            "struct S { #[gamma::value(0, 1)] field: usize }",
+            "fn f(value: Option<usize>) { match value { #[gamma::value(0, 1)] Some(n) => n, _ => 0 }; }",
+            "fn f() { let _ = #[gamma::value(0, 1)] 1; }",
+        ] {
+            assert!(
+                run_source(source, "all", &CfgSet::unconditional()).is_err(),
+                "the active nested attribute must be audited: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_visits_reach_expressions_inside_every_declaration_kind() {
+        let indexes = run_source(
+            r"
+            struct Buffer([u8; width - 1]);
+            const LIMIT: usize = left - right;
+            static FLOOR: usize = low - high;
+            trait T {
+                const STEP: usize = trait_left - trait_right;
+            }
+            impl T for Buffer {
+                const STEP: usize = impl_left - impl_right;
+            }
+            ",
+            "expr.increment",
+            &CfgSet::unconditional(),
+        )
+        .expect("the fixture has no stated-value fault");
+
+        for expected in [
+            "width",
+            "left",
+            "right",
+            "low",
+            "high",
+            "trait_left",
+            "trait_right",
+            "impl_left",
+            "impl_right",
+        ] {
+            assert!(indexes.numeric_uses.names.contains(expected), "{expected}");
+        }
     }
 }

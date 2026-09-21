@@ -6,11 +6,10 @@
 //! End-to-end tests of the command-line surface, driven through a fake host.
 
 use std::fs;
+use std::process::{Command, Stdio};
 
 use camino::Utf8PathBuf;
-use cargo_gamma_lib::internals::exec::gamma_base;
-use cargo_gamma_lib::run;
-use cargo_gamma_lib::testing::Sink;
+use cargo_gamma_lib::testing::{Sink, gamma_base, run};
 use tempfile::TempDir;
 
 /// Exit code for a run in which every gate passed.
@@ -56,7 +55,7 @@ fn runtime_stub(root: &std::path::Path) {
 fn scratch_base(dir: &TempDir) -> Utf8PathBuf {
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
 
-    gamma_base(&root, None)
+    gamma_base(&root)
 }
 
 /// Reproduces the cache-owner marker validated by `exec::workspace`.
@@ -380,6 +379,39 @@ fn a_run_reports_what_it_found() {
 }
 
 #[test]
+fn test_execution_optimization_is_explicit_and_conflicts_with_whole_binaries() {
+    let dir = workspace(SUBJECT);
+    let (code, host) = invoke(&dir, &["run", "--dry-run", "--optimize-test-execution"]);
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+
+    let (conflict_code, conflict) = invoke(&dir, &["run", "--dry-run", "--optimize-test-execution", "--whole-test-binaries"]);
+
+    assert_eq!(conflict_code, EXIT_USAGE, "{}", conflict.err());
+    assert!(conflict.err().contains("--optimize-test-execution"), "{}", conflict.err());
+    assert!(conflict.err().contains("--whole-test-binaries"), "{}", conflict.err());
+}
+
+#[test]
+fn a_default_measured_run_skips_and_reports_the_census() {
+    let dir = workspace(SUBJECT);
+    let (code, host) = invoke(&dir, &["run", "--jobs", "1"]);
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+
+    let diagnostics =
+        fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-diagnostics.json")).expect("the measured run writes diagnostics");
+    let diagnostics: serde_json::Value = serde_json::from_str(&diagnostics).expect("diagnostics are JSON");
+    let phases = &diagnostics["phases"];
+
+    assert_eq!(phases["censusStatus"], "disabled", "{diagnostics}");
+    assert!(
+        phases.get("census").is_none(),
+        "a disabled census must perform no measured work: {diagnostics}"
+    );
+}
+
+#[test]
 fn clean_deletes_only_the_current_workspaces_cached_data() {
     let dir = workspace(SUBJECT);
     let base = scratch_base(&dir);
@@ -404,13 +436,28 @@ fn clean_deletes_only_the_current_workspaces_cached_data() {
 #[test]
 fn a_measured_run_journals_every_testing_verdict_in_the_cache_directory() {
     let dir = workspace(SUBJECT);
+    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
+    let production = cargo_gamma_lib::testing::production_gamma_base(&root);
+
+    assert!(
+        !production.exists(),
+        "the fixture started with a production-cache entry at `{production}`"
+    );
+
     let (code, host) = invoke(&dir, &["run", "--whole-test-binaries", "--jobs", "1"]);
 
     assert_eq!(code, EXIT_OK, "{}", host.err());
 
-    let path = scratch_base(&dir).join("gamma-progress.log");
+    let base = scratch_base(&dir);
+    let path = base.join("gamma-progress.log");
     let text = fs::read_to_string(&path).unwrap_or_else(|cause| panic!("could not read `{path}`: {cause}"));
 
+    assert!(base.starts_with(&root), "the test cache escaped its workspace: `{base}`");
+    assert!(base.join(".cargo-gamma-owner").exists(), "the private cache was not claimed");
+    assert!(
+        !production.exists(),
+        "the run wrote into the user's production cache at `{production}`"
+    );
     assert!(text.contains("killed"), "{text}");
     assert!(text.contains("SURVIVED"), "{text}");
     assert!(!text.contains('\x1b'), "the log contains terminal escapes: {text:?}");
@@ -670,12 +717,101 @@ fn population(dir: &TempDir) -> Vec<(String, String)> {
         .collect()
 }
 
+#[test]
+fn a_survivor_report_selects_only_its_genuine_survivor_identities() {
+    let dir = workspace(SUBJECT);
+    let prior = dir.path().join("prior-report.json");
+    let prior_arg = prior.to_str().expect("the report path is UTF-8");
+    let (listed, listing) = invoke(&dir, &["list", "mutants", "--json-report", prior_arg]);
+
+    assert_eq!(listed, EXIT_OK, "{}", listing.err());
+
+    let mut report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&prior).expect("the population report exists")).expect("the population report is JSON");
+    let survivor = report["files"]
+        .as_object()
+        .expect("the report has files")
+        .values()
+        .flat_map(|file| file["mutants"].as_array().expect("the file has mutants"))
+        .next()
+        .expect("the fixture yields mutants")["id"]
+        .as_str()
+        .expect("the mutant has an id")
+        .to_owned();
+
+    for mutant in report["files"]
+        .as_object_mut()
+        .expect("the report has files")
+        .values_mut()
+        .flat_map(|file| file["mutants"].as_array_mut().expect("the file has mutants"))
+    {
+        let status = if mutant["id"].as_str() == Some(survivor.as_str()) {
+            "Survived"
+        } else {
+            "Killed"
+        };
+
+        mutant["status"] = serde_json::Value::String(status.to_owned());
+    }
+
+    fs::write(&prior, serde_json::to_vec(&report).expect("the report serializes")).expect("the prior report is writable");
+
+    let (code, host) = invoke(&dir, &["run", "--dry-run", "--only-survivors-from", prior_arg]);
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+
+    let selected: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-report.json")).expect("the dry-run report exists"),
+    )
+    .expect("the dry-run report is JSON");
+    let selected_ids = selected["files"]
+        .as_object()
+        .expect("the selected report has files")
+        .values()
+        .flat_map(|file| file["mutants"].as_array().expect("the selected file has mutants"))
+        .map(|mutant| mutant["id"].as_str().expect("the selected mutant has an id"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(selected_ids, [survivor]);
+}
+
 /// Writes a run record naming the first mutant unviable and the second one killed by a named test.
 ///
 /// Written as text rather than through the tool so that the on-disk shape of the record is pinned
 /// by something outside the code that produces it. A promotion that silently stopped reading a
 /// field would otherwise still pass every test it has.
+fn commit_workspace(dir: &TempDir) {
+    let git = |arguments: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git should start")
+    };
+
+    assert!(git(&["init", "--quiet"]).success());
+    assert!(git(&["add", "Cargo.toml", "src"]).success());
+    assert!(
+        git(&[
+            "-c",
+            "user.name=cargo-gamma",
+            "-c",
+            "user.email=cargo-gamma@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ])
+        .success()
+    );
+}
+
 fn seed_record(dir: &TempDir, population: &[(String, String)]) {
+    commit_workspace(dir);
     let base = scratch_base(dir);
 
     fs::create_dir_all(&base).expect("could not create the scratch base");
@@ -726,16 +862,23 @@ fn promoting_hints_writes_only_what_cannot_move_a_score() {
 
     assert_eq!(code, EXIT_OK, "{}", host.err());
 
-    let written = fs::read_to_string(dir.path().join("gamma-hints.json")).expect("the artifact should have been written");
-    let hints: serde_json::Value = serde_json::from_str(&written).expect("the artifact is JSON");
+    let written = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the artifact should have been written");
+    let hints: yaml_serde::Value = yaml_serde::from_str(&written).expect("the artifact is YAML");
 
-    assert_eq!(hints["version"], 1, "{written}");
+    assert_eq!(hints["version"].as_u64(), Some(3), "{written}");
     assert!(
         hints["tool"].as_str().is_some_and(|tool| tool.starts_with("cargo-gamma ")),
         "the artifact has to say what wrote it: {written}"
     );
+    assert_eq!(hints["context"].as_mapping().expect("context").len(), 2, "{written}");
+    assert_eq!(hints["context"]["repo_sha"].as_str().map(str::len), Some(40), "{written}");
+    assert_eq!(hints["context"]["generated_on"].as_str().map(str::len), Some(10), "{written}");
 
-    let entries = hints["mutants"].as_array().expect("the artifact lists mutants");
+    let files = hints["files"].as_sequence().expect("the artifact groups source files");
+    let entries = files
+        .iter()
+        .flat_map(|file| file["mutants"].as_sequence().expect("the file group lists mutants"))
+        .collect::<Vec<_>>();
 
     assert_eq!(entries.len(), 2, "one unviable mutant and one probe: {written}");
 
@@ -744,7 +887,13 @@ fn promoting_hints_writes_only_what_cannot_move_a_score() {
         "the build-order tier is missing: {written}"
     );
     assert!(
-        entries.iter().any(|entry| entry["killer"]["test"] == "tests::ranges_work"),
+        files.iter().any(|file| {
+            file["killers"]
+                .as_sequence()
+                .expect("the file group interns killers")
+                .iter()
+                .any(|killer| killer["test"] == "tests::ranges_work")
+        }),
         "the probe tier is missing: {written}"
     );
 
@@ -766,7 +915,7 @@ fn previewing_a_promotion_writes_no_file() {
     assert_eq!(code, EXIT_OK, "{}", host.err());
     assert!(host.err().contains("would carry"), "{}", host.err());
     assert!(
-        !dir.path().join("gamma-hints.json").exists(),
+        !dir.path().join("gamma-hints.yaml").exists(),
         "a preview must not write the artifact"
     );
 }
@@ -787,13 +936,34 @@ fn regenerating_an_unchanged_artifact_changes_no_bytes() {
 
     assert_eq!(first_code, EXIT_OK, "{}", first_host.err());
 
-    let first = fs::read_to_string(dir.path().join("gamma-hints.json")).expect("the artifact exists");
+    let first = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the artifact exists");
 
     let (second_code, host) = invoke(&dir, &["hints"]);
-    let second = fs::read_to_string(dir.path().join("gamma-hints.json")).expect("the artifact still exists");
+    let second = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the artifact still exists");
 
     assert_eq!(second_code, EXIT_OK, "{}", host.err());
     assert_eq!(first, second, "the artifact is not byte-stable across regeneration");
+    assert!(host.err().contains("Unchanged"), "{}", host.err());
+}
+
+#[test]
+fn no_op_promotion_preserves_a_current_artifact_without_generalized_hints() {
+    let dir = workspace(SUBJECT);
+    let artifact = concat!(
+        "version: 3\n",
+        "tool: cargo-gamma older\n",
+        "context:\n",
+        "  repo_sha: old\n",
+        "  generated_on: '2026-09-16'\n",
+        "files: []\n",
+    );
+    let path = dir.path().join("gamma-hints.yaml");
+    fs::write(&path, artifact).expect("current hints are writable");
+
+    let (code, host) = invoke(&dir, &["hints"]);
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert_eq!(fs::read_to_string(path).expect("current hints remain readable"), artifact);
     assert!(host.err().contains("Unchanged"), "{}", host.err());
 }
 
@@ -805,56 +975,126 @@ fn promoting_without_a_record_writes_nothing_and_explains_why() {
 
     assert_eq!(code, EXIT_OK, "{}", host.err());
     assert!(host.err().contains("nothing to promote"), "{}", host.err());
-    assert!(!dir.path().join("gamma-hints.json").exists());
+    assert!(!dir.path().join("gamma-hints.yaml").exists());
 }
 
-/// A record naming mutants that no longer exist promotes none of them.
-///
-/// Without the join against the current population the file grows without bound and fills its diff
-/// with ids nobody can locate, which is the failure mode that makes generated files unreviewable.
+/// An empty legacy generation still needs migration even when the latest run learned nothing.
 #[test]
-fn promotion_drops_hints_for_mutants_that_no_longer_exist() {
+fn promoting_empty_legacy_hints_writes_yaml_and_removes_json() {
     let dir = workspace(SUBJECT);
-    let population = population(&dir);
-
-    seed_record(&dir, &population);
-
-    // The mutants keep their identities only as long as the code they name does. Rewriting the
-    // library retires every one of them.
-    fs::write(dir.path().join("src/lib.rs"), "pub fn unrelated() -> u8 { 7 }\n").expect("could not rewrite the library");
+    commit_workspace(&dir);
+    let legacy = serde_json::json!({
+        "version": 1,
+        "tool": "cargo-gamma legacy",
+        "context": {
+            "features": "f",
+            "profile": "p",
+            "rustflags": "r",
+            "extra": "e",
+            "toolchain": "t",
+            "tool": "v",
+        },
+        "mutants": [],
+    });
+    fs::write(
+        dir.path().join("gamma-hints.json"),
+        serde_json::to_vec(&legacy).expect("legacy hints serialize"),
+    )
+    .expect("legacy hints are writable");
 
     let (code, host) = invoke(&dir, &["hints"]);
 
     assert_eq!(code, EXIT_OK, "{}", host.err());
-    assert!(host.err().contains("nothing to promote"), "{}", host.err());
+    assert!(host.err().contains("Wrote"), "{}", host.err());
+    assert!(dir.path().join("gamma-hints.yaml").exists());
+    assert!(!dir.path().join("gamma-hints.json").exists());
 }
 
-/// A corrupt or foreign artifact is treated exactly as a missing one.
+/// Explicit replacement writes a valid empty generation instead of retaining unknown bytes.
+#[test]
+fn replacing_an_unknown_artifact_without_new_hints_still_writes() {
+    let dir = workspace(SUBJECT);
+    commit_workspace(&dir);
+    fs::write(dir.path().join("gamma-hints.yaml"), "unknown: artifact\n").expect("unknown hints are writable");
+
+    let (code, host) = invoke(&dir, &["hints", "--replace"]);
+    let written = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("replacement hints exist");
+    let hints: yaml_serde::Value = yaml_serde::from_str(&written).expect("replacement hints are YAML");
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert!(host.err().contains("Wrote"), "{}", host.err());
+    assert_eq!(hints["version"].as_u64(), Some(3), "{written}");
+    assert!(hints["files"].as_sequence().expect("file groups").is_empty(), "{written}");
+}
+
+/// A partial selection preserves absences, while a complete replacement deliberately retires them.
+#[test]
+fn incremental_promotion_preserves_unproven_stale_hints_until_replacement() {
+    let dir = workspace(SUBJECT);
+    let population = population(&dir);
+
+    seed_record(&dir, &population);
+    let (first_code, first_host) = invoke(&dir, &["hints"]);
+
+    assert_eq!(first_code, EXIT_OK, "{}", first_host.err());
+    let before = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the first generation");
+
+    // The mutants keep their identities only as long as the code they name does. Rewriting the
+    // library retires every one of them, but the default mutator preset is not complete enough to
+    // prove that every absent id belongs to its selection.
+    fs::write(dir.path().join("src/lib.rs"), "pub fn unrelated() -> u8 { 7 }\n").expect("could not rewrite the library");
+
+    let (code, host) = invoke(&dir, &["hints"]);
+    let preserved = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the preserved generation");
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert_eq!(preserved, before);
+    assert!(host.err().contains("preserved"), "{}", host.err());
+
+    let (replacement_code, replacement) = invoke(&dir, &["hints", "--replace"]);
+    let replaced = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the replacement generation");
+    let yaml: yaml_serde::Value = yaml_serde::from_str(&replaced).expect("replacement YAML");
+
+    assert_eq!(replacement_code, EXIT_OK, "{}", replacement.err());
+    assert!(yaml["files"].as_sequence().expect("file groups").is_empty(), "{replaced}");
+    assert!(replacement.err().contains("removed"), "{}", replacement.err());
+}
+
+/// A corrupt artifact is ignored by automatic consumers but protected from incremental promotion.
 ///
 /// The file lives in version control, so it will be merged badly, truncated by a failed checkout,
 /// and written by a version that does not exist yet. A run that failed over any of that would have
-/// turned an optimization into a dependency.
+/// turned an optimization into a dependency. Promotion is explicit, so it must refuse to discard
+/// unknown knowledge unless replacement was requested.
 #[test]
-fn a_corrupt_artifact_costs_time_and_never_signal() {
+fn a_corrupt_artifact_costs_runs_only_and_requires_explicit_replacement() {
     let dir = workspace(SUBJECT);
 
-    fs::write(dir.path().join("gamma-hints.json"), "{ not json at all").expect("could not write the artifact");
+    fs::write(dir.path().join("gamma-hints.yaml"), "{ not yaml at all").expect("could not write the artifact");
 
     let (code, host) = invoke(&dir, &["list", "mutants"]);
 
     assert_eq!(code, EXIT_OK, "{}", host.err());
     assert!(host.out().contains("relational.lt_to_le"), "{}", host.out());
 
-    // A promotion over a corrupt file replaces it rather than refusing to run.
     let population = population(&dir);
 
     seed_record(&dir, &population);
 
     let (promoted, promotion) = invoke(&dir, &["hints"]);
 
-    assert_eq!(promoted, EXIT_OK, "{}", promotion.err());
+    assert_ne!(promoted, EXIT_OK, "incremental promotion replaced unknown knowledge");
+    assert!(promotion.err().contains("use `--replace`"), "{}", promotion.err());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the corrupt artifact remains"),
+        "{ not yaml at all"
+    );
 
-    let written = fs::read_to_string(dir.path().join("gamma-hints.json")).expect("the artifact was rewritten");
+    let (replaced, replacement) = invoke(&dir, &["hints", "--replace"]);
 
-    assert!(serde_json::from_str::<serde_json::Value>(&written).is_ok(), "{written}");
+    assert_eq!(replaced, EXIT_OK, "{}", replacement.err());
+
+    let written = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the artifact was rewritten");
+
+    assert!(yaml_serde::from_str::<yaml_serde::Value>(&written).is_ok(), "{written}");
 }

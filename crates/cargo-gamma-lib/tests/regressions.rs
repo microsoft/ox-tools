@@ -140,7 +140,7 @@ fn cli(args: &[&str]) -> (i32, String) {
 
     command.extend(args.iter().map(|arg| (*arg).to_owned()));
 
-    let code = cargo_gamma_lib::run(&mut host, command);
+    let code = cargo_gamma_lib::testing::run(&mut host, command);
 
     (code, format!("{}{}", host.out(), host.err()))
 }
@@ -215,7 +215,7 @@ fn issue_005_the_worst_case_pays_for_confirming_every_timeout() {
         budget,
         ..estimate::Workload::default()
     };
-    let estimate = estimate::project(&[], work, Duration::ZERO, Duration::ZERO, 1);
+    let estimate = estimate::project(&[], work, Duration::ZERO, Duration::ZERO, 1, true);
 
     assert!(
         estimate.worst_case() >= budget.saturating_mul(2),
@@ -233,7 +233,7 @@ fn issue_005_the_projected_range_never_reaches_past_the_ceiling() {
         budget: Duration::from_secs(1),
         single: Duration::from_secs(1),
     };
-    let estimate = estimate::project(&[], work, Duration::ZERO, Duration::ZERO, 1);
+    let estimate = estimate::project(&[], work, Duration::ZERO, Duration::ZERO, 1, true);
 
     assert!(estimate.high() <= estimate.worst_case());
 }

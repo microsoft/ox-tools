@@ -191,29 +191,48 @@ fn write_phases(text: &mut String, session: &Session) {
 
     let _ = writeln!(
         text,
-        "phases    copy {}, preflight {}, baseline {}",
+        "phases    copy {}, preflight {}, baseline {}, census {}",
         human(phases.copy),
         human(phases.preflight),
-        human(session.baseline_wall)
+        human(session.baseline_wall),
+        phases.census_status.as_str()
     );
 
     if let Some(census) = &phases.census {
         let _ = writeln!(
             text,
-            "          census {}, {} over {} binaries",
+            "          census {}, {} over {} binaries (up to {} sweep savings)",
             human(census.elapsed),
             quantity(census.walked, "test"),
-            census.binaries
+            census.binaries,
+            human(census.maximum_savings),
         );
     }
 
     if let Some(sweep) = &phases.sweep {
         let _ = writeln!(
             text,
-            "          sweep {}, {} launches, {} probes",
+            "          sweep {}, {} launches, {} probes, {} saved ({} from reach; exact {}/{}, generalized {}/{})",
             human(sweep.elapsed),
             sweep.launches,
-            sweep.probes
+            sweep.probes,
+            sweep.launches_saved,
+            sweep.reach_launches_saved,
+            sweep.exact_hits,
+            sweep.exact_probes,
+            sweep.generalized_hits,
+            sweep.generalized_probes,
+        );
+        let _ = writeln!(
+            text,
+            "          selection {} whole, {} narrowed, {} hinted ({} fell back), {} uncovered; {} of {} named tests selected",
+            sweep.whole_selections,
+            sweep.case_selections,
+            sweep.hinted_selections,
+            sweep.hinted_fallbacks,
+            sweep.uncovered_selections,
+            sweep.selected_tests,
+            sweep.available_tests,
         );
     }
 }
@@ -587,10 +606,12 @@ mod tests {
                 Round {
                     elapsed: Duration::from_secs(5),
                     withdrew: 4,
+                    packages: Vec::new(),
                 },
                 Round {
                     elapsed: Duration::from_secs(2),
                     withdrew: 0,
+                    packages: Vec::new(),
                 },
             ],
             binaries,
@@ -615,6 +636,56 @@ mod tests {
     #[test]
     fn a_percentile_of_nothing_is_zero_rather_than_a_panic() {
         assert_eq!(percentile(&[], 0.9), Duration::ZERO);
+    }
+
+    #[test]
+    fn outcome_buckets_count_each_category_and_cpu_exactly() {
+        let mut bucket = Bucket::default();
+        bucket.absorb(&mutant("a.rs", "a", Outcome::Killed, 10));
+        bucket.absorb(&mutant("a.rs", "a", Outcome::Survived, 20));
+        bucket.absorb(&mutant("a.rs", "a", Outcome::CompileError, 30));
+
+        assert_eq!(bucket.mutants, 3);
+        assert_eq!(bucket.cpu, Duration::from_millis(60));
+        assert_eq!(bucket.survivors, 1);
+        assert_eq!(bucket.unviable, 1);
+    }
+
+    #[test]
+    fn every_outcome_has_the_exact_unstyled_table_label() {
+        for (outcome, expected) in [
+            (Outcome::Killed, "killed"),
+            (Outcome::Survived, "survived"),
+            (Outcome::Timeout, "timeout"),
+            (Outcome::OutOfMemory, "outofmem"),
+            (Outcome::Flaky, "flaky"),
+            (Outcome::CompileError, "unviable"),
+            (Outcome::Ignored, "ignored"),
+            (Outcome::NoCoverage, "uncovered"),
+            (Outcome::NotBuilt, "notbuilt"),
+            (Outcome::Pending, "pending"),
+        ] {
+            assert_eq!(label(outcome), expected);
+        }
+    }
+
+    #[test]
+    fn timeout_noise_requires_two_positive_durations_and_a_strictly_crowded_budget() {
+        assert!(!crowded_timeout(Duration::ZERO, Duration::from_secs(1)));
+        assert!(!crowded_timeout(Duration::from_secs(1), Duration::ZERO));
+        assert!(crowded_timeout(Duration::from_millis(1999), Duration::from_secs(1)));
+        assert!(!crowded_timeout(Duration::from_secs(2), Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn diagnostic_header_and_population_lines_are_exact() {
+        let text = render(&plan(Vec::new()), None, 7, Duration::from_secs(2));
+        let mut lines = text.lines();
+
+        assert_eq!(lines.next(), Some("── diag ──────────────────────────────────────────────"));
+        assert_eq!(lines.next(), Some("run       wall 2.0s, of which 2.0s testing, 7 jobs"));
+        assert_eq!(lines.next(), Some("          root /w"));
+        assert_eq!(lines.next(), Some("discover  0 files, 0 mutants, 0 packages, 0 reach edges"));
     }
 
     #[test]
@@ -705,15 +776,24 @@ mod tests {
             phases: crate::exec::Phases {
                 copy: Duration::from_secs(1),
                 preflight: Duration::from_secs(2),
+                census_status: crate::exec::CensusStatus::Complete,
                 census: Some(crate::exec::CensusCost {
                     elapsed: Duration::from_secs(8),
                     walked: 1_681,
                     binaries: 30,
+                    ..crate::exec::CensusCost::default()
                 }),
                 sweep: Some(crate::exec::SweepCost {
                     elapsed: Duration::from_secs(42),
                     launches: 47,
                     probes: 12,
+                    exact_probes: 5,
+                    exact_hits: 4,
+                    generalized_probes: 7,
+                    generalized_hits: 3,
+                    launches_saved: 9,
+                    reach_launches_saved: 4,
+                    ..crate::exec::SweepCost::default()
                 }),
             },
             ..session(Vec::new())
@@ -723,7 +803,10 @@ mod tests {
 
         assert!(text.contains("phases    copy 1.0s, preflight 2.0s, baseline 2.0s"), "{text}");
         assert!(text.contains("census 8.0s, 1681 tests over 30 binaries"), "{text}");
-        assert!(text.contains("sweep 42.0s, 47 launches, 12 probes"), "{text}");
+        assert!(
+            text.contains("sweep 42.0s, 47 launches, 12 probes, 9 saved (4 from reach; exact 4/5, generalized 3/7)"),
+            "{text}"
+        );
     }
 
     /// A census that did not run leaves no census line, because a run that was not asked to census

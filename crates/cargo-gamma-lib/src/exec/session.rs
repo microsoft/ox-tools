@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use core::time::Duration;
+use std::sync::Arc;
 
 use super::build::Round;
 use super::test_binary::TestBinary;
@@ -82,7 +83,7 @@ pub struct Session {
     /// The test binaries that were run.
     pub binaries: Vec<TestBinary>,
 
-    /// Where the run put everything it kept on disk.
+    /// Where the run put its Cargo artifacts and reusable campaign state.
     ///
     /// The path rather than the size, because the size is a walk of a directory holding every build
     /// artifact of every round, and only the diagnostics dump ever prints it. See
@@ -147,7 +148,10 @@ pub struct Phases {
     /// of [`Session::build`].
     pub preflight: Duration,
 
-    /// What the census cost and covered, or `None` when `--whole-test-binaries` disabled it.
+    /// Why census work was absent or how far an attempted census got.
+    pub census_status: CensusStatus,
+
+    /// What the census cost and covered, or `None` when it was disabled or declined.
     ///
     /// Absent rather than zero: a run with no census did not spend zero time censusing, it did not
     /// census, and the difference is the whole question of whether turning the census on was worth
@@ -158,13 +162,43 @@ pub struct Phases {
     pub sweep: Option<SweepCost>,
 }
 
+/// Whether case-level reachability optimization ran and produced complete evidence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CensusStatus {
+    /// The user did not request the experimental optimization.
+    #[default]
+    Disabled,
+
+    /// The economic gate determined that census work could not repay itself.
+    Declined,
+
+    /// Census work ran but retained only checked positive hints.
+    Incomplete,
+
+    /// Census work completed and may safely exclude tests.
+    Complete,
+}
+
+impl CensusStatus {
+    /// Stable diagnostic spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Declined => "declined",
+            Self::Incomplete => "incomplete",
+            Self::Complete => "complete",
+        }
+    }
+}
+
 /// What the per-test census cost and covered.
 ///
 /// The census spends a subprocess per test to learn which tests can reach which sites, and is
 /// repaid during the sweep by running fewer tests per mutant. Whether that trade is positive
 /// depends on the workspace, and these are the figures that let anyone — including `--estimate` —
 /// see which way it went, rather than folding the cost invisibly into the build.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CensusCost {
     /// How long the whole census took, across every binary and every test.
     pub elapsed: Duration,
@@ -175,6 +209,25 @@ pub struct CensusCost {
 
     /// How many test binaries the census examined.
     pub binaries: usize,
+
+    /// Candidate binaries and unique binary-local sites presented to the economic gate.
+    pub candidate_binaries: usize,
+    pub candidate_sites: usize,
+
+    /// Test-listing subprocesses launched before sampling.
+    pub listing_launches: usize,
+    pub listed_binaries: usize,
+
+    /// Listing-time proxy used by the economic gate and whether it admitted sampling.
+    pub estimated_cost: Duration,
+    pub walk_admitted: bool,
+
+    /// Conservative upper bound on sweep time the census could avoid.
+    pub maximum_savings: Duration,
+
+    /// Candidate binaries that yielded complete or partial evidence.
+    pub complete_binaries: usize,
+    pub incomplete_binaries: usize,
 }
 
 /// What the sweep cost and how it spent its subprocess launches.
@@ -182,7 +235,7 @@ pub struct CensusCost {
 /// The launch count is what turns the cost model's `build + Σ(launch + prefix)` from a formula into
 /// a measurement; the probe count is what says whether the killer hints and the census are earning
 /// their keep, since a probe is a launch the run only made because a hint pointed at it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SweepCost {
     /// How long the sweep took, across every mutant and every binary it ran.
     pub elapsed: Duration,
@@ -192,4 +245,54 @@ pub struct SweepCost {
 
     /// How many of those launches were hint-directed probes rather than ordinary binary runs.
     pub probes: usize,
+
+    /// Exact mutant-id probes attempted and confirmed.
+    pub exact_probes: usize,
+    pub exact_hits: usize,
+
+    /// Generalized item, binary, census and reach-cluster probes attempted and confirmed.
+    pub generalized_probes: usize,
+    pub generalized_hits: usize,
+
+    /// Hint candidates available when mutants were assigned.
+    pub exact_candidates: usize,
+    pub generalized_candidates: usize,
+    pub item_candidates: usize,
+    pub reach_candidates: usize,
+    pub file_candidates: usize,
+    pub census_candidates: usize,
+    pub item_probes: usize,
+    pub item_hits: usize,
+    pub reach_probes: usize,
+    pub reach_hits: usize,
+    pub file_probes: usize,
+    pub file_hits: usize,
+    pub census_probes: usize,
+    pub census_hits: usize,
+
+    /// Final reachability decisions made before canonical binary execution.
+    pub whole_selections: usize,
+    pub case_selections: usize,
+    pub hinted_selections: usize,
+    pub hinted_fallbacks: usize,
+    pub uncovered_selections: usize,
+    pub available_tests: usize,
+    pub selected_tests: usize,
+
+    /// Package wall-clock spans measured from the beginning of the sweep.
+    pub packages: Vec<PackageSweepCost>,
+
+    /// Canonical binary launches avoided by in-run reach and killer learning.
+    pub launches_saved: usize,
+
+    /// Launches avoided specifically by reach observations harvested during this sweep.
+    pub reach_launches_saved: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageSweepCost {
+    pub package: Arc<str>,
+    pub mutants: usize,
+    pub first_started_ms: u64,
+    pub settled_ms: u64,
 }

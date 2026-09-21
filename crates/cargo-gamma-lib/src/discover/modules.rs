@@ -218,6 +218,28 @@ mod tests {
     }
 
     #[test]
+    fn non_modules_and_inline_modules_do_not_stop_later_declarations() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let source = root.join("lib.rs");
+        let first = root.join("inline").join("inside.rs");
+        let decoy = root.join("inline.rs");
+        let second = root.join("later.rs");
+
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::write(&first, "").unwrap();
+        std::fs::write(&decoy, "").unwrap();
+        std::fs::write(&second, "").unwrap();
+        let ast = parse("fn ordinary() {}\nmod inline { mod inside; }\nmod later;");
+        let found = declarations(&source, &ast, &CfgSet::unconditional());
+
+        assert_eq!(
+            found.iter().map(|declaration| declaration.target.as_path()).collect::<Vec<_>>(),
+            [first.as_path(), second.as_path()]
+        );
+    }
+
+    #[test]
     fn a_compound_gate_is_read_all_the_way_down() {
         // The parser this replaced looked one level deep, so `all(test, unix)` read as a plain
         // `unix` gate and the module below it was surveyed as production code.
