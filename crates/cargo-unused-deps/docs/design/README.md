@@ -603,16 +603,17 @@ changing the exit code.
 
 ### Reporting
 
-Unused entries are written to stderr, one per line, naming the entry and the
-manifest that declares it. Order follows the manifest so the report reads alongside
-the file. The success line goes to stdout.
+Catalog findings are written to stderr in manifest order. Package findings name the
+package, exact dependency table (including any target predicate), dependency, verdict,
+remediation, and manifest path. Compiler or doctest collection failures are errors, not
+ordinary findings. Success summaries go to stdout.
 
 ### Exit codes
 
-| Code | Meaning                                                                                          |
-|------|--------------------------------------------------------------------------------------------------|
-| 0    | No unused entries — or, under `--fix`, all unused entries were removed and the manifest written. |
-| 1    | Unused entries found without `--fix`, or a manifest could not be read, parsed, or enumerated.     |
+| Code | Meaning |
+|------|---------|
+| 0    | No catalog or selected package findings — or, under `--fix`, catalog findings were removed successfully. |
+| 1    | An uninherited catalog entry, selected unused/misplaced declaration, invalid selector/configuration, manifest/workspace error, or compiler/doctest evidence failure. |
 
 A `[workspace]` table with no `dependencies` catalog is a pass: no entry can be
 uninherited when none is declared. Configured allow-list names are still compared with

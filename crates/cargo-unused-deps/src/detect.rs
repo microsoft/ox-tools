@@ -89,6 +89,9 @@ pub struct Declared {
 
     /// Target-table predicate, or none for an unconditional declaration.
     pub target: Option<String>,
+
+    /// Whether the optional dependency exists to forward another crate's feature.
+    pub feature_forwarded: bool,
 }
 
 impl Declared {
@@ -102,10 +105,11 @@ impl Declared {
 /// Every dependency a member manifest declares, in every section and target table.
 pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
     let mut declared = Vec::new();
+    let feature_dependencies = feature_dependencies(doc);
 
     for (table, section) in DEP_TABLES {
         if let Some(item) = doc.get(table).and_then(Item::as_table_like) {
-            collect_declared(item, section, None, &mut declared);
+            collect_declared(item, section, None, &feature_dependencies, &mut declared);
         }
     }
 
@@ -113,7 +117,7 @@ pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
         for (target_name, target) in targets.iter().filter_map(|(name, target)| Some((name, target.as_table_like()?))) {
             for (table, section) in DEP_TABLES {
                 if let Some(item) = target.get(table).and_then(Item::as_table_like) {
-                    collect_declared(item, section, Some(target_name), &mut declared);
+                    collect_declared(item, section, Some(target_name), &feature_dependencies, &mut declared);
                 }
             }
         }
@@ -123,14 +127,52 @@ pub fn declared_dependencies(doc: &DocumentMut) -> Vec<Declared> {
 }
 
 /// Record one dependency table's declarations.
-fn collect_declared(table: &dyn TableLike, section: Section, target: Option<&str>, into: &mut Vec<Declared>) {
-    for (key, _) in table.iter() {
+fn collect_declared(
+    table: &dyn TableLike,
+    section: Section,
+    target: Option<&str>,
+    feature_dependencies: &BTreeSet<String>,
+    into: &mut Vec<Declared>,
+) {
+    for (key, spec) in table.iter() {
         into.push(Declared {
             name: key.to_owned(),
             section,
             target: target.map(str::to_owned),
+            feature_forwarded: is_optional(spec) && feature_dependencies.contains(key),
         });
     }
+}
+
+/// Dependency keys explicitly referenced by feature definitions.
+fn feature_dependencies(doc: &DocumentMut) -> BTreeSet<String> {
+    doc.get("features")
+        .and_then(Item::as_table_like)
+        .into_iter()
+        .flat_map(TableLike::iter)
+        .filter_map(|(_, feature)| feature.as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(feature_dependency)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Extract a dependency key from `dep:name`, `name/feature`, or `name?/feature`.
+fn feature_dependency(value: &str) -> Option<&str> {
+    if let Some(name) = value.strip_prefix("dep:") {
+        return Some(name);
+    }
+    value.split_once('/').map(|(name, _)| name.strip_suffix('?').unwrap_or(name))
+}
+
+/// Whether a dependency declaration sets `optional = true`.
+fn is_optional(spec: &Item) -> bool {
+    spec.as_table_like()
+        .and_then(|table| table.get("optional"))
+        .and_then(Item::as_value)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Read a manifest's text.
@@ -362,9 +404,34 @@ build = "1"
         assert_eq!(declared.len(), 3);
         assert_eq!(declared[0].section, Section::Normal);
         assert_eq!(declared[0].target, None);
+        assert!(!declared[0].feature_forwarded);
         assert_eq!(declared[1].section, Section::Development);
         assert_eq!(declared[1].target.as_deref(), Some("cfg(windows)"));
         assert_eq!(declared[2].section, Section::Build);
         assert_eq!(declared[2].target.as_deref(), Some("cfg(unix)"));
+    }
+
+    #[test]
+    fn optional_feature_forwarders_are_identified() {
+        let manifest = r#"
+[dependencies]
+required = "1"
+plain = { version = "1", optional = true }
+explicit = { version = "1", optional = true }
+forwarded = { version = "1", optional = true }
+weak = { version = "1", optional = true }
+
+[features]
+api = ["required/std", "dep:explicit", "forwarded/derive", "weak?/std"]
+"#
+        .parse()
+        .expect("fixture manifest is valid");
+
+        let declared = declared_dependencies(&manifest);
+        assert!(!declared[0].feature_forwarded, "a required dependency is not an optional forwarder");
+        assert!(!declared[1].feature_forwarded);
+        assert!(declared[2].feature_forwarded);
+        assert!(declared[3].feature_forwarded);
+        assert!(declared[4].feature_forwarded);
     }
 }

@@ -98,8 +98,9 @@ operationally wrong.
 `--fix` covers the catalog only. It replaces the manifest atomically – a
 temporary file in the same directory, renamed over the original, carrying the
 permissions of the manifest it replaces and following a symlinked manifest to
-its target – and refuses to write at all if the file changed after it was
-read, so a concurrent edit is never clobbered.
+its target. Before replacement it rechecks workspace membership and every
+manifest input; a change detected there aborts the write. This narrows but
+cannot close the final comparison-to-rename race.
 
 Comments on a removed entry are carried to the next surviving entry, which
 keeps a group header attached to the group it introduces. A note about one

@@ -209,6 +209,40 @@ fn inactive_target_dependencies_are_not_reported() {
 }
 
 #[test]
+fn optional_feature_forwarders_are_not_reported() {
+    let fixture = Fixture::new(
+        &["forwarded"],
+        concat!(
+            "[dependencies]\nforwarded = { path = \"../forwarded\", optional = true }\n\n",
+            "[features]\napi = [\"forwarded/forwarded-feature\"]\n",
+        ),
+        "pub fn go() {}\n",
+    );
+    fs::write(
+        fixture.dir.path().join("forwarded/Cargo.toml"),
+        concat!(
+            "[package]\nname = \"forwarded\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
+            "[features]\nforwarded-feature = []\n",
+        ),
+    )
+    .expect("failed to add the forwarded feature");
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(
+        output.status.success(),
+        "a feature-forwarding optional dependency is load-bearing: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn target_specific_findings_name_the_manifest_table() {
     let fixture = Fixture::new(
         &["dead"],
@@ -786,6 +820,29 @@ fn a_failing_doctest_fails_evidence_collection() {
 
     assert!(!output.status.success(), "invalid doctests must fail the check");
     assert!(String::from_utf8_lossy(&output.stderr).contains("failed while collecting doctest evidence"));
+}
+
+#[test]
+fn misplaced_only_skips_doctests_for_unselected_unused_dev_findings() {
+    let fixture = Fixture::new(
+        &["dead"],
+        &format!("[dev-dependencies]\n{}", dep("dead")),
+        "/// ```rust\n/// this is not rust\n/// ```\npub fn go() {}\n",
+    );
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main", "--check", "misplaced"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(
+        output.status.success(),
+        "an unselected unused dev finding must not trigger doctest collection: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

@@ -90,8 +90,9 @@
 //! `--fix` covers the catalog only. It replaces the manifest atomically -- a
 //! temporary file in the same directory, renamed over the original, carrying the
 //! permissions of the manifest it replaces and following a symlinked manifest to
-//! its target -- and refuses to write at all if the file changed after it was
-//! read, so a concurrent edit is never clobbered.
+//! its target. Before replacement it rechecks workspace membership and every
+//! manifest input; a change detected there aborts the write. This narrows but
+//! cannot close the final comparison-to-rename race.
 //!
 //! Comments on a removed entry are carried to the next surviving entry, which
 //! keeps a group header attached to the group it introduces. A note about one
@@ -270,8 +271,9 @@ const SUBCOMMAND: &str = "unused-deps";
 ///
 /// # Errors
 ///
-/// Returns an error if a manifest cannot be read or parsed, if the workspace
-/// members cannot be enumerated, or if a fixed manifest cannot be written back.
+/// Returns an error if a manifest cannot be read or parsed, workspace members
+/// cannot be enumerated, compiler or doctest evidence collection fails, package
+/// selectors are invalid, or a fixed manifest cannot be written back.
 pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let Commands::UnusedDeps {
@@ -395,7 +397,7 @@ fn source_checks(manifest_path: &Path, selection: &PackageSelection, checks: &[C
     // of only those packages that produced a finding, and judge again. On a
     // large workspace that is the difference between a handful of doctest
     // builds and one per package.
-    let candidates = verdict::judge(
+    let mut candidates = verdict::judge(
         &workspace.packages,
         &selected,
         &plain,
@@ -403,6 +405,12 @@ fn source_checks(manifest_path: &Path, selection: &PackageSelection, checks: &[C
         &doctests::DoctestEvidence::default(),
         &workspace.allowed,
     );
+    if !Check::Unused.wanted(checks) {
+        // Doctests can turn an unused normal dependency into a misplaced one,
+        // but they cannot affect dev/build declarations when only misplaced
+        // findings were requested.
+        candidates.retain(|finding| finding.section == Section::Normal);
+    }
     let doctests = doctest_evidence(manifest_path, &workspace, &candidates)?;
 
     let findings = verdict::judge(&workspace.packages, &selected, &plain, &all, &doctests, &workspace.allowed);

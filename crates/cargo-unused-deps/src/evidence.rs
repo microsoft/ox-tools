@@ -158,7 +158,7 @@ impl Evidence {
 /// # Errors
 ///
 /// Returns an error when cargo cannot be launched, exits unsuccessfully, or
-/// emits a line that is not the JSON it was asked for.
+/// emits a malformed JSON message line. Non-message output is ignored.
 pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, all_targets: bool) -> Result<Evidence> {
     let mut command = Command::new(cargo());
     command.arg("check").arg("--manifest-path").arg(manifest_path).args(selection);
