@@ -482,24 +482,27 @@ fn report_findings(findings: &[&verdict::Finding]) {
             Section::Development => "dev-dependencies",
             Section::Build => "build-dependencies",
         };
-        let table = finding
-            .target
-            .as_ref()
-            .map_or_else(|| format!("[{section}]"), |target| format!("[target.'{target}'.{section}]"));
+        let table = dependency_table(finding.target.as_deref(), section);
 
         match finding.verdict {
             Verdict::Unused => {
                 eprintln!("  {} {table} {}: no compiled unit loaded it.", finding.package, finding.name);
-                eprintln!("      remove it, or gate the declaration to where it is used.");
+                eprintln!("      remove it from {table}, or preserve that scope while narrowing where it is declared.");
             }
             Verdict::Misplaced => {
+                let destination = dependency_table(finding.target.as_deref(), "dev-dependencies");
                 eprintln!("  {} {table} {}: only development units load it.", finding.package, finding.name);
-                eprintln!("      move it to [dev-dependencies].");
+                eprintln!("      move it to {destination}.");
             }
         }
 
         eprintln!("      {}", finding.manifest_path.display());
     }
+}
+
+/// Render an unconditional or target-specific dependency table.
+fn dependency_table(target: Option<&str>, section: &str) -> String {
+    target.map_or_else(|| format!("[{section}]"), |target| format!("[target.'{target}'.{section}]"))
 }
 
 /// The catalog check: `[workspace.dependencies]` entries no member inherits.

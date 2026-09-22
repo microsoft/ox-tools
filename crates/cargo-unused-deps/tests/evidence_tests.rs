@@ -266,6 +266,31 @@ fn target_specific_findings_name_the_manifest_table() {
         stderr.contains("main [target.'cfg(all())'.dependencies] dead"),
         "the report must identify the target table: {stderr}"
     );
+    assert!(
+        stderr.contains("remove it from [target.'cfg(all())'.dependencies]"),
+        "the remediation must preserve the target predicate: {stderr}"
+    );
+}
+
+#[test]
+fn target_specific_misplaced_remediation_preserves_the_predicate() {
+    let fixture = Fixture::new(
+        &["helper"],
+        &format!("[target.'cfg(all())'.dependencies]\n{}", dep("helper")),
+        "pub fn go() {}\n",
+    )
+    .with_file("tests/it.rs", "#[test]\nfn t() { helper::f(); }\n");
+
+    let report = fixture.report();
+
+    assert!(
+        report.contains("main [target.'cfg(all())'.dependencies] helper: only development units load it"),
+        "the finding must identify the source target table: {report}"
+    );
+    assert!(
+        report.contains("move it to [target.'cfg(all())'.dev-dependencies]"),
+        "the remediation must preserve the target predicate: {report}"
+    );
 }
 
 #[test]
