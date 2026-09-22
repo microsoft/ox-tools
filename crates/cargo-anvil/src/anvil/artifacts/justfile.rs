@@ -383,10 +383,10 @@ mod tests {
         assert!(!checks.contains("bolero list failed; assuming no targets"));
     }
 
-    /// The collision guard must group targets by the file name Cargo
-    /// actually emits, and must fail rather than warn.
+    /// The collision guard must key targets by every file Cargo uplifts for
+    /// them, and must fail rather than warn.
     #[test]
-    fn unique_target_names_guards_every_uplifted_target_kind() {
+    fn unique_target_names_guards_every_uplifted_artifact() {
         let body = CHECK_FILES
             .iter()
             .find_map(|(path, body)| path.ends_with("/unique-target-names.just").then_some(*body))
@@ -401,12 +401,15 @@ mod tests {
         assert!(body.contains("'proc-macro' = 'shared library'"));
         // A static library shares the directory but not the file name.
         assert!(body.contains("'staticlib' = 'static library'"));
+        // Executables and shared libraries emit different primary files but
+        // the same debug-info file, so both families must key the pdb.
+        assert!(body.contains("'executable' = @('<name>[.exe]', '<name>.pdb')"));
+        assert!(body.contains("'shared library' = @('[lib]<name>[.so|.dll|.dylib]', '<name>.pdb')"));
+        // Libraries that emit no uplifted debug-info file must not key one.
+        assert!(body.contains("'rust library' = @('lib<name>.rlib')"));
+        assert!(body.contains("'static library' = @('[lib]<name>[.a|.lib]')"));
         // Only these kinds keep a metadata hash in `deps/`.
         assert!(body.contains("$hashed = @('test', 'bench', 'custom-build')"));
-        assert!(
-            body.contains("$key = \"$directory/$fileName\""),
-            "targets must be keyed by the emitted file name, not by crate type"
-        );
         assert!(
             body.contains("[System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)"),
             "keys must compare ordinally; an [ordered] hashtable merges names that differ only in case"
@@ -414,6 +417,10 @@ mod tests {
         assert!(
             body.contains("'target/<profile>/examples'"),
             "examples uplift to their own directory and must be keyed separately from binaries"
+        );
+        assert!(
+            body.contains("[Array]::Sort($sortedKeys, [StringComparer]::Ordinal)"),
+            "report order must be ordinal so the diagnostic is identical under every host culture"
         );
         assert!(body.contains("exit 1"), "a detected collision must fail the check rather than warn");
     }
@@ -1887,7 +1894,8 @@ mod tests {
             )
         }
 
-        /// A bin-crate-type example: uplifts to `examples/<name>`.
+        /// A bin-crate-type example: uplifts to `examples/<name>` and its
+        /// debug-info sibling.
         #[test]
         fn fails_when_two_packages_share_an_uplifted_example_name() {
             if !tools_available() {
@@ -1901,12 +1909,16 @@ mod tests {
             let diagnostic = combined(&output);
             assert!(!output.status.success(), "collision must fail the check: {diagnostic}");
             assert!(
-                diagnostic.contains("example target 'shared' is declared by 2 workspace packages: alpha, beta"),
-                "diagnostic must name the kind, the target, and every owning package: {diagnostic}"
+                diagnostic.contains("target 'shared' is declared by 2 workspace packages: alpha (example), beta (example)"),
+                "diagnostic must name the target, every owning package, and how each spells it: {diagnostic}"
             );
             assert!(
                 diagnostic.contains("target/<profile>/examples/shared[.exe]"),
                 "diagnostic must name the contested file: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("target/<profile>/examples/shared.pdb"),
+                "every contested file must be listed, not just the primary one: {diagnostic}"
             );
         }
 
@@ -1923,7 +1935,7 @@ mod tests {
             let diagnostic = combined(&output);
             assert!(!output.status.success(), "collision must fail the check: {diagnostic}");
             assert!(
-                diagnostic.contains("binary target 'tool' is declared by 2 workspace packages: alpha, beta"),
+                diagnostic.contains("target 'tool' is declared by 2 workspace packages: alpha (binary), beta (binary)"),
                 "duplicate binaries must be reported against the profile directory: {diagnostic}"
             );
             assert!(
@@ -1932,11 +1944,38 @@ mod tests {
             );
         }
 
-        /// An ordinary library uplifts its rlib, so two packages sharing a
-        /// library target name collide even with no explicit crate type.
-        /// This is the `foo-bar` / `foo_bar` case that needs no config at all.
+        /// The motivating accident: Cargo has already normalised `-` to `_`
+        /// in the default library target name, so two packages whose names
+        /// differ only in that separator collide with no configuration at all.
         #[test]
-        fn fails_when_two_packages_share_a_default_library_name() {
+        fn fails_when_default_library_names_normalise_to_one_target() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("foo-bar", "dash_example", "dash_tool", "dash_lib_example"),
+                Member::new("foo_bar", "score_example", "score_tool", "score_lib_example"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                !output.status.success(),
+                "packages differing only by the name separator collide and must fail the check: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("target 'foo_bar' is declared by 2 workspace packages: foo-bar (library), foo_bar (library)"),
+                "diagnostic must report the normalised target name against both packages: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("target/<profile>/libfoo_bar.rlib"),
+                "diagnostic must name the contested file: {diagnostic}"
+            );
+        }
+
+        /// An ordinary library uplifts its rlib, so an explicit duplicate
+        /// `[lib] name` collides even with the default crate type.
+        #[test]
+        fn fails_when_two_packages_share_an_explicit_library_name() {
             if !tools_available() {
                 return;
             }
@@ -1949,10 +1988,6 @@ mod tests {
             assert!(
                 !output.status.success(),
                 "an ordinary library uplifts its rlib and must be guarded: {diagnostic}"
-            );
-            assert!(
-                diagnostic.contains("library target 'shared_lib' is declared by 2 workspace packages: alpha, beta"),
-                "diagnostic must report the library: {diagnostic}"
             );
             assert!(
                 diagnostic.contains("target/<profile>/libshared_lib.rlib"),
@@ -2002,7 +2037,7 @@ mod tests {
                 "a cdylib and a dylib of the same name collide and must fail the check: {diagnostic}"
             );
             assert!(
-                diagnostic.contains("shared library target 'shared_lib' is declared by 2 workspace packages: alpha, beta"),
+                diagnostic.contains("alpha (shared library), beta (shared library)"),
                 "diagnostic must report the emitted family, not the crate type: {diagnostic}"
             );
             assert!(
@@ -2033,8 +2068,41 @@ mod tests {
             );
         }
 
+        /// A binary and a shared library of one name emit different primary
+        /// files but the same Windows debug-info file, so the collision is
+        /// visible only when every emitted file is keyed.
+        #[test]
+        fn fails_when_a_binary_and_a_shared_library_share_a_debug_info_file() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("alpha", "alpha_shared", "tool", "alpha_lib_example"),
+                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("tool", "cdylib"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                !output.status.success(),
+                "a binary and a shared library of one name share a pdb and must fail the check: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("alpha (binary), beta (shared library)"),
+                "diagnostic must describe how each package spells the target: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("target/<profile>/tool.pdb"),
+                "the debug-info file is the contested one and must be named: {diagnostic}"
+            );
+            assert!(
+                !diagnostic.contains("target/<profile>/tool[.exe]"),
+                "the primary files differ and must not be reported as contested: {diagnostic}"
+            );
+        }
+
         /// An rlib and a shared library of the same name emit different file
-        /// names, so they share a directory without colliding.
+        /// names, and an rlib has no uplifted debug-info file, so they share
+        /// a directory without colliding.
         #[test]
         fn passes_when_an_rlib_and_a_cdylib_share_a_library_name() {
             if !tools_available() {
@@ -2052,22 +2120,22 @@ mod tests {
             );
         }
 
-        /// A static library and a shared library of the same name likewise
-        /// emit different file names.
+        /// A static library likewise emits no uplifted debug-info file, so it
+        /// does not contend with a binary of the same name.
         #[test]
-        fn passes_when_a_staticlib_and_a_cdylib_share_a_library_name() {
+        fn passes_when_a_staticlib_and_a_binary_share_a_name() {
             if !tools_available() {
                 return;
             }
             let temp = fixture(&[
-                Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example").with_library("shared_lib", "staticlib"),
-                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "cdylib"),
+                Member::new("alpha", "alpha_shared", "tool", "alpha_lib_example"),
+                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("tool", "staticlib"),
             ]);
             let output = run(temp.path());
             let diagnostic = combined(&output);
             assert!(
                 output.status.success(),
-                "families that emit different file names must not be reported: {diagnostic}"
+                "a static library emits no pdb and must not contend with a binary: {diagnostic}"
             );
         }
 

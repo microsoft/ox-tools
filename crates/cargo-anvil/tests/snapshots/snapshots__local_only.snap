@@ -3173,24 +3173,35 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 # metadata-hashed name, then uplifts the root unit of most target kinds to
 # `target/<profile>/` (examples to `target/<profile>/examples/`) under a
 # plain, unhashed name. Two workspace packages whose targets uplift to the
-# same file name therefore write the same file -- and, on Windows, the same
-# import library and debug-info files, plus the same SBOM sidecar when CI
-# generates one. Cargo reports this as `output filename collision`, warns
-# that it may become a hard error, and keeps building, so the workspace
-# stays green while concurrent jobs race for one path. This recipe turns
-# that warning into a failure before anything is compiled.
+# same file therefore write the same file. Cargo reports this as `output
+# filename collision`, warns that it may become a hard error, and keeps
+# building, so the workspace stays green while concurrent jobs race for one
+# path. This recipe turns that warning into a failure before anything is
+# compiled.
 #
 # Only test and benchmark binaries and build scripts stay in `deps/`, so
 # duplicate names among those are harmless and are not reported. Everything
 # else uplifts, including an ordinary `lib`: two packages named `foo-bar`
-# and `foo_bar` both uplift to `libfoo_bar.rlib` because target names
-# normalise `-` to `_`, with no explicit `[lib] name` anywhere.
+# and `foo_bar` both uplift to `libfoo_bar.rlib`, because Cargo normalises
+# `-` to `_` in the default library target name and reports the normalised
+# name in `cargo metadata`, with no explicit `[lib] name` anywhere.
 #
-# Targets are grouped by the file name they emit rather than by crate type,
-# because several crate types share one name and must land in one bucket
-# (`cdylib`, `dylib`, and `proc-macro` all emit the platform shared-library
-# file) while others that share a directory must not (an `rlib` and a
-# `cdylib` of the same name emit different files and do not collide).
+# Targets are keyed by every file they uplift, not by crate type, because
+# the relationship between the two runs both ways:
+#
+#   - several crate types emit one file and must share a key: `cdylib`,
+#     `dylib`, and `proc-macro` all emit the platform shared library;
+#   - one target emits several files, and a collision in any one of them is
+#     a collision: on Windows a binary and a shared library of the same name
+#     produce different primary files (`tool.exe` and `tool.dll`) but both
+#     write `tool.pdb`;
+#   - crate types that share a directory but emit different names must stay
+#     apart: an `rlib`, a `staticlib`, and a binary of one name coexist.
+#
+# The Windows debug-info file is keyed on every platform. The check is a
+# gate for a workspace that must build everywhere, so a Windows-only
+# collision is reported from a Linux run too, and every leg of a build
+# matrix agrees.
 #
 # Cargo already rejects duplicate target names inside a single package, so
 # only cross-package duplicates are reported here.
@@ -3211,9 +3222,8 @@ anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
         exit 1
     }
 
-    # Crate type -> the family of file name it emits. Crate types that emit
-    # the same name share a family; `cargo metadata` reports an ordinary
-    # library as `lib`, not `rlib`, so both spellings are listed.
+    # Crate type -> the family of artifacts it emits. `cargo metadata`
+    # reports an ordinary library as `lib`, not `rlib`, so both are listed.
     $families = [ordered]@{
         'bin' = 'executable'
         'lib' = 'rust library'
@@ -3223,12 +3233,14 @@ anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
         'proc-macro' = 'shared library'
         'staticlib' = 'static library'
     }
-    # The file name each family emits, used to name the contested path.
-    $fileNames = @{
-        'executable' = '<name>[.exe]'
-        'rust library' = 'lib<name>.rlib'
-        'shared library' = '[lib]<name>[.so|.dll|.dylib]'
-        'static library' = '[lib]<name>[.a|.lib]'
+    # Every uplifted file each family emits. The import library and export
+    # file beside a Windows DLL are named after the DLL, so keying the DLL
+    # covers them; the debug-info file is not, so it is keyed on its own.
+    $artifacts = @{
+        'executable' = @('<name>[.exe]', '<name>.pdb')
+        'rust library' = @('lib<name>.rlib')
+        'shared library' = @('[lib]<name>[.so|.dll|.dylib]', '<name>.pdb')
+        'static library' = @('[lib]<name>[.a|.lib]')
     }
     # How each family is described in the diagnostic.
     $labels = @{
@@ -3255,31 +3267,56 @@ anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
             foreach ($crateType in $target.crate_types) {
                 if (-not $families.Contains($crateType)) { continue }
                 $family = $families[$crateType]
-                $fileName = $fileNames[$family].Replace('<name>', $target.name)
-                $key = "$directory/$fileName"
-                if (-not $owners.ContainsKey($key)) {
-                    $owners[$key] = [pscustomobject]@{
-                        Label = if ($isExample) { 'example' } else { $labels[$family] }
-                        Name = $target.name
-                        Path = $key
-                        Packages = [System.Collections.Generic.List[string]]::new()
+                $label = if ($isExample) { 'example' } else { $labels[$family] }
+                foreach ($pattern in $artifacts[$family]) {
+                    $key = "$directory/" + $pattern.Replace('<name>', $target.name)
+                    if (-not $owners.ContainsKey($key)) {
+                        $owners[$key] = [pscustomobject]@{
+                            Name = $target.name
+                            # Package -> how that package spells the target.
+                            # Keyed by package so one package owning several
+                            # crate types of one name counts once.
+                            Owners = [ordered]@{}
+                        }
                     }
+                    $owners[$key].Owners[$package.name] = $label
                 }
-                $owners[$key].Packages.Add($package.name)
             }
         }
     }
 
-    $failed = $false
-    foreach ($key in ($owners.Keys | Sort-Object)) {
+    # One target name can contend for several files at once (an executable
+    # collides on both its exe and its pdb). Report each contended target
+    # once, listing every file it contends for. Sorting is ordinal so the
+    # diagnostic reads identically under every host culture.
+    $groups = [ordered]@{}
+    $sortedKeys = [string[]]@($owners.Keys)
+    [Array]::Sort($sortedKeys, [StringComparer]::Ordinal)
+    foreach ($key in $sortedKeys) {
         $entry = $owners[$key]
-        $packages = @($entry.Packages | Sort-Object -Unique)
-        if ($packages.Count -lt 2) { continue }
-        $failed = $true
-        Write-Host "anvil-unique-target-names: $($entry.Label) target '$($entry.Name)' is declared by $($packages.Count) workspace packages: $($packages -join ', ')"
-        Write-Host "  all of them uplift to $($entry.Path), so one build output overwrites the others"
+        $owned = [string[]]@($entry.Owners.Keys)
+        if ($owned.Count -lt 2) { continue }
+        [Array]::Sort($owned, [StringComparer]::Ordinal)
+        $groupKey = "$($entry.Name) " + ($owned -join ' ')
+        if (-not $groups.Contains($groupKey)) {
+            $described = $owned | ForEach-Object { "$_ ($($entry.Owners[$_]))" }
+            $groups[$groupKey] = [pscustomobject]@{
+                Name = $entry.Name
+                Count = $owned.Count
+                Described = ($described -join ', ')
+                Files = [System.Collections.Generic.List[string]]::new()
+            }
+        }
+        $groups[$groupKey].Files.Add($key)
     }
-    if ($failed) {
+
+    foreach ($groupKey in $groups.Keys) {
+        $group = $groups[$groupKey]
+        $noun = if ($group.Files.Count -eq 1) { 'file' } else { 'files' }
+        Write-Host "anvil-unique-target-names: target '$($group.Name)' is declared by $($group.Count) workspace packages: $($group.Described)"
+        Write-Host "  they uplift to the same $($noun): $($group.Files -join ', ')"
+    }
+    if ($groups.Count -gt 0) {
         Write-Error 'anvil-unique-target-names: rename the reported targets so each one uplifts to its own path'
         exit 1
     }
