@@ -1164,11 +1164,11 @@ mod tests {
 
     use super::{
         BufferedOutcome, CapturedOutput, CapturedStream, Invocation, InvocationResult, OutputEmitError, Plan, ProcessReaper, RunningWorker,
-        SnapshotSource, TemporarySnapshot, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
+        SnapshotSource, StreamedChild, TemporarySnapshot, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
         add_infrastructure_failure, combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel,
         exit_byte, failed_child_handoffs, failed_handoffs, failure_stops_launching, finish_capture, handoff_group,
-        handoff_group_with_fallback, panic_description, parallel_failure_exit_code, poll_process_exit, poll_reaper, record_emitted_failure,
-        retain_after_reaper_observation, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
+        handoff_group_with_fallback, observe_streamed_child, panic_description, parallel_failure_exit_code, poll_process_exit, poll_reaper,
+        record_emitted_failure, retain_after_reaper_observation, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
         run_streamed_with_timeout_with, spawn_group, spawn_worker, start_failed_handoff_reaper_with, terminate_child_bounded,
         terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure, with_reaper_handoff,
     };
@@ -1969,6 +1969,25 @@ mod tests {
             injected,
             InvocationResult::Infrastructure(message) if message.contains("injected group spawn failure")
         ));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns a child process")]
+    fn streamed_child_observation_returns_a_completed_status() {
+        let reaper = test_reaper();
+        let mut command = Command::new("rustc");
+        let mut child = command
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn short-lived child");
+        let expected = child.wait().expect("wait for short-lived child");
+        let mut control = StreamedChild { child, reaper: &reaper };
+        assert_eq!(
+            observe_streamed_child(&mut control).expect("observe completed child"),
+            Some(expected)
+        );
     }
 
     #[test]
