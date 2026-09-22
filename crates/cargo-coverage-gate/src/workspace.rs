@@ -59,14 +59,13 @@ pub(crate) struct Member {
 
 impl Member {
     fn apply_policy_override(&mut self, policy: PolicyOverride) {
+        self.expect_no_coverable_lines = matches!(policy, PolicyOverride::ExpectNoCoverableLines);
         match policy {
             PolicyOverride::Threshold(value) => {
                 self.min_lines_percent = Some(value);
-                self.expect_no_coverable_lines = false;
             }
             PolicyOverride::ExpectNoCoverableLines => {
-                self.min_lines_percent = None;
-                self.expect_no_coverable_lines = true;
+                self.min_lines_percent.take();
             }
         }
     }
@@ -333,7 +332,7 @@ fn select_target_policy(
             .join(", ");
         return Err(AmbiguousTargetPolicyError::new(source.to_owned(), target.triple.clone(), selectors).into());
     }
-    Ok(matching_cfg.first().map(|policy| policy.policy))
+    Ok(matching_cfg.pop().map(|policy| policy.policy))
 }
 
 /// Pull `min-lines-percent` out of a `coverage-gate` block and validate
@@ -387,6 +386,14 @@ mod tests {
             "x86_64-unknown-linux-gnu",
             &["unix", "target_arch=\"x86_64\"", "target_os=\"linux\""],
         )
+    }
+
+    fn target_policy(selector: &str, threshold: f64) -> TargetPolicy {
+        TargetPolicy {
+            selector_text: selector.to_owned(),
+            selector: Platform::from_str(selector).expect("test selector"),
+            policy: PolicyOverride::Threshold(threshold),
+        }
     }
 
     fn load(manifest_path: &Path) -> Result<Workspace, CoverageGateError> {
@@ -457,6 +464,23 @@ edition = "2021"
             assert!(m.min_lines_percent.is_none());
             assert!(m.manifest_dir.is_dir());
         }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
+    #[test]
+    fn workspace_members_are_sorted_even_when_manifest_order_is_reversed() {
+        let tmp = tempdir().expect("tempdir");
+        let root = "[workspace]\nresolver = \"2\"\nmembers = [\"zeta\", \"alpha\"]\n";
+        write_workspace(
+            tmp.path(),
+            root,
+            &[("zeta", &member("zeta", None)), ("alpha", &member("alpha", None))],
+        );
+        let workspace = load(&tmp.path().join("Cargo.toml")).expect("workspace load");
+        assert_eq!(
+            workspace.members.iter().map(|member| member.name.as_str()).collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
@@ -692,6 +716,45 @@ expect-no-coverable-lines = false
         assert_eq!(alpha.min_lines_percent, Some(0.0));
     }
 
+    #[test]
+    fn policy_overrides_clear_the_other_behavior() {
+        let mut member = Member {
+            name: "alpha".to_owned(),
+            manifest_dir: PathBuf::from("alpha"),
+            min_lines_percent: Some(75.0),
+            expect_no_coverable_lines: true,
+        };
+        member.apply_policy_override(PolicyOverride::Threshold(90.0));
+        assert_eq!(member.min_lines_percent, Some(90.0));
+        assert!(!member.expect_no_coverable_lines);
+
+        member.apply_policy_override(PolicyOverride::ExpectNoCoverableLines);
+        assert_eq!(member.min_lines_percent, None);
+        assert!(member.expect_no_coverable_lines);
+    }
+
+    #[test]
+    fn unsupported_build_context_options_are_sorted_and_deduplicated() {
+        let platform =
+            Platform::from_str("cfg(all(test, feature = \"a\", debug_assertions, feature = \"b\", test))").expect("test platform");
+        assert_eq!(
+            unsupported_build_context_options(&platform),
+            ["debug_assertions", "feature", "test"]
+        );
+    }
+
+    #[test]
+    fn target_policy_selection_skips_nonmatching_cfgs() {
+        let target = test_target();
+        let selected = select_target_policy(
+            vec![target_policy("cfg(windows)", 10.0), target_policy("cfg(unix)", 20.0)],
+            &target,
+            "alpha",
+        )
+        .expect("unambiguous policy");
+        assert_eq!(selected, Some(PolicyOverride::Threshold(20.0)));
+    }
+
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
     fn exact_target_policy_wins_over_matching_cfg() {
@@ -791,6 +854,10 @@ expect-no-coverable-lines = false
         let rendered = error.to_string();
         assert!(rendered.contains("multiple coverage-gate target policies"), "rendered: {rendered}");
         assert!(rendered.contains("cfg(unix)"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("cfg(target_os = \"linux\"), cfg(unix)") || rendered.contains("cfg(unix), cfg(target_os = \"linux\")"),
+            "selectors must be separated by comma-space: {rendered}"
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
@@ -902,6 +969,22 @@ min-lines-percent = 0
                 "{selector}: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn unsupported_target_options_use_comma_space_separator() {
+        let gate = json!({
+            "target": {
+                "cfg(all(test, feature = \"simd\"))": { "min-lines-percent": 0 }
+            }
+        });
+        let rendered = extract_target_policies(&gate, "alpha", Scope::Package)
+            .expect_err("build-context selectors must fail")
+            .to_string();
+        assert!(
+            rendered.contains("feature, test"),
+            "unsupported options must use comma-space separation: {rendered}"
+        );
     }
 
     #[test]

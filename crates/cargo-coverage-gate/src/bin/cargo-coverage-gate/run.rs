@@ -38,7 +38,7 @@ pub(crate) fn evaluate_paths(
 
     let report = evaluate_many_for_target(&lcov_refs, None, gated_packages, target).into_app_err("failed to evaluate coverage")?;
 
-    write_text_output(&report, args.quiet).into_app_err("failed to write verdict to stdout")?;
+    write_text_output(&report, args.quiet)?;
 
     if let Some(path) = summary_target(args) {
         write_summary_file(&report, &path).into_app_err(format!("failed to write summary file `{}`", path.display()))?;
@@ -56,13 +56,21 @@ pub(crate) fn write_no_gate_summary(args: &CoverageGateArgs, result: &str) -> Re
     Ok(())
 }
 
-fn write_text_output(report: &EvaluatedReport, quiet: bool) -> io::Result<()> {
+fn write_text_output(report: &EvaluatedReport, quiet: bool) -> Result<(), AppError> {
     if quiet {
         return Ok(());
     }
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    report.render_text(&mut handle)
+    write_text_output_to(report, &mut handle)
+}
+
+fn write_text_output_to(report: &EvaluatedReport, out: &mut dyn io::Write) -> Result<(), AppError> {
+    verdict_write_result(report.render_text(out))
+}
+
+fn verdict_write_result(result: io::Result<()>) -> Result<(), AppError> {
+    result.into_app_err("failed to write verdict to stdout")
 }
 
 fn write_summary_file(report: &EvaluatedReport, path: &Path) -> io::Result<()> {
@@ -78,16 +86,67 @@ fn write_summary_file(report: &EvaluatedReport, path: &Path) -> io::Result<()> {
 /// `GITHUB_STEP_SUMMARY` environment variable, then the
 /// `COVERAGE_GATE_SUMMARY` environment variable.
 fn summary_target(args: &CoverageGateArgs) -> Option<PathBuf> {
+    summary_target_with(args, |name| env::var_os(name))
+}
+
+fn summary_target_with(args: &CoverageGateArgs, mut var_os: impl FnMut(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
     if let Some(p) = &args.summary_file {
         return Some(p.clone());
     }
 
     for var in ["GITHUB_STEP_SUMMARY", "COVERAGE_GATE_SUMMARY"] {
-        if let Some(v) = env::var_os(var)
+        if let Some(v) = var_os(var)
             && !v.is_empty()
         {
             return Some(PathBuf::from(v));
         }
     }
     None
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::cli::CoverageGateCommand;
+
+    fn args() -> CoverageGateArgs {
+        CoverageGateArgs {
+            lcov: Vec::new(),
+            packages: Vec::new(),
+            target: None,
+            summary_file: None,
+            quiet: false,
+            command: None::<CoverageGateCommand>,
+        }
+    }
+
+    #[test]
+    fn summary_target_queries_documented_environment_variables_in_order() {
+        let mut queried = Vec::new();
+        let target = summary_target_with(&args(), |name| {
+            queried.push(name.to_owned());
+            (name == "COVERAGE_GATE_SUMMARY").then(|| "coverage.md".into())
+        });
+        assert_eq!(queried, ["GITHUB_STEP_SUMMARY", "COVERAGE_GATE_SUMMARY"]);
+        assert_eq!(target, Some(PathBuf::from("coverage.md")));
+    }
+
+    #[test]
+    fn verdict_write_error_has_exact_context() {
+        let error = verdict_write_result(Err(io::Error::other("injected"))).expect_err("write must fail");
+        assert!(error.to_string().contains("failed to write verdict to stdout"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses a temporary LCOV file; miri isolation forbids filesystem access")]
+    fn evaluation_error_has_exact_context() {
+        let tmp = tempdir().expect("tempdir");
+        let lcov = tmp.path().join("malformed.info");
+        fs::write(&lcov, "not lcov").expect("write malformed lcov");
+        let error = evaluate_paths(&args(), &[lcov], &[], None).expect_err("malformed lcov must fail");
+        assert!(error.to_string().contains("failed to evaluate coverage"));
+    }
 }

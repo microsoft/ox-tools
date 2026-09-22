@@ -72,6 +72,11 @@ fn mark_cache_owner(dir: &TempDir, base: &Utf8PathBuf) {
 /// Runs the tool against a directory and returns the exit code and captured host.
 fn invoke(dir: &TempDir, args: &[&str]) -> (i32, Sink) {
     let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
+
+    invoke_at(&path, args)
+}
+
+fn invoke_at(path: &Utf8PathBuf, args: &[&str]) -> (i32, Sink) {
     let mut command = vec!["cargo-gamma".to_owned(), "gamma".to_owned()];
 
     command.extend(args.iter().map(|arg| (*arg).to_owned()));
@@ -818,10 +823,11 @@ fn seed_record(dir: &TempDir, population: &[(String, String)]) {
     mark_cache_owner(dir, &base);
 
     let (unviable, file) = population.first().expect("the fixture yields mutants");
-    let (killed, _elsewhere) = population.get(1).expect("the fixture yields more than one mutant");
+    let (killed, killed_file) = population.get(1).expect("the fixture yields more than one mutant");
+    assert_eq!(file, killed_file, "the promotion fixture expects both mutants in one file");
 
     let record = serde_json::json!({
-        "version": 9,
+        "version": 10,
         "context": {
             "features": "f",
             "profile": "p",
@@ -836,6 +842,7 @@ fn seed_record(dir: &TempDir, population: &[(String, String)]) {
             "size": 0,
             "mutants": [
                 { "id": unviable, "outcome": "CompileError" },
+                { "id": killed, "outcome": "Killed" },
             ],
         }],
         "hints": {
@@ -902,6 +909,34 @@ fn promoting_hints_writes_only_what_cannot_move_a_score() {
     assert!(!written.contains("Survived"), "a verdict reached the artifact: {written}");
 }
 
+#[test]
+fn promoting_hints_from_a_workspace_member_writes_at_the_workspace_root() {
+    let dir = workspace(SUBJECT);
+    let member = Utf8PathBuf::from_path_buf(dir.path().join("member")).expect("member path is UTF-8");
+    fs::create_dir_all(member.join("src")).expect("member source directory");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [workspace]\nmembers = [\"member\"]\n",
+    )
+    .expect("workspace manifest");
+    fs::write(
+        member.join("Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("member manifest");
+    fs::write(member.join("src/lib.rs"), "pub fn member() {}\n").expect("member source");
+    let population = population(&dir);
+    seed_record(&dir, &population);
+    let base = scratch_base(&dir);
+
+    let (code, host) = invoke_at(&member, &["hints", "--cache-dir", base.as_str()]);
+
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert!(dir.path().join("gamma-hints.yaml").exists(), "{}", host.err());
+    assert!(!member.join("gamma-hints.yaml").exists());
+}
+
 /// A preview says what would be promoted and writes nothing.
 #[test]
 fn previewing_a_promotion_writes_no_file() {
@@ -913,7 +948,11 @@ fn previewing_a_promotion_writes_no_file() {
     let (code, host) = invoke(&dir, &["hints", "--dry-run"]);
 
     assert_eq!(code, EXIT_OK, "{}", host.err());
-    assert!(host.err().contains("would carry"), "{}", host.err());
+    assert!(host.err().contains("records added"), "{}", host.err());
+    assert!(!host.err().contains("killing test"), "{}", host.err());
+    assert!(!host.err().contains("build-order hint"), "{}", host.err());
+    assert!(!host.err().contains("generalized hint"), "{}", host.err());
+    assert!(!host.err().contains("mutant"), "{}", host.err());
     assert!(
         !dir.path().join("gamma-hints.yaml").exists(),
         "a preview must not write the artifact"
@@ -944,6 +983,11 @@ fn regenerating_an_unchanged_artifact_changes_no_bytes() {
     assert_eq!(second_code, EXIT_OK, "{}", host.err());
     assert_eq!(first, second, "the artifact is not byte-stable across regeneration");
     assert!(host.err().contains("Unchanged"), "{}", host.err());
+    assert!(host.err().contains("records preserved"), "{}", host.err());
+    assert!(!host.err().contains("killing test"), "{}", host.err());
+    assert!(!host.err().contains("build-order hint"), "{}", host.err());
+    assert!(!host.err().contains("generalized hint"), "{}", host.err());
+    assert!(!host.err().contains("mutant"), "{}", host.err());
 }
 
 #[test]
@@ -978,58 +1022,25 @@ fn promoting_without_a_record_writes_nothing_and_explains_why() {
     assert!(!dir.path().join("gamma-hints.yaml").exists());
 }
 
-/// An empty legacy generation still needs migration even when the latest run learned nothing.
+/// Explicit replacement requires campaign evidence before replacing an existing artifact.
 #[test]
-fn promoting_empty_legacy_hints_writes_yaml_and_removes_json() {
+fn replacing_without_a_record_preserves_the_existing_artifact() {
     let dir = workspace(SUBJECT);
     commit_workspace(&dir);
-    let legacy = serde_json::json!({
-        "version": 1,
-        "tool": "cargo-gamma legacy",
-        "context": {
-            "features": "f",
-            "profile": "p",
-            "rustflags": "r",
-            "extra": "e",
-            "toolchain": "t",
-            "tool": "v",
-        },
-        "mutants": [],
-    });
-    fs::write(
-        dir.path().join("gamma-hints.json"),
-        serde_json::to_vec(&legacy).expect("legacy hints serialize"),
-    )
-    .expect("legacy hints are writable");
-
-    let (code, host) = invoke(&dir, &["hints"]);
-
-    assert_eq!(code, EXIT_OK, "{}", host.err());
-    assert!(host.err().contains("Wrote"), "{}", host.err());
-    assert!(dir.path().join("gamma-hints.yaml").exists());
-    assert!(!dir.path().join("gamma-hints.json").exists());
-}
-
-/// Explicit replacement writes a valid empty generation instead of retaining unknown bytes.
-#[test]
-fn replacing_an_unknown_artifact_without_new_hints_still_writes() {
-    let dir = workspace(SUBJECT);
-    commit_workspace(&dir);
-    fs::write(dir.path().join("gamma-hints.yaml"), "unknown: artifact\n").expect("unknown hints are writable");
+    let path = dir.path().join("gamma-hints.yaml");
+    let artifact = "unknown: artifact\n";
+    fs::write(&path, artifact).expect("unknown hints are writable");
 
     let (code, host) = invoke(&dir, &["hints", "--replace"]);
-    let written = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("replacement hints exist");
-    let hints: yaml_serde::Value = yaml_serde::from_str(&written).expect("replacement hints are YAML");
 
-    assert_eq!(code, EXIT_OK, "{}", host.err());
-    assert!(host.err().contains("Wrote"), "{}", host.err());
-    assert_eq!(hints["version"].as_u64(), Some(3), "{written}");
-    assert!(hints["files"].as_sequence().expect("file groups").is_empty(), "{written}");
+    assert_ne!(code, EXIT_OK, "{}", host.err());
+    assert!(host.err().contains("could not read campaign state"), "{}", host.err());
+    assert_eq!(fs::read_to_string(path).expect("current hints remain readable"), artifact);
 }
 
-/// A partial selection preserves absences, while a complete replacement deliberately retires them.
+/// Promotion consumes persisted campaign state without rediscovering current source.
 #[test]
-fn incremental_promotion_preserves_unproven_stale_hints_until_replacement() {
+fn source_changes_do_not_reinterpret_persisted_hints() {
     let dir = workspace(SUBJECT);
     let population = population(&dir);
 
@@ -1039,9 +1050,8 @@ fn incremental_promotion_preserves_unproven_stale_hints_until_replacement() {
     assert_eq!(first_code, EXIT_OK, "{}", first_host.err());
     let before = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the first generation");
 
-    // The mutants keep their identities only as long as the code they name does. Rewriting the
-    // library retires every one of them, but the default mutator preset is not complete enough to
-    // prove that every absent id belongs to its selection.
+    // Rewriting source after the campaign does not reinterpret or discard its score-neutral
+    // knowledge. Hints are checked before use, so stale identities can only cost work.
     fs::write(dir.path().join("src/lib.rs"), "pub fn unrelated() -> u8 { 7 }\n").expect("could not rewrite the library");
 
     let (code, host) = invoke(&dir, &["hints"]);
@@ -1053,11 +1063,9 @@ fn incremental_promotion_preserves_unproven_stale_hints_until_replacement() {
 
     let (replacement_code, replacement) = invoke(&dir, &["hints", "--replace"]);
     let replaced = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("the replacement generation");
-    let yaml: yaml_serde::Value = yaml_serde::from_str(&replaced).expect("replacement YAML");
 
     assert_eq!(replacement_code, EXIT_OK, "{}", replacement.err());
-    assert!(yaml["files"].as_sequence().expect("file groups").is_empty(), "{replaced}");
-    assert!(replacement.err().contains("removed"), "{}", replacement.err());
+    assert_eq!(replaced, before);
 }
 
 /// A corrupt artifact is ignored by automatic consumers but protected from incremental promotion.

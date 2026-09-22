@@ -25,12 +25,10 @@ where
     }
 
     while out.last().is_some_and(String::is_empty) {
+        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-22")]
         out.pop();
     }
 
-    if out.is_empty() {
-        return None;
-    }
     let block = out.join("\n");
     looks_like_license_header(&block).then_some(block)
 }
@@ -100,5 +98,24 @@ mod tests {
             script_header("#!/usr/bin/env cargo\nnot-dashes\n// c\n", CommentStyle::DoubleSlash),
             None
         );
+    }
+
+    #[test]
+    fn collection_stops_at_the_first_non_comment_line() {
+        let content = "// introductory\nfn main() {}\n// Licensed later\n";
+
+        assert_eq!(header_comment(content, CommentStyle::DoubleSlash), None);
+    }
+
+    #[test]
+    fn collection_trims_only_trailing_blank_comment_lines() {
+        let content = "// Copyright\n//\n";
+
+        assert_eq!(header_comment(content, CommentStyle::DoubleSlash), Some("Copyright".to_owned()));
+    }
+
+    #[test]
+    fn empty_input_has_no_header() {
+        assert_eq!(header_comment("", CommentStyle::DoubleSlash), None);
     }
 }

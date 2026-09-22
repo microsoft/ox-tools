@@ -35,7 +35,11 @@ pub(crate) struct TargetContext {
 impl TargetContext {
     /// Resolve an explicit Rust target, or the rustc host target when omitted.
     pub(crate) fn resolve(target: Option<&str>) -> Result<Self, CoverageGateError> {
-        let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+        Self::resolve_with_env(target, |name| env::var_os(name))
+    }
+
+    fn resolve_with_env(target: Option<&str>, var_os: impl FnOnce(&str) -> Option<OsString>) -> Result<Self, CoverageGateError> {
+        let rustc = var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
         Self::resolve_with_rustc(target, &rustc).map_err(Into::into)
     }
 
@@ -206,6 +210,17 @@ mod tests {
 
         assert!(error.to_string().contains("failed to resolve"));
         assert!(error.source().is_some(), "resolve error must preserve its typed cause");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns a process; miri isolation forbids that")]
+    fn rustc_override_uses_the_documented_environment_variable() {
+        let error = TargetContext::resolve_with_env(None, |name| {
+            assert_eq!(name, "RUSTC");
+            Some(OsString::from("cargo-coverage-gate-no-such-rustc"))
+        })
+        .expect_err("the injected rustc must be used");
+        assert!(error.to_string().contains("failed to resolve"));
     }
 
     #[test]

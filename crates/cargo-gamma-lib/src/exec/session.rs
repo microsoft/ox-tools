@@ -253,6 +253,7 @@ pub struct SweepCost {
     /// Generalized item, binary, census and reach-cluster probes attempted and confirmed.
     pub generalized_probes: usize,
     pub generalized_hits: usize,
+    pub generalized_rejected: usize,
 
     /// Hint candidates available when mutants were assigned.
     pub exact_candidates: usize,
@@ -267,6 +268,9 @@ pub struct SweepCost {
     pub reach_hits: usize,
     pub file_probes: usize,
     pub file_hits: usize,
+    pub item_rejected: usize,
+    pub reach_rejected: usize,
+    pub file_rejected: usize,
     pub census_probes: usize,
     pub census_hits: usize,
 

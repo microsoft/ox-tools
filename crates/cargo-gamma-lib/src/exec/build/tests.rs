@@ -881,6 +881,7 @@ fn an_unattributed_failure_is_isolated_to_the_mutant_that_provably_breaks_the_bu
         path: Utf8PathBuf::from("src/lib.rs"),
         absolute: pristine.join("lib.rs"),
         package: "trivial".to_owned(),
+        source: None,
     });
     plan.mutants.extend([bad, good]);
     fs::create_dir_all(work.root.join("gamma-rt/src").as_std_path()).expect("runtime source");
@@ -1002,6 +1003,7 @@ fn unguardable_plan(work: &Workspace, ordinal: u32) -> Plan {
         path: Utf8PathBuf::from("src/lib.rs"),
         absolute: pristine.join("lib.rs"),
         package: "trivial".to_owned(),
+        source: None,
     });
     plan.mutants.push(Mutant {
         ordinal,
@@ -1422,6 +1424,7 @@ fn a_mutants_file_the_copy_never_created_reports_the_read_failure() {
         path: Utf8PathBuf::from("src/never_copied.rs"),
         absolute: work.root.join("src/lib.rs"),
         package: "trivial".to_owned(),
+        source: None,
     });
 
     let error = Splices::default()
@@ -1439,6 +1442,7 @@ fn target_file(root: &Utf8Path, path: &str) -> TargetFile {
         path: Utf8PathBuf::from(path),
         absolute: root.join(path),
         package: "trivial".to_owned(),
+        source: None,
     }
 }
 
@@ -2578,6 +2582,7 @@ fn a_mutant_in_a_file_whose_path_contains_a_space_is_not_excused_as_unbuilt() {
         path: Utf8PathBuf::from(path),
         absolute: Utf8PathBuf::from("/nowhere").join(path),
         package: "pkg".to_owned(),
+        source: None,
     };
 
     let mutant_in = |path: &str, ordinal: u32| Mutant {
@@ -2620,6 +2625,7 @@ fn a_compiled_set_disjoint_from_the_survey_withdraws_nothing() {
         path: Utf8PathBuf::from(path),
         absolute: Utf8PathBuf::from("/nowhere").join(path),
         package: "pkg".to_owned(),
+        source: None,
     };
     let mutant_in = |path: &str, ordinal: u32| Mutant {
         ordinal,
@@ -2840,6 +2846,7 @@ fn a_second_round_rewrites_only_the_files_it_withdrew_from() {
             path: Utf8PathBuf::from(name),
             absolute: origin.join(name),
             package: "trivial".to_owned(),
+            source: None,
         });
     }
 
@@ -2992,6 +2999,7 @@ fn baseline_reaches_the_function() {
         path: Utf8PathBuf::from("src/lib.rs"),
         absolute: absolute.clone(),
         package: "trivial".to_owned(),
+        source: None,
     });
     plan.mutants = mutants;
     let _digest = plan
@@ -3062,6 +3070,7 @@ fn probe_plan(work: &Workspace, unviable: usize, viable: usize) -> Plan {
         path: Utf8PathBuf::from("src/lib.rs"),
         absolute: pristine.join("lib.rs"),
         package: "trivial".to_owned(),
+        source: None,
     });
 
     // Every `1` in the fixture is a mutation site, and they appear in source order: the constants

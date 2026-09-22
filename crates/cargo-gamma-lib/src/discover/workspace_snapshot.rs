@@ -11,6 +11,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use ignore::{WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
 
+use super::Plan;
 use super::record::digest;
 
 /// A file in the workspace input snapshot.
@@ -183,12 +184,33 @@ impl WorkspaceSnapshot {
         self.files.get(index)
     }
 
+    /// Whether every source generation discovered for a completed plan belongs to this snapshot.
+    pub(super) fn contains_plan_sources(&self, plan: &Plan) -> bool {
+        let retained: crate::HashMap<&Utf8Path, &str> = plan
+            .files
+            .iter()
+            .filter_map(|file| file.source.as_deref().map(|source| (file.path.as_path(), source)))
+            .collect();
+
+        plan.digests.iter().all(|(path, expected)| {
+            let Some(file) = self.file(path) else {
+                return false;
+            };
+
+            Self::source_generation_matches(&file.digest, expected, retained.get(path.as_path()).copied())
+        })
+    }
+
     fn is_compilation_input(path: &Utf8Path, roots: &[Utf8PathBuf]) -> bool {
         matches!(
             path.as_str(),
             "Cargo.toml" | "Cargo.lock" | "rust-toolchain" | "rust-toolchain.toml"
         ) || path.starts_with(".cargo")
             || roots.iter().any(|root| root.as_str().is_empty() || path.starts_with(root))
+    }
+
+    fn source_generation_matches(snapshot: &str, normalized: &str, retained: Option<&str>) -> bool {
+        snapshot == normalized || retained.is_some_and(|source| snapshot == digest(source.as_bytes()))
     }
 
     /// Rust files known before the run, for the declaring-file index.
@@ -395,7 +417,19 @@ mod tests {
 
     use camino::Utf8Path;
 
-    use super::WorkspaceSnapshot;
+    use super::{WorkspaceSnapshot, digest};
+
+    #[test]
+    fn a_raw_bom_source_matches_its_normalized_discovery_generation() {
+        let normalized = "fn source() {}\n";
+        let retained = format!("{}{}", crate::parse::BOM, normalized);
+
+        assert!(WorkspaceSnapshot::source_generation_matches(
+            &digest(retained.as_bytes()),
+            &digest(normalized.as_bytes()),
+            Some(&retained)
+        ));
+    }
 
     #[cfg(unix)]
     #[test]

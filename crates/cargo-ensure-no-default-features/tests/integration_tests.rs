@@ -434,6 +434,41 @@ tokio = { version = "1.0", default-features = false }
 }
 
 #[test]
+fn missing_exception_names_both_checked_sections() {
+    let content = r#"
+[workspace]
+members = []
+
+[workspace.dependencies]
+serde = { version = "1.0", default-features = false }
+
+[package]
+name = "my-crate"
+version = "0.1.0"
+
+[dependencies]
+tokio = { version = "1.0", default-features = false }
+"#;
+
+    let temp_dir = create_test_manifest(content);
+    let manifest_path = temp_dir.path().join("Cargo.toml");
+    let output = Command::new(get_binary_path())
+        .arg("ensure-no-default-features")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .arg("--exceptions")
+        .arg("missing")
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success(), "Command should succeed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "⚠️ Warning: exception 'missing' was not found in [workspace.dependencies] or [dependencies]\n"
+    );
+}
+
+#[test]
 fn test_exception_found_no_warning() {
     // Test that warning is NOT generated when exception is found in dependencies
     let content = r#"

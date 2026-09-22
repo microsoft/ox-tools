@@ -58,19 +58,21 @@ the UTC `generated_on` date. These fields describe artifact provenance and do no
 claim that retained entries originated at that revision. No-op promotion preserves the date and
 bytes.
 
-Runs read the artifact automatically and it needs no setting here. Legacy JSON versions 1 and 2
-remain readable only while `gamma-hints.yaml` is absent. The next successful promotion writes YAML
-and removes the JSON file after verifying its replacement. Malformed artifacts, unsupported
+The independently versioned generalized section is schema version 2. It separates seed
+observations from transfer hits and misses and interns repeated test and binary identities.
+Version-1 candidate identities migrate as seeds; their conflated transfer statistics and measured
+cost are reset.
+
+Runs read the artifact automatically and it needs no setting here. Malformed artifacts, unsupported
 versions, and artifacts whose producer is not cargo-gamma are ignored safely. See
 [checking in the hints file](../README.md#checking-in-the-hints-file).
 
 Explicit promotion is stricter than automatic reading. Ordinary promotion refuses a malformed,
 foreign, or unsupported existing generation rather than silently replacing knowledge it cannot
 round-trip. `--replace` permits discarding that unsupported knowledge, but it does not disable
-publication safety: the command still compares the exact YAML and legacy JSON bytes it read, leaves
-a concurrently written generation alone, writes atomically, and verifies the published artifact
-before deleting migration input. An unreadable or over-limit existing file is never overwritten
-implicitly, even with `--replace`.
+publication safety: the command still compares the exact YAML bytes it read, leaves a concurrently
+written generation alone, writes atomically, and verifies the published artifact. An unreadable or
+over-limit existing file is never overwritten implicitly, even with `--replace`.
 
 ## How settings combine
 

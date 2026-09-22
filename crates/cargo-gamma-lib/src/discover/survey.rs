@@ -231,6 +231,11 @@ pub struct Scanned {
     /// not computed from. This is what lets the edit refuse rather than delete the wrong line.
     pub digests: HashMap<Utf8PathBuf, String>,
 
+    /// The retained source generation, including a leading UTF-8 BOM when the input had one.
+    ///
+    /// Parsing, spans, and digests use the corresponding normalized text without that BOM.
+    pub sources: HashMap<Utf8PathBuf, String>,
+
     /// Files that were found but could not be analyzed, each already a complete diagnostic.
     ///
     /// These contributed no mutants, so they are missing from both halves of the score's fraction
@@ -381,6 +386,7 @@ impl Survey {
                             path: relative.clone(),
                             absolute: absolute.clone(),
                             package: package.name.to_string(),
+                            source: None,
                         });
                     }
 
@@ -416,6 +422,7 @@ impl Survey {
                         path: relative,
                         absolute,
                         package: package.name.to_string(),
+                        source: None,
                     });
                 }
             }
@@ -616,6 +623,7 @@ impl Survey {
             idle,
             skipped,
             digests,
+            sources,
         } = scan(&files, &declaration_files, &roots, selection, &self.cfgs, &self.exclude_trait_impls)?;
 
         // Within a file the diff still has the last word: a changed line usually sits among many
@@ -685,6 +693,7 @@ impl Survey {
             settled_out,
             skipped,
             digests,
+            sources,
         })
     }
 
@@ -822,7 +831,16 @@ fn mutate(
         idle,
         declared,
         digest: crate::discover::digest(source.text().as_bytes()),
+        source: retained_source(source),
     })
+}
+
+fn retained_source(source: &SourceFile) -> String {
+    if source.has_bom() {
+        format!("{}{}", crate::parse::BOM, source.text())
+    } else {
+        source.text().to_owned()
+    }
 }
 
 struct TraitImplementations<'cfg> {
@@ -1034,6 +1052,7 @@ fn scan(
     let total = collected.iter().map(|(_index, parsed)| parsed.mutants.len()).sum();
     let mut mutants = Vec::with_capacity(total);
     let mut digests: HashMap<Utf8PathBuf, String> = HashMap::default();
+    let mut sources: HashMap<Utf8PathBuf, String> = HashMap::default();
     let mut suppressed = 0;
     let mut idle = Vec::new();
 
@@ -1044,6 +1063,7 @@ fn scan(
 
         if let Some(file) = files.get(index) {
             let _replaced = digests.insert(file.path.clone(), parsed.digest);
+            let _replaced = sources.insert(file.path.clone(), parsed.source);
         }
         mutants.extend(parsed.mutants);
         suppressed += parsed.suppressed;
@@ -1075,6 +1095,7 @@ fn scan(
         idle,
         skipped: unanalyzable.into_iter().map(|(_path, message)| message).collect(),
         digests,
+        sources,
     })
 }
 
@@ -1208,6 +1229,7 @@ struct Scan {
     idle: Vec<suppress::Idle>,
     skipped: Vec<String>,
     digests: HashMap<Utf8PathBuf, String>,
+    sources: HashMap<Utf8PathBuf, String>,
 }
 
 /// Everything the workers of one scan share, so that adding a channel does not widen every
@@ -1363,6 +1385,7 @@ struct Parsed {
 
     /// A digest of the exact bytes this file's mutants were derived from.
     digest: String,
+    source: String,
 }
 
 fn sort_paths(paths: &mut [Utf8PathBuf]) {
@@ -2134,6 +2157,15 @@ mod tests {
     /// other test running at the same time can trip it.
     const PANIC_PROBE: &str = "gamma_panic_probe.rs";
 
+    #[test]
+    fn retained_source_restores_only_a_leading_byte_order_mark() {
+        let marked = SourceFile::parse("marked.rs", "\u{feff}fn marked() {}\n".to_owned()).expect("marked source parses");
+        let plain = SourceFile::parse("plain.rs", "fn plain() {}\n".to_owned()).expect("plain source parses");
+
+        assert_eq!(retained_source(&marked), "\u{feff}fn marked() {}\n");
+        assert_eq!(retained_source(&plain), "fn plain() {}\n");
+    }
+
     /// Panics if this is the file a test planted to make a survey worker die mid-phase.
     pub(super) fn panic_probe(path: &Utf8Path) {
         assert!(
@@ -2263,6 +2295,7 @@ mod tests {
             path: Utf8PathBuf::from(path),
             absolute: Utf8PathBuf::from(path),
             package: "p".to_owned(),
+            source: None,
         };
         let mut declarations = HashMap::default();
         declarations.insert("p".to_owned(), vec![Utf8PathBuf::from("z.rs"), Utf8PathBuf::from("a.rs")]);
@@ -2930,6 +2963,7 @@ mod tests {
             path: Utf8PathBuf::from("core/src/lib.rs"),
             absolute: Utf8PathBuf::from("/tree/core/src/lib.rs"),
             package: "core".to_owned(),
+            source: None,
         }];
         let mutants = [counting_mutant("core"), counting_mutant("ghost")];
 

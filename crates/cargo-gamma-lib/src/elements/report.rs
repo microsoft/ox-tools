@@ -460,6 +460,12 @@ fn reason_for(mutant: &Mutant) -> Option<String> {
 /// nested beyond the supported parser limit in the meantime fails here.
 // #[gamma::skip(all, reason = "report metadata, root identity, and mutant-id schema are asserted by schema and golden artifact tests; mutations here duplicate those report contracts")]
 pub fn build(plan: &Plan, thresholds: Thresholds, run: Option<RunInfo>) -> Result<Report> {
+    build_from(plan, None, thresholds, run)
+}
+
+/// Builds a report from a synchronized campaign tree, falling back to discovery-retained source
+/// only when no such tree was built.
+pub(crate) fn build_from(plan: &Plan, source_root: Option<&Utf8Path>, thresholds: Thresholds, run: Option<RunInfo>) -> Result<Report> {
     let mut files: BTreeMap<String, FileResult> = BTreeMap::new();
 
     // Grouped once rather than rescanned per file: a workspace with many files has many mutants
@@ -475,17 +481,28 @@ pub fn build(plan: &Plan, thresholds: Thresholds, run: Option<RunInfo>) -> Resul
             continue;
         };
 
-        let original = fs::read_to_string(file.absolute.as_std_path())
-            .map_err(|cause| error!("could not read `{}`", file.absolute).caused_by(cause))?;
+        let snapshot = source_root.map(|root| root.join(&file.path));
+        let original = match snapshot.as_ref() {
+            Some(path) => fs::read_to_string(path.as_std_path())
+                .map_err(|cause| error!("could not read campaign source `{path}` for `{}`", file.path).caused_by(cause))?,
+            None => file.source.clone().map_or_else(
+                || {
+                    fs::read_to_string(file.absolute.as_std_path())
+                        .map_err(|cause| error!("could not read `{}`", file.absolute).caused_by(cause))
+                },
+                Ok,
+            )?,
+        };
         let has_bom = original.starts_with('\u{feff}');
-        let source = SourceFile::parse(file.absolute.clone(), original.clone())?;
+        let source = SourceFile::parse(file.path.clone(), original.clone())?;
 
         if let Some(expected) = plan.digests.get(&file.path)
             && crate::discover::digest(source.text().as_bytes()) != *expected
         {
             return Err(error!(
-                "`{}` changed after its mutants were discovered; rerun cargo-gamma so discovery, verdicts, and report source use the same generation",
-                file.path
+                "campaign source `{}` does not match the generation discovered for `{}`; the synchronized workspace may be incomplete or corrupt",
+                snapshot.as_deref().unwrap_or(&file.absolute),
+                file.path,
             ));
         }
 
@@ -1412,7 +1429,7 @@ mod tests {
         let normalized = source.strip_prefix('\u{feff}').expect("leading byte-order mark");
         let first = normalized.find("fn").expect("first-line span");
         let second = normalized.find("true").expect("second-line span");
-        let plan = Plan {
+        let mut plan = Plan {
             skipped: Vec::new(),
             digests: HashMap::default(),
             root,
@@ -1420,6 +1437,7 @@ mod tests {
                 path: Utf8PathBuf::from("lib.rs"),
                 absolute,
                 package: "subject".to_owned(),
+                source: None,
             }],
             mutants: vec![
                 Mutant {
@@ -1449,6 +1467,14 @@ mod tests {
         assert_eq!(mutants[1].location.start.column, 5);
         assert_eq!(report.files["lib.rs"].source, source);
         assert_eq!(report.files["lib.rs"].language, "rust");
+
+        plan.files[0].source = Some(source.to_owned());
+        fs::remove_file(&plan.files[0].absolute).expect("remove live source");
+
+        let retained = build(&plan, Thresholds::default(), None).expect("report from retained discovery source");
+        assert_eq!(retained.files["lib.rs"].mutants[0].location.start.column, 2);
+        assert_eq!(retained.files["lib.rs"].mutants[1].location.start.column, 5);
+        assert_eq!(retained.files["lib.rs"].source, source);
     }
 
     #[test]
@@ -1901,6 +1927,7 @@ mod tests {
                 path: Utf8PathBuf::from("lib.rs"),
                 absolute: root.join("lib.rs"),
                 package: "subject".to_owned(),
+                source: None,
             }],
             mutants: vec![
                 Mutant {
@@ -2071,6 +2098,7 @@ mod tests {
                 path: Utf8PathBuf::from("src/lib.rs"),
                 absolute: Utf8PathBuf::from("/w/src/lib.rs"),
                 package: "subject".to_owned(),
+                source: None,
             }],
             mutants: Vec::new(),
             suppressed: 0,
@@ -2265,6 +2293,7 @@ mod tests {
                 path: Utf8PathBuf::from(*name),
                 absolute: root.join(*name),
                 package: "subject".to_owned(),
+                source: None,
             })
             .collect();
 
@@ -2330,6 +2359,7 @@ mod tests {
                 path: path.clone(),
                 absolute: absolute.clone(),
                 package: "subject".to_owned(),
+                source: None,
             }],
             mutants: vec![Mutant {
                 file: path.into(),
@@ -2347,10 +2377,98 @@ mod tests {
 
         let error = build(&plan, Thresholds::default(), None).expect_err("mixed source generations must be refused");
 
+        assert!(error.to_string().contains("does not match the generation discovered"), "{error}");
+    }
+
+    #[test]
+    fn a_campaign_snapshot_survives_original_source_changes_and_deletion() {
+        let directory = crate::testing::workdir("elements-campaign-source");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the original path is UTF-8");
+        let snapshot = root.join("campaign-source");
+        let path = Utf8PathBuf::from("src/lib.rs");
+        let absolute = root.join(&path);
+        let copied = snapshot.join(&path);
+        let discovered = "fn f() { a < b; }\n";
+        fs::create_dir_all(absolute.parent().expect("original parent")).expect("original parent");
+        fs::create_dir_all(copied.parent().expect("snapshot parent")).expect("snapshot parent");
+        fs::write(&absolute, discovered).expect("original source");
+        fs::write(&copied, discovered).expect("campaign source");
+        let mut digests = HashMap::default();
+        let _previous = digests.insert(path.clone(), crate::discover::digest(discovered.as_bytes()));
+        let plan = Plan {
+            skipped: Vec::new(),
+            digests,
+            root: root.clone(),
+            files: vec![TargetFile {
+                path: path.clone(),
+                absolute: absolute.clone(),
+                package: "subject".to_owned(),
+                source: Some(discovered.to_owned()),
+            }],
+            mutants: vec![Mutant {
+                file: path.clone().into(),
+                ..mutant(Outcome::Killed, 9..14)
+            }],
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            reach: HashMap::default(),
+            specs: HashMap::default(),
+        };
+
+        fs::write(&absolute, "fn f() { a > b; }\n").expect("changed original");
+        let changed = build_from(&plan, Some(&snapshot), Thresholds::default(), None).expect("report after source change");
+        fs::remove_file(&absolute).expect("delete original");
+        let deleted = build_from(&plan, Some(&snapshot), Thresholds::default(), None).expect("report after source deletion");
+
+        for report in [&changed, &deleted] {
+            assert_eq!(report.project_root.as_deref(), Some(root.as_str()));
+            assert_eq!(report.files.len(), 1);
+            assert!(report.files.contains_key(path.as_str()));
+            assert_eq!(report.files["src/lib.rs"].source, discovered);
+        }
+    }
+
+    #[test]
+    fn a_corrupt_campaign_snapshot_is_refused_before_report_publication() {
+        let directory = crate::testing::workdir("elements-corrupt-campaign-source");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the original path is UTF-8");
+        let snapshot = root.join("campaign-source");
+        let path = Utf8PathBuf::from("src/lib.rs");
+        let absolute = root.join(&path);
+        let copied = snapshot.join(&path);
+        let discovered = "fn f() { a < b; }\n";
+        fs::create_dir_all(copied.parent().expect("snapshot parent")).expect("snapshot parent");
+        fs::write(&copied, "fn f() { a > b; }\n").expect("corrupt campaign source");
+        let mut digests = HashMap::default();
+        let _previous = digests.insert(path.clone(), crate::discover::digest(discovered.as_bytes()));
+        let plan = Plan {
+            skipped: Vec::new(),
+            digests,
+            root,
+            files: vec![TargetFile {
+                path: path.clone(),
+                absolute,
+                package: "subject".to_owned(),
+                source: Some(discovered.to_owned()),
+            }],
+            mutants: vec![Mutant {
+                file: path.into(),
+                ..mutant(Outcome::Killed, 9..14)
+            }],
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            reach: HashMap::default(),
+            specs: HashMap::default(),
+        };
+
+        let error = build_from(&plan, Some(&snapshot), Thresholds::default(), None).expect_err("mixed generation");
+
         assert!(
-            error
-                .to_string()
-                .contains("rerun cargo-gamma so discovery, verdicts, and report source use the same generation"),
+            error.to_string().contains("synchronized workspace may be incomplete or corrupt"),
             "{error}"
         );
     }
@@ -2375,6 +2493,7 @@ mod tests {
                 path: Utf8PathBuf::from("a.rs"),
                 absolute: root.join("a.rs"),
                 package: "subject".to_owned(),
+                source: None,
             }],
             mutants: vec![
                 Mutant {

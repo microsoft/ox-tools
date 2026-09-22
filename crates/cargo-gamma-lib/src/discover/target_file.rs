@@ -16,4 +16,11 @@ pub struct TargetFile {
 
     /// The package the file belongs to.
     pub package: String,
+
+    /// The source generation discovery read, including a leading UTF-8 byte-order mark when present.
+    ///
+    /// Parsing and generation digests use normalized text with that mark removed. Reports use the
+    /// synchronized campaign tree when one was built; this retained raw copy covers campaigns that
+    /// had no buildable workspace and keeps report publication independent of later checkout edits.
+    pub source: Option<String>,
 }

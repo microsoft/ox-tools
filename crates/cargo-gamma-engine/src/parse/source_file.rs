@@ -28,6 +28,9 @@ pub struct SourceFile {
     /// The exact bytes that were parsed. All spans index into this.
     pub(crate) text: String,
 
+    /// Whether the input had a leading UTF-8 byte-order mark before parsing normalized it away.
+    had_bom: bool,
+
     /// The syntax tree.
     ///
     /// `pub(crate)` rather than private: this crate's own tests build fixtures by mutating a
@@ -65,6 +68,7 @@ impl SourceFile {
     /// deep to look at.
     pub fn parse(path: impl Into<Utf8PathBuf>, text: String) -> Result<Self> {
         let path = path.into();
+        let had_bom = text.starts_with(BOM);
         let text = without_bom(text);
         let lines = line_starts(&text);
         let comments = comment::scan_comments(&text, &lines);
@@ -106,6 +110,7 @@ impl SourceFile {
         Ok(Self {
             path,
             text,
+            had_bom,
             ast,
             lines,
             comments,
@@ -182,6 +187,13 @@ impl SourceFile {
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Whether the source text supplied to [`Self::parse`] had a leading byte-order mark.
+    #[inline]
+    #[must_use]
+    pub fn has_bom(&self) -> bool {
+        self.had_bom
     }
 
     /// Returns the syntax tree.
@@ -424,11 +436,13 @@ mod tests {
         let file = parse("\u{feff}fn a() {}\n");
 
         assert_eq!(file.text, "fn a() {}\n");
+        assert!(file.has_bom());
         assert_eq!(file.location(0), (1, 1));
 
         // A mark anywhere but the front is ordinary text and is left alone.
         let inner = parse("fn a() { let _ = \"\u{feff}\"; }\n");
 
+        assert!(!inner.has_bom());
         assert!(inner.text.contains('\u{feff}'));
     }
 

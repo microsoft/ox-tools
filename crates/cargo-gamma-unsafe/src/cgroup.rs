@@ -589,6 +589,8 @@ pub struct Cgroup {
 pub(crate) struct CgroupWatch {
     slot: usize,
     descriptor: RawFd,
+    #[cfg(all(test, not(miri)))]
+    registry: Option<interrupt::TestRegistry>,
 }
 
 /// An open cgroup kill switch, valid while its owning [`Cgroup`] remains alive.
@@ -820,7 +822,21 @@ impl Cgroup {
     /// cgroup borrow keeps the owning file live until this reminder is stored, and this cgroup
     /// retains ownership of the descriptor until `Drop` removes the registry entry.
     pub(crate) const fn watched_at(&mut self, slot: usize, descriptor: RawFd) {
-        self.watch = Some(CgroupWatch { slot, descriptor });
+        self.watch = Some(CgroupWatch {
+            slot,
+            descriptor,
+            #[cfg(all(test, not(miri)))]
+            registry: None,
+        });
+    }
+
+    #[cfg(all(test, not(miri)))]
+    pub(crate) const fn watched_at_for_test(&mut self, slot: usize, descriptor: RawFd, registry: interrupt::TestRegistry) {
+        self.watch = Some(CgroupWatch {
+            slot,
+            descriptor,
+            registry: Some(registry),
+        });
     }
 
     /// Whether the kernel reported killing this workload for reaching its ceiling.
@@ -867,6 +883,14 @@ impl Drop for Cgroup {
         // up again. Doing it here rather than asking the caller to is what makes the pairing
         // impossible to get wrong: there is no safe way to drop a watched cgroup without it.
         if let Some(watch) = self.watch.take() {
+            #[cfg(all(test, not(miri)))]
+            if let Some(registry) = watch.registry {
+                registry.release_cgroup(watch.slot, watch.descriptor);
+            } else {
+                interrupt::release_watched_cgroup(watch.slot, watch.descriptor);
+            }
+
+            #[cfg(any(not(test), miri))]
             interrupt::release_watched_cgroup(watch.slot, watch.descriptor);
         }
 
@@ -912,6 +936,7 @@ fn remove_with_retry(mut remove: impl FnMut() -> bool, mut pause: impl FnMut()) 
 
 #[cfg(all(test, not(miri)))]
 mod tests {
+    use core::cell::RefCell;
     use std::error::Error as _;
 
     use super::*;
@@ -932,6 +957,47 @@ mod tests {
     const WATCHED_PROCESS_GROUP: i32 = 41;
     const REPLACEMENT_PROCESS_GROUP: i32 = 42;
 
+    /// An isolated registry whose only observable effects are appended to these records.
+    struct RecordedRegistry {
+        registry: interrupt::TestRegistry,
+        killed_groups: RefCell<Vec<i32>>,
+        killed_cgroups: RefCell<Vec<i32>>,
+    }
+
+    impl RecordedRegistry {
+        fn new() -> Self {
+            Self {
+                registry: interrupt::TestRegistry::spawning(),
+                killed_groups: RefCell::new(Vec::new()),
+                killed_cgroups: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn watch_cgroup(&self, group: i32, cgroup: &mut Cgroup) -> Option<usize> {
+            self.registry
+                .watch_cgroup(group, cgroup, &|group| self.killed_groups.borrow_mut().push(group), &|descriptor| {
+                    self.killed_cgroups.borrow_mut().push(descriptor);
+                })
+        }
+
+        fn forget(&self, slot: usize, group: i32) {
+            self.registry.forget(slot, group);
+        }
+
+        fn finish(self) {
+            assert_eq!(
+                self.registry
+                    .close(&|group| self.killed_groups.borrow_mut().push(group), &|descriptor| self
+                        .killed_cgroups
+                        .borrow_mut()
+                        .push(descriptor),),
+                None
+            );
+            assert!(self.killed_groups.into_inner().is_empty(), "no fabricated process group was killed");
+            assert!(self.killed_cgroups.into_inner().is_empty(), "no cgroup kill switch was invoked");
+        }
+    }
+
     /// Fails an explicitly requested run on a host that cannot support it, saying what is missing.
     ///
     /// Reached only when somebody asked for these by name, so the answer is a failure rather than a
@@ -939,6 +1005,25 @@ mod tests {
     /// the same one the tool itself would give a user who asked for a ceiling here.
     fn demand_delegation() {
         assert!(root().is_ok(), "{NEEDS_DELEGATION}: {:?}", root().err());
+    }
+
+    #[test]
+    fn registration_without_a_kill_handle_releases_its_process_group_slot() {
+        let directory = tempfile::tempdir().expect("temporary cgroup root");
+        let path = directory.path().join("leaf");
+        fs::create_dir(&path).expect("created");
+        let mut group = over(&path);
+        let spawning = RecordedRegistry::new();
+
+        assert_eq!(spawning.watch_cgroup(WATCHED_PROCESS_GROUP, &mut group), None);
+        let replacement = spawning
+            .registry
+            .watch(REPLACEMENT_PROCESS_GROUP, &|group| spawning.killed_groups.borrow_mut().push(group))
+            .expect("the released first slot is reusable");
+
+        assert_eq!(replacement, 0);
+        spawning.forget(replacement, REPLACEMENT_PROCESS_GROUP);
+        spawning.finish();
     }
 
     /// A cgroup standing over a plain directory whose kill switch a signal handler can be given.
@@ -982,15 +1067,15 @@ mod tests {
         let mut group = watchable(&path);
         let descriptor = group.kill.as_ref().expect("the stand-in leaf has a kill switch").as_raw_fd();
         let watched = WATCHED_PROCESS_GROUP;
-        let spawning = interrupt::spawning();
+        let spawning = RecordedRegistry::new();
         let slot = spawning
-            .watch_cgroup(watched, Some(&mut group))
+            .watch_cgroup(watched, &mut group)
             .expect("a free slot, since a fresh registry has a thousand");
         let cgroup_slot = group.watch.as_ref().expect("the cgroup owns its registry watch").slot;
 
-        assert_eq!(interrupt::watched(slot), watched, "the process group was never published");
+        assert_eq!(spawning.registry.watched(slot), watched, "the process group was never published");
         assert_eq!(
-            interrupt::watched_cgroup(cgroup_slot),
+            spawning.registry.watched_cgroup(cgroup_slot),
             Some(descriptor),
             "the kill descriptor was never published"
         );
@@ -998,13 +1083,13 @@ mod tests {
         drop(group);
 
         assert_eq!(
-            interrupt::watched_cgroup(cgroup_slot),
+            spawning.registry.watched_cgroup(cgroup_slot),
             None,
             "a dropped cgroup left its now-closed kill descriptor registered"
         );
 
-        interrupt::forget(slot, watched);
-        drop(spawning);
+        spawning.forget(slot, watched);
+        spawning.finish();
     }
 
     /// A dropped cgroup leaves a slot some later spawn has claimed alone.
@@ -1022,32 +1107,35 @@ mod tests {
 
         let mut group = watchable(&path);
         let watched = WATCHED_PROCESS_GROUP;
-        let spawning = interrupt::spawning();
-        let slot = spawning.watch_cgroup(watched, Some(&mut group)).expect("a free slot");
+        let spawning = RecordedRegistry::new();
+        let slot = spawning.watch_cgroup(watched, &mut group).expect("a free slot");
         let cgroup_slot = group.watch.as_ref().expect("the cgroup owns its registry watch").slot;
         let descriptor = group.kill.as_ref().expect("the stand-in leaf has a kill switch").as_raw_fd();
 
         // What the owning subtree does the moment its leader is reaped.
-        interrupt::forget(slot, watched);
+        spawning.forget(slot, watched);
         assert_eq!(
-            interrupt::watched_cgroup(cgroup_slot),
+            spawning.registry.watched_cgroup(cgroup_slot),
             Some(descriptor),
             "releasing the leader's process group retracted descendant interruption coverage"
         );
 
         let replacement = REPLACEMENT_PROCESS_GROUP;
-        let taken = spawning.watch(replacement).expect("the freed slot, or another");
+        let taken = spawning
+            .registry
+            .watch(replacement, &|group| spawning.killed_groups.borrow_mut().push(group))
+            .expect("the freed slot, or another");
 
         drop(group);
 
         assert_eq!(
-            interrupt::watched(taken),
+            spawning.registry.watched(taken),
             replacement,
             "a dropped cgroup took a later child's registration with it"
         );
 
-        interrupt::forget(taken, replacement);
-        drop(spawning);
+        spawning.forget(taken, replacement);
+        spawning.finish();
     }
 
     /// A cgroup can publish its kill descriptor only once.
@@ -1059,26 +1147,26 @@ mod tests {
         fs::create_dir(&path).expect("created");
 
         let mut group = watchable(&path);
-        let spawning = interrupt::spawning();
+        let spawning = RecordedRegistry::new();
         let first = spawning
-            .watch_cgroup(WATCHED_PROCESS_GROUP, Some(&mut group))
+            .watch_cgroup(WATCHED_PROCESS_GROUP, &mut group)
             .expect("the first registration succeeds");
         let cgroup_slot = group.watch.as_ref().expect("the cgroup owns its registry watch").slot;
 
         assert_eq!(
-            spawning.watch_cgroup(REPLACEMENT_PROCESS_GROUP, Some(&mut group)),
+            spawning.watch_cgroup(REPLACEMENT_PROCESS_GROUP, &mut group),
             None,
             "a second registration must be refused"
         );
         assert_eq!(
-            interrupt::watched_cgroup(cgroup_slot),
+            spawning.registry.watched_cgroup(cgroup_slot),
             group.kill.as_ref().map(std::os::fd::AsRawFd::as_raw_fd),
             "the original descriptor registration must remain owned"
         );
 
-        interrupt::forget(first, WATCHED_PROCESS_GROUP);
+        spawning.forget(first, WATCHED_PROCESS_GROUP);
         drop(group);
-        drop(spawning);
+        spawning.finish();
     }
 
     /// A cgroup standing over a plain directory, for testing the interface-file handling.
