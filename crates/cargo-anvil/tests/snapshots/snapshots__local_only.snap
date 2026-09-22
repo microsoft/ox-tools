@@ -734,6 +734,8 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-bench: no affected packages; skipping'; exit 0 }
     & cargo {{_anvil_stable_toolchain_args}} bench @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -785,6 +787,8 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if (-not $IsLinux) {
         Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
         exit 0
@@ -885,6 +889,8 @@ anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-to
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-careful: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Guard against cargo-careful's stale-sysroot hazard. cargo-careful
@@ -969,6 +975,8 @@ anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereq
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include required)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-cargo-hack: no affected packages; skipping'; exit 0 }
     & cargo {{_anvil_stable_toolchain_args}} hack @(if ($include) { -split $include } else { '--workspace' }) --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1004,6 +1012,8 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-cargo-sort: no modified packages; skipping'; exit 0 }
     & cargo {{_anvil_stable_toolchain_args}} sort --workspace --grouped --check --check-format
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1037,6 +1047,8 @@ anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-clippy: no affected packages; skipping'; exit 0 }
     & cargo {{_anvil_stable_toolchain_args}} clippy @(if ($include) { -split $include } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1096,6 +1108,8 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 anvil-doc-build open="false": anvil-doc-build-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include required)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-doc-build: no affected packages; skipping'; exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
@@ -1135,6 +1149,8 @@ anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     & cargo {{_anvil_stable_toolchain_args}} test --doc @pkg --all-features --locked
@@ -1166,6 +1182,8 @@ anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-ensure-no-cyclic-deps: no modified packages; skipping'; exit 0 }
     & cargo {{_anvil_stable_toolchain_args}} ensure-no-cyclic-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1194,6 +1212,8 @@ anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-ensure-no-default-features: no modified packages; skipping'; exit 0 }
     & cargo {{_anvil_stable_toolchain_args}} ensure-no-default-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1235,6 +1255,8 @@ anvil-examples run="false" package="" example="" timeout="30": anvil-examples-va
         exit 2
     }
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
     $pkgArgs = @(if ($package) { '--package'; $package } elseif ($include) { -split $include } else { '--workspace' })
     $exampleArgs = @(if ($example) { '--example'; $example } else { '--examples' })
@@ -1368,6 +1390,8 @@ anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') {
         Write-Host 'anvil-external-types: no affected packages; skipping'
         exit 0
@@ -1467,6 +1491,8 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 anvil-fmt fix="false": anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-fmt: no modified packages; skipping'; exit 0 }
     cargo '+{{ rust_nightly }}' each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' {{ if fix == "true" { "" } else { "--check" } }}
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1510,6 +1536,8 @@ anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anv
 anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-license-headers: no modified packages; skipping'; exit 0 }
     & cargo {{_anvil_stable_toolchain_args}} heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1543,6 +1571,8 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') {
         Write-Host 'anvil-llvm-cov: no affected packages; skipping'
         exit 0
@@ -1834,6 +1864,8 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') {
         Write-Host 'anvil-loom: no affected packages; skipping'
         exit 0
@@ -2086,7 +2118,8 @@ _anvil-miri-test profile package="" test_filter="" example="": anvil-impact
     }
 
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if (-not $package -and $include -eq '--skip') {
         Write-Host "$recipeName`: no affected packages; skipping"
         exit 0
@@ -2471,6 +2504,8 @@ anvil-msrv-test-validate-prereqs:
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
         exit 0
@@ -2813,6 +2848,8 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $stableArgs = {{_anvil_stable_toolchain_args}}
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     $commentFile = 'target/anvil/comments/semver.md'
     if ($include -eq '--skip') {
         Write-Host 'anvil-semver-check: no affected packages; skipping'
@@ -3101,6 +3138,8 @@ anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include required)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-udeps: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Pass 1: default targets (lib + bins) -- surfaces [dependencies] that
@@ -4824,10 +4863,24 @@ anvil-scheduled-test-validate-prereqs: \
 #     like-named crate is also a transitive dependency.
 #   * "--skip" - the tier is empty for this change (recipe exits 0).
 #
-# This keeps the per-recipe boilerplate to a single capture, a one-line skip
-# guard, and the cargo invocation. Modified-tier recipes never forward
-# `$include`; they only check the skip sentinel and then let their command
-# determine its normal input domain.
+# Those three values are only meaningful when the resolver succeeded, so every
+# caller captures its exit code and propagates it before reading `$include`:
+#
+#   $impactExit = $LASTEXITCODE
+#   if ($impactExit -ne 0) { exit $impactExit }
+#
+# `$ErrorActionPreference = 'Stop'` does not fail a recipe on a native
+# command's nonzero exit, so without that guard a failed lookup (a missing
+# cache under ANVIL_IMPACT=consume, an unreadable include file, an
+# unrecognized ANVIL_IMPACT value) would leave `$include` empty and the check
+# would silently widen to its unscoped default and pass. The same reason
+# anvil-impact fails loudly in consume mode applies to reading the cache it
+# asserts: a broken scope must stop the check, not quietly rescope it.
+#
+# This keeps the per-recipe boilerplate to a single capture, the exit-code
+# guard, a one-line skip guard, and the cargo invocation. Modified-tier
+# recipes never forward `$include`; they only check the skip sentinel and then
+# let their command determine its normal input domain.
 #
 # Every recipe whose body uses multi-line conditionals or array-splat
 # splicing is annotated with [script("pwsh", "-NoProfile")]. pwsh is preinstalled on
