@@ -19,7 +19,7 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-each"
 [dependencies]
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
-command-group = "=5.0.1"
+command-group = { workspace = true }
 mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 serde_json = { workspace = true, features = ["std"] }
