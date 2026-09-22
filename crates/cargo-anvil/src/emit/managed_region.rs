@@ -189,16 +189,30 @@ pub fn plan_managed_region(
         ));
     }
     if let Some(legacy_id) = legacy_lint_region_id(region_id)
-        && host_text.is_some_and(|text| matches!(find_region(text, legacy_id, syntax), Ok(Some(_))))
-        && manifest.region_checksum(host_relpath, legacy_id).is_none()
+        && let Some(text) = host_text
+        && let Some(legacy_region) =
+            find_region(text, legacy_id, syntax).map_err(|error| ManagedRegionRefusal::new(error, RefusalRemedy::MalformedMarkers))?
     {
-        return Err(ManagedRegionRefusal::new(
-            app_err!(
-                "the host contains legacy managed region '{legacy_id}', but the manifest does not record it as owned. \
-                 Refusing to add replacement lint regions alongside an orphan that cargo-anvil cannot retire."
-            ),
-            RefusalRemedy::EditedRetirement,
-        ));
+        let recorded_checksum = manifest.region_checksum(host_relpath, legacy_id);
+        if recorded_checksum.is_none() {
+            return Err(ManagedRegionRefusal::new(
+                app_err!(
+                    "the host contains legacy managed region '{legacy_id}', but the manifest does not record it as owned. \
+                     Refusing to add replacement lint regions alongside an orphan that cargo-anvil cannot retire."
+                ),
+                RefusalRemedy::EditedRetirement,
+            ));
+        }
+        let disk_checksum = checksum_str(legacy_region.body_str());
+        if !legacy_region.is_empty() && recorded_checksum != Some(disk_checksum.as_str()) {
+            return Err(ManagedRegionRefusal::new(
+                app_err!(
+                    "legacy managed region '{legacy_id}' contains edits that do not match its last render. \
+                     Restore its generated content, or empty its body before migrating to the replacement lint regions."
+                ),
+                RefusalRemedy::EditedRetirement,
+            ));
+        }
     }
     let spliced = splice(host_relpath, host_text, region_id, rendered_body, syntax, placement, newline)?;
     Ok(PlanItem::write_region(

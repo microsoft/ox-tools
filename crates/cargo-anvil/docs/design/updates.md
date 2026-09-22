@@ -177,7 +177,9 @@ old block remains tracked and causes a refusal rather than being overwritten or
 retired. During a successful migration, repository-owned dotted assignments
 below the old region are rewritten into bare assignments under the matching new
 subtable. Their values and comments are preserved; assignments outside the
-three lint namespaces are unaffected.
+three lint namespaces are unaffected. An empty legacy block cannot identify its
+parent table when that parent is also declared outside the block, so this
+ambiguous layout is refused and left unchanged for manual reconciliation.
 
 For example, a repository's `[Hunspell] transform_regex = ["^[0-9]+$"]`
 stays under `[Hunspell]` below `anvil-spellcheck-hunspell`, not under quirks.

@@ -593,6 +593,19 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
     boundaries.extend(protected.iter().map(|range| range.start));
     boundaries.sort_unstable();
 
+    for (legacy_id, parent) in [
+        ("anvil-workspace-lints", ["workspace", "lints"].as_slice()),
+        ("anvil-lints", ["lints"].as_slice()),
+    ] {
+        if matches!(find_region(text, legacy_id, syntax), Ok(Some(region)) if region.is_empty())
+            && candidates.iter().any(|table| table.path == parent)
+        {
+            return TomlAdoption::Unrelocatable {
+                table: parent.join("."),
+                tail_table: tail.join("."),
+            };
+        }
+    }
     if let Some(adoption) = adopt_dotted_child_assignments(text, &managed, &candidates, &boundaries, &protected) {
         return adoption;
     }

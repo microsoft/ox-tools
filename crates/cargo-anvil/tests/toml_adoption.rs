@@ -375,6 +375,61 @@ fn untracked_single_crate_combined_lint_region_is_refused() {
 }
 
 #[test]
+fn edited_combined_lint_region_is_refused() {
+    let old_body = "[workspace.lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
+    let edited_body = "[workspace.lints]\nrust.unsafe_op_in_unsafe_fn = \"deny\"\n";
+    let before = format!(
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n\
+         # >>> anvil-managed: anvil-workspace-lints\n{edited_body}\
+         # <<< anvil-managed: anvil-workspace-lints\n"
+    );
+    let tmp = workspace_with("Cargo.toml", &before);
+    let mut manifest = Manifest::default();
+    manifest.set_region("Cargo.toml", "anvil-workspace-lints", checksum_str(old_body));
+    manifest.save(tmp.path()).unwrap();
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(
+        outcome
+            .plan
+            .refusals()
+            .iter()
+            .any(|item| item.contains("legacy managed region 'anvil-workspace-lints' contains edits")),
+        "{:?}",
+        outcome.plan.refusals()
+    );
+    assert_eq!(after, before);
+}
+
+#[test]
+fn empty_combined_lint_region_after_external_parent_table_is_refused() {
+    let old_body = "";
+    let before = "\
+[workspace]
+resolver = \"2\"
+members = [\"crates/*\"]
+
+[workspace.lints]
+rust.unreachable_pub = \"warn\"
+
+# >>> anvil-managed: anvil-workspace-lints
+# <<< anvil-managed: anvil-workspace-lints
+
+rust.missing_docs = \"warn\"
+";
+    let tmp = workspace_with("Cargo.toml", before);
+    let mut manifest = Manifest::default();
+    manifest.set_region("Cargo.toml", "anvil-workspace-lints", checksum_str(old_body));
+    manifest.save(tmp.path()).unwrap();
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(!outcome.plan.refusals().is_empty(), "{after}");
+    assert_eq!(after, before);
+}
+
+#[test]
 fn replaces_the_single_crate_combined_lint_region() {
     let old_body = "[lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
     let before = format!(

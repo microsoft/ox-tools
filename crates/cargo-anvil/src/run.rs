@@ -27,7 +27,8 @@ use crate::plan::{Plan, PlanItem, Target};
 #[cfg(test)]
 use crate::region::upsert_region;
 use crate::region::{
-    CommentSyntax, MarkerRepair, RegionPlacement, find_region, lint_region_placement, managed_region_ids, remove_region, repair_markers,
+    CommentSyntax, MarkerRepair, RegionPlacement, find_region, legacy_lint_region_id, lint_region_placement, managed_region_ids,
+    remove_region, repair_markers,
 };
 use crate::workspace::{self, Workspace};
 
@@ -407,7 +408,16 @@ fn push_region_at(
     let item = match plan_managed_region(manifest, current.as_deref(), request) {
         Ok(item) => item,
         Err(refusal) => {
-            refuse_region(plan, host, spec.id.as_str(), &refusal.reason.to_string(), refusal.remedy);
+            let reason = refusal.reason.to_string();
+            if legacy_lint_region_id(spec.id.as_str()).is_some_and(|legacy_id| {
+                current
+                    .as_deref()
+                    .is_some_and(|text| matches!(find_region(text, legacy_id, spec.syntax), Ok(Some(_))))
+            }) {
+                composed.states.insert(host.clone(), ComposedHostState::Unsafe(reason.clone()));
+                composed.reported.insert(host.clone());
+            }
+            refuse_region(plan, host, spec.id.as_str(), &reason, refusal.remedy);
             return Ok(());
         }
     };
