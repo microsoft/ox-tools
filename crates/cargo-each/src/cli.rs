@@ -96,7 +96,7 @@ pub(crate) struct EachArgs {
 
     /// Run at most N per-package or per-target commands concurrently. Use
     /// `auto` to detect available parallelism once. Defaults to 1. Buffered
-    /// output spills to unique system-temporary files beyond 1 MiB per stream.
+    /// output is redirected to unique temporary files and emitted in plan order.
     /// Only an effective count above 1 disconnects child standard input for capture.
     #[arg(long, default_value_t = NonZeroUsize::MIN, value_name = "N|auto", value_parser = parse_jobs)]
     pub(crate) jobs: NonZeroUsize,

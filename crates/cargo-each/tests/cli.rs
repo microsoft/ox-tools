@@ -271,6 +271,17 @@ fn main() {
             thread::sleep(Duration::from_millis(100));
             fs::write(&args[2], "completed").expect("write background marker");
         }
+        "timed-background-parent" => {
+            Command::new(env::current_exe().expect("current exe"))
+                .arg("timed-background-child")
+                .arg(&args[2])
+                .spawn()
+                .expect("spawn timed background child");
+        }
+        "timed-background-child" => {
+            thread::sleep(Duration::from_millis(1200));
+            fs::write(&args[2], "completed").expect("write timed background marker");
+        }
         "stubborn-background-parent" => {
             Command::new(env::current_exe().expect("current exe"))
                 .arg("stubborn-background-child")
@@ -280,7 +291,27 @@ fn main() {
         }
         "stubborn-background-child" => {
             thread::sleep(Duration::from_secs(6));
+            println!("late descendant output");
             fs::write(&args[2], "completed").expect("write stubborn background marker");
+        }
+        "snapshot-offset-parent" => {
+            if args[2] == "alpha" {
+                let mut stdout = std::io::stdout().lock();
+                stdout.write_all(&vec![b'A'; 1_100_000]).expect("write snapshot payload");
+                stdout.flush().expect("flush snapshot payload");
+                Command::new(env::current_exe().expect("current exe"))
+                    .arg("snapshot-offset-child")
+                    .arg(&args[4])
+                    .arg(&args[5])
+                    .spawn()
+                    .expect("spawn snapshot offset child");
+                fs::write(&args[3], "ready").expect("write snapshot-ready marker");
+            }
+        }
+        "snapshot-offset-child" => {
+            wait_for(std::path::Path::new(&args[2]));
+            println!("late descendant output");
+            fs::write(&args[3], "completed").expect("write snapshot child marker");
         }
         other => panic!("unknown probe mode: {other}"),
     }
@@ -1447,9 +1478,7 @@ fn parallel_output_is_buffered_in_plan_order() {
         .expect("run cargo-each");
     assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 probe output");
-    let alpha = stdout.find("alpha:start").expect("alpha output");
-    let beta = stdout.find("beta:start").expect("beta output");
-    assert!(alpha < beta, "buffered blocks must follow plan order:\n{stdout}");
+    assert_eq!(stdout, "alpha:start\nalpha:end\nbeta:start\nbeta:end\n");
     assert_eq!(
         fs::read_to_string(completion_log).expect("completion log"),
         "beta\nalpha\n",
@@ -1518,7 +1547,7 @@ fn parallel_keep_going_runs_the_complete_plan() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
-fn parallel_spills_large_stdout_and_stderr_without_truncating_plan_order() {
+fn parallel_tempfile_capture_preserves_large_stdout_and_stderr_in_plan_order() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
     let output = each(&manifest)
@@ -1541,6 +1570,57 @@ fn parallel_spills_large_stdout_and_stderr_without_truncating_plan_order() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn parallel_snapshot_reads_do_not_move_descendant_write_offsets() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let ready = tmp.path().join("snapshot-ready");
+    let release = tmp.path().join("snapshot-release");
+    let completed = tmp.path().join("snapshot-child-completed");
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin!("cargo-each"));
+    let _ = command
+        .arg("each")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .args(["-p", "alpha", "-p", "beta", "--jobs", "2", "--"])
+        .arg(probe)
+        .args(["snapshot-offset-parent", "{name}"])
+        .arg(&ready)
+        .arg(&release)
+        .arg(&completed)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = command.spawn().expect("spawn cargo-each snapshot-offset probe");
+
+    let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready.exists() && std::time::Instant::now() < ready_deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(ready.exists(), "the snapshot leader did not become ready");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    fs::write(&release, "release").expect("release the background writer");
+
+    let output = child.wait_with_output().expect("collect cargo-each snapshot-offset output");
+    assert!(
+        output.status.success(),
+        "snapshot-offset probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("snapshot-offset probe output is ASCII");
+    assert_eq!(stdout.bytes().filter(|byte| *byte == b'A').count(), 1_100_000);
+    assert!(
+        !stdout.contains("late descendant output"),
+        "bytes appended after snapshot finalization leaked into the finite snapshot"
+    );
+
+    let completed_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !completed.exists() && std::time::Instant::now() < completed_deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(completed.exists(), "the released background writer did not complete");
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn parallel_without_timeout_preserves_ordinary_background_descendants() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
@@ -1552,6 +1632,10 @@ fn parallel_without_timeout_preserves_ordinary_background_descendants() {
         .arg(&marker)
         .assert()
         .success();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(
         marker.exists(),
         "parallel execution without --timeout must not kill an ordinary background descendant"
@@ -1560,7 +1644,7 @@ fn parallel_without_timeout_preserves_ordinary_background_descendants() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
-fn parallel_open_descendant_pipe_returns_after_bounded_drain() {
+fn parallel_descendant_inheriting_capture_handles_does_not_delay_snapshot() {
     let (tmp, manifest) = fixture();
     let probe = compile_execution_probe(tmp.path());
     let marker = tmp.path().join("stubborn-background-completed");
@@ -1574,17 +1658,17 @@ fn parallel_open_descendant_pipe_returns_after_bounded_drain() {
         .arg(probe)
         .arg("stubborn-background-parent")
         .arg(&marker);
-    let status = command.status().expect("run cargo-each with a descendant-held pipe");
+    let status = command.status().expect("run cargo-each with descendant-held capture handles");
 
-    assert_eq!(status.code(), Some(2));
-    assert!(
-        !marker.exists(),
-        "cargo-each waited for the ordinary background descendant instead of cancelling its readers"
-    );
+    assert_eq!(status.code(), Some(0));
     assert!(
         started.elapsed() < std::time::Duration::from_secs(4),
-        "output drain exceeded its bounded grace: {:?}",
+        "capture finalization waited for an inherited handle to close: {:?}",
         started.elapsed()
+    );
+    assert!(
+        !marker.exists(),
+        "cargo-each waited for the ordinary background descendant instead of finalizing a file snapshot"
     );
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(7);
@@ -1594,6 +1678,35 @@ fn parallel_open_descendant_pipe_returns_after_bounded_drain() {
     assert!(
         marker.exists(),
         "untimed execution must preserve the ordinary background descendant"
+    );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn timed_invocation_preserves_leader_success_while_background_descendant_remains() {
+    let (tmp, manifest) = fixture();
+    let probe = compile_execution_probe(tmp.path());
+    let marker = tmp.path().join("timed-background-completed");
+    let output = each(&manifest)
+        .args(["-p", "alpha", "--timeout", "500ms", "--"])
+        .arg(probe)
+        .arg("timed-background-parent")
+        .arg(&marker)
+        .output()
+        .expect("run timed invocation with ordinary background descendant");
+    assert!(
+        output.status.success(),
+        "leader success must win before the deadline; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "ordinary background descendant must remain alive after leader success"
     );
 }
 
@@ -1643,7 +1756,7 @@ fn timeout_kills_an_ordinary_descendant_in_the_process_group() {
     let probe = compile_execution_probe(tmp.path());
     let marker = tmp.path().join("grandchild-survived");
     let output = each(&manifest)
-        .args(["-p", "alpha", "--jobs", "2", "--timeout", "50ms", "--"])
+        .args(["-p", "alpha", "-p", "beta", "--jobs", "2", "--timeout", "50ms", "--"])
         .arg(probe)
         .arg("tree-parent")
         .arg(&marker)

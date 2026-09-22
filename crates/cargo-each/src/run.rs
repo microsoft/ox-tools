@@ -4,13 +4,12 @@
 //! Implementation of the `cargo each` command: resolve the selection,
 //! apply filters, build the plan, and run it.
 
-use std::collections::{BTreeSet, VecDeque};
-use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
+use std::collections::BTreeSet;
+use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::num::NonZeroUsize;
-use std::panic::{self, AssertUnwindSafe, UnwindSafe};
-use std::process::{ChildStderr, ChildStdout, Command, ExitCode, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, TryLockError, mpsc};
+use std::panic::{self, UnwindSafe};
+use std::process::{Command, ExitCode, ExitStatus, Stdio};
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
 
@@ -31,10 +30,9 @@ const WORKER_PANIC_TEST_PROGRAM: &str = "__cargo_each_injected_worker_panic";
 #[cfg(test)]
 const WORKER_SPAWN_ERROR_TEST_PROGRAM: &str = "__cargo_each_injected_worker_spawn_error";
 const TERMINATION_GRACE: Duration = Duration::from_millis(250);
-const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
-const OUTPUT_READER_CANCEL_GRACE: Duration = Duration::from_millis(100);
-const OUTPUT_READER_POLL: Duration = Duration::from_millis(5);
-const OUTPUT_MEMORY_LIMIT: usize = 1_048_576;
+const REAPER_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+type ReaperJob = Box<dyn FnOnce() + Send + 'static>;
 
 pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     let selection = build_selection(args).into_app_err("failed to read package selection")?;
@@ -141,22 +139,23 @@ fn parse_target_kinds(kinds: &[String]) -> Result<BTreeSet<TargetKind>, AppError
 }
 
 fn execute(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: Option<Duration>) -> Result<ExitCode, AppError> {
+    let reaper = GroupReaper::start().into_app_err("failed to start cargo-each process-group reaper")?;
     let worker_count = effective_worker_count(jobs, plan.invocations.len());
     if worker_count.get() == 1 {
-        Ok(execute_sequential(plan, keep_going, timeout))
+        Ok(execute_sequential(plan, keep_going, timeout, &reaper))
     } else {
-        execute_parallel(plan, keep_going, worker_count, timeout)
+        execute_parallel(plan, keep_going, worker_count, timeout, &reaper)
     }
 }
 
 fn effective_worker_count(requested: NonZeroUsize, plan_size: usize) -> NonZeroUsize {
-    NonZeroUsize::new(requested.get().min(plan_size)).expect("execution receives a nonempty plan")
+    NonZeroUsize::new(requested.get().min(plan_size)).expect("Plan::is_empty is checked before execute, so the execution plan is nonempty")
 }
 
-fn execute_sequential(plan: &Plan, keep_going: bool, timeout: Option<Duration>) -> ExitCode {
+fn execute_sequential(plan: &Plan, keep_going: bool, timeout: Option<Duration>, reaper: &GroupReaper) -> ExitCode {
     execute_sequential_with(plan, keep_going, timeout, |invocation, timeout| {
         if let Some(timeout) = timeout {
-            run_streamed_with_timeout(invocation, timeout)
+            run_streamed_with_timeout(invocation, timeout, reaper)
         } else {
             run_streamed(invocation)
         }
@@ -200,25 +199,36 @@ fn execute_sequential_with(
     if any_failed { ExitCode::from(1) } else { ExitCode::SUCCESS }
 }
 
-fn execute_parallel(plan: &Plan, keep_going: bool, worker_count: NonZeroUsize, timeout: Option<Duration>) -> Result<ExitCode, AppError> {
+fn execute_parallel(
+    plan: &Plan,
+    keep_going: bool,
+    worker_count: NonZeroUsize,
+    timeout: Option<Duration>,
+    reaper: &GroupReaper,
+) -> Result<ExitCode, AppError> {
     let invocations = plan.invocations.clone();
-    let mut pending: VecDeque<(usize, Invocation)> = invocations.iter().cloned().enumerate().collect();
     let mut workers = Vec::with_capacity(worker_count.get());
-    let mut outcomes = Vec::with_capacity(invocations.len());
+    let mut outcomes = Vec::with_capacity(worker_count.get());
     let mut stop_launching = false;
+    let mut any_failed = false;
+    let mut first_failure = None;
+    let mut next_index = 0;
 
-    loop {
-        while !stop_launching && workers.len() < worker_count.get() {
-            let Some((index, invocation)) = pending.pop_front() else {
+    for wave in invocations.chunks(worker_count.get()) {
+        for invocation in wave.iter().cloned() {
+            if stop_launching {
                 break;
-            };
-            match spawn_worker(index, invocation, timeout) {
+            }
+            let index = next_index;
+            next_index += 1;
+            match spawn_worker(index, invocation, timeout, reaper.clone()) {
                 Ok(worker) => workers.push(worker),
                 Err(error) => {
                     outcomes.push(IndexedOutcome {
                         index,
                         outcome: BufferedOutcome::infrastructure(format!("failed to create cargo-each worker thread: {error}")),
                     });
+                    any_failed = true;
                     if failure_stops_launching(keep_going, true) {
                         stop_launching = true;
                     }
@@ -226,28 +236,38 @@ fn execute_parallel(plan: &Plan, keep_going: bool, worker_count: NonZeroUsize, t
             }
         }
 
-        let Some(outcome) = wait_for_worker(&mut workers) else {
-            break;
-        };
-        if failure_stops_launching(keep_going, outcome.outcome.result.failed()) {
-            stop_launching = true;
+        while let Some(outcome) = wait_for_worker(&mut workers) {
+            if outcome.outcome.result.failed() {
+                any_failed = true;
+                if failure_stops_launching(keep_going, true) {
+                    stop_launching = true;
+                }
+            }
+            outcomes.push(outcome);
         }
-        outcomes.push(outcome);
+
+        outcomes.sort_by_key(|outcome| outcome.index);
+        for indexed in &mut outcomes {
+            emit_buffered(&invocations[indexed.index], &mut indexed.outcome).into_app_err("failed to emit buffered command output")?;
+            if first_failure.is_none() && indexed.outcome.result.failed() {
+                first_failure = Some(parallel_failure_exit_code(&indexed.outcome.result));
+            }
+        }
+        outcomes.clear();
+        if stop_launching {
+            break;
+        }
     }
 
-    outcomes.sort_by_key(|outcome| outcome.index);
-
-    for indexed in &mut outcomes {
-        emit_buffered(&invocations[indexed.index], &mut indexed.outcome).into_app_err("failed to emit buffered command output")?;
+    if any_failed {
+        if keep_going {
+            Ok(ExitCode::from(1))
+        } else {
+            Ok(first_failure.expect("a fail-fast failure is recorded while its completed wave is emitted"))
+        }
+    } else {
+        Ok(ExitCode::SUCCESS)
     }
-
-    let Some(first_failure) = outcomes.iter().find(|outcome| outcome.outcome.result.failed()) else {
-        return Ok(ExitCode::SUCCESS);
-    };
-    if keep_going {
-        return Ok(ExitCode::from(1));
-    }
-    Ok(parallel_failure_exit_code(&first_failure.outcome.result))
 }
 
 fn parallel_failure_exit_code(result: &InvocationResult) -> ExitCode {
@@ -262,7 +282,7 @@ fn failure_stops_launching(keep_going: bool, failed: bool) -> bool {
     matches!((keep_going, failed), (false, true))
 }
 
-fn spawn_worker(index: usize, invocation: Invocation, timeout: Option<Duration>) -> io::Result<RunningWorker> {
+fn spawn_worker(index: usize, invocation: Invocation, timeout: Option<Duration>, reaper: GroupReaper) -> io::Result<RunningWorker> {
     #[cfg(test)]
     if invocation
         .argv
@@ -274,7 +294,7 @@ fn spawn_worker(index: usize, invocation: Invocation, timeout: Option<Duration>)
 
     let (sender, receiver) = mpsc::channel();
     let thread = thread::Builder::new().name(format!("cargo-each-worker-{index}")).spawn(move || {
-        complete_worker(&sender, move || run_captured(&invocation, timeout));
+        complete_worker(&sender, move || run_captured(&invocation, timeout, &reaper));
     })?;
     Ok(RunningWorker { index, receiver, thread })
 }
@@ -342,13 +362,14 @@ fn run_streamed(invocation: &Invocation) -> InvocationResult {
     }
 }
 
-fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration) -> InvocationResult {
-    run_streamed_with_timeout_with(invocation, timeout, spawn_group)
+fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration, reaper: &GroupReaper) -> InvocationResult {
+    run_streamed_with_timeout_with(invocation, timeout, reaper, spawn_group)
 }
 
 fn run_streamed_with_timeout_with(
     invocation: &Invocation,
     timeout: Duration,
+    reaper: &GroupReaper,
     spawn: impl FnOnce(Command) -> Result<GroupChild, String>,
 ) -> InvocationResult {
     let (program, command) = match command_for(invocation) {
@@ -364,102 +385,66 @@ fn run_streamed_with_timeout_with(
     wait_for_process(
         tree,
         Some(timeout),
-        GroupChild::try_wait,
-        || None,
-        terminate_group_bounded,
-        "observe child process group",
+        |process| process.inner().try_wait(),
+        |process| terminate_group_bounded(process, reaper),
+        "observe child process leader",
     )
     .result
 }
 
-fn run_captured(invocation: &Invocation, timeout: Option<Duration>) -> BufferedOutcome {
+fn run_captured(invocation: &Invocation, timeout: Option<Duration>, reaper: &GroupReaper) -> BufferedOutcome {
     #[cfg(test)]
     assert!(
         invocation.argv.first().is_none_or(|program| program != WORKER_PANIC_TEST_PROGRAM),
         "injected worker panic"
     );
 
-    run_captured_with(
-        invocation,
-        timeout,
-        spawn_group,
-        spawn_child_stdout_reader,
-        spawn_child_stderr_reader,
-    )
+    run_captured_with(invocation, timeout, reaper, create_output_capture, spawn_group)
 }
 
 fn run_captured_with(
     invocation: &Invocation,
     timeout: Option<Duration>,
+    reaper: &GroupReaper,
+    mut capture: impl FnMut(&'static str) -> io::Result<(Box<dyn SnapshotSource>, Stdio)>,
     spawner: impl FnOnce(Command) -> Result<GroupChild, String>,
-    stdout_spawner: impl FnOnce(ChildStdout, &'static str) -> io::Result<OutputReader>,
-    stderr_spawner: impl FnOnce(ChildStderr, &'static str) -> io::Result<OutputReader>,
 ) -> BufferedOutcome {
     let (program, mut command) = match command_for(invocation) {
         Ok(command) => command,
         Err(message) => return BufferedOutcome::infrastructure(message),
     };
-    let _ = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut process = match spawner(command) {
+    let (stdout, stdout_stdio) = match capture("stdout") {
+        Ok(capture) => capture,
+        Err(error) => {
+            return BufferedOutcome::infrastructure(format!("failed to prepare child stdout capture: {error}"));
+        }
+    };
+    let (stderr, stderr_stdio) = match capture("stderr") {
+        Ok(capture) => capture,
+        Err(error) => {
+            return BufferedOutcome::infrastructure(format!("failed to prepare child stderr capture: {error}"));
+        }
+    };
+    let _ = command.stdin(Stdio::null()).stdout(stdout_stdio).stderr(stderr_stdio);
+    let process = match spawner(command) {
         Ok(process) => process,
         Err(error) => {
             return BufferedOutcome::infrastructure(format!("failed to spawn `{program}`: {error}"));
         }
     };
-    let stdout = process.inner().stdout.take();
-    let Some(stdout) = stdout else {
-        let cleanup = terminate_group_bounded(process);
-        return BufferedOutcome::infrastructure(with_cleanup_failure("failed to capture child stdout".to_owned(), &cleanup));
-    };
-    let mut stdout_reader = match stdout_spawner(stdout, "cargo-each-stdout") {
-        Ok(reader) => reader,
-        Err(error) => {
-            let cleanup = terminate_group_bounded(process);
-            return BufferedOutcome::infrastructure(with_cleanup_failure(format!("failed to create stdout reader: {error}"), &cleanup));
-        }
-    };
-    let stderr = process.inner().stderr.take();
-    let Some(stderr) = stderr else {
-        let cleanup = terminate_group_bounded(process);
-        return BufferedOutcome::from_reader_failure("failed to capture child stderr".to_owned(), stdout_reader, &cleanup);
-    };
-    let mut stderr_reader = match stderr_spawner(stderr, "cargo-each-stderr") {
-        Ok(reader) => reader,
-        Err(error) => {
-            let cleanup = terminate_group_bounded(process);
-            return BufferedOutcome::from_reader_failure(format!("failed to create stderr reader: {error}"), stdout_reader, &cleanup);
-        }
-    };
 
-    let observe_group = timeout.is_some();
     let process_outcome = wait_for_process(
         process,
         timeout,
-        move |process| {
-            if observe_group {
-                process.try_wait()
-            } else {
-                process.inner().try_wait()
-            }
-        },
-        || {
-            let failure = [stdout_reader.take_failure("stdout"), stderr_reader.take_failure("stderr")]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join("; ");
-            (!failure.is_empty()).then_some(failure)
-        },
-        terminate_group_bounded,
-        if observe_group {
-            "observe child process group"
-        } else {
-            "observe child process leader"
-        },
+        |process| process.inner().try_wait(),
+        |process| terminate_group_bounded(process, reaper),
+        "observe child process leader",
     );
-    let boundary = if observe_group { "process group" } else { "process leader" };
-    let (stdout, stderr) = finish_output_readers(stdout_reader, stderr_reader, OUTPUT_DRAIN_GRACE, boundary);
-    combine_captured_output(stdout, stderr, process_outcome.result)
+    combine_captured_output(
+        finish_capture(stdout, "stdout"),
+        finish_capture(stderr, "stderr"),
+        process_outcome.result,
+    )
 }
 
 fn combine_captured_output(stdout: CapturedStream, stderr: CapturedStream, result: InvocationResult) -> BufferedOutcome {
@@ -508,22 +493,40 @@ fn spawn_group(mut command: Command) -> Result<GroupChild, String> {
     command.group_spawn().map_err(|error| error.to_string())
 }
 
+fn create_output_capture(_stream: &'static str) -> io::Result<(Box<dyn SnapshotSource>, Stdio)> {
+    let temporary = tempfile::NamedTempFile::new()?;
+    let reader = temporary.reopen()?;
+    let child = temporary.reopen()?;
+    let path = temporary.into_temp_path();
+    Ok((Box::new(TemporarySnapshot { _path: path, reader }), Stdio::from(child)))
+}
+
+fn finish_capture(mut source: Box<dyn SnapshotSource>, stream: &str) -> CapturedStream {
+    let result = source
+        .snapshot_len()
+        .and_then(|length| source.seek(SeekFrom::Start(0)).map(|_| length));
+    match result {
+        Ok(length) => CapturedStream {
+            output: CapturedOutput::Snapshot { source, length },
+            failure: None,
+        },
+        Err(error) => CapturedStream {
+            output: CapturedOutput::empty(),
+            failure: Some(format!("failed to finalize child {stream} capture: {error}")),
+        },
+    }
+}
+
 fn wait_for_process<T>(
     mut control: T,
     timeout: Option<Duration>,
     mut observe: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
-    mut reader_failure: impl FnMut() -> Option<String>,
     terminate: impl FnOnce(T) -> io::Result<ExitStatus>,
     operation: &str,
 ) -> TreeOutcome {
     let started = Instant::now();
     let mut terminate = Some(terminate);
     loop {
-        if let Some(reader_failure) = reader_failure() {
-            let cleanup = terminate.take().expect("termination is consumed only on a returning branch")(control);
-            return TreeOutcome::new(InvocationResult::Infrastructure(with_cleanup_failure(reader_failure, &cleanup)));
-        }
-
         if let Some(timeout) = timeout
             && timeout.checked_sub(started.elapsed()).is_none()
         {
@@ -555,14 +558,16 @@ fn wait_for_process<T>(
     }
 }
 
-fn terminate_group_bounded(child: GroupChild) -> io::Result<ExitStatus> {
-    terminate_group_with(
-        child,
-        TERMINATION_GRACE,
-        GroupChild::kill,
-        GroupChild::try_wait,
-        detach_group_reaper,
-    )
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn terminate_group_bounded(child: GroupChild, reaper: &GroupReaper) -> io::Result<ExitStatus> {
+    terminate_group_with(child, TERMINATION_GRACE, GroupChild::kill, GroupChild::try_wait, |child| {
+        handoff_terminated_group(reaper, child)
+    })
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn handoff_terminated_group(reaper: &GroupReaper, child: GroupChild) -> io::Result<()> {
+    reaper.handoff(child)
 }
 
 fn terminate_group_with<T>(
@@ -602,19 +607,110 @@ fn terminate_group_with<T>(
     }
 }
 
-fn detach_group_reaper(mut child: GroupChild) -> io::Result<()> {
-    thread::Builder::new()
-        .name("cargo-each-process-reaper".to_owned())
-        .spawn(move || {
-            let _ignored = child.wait();
+#[derive(Debug)]
+struct GroupReaper {
+    sender: mpsc::Sender<GroupChild>,
+}
+
+impl Clone for GroupReaper {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl GroupReaper {
+    fn start() -> io::Result<Self> {
+        Self::start_with(|job| {
+            thread::Builder::new()
+                .name("cargo-each-process-reaper".to_owned())
+                .spawn(job)
+                .map(drop)
         })
-        .map(drop)
+    }
+
+    fn start_with(spawn: impl FnOnce(ReaperJob) -> io::Result<()>) -> io::Result<Self> {
+        let (sender, receiver) = mpsc::channel();
+        spawn(Box::new(move || {
+            poll_reaper(&receiver, GroupChild::try_wait, report_reaper_failure);
+        }))?;
+        Ok(Self { sender })
+    }
+
+    fn handoff(&self, child: GroupChild) -> io::Result<()> {
+        static FAILED_HANDOFFS: OnceLock<Mutex<Vec<GroupChild>>> = OnceLock::new();
+        handoff_group(&self.sender, FAILED_HANDOFFS.get_or_init(|| Mutex::new(Vec::new())), child)
+    }
+}
+
+fn handoff_group<T>(sender: &mpsc::Sender<T>, retained: &Mutex<Vec<T>>, child: T) -> io::Result<()> {
+    match sender.send(child) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            retained.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(error.0);
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "process-group reaper channel disconnected; a persistent fallback retained the wait handle",
+            ))
+        }
+    }
+}
+
+struct ReaperEntry<T> {
+    child: T,
+    failure_reported: bool,
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[mutants::skip] // Process-thread diagnostic for an OS observation failure; behavior is covered through the injected reporter seam.
+fn report_reaper_failure(error: &io::Error) {
+    eprintln!("cargo each: process-group reaper failed to observe a retained group: {error}");
+}
+
+#[mutants::skip] // Deleting the disconnected-and-empty shutdown arm hangs by definition; deterministic tests cover polling and exit.
+fn poll_reaper<T>(
+    receiver: &mpsc::Receiver<T>,
+    mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    mut report_failure: impl FnMut(&io::Error),
+) {
+    let mut retained: Vec<ReaperEntry<T>> = Vec::new();
+    let mut connected = true;
+    loop {
+        if connected {
+            match receiver.recv_timeout(REAPER_POLL_INTERVAL) {
+                Ok(child) => retained.push(ReaperEntry {
+                    child,
+                    failure_reported: false,
+                }),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => connected = false,
+            }
+        }
+
+        retained.retain_mut(|entry| match try_wait(&mut entry.child) {
+            Ok(Some(_)) => false,
+            Ok(None) => true,
+            Err(error) => {
+                if !entry.failure_reported {
+                    report_failure(&error);
+                    entry.failure_reported = true;
+                }
+                true
+            }
+        });
+
+        match (connected, retained.is_empty()) {
+            (false, true) => return,
+            _ => thread::sleep(REAPER_POLL_INTERVAL),
+        }
+    }
 }
 
 fn with_reaper_handoff(message: &str, reaper: &io::Result<()>) -> String {
     match reaper {
-        Ok(()) => format!("{message}; the process group was moved to a detached reaper thread"),
-        Err(error) => format!("{message}; failed to start the detached process-group reaper: {error}"),
+        Ok(()) => format!("{message}; the process group was moved to the local polling reaper"),
+        Err(error) => format!("{message}; failed to hand the process group to the local reaper: {error}"),
     }
 }
 
@@ -633,225 +729,6 @@ fn poll_process_exit<T>(
         };
         thread::sleep(remaining.min(Duration::from_millis(10)));
     }
-}
-
-fn spawn_child_stdout_reader(stream: ChildStdout, name: &'static str) -> io::Result<OutputReader> {
-    spawn_output_reader_inner(
-        stream,
-        name,
-        OUTPUT_MEMORY_LIMIT,
-        Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
-    )
-}
-
-fn spawn_child_stderr_reader(stream: ChildStderr, name: &'static str) -> io::Result<OutputReader> {
-    spawn_output_reader_inner(
-        stream,
-        name,
-        OUTPUT_MEMORY_LIMIT,
-        Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
-    )
-}
-
-#[cfg(test)]
-fn spawn_output_reader<R>(stream: R, name: &'static str) -> io::Result<OutputReader>
-where
-    R: io::Read + Send + 'static,
-{
-    spawn_output_reader_inner(
-        stream,
-        name,
-        OUTPUT_MEMORY_LIMIT,
-        Box::new(|| tempfile::tempfile().map(|file| Box::new(file) as Box<dyn SpillFile>)),
-    )
-}
-
-#[cfg(test)]
-fn spawn_output_reader_with<R>(stream: R, name: &'static str, memory_limit: usize, spill_factory: SpillFactory) -> io::Result<OutputReader>
-where
-    R: io::Read + Send + 'static,
-{
-    spawn_output_reader_inner(stream, name, memory_limit, spill_factory)
-}
-
-fn spawn_output_reader_inner<R>(
-    mut stream: R,
-    name: &'static str,
-    memory_limit: usize,
-    mut spill_factory: SpillFactory,
-) -> io::Result<OutputReader>
-where
-    R: io::Read + Send + 'static,
-{
-    let output = Arc::new(Mutex::new(CapturedOutput::empty()));
-    let retaining = Arc::new(AtomicBool::new(true));
-    let captured = Arc::clone(&output);
-    let capture_enabled = Arc::clone(&retaining);
-    let (completion_sender, completion) = mpsc::channel();
-    let thread = thread::Builder::new().name(name.to_owned()).spawn(move || {
-        let result = panic::catch_unwind(AssertUnwindSafe(|| -> io::Result<()> {
-            let mut chunk = [0_u8; 8192];
-            loop {
-                if !capture_enabled.load(Ordering::Acquire) {
-                    return Ok(());
-                }
-                let read = loop {
-                    match stream.read(&mut chunk) {
-                        Ok(0) => return Ok(()),
-                        Ok(read) => break read,
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if !capture_enabled.load(Ordering::Acquire) {
-                                return Ok(());
-                            }
-                            thread::sleep(OUTPUT_READER_POLL);
-                        }
-                        Err(error) => return Err(error),
-                    }
-                };
-                let mut output = captured
-                    .lock()
-                    .map_err(|error| io::Error::other(format!("child {name} capture buffer was poisoned: {error}")))?;
-                if !capture_enabled.load(Ordering::Acquire) {
-                    continue;
-                }
-                output.append(&chunk[..read], memory_limit, &mut spill_factory)?;
-            }
-        }));
-        drop(stream);
-        let completion = match result {
-            Ok(result) => ReaderCompletion::Finished(result),
-            Err(payload) => ReaderCompletion::Panicked(panic_description(payload.as_ref()).to_owned()),
-        };
-        let _receiver_gone = completion_sender.send(completion);
-    })?;
-    Ok(OutputReader {
-        thread,
-        completion,
-        output,
-        retaining,
-        reported: None,
-        failure_claimed: false,
-    })
-}
-
-fn finish_output_reader(mut reader: OutputReader, stream: &str, grace: Duration, boundary: &str) -> CapturedStream {
-    let mut thread_finished = false;
-    let completion = reader
-        .reported
-        .take()
-        .unwrap_or_else(|| match reader.completion.recv_timeout(grace) {
-            Ok(completion) => completion,
-            Err(mpsc::RecvTimeoutError::Disconnected) => ReaderCompletion::Disconnected,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                reader.retaining.store(false, Ordering::Release);
-                ReaderCompletion::DrainTimedOut
-            }
-        });
-    let mut failure = if reader.failure_claimed {
-        None
-    } else {
-        reader_failure(&completion, stream, grace, boundary)
-    };
-
-    if matches!(completion, ReaderCompletion::DrainTimedOut) {
-        match reader.completion.recv_timeout(OUTPUT_READER_CANCEL_GRACE) {
-            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                thread_finished = true;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let cancellation = format!(
-                    "child {stream} reader did not stop within {} ms after capture was cancelled",
-                    OUTPUT_READER_CANCEL_GRACE.as_millis()
-                );
-                failure = Some(match failure {
-                    Some(failure) => format!("{failure}; {cancellation}"),
-                    None => cancellation,
-                });
-            }
-        }
-    } else {
-        thread_finished = true;
-    }
-
-    if thread_finished {
-        if let Err(payload) = reader.thread.join() {
-            let panic = format!(
-                "child {stream} reader thread panicked after reporting completion: {}",
-                panic_description(payload.as_ref())
-            );
-            failure = Some(match failure {
-                Some(failure) => format!("{failure}; {panic}"),
-                None => panic,
-            });
-        }
-    } else {
-        drop(reader.thread);
-    }
-
-    let output = take_reader_output(&reader.output, stream, thread_finished, &mut failure);
-    CapturedStream { output, failure }
-}
-
-fn take_reader_output(output: &Mutex<CapturedOutput>, stream: &str, thread_finished: bool, failure: &mut Option<String>) -> CapturedOutput {
-    let mut captured = if thread_finished {
-        match output.lock() {
-            Ok(captured) => captured,
-            Err(poisoned) => {
-                append_failure(failure, format!("child {stream} capture buffer was poisoned"));
-                poisoned.into_inner()
-            }
-        }
-    } else {
-        match output.try_lock() {
-            Ok(captured) => captured,
-            Err(TryLockError::Poisoned(poisoned)) => {
-                append_failure(failure, format!("child {stream} capture buffer was poisoned"));
-                poisoned.into_inner()
-            }
-            Err(TryLockError::WouldBlock) => {
-                append_failure(
-                    failure,
-                    format!(
-                        "child {stream} capture buffer remained locked after reader cancellation; \
-                         partial output could not be recovered without exceeding the drain bound"
-                    ),
-                );
-                return CapturedOutput::empty();
-            }
-        }
-    };
-    std::mem::replace(&mut *captured, CapturedOutput::empty())
-}
-
-fn append_failure(failure: &mut Option<String>, additional: String) {
-    *failure = Some(match failure.take() {
-        Some(failure) => format!("{failure}; {additional}"),
-        None => additional,
-    });
-}
-
-fn reader_failure(completion: &ReaderCompletion, stream: &str, grace: Duration, boundary: &str) -> Option<String> {
-    match completion {
-        ReaderCompletion::Finished(Ok(())) => None,
-        ReaderCompletion::Finished(Err(error)) => Some(format!("failed to read child {stream}: {error}")),
-        ReaderCompletion::Panicked(message) => Some(format!("child {stream} reader thread panicked: {message}")),
-        ReaderCompletion::Disconnected => Some(format!("child {stream} reader exited without reporting completion")),
-        ReaderCompletion::DrainTimedOut => Some(format!(
-            "child {stream} remained open for more than {} ms after the {boundary} completed; partial output was retained",
-            grace.as_millis()
-        )),
-    }
-}
-
-fn finish_output_readers(stdout: OutputReader, stderr: OutputReader, grace: Duration, boundary: &str) -> (CapturedStream, CapturedStream) {
-    let deadline = Instant::now().checked_add(grace);
-    let stdout = finish_output_reader(stdout, "stdout", grace, boundary);
-    let remaining = deadline
-        .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
-        .unwrap_or(Duration::ZERO);
-    let stderr = finish_output_reader(stderr, "stderr", remaining, boundary);
-    (stdout, stderr)
 }
 
 fn with_cleanup_failure<T>(message: String, cleanup: &io::Result<T>) -> String {
@@ -884,7 +761,7 @@ fn emit_buffered_to(
     match outcome.stdout.emit_to(stdout) {
         Ok(()) => {}
         Err(OutputEmitError::Source(error)) => {
-            source_failures.push(format!("failed to read spilled child stdout: {error}"));
+            source_failures.push(format!("failed to read captured child stdout: {error}"));
         }
         Err(OutputEmitError::Destination(error)) => return Err(error),
     }
@@ -892,7 +769,7 @@ fn emit_buffered_to(
     match outcome.stderr.emit_to(stderr) {
         Ok(()) => {}
         Err(OutputEmitError::Source(error)) => {
-            source_failures.push(format!("failed to read spilled child stderr: {error}"));
+            source_failures.push(format!("failed to read captured child stderr: {error}"));
         }
         Err(OutputEmitError::Destination(error)) => return Err(error),
     }
@@ -938,101 +815,76 @@ struct RunningWorker {
     thread: thread::JoinHandle<()>,
 }
 
-#[derive(Debug)]
-struct OutputReader {
-    thread: thread::JoinHandle<()>,
-    completion: mpsc::Receiver<ReaderCompletion>,
-    output: Arc<Mutex<CapturedOutput>>,
-    retaining: Arc<AtomicBool>,
-    reported: Option<ReaderCompletion>,
-    failure_claimed: bool,
+trait SnapshotSource: io::Read + io::Seek + Send + fmt::Debug {
+    fn snapshot_len(&self) -> io::Result<u64>;
 }
 
 #[derive(Debug)]
-enum ReaderCompletion {
-    Finished(io::Result<()>),
-    Panicked(String),
-    Disconnected,
-    DrainTimedOut,
+struct TemporarySnapshot {
+    _path: tempfile::TempPath,
+    reader: std::fs::File,
 }
 
-impl OutputReader {
-    fn take_failure(&mut self, stream: &str) -> Option<String> {
-        if self.reported.is_none() {
-            self.reported = match self.completion.try_recv() {
-                Ok(completion) => Some(completion),
-                Err(mpsc::TryRecvError::Disconnected) => Some(ReaderCompletion::Disconnected),
-                Err(mpsc::TryRecvError::Empty) => None,
-            };
-        }
-        if self.failure_claimed {
-            return None;
-        }
-        let failure = self
-            .reported
-            .as_ref()
-            .and_then(|completion| reader_failure(completion, stream, OUTPUT_DRAIN_GRACE, "process"));
-        if failure.is_some() {
-            self.failure_claimed = true;
-        }
-        failure
+impl io::Read for TemporarySnapshot {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.reader.read(buf)
     }
 }
 
-trait SpillFile: io::Read + io::Write + io::Seek + Send + fmt::Debug {}
+impl io::Seek for TemporarySnapshot {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.reader.seek(pos)
+    }
+}
 
-impl<T> SpillFile for T where T: io::Read + io::Write + io::Seek + Send + fmt::Debug {}
+impl SnapshotSource for TemporarySnapshot {
+    fn snapshot_len(&self) -> io::Result<u64> {
+        self.reader.metadata().map(|metadata| metadata.len())
+    }
+}
 
-type SpillFactory = Box<dyn FnMut() -> io::Result<Box<dyn SpillFile>> + Send>;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl SnapshotSource for io::Cursor<Vec<u8>> {
+    fn snapshot_len(&self) -> io::Result<u64> {
+        u64::try_from(self.get_ref().len()).map_err(io::Error::other)
+    }
+}
 
 #[derive(Debug)]
 enum CapturedOutput {
-    Memory(Vec<u8>),
-    Spill(Box<dyn SpillFile>),
+    Empty,
+    Snapshot { source: Box<dyn SnapshotSource>, length: u64 },
 }
 
 impl CapturedOutput {
     fn empty() -> Self {
-        Self::Memory(Vec::new())
-    }
-
-    fn append(&mut self, bytes: &[u8], memory_limit: usize, spill_factory: &mut SpillFactory) -> io::Result<()> {
-        match self {
-            Self::Memory(memory) if memory.len().saturating_add(bytes.len()) <= memory_limit => {
-                memory.extend_from_slice(bytes);
-                Ok(())
-            }
-            Self::Memory(memory) => {
-                let mut spill = spill_factory()?;
-                spill.write_all(memory)?;
-                spill.write_all(bytes)?;
-                *self = Self::Spill(spill);
-                Ok(())
-            }
-            Self::Spill(spill) => spill.write_all(bytes),
-        }
+        Self::Empty
     }
 
     fn emit_to(&mut self, destination: &mut dyn io::Write) -> Result<(), OutputEmitError> {
         match self {
-            Self::Memory(bytes) => destination.write_all(bytes).map_err(OutputEmitError::Destination),
-            Self::Spill(spill) => {
-                spill.seek(SeekFrom::Start(0)).map_err(OutputEmitError::Source)?;
+            Self::Empty => Ok(()),
+            Self::Snapshot { source, length } => {
+                source.seek(SeekFrom::Start(0)).map_err(OutputEmitError::Source)?;
                 let mut buffer = [0_u8; 8192];
-                loop {
-                    let read = spill.read(&mut buffer).map_err(OutputEmitError::Source)?;
-                    if read == 0 {
-                        return Ok(());
-                    }
-                    destination.write_all(&buffer[..read]).map_err(OutputEmitError::Destination)?;
+                let mut remaining = *length;
+                while remaining > 0 {
+                    let limit = usize::try_from(remaining.min(buffer.len() as u64))
+                        .expect("the read size is capped by the 8192-byte buffer length");
+                    let read = source.read(&mut buffer[..limit]).map_err(OutputEmitError::Source)?;
+                    let Some(read) = NonZeroUsize::new(read) else {
+                        return Err(OutputEmitError::Source(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "captured output ended before its finalized snapshot length",
+                        )));
+                    };
+                    destination.write_all(&buffer[..read.get()]).map_err(OutputEmitError::Destination)?;
+                    remaining -= u64::try_from(read.get()).expect("a read byte count always fits in u64");
                 }
+                Ok(())
             }
         }
-    }
-
-    #[cfg(test)]
-    fn is_spilled(&self) -> bool {
-        matches!(self, Self::Spill(_))
     }
 }
 
@@ -1073,18 +925,6 @@ impl BufferedOutcome {
             stderr: CapturedOutput::empty(),
             result: InvocationResult::Infrastructure(message),
         }
-    }
-
-    fn from_reader_failure<T>(message: String, stdout_reader: OutputReader, cleanup: &io::Result<T>) -> Self {
-        let message = with_cleanup_failure(message, cleanup);
-        combine_captured_output(
-            finish_output_reader(stdout_reader, "stdout", OUTPUT_DRAIN_GRACE, "process group"),
-            CapturedStream {
-                output: CapturedOutput::empty(),
-                failure: None,
-            },
-            InvocationResult::Infrastructure(message),
-        )
     }
 }
 
@@ -1136,23 +976,20 @@ mod tests {
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt as _;
     use std::process::{Command, ExitCode, ExitStatus, Stdio};
-    use std::sync::{Arc, Condvar, Mutex, mpsc};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
     use std::{io, thread};
 
     use super::{
-        BufferedOutcome, CapturedOutput, CapturedStream, Invocation, InvocationResult, OutputEmitError, OutputReader, Plan,
-        ReaderCompletion, RunningWorker, SpillFile, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
-        add_infrastructure_failure, combine_captured_output, detach_group_reaper, display_duration, effective_worker_count,
-        emit_buffered_to, execute_parallel, exit_byte, failure_stops_launching, finish_output_reader, panic_description,
-        parallel_failure_exit_code, poll_process_exit, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
-        run_streamed_with_timeout_with, spawn_child_stderr_reader, spawn_child_stdout_reader, spawn_group, spawn_output_reader,
-        spawn_output_reader_with, spawn_worker, take_reader_output, terminate_group_bounded, terminate_group_with, wait_for_process,
-        wait_for_worker, with_cleanup_failure, with_reaper_handoff,
+        BufferedOutcome, CapturedOutput, CapturedStream, GroupReaper, Invocation, InvocationResult, OutputEmitError, Plan, RunningWorker,
+        SnapshotSource, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM, add_infrastructure_failure,
+        combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel, exit_byte,
+        failure_stops_launching, finish_capture, handoff_group, panic_description, parallel_failure_exit_code, poll_process_exit,
+        poll_reaper, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with, spawn_group,
+        spawn_worker, terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure,
+        with_reaper_handoff,
     };
-
-    const LEADER_BOUNDARY: &str = "process leader";
-    const GROUP_BOUNDARY: &str = "process group";
 
     fn invocation(argv: &[&str]) -> Invocation {
         Invocation {
@@ -1199,9 +1036,16 @@ mod tests {
 
     fn captured(bytes: &[u8], failure: Option<&str>) -> CapturedStream {
         CapturedStream {
-            output: CapturedOutput::Memory(bytes.to_vec()),
+            output: CapturedOutput::Snapshot {
+                source: Box::new(io::Cursor::new(bytes.to_vec())),
+                length: u64::try_from(bytes.len()).expect("test output length fits in u64"),
+            },
             failure: failure.map(str::to_owned),
         }
+    }
+
+    fn test_reaper() -> GroupReaper {
+        GroupReaper::start().expect("the test process can start its reaper")
     }
 
     struct FakeProcess {
@@ -1221,190 +1065,42 @@ mod tests {
         }
     }
 
-    struct PendingReader {
-        dropped: Option<mpsc::Sender<()>>,
-    }
-
-    impl io::Read for PendingReader {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::from(io::ErrorKind::WouldBlock))
-        }
-    }
-
-    impl Drop for PendingReader {
-        fn drop(&mut self) {
-            if let Some(dropped) = self.dropped.take() {
-                let _receiver_gone = dropped.send(());
-            }
-        }
-    }
-
-    struct BlockingReader {
-        first_read: bool,
-        blocked: Option<mpsc::Sender<()>>,
-        finished: mpsc::Sender<()>,
-        release: Arc<(Mutex<bool>, Condvar)>,
-    }
-
-    impl io::Read for BlockingReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if !self.first_read {
-                self.first_read = true;
-                let bytes = b"captured-before-detach";
-                buf[..bytes.len()].copy_from_slice(bytes);
-                return Ok(bytes.len());
-            }
-            if let Some(blocked) = self.blocked.take() {
-                let _receiver_gone = blocked.send(());
-            }
-            let (lock, condition) = &*self.release;
-            let mut released = lock.lock().expect("the test owns the release mutex without panicking");
-            while !*released {
-                released = condition.wait(released).expect("the test owns the release mutex without panicking");
-            }
-            let _receiver_gone = self.finished.send(());
-            Ok(0)
-        }
-    }
-
-    struct DropSignalReader {
-        bytes: Option<&'static [u8]>,
-        dropped: Option<mpsc::Sender<()>>,
-    }
-
-    impl io::Read for DropSignalReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let Some(bytes) = self.bytes.take() else {
-                return Ok(0);
-            };
-            buf[..bytes.len()].copy_from_slice(bytes);
-            Ok(bytes.len())
-        }
-    }
-
-    impl Drop for DropSignalReader {
-        fn drop(&mut self) {
-            if let Some(dropped) = self.dropped.take() {
-                let _receiver_gone = dropped.send(());
-            }
-        }
-    }
-
-    struct LateDataReader {
-        started: Option<mpsc::Sender<()>>,
-        finished: Option<mpsc::Sender<()>>,
-        release: Arc<(Mutex<bool>, Condvar)>,
-    }
-
-    impl io::Read for LateDataReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if let Some(started) = self.started.take() {
-                let _receiver_gone = started.send(());
-            }
-            let (lock, condition) = &*self.release;
-            let mut released = lock.lock().expect("the test owns the release mutex without panicking");
-            while !*released {
-                released = condition.wait(released).expect("the test owns the release mutex without panicking");
-            }
-            let bytes = b"late data";
-            buf[..bytes.len()].copy_from_slice(bytes);
-            Ok(bytes.len())
-        }
-    }
-
-    impl Drop for LateDataReader {
-        fn drop(&mut self) {
-            if let Some(finished) = self.finished.take() {
-                let _receiver_gone = finished.send(());
-            }
-        }
-    }
-
-    struct InterruptedThenData {
-        interrupted: bool,
-        emitted: bool,
-    }
-
-    impl io::Read for InterruptedThenData {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if !self.interrupted {
-                self.interrupted = true;
-                return Err(io::Error::from(io::ErrorKind::Interrupted));
-            }
-            if self.emitted {
-                return Ok(0);
-            }
-            self.emitted = true;
-            let bytes = b"after interrupt";
-            buf[..bytes.len()].copy_from_slice(bytes);
-            Ok(bytes.len())
-        }
-    }
-
-    struct FailingReader;
-
-    impl io::Read for FailingReader {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("injected read failure"))
-        }
-    }
-
-    struct PanickingReader;
-
-    impl io::Read for PanickingReader {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            panic!("injected reader panic");
-        }
-    }
-
-    struct ChunkedReader {
-        chunks: VecDeque<Vec<u8>>,
-    }
-
-    impl io::Read for ChunkedReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let Some(chunk) = self.chunks.pop_front() else {
-                return Ok(0);
-            };
-            buf[..chunk.len()].copy_from_slice(&chunk);
-            Ok(chunk.len())
-        }
-    }
-
     #[derive(Debug)]
-    struct FaultySpill {
+    struct FaultySnapshot {
         cursor: io::Cursor<Vec<u8>>,
-        fail_write: bool,
+        reported_length: u64,
+        fail_length: bool,
+        fail_seek: bool,
         fail_read: bool,
     }
 
-    impl io::Write for FaultySpill {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            if self.fail_write {
-                Err(io::Error::other("injected spill write failure"))
-            } else {
-                io::Write::write(&mut self.cursor, buf)
-            }
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            io::Write::flush(&mut self.cursor)
-        }
-    }
-
-    impl io::Read for FaultySpill {
+    impl io::Read for FaultySnapshot {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if self.fail_read {
-                Err(io::Error::other("injected spill read failure"))
+                Err(io::Error::other("injected snapshot read failure"))
             } else {
                 io::Read::read(&mut self.cursor, buf)
             }
         }
     }
 
-    impl io::Seek for FaultySpill {
+    impl io::Seek for FaultySnapshot {
         fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
-            io::Seek::seek(&mut self.cursor, pos)
+            if self.fail_seek {
+                Err(io::Error::other("injected snapshot seek failure"))
+            } else {
+                io::Seek::seek(&mut self.cursor, pos)
+            }
+        }
+    }
+
+    impl SnapshotSource for FaultySnapshot {
+        fn snapshot_len(&self) -> io::Result<u64> {
+            if self.fail_length {
+                Err(io::Error::other("injected snapshot length failure"))
+            } else {
+                Ok(self.reported_length)
+            }
         }
     }
 
@@ -1491,19 +1187,33 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns rustc subprocesses")]
     fn scheduler_surfaces_worker_launch_failures_in_both_policies() {
+        let reaper = test_reaper();
         let fail_fast = Plan {
             invocations: vec![invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), invocation(&["rustc", "--version"])],
         };
-        let code = execute_parallel(&fail_fast, false, NonZeroUsize::new(2).expect("literal two is nonzero"), None)
-            .expect("worker launch failure is an invocation outcome");
+        let code = execute_parallel(
+            &fail_fast,
+            false,
+            NonZeroUsize::new(2).expect("literal two is nonzero"),
+            None,
+            &reaper,
+        )
+        .expect("worker launch failure is an invocation outcome");
         assert_eq!(code, ExitCode::from(2));
 
         let keep_going = Plan {
             invocations: vec![invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), invocation(&["rustc", "--version"])],
         };
-        let code = execute_parallel(&keep_going, true, NonZeroUsize::new(2).expect("literal two is nonzero"), None)
-            .expect("keep-going retains worker launch failures");
+        let code = execute_parallel(
+            &keep_going,
+            true,
+            NonZeroUsize::new(2).expect("literal two is nonzero"),
+            None,
+            &reaper,
+        )
+        .expect("keep-going retains worker launch failures");
         assert_eq!(code, ExitCode::from(1));
     }
 
@@ -1517,7 +1227,6 @@ mod tests {
             completed,
             None,
             FakeProcess::observe,
-            || None,
             FakeProcess::terminate,
             "observe fake process",
         );
@@ -1531,7 +1240,6 @@ mod tests {
             timed_out,
             Some(Duration::ZERO),
             FakeProcess::observe,
-            || None,
             FakeProcess::terminate,
             "observe fake process",
         );
@@ -1545,7 +1253,6 @@ mod tests {
             late_success,
             Some(Duration::from_millis(1)),
             FakeProcess::observe,
-            || None,
             FakeProcess::terminate,
             "observe fake process",
         );
@@ -1558,14 +1265,7 @@ mod tests {
             observations: VecDeque::from([Err(io::Error::other("observation failed"))]),
             termination: Some(Err(io::Error::other("cleanup failed"))),
         };
-        let outcome = wait_for_process(
-            failed,
-            None,
-            FakeProcess::observe,
-            || None,
-            FakeProcess::terminate,
-            "observe fake process",
-        );
+        let outcome = wait_for_process(failed, None, FakeProcess::observe, FakeProcess::terminate, "observe fake process");
         let message = result_infrastructure_message(outcome.result);
         assert!(message.contains("observation failed"));
         assert!(message.contains("cleanup failed"));
@@ -1578,28 +1278,10 @@ mod tests {
             failed_timeout_cleanup,
             Some(Duration::ZERO),
             FakeProcess::observe,
-            || None,
             FakeProcess::terminate,
             "observe fake process",
         );
         assert!(result_infrastructure_message(outcome.result).contains("timeout cleanup failed"));
-    }
-
-    #[test]
-    fn reader_failure_terminates_the_process_through_the_local_wait_seam() {
-        let process = FakeProcess {
-            observations: VecDeque::from([Ok(None)]),
-            termination: Some(Ok(successful_status())),
-        };
-        let outcome = wait_for_process(
-            process,
-            None,
-            FakeProcess::observe,
-            || Some("failed to read child stdout".to_owned()),
-            FakeProcess::terminate,
-            "observe fake process",
-        );
-        assert!(result_infrastructure_message(outcome.result).contains("failed to read child stdout"));
     }
 
     #[test]
@@ -1643,7 +1325,7 @@ mod tests {
         let deadline = terminate_group_with((), Duration::ZERO, |()| Ok(()), |()| Ok(None), |()| Ok(()))
             .expect_err("an unreaped group reaches the deadline");
         assert_eq!(deadline.kind(), io::ErrorKind::WouldBlock);
-        assert!(deadline.to_string().contains("detached reaper thread"));
+        assert!(deadline.to_string().contains("local polling reaper"));
 
         let failed_handoff = terminate_group_with(
             (),
@@ -1665,31 +1347,128 @@ mod tests {
         )
         .expect_err("post-kill observation failure is reported");
         assert!(failed_observation.to_string().contains("observation failed"));
-        assert!(failed_observation.to_string().contains("detached reaper thread"));
+        assert!(failed_observation.to_string().contains("local polling reaper"));
+    }
+
+    #[test]
+    fn reaper_startup_failure_is_reported_synchronously() {
+        let error = GroupReaper::start_with(|job| {
+            drop(job);
+            Err(io::Error::other("injected reaper startup failure"))
+        })
+        .expect_err("startup failure must be returned");
+        assert!(error.to_string().contains("injected reaper startup failure"));
+    }
+
+    #[test]
+    fn polling_reaper_checks_every_retained_group_and_eventually_collects_them() {
+        struct FakeGroup {
+            errors_remaining: usize,
+            polls_remaining: usize,
+            collected: Arc<AtomicUsize>,
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let collected = Arc::new(AtomicUsize::new(0));
+        let reports = Arc::new(AtomicUsize::new(0));
+        let first = FakeGroup {
+            errors_remaining: 2,
+            polls_remaining: 20,
+            collected: Arc::clone(&collected),
+        };
+        let second = FakeGroup {
+            errors_remaining: 0,
+            polls_remaining: 0,
+            collected: Arc::clone(&collected),
+        };
+        sender.send(first).expect("reaper receiver is connected");
+        sender.send(second).expect("reaper receiver is connected");
+        drop(sender);
+
+        let worker = thread::spawn({
+            let reports = Arc::clone(&reports);
+            move || {
+                poll_reaper(
+                    &receiver,
+                    |group| {
+                        if group.errors_remaining > 0 {
+                            group.errors_remaining -= 1;
+                            return Err(io::Error::other("injected reaper observation failure"));
+                        }
+                        if group.polls_remaining == 0 {
+                            group.collected.fetch_add(1, Ordering::SeqCst);
+                            Ok(Some(successful_status()))
+                        } else {
+                            group.polls_remaining -= 1;
+                            Ok(None)
+                        }
+                    },
+                    |_| {
+                        reports.fetch_add(1, Ordering::SeqCst);
+                    },
+                );
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while collected.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            collected.load(Ordering::SeqCst),
+            1,
+            "the ready group must be collected while another group remains pending"
+        );
+        worker.join().expect("the finite fake reaper exits");
+        assert_eq!(collected.load(Ordering::SeqCst), 2);
+        assert_eq!(reports.load(Ordering::SeqCst), 1, "each failing group is reported once");
+    }
+
+    #[test]
+    fn failed_reaper_handoff_recovers_ownership_before_returning() {
+        let (connected_sender, connected_receiver) = mpsc::channel();
+        let retained = Mutex::new(Vec::new());
+        handoff_group(&connected_sender, &retained, "delivered group").expect("connected handoff succeeds");
+        assert_eq!(connected_receiver.recv().expect("group is delivered"), "delivered group");
+        assert!(retained.lock().expect("fallback ownership mutex is not poisoned").is_empty());
+
+        let (sender, receiver) = mpsc::channel();
+        drop(receiver);
+        let retained = Mutex::new(Vec::new());
+        let error = handoff_group(&sender, &retained, "owned group").expect_err("disconnected handoff is reported");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(
+            retained.lock().expect("fallback ownership mutex is not poisoned").as_slice(),
+            ["owned group"]
+        );
     }
 
     #[test]
     #[cfg_attr(miri, ignore = "spawns process groups")]
     fn real_group_execution_observes_completion_and_timeout() {
-        let success = run_streamed_with_timeout(&invocation(&["rustc", "--version"]), Duration::from_secs(5));
+        let reaper = test_reaper();
+        let success = run_streamed_with_timeout(&invocation(&["rustc", "--version"]), Duration::from_secs(5), &reaper);
         assert!(matches!(success, InvocationResult::Exited(status) if status.success()));
 
         let group = spawn_group(sleeping_test_command()).expect("spawn sleeping process group");
         let started = Instant::now();
-        let error = terminate_group_bounded(group).expect("killed process group is reaped");
+        let error = terminate_group_bounded(group, &reaper).expect("killed process group is reaped");
         assert!(!error.success());
         assert!(started.elapsed() < Duration::from_secs(2));
 
         let mut quick = Command::new("rustc");
         let _ = quick.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
-        let group = spawn_group(quick).expect("spawn quick process group");
-        detach_group_reaper(group).expect("detach the local process-group reaper");
+        let mut group = spawn_group(quick).expect("spawn quick process group");
+        group.inner().wait().expect("quick leader exits");
+        reaper.handoff(group).expect("completed group reaches the local reaper");
+        drop(reaper);
+        thread::sleep(Duration::from_millis(100));
     }
 
     #[test]
     #[cfg_attr(miri, ignore = "spawns and captures process groups")]
     fn captured_runner_uses_group_control_and_keeps_output() {
-        let mut untimed = run_captured(&invocation(&["rustc", "--version"]), None);
+        let reaper = test_reaper();
+        let mut untimed = run_captured(&invocation(&["rustc", "--version"]), None, &reaper);
         assert!(matches!(untimed.result, InvocationResult::Exited(status) if status.success()));
         assert!(
             String::from_utf8(output_bytes(&mut untimed.stdout))
@@ -1697,25 +1476,27 @@ mod tests {
                 .contains("rustc")
         );
 
-        let timed = run_captured(&invocation(&["rustc", "--version"]), Some(Duration::from_secs(5)));
+        let timed = run_captured(&invocation(&["rustc", "--version"]), Some(Duration::from_secs(5)), &reaper);
         assert!(matches!(timed.result, InvocationResult::Exited(status) if status.success()));
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns subprocesses")]
     fn direct_runners_report_empty_and_unspawnable_commands() {
+        let reaper = test_reaper();
         let empty = invocation(&[]);
         assert!(matches!(run_streamed(&empty), InvocationResult::Infrastructure(message) if message.contains("empty argument vector")));
-        assert!(infrastructure_message(run_captured(&empty, None)).contains("empty argument vector"));
+        assert!(infrastructure_message(run_captured(&empty, None, &reaper)).contains("empty argument vector"));
         assert!(matches!(
-            run_streamed_with_timeout(&empty, Duration::from_secs(1)),
+            run_streamed_with_timeout(&empty, Duration::from_secs(1), &reaper),
             InvocationResult::Infrastructure(message) if message.contains("empty argument vector")
         ));
 
         let missing = invocation(&["__cargo_each_missing_program_for_unit_test__"]);
         assert!(matches!(run_streamed(&missing), InvocationResult::Infrastructure(message) if message.contains("failed to spawn")));
-        assert!(infrastructure_message(run_captured(&missing, None)).contains("failed to spawn"));
+        assert!(infrastructure_message(run_captured(&missing, None, &reaper)).contains("failed to spawn"));
 
-        let injected = run_streamed_with_timeout_with(&invocation(&["rustc", "--version"]), Duration::from_secs(1), |_| {
+        let injected = run_streamed_with_timeout_with(&invocation(&["rustc", "--version"]), Duration::from_secs(1), &reaper, |_| {
             Err("injected group spawn failure".to_owned())
         });
         assert!(matches!(
@@ -1725,348 +1506,138 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "spawns process groups with injected capture seams")]
-    fn captured_setup_failures_use_local_reader_and_process_seams() {
+    fn capture_setup_failure_is_reported_before_process_spawn() {
+        let reaper = test_reaper();
         let invocation = invocation(&["rustc", "--version"]);
-
-        let missing_stdout = run_captured_with(
+        let spawn_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&spawn_calls);
+        let outcome = run_captured_with(
             &invocation,
             None,
-            |command| {
-                let mut group = spawn_group(command)?;
-                drop(group.inner().stdout.take());
-                Ok(group)
+            &reaper,
+            |_| Err(io::Error::other("injected capture setup failure")),
+            move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err("spawn must not be reached".to_owned())
             },
-            spawn_child_stdout_reader,
-            spawn_child_stderr_reader,
         );
-        assert!(infrastructure_message(missing_stdout).contains("failed to capture child stdout"));
+        assert!(infrastructure_message(outcome).contains("injected capture setup failure"));
+        assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
 
-        let stdout_reader = run_captured_with(
+        let stderr_failure = run_captured_with(
             &invocation,
             None,
-            spawn_group,
-            |_stream, _name| Err(io::Error::other("injected stdout reader failure")),
-            spawn_child_stderr_reader,
-        );
-        assert!(infrastructure_message(stdout_reader).contains("injected stdout reader failure"));
-
-        let missing_stderr = run_captured_with(
-            &invocation,
-            None,
-            |command| {
-                let mut group = spawn_group(command)?;
-                drop(group.inner().stderr.take());
-                Ok(group)
-            },
-            spawn_child_stdout_reader,
-            spawn_child_stderr_reader,
-        );
-        assert!(infrastructure_message(missing_stderr).contains("failed to capture child stderr"));
-
-        let stderr_reader = run_captured_with(&invocation, None, spawn_group, spawn_child_stdout_reader, |_stream, _name| {
-            Err(io::Error::other("injected stderr reader failure"))
-        });
-        assert!(infrastructure_message(stderr_reader).contains("injected stderr reader failure"));
-    }
-
-    #[test]
-    fn output_reader_retries_interrupts_and_reports_failures() {
-        let interrupted = spawn_output_reader(
-            InterruptedThenData {
-                interrupted: false,
-                emitted: false,
-            },
-            "interrupted-reader",
-        )
-        .expect("spawn interrupted reader");
-        let mut interrupted = finish_output_reader(interrupted, "stdout", Duration::from_secs(1), GROUP_BOUNDARY);
-        assert_eq!(output_bytes(&mut interrupted.output), b"after interrupt");
-        assert!(interrupted.failure.is_none());
-
-        let failed = spawn_output_reader(FailingReader, "failing-reader").expect("spawn failing reader");
-        let failed = finish_output_reader(failed, "stdout", Duration::from_secs(1), GROUP_BOUNDARY);
-        assert!(failed.failure.is_some_and(|failure| failure.contains("injected read failure")));
-
-        let panicked = spawn_output_reader(PanickingReader, "panicking-reader").expect("spawn panicking reader");
-        let panicked = finish_output_reader(panicked, "stderr", Duration::from_secs(1), GROUP_BOUNDARY);
-        assert!(panicked.failure.is_some_and(|failure| failure.contains("injected reader panic")));
-    }
-
-    #[test]
-    fn reader_finish_reports_post_completion_panics_and_failed_cancellation() {
-        let (sender, completion) = mpsc::channel();
-        let thread = thread::spawn(move || {
-            sender.send(ReaderCompletion::Finished(Ok(()))).expect("the receiver remains alive");
-            panic!("panic after completion");
-        });
-        let reader = OutputReader {
-            thread,
-            completion,
-            output: Arc::new(Mutex::new(CapturedOutput::empty())),
-            retaining: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            reported: None,
-            failure_claimed: false,
-        };
-        let failure = finish_output_reader(reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY)
-            .failure
-            .expect("the join panic is reported");
-        assert!(failure.contains("panic after completion"));
-
-        let (failed_sender, failed_completion) = mpsc::channel();
-        let failed_thread = thread::spawn(move || {
-            failed_sender
-                .send(ReaderCompletion::Finished(Err(io::Error::other("read failed"))))
-                .expect("the receiver remains alive");
-            panic!("panic after failed completion");
-        });
-        let failed_reader = OutputReader {
-            thread: failed_thread,
-            completion: failed_completion,
-            output: Arc::new(Mutex::new(CapturedOutput::empty())),
-            retaining: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            reported: None,
-            failure_claimed: false,
-        };
-        let failure = finish_output_reader(failed_reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY)
-            .failure
-            .expect("read and join failures are reported");
-        assert!(failure.contains("read failed"));
-        assert!(failure.contains("panic after failed completion"));
-
-        let (sender, completion) = mpsc::channel::<ReaderCompletion>();
-        let reader = OutputReader {
-            thread: thread::spawn(|| {}),
-            completion,
-            output: Arc::new(Mutex::new(CapturedOutput::empty())),
-            retaining: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            reported: None,
-            failure_claimed: true,
-        };
-        let failure = finish_output_reader(reader, "stderr", Duration::ZERO, LEADER_BOUNDARY)
-            .failure
-            .expect("failed cancellation is reported");
-        assert!(failure.contains("reader did not stop"));
-        drop(sender);
-    }
-
-    #[test]
-    fn disconnected_reader_completion_is_reported_by_the_finisher() {
-        let (sender, completion) = mpsc::channel::<ReaderCompletion>();
-        drop(sender);
-        let reader = OutputReader {
-            thread: thread::spawn(|| {}),
-            completion,
-            output: Arc::new(Mutex::new(CapturedOutput::empty())),
-            retaining: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            reported: None,
-            failure_claimed: false,
-        };
-        let failure = finish_output_reader(reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY)
-            .failure
-            .expect("disconnection is reported");
-        assert!(failure.contains("without reporting completion"));
-    }
-
-    #[test]
-    fn cancellable_reader_stops_within_the_join_grace() {
-        let (dropped_tx, dropped_rx) = mpsc::channel();
-        let reader = spawn_output_reader(PendingReader { dropped: Some(dropped_tx) }, "pending-reader").expect("spawn pending reader");
-        let captured = finish_output_reader(reader, "stdout", Duration::from_millis(25), LEADER_BOUNDARY);
-        dropped_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the polling reader observes capture cancellation");
-        let failure = captured.failure.expect("an open pipe is an infrastructure failure");
-        assert!(failure.contains("remained open"));
-        assert!(!failure.contains("did not stop"));
-    }
-
-    #[test]
-    fn blocking_reader_is_detached_and_partial_output_is_recovered_without_blocking() {
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        let (blocked_tx, blocked_rx) = mpsc::channel();
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let reader = spawn_output_reader(
-            BlockingReader {
-                first_read: false,
-                blocked: Some(blocked_tx),
-                finished: finished_tx,
-                release: Arc::clone(&release),
-            },
-            "blocking-reader",
-        )
-        .expect("spawn blocking reader");
-        blocked_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the reader reaches its blocking read");
-
-        let started = Instant::now();
-        let mut captured = finish_output_reader(reader, "stdout", Duration::from_millis(25), LEADER_BOUNDARY);
-        assert!(started.elapsed() < Duration::from_millis(500));
-        assert_eq!(output_bytes(&mut captured.output), b"captured-before-detach");
-        let failure = captured.failure.expect("detachment is an infrastructure failure");
-        assert!(failure.contains("remained open"));
-        assert!(failure.contains("did not stop"));
-
-        let (lock, condition) = &*release;
-        *lock.lock().expect("the test owns the release mutex without panicking") = true;
-        condition.notify_all();
-        finished_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the detached reader exits after the pipe closes");
-    }
-
-    #[test]
-    fn detached_reader_never_blocks_on_a_locked_capture_buffer() {
-        let (factory_started, factory_is_started) = mpsc::sync_channel(0);
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        let factory_release = Arc::clone(&release);
-        let (dropped_tx, dropped_rx) = mpsc::channel();
-        let reader = spawn_output_reader_with(
-            DropSignalReader {
-                bytes: Some(b"stalled append"),
-                dropped: Some(dropped_tx),
-            },
-            "locked-buffer-reader",
-            0,
-            Box::new(move || {
-                factory_started.send(()).expect("the finisher waits for spill creation");
-                let (lock, condition) = &*factory_release;
-                let mut released = lock.lock().expect("the test owns the release mutex without panicking");
-                while !*released {
-                    released = condition.wait(released).expect("the test owns the release mutex without panicking");
+            &reaper,
+            |stream| {
+                if stream == "stdout" {
+                    Ok((Box::new(io::Cursor::new(Vec::new())), Stdio::null()))
+                } else {
+                    Err(io::Error::other("injected stderr capture failure"))
                 }
-                Ok(Box::new(io::Cursor::new(Vec::new())) as Box<dyn SpillFile>)
-            }),
-        )
-        .expect("spawn locked-buffer reader");
-        factory_is_started
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the reader holds the capture mutex");
-
-        let started = Instant::now();
-        let mut captured = finish_output_reader(reader, "stdout", Duration::ZERO, LEADER_BOUNDARY);
-        assert!(started.elapsed() < Duration::from_millis(500));
-        assert!(output_bytes(&mut captured.output).is_empty());
-        let failure = captured.failure.expect("unavailable partial bytes are explicit");
-        assert!(failure.contains("capture buffer remained locked"));
-
-        let (lock, condition) = &*release;
-        *lock.lock().expect("the test owns the release mutex without panicking") = true;
-        condition.notify_all();
-        dropped_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the detached reader exits after spill creation resumes");
-    }
-
-    #[test]
-    fn data_arriving_after_capture_cancellation_is_discarded() {
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        let (started_tx, started_rx) = mpsc::channel();
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let reader = spawn_output_reader(
-            LateDataReader {
-                started: Some(started_tx),
-                finished: Some(finished_tx),
-                release: Arc::clone(&release),
             },
-            "late-data-reader",
-        )
-        .expect("spawn late-data reader");
-        started_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the reader blocks before producing data");
+            |_| Err("spawn must not be reached".to_owned()),
+        );
+        assert!(infrastructure_message(stderr_failure).contains("injected stderr capture failure"));
 
-        let mut captured = finish_output_reader(reader, "stdout", Duration::ZERO, LEADER_BOUNDARY);
-        assert!(output_bytes(&mut captured.output).is_empty());
-        assert!(captured.failure.is_some());
-
-        let (lock, condition) = &*release;
-        *lock.lock().expect("the test owns the release mutex without panicking") = true;
-        condition.notify_all();
-        finished_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the detached reader discards late data and exits");
+        let spawn_failure = run_captured_with(
+            &invocation,
+            None,
+            &reaper,
+            |_| Ok((Box::new(io::Cursor::new(Vec::new())), Stdio::null())),
+            |_| Err("injected captured spawn failure".to_owned()),
+        );
+        assert!(infrastructure_message(spawn_failure).contains("injected captured spawn failure"));
     }
 
     #[test]
-    fn output_spills_after_the_memory_limit_and_cleans_up_by_raii() {
-        let named = tempfile::NamedTempFile::new().expect("create named spill file");
-        let path = named.path().to_path_buf();
-        let mut named = Some(named);
-        let reader = spawn_output_reader_with(
-            ChunkedReader {
-                chunks: VecDeque::from([b"abcd".to_vec(), b"efgh".to_vec(), b"ijkl".to_vec()]),
-            },
-            "spill-reader",
-            4,
-            Box::new(move || Ok(Box::new(named.take().expect("capture creates one spill")) as Box<dyn SpillFile>)),
-        )
-        .expect("spawn spill reader");
-        let mut captured = finish_output_reader(reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY);
-        assert!(captured.output.is_spilled());
-        assert_eq!(output_bytes(&mut captured.output), b"abcdefghijkl");
-        assert!(path.exists());
-        drop(captured);
-        assert!(!path.exists());
-    }
+    fn capture_finalization_and_emission_use_a_finite_snapshot() {
+        let source = FaultySnapshot {
+            cursor: io::Cursor::new(b"snapshot-later".to_vec()),
+            reported_length: 8,
+            fail_length: false,
+            fail_seek: false,
+            fail_read: false,
+        };
+        let mut captured = finish_capture(Box::new(source), "stdout");
+        assert!(captured.failure.is_none());
+        assert_eq!(output_bytes(&mut captured.output), b"snapshot");
 
-    #[test]
-    fn output_at_the_memory_limit_does_not_create_a_spill() {
-        let mut output = CapturedOutput::empty();
-        let mut spill_factory: super::SpillFactory = Box::new(|| panic!("output at the limit must stay in memory"));
-
-        output.append(b"abcd", 4, &mut spill_factory).expect("in-memory append succeeds");
-
-        assert!(!output.is_spilled());
-        assert_eq!(output_bytes(&mut output), b"abcd");
-    }
-
-    #[test]
-    fn spill_failures_become_infrastructure_failures() {
-        let reader = spawn_output_reader_with(
-            ChunkedReader {
-                chunks: VecDeque::from([b"abc".to_vec(), b"def".to_vec()]),
-            },
-            "write-failing-spill",
-            4,
-            Box::new(|| {
-                Ok(Box::new(FaultySpill {
-                    cursor: io::Cursor::new(Vec::new()),
-                    fail_write: true,
-                    fail_read: false,
-                }) as Box<dyn SpillFile>)
-            }),
-        )
-        .expect("spawn write-failing reader");
-        let captured_stream = finish_output_reader(reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY);
-        let outcome = combine_captured_output(captured_stream, captured(b"", None), InvocationResult::Exited(successful_status()));
-        assert!(infrastructure_message(outcome).contains("injected spill write failure"));
-
-        let mut outcome = BufferedOutcome {
-            stdout: CapturedOutput::Spill(Box::new(FaultySpill {
+        let failed_length = finish_capture(
+            Box::new(FaultySnapshot {
                 cursor: io::Cursor::new(Vec::new()),
-                fail_write: false,
-                fail_read: true,
-            })),
+                reported_length: 0,
+                fail_length: true,
+                fail_seek: false,
+                fail_read: false,
+            }),
+            "stdout",
+        );
+        assert!(
+            failed_length
+                .failure
+                .is_some_and(|failure| failure.contains("injected snapshot length failure"))
+        );
+
+        let failed_seek = finish_capture(
+            Box::new(FaultySnapshot {
+                cursor: io::Cursor::new(Vec::new()),
+                reported_length: 0,
+                fail_length: false,
+                fail_seek: true,
+                fail_read: false,
+            }),
+            "stderr",
+        );
+        assert!(
+            failed_seek
+                .failure
+                .is_some_and(|failure| failure.contains("injected snapshot seek failure"))
+        );
+    }
+
+    #[test]
+    fn capture_source_failures_become_infrastructure_failures() {
+        let mut outcome = BufferedOutcome {
+            stdout: CapturedOutput::Snapshot {
+                source: Box::new(FaultySnapshot {
+                    cursor: io::Cursor::new(Vec::new()),
+                    reported_length: 1,
+                    fail_length: false,
+                    fail_seek: false,
+                    fail_read: true,
+                }),
+                length: 1,
+            },
             stderr: CapturedOutput::empty(),
             result: InvocationResult::Exited(successful_status()),
         };
         emit_buffered_to(&invocation(&["probe"]), &mut outcome, &mut Vec::new(), &mut Vec::new()).expect("destinations remain writable");
-        assert!(infrastructure_message(outcome).contains("injected spill read failure"));
+        assert!(infrastructure_message(outcome).contains("injected snapshot read failure"));
 
         let mut stderr_outcome = BufferedOutcome {
             stdout: CapturedOutput::empty(),
-            stderr: CapturedOutput::Spill(Box::new(FaultySpill {
-                cursor: io::Cursor::new(Vec::new()),
-                fail_write: false,
-                fail_read: true,
-            })),
+            stderr: CapturedOutput::Snapshot {
+                source: Box::new(FaultySnapshot {
+                    cursor: io::Cursor::new(Vec::new()),
+                    reported_length: 1,
+                    fail_length: false,
+                    fail_seek: false,
+                    fail_read: true,
+                }),
+                length: 1,
+            },
             result: InvocationResult::Exited(successful_status()),
         };
         emit_buffered_to(&invocation(&["probe"]), &mut stderr_outcome, &mut Vec::new(), &mut Vec::new())
             .expect("destinations remain writable");
-        assert!(infrastructure_message(stderr_outcome).contains("injected spill read failure"));
+        assert!(infrastructure_message(stderr_outcome).contains("injected snapshot read failure"));
+
+        let mut short = CapturedOutput::Snapshot {
+            source: Box::new(io::Cursor::new(Vec::new())),
+            length: 1,
+        };
+        let error = short.emit_to(&mut Vec::new()).expect_err("short snapshots are reported");
+        assert!(matches!(error, OutputEmitError::Source(error) if error.kind() == io::ErrorKind::UnexpectedEof));
     }
 
     #[test]
@@ -2085,7 +1656,7 @@ mod tests {
         }
 
         let mut outcome = BufferedOutcome {
-            stdout: CapturedOutput::Memory(b"stdout".to_vec()),
+            stdout: captured(b"stdout", None).output,
             stderr: CapturedOutput::empty(),
             result: InvocationResult::Exited(successful_status()),
         };
@@ -2095,7 +1666,7 @@ mod tests {
 
         let mut stderr_failure = BufferedOutcome {
             stdout: CapturedOutput::empty(),
-            stderr: CapturedOutput::Memory(b"stderr".to_vec()),
+            stderr: captured(b"stderr", None).output,
             result: InvocationResult::Exited(successful_status()),
         };
         let error = emit_buffered_to(&invocation(&["probe"]), &mut stderr_failure, &mut Vec::new(), &mut FailingWriter)
@@ -2140,79 +1711,8 @@ mod tests {
     }
 
     #[test]
-    fn reader_setup_failure_keeps_partial_output_and_cleanup_context() {
-        let reader = spawn_output_reader(io::Cursor::new(b"partial".to_vec()), "partial-reader").expect("spawn partial reader");
-        let mut outcome = BufferedOutcome::from_reader_failure(
-            "stderr unavailable".to_owned(),
-            reader,
-            &Err::<(), _>(io::Error::other("cleanup failed")),
-        );
-        assert_eq!(output_bytes(&mut outcome.stdout), b"partial");
-        let message = infrastructure_message(outcome);
-        assert!(message.contains("stderr unavailable"));
-        assert!(message.contains("cleanup failed"));
-    }
-
-    #[test]
-    fn reader_state_reports_disconnection_and_never_repeats_a_failure() {
-        let (sender, completion) = mpsc::channel::<ReaderCompletion>();
-        drop(sender);
-        let mut reader = OutputReader {
-            thread: thread::spawn(|| {}),
-            completion,
-            output: Arc::new(Mutex::new(CapturedOutput::empty())),
-            retaining: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            reported: None,
-            failure_claimed: false,
-        };
-        assert!(
-            reader
-                .take_failure("stdout")
-                .is_some_and(|failure| failure.contains("without reporting completion"))
-        );
-        assert!(reader.take_failure("stdout").is_none());
-        assert!(
-            finish_output_reader(reader, "stdout", Duration::from_secs(1), LEADER_BOUNDARY)
-                .failure
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn detached_output_recovery_uses_only_nonblocking_mutex_acquisition() {
-        let output = Arc::new(Mutex::new(CapturedOutput::Memory(b"partial".to_vec())));
-        let held = output.lock().expect("the fresh capture mutex is available");
-        let mut failure = None;
-        let mut captured = take_reader_output(&output, "stdout", false, &mut failure);
-        assert!(output_bytes(&mut captured).is_empty());
-        assert!(failure.is_some_and(|message| message.contains("partial output could not be recovered")));
-        drop(held);
-    }
-
-    #[test]
-    fn poisoned_capture_buffers_are_recovered_in_joined_and_detached_modes() {
-        fn poisoned_output() -> Arc<Mutex<CapturedOutput>> {
-            let output = Arc::new(Mutex::new(CapturedOutput::Memory(b"poisoned".to_vec())));
-            let poisoned = Arc::clone(&output);
-            let _panic = thread::spawn(move || {
-                let _guard = poisoned.lock().expect("the fresh mutex is available");
-                panic!("poison output");
-            })
-            .join();
-            output
-        }
-
-        for thread_finished in [true, false] {
-            let output = poisoned_output();
-            let mut failure = None;
-            let mut captured = take_reader_output(&output, "stdout", thread_finished, &mut failure);
-            assert_eq!(output_bytes(&mut captured), b"poisoned");
-            assert!(failure.is_some_and(|message| message.contains("capture buffer was poisoned")));
-        }
-    }
-
-    #[test]
     fn worker_panics_and_disconnects_become_infrastructure_outcomes() {
+        let reaper = test_reaper();
         let plan = Plan {
             invocations: vec![Invocation {
                 label: Some("panic-probe".to_owned()),
@@ -2220,7 +1720,7 @@ mod tests {
                 work_dir: None,
             }],
         };
-        let code = execute_parallel(&plan, false, NonZeroUsize::new(2).expect("literal two is nonzero"), None)
+        let code = execute_parallel(&plan, false, NonZeroUsize::new(2).expect("literal two is nonzero"), None, &reaper)
             .expect("worker panic is represented as an outcome");
         assert_eq!(code, ExitCode::from(2));
 
@@ -2261,12 +1761,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns a rustc subprocess")]
     fn worker_spawn_errors_are_local_and_scheduler_visible() {
-        let error =
-            spawn_worker(0, invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), None).expect_err("the local seam rejects only its sentinel");
+        let reaper = test_reaper();
+        let error = spawn_worker(0, invocation(&[WORKER_SPAWN_ERROR_TEST_PROGRAM]), None, reaper.clone())
+            .expect_err("the local seam rejects only its sentinel");
         assert!(error.to_string().contains("injected worker spawn failure"));
 
-        let worker = spawn_worker(1, invocation(&["rustc", "--version"]), None).expect("ordinary program launches");
+        let worker = spawn_worker(1, invocation(&["rustc", "--version"]), None, reaper).expect("ordinary program launches");
         let outcome = wait_for_worker(&mut vec![worker]).expect("ordinary worker reports");
         assert_eq!(outcome.index, 1);
         assert!(!outcome.outcome.result.failed());
@@ -2279,7 +1781,7 @@ mod tests {
             with_cleanup_failure("primary".to_owned(), &Err::<(), _>(io::Error::other("cleanup"))),
             "primary; process-group cleanup also failed: cleanup"
         );
-        assert!(with_reaper_handoff("deadline", &Ok(())).contains("detached reaper"));
+        assert!(with_reaper_handoff("deadline", &Ok(())).contains("local polling reaper"));
         assert!(with_reaper_handoff("deadline", &Err(io::Error::other("thread unavailable"))).contains("thread unavailable"));
         assert_eq!(panic_description(&"borrowed panic"), "borrowed panic");
         assert_eq!(panic_description(&"owned panic".to_owned()), "owned panic");

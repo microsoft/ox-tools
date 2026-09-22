@@ -300,7 +300,7 @@ no-op.
 - **Exit codes.** `0` when every executed command succeeded *or* the set was
   empty. In fail-fast mode, a command failure returns that command's code, a
   timeout returns `1`, and a post-spawn infrastructure failure (including
-  output capture, drain, worker, wait, or cleanup failure) returns `2`.
+  output capture, worker, wait, reaper, or cleanup failure) returns `2`.
   Pre-execution usage/configuration and spawn failures also return `2`. Under
   `--keep-going`, any command, timeout, spawn, or infrastructure failure maps
   the aggregate result to `1`.
@@ -331,40 +331,46 @@ no-op.
   leaving the scheduler blocked forever. A worker-thread launch failure is
   represented as an infrastructure outcome at that invocation's plan index,
   so output already collected from earlier invocations is still emitted.
+  Parallel work runs in plan-contiguous waves capped by the effective worker
+  count. A wave is fully observed, emitted, and dropped before the next wave
+  starts, so the number of retained invocation captures is also capped by the
+  effective worker count.
   Without `--timeout`, parallel commands are still launched in a Windows job
   or Unix process group, but cargo-each observes only the launched leader and
-  does not kill background descendants. Buffering is memory-bounded per stream:
-  after 1 MiB,
-  output spills to a unique file in the system temporary directory. The
-  invocation outcome owns that file through deterministic plan-order emission,
-  so every success, failure, and panic path removes it through RAII. Spill
-  creation, write, seek, or read failures are infrastructure failures; output
-  is never intentionally truncated on a successful path.
-- **Output capture and drain are bounded.** Reader failures are observed while
-  the leader is still running; cargo-each terminates the invocation and reports
-  the infrastructure failure instead of waiting indefinitely with an
-  unconsumed pipe. After leader completion, readers get one second to observe
-  EOF. Complete output is preserved when both pipes close within that grace.
-  If a background or escaped descendant keeps a pipe open, capture stops
-  retaining new bytes and gives the reader a bounded join opportunity. A
-  blocking pipe read cannot be forcibly interrupted without platform-specific
-  unsafe code, so a reader that does not finish is detached and may remain
-  until the escaped or background descendant closes the pipe. cargo-each emits
-  partial bytes only when their capture mutex is immediately available and
-  reports an explicit infrastructure failure, including when partial bytes
-  cannot be recovered without blocking. It never blocks on that mutex after
-  detaching a reader.
+  does not kill background descendants.
+- **Parallel capture uses finite temporary-file snapshots.** Every genuinely
+  parallel invocation redirects stdout and stderr directly to separate unique
+  temporary files before group spawn; no pipe-reader threads are created. The
+  child writer and parent reader are separately reopened so parent seeks cannot
+  move a descendant's write position. The parent records each file's current
+  length when the leader completes, or after timeout cleanup completes.
+  Plan-order emission seeks to the beginning and streams exactly that many
+  bytes, so memory does not scale with command output and output is not
+  intentionally truncated.
+  The plan-contiguous wave bound also caps the number of retained capture files.
+  A background or escaped descendant can continue and can append through an
+  inherited handle, but it cannot hold capture open and bytes written after
+  finalization are outside the finite snapshot. Capture create, handle-reopen,
+  length, seek, or read failures are infrastructure failures. Each invocation
+  owns both files through emission and removes them through RAII.
 - **Timeouts terminate jobs or process groups.** A timed-out command is a
   failure. `command-group` creates a job object on Windows and a process group
-  on Unix. cargo-each kills that boundary, polls completion with bounded sleeps,
-  and allows 250 ms for the group to finish. If it still has not completed, the
-  `GroupChild` moves to a detached cargo-each-local reaper thread whose
-  blocking wait cannot delay the caller. A failed kill, observation, bounded
-  reap, or reaper-thread launch is an infrastructure failure. Unix process
-  groups are not sealed containment: a descendant can escape by creating a new
-  session, and timeout cleanup is best-effort for such descendants. An escaped
-  descendant can also keep an inherited output pipe open, in which case the
-  bounded drain behavior above applies.
+  on Unix. Both timed streamed and captured execution observe the launched
+  leader directly, preserving its exit status even while an ordinary
+  background group member remains. The group handle remains available solely
+  for deadline termination. At the deadline cargo-each kills that boundary,
+  polls completion with bounded sleeps, and allows 250 ms for the group to
+  finish. If it still has not completed, the `GroupChild` moves to one
+  cargo-each-local polling reaper started before any child process. The reaper
+  polls every retained group rather than blocking forever on one, owns groups
+  after the caller returns, and shuts down only after all senders disconnect
+  and its retained set is empty. Startup failure therefore aborts before
+  command launch. A disconnected handoff reports an infrastructure failure and
+  places the recovered handle in a persistent fallback instead of dropping
+  ownership. A failed kill, observation, bounded reap, reaper startup, or
+  handoff is an infrastructure failure. Unix process groups are not sealed
+  containment: a descendant can escape by creating a new session, so timeout
+  cleanup remains best-effort for escaped descendants.
 - **Child executable resolution follows `PATH`.** `cargo-each` explicitly
   copies an inherited `PATH` onto every child command. This is equivalent to
   ordinary inheritance on other platforms and makes Windows resolve a relative

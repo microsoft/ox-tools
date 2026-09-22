@@ -138,26 +138,29 @@ observed failure, waits for running work, and chooses the final failure by
 plan order. `--keep-going` runs the complete plan. Worker panics and
 unexpected worker-channel disconnections become infrastructure-failure
 outcomes instead of blocking the scheduler. Worker launch failures retain
-output already collected at earlier plan indices. Without `--timeout`,
-parallel commands are launched in a job or process group, but cargo-each
-observes only the leader and does not kill background descendants. Each
-output stream retains at most 1 MiB in memory
-before spilling to a unique system-temporary file owned by the invocation
-outcome; spill failures are infrastructure failures and spill files are
-removed by RAII after deterministic plan-order emission.
+output already collected at earlier plan indices. Parallel work runs in
+plan-contiguous waves capped by the effective worker count; each completed
+wave is emitted and dropped before the next wave starts, bounding retained
+temporary-file storage. Without `--timeout`, parallel commands are launched
+in a job or process group, but cargo-each observes only the leader and does
+not kill background descendants. Every genuinely parallel invocation
+redirects stdout and stderr directly to separate unique temporary files.
+Child writers and parent readers are separately reopened so parent seeks
+cannot move descendant write positions. Cargo-each records each file’s
+current length when the leader completes (or after timeout cleanup), then
+reads exactly that finite snapshot in plan order without loading unbounded
+output into memory. Later writes by background or escaped descendants are
+outside the snapshot, and inherited file handles cannot hold capture open.
+Capture create, reopen, length, seek, and read failures are infrastructure
+failures; files are removed by RAII.
 
-Reader failures are observed while the child is running and trigger bounded
-termination. Output drain is bounded after every completion: readers get
-one second to observe EOF, then cargo-each stops retaining bytes and gives
-each reader a bounded join opportunity. A reader blocked in a pipe read is
-detached and may remain until an escaped or background descendant closes
-the pipe. Partial output is recovered only through a nonblocking capture
-mutex acquisition; unavailable bytes and every detached-reader case are
-explicit infrastructure failures.
 Timed-out group termination gets a bounded 250 ms reap grace. If the group
-still has not completed, its handle moves to a detached cargo-each reaper
-thread whose blocking wait cannot delay the caller; failure to start that
-thread is also reported as an infrastructure failure.
+still has not completed, its handle moves to a cargo-each-local polling
+reaper started before any command. The reaper checks every retained group
+without blocking on one child, remains the wait owner after the caller
+returns, and exits after all senders disconnect and retained groups are
+collected. Reaper startup and handoff failures are explicit infrastructure
+failures; a failed handoff retains the group handle in a persistent fallback.
 Child commands inherit `PATH` explicitly. On Windows this makes relative
 program lookup honor the inherited `PATH` order instead of preferring an
 unrelated executable beside `cargo-each`.
