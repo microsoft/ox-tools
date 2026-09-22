@@ -684,14 +684,32 @@ fn mask_legacy_lint_region_to_header(text: &str, syntax: CommentSyntax) -> Strin
         let Ok(Some(region)) = find_region(text, id, syntax) else {
             continue;
         };
-        let Some(relative) = region.body_str().find(header) else {
+        let start = if let Some(relative) = region.body_str().find(header) {
+            region.body.start + relative
+        } else if region.is_empty() {
+            if region.body.end - region.body.start >= header.len() {
+                region.body.start
+            } else {
+                region.end_line.start
+            }
+        } else {
             continue;
         };
-        let start = region.body.start + relative;
         let end = start + header.len();
         masked[start..end].copy_from_slice(&text.as_bytes()[start..end]);
+        if region.is_empty() {
+            masked[start..end].copy_from_slice(header.as_bytes());
+        }
     }
     String::from_utf8(masked).expect("masking preserves UTF-8 and only restores original UTF-8 slices")
+}
+
+pub(crate) fn legacy_lint_region_id(region_id: &str) -> Option<&'static str> {
+    match region_id {
+        "anvil-workspace-rust-lints" | "anvil-workspace-rustdoc-lints" | "anvil-workspace-clippy-lints" => Some("anvil-workspace-lints"),
+        "anvil-rust-lints" | "anvil-rustdoc-lints" | "anvil-clippy-lints" => Some("anvil-lints"),
+        _ => None,
+    }
 }
 
 pub(crate) fn lint_region_placement(region_id: &str, current: Option<&str>) -> Option<RegionPlacement> {

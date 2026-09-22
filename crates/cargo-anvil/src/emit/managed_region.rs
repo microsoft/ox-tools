@@ -27,8 +27,9 @@ use crate::decision::Decision;
 use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
 use crate::region::{
-    CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_region, insert_after_region, lint_region_placement,
-    managed_region_ids, mask_retiring_managed_regions, start_region_offset, text_newline, upsert_region_with_newline,
+    CommentSyntax, RegionPlacement, TomlAdoption, adopt_unmanaged_toml_tables, find_region, insert_after_region, legacy_lint_region_id,
+    lint_region_placement, managed_region_ids, mask_retiring_managed_regions, start_region_offset, text_newline,
+    upsert_region_with_newline,
 };
 
 /// What the reader should do about a refused region.
@@ -185,6 +186,18 @@ pub fn plan_managed_region(
                  Restore its generated content, or empty its body to regenerate it; keep user settings outside the sentinels"
             ),
             RefusalRemedy::EditedRegion,
+        ));
+    }
+    if let Some(legacy_id) = legacy_lint_region_id(region_id)
+        && host_text.is_some_and(|text| matches!(find_region(text, legacy_id, syntax), Ok(Some(_))))
+        && manifest.region_checksum(host_relpath, legacy_id).is_none()
+    {
+        return Err(ManagedRegionRefusal::new(
+            app_err!(
+                "the host contains legacy managed region '{legacy_id}', but the manifest does not record it as owned. \
+                 Refusing to add replacement lint regions alongside an orphan that cargo-anvil cannot retire."
+            ),
+            RefusalRemedy::EditedRetirement,
         ));
     }
     let spliced = splice(host_relpath, host_text, region_id, rendered_body, syntax, placement, newline)?;
