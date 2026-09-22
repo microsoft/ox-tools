@@ -19,11 +19,12 @@
 //! because TOML rejects a duplicate table header outright. See
 //! [`adopt_unmanaged_toml_tables`].
 //! The `id` is globally unique within the catalog (e.g. `anvil-imports`,
-//! `anvil-workspace-lints`).
+//! `anvil-workspace-rust-lints`).
 //!
 //! Empty bodies are regenerated; nonempty edits require reconciliation.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use ohno::{AppError, app_err, bail};
 use toml_edit::{Item, Key, RawString, Table};
@@ -763,16 +764,30 @@ fn adopt_dotted_child_assignments(
     let end = boundary_after(boundaries, candidate.header.start, text.len());
     let mut deletions = Vec::new();
     let mut residue = String::new();
+    let mut parent_residue = String::new();
+    let is_final_lint_namespace = namespace == "clippy" && parent_path.last().is_some_and(|segment| segment == "lints");
 
-    for entry in candidate
-        .entries
-        .iter()
-        .filter(|entry| entry.path.first().is_some_and(|segment| segment == namespace))
-    {
+    for entry in &candidate.entries {
         let start = protected
             .iter()
             .find(|range| (range.start..range.end).contains(&entry.span.start))
             .map_or(entry.span.start, |range| range.end);
+        if entry.path.first().is_none_or(|segment| segment != namespace) {
+            if is_final_lint_namespace {
+                parent_residue.push_str(&text[start..entry.span.end.min(end)]);
+                deletions.push(ByteRange {
+                    start,
+                    end: entry.span.end.min(end),
+                });
+            }
+            continue;
+        }
+        if entry.path.len() == 1 {
+            return Some(TomlAdoption::Unrelocatable {
+                table: parent_path.iter().chain(entry.path.iter()).cloned().collect::<Vec<_>>().join("."),
+                tail_table: managed.path.join("."),
+            });
+        }
         let relative_path = &entry.path[1..];
         match managed.values.get(relative_path) {
             Some(managed_value) if *managed_value == entry.value => {}
@@ -801,6 +816,10 @@ fn adopt_dotted_child_assignments(
             start,
             end: entry.span.end.min(end),
         });
+    }
+    if !parent_residue.trim().is_empty() {
+        writeln!(residue, "[{}]", parent_path.join(".")).expect("writing to a String cannot fail");
+        residue.push_str(&parent_residue);
     }
 
     if deletions.is_empty() {
@@ -2523,6 +2542,23 @@ mod tests {
                 key: "workspace.lints.rust.unsafe_op_in_unsafe_fn".to_owned(),
                 managed: "\"warn\"".to_owned(),
                 hand_written: "\"deny\"".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn exact_namespace_inline_table_is_refused_instead_of_panicking() {
+        let adoption = adopt_unmanaged_toml_tables(
+            "[workspace.lints]\nrust = { missing_docs = \"warn\" }\n",
+            "[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"warn\"\n",
+            SYN,
+        );
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Unrelocatable {
+                table: "workspace.lints.rust".to_owned(),
+                tail_table: "workspace.lints.rust".to_owned(),
             }
         );
     }

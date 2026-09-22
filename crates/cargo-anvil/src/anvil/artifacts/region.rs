@@ -144,6 +144,7 @@ pub fn justfile_imports() -> Artifact {
     )
 }
 
+/// Workspace `Cargo.toml` / `anvil-workspace-rust-lints` — Rust compiler lints.
 #[must_use]
 pub fn workspace_rust_lints() -> Artifact {
     lint_region(
@@ -155,6 +156,7 @@ pub fn workspace_rust_lints() -> Artifact {
     )
 }
 
+/// Workspace `Cargo.toml` / `anvil-workspace-rustdoc-lints` — rustdoc lints.
 #[must_use]
 pub fn workspace_rustdoc_lints() -> Artifact {
     lint_region(
@@ -166,6 +168,7 @@ pub fn workspace_rustdoc_lints() -> Artifact {
     )
 }
 
+/// Workspace `Cargo.toml` / `anvil-workspace-clippy-lints` — Clippy lints.
 #[must_use]
 pub fn workspace_clippy_lints() -> Artifact {
     lint_region(
@@ -177,6 +180,7 @@ pub fn workspace_clippy_lints() -> Artifact {
     )
 }
 
+/// Single-crate `Cargo.toml` / `anvil-rust-lints` — Rust compiler lints.
 #[must_use]
 pub fn single_crate_rust_lints() -> Artifact {
     lint_region(
@@ -188,6 +192,7 @@ pub fn single_crate_rust_lints() -> Artifact {
     )
 }
 
+/// Single-crate `Cargo.toml` / `anvil-rustdoc-lints` — rustdoc lints.
 #[must_use]
 pub fn single_crate_rustdoc_lints() -> Artifact {
     lint_region(
@@ -199,6 +204,7 @@ pub fn single_crate_rustdoc_lints() -> Artifact {
     )
 }
 
+/// Single-crate `Cargo.toml` / `anvil-clippy-lints` — Clippy lints.
 #[must_use]
 pub fn single_crate_clippy_lints() -> Artifact {
     lint_region(

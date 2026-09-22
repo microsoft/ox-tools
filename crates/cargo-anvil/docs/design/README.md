@@ -117,8 +117,9 @@ Corollaries that drive every section below:
 - Drift detection lives inside the files themselves (per-file checksums and per-managed-region
   checksums). There is no parallel metadata file. See [updates.md](./updates.md).
 - The tool inserts managed sections into the user's `Justfile` and into a small set of shared
-  config files (`deny.toml`, `[workspace.lints]` in the workspace `Cargo.toml`, and `[lints]`
-  in each crate's `Cargo.toml`, plus `.delta.toml` and `rustfmt.toml`). Outside those sections,
+  config files (`deny.toml`, separate `[workspace.lints.<namespace>]` regions in the workspace
+  `Cargo.toml`, and `[lints]` in each member crate's `Cargo.toml`, plus `.delta.toml` and
+  `rustfmt.toml`). Outside those sections,
   the user's content is preserved verbatim. Everything else is in tool-owned files under
   `justfiles/anvil/` and the backend-specific cloud workflows directories.
 
@@ -362,12 +363,12 @@ Four escape valves, in increasing severity:
    The path of least resistance and the recommended approach for project-specific checks.
 2. **Edit a managed-region host file outside the sentinels**: extra recipes in your
    `Justfile`, extra rules in `deny.toml` outside the managed regions (or in the gaps
-   between its per-section regions), extra clippy
-   lints written in dotted-key form after the closing sentinel (e.g. `clippy.pedantic = "warn"`
-   in the `[workspace.lints]` scope). The tool preserves everything outside the
-   sentinels verbatim. Note that TOML forbids redeclaring a table header (`[workspace.lints.clippy]`
-   etc.), so user extensions must use dotted-key form or sit in a different parent
-   table. Repeating a managed key is invalid TOML; editing it inside the block
+   between its per-section regions), and extra lint keys written in bare form immediately
+   after the matching namespace sentinel (for example, `pedantic = "warn"` after
+   `anvil-workspace-clippy-lints`). The tool preserves everything outside the
+   sentinels verbatim. Note that TOML forbids redeclaring a table header
+   (`[workspace.lints.clippy]` etc.), so user extensions continue the table opened by
+   the managed region. Repeating a managed key is invalid TOML; editing it inside the block
    causes a refusal, even if the template has not changed.
 3. **Disable an owned file by emptying it.** An unchanged template leaves it alone;
    a changed template can produce a `.anvil-proposed` sibling. Emptying a managed

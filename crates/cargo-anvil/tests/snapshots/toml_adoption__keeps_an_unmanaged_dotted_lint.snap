@@ -30,7 +30,6 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.lints]
-
 # >>> anvil-managed: anvil-workspace-rust-lints
 [workspace.lints.rust]
 # Rust compiler lint policy. Repository-specific Rust lints can follow this

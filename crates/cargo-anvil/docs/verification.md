@@ -29,8 +29,9 @@ See also:
 ### 2.1 Self-hosting (primary)
 
 `microsoft/ox-tools` is the canonical adopter of `cargo-anvil`. Its `.github/workflows/`,
-`.github/actions/`, `justfiles/anvil/`, `[workspace.lints]` region in `Cargo.toml`, etc.
-are all emitted by `cargo anvil` against the in-repo version of the binary. There
+`.github/actions/`, `justfiles/anvil/`, and the `anvil-workspace-rust-lints`,
+`anvil-workspace-rustdoc-lints`, and `anvil-workspace-clippy-lints` regions in
+`Cargo.toml` are all emitted by `cargo anvil` against the in-repo version of the binary. There
 is no manual maintenance of these files after the initial migration.
 
 Every PR runs (via a small bootstrap workflow described in §3):
