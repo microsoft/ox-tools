@@ -2139,6 +2139,26 @@ mod tests {
             );
         }
 
+        /// The static-library / shared-library boundary: different archive
+        /// and shared-library names, and only the shared library emits an
+        /// uplifted debug-info file.
+        #[test]
+        fn passes_when_a_staticlib_and_a_cdylib_share_a_library_name() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example").with_library("shared_lib", "staticlib"),
+                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "cdylib"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                output.status.success(),
+                "a static library and a shared library of one name emit different files: {diagnostic}"
+            );
+        }
+
         /// Cargo keys its own collision check by exact path, so names that
         /// differ only in case are distinct targets to Cargo and must not be
         /// merged here.

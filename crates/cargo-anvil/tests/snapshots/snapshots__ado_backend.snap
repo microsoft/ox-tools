@@ -4436,9 +4436,12 @@ anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
         'proc-macro' = 'shared library'
         'staticlib' = 'static library'
     }
-    # Every uplifted file each family emits. The import library and export
-    # file beside a Windows DLL are named after the DLL, so keying the DLL
-    # covers them; the debug-info file is not, so it is keyed on its own.
+    # Every uplifted file each family emits. Files whose name is derived
+    # from another artifact are covered by that artifact's key and are not
+    # listed: the import library and export file beside a Windows DLL, and
+    # the `<artifact>.cargo-sbom.json` sidecar when a build enables SBOM
+    # generation. The debug-info file is not derived that way -- it is
+    # `<name>.pdb`, not `<name>.exe.pdb` -- so it is keyed on its own.
     $artifacts = @{
         'executable' = @('<name>[.exe]', '<name>.pdb')
         'rust library' = @('lib<name>.rlib')
