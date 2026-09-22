@@ -1564,6 +1564,7 @@ mod tests {
         sender.send(terminal).expect("reaper receiver is connected");
         drop(sender);
 
+        let (done_sender, done_receiver) = mpsc::channel();
         let worker = thread::spawn({
             let reports = Arc::clone(&reports);
             move || {
@@ -1586,6 +1587,7 @@ mod tests {
                         reports.fetch_add(1, Ordering::SeqCst);
                     },
                 );
+                let _receiver_gone = done_sender.send(());
             }
         });
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1597,6 +1599,9 @@ mod tests {
             1,
             "the ready group must be collected while another group remains pending"
         );
+        done_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the finite fake reaper must stop after the sender disconnects");
         worker.join().expect("the finite fake reaper exits");
         assert_eq!(collected.load(Ordering::SeqCst), 2);
         assert_eq!(reports.load(Ordering::SeqCst), 1, "each failing group is reported once");
