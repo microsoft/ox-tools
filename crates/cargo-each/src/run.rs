@@ -158,7 +158,7 @@ fn execute_sequential(plan: &Plan, keep_going: bool, timeout: Option<Duration>, 
         if let Some(timeout) = timeout {
             run_streamed_with_timeout(invocation, timeout, reaper)
         } else {
-            run_streamed(invocation)
+            run_streamed(invocation, reaper)
         }
     })
 }
@@ -375,15 +375,8 @@ fn panic_description(payload: &(dyn std::any::Any + Send)) -> &str {
     }
 }
 
-fn run_streamed(invocation: &Invocation) -> InvocationResult {
-    let (program, mut command) = match command_for(invocation) {
-        Ok(command) => command,
-        Err(message) => return InvocationResult::Infrastructure(message),
-    };
-    match command.status() {
-        Ok(status) => InvocationResult::Exited(status),
-        Err(error) => InvocationResult::Infrastructure(format!("failed to spawn `{program}`: {error}")),
-    }
+fn run_streamed(invocation: &Invocation, reaper: &GroupReaper) -> InvocationResult {
+    run_streamed_group_with(invocation, None, reaper, spawn_group)
 }
 
 fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration, reaper: &GroupReaper) -> InvocationResult {
@@ -393,6 +386,15 @@ fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration, reaper:
 fn run_streamed_with_timeout_with(
     invocation: &Invocation,
     timeout: Duration,
+    reaper: &GroupReaper,
+    spawn: impl FnOnce(Command) -> Result<GroupChild, String>,
+) -> InvocationResult {
+    run_streamed_group_with(invocation, Some(timeout), reaper, spawn)
+}
+
+fn run_streamed_group_with(
+    invocation: &Invocation,
+    timeout: Option<Duration>,
     reaper: &GroupReaper,
     spawn: impl FnOnce(Command) -> Result<GroupChild, String>,
 ) -> InvocationResult {
@@ -408,7 +410,7 @@ fn run_streamed_with_timeout_with(
     };
     wait_for_process(
         tree,
-        Some(timeout),
+        timeout,
         |process| process.inner().try_wait(),
         |process| terminate_group_bounded(process, reaper),
         "observe child process leader",
@@ -1799,7 +1801,9 @@ mod tests {
     fn direct_runners_report_empty_and_unspawnable_commands() {
         let reaper = test_reaper();
         let empty = invocation(&[]);
-        assert!(matches!(run_streamed(&empty), InvocationResult::Infrastructure(message) if message.contains("empty argument vector")));
+        assert!(
+            matches!(run_streamed(&empty, &reaper), InvocationResult::Infrastructure(message) if message.contains("empty argument vector"))
+        );
         assert!(infrastructure_message(run_captured(&empty, None, &reaper)).contains("empty argument vector"));
         assert!(matches!(
             run_streamed_with_timeout(&empty, Duration::from_secs(1), &reaper),
@@ -1807,7 +1811,9 @@ mod tests {
         ));
 
         let missing = invocation(&["__cargo_each_missing_program_for_unit_test__"]);
-        assert!(matches!(run_streamed(&missing), InvocationResult::Infrastructure(message) if message.contains("failed to spawn")));
+        assert!(
+            matches!(run_streamed(&missing, &reaper), InvocationResult::Infrastructure(message) if message.contains("failed to spawn"))
+        );
         assert!(infrastructure_message(run_captured(&missing, None, &reaper)).contains("failed to spawn"));
 
         let injected = run_streamed_with_timeout_with(&invocation(&["rustc", "--version"]), Duration::from_secs(1), &reaper, |_| {

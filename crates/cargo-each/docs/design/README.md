@@ -335,9 +335,10 @@ no-op.
   count. A wave is fully observed, emitted, and dropped before the next wave
   starts, so the number of retained invocation captures is also capped by the
   effective worker count.
-  Without `--timeout`, parallel commands are still launched in a Windows job
-  or Unix process group, but cargo-each observes only the launched leader and
-  does not kill background descendants.
+  Every launched command uses a Windows job or Unix process group. Without
+  `--timeout`, cargo-each observes only the launched leader and does not kill
+  ordinary background descendants. A post-spawn leader-observation failure
+  enters the same bounded group termination and reaper path as timeout cleanup.
 - **Parallel capture uses finite temporary-file snapshots.** Every genuinely
   parallel invocation redirects stdout and stderr directly to separate unique
   temporary files before group spawn; no pipe-reader threads are created. The
