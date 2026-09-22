@@ -1384,6 +1384,92 @@ fn consume_without_downloaded_cache_fails_loudly() {
     );
 }
 
+#[test]
+#[serial]
+fn consume_input_override_reads_complete_cache_and_fails_closed() {
+    if !core_tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    let shim = ShimBin::tripwire_cargo();
+
+    // A complete default cache exists to make any accidental fallback
+    // observable when the selected input later loses one tier.
+    let default_cache = root.join("target/anvil/impact");
+    for (file, spec) in [
+        ("include_modified.txt", "--package default-modified@0.1.0"),
+        ("include_affected.txt", "--workspace"),
+        ("include_required.txt", "--workspace"),
+    ] {
+        write(&default_cache.join(file), spec);
+    }
+
+    let injected = TempDir::new().unwrap();
+    for (file, spec) in [
+        ("include_modified.txt", "--package injected-modified@0.1.0"),
+        ("include_affected.txt", "--package injected-affected@0.1.0"),
+        ("include_required.txt", "--package injected-required@0.1.0"),
+    ] {
+        write(&injected.path().join(file), spec);
+    }
+    let command = |args: &[&str]| {
+        just_cmd(root, args)
+            .env("ANVIL_IMPACT", "consume")
+            .env("ANVIL_IMPACT_INPUT_DIR", injected.path())
+            .env("PATH", &shim.path)
+            .env("ANVIL_TEST_LOG", &shim.log)
+            .output()
+            .unwrap()
+    };
+
+    let complete = command(&["anvil-impact"]);
+    assert!(
+        complete.status.success(),
+        "consume with a complete injected cache must succeed:\n{}{}",
+        String::from_utf8_lossy(&complete.stdout),
+        String::from_utf8_lossy(&complete.stderr)
+    );
+    for (tier, expected) in [
+        ("modified", "--package injected-modified@0.1.0"),
+        ("affected", "--package injected-affected@0.1.0"),
+        ("required", "--package injected-required@0.1.0"),
+    ] {
+        let include = command(&["_anvil-impact-include", tier]);
+        assert!(
+            include.status.success(),
+            "reading the injected {tier} tier failed:\n{}{}",
+            String::from_utf8_lossy(&include.stdout),
+            String::from_utf8_lossy(&include.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&include.stdout).trim(),
+            expected,
+            "the {tier} tier must come from the injected cache"
+        );
+    }
+
+    fs::remove_file(injected.path().join("include_affected.txt")).unwrap();
+    for args in [&["anvil-impact"][..], &["_anvil-impact-include", "affected"][..]] {
+        let out = command(args);
+        let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(
+            !out.status.success(),
+            "an injected cache missing one tier must fail instead of falling back:\n{combined}"
+        );
+        assert!(
+            combined.contains("affected"),
+            "the diagnostic must name the missing injected tier:\n{combined}"
+        );
+    }
+
+    assert!(
+        shim.log_lines().is_empty(),
+        "consume must not invoke cargo-delta while reading an injected cache, but did: {:?}",
+        shim.log_lines()
+    );
+}
+
 /// Invoke the emitted `_anvil-impact-format` helper directly against a
 /// hand-written impact JSON file, returning (trimmed stdout, stderr, success).
 /// This exercises the formatter's mapping logic -- name/lib/proc-macro
