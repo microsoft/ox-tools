@@ -687,11 +687,7 @@ fn mask_legacy_lint_region_to_header(text: &str, syntax: CommentSyntax) -> Strin
         let start = if let Some(relative) = region.body_str().find(header) {
             region.body.start + relative
         } else if region.is_empty() {
-            if region.body.end - region.body.start >= header.len() {
-                region.body.start
-            } else {
-                region.end_line.start
-            }
+            region.body.start
         } else {
             continue;
         };

@@ -349,6 +349,32 @@ fn untracked_combined_lint_region_is_refused() {
 }
 
 #[test]
+fn untracked_single_crate_combined_lint_region_is_refused() {
+    let old_body = "[lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
+    let before = format!(
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         # >>> anvil-managed: anvil-lints\n{old_body}\
+         # <<< anvil-managed: anvil-lints\n"
+    );
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("Cargo.toml"), &before);
+    write(&tmp.path().join("src/lib.rs"), "");
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(
+        outcome
+            .plan
+            .refusals()
+            .iter()
+            .any(|item| item.contains("manifest does not record it as owned")),
+        "{:?}",
+        outcome.plan.refusals()
+    );
+    assert_eq!(after, before);
+}
+
+#[test]
 fn replaces_the_single_crate_combined_lint_region() {
     let old_body = "[lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
     let before = format!(
