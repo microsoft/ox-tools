@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::num::NonZeroUsize;
 use std::panic::{self, UnwindSafe};
-use std::process::{Command, ExitCode, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
@@ -140,7 +140,7 @@ fn parse_target_kinds(kinds: &[String]) -> Result<BTreeSet<TargetKind>, AppError
 }
 
 fn execute(plan: &Plan, keep_going: bool, jobs: NonZeroUsize, timeout: Option<Duration>) -> Result<ExitCode, AppError> {
-    let reaper = GroupReaper::start().into_app_err("failed to start cargo-each process-group reaper")?;
+    let reaper = ProcessReaper::start().into_app_err("failed to start cargo-each process reaper")?;
     let worker_count = effective_worker_count(jobs, plan.invocations.len());
     if worker_count.get() == 1 {
         Ok(execute_sequential(plan, keep_going, timeout, &reaper))
@@ -153,7 +153,7 @@ fn effective_worker_count(requested: NonZeroUsize, plan_size: usize) -> NonZeroU
     NonZeroUsize::new(requested.get().min(plan_size)).expect("Plan::is_empty is checked before execute, so the execution plan is nonempty")
 }
 
-fn execute_sequential(plan: &Plan, keep_going: bool, timeout: Option<Duration>, reaper: &GroupReaper) -> ExitCode {
+fn execute_sequential(plan: &Plan, keep_going: bool, timeout: Option<Duration>, reaper: &ProcessReaper) -> ExitCode {
     execute_sequential_with(plan, keep_going, timeout, |invocation, timeout| {
         if let Some(timeout) = timeout {
             run_streamed_with_timeout(invocation, timeout, reaper)
@@ -205,7 +205,7 @@ fn execute_parallel(
     keep_going: bool,
     worker_count: NonZeroUsize,
     timeout: Option<Duration>,
-    reaper: &GroupReaper,
+    reaper: &ProcessReaper,
 ) -> Result<ExitCode, AppError> {
     let invocations = plan.invocations.clone();
     let mut workers = Vec::with_capacity(worker_count.get());
@@ -306,7 +306,7 @@ fn failure_stops_launching(keep_going: bool, failed: bool) -> bool {
     matches!((keep_going, failed), (false, true))
 }
 
-fn spawn_worker(index: usize, invocation: Invocation, timeout: Option<Duration>, reaper: GroupReaper) -> io::Result<RunningWorker> {
+fn spawn_worker(index: usize, invocation: Invocation, timeout: Option<Duration>, reaper: ProcessReaper) -> io::Result<RunningWorker> {
     #[cfg(test)]
     if invocation
         .argv
@@ -375,18 +375,43 @@ fn panic_description(payload: &(dyn std::any::Any + Send)) -> &str {
     }
 }
 
-fn run_streamed(invocation: &Invocation, reaper: &GroupReaper) -> InvocationResult {
-    run_streamed_group_with(invocation, None, reaper, spawn_group)
+fn run_streamed(invocation: &Invocation, reaper: &ProcessReaper) -> InvocationResult {
+    run_streamed_with(invocation, reaper, spawn_child)
 }
 
-fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration, reaper: &GroupReaper) -> InvocationResult {
+fn run_streamed_with(
+    invocation: &Invocation,
+    reaper: &ProcessReaper,
+    spawn: impl FnOnce(Command) -> Result<Child, String>,
+) -> InvocationResult {
+    let (program, command) = match command_for(invocation) {
+        Ok(command) => command,
+        Err(message) => return InvocationResult::Infrastructure(message),
+    };
+    let child = match spawn(command) {
+        Ok(child) => child,
+        Err(error) => {
+            return InvocationResult::Infrastructure(format!("failed to spawn `{program}`: {error}"));
+        }
+    };
+    wait_for_process(
+        child,
+        None,
+        Child::try_wait,
+        |child| terminate_child_bounded(child, reaper),
+        "observe child process",
+    )
+    .result
+}
+
+fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration, reaper: &ProcessReaper) -> InvocationResult {
     run_streamed_with_timeout_with(invocation, timeout, reaper, spawn_group)
 }
 
 fn run_streamed_with_timeout_with(
     invocation: &Invocation,
     timeout: Duration,
-    reaper: &GroupReaper,
+    reaper: &ProcessReaper,
     spawn: impl FnOnce(Command) -> Result<GroupChild, String>,
 ) -> InvocationResult {
     run_streamed_group_with(invocation, Some(timeout), reaper, spawn)
@@ -395,7 +420,7 @@ fn run_streamed_with_timeout_with(
 fn run_streamed_group_with(
     invocation: &Invocation,
     timeout: Option<Duration>,
-    reaper: &GroupReaper,
+    reaper: &ProcessReaper,
     spawn: impl FnOnce(Command) -> Result<GroupChild, String>,
 ) -> InvocationResult {
     let (program, command) = match command_for(invocation) {
@@ -418,7 +443,7 @@ fn run_streamed_group_with(
     .result
 }
 
-fn run_captured(invocation: &Invocation, timeout: Option<Duration>, reaper: &GroupReaper) -> BufferedOutcome {
+fn run_captured(invocation: &Invocation, timeout: Option<Duration>, reaper: &ProcessReaper) -> BufferedOutcome {
     #[cfg(test)]
     assert!(
         invocation.argv.first().is_none_or(|program| program != WORKER_PANIC_TEST_PROGRAM),
@@ -431,7 +456,7 @@ fn run_captured(invocation: &Invocation, timeout: Option<Duration>, reaper: &Gro
 fn run_captured_with(
     invocation: &Invocation,
     timeout: Option<Duration>,
-    reaper: &GroupReaper,
+    reaper: &ProcessReaper,
     mut capture: impl FnMut(&'static str) -> io::Result<(Box<dyn SnapshotSource>, Stdio)>,
     spawner: impl FnOnce(Command) -> Result<GroupChild, String>,
 ) -> BufferedOutcome {
@@ -519,6 +544,10 @@ fn spawn_group(mut command: Command) -> Result<GroupChild, String> {
     command.group_spawn().map_err(|error| error.to_string())
 }
 
+fn spawn_child(mut command: Command) -> Result<Child, String> {
+    command.spawn().map_err(|error| error.to_string())
+}
+
 fn create_output_capture(_stream: &'static str) -> io::Result<(Box<dyn SnapshotSource>, Stdio)> {
     let temporary = tempfile::NamedTempFile::new()?;
     let reader = temporary.reopen()?;
@@ -585,14 +614,21 @@ fn wait_for_process<T>(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn terminate_group_bounded(child: GroupChild, reaper: &GroupReaper) -> io::Result<ExitStatus> {
+fn terminate_group_bounded(child: GroupChild, reaper: &ProcessReaper) -> io::Result<ExitStatus> {
     terminate_group_with(
         child,
         TERMINATION_GRACE,
         GroupChild::kill,
         |child| child.inner().try_wait(),
-        |child| reaper.handoff(child),
+        |child| reaper.handoff_group(child),
     )
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn terminate_child_bounded(child: Child, reaper: &ProcessReaper) -> io::Result<ExitStatus> {
+    terminate_group_with(child, TERMINATION_GRACE, Child::kill, Child::try_wait, |child| {
+        reaper.handoff_child(child)
+    })
 }
 
 fn terminate_group_with<T>(
@@ -612,10 +648,10 @@ fn terminate_group_with<T>(
         Ok(None) => {
             let reaper = detach(child);
             let message = kill_error.map_or_else(
-                || format!("process group did not exit within {} ms after termination", grace.as_millis()),
+                || format!("process boundary did not exit within {} ms after termination", grace.as_millis()),
                 |error| {
                     format!(
-                        "{error}; process group did not exit within {} ms after termination",
+                        "{error}; process boundary did not exit within {} ms after termination",
                         grace.as_millis()
                     )
                 },
@@ -626,26 +662,28 @@ fn terminate_group_with<T>(
             let reaper = detach(child);
             Err(io::Error::new(
                 error.kind(),
-                with_reaper_handoff(&format!("failed to observe process group after termination: {error}"), &reaper),
+                with_reaper_handoff(&format!("failed to observe process boundary after termination: {error}"), &reaper),
             ))
         }
     }
 }
 
 #[derive(Debug)]
-struct GroupReaper {
-    sender: mpsc::Sender<GroupChild>,
+struct ProcessReaper {
+    group_sender: mpsc::Sender<GroupChild>,
+    child_sender: mpsc::Sender<Child>,
 }
 
-impl Clone for GroupReaper {
+impl Clone for ProcessReaper {
     fn clone(&self) -> Self {
         Self {
-            sender: self.sender.clone(),
+            group_sender: self.group_sender.clone(),
+            child_sender: self.child_sender.clone(),
         }
     }
 }
 
-impl GroupReaper {
+impl ProcessReaper {
     fn start() -> io::Result<Self> {
         Self::start_with(|job| {
             thread::Builder::new()
@@ -655,17 +693,29 @@ impl GroupReaper {
         })
     }
 
-    fn start_with(spawn: impl FnOnce(ReaperJob) -> io::Result<()>) -> io::Result<Self> {
-        let (sender, receiver) = mpsc::channel();
+    fn start_with(mut spawn: impl FnMut(ReaperJob) -> io::Result<()>) -> io::Result<Self> {
+        let (group_sender, group_receiver) = mpsc::channel();
         spawn(Box::new(move || {
-            poll_reaper(&receiver, GroupChild::try_wait, report_reaper_failure);
+            poll_reaper(&group_receiver, GroupChild::try_wait, report_reaper_failure);
         }))?;
-        Ok(Self { sender })
+        let (child_sender, child_receiver) = mpsc::channel();
+        spawn(Box::new(move || {
+            poll_reaper(&child_receiver, Child::try_wait, report_reaper_failure);
+        }))?;
+        Ok(Self {
+            group_sender,
+            child_sender,
+        })
     }
 
-    fn handoff(&self, child: GroupChild) -> io::Result<()> {
+    fn handoff_group(&self, child: GroupChild) -> io::Result<()> {
         let retained = failed_handoffs();
-        handoff_group_with_fallback(&self.sender, retained, child, || start_failed_handoff_reaper(retained))
+        handoff_group_with_fallback(&self.group_sender, retained, child, || start_failed_handoff_reaper(retained))
+    }
+
+    fn handoff_child(&self, child: Child) -> io::Result<()> {
+        let retained = failed_child_handoffs();
+        handoff_group_with_fallback(&self.child_sender, retained, child, || start_failed_child_handoff_reaper(retained))
     }
 }
 
@@ -679,6 +729,21 @@ fn start_failed_handoff_reaper(retained: &'static Mutex<Vec<GroupChild>>) -> io:
     start_failed_handoff_reaper_with(retained, &RUNNING, GroupChild::try_wait, report_reaper_failure, |job| {
         thread::Builder::new()
             .name("cargo-each-fallback-reaper".to_owned())
+            .spawn(job)
+            .map(drop)
+    })
+}
+
+fn failed_child_handoffs() -> &'static Mutex<Vec<Child>> {
+    static FAILED_HANDOFFS: OnceLock<Mutex<Vec<Child>>> = OnceLock::new();
+    FAILED_HANDOFFS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn start_failed_child_handoff_reaper(retained: &'static Mutex<Vec<Child>>) -> io::Result<()> {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    start_failed_handoff_reaper_with(retained, &RUNNING, Child::try_wait, report_reaper_failure, |job| {
+        thread::Builder::new()
+            .name("cargo-each-fallback-child-reaper".to_owned())
             .spawn(job)
             .map(drop)
     })
@@ -808,8 +873,8 @@ fn retain_after_reaper_observation(observation: io::Result<Option<ExitStatus>>, 
 
 fn with_reaper_handoff(message: &str, reaper: &io::Result<()>) -> String {
     match reaper {
-        Ok(()) => format!("{message}; the process group was moved to the local polling reaper"),
-        Err(error) => format!("{message}; failed to hand the process group to the local reaper: {error}"),
+        Ok(()) => format!("{message}; the process wait handle was moved to the local polling reaper"),
+        Err(error) => format!("{message}; failed to hand the process wait handle to the local reaper: {error}"),
     }
 }
 
@@ -1082,14 +1147,14 @@ mod tests {
     use std::{io, thread};
 
     use super::{
-        BufferedOutcome, CapturedOutput, CapturedStream, GroupReaper, Invocation, InvocationResult, OutputEmitError, Plan, RunningWorker,
+        BufferedOutcome, CapturedOutput, CapturedStream, Invocation, InvocationResult, OutputEmitError, Plan, ProcessReaper, RunningWorker,
         SnapshotSource, TemporarySnapshot, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
         add_infrastructure_failure, combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel,
-        exit_byte, failed_handoffs, failure_stops_launching, finish_capture, handoff_group, handoff_group_with_fallback, panic_description,
-        parallel_failure_exit_code, poll_process_exit, poll_reaper, record_emitted_failure, retain_after_reaper_observation, run_captured,
-        run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with, spawn_group, spawn_worker,
-        start_failed_handoff_reaper_with, terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker,
-        with_cleanup_failure, with_reaper_handoff,
+        exit_byte, failed_child_handoffs, failed_handoffs, failure_stops_launching, finish_capture, handoff_group,
+        handoff_group_with_fallback, panic_description, parallel_failure_exit_code, poll_process_exit, poll_reaper, record_emitted_failure,
+        retain_after_reaper_observation, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
+        run_streamed_with_timeout_with, spawn_group, spawn_worker, start_failed_handoff_reaper_with, terminate_group_bounded,
+        terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure, with_reaper_handoff,
     };
 
     fn invocation(argv: &[&str]) -> Invocation {
@@ -1175,8 +1240,8 @@ mod tests {
         }
     }
 
-    fn test_reaper() -> GroupReaper {
-        GroupReaper::start().expect("the test process can start its reaper")
+    fn test_reaper() -> ProcessReaper {
+        ProcessReaper::start().expect("the test process can start its reaper")
     }
 
     struct FakeProcess {
@@ -1523,12 +1588,25 @@ mod tests {
 
     #[test]
     fn reaper_startup_failure_is_reported_synchronously() {
-        let error = GroupReaper::start_with(|job| {
+        let error = ProcessReaper::start_with(|job| {
             drop(job);
             Err(io::Error::other("injected reaper startup failure"))
         })
         .expect_err("startup failure must be returned");
         assert!(error.to_string().contains("injected reaper startup failure"));
+
+        let mut starts = 0;
+        let error = ProcessReaper::start_with(|job| {
+            starts += 1;
+            if starts == 1 {
+                thread::Builder::new().spawn(job).map(drop)
+            } else {
+                drop(job);
+                Err(io::Error::other("injected child-reaper startup failure"))
+            }
+        })
+        .expect_err("child-reaper startup failure must be returned");
+        assert!(error.to_string().contains("injected child-reaper startup failure"));
     }
 
     #[test]
@@ -1726,6 +1804,7 @@ mod tests {
     #[test]
     fn failed_handoff_storage_is_process_stable() {
         assert!(std::ptr::eq(failed_handoffs(), failed_handoffs()));
+        assert!(std::ptr::eq(failed_child_handoffs(), failed_child_handoffs()));
     }
 
     #[test]
@@ -1733,12 +1812,18 @@ mod tests {
     fn disconnected_reaper_handoff_is_eventually_collected() {
         let (sender, receiver) = mpsc::channel();
         drop(receiver);
-        let reaper = GroupReaper { sender };
+        let (child_sender, _child_receiver) = mpsc::channel();
+        let reaper = ProcessReaper {
+            group_sender: sender,
+            child_sender,
+        };
         let mut command = Command::new("rustc");
         let _ = command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
         let child = spawn_group(command).expect("spawn a short-lived process group");
 
-        let error = reaper.handoff(child).expect_err("the disconnected primary reaper is reported");
+        let error = reaper
+            .handoff_group(child)
+            .expect_err("the disconnected primary reaper is reported");
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         let deadline = Instant::now() + Duration::from_secs(2);
         while !failed_handoffs()
@@ -1749,12 +1834,51 @@ mod tests {
         {
             thread::sleep(Duration::from_millis(10));
         }
+
         assert!(
             failed_handoffs()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty(),
             "the fallback reaper must eventually collect a recovered handoff"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns a child process and a fallback reaper thread")]
+    fn disconnected_child_reaper_handoff_is_eventually_collected() {
+        let (group_sender, _group_receiver) = mpsc::channel();
+        let (child_sender, child_receiver) = mpsc::channel();
+        drop(child_receiver);
+        let reaper = ProcessReaper {
+            group_sender,
+            child_sender,
+        };
+        let mut command = Command::new("rustc");
+        let child = command
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a short-lived child");
+
+        let error = reaper.handoff_child(child).expect_err("the disconnected child reaper is reported");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !failed_child_handoffs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            failed_child_handoffs()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "the fallback child reaper must eventually collect a recovered handoff"
         );
     }
 
@@ -1775,7 +1899,7 @@ mod tests {
         let _ = quick.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
         let mut group = spawn_group(quick).expect("spawn quick process group");
         group.inner().wait().expect("quick leader exits");
-        reaper.handoff(group).expect("completed group reaches the local reaper");
+        reaper.handoff_group(group).expect("completed group reaches the local reaper");
         drop(reaper);
         thread::sleep(Duration::from_millis(100));
     }

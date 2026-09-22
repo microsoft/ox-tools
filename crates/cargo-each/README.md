@@ -141,11 +141,13 @@ outcomes instead of blocking the scheduler. Worker launch failures retain
 output already collected at earlier plan indices. Parallel work runs in
 plan-contiguous waves capped by the effective worker count; each completed
 wave is emitted and dropped before the next wave starts, bounding retained
-temporary-file storage. Every command is launched in a job or process group.
-Without `--timeout`, cargo-each observes only the leader and does not kill
-background descendants; a post-spawn observation failure still receives
-bounded group cleanup. Every genuinely parallel invocation redirects stdout
-and stderr directly to separate unique temporary files.
+temporary-file storage. Untimed effective-one execution uses an ordinary
+child, preserving terminal foreground behavior and Ctrl-C delivery; a
+post-spawn wait failure gets bounded child cleanup and reaper ownership.
+Timed and genuinely parallel commands use a job or process group. Without
+`--timeout`, cargo-each observes only the leader and does not kill background
+descendants. Every genuinely parallel invocation redirects stdout and
+stderr directly to separate unique temporary files.
 Child writers and parent readers are separately reopened so parent seeks
 cannot move descendant write positions. Cargo-each records each file’s
 current length when the leader completes (or after timeout cleanup), then
