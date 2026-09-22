@@ -1084,9 +1084,10 @@ mod tests {
         SnapshotSource, TemporarySnapshot, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
         add_infrastructure_failure, combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel,
         exit_byte, failed_handoffs, failure_stops_launching, finish_capture, handoff_group, handoff_group_with_fallback, panic_description,
-        parallel_failure_exit_code, poll_process_exit, poll_reaper, record_emitted_failure, run_captured, run_captured_with, run_streamed,
-        run_streamed_with_timeout, run_streamed_with_timeout_with, spawn_group, spawn_worker, start_failed_handoff_reaper_with,
-        terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure, with_reaper_handoff,
+        parallel_failure_exit_code, poll_process_exit, poll_reaper, record_emitted_failure, retain_after_reaper_observation, run_captured,
+        run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with, spawn_group, spawn_worker,
+        start_failed_handoff_reaper_with, terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker,
+        with_cleanup_failure, with_reaper_handoff,
     };
 
     fn invocation(argv: &[&str]) -> Invocation {
@@ -1599,6 +1600,27 @@ mod tests {
         worker.join().expect("the finite fake reaper exits");
         assert_eq!(collected.load(Ordering::SeqCst), 2);
         assert_eq!(reports.load(Ordering::SeqCst), 1, "each failing group is reported once");
+    }
+
+    #[test]
+    fn reaper_observation_retention_distinguishes_transient_and_terminal_states() {
+        let mut reported = Vec::new();
+        assert!(!retain_after_reaper_observation(Ok(Some(successful_status())), &mut |error| {
+            reported.push(error.kind());
+        }));
+        assert!(retain_after_reaper_observation(Ok(None), &mut |error| {
+            reported.push(error.kind());
+        }));
+        assert!(retain_after_reaper_observation(
+            Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted")),
+            &mut |error| {
+                reported.push(error.kind());
+            },
+        ));
+        assert!(!retain_after_reaper_observation(Err(io::Error::other("terminal")), &mut |error| {
+            reported.push(error.kind());
+        },));
+        assert_eq!(reported, [io::ErrorKind::Other]);
     }
 
     #[test]
