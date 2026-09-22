@@ -394,14 +394,30 @@ fn run_streamed_with(
             return InvocationResult::Infrastructure(format!("failed to spawn `{program}`: {error}"));
         }
     };
+    let control = StreamedChild { child, reaper };
     wait_for_process(
-        child,
+        control,
         None,
-        Child::try_wait,
-        |child| terminate_child_bounded(child, reaper),
+        observe_streamed_child,
+        terminate_streamed_child,
         "observe child process",
     )
     .result
+}
+
+struct StreamedChild<'a> {
+    child: Child,
+    reaper: &'a ProcessReaper,
+}
+
+fn observe_streamed_child(control: &mut StreamedChild<'_>) -> io::Result<Option<ExitStatus>> {
+    control.child.try_wait()
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[mutants::skip] // Thin ownership adapter for an OS wait-error path; terminate_child_bounded has a real-process regression.
+fn terminate_streamed_child(control: StreamedChild<'_>) -> io::Result<ExitStatus> {
+    terminate_child_bounded(control.child, control.reaper)
 }
 
 fn run_streamed_with_timeout(invocation: &Invocation, timeout: Duration, reaper: &ProcessReaper) -> InvocationResult {
@@ -1153,8 +1169,8 @@ mod tests {
         exit_byte, failed_child_handoffs, failed_handoffs, failure_stops_launching, finish_capture, handoff_group,
         handoff_group_with_fallback, panic_description, parallel_failure_exit_code, poll_process_exit, poll_reaper, record_emitted_failure,
         retain_after_reaper_observation, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
-        run_streamed_with_timeout_with, spawn_group, spawn_worker, start_failed_handoff_reaper_with, terminate_group_bounded,
-        terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure, with_reaper_handoff,
+        run_streamed_with_timeout_with, spawn_group, spawn_worker, start_failed_handoff_reaper_with, terminate_child_bounded,
+        terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure, with_reaper_handoff,
     };
 
     fn invocation(argv: &[&str]) -> Invocation {
@@ -1893,6 +1909,12 @@ mod tests {
         let started = Instant::now();
         let error = terminate_group_bounded(group, &reaper).expect("killed process group is reaped");
         assert!(!error.success());
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let child = sleeping_test_command().spawn().expect("spawn sleeping direct child");
+        let started = Instant::now();
+        let status = terminate_child_bounded(child, &reaper).expect("killed direct child is reaped");
+        assert!(!status.success());
         assert!(started.elapsed() < Duration::from_secs(2));
 
         let mut quick = Command::new("rustc");
