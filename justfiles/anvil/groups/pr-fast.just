@@ -15,6 +15,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-license-headers \
     anvil-ensure-no-cyclic-deps \
     anvil-ensure-no-default-features \
+    anvil-unique-target-names \
     anvil-doc-build \
     anvil-readme-check \
     anvil-spellcheck \
@@ -41,6 +42,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-license-headers-setup installer) \
     (anvil-ensure-no-cyclic-deps-setup installer) \
     (anvil-ensure-no-default-features-setup installer) \
+    (anvil-unique-target-names-setup installer) \
     (anvil-doc-build-setup installer) \
     (anvil-readme-check-setup installer) \
     (anvil-spellcheck-setup installer) \
@@ -61,6 +63,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-license-headers-validate-prereqs \
     anvil-ensure-no-cyclic-deps-validate-prereqs \
     anvil-ensure-no-default-features-validate-prereqs \
+    anvil-unique-target-names-validate-prereqs \
     anvil-doc-build-validate-prereqs \
     anvil-readme-check-validate-prereqs \
     anvil-spellcheck-validate-prereqs \

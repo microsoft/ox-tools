@@ -60,6 +60,7 @@ flowchart LR
     pr_fast --> license_headers[license-headers]:::check
     pr_fast --> ensure_no_cyclic_deps[ensure-no-cyclic-deps]:::check
     pr_fast --> ensure_no_default_features[ensure-no-default-features]:::check
+    pr_fast --> unique_target_names[unique-target-names]:::check
     pr_fast --> doc_build[doc-build]:::check
     pr_fast --> readme_check[readme-check]:::check
     pr_fast --> spellcheck[spellcheck]:::check
@@ -182,6 +183,7 @@ while paired prerequisite validation remains read-only.
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |
 | `ensure-no-cyclic-deps`        | `cargo ensure-no-cyclic-deps --workspace`                 | oxidizer-github (sibling crate in `ox-tools-gh`) |
 | `ensure-no-default-features`   | `cargo ensure-no-default-features --workspace`            | oxidizer-github |
+| `unique-target-names`          | Reads `cargo metadata --no-deps` and fails when two workspace packages declare the same uplifted target name. Cargo copies binaries, examples, and `cdylib` / `dylib` / `staticlib` libraries out of `deps/` into `target/<profile>/` (examples into `target/<profile>/examples/`) without a metadata hash, so duplicates share one file -- plus one debug-info file on Windows, and one SBOM sidecar when CI generates them. Cargo reports `output filename collision`, warns it may become a hard error, and builds anyway. Test and benchmark binaries, build scripts, and `lib` / `rlib` / `proc-macro` libraries keep their metadata hash in `deps/`, so duplicate names there are not reported. Duplicates inside a single package are already rejected by Cargo. A `[script("pwsh", "-NoProfile")]` recipe; there is no cargo subcommand for this. | oxidizer |
 | `doc-build`                    | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps`. Local `--open` adds Cargo's `--open`; cloud workflows retain the non-interactive default. | oxidizer-github |
 | `readme-check`                 | `cargo doc2readme --check` for each publishable crate that does not opt out through `[package.metadata.ox-gen-readme]`; generation and checking share one crate-selection path, library or proc-macro rustdoc is preferred, and binary rustdoc is used for bin-only crates | oxidizer-github |
 | `spellcheck`                   | `cargo spellcheck check --code 1`                         | oxidizer-github |
@@ -362,7 +364,7 @@ What that means concretely:
 - **Run only in PR** -- checks whose outcome is fully determined by the source tree and
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,
-  `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
+  `ensure-no-default-features`, `unique-target-names`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
   `udeps`, `semver-check`, `external-types`, `careful`, `loom`, `bolero`,
   diff-scoped `mutants`.
 - **Run only in scheduled** -- the expensive whole-workspace work that doesn't fit a PR
@@ -417,7 +419,7 @@ Bucket assignments per check:
 | modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features` |
 | affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `msrv-test`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
 | required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
-| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck` |
+| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck`, `unique-target-names` |
 
 \* cargo-delta's README recommends `clippy` with the modified tier. anvil deliberately
 runs it on the affected set instead: a change in a crate's API can introduce clippy lints

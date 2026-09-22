@@ -179,7 +179,9 @@
 //!   [`cargo-sort`](https://crates.io/crates/cargo-sort), license headers with
 //!   [`cargo-heather`](https://crates.io/crates/cargo-heather),
 //!   [`cargo-ensure-no-cyclic-deps`](https://crates.io/crates/cargo-ensure-no-cyclic-deps),
-//!   and [`cargo-ensure-no-default-features`](https://crates.io/crates/cargo-ensure-no-default-features).
+//!   [`cargo-ensure-no-default-features`](https://crates.io/crates/cargo-ensure-no-default-features),
+//!   and unique uplifted binary, example, and library target names
+//!   (`unique-target-names`).
 //! - **Documentation and repository policy:** Cargo documentation
 //!   (`doc-build`), documentation tests (`doc-test`), generated README checks
 //!   with [`cargo-doc2readme`](https://crates.io/crates/cargo-doc2readme),

@@ -126,6 +126,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "semver-check",
         "spellcheck",
         "udeps",
+        "unique-target-names",
     ]
 );
 
@@ -296,6 +297,11 @@ mod tests {
             ("semver-check", Affected),
             ("spellcheck", Unscoped),
             ("udeps", Required),
+            // unique-target-names is unscoped: a collision needs two packages
+            // to declare the same target name, and only one of them has to be
+            // in the diff, so scoping to the modified set would miss the half
+            // of the pair that was already on main.
+            ("unique-target-names", Unscoped),
         ]
     };
 
@@ -355,6 +361,7 @@ mod tests {
             "all affected packages opted out of coverage",
             "could not resolve the cargo-careful executable",
             "anvil-mutants-full: aarch64-pc-windows-msvc",
+            "anvil-unique-target-names: cargo metadata failed",
         ] {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
         }
@@ -374,6 +381,31 @@ mod tests {
             "bolero discovery must not pass repeated --package arguments"
         );
         assert!(!checks.contains("bolero list failed; assuming no targets"));
+    }
+
+    /// The collision guard must cover exactly the target kinds Cargo uplifts
+    /// to a shared, hash-free path, and must fail rather than warn.
+    #[test]
+    fn unique_target_names_guards_only_uplifted_target_kinds() {
+        let body = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/unique-target-names.just").then_some(*body))
+            .expect("unique-target-names.just is registered in CHECK_FILES above");
+        // Exactly the crate types Cargo copies out of `deps/`; `lib`, `rlib`,
+        // and `proc-macro` keep their metadata hash and cannot collide.
+        assert!(body.contains("$uplifted = @('bin', 'cdylib', 'dylib', 'staticlib')"));
+        // Test, benchmark, and build-script binaries stay in `deps/` even
+        // though their crate type is `bin`.
+        assert!(body.contains("$hashed = @('test', 'bench', 'custom-build')"));
+        assert!(
+            body.contains("if ($uplifted -notcontains $crateType) { continue }"),
+            "the guard must skip every crate type that is not uplifted"
+        );
+        assert!(
+            body.contains("'target/<profile>/examples'"),
+            "examples uplift to their own directory and must be keyed separately from binaries"
+        );
+        assert!(body.contains("exit 1"), "a detected collision must fail the check rather than warn");
     }
 
     #[test]
@@ -599,7 +631,7 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (24, 7),
+            (24, 8),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
     }
@@ -1680,6 +1712,223 @@ mod tests {
             fs::write(root.join("rust-toolchain.toml"), "[toolchain]\npath = \"toolchains/custom\"\n")
                 .expect("toolchain fixture must be writable");
             assert_eq!(resolve_msrv(root), "1.93");
+        }
+    }
+
+    /// Executes the shipped `anvil-unique-target-names` recipe against
+    /// synthetic workspaces, so the collision rule is verified as behavior
+    /// rather than as a string in the template.
+    #[cfg(not(miri))]
+    mod unique_target_names_recipe_tests {
+        use std::path::{Path, PathBuf};
+        use std::process::{Command, Output};
+        use std::{env, fs};
+
+        use tempfile::{Builder, TempDir};
+
+        use super::CHECK_FILES;
+
+        /// A workspace member: its name plus the names of its uplifted
+        /// example and binary targets.
+        struct Member<'a> {
+            package: &'a str,
+            example: &'a str,
+            binary: &'a str,
+        }
+
+        fn check_template() -> &'static str {
+            CHECK_FILES
+                .iter()
+                .find_map(|(path, body)| path.ends_with("/unique-target-names.just").then_some(*body))
+                .expect("unique-target-names.just is registered in CHECK_FILES above")
+        }
+
+        fn tools_available() -> bool {
+            ["just", "pwsh", "cargo"].iter().all(|tool| tool_path(tool).is_some())
+        }
+
+        fn tool_path(name: &str) -> Option<PathBuf> {
+            let executable = format!("{name}{}", env::consts::EXE_SUFFIX);
+            env::split_paths(&env::var_os("PATH").unwrap_or_default())
+                .map(|directory| directory.join(&executable))
+                .find(|candidate| candidate.is_file())
+        }
+
+        /// Builds a workspace whose members each declare the same duplicated
+        /// `test`, `bench`, and library-crate-type `example` names, plus the
+        /// per-member uplifted example and binary names given by `members`.
+        fn fixture(members: &[Member<'_>]) -> TempDir {
+            let temp = Builder::new()
+                .prefix("anvil repo's [copy] (fork) ")
+                .tempdir()
+                .expect("temporary repository must be creatable");
+            let root = temp.path();
+
+            let list = members
+                .iter()
+                .map(|member| format!("\"{}\"", member.package))
+                .collect::<Vec<_>>()
+                .join(", ");
+            fs::write(
+                root.join("Cargo.toml"),
+                format!("[workspace]\nresolver = \"3\"\nmembers = [{list}]\n"),
+            )
+            .expect("workspace manifest must be writable");
+
+            // The stable-toolchain resolver is exercised by its own tests; here
+            // it is stubbed to an empty argument list so the recipe runs against
+            // the ambient cargo, and the prerequisite recipes are stubbed out.
+            fs::write(root.join("unique-target-names.just"), check_template()).expect("check fixture must be writable");
+            fs::write(
+                root.join("Justfile"),
+                concat!(
+                    "set unstable\n",
+                    "set windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n\n",
+                    "_anvil_stable_toolchain_args := \"@()\"\n\n",
+                    "anvil-tool-rustc-validate-prereqs:\n\n",
+                    "anvil-tool-pwsh-validate-prereqs:\n\n",
+                    "anvil-toolchain-stable-install:\n\n",
+                    "import 'unique-target-names.just'\n",
+                ),
+            )
+            .expect("Justfile fixture must be writable");
+
+            for member in members {
+                let package = root.join(member.package);
+                for directory in ["src", "src/bin", "examples", "tests", "benches"] {
+                    fs::create_dir_all(package.join(directory)).expect("member directories must be creatable");
+                }
+                fs::write(
+                    package.join("Cargo.toml"),
+                    format!(
+                        concat!(
+                            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
+                            "[lib]\npath = \"src/lib.rs\"\n\n",
+                            "[[example]]\nname = \"library_example\"\npath = \"examples/library_example.rs\"\ncrate-type = [\"lib\"]\n"
+                        ),
+                        name = member.package
+                    ),
+                )
+                .expect("member manifest must be writable");
+                fs::write(package.join("src/lib.rs"), "").expect("member library must be writable");
+                fs::write(package.join(format!("src/bin/{}.rs", member.binary)), "fn main() {}\n").expect("member binary must be writable");
+                fs::write(package.join(format!("examples/{}.rs", member.example)), "fn main() {}\n")
+                    .expect("member example must be writable");
+                fs::write(package.join("examples/library_example.rs"), "").expect("library example must be writable");
+                // Duplicated across members on purpose: cargo keeps a metadata
+                // hash on these, so they must never be reported.
+                fs::write(package.join("tests/shared.rs"), "").expect("member test must be writable");
+                fs::write(package.join("benches/shared.rs"), "fn main() {}\n").expect("member bench must be writable");
+            }
+            temp
+        }
+
+        fn run(root: &Path) -> Output {
+            let just = tool_path("just").expect("recipe tests call run only after tools_available confirms Just is on PATH");
+            Command::new(just)
+                .arg("--justfile")
+                .arg(root.join("Justfile"))
+                .arg("anvil-unique-target-names")
+                .current_dir(root)
+                .output()
+                .expect("just must be available to run the collision check")
+        }
+
+        fn combined(output: &Output) -> String {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        }
+
+        #[test]
+        fn fails_when_two_packages_share_an_uplifted_example_name() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member {
+                    package: "alpha",
+                    example: "shared",
+                    binary: "alpha_tool",
+                },
+                Member {
+                    package: "beta",
+                    example: "shared",
+                    binary: "beta_tool",
+                },
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(!output.status.success(), "collision must fail the check: {diagnostic}");
+            assert!(
+                diagnostic.contains("example target 'shared' is declared by 2 workspace packages: alpha, beta"),
+                "diagnostic must name the kind, the target, and every owning package: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("target/<profile>/examples/shared"),
+                "diagnostic must name the contested path: {diagnostic}"
+            );
+            assert!(
+                !diagnostic.contains("library_example"),
+                "a library-crate-type example is never uplifted and must not be reported: {diagnostic}"
+            );
+        }
+
+        #[test]
+        fn fails_when_two_packages_share_an_uplifted_binary_name() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member {
+                    package: "alpha",
+                    example: "alpha_shared",
+                    binary: "tool",
+                },
+                Member {
+                    package: "beta",
+                    example: "beta_shared",
+                    binary: "tool",
+                },
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(!output.status.success(), "collision must fail the check: {diagnostic}");
+            assert!(
+                diagnostic.contains("binary target 'tool' is declared by 2 workspace packages: alpha, beta"),
+                "duplicate binaries must be reported against the profile directory: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("target/<profile>/tool"),
+                "diagnostic must name the contested path: {diagnostic}"
+            );
+        }
+
+        #[test]
+        fn passes_when_only_hashed_target_kinds_repeat() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member {
+                    package: "alpha",
+                    example: "alpha_shared",
+                    binary: "alpha_tool",
+                },
+                Member {
+                    package: "beta",
+                    example: "beta_shared",
+                    binary: "beta_tool",
+                },
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                output.status.success(),
+                "duplicate test, bench, and library-example names must not fail the check: {diagnostic}"
+            );
         }
     }
 }
