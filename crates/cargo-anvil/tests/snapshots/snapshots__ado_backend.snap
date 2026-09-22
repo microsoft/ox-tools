@@ -4387,6 +4387,10 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 # scripts, so duplicate names there are harmless and are not reported. Cargo
 # already rejects duplicate target names inside a single package, so only
 # cross-package duplicates are reported here.
+#
+# Targets are grouped by the file name they produce, not by their crate
+# type: `cdylib` and `dylib` emit the same platform shared-library file, so
+# a collision can cross the two crate types.
 
 # Check that uplifted binary, example, and library target names are unique.
 [script("pwsh", "-NoProfile")]
@@ -4404,9 +4408,23 @@ anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
         exit 1
     }
 
-    # Crate types Cargo copies out of `deps/` into the profile directory, and
-    # the target kinds that are always left in `deps/` with a metadata hash.
-    $uplifted = @('bin', 'cdylib', 'dylib', 'staticlib')
+    # Crate types Cargo copies out of `deps/` into the profile directory,
+    # mapped to the family of file name they emit. `cdylib` and `dylib` share
+    # a family because they produce the same platform file, so a collision
+    # between them must be caught.
+    $families = [ordered]@{
+        'bin' = 'executable'
+        'cdylib' = 'shared library'
+        'dylib' = 'shared library'
+        'staticlib' = 'static library'
+    }
+    # The file name each family emits, used to name the contested path.
+    $fileNames = @{
+        'executable' = '<name>'
+        'shared library' = '[lib]<name>[.so|.dll|.dylib]'
+        'static library' = '[lib]<name>[.a|.lib]'
+    }
+    # Target kinds that always keep a metadata hash in `deps/`.
     $hashed = @('test', 'bench', 'custom-build')
 
     $owners = [ordered]@{}
@@ -4417,17 +4435,19 @@ anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
             $isExample = $target.kind -contains 'example'
             $directory = if ($isExample) { 'target/<profile>/examples' } else { 'target/<profile>' }
             foreach ($crateType in $target.crate_types) {
-                if ($uplifted -notcontains $crateType) { continue }
-                $label = if ($isExample) { 'example' } elseif ($crateType -eq 'bin') { 'binary' } else { $crateType }
-                # The crate type is part of the key because two crate types
-                # that land in the same directory still produce different file
-                # names (`foo.exe` next to `foo.lib`).
-                $key = "$directory $crateType $($target.name)"
+                if (-not $families.Contains($crateType)) { continue }
+                $family = $families[$crateType]
+                $label = if ($isExample) { 'example' } elseif ($family -eq 'executable') { 'binary' } else { $family }
+                # Keyed by family rather than crate type, so two crate types
+                # that emit one file name share a bucket, while families that
+                # emit different names (an executable next to a static
+                # library) stay apart.
+                $key = "$directory $family $($target.name)"
                 if (-not $owners.Contains($key)) {
                     $owners[$key] = [pscustomobject]@{
                         Label = $label
                         Name = $target.name
-                        Path = "$directory/$($target.name)"
+                        Path = "$directory/" + $fileNames[$family].Replace('<name>', $target.name)
                         Packages = [System.Collections.Generic.List[string]]::new()
                     }
                 }

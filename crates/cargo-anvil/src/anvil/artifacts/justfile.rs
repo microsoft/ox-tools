@@ -393,13 +393,22 @@ mod tests {
             .expect("unique-target-names.just is registered in CHECK_FILES above");
         // Exactly the crate types Cargo copies out of `deps/`; `lib`, `rlib`,
         // and `proc-macro` keep their metadata hash and cannot collide.
-        assert!(body.contains("$uplifted = @('bin', 'cdylib', 'dylib', 'staticlib')"));
+        assert!(body.contains("'cdylib' = 'shared library'"));
+        assert!(
+            body.contains("'dylib' = 'shared library'"),
+            "cdylib and dylib emit one file name and must share a bucket"
+        );
+        assert!(body.contains("'staticlib' = 'static library'"));
         // Test, benchmark, and build-script binaries stay in `deps/` even
         // though their crate type is `bin`.
         assert!(body.contains("$hashed = @('test', 'bench', 'custom-build')"));
         assert!(
-            body.contains("if ($uplifted -notcontains $crateType) { continue }"),
+            body.contains("if (-not $families.Contains($crateType)) { continue }"),
             "the guard must skip every crate type that is not uplifted"
+        );
+        assert!(
+            body.contains("$key = \"$directory $family $($target.name)\""),
+            "targets must be keyed by emitted file name family, not by crate type"
         );
         assert!(
             body.contains("'target/<profile>/examples'"),
@@ -1729,11 +1738,34 @@ mod tests {
         use super::CHECK_FILES;
 
         /// A workspace member: its name plus the names of its uplifted
-        /// example and binary targets.
+        /// example and binary targets, and an optional explicit library
+        /// name and crate type.
         struct Member<'a> {
             package: &'a str,
             example: &'a str,
             binary: &'a str,
+            library: Option<(&'a str, &'a str)>,
+        }
+
+        impl<'a> Member<'a> {
+            /// A member whose only uplifted targets are its example and its
+            /// binary; its library keeps the default (unique) package name
+            /// and the default, never-uplifted `lib` crate type.
+            fn new(package: &'a str, example: &'a str, binary: &'a str) -> Self {
+                Self {
+                    package,
+                    example,
+                    binary,
+                    library: None,
+                }
+            }
+
+            /// The same, with an explicit library name and crate type so a
+            /// library-level collision can be provoked.
+            fn with_library(mut self, name: &'a str, crate_type: &'a str) -> Self {
+                self.library = Some((name, crate_type));
+                self
+            }
         }
 
         fn check_template() -> &'static str {
@@ -1798,15 +1830,22 @@ mod tests {
                 for directory in ["src", "src/bin", "examples", "tests", "benches"] {
                     fs::create_dir_all(package.join(directory)).expect("member directories must be creatable");
                 }
+                let library = match member.library {
+                    Some((name, crate_type)) => {
+                        format!("[lib]\nname = \"{name}\"\npath = \"src/lib.rs\"\ncrate-type = [\"{crate_type}\"]\n")
+                    }
+                    None => "[lib]\npath = \"src/lib.rs\"\n".to_owned(),
+                };
                 fs::write(
                     package.join("Cargo.toml"),
                     format!(
                         concat!(
                             "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
-                            "[lib]\npath = \"src/lib.rs\"\n\n",
+                            "{library}\n",
                             "[[example]]\nname = \"library_example\"\npath = \"examples/library_example.rs\"\ncrate-type = [\"lib\"]\n"
                         ),
-                        name = member.package
+                        name = member.package,
+                        library = library
                     ),
                 )
                 .expect("member manifest must be writable");
@@ -1848,16 +1887,8 @@ mod tests {
                 return;
             }
             let temp = fixture(&[
-                Member {
-                    package: "alpha",
-                    example: "shared",
-                    binary: "alpha_tool",
-                },
-                Member {
-                    package: "beta",
-                    example: "shared",
-                    binary: "beta_tool",
-                },
+                Member::new("alpha", "shared", "alpha_tool"),
+                Member::new("beta", "shared", "beta_tool"),
             ]);
             let output = run(temp.path());
             let diagnostic = combined(&output);
@@ -1882,16 +1913,8 @@ mod tests {
                 return;
             }
             let temp = fixture(&[
-                Member {
-                    package: "alpha",
-                    example: "alpha_shared",
-                    binary: "tool",
-                },
-                Member {
-                    package: "beta",
-                    example: "beta_shared",
-                    binary: "tool",
-                },
+                Member::new("alpha", "alpha_shared", "tool"),
+                Member::new("beta", "beta_shared", "tool"),
             ]);
             let output = run(temp.path());
             let diagnostic = combined(&output);
@@ -1906,22 +1929,61 @@ mod tests {
             );
         }
 
+        /// `cdylib` and `dylib` emit the same platform file name, so the
+        /// collision crosses the two crate types. Keying by crate type would
+        /// silently bucket these apart and miss it.
+        #[test]
+        fn fails_when_a_cdylib_and_a_dylib_share_a_library_name() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("alpha", "alpha_shared", "alpha_tool").with_library("shared_lib", "cdylib"),
+                Member::new("beta", "beta_shared", "beta_tool").with_library("shared_lib", "dylib"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                !output.status.success(),
+                "a cdylib and a dylib of the same name collide and must fail the check: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("shared library target 'shared_lib' is declared by 2 workspace packages: alpha, beta"),
+                "diagnostic must report the emitted family, not the crate type: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("target/<profile>/[lib]shared_lib[.so|.dll|.dylib]"),
+                "diagnostic must name the platform-specific contested file: {diagnostic}"
+            );
+        }
+
+        /// A static library and a shared library of the same name emit
+        /// different file names, so they must not be reported.
+        #[test]
+        fn passes_when_a_staticlib_and_a_cdylib_share_a_library_name() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("alpha", "alpha_shared", "alpha_tool").with_library("shared_lib", "staticlib"),
+                Member::new("beta", "beta_shared", "beta_tool").with_library("shared_lib", "cdylib"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                output.status.success(),
+                "families that emit different file names must not be reported: {diagnostic}"
+            );
+        }
+
         #[test]
         fn passes_when_only_hashed_target_kinds_repeat() {
             if !tools_available() {
                 return;
             }
             let temp = fixture(&[
-                Member {
-                    package: "alpha",
-                    example: "alpha_shared",
-                    binary: "alpha_tool",
-                },
-                Member {
-                    package: "beta",
-                    example: "beta_shared",
-                    binary: "beta_tool",
-                },
+                Member::new("alpha", "alpha_shared", "alpha_tool"),
+                Member::new("beta", "beta_shared", "beta_tool"),
             ]);
             let output = run(temp.path());
             let diagnostic = combined(&output);
