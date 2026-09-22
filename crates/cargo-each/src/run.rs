@@ -562,13 +562,8 @@ fn wait_for_process<T>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn terminate_group_bounded(child: GroupChild, reaper: &GroupReaper) -> io::Result<ExitStatus> {
     terminate_group_with(child, TERMINATION_GRACE, GroupChild::kill, GroupChild::try_wait, |child| {
-        handoff_terminated_group(reaper, child)
+        reaper.handoff(child)
     })
-}
-
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn handoff_terminated_group(reaper: &GroupReaper, child: GroupChild) -> io::Result<()> {
-    reaper.handoff(child)
 }
 
 fn terminate_group_with<T>(
@@ -641,16 +636,7 @@ impl GroupReaper {
 
     fn handoff(&self, child: GroupChild) -> io::Result<()> {
         let retained = failed_handoffs();
-        let handoff = handoff_group(&self.sender, retained, child);
-        if handoff.is_err()
-            && let Err(error) = start_failed_handoff_reaper(retained)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                format!("process-group reaper channel disconnected; the fallback retained the wait handle but failed to start: {error}"),
-            ));
-        }
-        handoff
+        handoff_group_with_fallback(&self.sender, retained, child, || start_failed_handoff_reaper(retained))
     }
 }
 
@@ -661,25 +647,40 @@ fn failed_handoffs() -> &'static Mutex<Vec<GroupChild>> {
 
 fn start_failed_handoff_reaper(retained: &'static Mutex<Vec<GroupChild>>) -> io::Result<()> {
     static RUNNING: AtomicBool = AtomicBool::new(false);
-    if RUNNING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+    start_failed_handoff_reaper_with(retained, &RUNNING, GroupChild::try_wait, |job| {
+        thread::Builder::new()
+            .name("cargo-each-fallback-reaper".to_owned())
+            .spawn(job)
+            .map(drop)
+    })
+}
+
+fn start_failed_handoff_reaper_with<T: Send + 'static>(
+    retained: &'static Mutex<Vec<T>>,
+    running: &'static AtomicBool,
+    try_wait: fn(&mut T) -> io::Result<Option<ExitStatus>>,
+    spawn: impl FnOnce(ReaperJob) -> io::Result<()>,
+) -> io::Result<()> {
+    if running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return Ok(());
     }
-    match thread::Builder::new()
-        .name("cargo-each-fallback-reaper".to_owned())
-        .spawn(move || poll_failed_handoffs(retained, &RUNNING))
-    {
-        Ok(_) => Ok(()),
+    match spawn(Box::new(move || poll_failed_handoffs(retained, running, try_wait))) {
+        Ok(()) => Ok(()),
         Err(error) => {
-            RUNNING.store(false, Ordering::Release);
+            running.store(false, Ordering::Release);
             Err(error)
         }
     }
 }
 
-fn poll_failed_handoffs(retained: &Mutex<Vec<GroupChild>>, running: &AtomicBool) {
+fn poll_failed_handoffs<T>(
+    retained: &Mutex<Vec<T>>,
+    running: &AtomicBool,
+    mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+) {
     loop {
         let mut children = retained.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        children.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+        children.retain_mut(|child| !matches!(try_wait(child), Ok(Some(_))));
         if children.is_empty() {
             running.store(false, Ordering::Release);
             return;
@@ -700,6 +701,24 @@ fn handoff_group<T>(sender: &mpsc::Sender<T>, retained: &Mutex<Vec<T>>, child: T
             ))
         }
     }
+}
+
+fn handoff_group_with_fallback<T>(
+    sender: &mpsc::Sender<T>,
+    retained: &Mutex<Vec<T>>,
+    child: T,
+    start_fallback: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    let handoff = handoff_group(sender, retained, child);
+    if handoff.is_err()
+        && let Err(error) = start_fallback()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            format!("process-group reaper channel disconnected; the fallback retained the wait handle but failed to start: {error}"),
+        ));
+    }
+    handoff
 }
 
 struct ReaperEntry<T> {
@@ -1023,25 +1042,26 @@ fn exit_byte(raw: Option<i32>) -> u8 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::collections::VecDeque;
+    use std::io::{Read as _, Seek as _};
     use std::num::NonZeroUsize;
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt as _;
     use std::process::{Command, ExitCode, ExitStatus, Stdio};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
     use std::{io, thread};
 
     use super::{
         BufferedOutcome, CapturedOutput, CapturedStream, GroupReaper, Invocation, InvocationResult, OutputEmitError, Plan, RunningWorker,
-        SnapshotSource, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM, add_infrastructure_failure,
-        combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel, exit_byte, failed_handoffs,
-        failure_stops_launching, finish_capture, handoff_group, panic_description, parallel_failure_exit_code, poll_process_exit,
-        poll_reaper, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with, spawn_group,
-        spawn_worker, terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure,
-        with_reaper_handoff,
+        SnapshotSource, TemporarySnapshot, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
+        add_infrastructure_failure, combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel,
+        exit_byte, failed_handoffs, failure_stops_launching, finish_capture, handoff_group, handoff_group_with_fallback, panic_description,
+        parallel_failure_exit_code, poll_process_exit, poll_reaper, run_captured, run_captured_with, run_streamed,
+        run_streamed_with_timeout, run_streamed_with_timeout_with, spawn_group, spawn_worker, start_failed_handoff_reaper_with,
+        terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure, with_reaper_handoff,
     };
 
     fn invocation(argv: &[&str]) -> Invocation {
@@ -1481,7 +1501,7 @@ mod tests {
         let (connected_sender, connected_receiver) = mpsc::channel();
         let retained = Mutex::new(Vec::new());
         handoff_group(&connected_sender, &retained, "delivered group").expect("connected handoff succeeds");
-        assert_eq!(connected_receiver.recv().expect("group is delivered"), "delivered group");
+        assert_eq!(connected_receiver.try_recv().expect("group is delivered"), "delivered group");
         assert!(retained.lock().expect("fallback ownership mutex is not poisoned").is_empty());
 
         let (sender, receiver) = mpsc::channel();
@@ -1493,6 +1513,83 @@ mod tests {
             retained.lock().expect("fallback ownership mutex is not poisoned").as_slice(),
             ["owned group"]
         );
+    }
+
+    #[test]
+    fn fallback_handoff_reports_startup_failure_without_losing_ownership() {
+        let (sender, receiver) = mpsc::channel();
+        drop(receiver);
+        let retained = Mutex::new(Vec::new());
+        let error = handoff_group_with_fallback(&sender, &retained, "owned group", || {
+            Err(io::Error::other("injected fallback startup failure"))
+        })
+        .expect_err("fallback startup failure is reported");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(error.to_string().contains("injected fallback startup failure"));
+        assert_eq!(
+            retained.lock().expect("fallback ownership mutex is not poisoned").as_slice(),
+            ["owned group"]
+        );
+    }
+
+    #[test]
+    fn fallback_reaper_startup_and_polling_cover_every_state() {
+        struct FakeGroup {
+            errors_remaining: usize,
+            polls_remaining: usize,
+            collected: Arc<AtomicUsize>,
+        }
+
+        fn observe(group: &mut FakeGroup) -> io::Result<Option<ExitStatus>> {
+            if group.errors_remaining > 0 {
+                group.errors_remaining -= 1;
+                Err(io::Error::other("injected fallback observation failure"))
+            } else if group.polls_remaining == 0 {
+                group.collected.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(successful_status()))
+            } else {
+                group.polls_remaining -= 1;
+                Ok(None)
+            }
+        }
+
+        let retained: &'static Mutex<Vec<FakeGroup>> = Box::leak(Box::new(Mutex::new(Vec::new())));
+        let running: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(true)));
+        start_failed_handoff_reaper_with(retained, running, observe, |_| {
+            panic!("an already-running fallback must not spawn another thread");
+        })
+        .expect("an already-running fallback accepts more work");
+
+        running.store(false, Ordering::Release);
+        let collected = Arc::new(AtomicUsize::new(0));
+        retained.lock().expect("fallback ownership mutex is not poisoned").push(FakeGroup {
+            errors_remaining: 1,
+            polls_remaining: 1,
+            collected: Arc::clone(&collected),
+        });
+        let error = start_failed_handoff_reaper_with(retained, running, observe, |job| {
+            drop(job);
+            Err(io::Error::other("injected fallback thread failure"))
+        })
+        .expect_err("fallback thread failure is reported");
+        assert!(error.to_string().contains("injected fallback thread failure"));
+        assert!(!running.load(Ordering::Acquire));
+        assert_eq!(retained.lock().expect("fallback ownership mutex is not poisoned").len(), 1);
+
+        start_failed_handoff_reaper_with(retained, running, observe, |job| thread::Builder::new().spawn(job).map(drop))
+            .expect("fallback polling thread starts");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while running.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!running.load(Ordering::Acquire), "fallback polling thread did not finish");
+        assert_eq!(collected.load(Ordering::SeqCst), 1);
+        assert!(retained.lock().expect("fallback ownership mutex is not poisoned").is_empty());
+    }
+
+    #[test]
+    fn failed_handoff_storage_is_process_stable() {
+        assert!(std::ptr::eq(failed_handoffs(), failed_handoffs()));
     }
 
     #[test]
@@ -1676,6 +1773,23 @@ mod tests {
                 .failure
                 .is_some_and(|failure| failure.contains("injected snapshot seek failure"))
         );
+    }
+
+    #[test]
+    fn temporary_snapshot_seek_rewinds_the_independent_reader() {
+        let temporary = tempfile::NamedTempFile::new().expect("create named temporary capture");
+        std::fs::write(temporary.path(), b"snapshot").expect("write temporary capture");
+        let reader = temporary.reopen().expect("reopen temporary capture reader");
+        let path = temporary.into_temp_path();
+        let mut snapshot = TemporarySnapshot { _path: path, reader };
+        let mut first = [0_u8; 1];
+        snapshot.read_exact(&mut first).expect("read first snapshot byte");
+        assert_eq!(first, [b's']);
+
+        snapshot.seek(io::SeekFrom::Start(0)).expect("rewind snapshot reader");
+        let mut output = Vec::new();
+        snapshot.read_to_end(&mut output).expect("read rewound snapshot");
+        assert_eq!(output, b"snapshot");
     }
 
     #[test]
