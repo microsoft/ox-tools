@@ -1050,7 +1050,7 @@ mod tests {
     use std::os::windows::process::ExitStatusExt as _;
     use std::process::{Command, ExitCode, ExitStatus, Stdio};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{Arc, Mutex, OnceLock, mpsc};
     use std::time::{Duration, Instant};
     use std::{io, thread};
 
@@ -1084,6 +1084,27 @@ mod tests {
     #[cfg(windows)]
     fn failed_status(code: i32) -> ExitStatus {
         ExitStatus::from_raw(u32::try_from(code).expect("test exit code is nonnegative"))
+    }
+
+    static FALLBACK_TEST_GROUPS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+    static FALLBACK_TEST_RUNNING: AtomicBool = AtomicBool::new(false);
+    static FALLBACK_TEST_COLLECTED: AtomicUsize = AtomicUsize::new(0);
+
+    fn observe_fallback_test_group(state: &mut usize) -> io::Result<Option<ExitStatus>> {
+        match *state {
+            2 => {
+                *state = 1;
+                Err(io::Error::other("injected fallback observation failure"))
+            }
+            1 => {
+                *state = 0;
+                Ok(None)
+            }
+            _ => {
+                FALLBACK_TEST_COLLECTED.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(successful_status()))
+            }
+        }
     }
 
     fn result_infrastructure_message(result: InvocationResult) -> String {
@@ -1534,56 +1555,39 @@ mod tests {
 
     #[test]
     fn fallback_reaper_startup_and_polling_cover_every_state() {
-        struct FakeGroup {
-            errors_remaining: usize,
-            polls_remaining: usize,
-            collected: Arc<AtomicUsize>,
-        }
-
-        fn observe(group: &mut FakeGroup) -> io::Result<Option<ExitStatus>> {
-            if group.errors_remaining > 0 {
-                group.errors_remaining -= 1;
-                Err(io::Error::other("injected fallback observation failure"))
-            } else if group.polls_remaining == 0 {
-                group.collected.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(successful_status()))
-            } else {
-                group.polls_remaining -= 1;
-                Ok(None)
-            }
-        }
-
-        let retained: &'static Mutex<Vec<FakeGroup>> = Box::leak(Box::new(Mutex::new(Vec::new())));
-        let running: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(true)));
-        start_failed_handoff_reaper_with(retained, running, observe, |_| {
+        let retained = FALLBACK_TEST_GROUPS.get_or_init(|| Mutex::new(Vec::new()));
+        retained.lock().expect("fallback ownership mutex is not poisoned").clear();
+        FALLBACK_TEST_RUNNING.store(true, Ordering::Release);
+        FALLBACK_TEST_COLLECTED.store(0, Ordering::SeqCst);
+        start_failed_handoff_reaper_with(retained, &FALLBACK_TEST_RUNNING, observe_fallback_test_group, |_| {
             panic!("an already-running fallback must not spawn another thread");
         })
         .expect("an already-running fallback accepts more work");
 
-        running.store(false, Ordering::Release);
-        let collected = Arc::new(AtomicUsize::new(0));
-        retained.lock().expect("fallback ownership mutex is not poisoned").push(FakeGroup {
-            errors_remaining: 1,
-            polls_remaining: 1,
-            collected: Arc::clone(&collected),
-        });
-        let error = start_failed_handoff_reaper_with(retained, running, observe, |job| {
+        FALLBACK_TEST_RUNNING.store(false, Ordering::Release);
+        retained.lock().expect("fallback ownership mutex is not poisoned").push(2);
+        let error = start_failed_handoff_reaper_with(retained, &FALLBACK_TEST_RUNNING, observe_fallback_test_group, |job| {
             drop(job);
             Err(io::Error::other("injected fallback thread failure"))
         })
         .expect_err("fallback thread failure is reported");
         assert!(error.to_string().contains("injected fallback thread failure"));
-        assert!(!running.load(Ordering::Acquire));
+        assert!(!FALLBACK_TEST_RUNNING.load(Ordering::Acquire));
         assert_eq!(retained.lock().expect("fallback ownership mutex is not poisoned").len(), 1);
 
-        start_failed_handoff_reaper_with(retained, running, observe, |job| thread::Builder::new().spawn(job).map(drop))
-            .expect("fallback polling thread starts");
+        start_failed_handoff_reaper_with(retained, &FALLBACK_TEST_RUNNING, observe_fallback_test_group, |job| {
+            thread::Builder::new().spawn(job).map(drop)
+        })
+        .expect("fallback polling thread starts");
         let deadline = Instant::now() + Duration::from_secs(1);
-        while running.load(Ordering::Acquire) && Instant::now() < deadline {
+        while FALLBACK_TEST_RUNNING.load(Ordering::Acquire) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(1));
         }
-        assert!(!running.load(Ordering::Acquire), "fallback polling thread did not finish");
-        assert_eq!(collected.load(Ordering::SeqCst), 1);
+        assert!(
+            !FALLBACK_TEST_RUNNING.load(Ordering::Acquire),
+            "fallback polling thread did not finish"
+        );
+        assert_eq!(FALLBACK_TEST_COLLECTED.load(Ordering::SeqCst), 1);
         assert!(retained.lock().expect("fallback ownership mutex is not poisoned").is_empty());
     }
 
@@ -1776,6 +1780,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem-backed temporary files; Miri isolation forbids them")]
     fn temporary_snapshot_seek_rewinds_the_independent_reader() {
         let temporary = tempfile::NamedTempFile::new().expect("create named temporary capture");
         std::fs::write(temporary.path(), b"snapshot").expect("write temporary capture");
