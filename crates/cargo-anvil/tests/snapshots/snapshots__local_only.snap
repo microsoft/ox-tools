@@ -3278,8 +3278,11 @@ anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
                             Name = $target.name
                             # Package -> how that package spells the target.
                             # Keyed by package so one package owning several
-                            # crate types of one name counts once.
-                            Owners = [ordered]@{}
+                            # crate types of one name counts once, and ordinal
+                            # like the outer map so packages differing only in
+                            # case stay distinct instead of overwriting each
+                            # other and hiding the collision.
+                            Owners = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
                         }
                     }
                     $owners[$key].Owners[$package.name] = $label
@@ -3292,7 +3295,7 @@ anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
     # collides on both its exe and its pdb). Report each contended target
     # once, listing every file it contends for. Sorting is ordinal so the
     # diagnostic reads identically under every host culture.
-    $groups = [ordered]@{}
+    $groups = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
     $sortedKeys = [string[]]@($owners.Keys)
     [Array]::Sort($sortedKeys, [StringComparer]::Ordinal)
     foreach ($key in $sortedKeys) {

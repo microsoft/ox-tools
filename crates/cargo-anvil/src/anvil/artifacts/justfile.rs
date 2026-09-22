@@ -415,6 +415,10 @@ mod tests {
             "keys must compare ordinally; an [ordered] hashtable merges names that differ only in case"
         );
         assert!(
+            body.contains("[System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)"),
+            "the owner and group maps are keyed by package name and must be ordinal too"
+        );
+        assert!(
             body.contains("'target/<profile>/examples'"),
             "examples uplift to their own directory and must be keyed separately from binaries"
         );
@@ -1745,10 +1749,11 @@ mod tests {
 
         use super::CHECK_FILES;
 
-        /// A workspace member: its name plus the names of its uplifted
-        /// example, binary, and library-crate-type example targets, and an
-        /// optional explicit library name and crate type.
+        /// A workspace member: its directory and package name plus the names
+        /// of its uplifted example, binary, and library-crate-type example
+        /// targets, and an optional explicit library name and crate type.
         struct Member<'a> {
+            directory: &'a str,
             package: &'a str,
             example: &'a str,
             binary: &'a str,
@@ -1763,6 +1768,7 @@ mod tests {
             /// the default `lib` crate type.
             fn new(package: &'a str, example: &'a str, binary: &'a str, library_example: &'a str) -> Self {
                 Self {
+                    directory: package,
                     package,
                     example,
                     binary,
@@ -1775,6 +1781,14 @@ mod tests {
             /// library-level collision can be provoked.
             fn with_library(mut self, name: &'a str, crate_type: &'a str) -> Self {
                 self.library = Some((name, crate_type));
+                self
+            }
+
+            /// The same, in a directory that does not match the package name.
+            /// Needed to give two members package names that differ only in
+            /// case, which their directories cannot do on Windows.
+            fn in_directory(mut self, directory: &'a str) -> Self {
+                self.directory = directory;
                 self
             }
         }
@@ -1810,7 +1824,7 @@ mod tests {
 
             let list = members
                 .iter()
-                .map(|member| format!("\"{}\"", member.package))
+                .map(|member| format!("\"{}\"", member.directory))
                 .collect::<Vec<_>>()
                 .join(", ");
             fs::write(
@@ -1838,7 +1852,7 @@ mod tests {
             .expect("Justfile fixture must be writable");
 
             for member in members {
-                let package = root.join(member.package);
+                let package = root.join(member.directory);
                 for directory in ["src", "src/bin", "examples", "tests", "benches"] {
                     fs::create_dir_all(package.join(directory)).expect("member directories must be creatable");
                 }
@@ -2176,6 +2190,31 @@ mod tests {
             assert!(
                 output.status.success(),
                 "names differing only by case are distinct to Cargo and must not be merged: {diagnostic}"
+            );
+        }
+
+        /// The owner and group maps are keyed by package name, so they must
+        /// be ordinal too. A case-insensitive map would let the second
+        /// package overwrite the first, leaving one owner and hiding a real
+        /// collision.
+        #[test]
+        fn fails_when_packages_differing_only_by_case_share_a_binary_name() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("Shared", "upper_example", "tool", "upper_lib_example").in_directory("upper"),
+                Member::new("shared", "lower_example", "tool", "lower_lib_example").in_directory("lower"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                !output.status.success(),
+                "two packages owning one binary name collide however their own names are cased: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("is declared by 2 workspace packages: Shared (binary), shared (binary)"),
+                "both owners must survive; a case-insensitive owner map would drop one: {diagnostic}"
             );
         }
 
