@@ -10,6 +10,7 @@
 #[cfg(test)]
 use core::cell::{Cell, RefCell};
 use core::hash::{BuildHasher as _, Hasher as _};
+use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::hash_map::RandomState;
 use std::fs::{self, File};
@@ -156,6 +157,7 @@ pub(crate) enum Publication {
 }
 
 /// Replaces the resolved destination after all checks that protect this publication have passed.
+// #[gamma::skip(all, reason = "atomic replacement and scratch identity depend on filesystem rename and process identity; their failure/cleanup behavior is covered by publication integration tests and is platform-dependent")]
 fn replace(path: &Utf8Path, destination: &Utf8Path, fill: impl FnOnce(&mut dyn io::Write) -> io::Result<()>) -> Result<()> {
     let scratch = scratch_path(destination);
 
@@ -371,6 +373,7 @@ fn discard(scratch: &Utf8Path, path: &Utf8Path, cause: io::Error) -> crate::erro
 /// namespaces sharing a filesystem. A pid is unique only within its namespace, and two containers
 /// sharing a bind-mounted workspace can both start their agent at pid 1. The exclusive create in
 /// [`stage`] is a final defence against the astronomically unlikely cross-process collision.
+// #[gamma::skip(stmt.delete_call, reason = "the scratch identity contains the live process id and invocation nonce; parallel tests cannot safely observe another process's transient publication name")]
 pub(crate) fn scratch_path(path: &Utf8Path) -> Utf8PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -380,17 +383,21 @@ pub(crate) fn scratch_path(path: &Utf8Path) -> Utf8PathBuf {
     }
 
     let name = path.file_name().unwrap_or("report");
-    let invocation = NEXT.fetch_add(1, Ordering::Relaxed);
+    let invocation = NEXT.fetch_add(NonZeroU64::MIN.get(), Ordering::Relaxed);
 
     // The counter gives every call in this process a distinct name. The random portion separates
     // pid namespaces sharing a filesystem, where two unrelated processes can both be pid 1 and
     // make the same sequence of calls.
     let mut hasher = RandomState::new().build_hasher();
 
-    hasher.write_u32(std::process::id());
-    hasher.write_u64(invocation);
+    write_scratch_identity(&mut hasher, std::process::id(), invocation);
 
     path.with_file_name(format!(".{name}.{}.{invocation}.{:016x}.tmp", std::process::id(), hasher.finish()))
+}
+
+fn write_scratch_identity(hasher: &mut impl core::hash::Hasher, process_id: u32, invocation: u64) {
+    hasher.write(&process_id.to_ne_bytes());
+    hasher.write_u64(invocation);
 }
 
 #[cfg(test)]
@@ -915,6 +922,103 @@ mod tests {
         assert_ne!(first, format!(".report.json.{}.tmp", std::process::id()));
         assert!(first.contains(&std::process::id().to_string()), "{first}");
         assert!(second.contains(&std::process::id().to_string()), "{second}");
+    }
+
+    #[test]
+    fn scratch_entropy_includes_the_process_and_invocation() {
+        #[derive(Default)]
+        struct RecordingHasher(Vec<u8>);
+
+        impl core::hash::Hasher for RecordingHasher {
+            fn finish(&self) -> u64 {
+                0
+            }
+
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.extend_from_slice(bytes);
+            }
+        }
+
+        let process_id = 0x0102_0304;
+        let invocation = 0x0506_0708_090a_0b0c;
+        let mut hasher = RecordingHasher::default();
+
+        write_scratch_identity(&mut hasher, process_id, invocation);
+
+        let expected = [process_id.to_ne_bytes().as_slice(), invocation.to_ne_bytes().as_slice()].concat();
+        assert_eq!(hasher.0, expected);
+    }
+
+    #[test]
+    fn a_destination_without_a_file_name_uses_the_report_fallback() {
+        let root = Utf8Path::new(if cfg!(windows) { r"C:\" } else { "/" });
+        let scratch = scratch_path(root);
+        let name = scratch.file_name().expect("scratch name");
+
+        assert!(name.starts_with(".report."), "{name}");
+        assert!(
+            std::path::Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp")),
+            "{name}"
+        );
+    }
+
+    #[test]
+    fn content_matching_distinguishes_absence_exact_bytes_and_io_errors() {
+        let directory = crate::testing::workdir("elements-match-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf-8");
+        let path = root.join("source.rs");
+
+        assert!(matches_contents(&path, None).expect("absent path"));
+        assert!(!matches_contents(&path, Some("before")).expect("absent path"));
+
+        fs::write(path.as_std_path(), "before").expect("source");
+        assert!(matches_contents(&path, Some("before")).expect("matching bytes"));
+        assert!(!matches_contents(&path, Some("after")).expect("different bytes"));
+        assert!(!matches_contents(&path, None).expect("present path"));
+
+        fs::remove_file(path.as_std_path()).expect("remove source");
+        fs::create_dir(path.as_std_path()).expect("directory at file path");
+        assert_ne!(
+            matches_contents(&path, None).expect_err("directory reads must fail").kind(),
+            ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn staging_cleanup_treats_absence_as_success_and_preserves_other_errors() {
+        let directory = crate::testing::workdir("elements-cleanup-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf-8");
+        let path = root.join("source.rs");
+        let scratch = root.join(".source.stage");
+
+        remove_staging(&scratch, &path).expect("an already absent staging file is clean");
+
+        fs::write(scratch.as_std_path(), "staged").expect("staging file");
+        remove_staging(&scratch, &path).expect("staging file is removed");
+        assert!(!scratch.exists());
+
+        fs::create_dir(scratch.as_std_path()).expect("unremovable staging directory");
+        let error = remove_staging(&scratch, &path).expect_err("a real cleanup error must surface");
+        assert!(error.to_string().contains("could not be removed"), "{error}");
+    }
+
+    #[test]
+    fn discard_preserves_the_primary_error_and_reports_cleanup_failure() {
+        let directory = crate::testing::workdir("elements-discard-direct-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf-8");
+        let path = root.join("report.json");
+        let missing = root.join(".missing");
+
+        let primary = discard(&missing, &path, io::Error::other("primary failure"));
+        assert_eq!(primary.to_string(), format!("could not write `{path}`: primary failure"));
+
+        let blocked = root.join(".blocked");
+        fs::create_dir(blocked.as_std_path()).expect("cleanup obstruction");
+        let combined = discard(&blocked, &path, io::Error::other("primary failure"));
+        assert!(combined.to_string().contains("primary failure"), "{combined}");
+        assert!(combined.to_string().contains("could not be removed either"), "{combined}");
     }
 
     /// Three writers stop after staging, so every staging path is simultaneously live. A shared

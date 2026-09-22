@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-09-21
+
+- 🐛 Bug Fixes
+
+  - normalize shell-quoted coverage arguments
+  - parse single-quoted llvm-cov paths
+
+## [0.11.0] - 2026-09-17
+
+- 🐛 Bug Fixes
+
+  - scope coverage reports to affected packages
+
+- ✔️ Tasks
+
+  - add 0.10.1 changelog
+  - bump version to 0.10.1
+
 ## [0.10.0] - 2026-09-16
 
 - ✨ Features

@@ -162,6 +162,7 @@ impl Walk<'_> {
             .entry(name)
             .and_modify(|known| {
                 if known.as_deref() != Some(prefix) {
+                    // #[gamma::skip(assign_value.default, reason = "Option::default() is None, exactly the unknown-import sentinel assigned here")]
                     *known = None;
                 }
             })
@@ -341,6 +342,7 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
         self.on_item_use(node);
 
+        // #[gamma::skip(stmt.delete_call, reason = "a use tree contains no expressions, declarations, or nested items consumed by this visitor, so syn's recursive continuation cannot update an index")]
         visit::visit_item_use(self, node);
     }
 
@@ -369,63 +371,25 @@ impl<'ast> Visit<'ast> for Walk<'_> {
     }
 
     fn visit_expr_binary(&mut self, node: &'ast ExprBinary) {
-        if self.numeric {
-            match node.op {
-                // Nothing else in wide use subtracts, multiplies, divides or takes a remainder.
-                BinOp::Sub(_)
-                | BinOp::Mul(_)
-                | BinOp::Div(_)
-                | BinOp::Rem(_)
-                | BinOp::SubAssign(_)
-                | BinOp::MulAssign(_)
-                | BinOp::DivAssign(_)
-                | BinOp::RemAssign(_) => {
-                    self.note(&node.left);
-                    self.note(&node.right);
-                }
-
-                // `String + &str` and `Ordering` comparisons make these two ambiguous on their
-                // own, so they count only against an integer literal, which fixes both sides.
-                BinOp::Add(_) | BinOp::AddAssign(_) | BinOp::Lt(_) | BinOp::Gt(_) | BinOp::Le(_) | BinOp::Ge(_) => {
-                    if is_int_literal(&node.right) {
-                        self.note(&node.left);
-                    }
-
-                    if is_int_literal(&node.left) {
-                        self.note(&node.right);
-                    }
-                }
-
-                _ => {}
-            }
-        }
+        self.on_expr_binary(node);
 
         visit::visit_expr_binary(self, node);
     }
 
     fn visit_expr_index(&mut self, node: &'ast ExprIndex) {
-        if self.numeric {
-            self.note(&node.index);
-        }
+        self.on_expr_index(node);
 
         visit::visit_expr_index(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if self.numeric && is_numeric_receiver(&node.method.to_string()) {
-            self.note(&node.receiver);
-        }
+        self.on_expr_method_call(node);
 
         visit::visit_expr_method_call(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast ExprForLoop) {
-        if self.numeric
-            && matches!(&*node.expr, Expr::Range(_))
-            && let Pat::Ident(ident) = &*node.pat
-        {
-            let _added = self.indexes.numeric_uses.names.insert(ident.ident.to_string());
-        }
+        self.on_expr_for_loop(node);
 
         visit::visit_expr_for_loop(self, node);
     }
@@ -475,7 +439,10 @@ impl<'cfg> Walk<'cfg> {
             // `Default` to reach for, and `result.ok_to_err` to know whether the `Err` it would
             // write could be built at all. Missing the second cost five mutants when this gate was
             // first written, which is what a gate on an index has to be checked against.
-            imports: selection.any_in_family("fn_value") || selection.contains("result.ok_to_err"),
+            imports: selection.any_in_family("fn_value")
+                || selection.contains("result.ok_to_err")
+                || selection.contains("expr.increment")
+                || selection.contains("expr.decrement"),
             cfg,
         }
     }
@@ -488,6 +455,8 @@ impl<'cfg> Walk<'cfg> {
 
 #[cfg(test)]
 mod tests {
+    use syn::parse_quote;
+
     use super::*;
 
     fn walk(numeric: bool, imports: bool, cfg: &CfgSet) -> Walk<'_> {
@@ -516,6 +485,64 @@ mod tests {
     }
 
     #[test]
+    fn note_accepts_only_unqualified_bare_paths_and_named_fields() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(true, false, &cfg);
+
+        walk.note(&syn::parse_str::<Expr>("offset").expect("the bare path parses"));
+        walk.note(&syn::parse_str::<Expr>("<T as Trait>::VALUE").expect("the qualified path parses"));
+        walk.note(&syn::parse_str::<Expr>("tuple.0").expect("the tuple field parses"));
+
+        assert_eq!(walk.indexes.numeric_uses.names.len(), 1);
+        assert!(walk.indexes.numeric_uses.names.contains("offset"));
+        assert!(walk.indexes.numeric_uses.fields.is_empty());
+    }
+
+    #[test]
+    fn numeric_index_and_receiver_uses_are_recorded() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(true, false, &cfg);
+        let index: syn::ExprIndex = parse_quote!(values[offset]);
+        let method: syn::ExprMethodCall = parse_quote!(capacity.saturating_add(1));
+        let left_literal: syn::ExprBinary = parse_quote!(1 + width);
+
+        walk.on_expr_index(&index);
+        walk.on_expr_method_call(&method);
+        walk.on_expr_binary(&left_literal);
+
+        assert!(walk.indexes.numeric_uses.names.contains("offset"));
+        assert!(walk.indexes.numeric_uses.names.contains("capacity"));
+        assert!(walk.indexes.numeric_uses.names.contains("width"));
+    }
+
+    #[test]
+    fn numeric_evidence_requires_the_exact_operator_and_receiver_shapes() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(true, false, &cfg);
+
+        for expression in ["left - right", "left + 1", "1 + right", "left[at]", "index.saturating_add(1)"] {
+            let expression = syn::parse_str::<Expr>(expression).expect("the numeric expression parses");
+            visit::visit_expr(&mut walk, &expression);
+        }
+        for expression in [
+            "text + suffix",
+            "value == other",
+            "text.max(other)",
+            "for item in values { use_item(item); }",
+        ] {
+            let expression = syn::parse_str::<Expr>(expression).expect("the non-evidence expression parses");
+            visit::visit_expr(&mut walk, &expression);
+        }
+
+        for expected in ["left", "right", "at", "index"] {
+            assert!(walk.indexes.numeric_uses.names.contains(expected), "{expected}");
+        }
+        for absent in ["text", "suffix", "value", "other", "item"] {
+            assert!(!walk.indexes.numeric_uses.names.contains(absent), "{absent}");
+        }
+    }
+
+    #[test]
     fn declared_ignores_constants_when_numeric_index_is_disabled() {
         let cfg = CfgSet::unconditional();
         let mut walk = walk(false, false, &cfg);
@@ -524,6 +551,27 @@ mod tests {
         walk.declared("COUNT", &ty);
 
         assert!(walk.indexes.constants.is_empty());
+    }
+
+    #[test]
+    fn conflicting_declarations_and_fields_are_demoted_to_non_numeric() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(true, false, &cfg);
+        walk.declared("LIMIT", &parse_quote!(usize));
+        walk.declared("LIMIT", &parse_quote!(&str));
+        walk.on_item_struct(&parse_quote!(
+            struct Numeric {
+                count: usize,
+            }
+        ));
+        walk.on_item_struct(&parse_quote!(
+            struct Text {
+                count: String,
+            }
+        ));
+
+        assert_eq!(walk.indexes.constants.get("LIMIT"), Some(&false));
+        assert_eq!(walk.indexes.fields.get("count"), Some(&false));
     }
 
     #[test]
@@ -540,6 +588,29 @@ mod tests {
             Some(&Some(vec!["crate".to_owned(), "inner".to_owned()]))
         );
         assert_eq!(walk.indexes.imports.len(), 2);
+    }
+
+    #[test]
+    fn conflicting_imports_are_unknown_while_repeated_imports_stay_known() {
+        let cfg = CfgSet::unconditional();
+        let mut walk = walk(false, true, &cfg);
+
+        for item in [
+            "use first::Thing;",
+            "use first::Thing;",
+            "use second::Thing;",
+            "use crate::module::{self, Item};",
+        ] {
+            let item = syn::parse_str::<ItemUse>(item).expect("the use item parses");
+            walk.descend(&mut Vec::new(), &item.tree);
+        }
+
+        assert_eq!(walk.indexes.imports.get("Thing"), Some(&None));
+        assert_eq!(walk.indexes.imports.get("module"), Some(&Some(vec!["crate".to_owned()])));
+        assert_eq!(
+            walk.indexes.imports.get("Item"),
+            Some(&Some(vec!["crate".to_owned(), "module".to_owned()]))
+        );
     }
 
     #[test]
@@ -567,6 +638,59 @@ mod tests {
         assert_eq!(indexes.constants.get("TRAIT_LIMIT"), Some(&true));
         assert!(indexes.fields.is_empty());
         assert!(indexes.numeric_uses.names.contains("limit"));
+    }
+
+    #[test]
+    fn recursive_constant_and_struct_visits_collect_initializer_and_type_expressions() {
+        let file = syn::parse_file(
+            r"
+            const LIMIT: usize = left - right;
+            static FLOOR: usize = low - high;
+            struct Buffer([u8; width - 1]);
+            trait T { const STEP: usize = trait_left - trait_right; }
+            impl T for Buffer { const STEP: usize = impl_left - impl_right; }
+            ",
+        )
+        .expect("the file parses");
+        let selection = Selection::parse("expr.increment").expect("the numeric selector resolves");
+        let indexes = indexes_in(&file, &selection, &CfgSet::unconditional());
+
+        for expected in [
+            "left",
+            "right",
+            "low",
+            "high",
+            "width",
+            "trait_left",
+            "trait_right",
+            "impl_left",
+            "impl_right",
+        ] {
+            assert!(indexes.numeric_uses.names.contains(expected), "{expected}");
+        }
+    }
+
+    #[test]
+    fn selection_enables_only_the_indexes_its_exact_families_consume() {
+        let cfg = CfgSet::unconditional();
+
+        let numeric = Walk::new(&Selection::parse("expr.decrement").expect("selector resolves"), &cfg);
+        assert!(numeric.numeric);
+        assert!(numeric.imports);
+
+        let result = Walk::new(&Selection::parse("result.ok_to_err").expect("selector resolves"), &cfg);
+        assert!(!result.numeric);
+        assert!(result.imports);
+
+        let unrelated = Walk::new(&Selection::parse("literal.bool_flip").expect("selector resolves"), &cfg);
+        assert!(!unrelated.numeric);
+        assert!(!unrelated.imports);
+
+        let file = syn::parse_file("const LIMIT: usize = left - right; use crate::Thing;").expect("the file parses");
+        let indexes = indexes_in(&file, &Selection::parse("literal.bool_flip").expect("selector resolves"), &cfg);
+        assert!(indexes.constants.is_empty());
+        assert!(indexes.imports.is_empty());
+        assert!(indexes.numeric_uses.names.is_empty());
     }
 
     /// A field or a constant behind a predicate the active build does not satisfy must not
@@ -599,6 +723,29 @@ mod tests {
 
         assert_eq!(indexes.fields.get("count"), Some(&true));
         assert_eq!(indexes.constants.get("COUNT"), Some(&true));
+    }
+
+    #[test]
+    fn a_skipped_or_unnamed_field_does_not_end_the_struct_scan() {
+        let file = syn::parse_file(
+            r"
+            struct Record(
+                #[cfg(windows)] String,
+                usize,
+            );
+
+            struct Named {
+                #[cfg(windows)]
+                ignored: String,
+                count: usize,
+            }
+            ",
+        )
+        .expect("the file parses");
+        let selection = Selection::parse("expr.increment").expect("the numeric selector resolves");
+        let indexes = indexes_in(&file, &selection, &CfgSet::parse("unix\n"));
+
+        assert_eq!(indexes.fields.get("count"), Some(&true));
     }
 
     /// A misplaced or malformed item nested inside an inactive module must not reach this index

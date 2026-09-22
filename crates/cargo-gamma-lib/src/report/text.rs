@@ -5,6 +5,7 @@
 
 /// Width of the status verb column, matching cargo.
 pub(super) const VERB_WIDTH: usize = 12;
+const MAX_SCORE_PRECISION: usize = 12;
 
 /// The empty status column, for a line that continues the one above it.
 #[must_use]
@@ -60,7 +61,7 @@ pub(crate) fn score(value: f64, detected: usize, valid: usize) -> String {
         return format!("{value:.1}");
     }
 
-    for precision in 1..=12 {
+    for precision in 1..=MAX_SCORE_PRECISION {
         let shown = format!("{value:.precision$}");
 
         if shown.parse::<f64>().is_ok_and(|rounded| rounded > 0.0 && rounded < 100.0) {
@@ -143,5 +144,11 @@ mod tests {
         assert_eq!(score(100.0, 10_000, 10_000), "100.0");
         assert_eq!(score(0.01, 1, 10_000), "0.01");
         assert_eq!(score(99.99, 9_999, 10_000), "99.99");
+        assert_eq!(score(0.000_000_000_001_234, 1, usize::MAX), "0.000000000001");
+        assert_eq!(
+            score(0.000_000_000_000_123_4, 1, usize::MAX),
+            "0.0000000000001234",
+            "precision beyond the display cap must use the unrounded fallback"
+        );
     }
 }

@@ -359,9 +359,16 @@ if ($args -contains 'bolero' -and $args -contains 'list') {
     exit [int]$env:FAKE_BOLERO_LIST_EXIT
 }
 if ($args -contains 'llvm-cov' -and $args -contains 'report' -and $env:FAKE_LLVM_COV_REPORT_206) {
-    $command = "$([char]34)$($env:FAKE_LLVM_COV_PATH)$([char]34) export -format=lcov -instr-profile=fake.profdata -object fake-object.exe"
+    $quote = if ($env:FAKE_LLVM_COV_SINGLE_QUOTES) { [char]39 } else { [char]34 }
+    $arguments = if ($env:FAKE_LLVM_COV_SINGLE_QUOTES) {
+        "'-format=lcov' '-instr-profile=fake.profdata' '-object' 'fake-object.exe'"
+    } else {
+        '-format=lcov -instr-profile=fake.profdata -object fake-object.exe'
+    }
+    $command = "$quote$($env:FAKE_LLVM_COV_PATH)$quote export $arguments"
     if ($env:FAKE_LLVM_COV_MULTILINE) {
-        $command = $command.Replace(' -object', "`n-object")
+        $objectArgument = if ($env:FAKE_LLVM_COV_SINGLE_QUOTES) { " '-object'" } else { ' -object' }
+        $command = $command.Replace($objectArgument, "`n$($objectArgument.TrimStart())")
     }
     Write-Output (
         "error: failed to generate report: could not execute process $([char]96)$command$([char]96) " +
@@ -2358,8 +2365,60 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
     assert_failed(&failed, "plain nextest failure for an opted-out package");
 }
 
+#[cfg(not(target_arch = "aarch64"))]
+#[test]
+fn coverage_reports_use_requested_package_scope() {
+    if !tools_available() {
+        return;
+    }
+
+    for (scope, expected, include_second_package) in [
+        ("--package measured@0.1.0", "llvm-cov report --package measured@0.1.0 --lcov", true),
+        ("--workspace", "llvm-cov report --workspace --lcov", false),
+    ] {
+        let tmp = fixture(
+            &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
+            &[
+                "anvil-component-nightly-llvm-tools-validate-prereqs",
+                "anvil-tool-cargo-llvm-cov-validate-prereqs",
+                "anvil-tool-cargo-nextest-validate-prereqs",
+                "anvil-tool-cargo-coverage-gate-validate-prereqs",
+                "anvil-component-nightly-llvm-tools-install",
+                "anvil-tool-cargo-llvm-cov-install installer",
+                "anvil-tool-cargo-nextest-install installer",
+                "anvil-tool-cargo-coverage-gate-install installer",
+                "anvil-impact",
+            ],
+        );
+        let log = tmp.path().join("cargo.log");
+        seed_include(tmp.path(), "affected", scope);
+        let mut environment = vec![("FAKE_CARGO_LOG", log.as_os_str())];
+        if include_second_package {
+            environment.push(("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")));
+        }
+        let output = run_just(tmp.path(), &["anvil-llvm-cov"], &environment);
+        assert!(
+            output.status.success(),
+            "coverage path for {scope} should succeed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let calls = fs::read_to_string(&log).unwrap();
+        let reports: Vec<_> = calls.lines().filter(|call| call.contains("llvm-cov report")).collect();
+        assert_eq!(reports.len(), 2, "calls for {scope}:\n{calls}");
+        assert!(
+            reports.iter().all(|call| call.contains(expected)),
+            "coverage reports must match the requested {scope} scope:\n{calls}"
+        );
+    }
+}
+
 #[cfg(all(windows, not(target_arch = "aarch64")))]
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end fixture covers successful and failed response-file retries"
+)]
 fn windows_coverage_report_retries_error_206_with_response_file() {
     if !tools_available() {
         return;
@@ -2387,7 +2446,10 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
          Add-Content -LiteralPath $env:FAKE_LLVM_COV_LOG -Value ($Remaining -join ' ')\n\
          $response = $Remaining | Where-Object { $_.StartsWith('@') } | Select-Object -First 1\n\
          if (-not $response) { exit 2 }\n\
-         Add-Content -LiteralPath $env:FAKE_LLVM_COV_RESPONSE_LOG -Value (Get-Content -LiteralPath $response.Substring(1) -Raw)\n\
+         $responseContent = Get-Content -LiteralPath $response.Substring(1) -Raw\n\
+         if ($responseContent -match \"'\") { exit 3 }\n\
+         if ($responseContent -notmatch '-instr-profile=fake.profdata') { exit 4 }\n\
+         Add-Content -LiteralPath $env:FAKE_LLVM_COV_RESPONSE_LOG -Value $responseContent\n\
          Write-Output 'TN:'\n\
          if ($env:FAKE_LLVM_COV_EXIT) { exit [int]$env:FAKE_LLVM_COV_EXIT }\n\
          exit 0\n",
@@ -2400,6 +2462,7 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")),
             ("FAKE_LLVM_COV_REPORT_206", OsStr::new("1")),
             ("FAKE_LLVM_COV_MULTILINE", OsStr::new("1")),
+            ("FAKE_LLVM_COV_SINGLE_QUOTES", OsStr::new("1")),
             ("FAKE_LLVM_COV_PATH", llvm_cov.as_os_str()),
             ("FAKE_LLVM_COV_LOG", llvm_cov_log.as_os_str()),
             ("FAKE_LLVM_COV_RESPONSE_LOG", response_log.as_os_str()),
@@ -2416,7 +2479,11 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
     assert_eq!(invocations.lines().count(), 2, "invocations:\n{invocations}");
     assert_eq!(invocations.matches("export @").count(), 2, "invocations:\n{invocations}");
     let responses = fs::read_to_string(&response_log).unwrap();
-    assert_eq!(responses.matches("-object fake-object.exe").count(), 2, "responses:\n{responses}");
+    assert_eq!(
+        responses.matches("\n\"-object\" \"fake-object.exe\"").count(),
+        2,
+        "both reports must preserve the multiline command shape:\n{responses}"
+    );
     for config in ["all-features", "no-default"] {
         let report = tmp.path().join(format!("target/coverage/lcov-{config}.info"));
         assert_eq!(fs::read_to_string(report).unwrap().trim(), "TN:");
@@ -2443,6 +2510,12 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
         ],
     );
     assert_failed(&failed, "failed response-file fallback");
+    let invocations = fs::read_to_string(&llvm_cov_log).unwrap();
+    assert_eq!(
+        invocations.lines().count(),
+        3,
+        "both quote styles must reach llvm-cov:\n{invocations}"
+    );
     let failed_report = tmp.path().join("target/coverage/lcov-all-features.info");
     assert!(!failed_report.exists(), "failed response-file fallback must remove partial report");
     assert!(

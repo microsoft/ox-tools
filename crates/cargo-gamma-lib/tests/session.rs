@@ -10,13 +10,12 @@
 //! they are slower than the rest of the suite, but they are the only coverage that proves the
 //! encoding in `schema.rs` actually compiles and that a verdict means what it claims.
 
+use std::process::Command;
 use std::sync::Arc;
 use std::{fs, thread};
 
 use camino::Utf8PathBuf;
-use cargo_gamma_lib::internals::exec::gamma_base;
-use cargo_gamma_lib::run;
-use cargo_gamma_lib::testing::Sink;
+use cargo_gamma_lib::testing::{Sink, gamma_base, run};
 use tempfile::TempDir;
 
 /// Exit code for a run in which every gate passed.
@@ -28,7 +27,7 @@ const EXIT_USAGE: i32 = 1;
 fn scratch_base(dir: &TempDir) -> Utf8PathBuf {
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
 
-    gamma_base(&root, None)
+    gamma_base(&root)
 }
 
 /// A subject whose comparison is asserted exactly and whose side effect is not.
@@ -92,6 +91,111 @@ mod tests {
 }
 ";
 
+const ENVIRONMENT_TEST: &str = r#"
+#[test]
+fn cargo_runtime_environment_is_present() {
+    let required = [
+        "CARGO",
+        "CARGO_HOME",
+        "CARGO_MANIFEST_DIR",
+        "CARGO_MANIFEST_PATH",
+        "CARGO_PKG_NAME",
+        "CARGO_PKG_VERSION",
+        "CARGO_PKG_VERSION_MAJOR",
+        "CARGO_PKG_VERSION_MINOR",
+        "CARGO_PKG_VERSION_PATCH",
+        "CARGO_PKG_VERSION_PRE",
+        "CARGO_PKG_AUTHORS",
+        "CARGO_PKG_DESCRIPTION",
+        "CARGO_PKG_HOMEPAGE",
+        "CARGO_PKG_REPOSITORY",
+        "CARGO_PKG_LICENSE",
+        "CARGO_PKG_LICENSE_FILE",
+        "CARGO_PKG_README",
+        "CARGO_PKG_RUST_VERSION",
+        "CARGO_BIN_EXE_subject-cli",
+        "OUT_DIR",
+        "SUBJECT_BUILD_VALUE",
+    ];
+    for name in required {
+        assert!(std::env::var_os(name).is_some(), "{name} was not set");
+    }
+
+    // Standalone toolchains provide Cargo's environment without rustup's variables.
+    if RUSTUP_AVAILABLE {
+        for name in [
+            "RUSTUP_HOME",
+            "RUSTUP_TOOLCHAIN",
+            "RUSTUP_TOOLCHAIN_SOURCE",
+            "RUST_RECURSION_COUNT",
+        ] {
+            assert!(std::env::var_os(name).is_some(), "{name} was not set");
+        }
+        assert!(std::path::Path::new(&std::env::var_os("RUSTUP_HOME").unwrap()).is_dir());
+    }
+
+    assert_eq!(std::env::var("CARGO_PKG_NAME").unwrap(), "subject");
+    assert_eq!(std::env::var("CARGO_PKG_VERSION").unwrap(), "1.2.3-alpha.1");
+    assert_eq!(std::env::var("CARGO_PKG_VERSION_PRE").unwrap(), "alpha.1");
+    assert_eq!(std::env::var("CARGO_PKG_AUTHORS").unwrap(), "One:Two");
+    let rust_version = std::env::var("CARGO_PKG_RUST_VERSION").unwrap();
+    if std::env::var_os("NEXTEST").is_some() {
+        // Nextest parses Cargo metadata through semver and exports the normalized spelling.
+        assert_eq!(rust_version, "1.90.0");
+    } else {
+        assert_eq!(rust_version, "1.90");
+    }
+    assert_eq!(std::env::var("SUBJECT_BUILD_VALUE").unwrap(), "ready");
+
+    let manifest = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_PATH").unwrap());
+    assert!(manifest.is_file(), "manifest does not exist: {}", manifest.display());
+    assert_eq!(manifest.parent(), Some(std::env::current_dir().unwrap().as_path()));
+    let cargo_binary = std::path::PathBuf::from(std::env::var_os("CARGO_BIN_EXE_subject-cli").unwrap());
+    assert!(cargo_binary.is_file());
+    assert!(std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).is_dir());
+    assert!(std::path::Path::new(&std::env::var_os("CARGO").unwrap()).is_file());
+    assert!(std::path::Path::new(&std::env::var_os("CARGO_HOME").unwrap()).is_dir());
+
+    let profile = cargo_binary
+        .parent()
+        .expect("Cargo places a binary target inside its profile directory");
+    let dependencies = profile.join("deps");
+    #[cfg(windows)]
+    {
+        let search = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect::<Vec<_>>();
+        assert!(search.iter().any(|path| path == &dependencies), "{dependencies:?} not in {search:?}");
+        assert!(search.iter().any(|path| path == profile), "{profile:?} not in {search:?}");
+    }
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        let loader = "DYLD_FALLBACK_LIBRARY_PATH";
+        #[cfg(not(target_os = "macos"))]
+        let loader = "LD_LIBRARY_PATH";
+        let search = std::env::split_paths(&std::env::var_os(loader).unwrap()).collect::<Vec<_>>();
+        assert!(search.iter().any(|path| path == &dependencies), "{dependencies:?} not in {search:?}");
+        assert!(search.iter().any(|path| path == profile), "{profile:?} not in {search:?}");
+    }
+
+    if std::env::var_os("NEXTEST").is_some() {
+        for name in [
+            "NEXTEST_ATTEMPT",
+            "NEXTEST_ATTEMPT_ID",
+            "NEXTEST_BINARY_ID",
+            "NEXTEST_EXECUTION_MODE",
+            "NEXTEST_PROFILE",
+            "NEXTEST_RUN_ID",
+            "NEXTEST_TEST_NAME",
+            "NEXTEST_TEST_THREADS",
+            "NEXTEST_VERSION",
+            "NEXTEST_WORKSPACE_ROOT",
+        ] {
+            assert!(std::env::var_os(name).is_some(), "{name} was not set");
+        }
+    }
+}
+"#;
+
 /// Builds a throwaway crate containing `source`.
 fn workspace(source: &str) -> TempDir {
     let dir = TempDir::new().expect("could not create a temporary directory");
@@ -105,6 +209,148 @@ fn workspace(source: &str) -> TempDir {
 
     fs::create_dir_all(root.join("src")).expect("could not create src");
     fs::write(root.join("src/lib.rs"), source).expect("could not write the library");
+
+    dir
+}
+
+/// Builds two workspace test targets, only one of which links the mutated package.
+fn compiler_linkage_workspace() -> TempDir {
+    let dir = TempDir::new().expect("could not create a temporary directory");
+    let root = dir.path();
+
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"subject\", \"oracle\", \"independent\"]\nresolver = \"2\"\n",
+    )
+    .expect("could not write the workspace manifest");
+
+    fs::create_dir_all(root.join("subject/src")).expect("could not create subject sources");
+    fs::write(
+        root.join("subject/Cargo.toml"),
+        "[package]\nname = \"subject\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ntest = false\n\n[dependencies]\n",
+    )
+    .expect("could not write the subject manifest");
+    fs::write(
+        root.join("subject/src/lib.rs"),
+        "pub fn is_adult(age: u32) -> bool {\n    age >= 18\n}\n",
+    )
+    .expect("could not write the mutated source");
+
+    fs::create_dir_all(root.join("oracle/src")).expect("could not create oracle sources");
+    fs::create_dir_all(root.join("oracle/tests")).expect("could not create oracle tests");
+    fs::write(
+        root.join("oracle/Cargo.toml"),
+        "[package]\nname = \"oracle\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [lib]\ntest = false\n\n[dependencies]\nsubject = { path = \"../subject\" }\n",
+    )
+    .expect("could not write the oracle manifest");
+    fs::write(root.join("oracle/src/lib.rs"), "").expect("could not write the oracle library");
+    fs::write(
+        root.join("oracle/tests/linked.rs"),
+        r"
+#[test]
+fn reaches_the_subject_without_convicting_it() {
+    let _unasserted = subject::is_adult(18);
+}
+",
+    )
+    .expect("could not write the linked target");
+
+    fs::create_dir_all(root.join("independent/src")).expect("could not create independent sources");
+    fs::create_dir_all(root.join("independent/tests")).expect("could not create independent tests");
+    fs::write(
+        root.join("independent/Cargo.toml"),
+        "[package]\nname = \"independent\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [lib]\ntest = false\n\n[dependencies]\n",
+    )
+    .expect("could not write the independent manifest");
+    fs::write(root.join("independent/src/lib.rs"), "").expect("could not write the independent library");
+    fs::write(
+        root.join("independent/tests/independent.rs"),
+        r#"
+#[test]
+fn objects_to_mutants_it_cannot_link() {
+    assert!(std::env::var_os("GAMMA_ACTIVE").is_none(), "an unrelated mutant was active");
+}
+"#,
+    )
+    .expect("could not write the independent target");
+
+    dir
+}
+
+fn commit_fixture(dir: &TempDir) {
+    let git = |arguments: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(arguments)
+            .status()
+            .expect("git should start")
+    };
+
+    assert!(git(&["init", "--quiet"]).success());
+    assert!(git(&["add", "."]).success());
+    assert!(
+        git(&[
+            "-c",
+            "user.name=cargo-gamma",
+            "-c",
+            "user.email=cargo-gamma@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ])
+        .success()
+    );
+}
+
+/// Builds a crate whose integration test observes Cargo's complete runtime contract.
+fn environment_workspace() -> TempDir {
+    let dir = TempDir::new().expect("could not create a temporary directory");
+    let root = dir.path();
+
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\n\
+         name = \"subject\"\n\
+         version = \"1.2.3-alpha.1\"\n\
+         edition = \"2021\"\n\
+         rust-version = \"1.90\"\n\
+         authors = [\"One\", \"Two\"]\n\
+         description = \"description\"\n\
+         homepage = \"https://example.invalid\"\n\
+         repository = \"https://example.invalid/repository\"\n\
+         license = \"MIT\"\n\
+         license-file = \"LICENSE\"\n\
+         readme = \"README.md\"\n\n\
+         [dependencies]\n",
+    )
+    .expect("could not write the manifest");
+    fs::write(root.join("LICENSE"), "fixture license").expect("could not write the license");
+    fs::write(root.join("README.md"), "fixture readme").expect("could not write the readme");
+    fs::write(
+        root.join("build.rs"),
+        "fn main() { println!(\"cargo::rustc-env=SUBJECT_BUILD_VALUE=ready\"); }\n",
+    )
+    .expect("could not write the build script");
+
+    fs::create_dir_all(root.join("src/bin")).expect("could not create src/bin");
+    fs::write(root.join("src/lib.rs"), SUBJECT).expect("could not write the library");
+    fs::write(root.join("src/bin/subject-cli.rs"), "fn main() {}\n").expect("could not write the binary");
+
+    let rustup_available = Command::new("rustup")
+        .args(["show", "active-toolchain"])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    fs::create_dir_all(root.join("tests")).expect("could not create tests");
+    fs::write(
+        root.join("tests/environment.rs"),
+        format!("const RUSTUP_AVAILABLE: bool = {rustup_available};\n{ENVIRONMENT_TEST}"),
+    )
+    .expect("could not write the integration test");
 
     dir
 }
@@ -297,12 +543,14 @@ fn session(dir: &TempDir, args: &[&str]) -> (i32, String) {
     (code, format!("{out}{err}"))
 }
 
-/// Runs a session under the default case-level reachability policy.
+/// Runs a session with the experimental case-level reachability optimization enabled.
 ///
 /// Kept separate because most tests in this file exercise unrelated behavior and run concurrently;
 /// making all fifty of them census at once creates a process storm no real invocation produces.
 fn censused_session(dir: &TempDir, args: &[&str]) -> (i32, String) {
-    let (code, out, err) = session_on_with(Sink::default(), dir, args, false);
+    let mut args = args.to_vec();
+    args.push("--optimize-test-execution");
+    let (code, out, err) = session_on_with(Sink::default(), dir, &args, false);
 
     (code, format!("{out}{err}"))
 }
@@ -332,6 +580,23 @@ fn session_on_with(mut host: Sink, dir: &TempDir, args: &[&str], whole_test_bina
     let code = run(&mut host, command);
 
     (code, host.out(), host.err())
+}
+
+fn promote_hints(dir: &TempDir) -> (i32, String) {
+    let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
+    let mut host = Sink::default();
+    let code = run(
+        &mut host,
+        vec![
+            "cargo-gamma".to_owned(),
+            "gamma".to_owned(),
+            "hints".to_owned(),
+            "--dir".to_owned(),
+            path.to_string(),
+        ],
+    );
+
+    (code, format!("{}{}", host.out(), host.err()))
 }
 
 #[test]
@@ -373,6 +638,75 @@ fn a_second_run_reestablishes_the_first_runs_kills() {
     assert_eq!(second, EXIT_OK, "{output}");
     assert!(output.contains("0 survived,"), "{output}");
     assert!(!output.contains("Iterating"), "a kill must never be carried: {output}");
+}
+
+#[test]
+fn promoted_generalized_hints_cross_a_clean_campaign_boundary() {
+    step_aside_if_nested!();
+    let first_source = "
+pub fn is_adult(age: u32) -> bool {
+    age >= 18
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_boundary_is_pinned() {
+        assert!(!super::is_adult(17));
+        assert!(super::is_adult(18));
+    }
+}
+";
+    let second_source = first_source.replace("age >= 18", "age > 17");
+    let dir = workspace(first_source);
+    commit_fixture(&dir);
+
+    let (first, first_output) = session(&dir, &["--mutators", "relational"]);
+    assert_eq!(first, EXIT_OK, "{first_output}");
+    assert!(first_output.contains("0 survived,"), "{first_output}");
+
+    let (promoted, promotion_output) = promote_hints(&dir);
+    assert_eq!(promoted, EXIT_OK, "{promotion_output}");
+    let artifact = fs::read_to_string(dir.path().join("gamma-hints.yaml")).expect("promoted hints");
+    assert!(artifact.contains("items:"), "{artifact}");
+    assert!(artifact.contains("the_boundary_is_pinned"), "{artifact}");
+
+    fs::remove_dir_all(scratch_base(&dir)).expect("the second campaign should not see the first run record");
+    fs::write(dir.path().join("src/lib.rs"), second_source).expect("could not change the mutant identity");
+
+    let (second, out, err) = session_on_with(Sink::default(), &dir, &["--mutators", "relational", "--diag"], false);
+    let second_output = format!("{out}{err}");
+
+    assert_eq!(second, EXIT_OK, "{second_output}");
+    assert!(second_output.contains("0 survived,"), "{second_output}");
+    assert!(second_output.contains("generalized 2/2"), "{second_output}");
+    assert!(second_output.contains("2 probes"), "{second_output}");
+}
+
+#[test]
+fn compiler_linkage_narrows_a_real_campaign_to_the_target_that_reads_the_source() {
+    step_aside_if_nested!();
+    let dir = compiler_linkage_workspace();
+    let (code, output) = session(
+        &dir,
+        &[
+            "--mutators",
+            "relational",
+            "--file",
+            "subject/src/lib.rs",
+            "--test-workspace",
+            "--diag",
+            "--incremental",
+            "no",
+        ],
+    );
+
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(output.contains("2 survived,"), "{output}");
+    assert!(output.contains("selection kept"), "{output}");
+    assert!(output.contains("tests     2 tests"), "{output}");
+    assert!(output.contains("2 launches"), "{output}");
+    assert!(!output.contains("objects_to_mutants_it_cannot_link"), "{output}");
 }
 
 fn incremental_args(cache: Option<&str>) -> Vec<&str> {
@@ -487,16 +821,86 @@ fn a_suppressed_mutant_is_never_run() {
 #[test]
 fn a_red_baseline_is_reported_rather_than_measured() {
     step_aside_if_nested!();
-    let source = format!("{SUBJECT}\n#[test]\nfn always_fails() {{ panic!(\"nope\"); }}\n");
+    let source = format!(
+        "{SUBJECT}\n\
+         pub fn lookup() -> Option<&'static dyn core::fmt::Debug> {{ None }}\n\
+         #[test]\nfn always_fails() {{ panic!(\"nope\"); }}\n"
+    );
     let dir = workspace(&source);
-    let (code, output) = session(&dir, &["--mutators", "relational"]);
+    let stale = dir.path().join("target/cargo-gamma/baseline-failures/stale/failure.json");
+    fs::create_dir_all(stale.parent().expect("stale failure has a parent")).expect("stale directory");
+    fs::write(&stale, "{}").expect("stale failure");
+    let (code, output) = session(&dir, &["--mutators", "relational,fn_value.some_default"]);
 
     assert_ne!(code, EXIT_OK, "{output}");
-    assert!(output.contains("the baseline could not be measured"), "{output}");
-    assert!(output.contains("test `always_fails` failed"), "{output}");
-    assert!(output.contains("baseline-failure.json"), "{output}");
+    assert!(output.contains("baseline measurement failed due to 1 test failures"), "{output}");
+    assert!(output.contains("baseline-failures for details"), "{output}");
+    assert!(!output.contains("test `always_fails` failed"), "{output}");
+    assert_eq!(output.matches("Wrote ").count(), 3, "{output}");
     assert!(output.contains("gamma-diagnostics.json"), "{output}");
+    assert!(output.contains("failure.json"), "{output}");
+    assert!(output.contains("diags.json"), "{output}");
     assert!(!output.contains("nope"), "{output}");
+
+    let failure_dir = dir
+        .path()
+        .join("target/cargo-gamma/baseline-failures/subject/subject/tests/always_fails");
+    let failure = fs::read_to_string(failure_dir.join("failure.json")).expect("failure record");
+    let diagnostics = fs::read_to_string(failure_dir.join("diags.json")).expect("diagnostics");
+    let canonical = fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-diagnostics.json")).expect("canonical diagnostics");
+    let parsed: serde_json::Value = serde_json::from_str(&canonical).expect("valid diagnostics");
+    let failure_diagnostics: serde_json::Value = serde_json::from_str(&diagnostics).expect("valid failure diagnostics");
+
+    assert!(!stale.exists(), "the new build retained an old failure record");
+    assert!(failure.contains("nope"), "{failure}");
+    assert!(diagnostics.contains("\"schemaVersion\": \"3\""), "{diagnostics}");
+    for document in [&parsed, &failure_diagnostics] {
+        assert!(
+            document["population"]["mutants"].as_u64().is_some_and(|count| count > 1),
+            "{document}"
+        );
+        assert!(
+            document["outcomes"]["unviable"].as_u64().is_some_and(|count| count >= 1),
+            "{document}"
+        );
+        assert!(
+            document["outcomes"]["pending"].as_u64().is_some_and(|count| count >= 1),
+            "{document}"
+        );
+        assert!(document["run"]["fixedMs"].as_u64().is_some_and(|elapsed| elapsed > 0), "{document}");
+        assert!(!document["binaries"].as_array().is_none_or(Vec::is_empty), "{document}");
+    }
+}
+
+#[test]
+fn direct_test_launches_reproduce_cargos_runtime_environment() {
+    step_aside_if_nested!();
+    let dir = environment_workspace();
+    let (code, output) = session(&dir, &["--mutators", "relational"]);
+    let failure = fs::read_to_string(
+        dir.path()
+            .join("target/cargo-gamma/baseline-failures/subject/environment/tests/cargo_runtime_environment_is_present/failure.json"),
+    )
+    .unwrap_or_default();
+
+    assert_eq!(code, EXIT_OK, "{output}\n{failure}");
+    assert!(!output.contains("baseline measurement failed"), "{output}");
+}
+
+#[test]
+fn nextest_launches_reproduce_cargos_and_nextests_runtime_environment() {
+    step_aside_if_nested!();
+    step_aside_without_nextest!();
+    let dir = environment_workspace();
+    let (code, output) = session(&dir, &["--mutators", "relational", "--nextest"]);
+    let failure = fs::read_to_string(
+        dir.path()
+            .join("target/cargo-gamma/baseline-failures/subject/environment/tests/cargo_runtime_environment_is_present/failure.json"),
+    )
+    .unwrap_or_default();
+
+    assert_eq!(code, EXIT_OK, "{output}\n{failure}");
+    assert!(!output.contains("baseline measurement failed"), "{output}");
 }
 
 #[test]

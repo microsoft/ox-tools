@@ -14,8 +14,14 @@ use serde_json::Value;
 /// A machine-readable diagnostic that should be persisted before an error unwinds its run state.
 #[derive(Debug)]
 pub(crate) struct Artifact {
+    pub(crate) directory: String,
     pub(crate) file_name: &'static str,
     pub(crate) value: Value,
+}
+
+#[derive(Debug)]
+struct Artifacts {
+    entries: Vec<Artifact>,
 }
 
 /// An error carrying a human-readable message and an optional cause.
@@ -28,7 +34,7 @@ pub struct Error {
     cause: Option<Box<dyn StdError + Send + Sync>>,
     usage: bool,
     skippable: bool,
-    artifact: Option<Box<Artifact>>,
+    artifacts: Option<Box<Artifacts>>,
 
     /// Captured at construction, unconditionally.
     ///
@@ -48,7 +54,7 @@ impl Error {
             cause: None,
             usage: false,
             skippable: false,
-            artifact: None,
+            artifacts: None,
             backtrace: Backtrace::capture(),
         }
     }
@@ -93,19 +99,57 @@ impl Error {
 
     /// Attaches a machine-readable diagnostic for the command layer to persist.
     #[must_use]
-    pub(crate) fn with_artifact(mut self, file_name: &'static str, value: Value) -> Self {
-        self.artifact = Some(Box::new(Artifact { file_name, value }));
+    pub(crate) fn with_nested_artifact(mut self, directory: String, file_name: &'static str, value: Value) -> Self {
+        self.artifacts
+            .get_or_insert_with(|| Box::new(Artifacts { entries: Vec::new() }))
+            .entries
+            .push(Artifact {
+                directory,
+                file_name,
+                value,
+            });
         self
     }
 
-    /// Returns the diagnostic attached to this failure, when it has one.
+    /// Returns the first diagnostic attached to this failure, when it has one.
+    #[cfg(test)]
     pub(crate) fn artifact(&self) -> Option<&Artifact> {
-        self.artifact.as_deref()
+        self.artifacts.as_deref().and_then(|artifacts| artifacts.entries.first())
+    }
+
+    /// Returns every diagnostic attached to this failure.
+    pub(crate) fn artifacts(&self) -> &[Artifact] {
+        self.artifacts.as_deref().map_or(&[], |artifacts| artifacts.entries.as_slice())
+    }
+
+    /// Returns every attached diagnostic mutably.
+    pub(crate) fn artifacts_mut(&mut self) -> &mut [Artifact] {
+        self.artifacts
+            .as_deref_mut()
+            .map_or(&mut [], |artifacts| artifacts.entries.as_mut_slice())
+    }
+
+    /// Moves another failure's diagnostics onto this one.
+    pub(crate) fn append_artifacts(&mut self, other: &mut Self) {
+        let Some(mut artifacts) = other.artifacts.take() else {
+            return;
+        };
+
+        if let Some(existing) = &mut self.artifacts {
+            existing.entries.append(&mut artifacts.entries);
+        } else {
+            self.artifacts = Some(artifacts);
+        }
     }
 
     /// Appends command-layer context that was not available where the error originated.
     pub(crate) fn append_message(&mut self, suffix: &str) {
         self.message.push_str(suffix);
+    }
+
+    /// Replaces the message when a higher layer can name the final destination or remedy.
+    pub(crate) fn set_message(&mut self, message: impl Into<String>) {
+        self.message = message.into();
     }
 
     /// Attaches an underlying cause.
@@ -175,7 +219,7 @@ impl From<EngineError> for Error {
             cause,
             usage,
             skippable,
-            artifact: None,
+            artifacts: None,
             backtrace,
         }
     }

@@ -38,6 +38,12 @@ pub(super) struct Progress {
     /// it is what the run would have reported had it read the output to exhaustion.
     pub(super) failed: Option<String>,
 
+    /// Every test the harness announced as failed, in announcement order.
+    ///
+    /// Mutant attempts still stop at the first entry. Baselines run the harness to completion and
+    /// retain the complete list so one pass can publish every known failure.
+    pub(super) failures: Vec<String>,
+
     /// Whether the guard runtime reported that process startup could not establish a selection.
     pub(super) environment_error: bool,
 
@@ -67,6 +73,7 @@ impl Progress {
         Self {
             watch,
             failed: None,
+            failures: Vec::new(),
             environment_error: false,
             heard: Instant::now(),
             quiet: Duration::ZERO,
@@ -137,11 +144,17 @@ impl Progress {
         self.environment_error |= runtime_startup_failure(line.as_bytes());
     }
 
-    /// Remembers the first failure announced, leaving any later one alone.
+    /// Remembers every failure announcement while keeping the first directly accessible.
     fn note(&mut self, name: &str) {
-        if self.failed.is_none() && !name.is_empty() {
+        if name.is_empty() {
+            return;
+        }
+
+        if self.failed.is_none() {
             self.failed = Some(name.to_owned());
         }
+
+        self.failures.push(name.to_owned());
     }
 }
 
@@ -304,8 +317,8 @@ mod tests {
         assert_eq!(progress.failed.as_deref(), Some("tests::second"));
     }
 
-    /// The first failure is the one that convicted the mutant, and is what reading the output to
-    /// exhaustion would have reported.
+    /// The first failure remains the mutant verdict while the complete list is retained for a
+    /// baseline diagnostic.
     #[test]
     fn a_later_failure_does_not_replace_the_first() {
         let mut progress = Progress::new(Watch::Libtest);
@@ -315,6 +328,7 @@ mod tests {
         progress.heard("test tests::second ... FAILED\n");
 
         assert_eq!(progress.failed.as_deref(), Some("tests::first"));
+        assert_eq!(progress.failures, ["tests::first", "tests::second"]);
     }
 
     /// A target built with `harness = false` announces no suite and prints whatever it likes, so

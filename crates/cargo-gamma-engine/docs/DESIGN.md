@@ -19,7 +19,12 @@ identity, mutator selection, and mutant-schema instrumentation.
 - Mutation discovery uses source-visible type evidence to avoid replacements
   known not to compile. This includes concrete `Self` and associated types in
   implementations, standard time types without `Default`, and standard
-  `fmt::Result` aliases.
+  `fmt::Result` aliases. Numeric perturbation requires declarations, numeric
+  use, or numeric type qualifiers rather than constant-style spelling alone.
+  Integer-literal decrement also omits unsuffixed zero where a written return
+  type or local annotation proves the value must be unsigned. An inferred
+  closure or async block does not expose enough error-type evidence to safely
+  synthesize a default error, so discovery omits that mutation.
 - The **discovery pre-pass** is the syntax-tree walk that runs before candidate
   collection to audit stated-value attributes and build per-file indexes of
   numeric evidence and imported type paths. Its configuration-aware audit is

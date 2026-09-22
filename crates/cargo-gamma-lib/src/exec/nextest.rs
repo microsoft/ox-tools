@@ -25,6 +25,8 @@ use crate::{HashMap, Result};
 
 /// Keep Windows' command line below its practical limit, with room for metadata paths and test args.
 const MAX_FILTERSET_BYTES: usize = 8 * 1024;
+const BINARIES_METADATA_FILE: &str = "nextest-binaries.json";
+const CARGO_METADATA_FILE: &str = "nextest-metadata.json";
 
 /// The metadata that lets nextest run a tree it did not build, and the ids it knows the binaries by.
 #[derive(Debug, Clone)]
@@ -49,12 +51,12 @@ impl Harness {
     /// # Errors
     ///
     /// Returns an error if nextest is not installed or cannot enumerate the built tree.
-    pub(super) fn prepare(work: &Workspace, binaries: &[TestBinary]) -> Result<Self> {
+    pub(super) fn prepare(work: &Workspace, binaries: &[TestBinary], metadata: &str) -> Result<Self> {
         let listing = work.capture_nextest_list(binaries)?;
         let ids = binary_ids(&listing);
 
-        let paths = work.write_scratch("nextest-binaries.json", &listing)?;
-        let metadata = work.write_scratch("nextest-metadata.json", &work.capture_cargo_metadata()?)?;
+        let paths = work.write_scratch(BINARIES_METADATA_FILE, &listing)?;
+        let metadata = work.write_scratch(CARGO_METADATA_FILE, metadata)?;
 
         let harness = Self {
             binaries: paths,
@@ -94,6 +96,8 @@ impl Harness {
         // directory to its own package root, and pointing it at one package's directory would make
         // it resolve the whole workspace relative to that.
         let _ = command.current_dir(work.root().as_std_path());
+        work.inherit_test_cache_home(&mut command);
+        work.configure_test_environment(&mut command, binary);
 
         // Only this binary's tests. The run visits the reachable binaries one at a time and stops
         // at the first that convicts, and letting nextest run all of them would discard both that
@@ -360,6 +364,22 @@ mod tests {
     }
 
     #[test]
+    fn a_filterset_exactly_at_the_command_line_cap_is_kept() {
+        let exact = (1..MAX_FILTERSET_BYTES)
+            .map(|length| "x".repeat(length))
+            .find(|name| {
+                let narrowed = format!("{} and (test({}))", filtersets("bin", &[])[0], matcher(name));
+                narrowed.len() == MAX_FILTERSET_BYTES
+            })
+            .expect("one plain test-name length reaches the byte cap exactly");
+
+        let filters = filtersets("bin", &[exact.as_str()]);
+
+        assert_eq!(filters.len(), 1);
+        assert!(filters[0].contains("test(="), "an exactly capped selection is not widened");
+    }
+
+    #[test]
     fn selected_tests_form_one_parenthesized_union() {
         assert_eq!(
             filtersets("nxspike", &["tests::one", "tests::two"]),
@@ -379,6 +399,12 @@ mod tests {
     fn output_with_no_failure_line_names_nothing() {
         assert_eq!(first_failure("        PASS [   0.012s] (1/1) nxspike tests::works"), None);
         assert_eq!(first_failure(""), None);
+    }
+
+    #[test]
+    fn failure_names_are_trimmed_after_the_timing_prefix_and_empty_names_are_ignored() {
+        assert_eq!(first_failure("FAIL [  0.123s] binary tests::fails  \n"), Some("tests::fails"));
+        assert_eq!(first_failure("FAIL [  0.123s]   \n"), None);
     }
 
     /// The scan must not stop at the first line that is not a failure, or a suite that reports
@@ -470,6 +496,69 @@ mod tests {
 
         assert_eq!(args.last().map(String::as_str), Some("pass"));
         assert!(!args.iter().any(|arg| arg == "--"), "{args:?}");
+    }
+
+    #[test]
+    fn command_construction_is_pinned_on_every_platform() {
+        let (_scratch, mut work) = crate::testing::helper_workspace("nextest-command-portable", &[]);
+        work.set_test_args(vec!["--nocapture".to_owned()]);
+        let binary = crate::testing::test_binary("/t/deps/nxspike-abc");
+        work.set_test_environment(&binary.package_id, "CARGO_PKG_NAME", "nextest-package");
+        let harness = Harness::fake(&[("/t/deps/nxspike-abc", "nxspike")]);
+
+        let command = harness.command(&work, &binary, &[]).expect("a known binary yields a command");
+        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+
+        assert_eq!(command.get_program(), "cargo-nextest");
+        assert_eq!(command.get_current_dir(), Some(work.root().as_std_path()));
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == "CARGO_GAMMA_TEST_CACHE_HOME" && value.is_some()),
+            "the private test cache follows nested helper launches"
+        );
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == "CARGO_PKG_NAME" && value == Some(std::ffi::OsStr::new("nextest-package"))),
+            "nextest receives the reconstructed Cargo test environment"
+        );
+        assert_eq!(
+            args,
+            vec![
+                "nextest",
+                "run",
+                "--binaries-metadata",
+                "/t/binaries.json",
+                "--cargo-metadata",
+                "/t/metadata.json",
+                "-E",
+                "binary_id(=nxspike)",
+                "--failure-output",
+                "immediate-final",
+                "--no-tests",
+                "pass",
+                "--",
+                "--nocapture",
+            ]
+        );
+    }
+
+    #[test]
+    fn nextest_metadata_files_are_distinct_nonempty_json_names() {
+        assert!(!BINARIES_METADATA_FILE.is_empty());
+        assert!(!CARGO_METADATA_FILE.is_empty());
+        assert_ne!(BINARIES_METADATA_FILE, CARGO_METADATA_FILE);
+        assert!(
+            std::path::Path::new(BINARIES_METADATA_FILE)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        );
+        assert!(
+            std::path::Path::new(CARGO_METADATA_FILE)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        );
     }
 
     /// A binary nextest never listed must be refused before a command is built for it, rather than

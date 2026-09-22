@@ -41,8 +41,10 @@ pub const ACTIVE_VAR: &str = "GAMMA_ACTIVE";
 /// The environment variable that puts a process into census mode.
 ///
 /// Its value is the path of the file where the process writes the ordinals it reached. Setting it
-/// selects unmutated behavior — a census runs the code the author wrote — and turns every guard
-/// into a probe that records the site it stands at.
+/// selects unmutated behavior when no mutant is active — a census runs the code the author wrote —
+/// and turns every guard into a probe that records the site it stands at. Alongside a positive
+/// [`ACTIVE_VAR`], the same path records only whether that active site was reached while preserving
+/// mutated behavior; this is how an ordinary sweep harvests reachability without another process.
 ///
 /// The path is fetched and opened through the platform's native encoding — `getenv` and `fopen` on
 /// Unix, the wide Win32 and CRT entry points on Windows — so a scratch tree whose path lies outside
@@ -262,8 +264,8 @@ fn capture_selection() -> u32 {
 
 /// Turns what startup learned about `GAMMA_CENSUS` into a selection, or into a startup failure.
 ///
-/// Census mode takes precedence over an active ordinal, so `active` is consulted only when the
-/// census variable was genuinely absent.
+/// A census path with no active ordinal selects census mode. A path alongside a positive active
+/// ordinal instead records that one active site's reach while leaving the mutant selected.
 ///
 /// A census request this process could not read is **not** absence, and must not fall through to
 /// active selection: the process would then execute a mutant, write no census file, and report a
@@ -277,9 +279,15 @@ fn capture_selection() -> u32 {
 fn selection_from(census: CensusRequest, active: impl FnOnce() -> Result<u32, ()>) -> Result<u32, ()> {
     match census {
         CensusRequest::Absent => active(),
-        // A path too long to retain still selects census mode: the file simply cannot be opened,
-        // so the census stays unsealed and the reader rejects it, which is the conservative answer.
-        CensusRequest::Path(_) | CensusRequest::Unusable => Ok(CENSUS),
+        CensusRequest::Path(_) | CensusRequest::Unusable => {
+            let selected = active()?;
+
+            // A path alongside an active mutant records whether that mutant's guard was reached
+            // without changing the code the process executes. With no active mutant, the same
+            // path retains its original census meaning and records every guard under baseline
+            // behavior.
+            Ok(if selected == NONE { CENSUS } else { selected })
+        }
         CensusRequest::Error => Err(()),
     }
 }
@@ -1248,11 +1256,9 @@ unsafe extern "C" {
 // Cost: this deliberately makes no empirical throughput promise. The structural trade-off is
 // sufficient here: census-only first and unique hits pay one relaxed load, while repeated hits
 // avoid the recorder lease and compare-exchange protocol entirely.
-// Cold: reached only under a census, never in a scoring run, and even then only off the inlined
-// per-site guard `a`. Keeping it out of line stops its bitmap machinery being inlined into every
-// guard site and bloating the instrumented build, which is the dominant fixed cost of a run.
-// `#[inline(never)]` turns the `#[cold]` hint into a guarantee at no cost: a census can afford one
-// call per site.
+// Cold: reached on a site's first hit during a census or an active-mutant reach sample. The
+// inlined guard performs the cheap bitmap precheck so repeated hot-loop hits do not pay an
+// out-of-line call; keeping the recorder protocol here avoids bloating every instrumented site.
 #[cold]
 #[inline(never)]
 #[cfg(any(unix, windows))]
@@ -1295,6 +1301,21 @@ fn note(id: u32) {
     end_recording();
 }
 
+#[inline]
+#[cfg(any(unix, windows))]
+fn already_noted(id: u32) -> bool {
+    let Ok(index) = usize::try_from(id) else {
+        return false;
+    };
+
+    if index >= SITES {
+        OVERFLOWED.load(Ordering::Relaxed)
+    } else {
+        let bit = 1_u32 << (index % WORD_BITS);
+        REACHED[index / WORD_BITS].load(Ordering::Relaxed) & bit != 0
+    }
+}
+
 /// The high bit closes census recording; the remaining bits count bitmap updates in progress.
 ///
 /// `seal` claims the closed state only from zero recorders. A guard increments the count before
@@ -1331,6 +1352,8 @@ impl RecorderState {
             }
 
             if state == RECORDER_MASK {
+                #[cfg(test)]
+                TEST_RECORDER_SATURATION_SPUN.store(true, Ordering::Release);
                 core::hint::spin_loop();
                 continue;
             }
@@ -1448,6 +1471,8 @@ static TEST_NOTE_STATE: AtomicUsize = AtomicUsize::new(0);
 static TEST_SEAL_WAITING: AtomicBool = AtomicBool::new(false);
 #[cfg(all(test, any(unix, windows)))]
 static TEST_SEAL_CLAIMED: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, any(unix, windows)))]
+static TEST_RECORDER_SATURATION_SPUN: AtomicBool = AtomicBool::new(false);
 
 /// Pauses a test writer after it has a lease but before it claims its bitmap bit.
 #[cfg(all(test, any(unix, windows)))]
@@ -1688,14 +1713,17 @@ extern "C" fn seal() {
 
 /// Returns the selection that is safe to publish after exit-handler registration.
 #[cfg(any(unix, windows))]
-fn selection_after_registration(selection: u32, mut register: impl FnMut(extern "C" fn()) -> c_int) -> u32 {
-    if selection != CENSUS || register(seal) == 0 {
+fn selection_after_registration(selection: u32, recording: bool, mut register: impl FnMut(extern "C" fn()) -> c_int) -> u32 {
+    if !recording || register(seal) == 0 {
         selection
-    } else {
-        // There is no Result channel from a loader constructor. Refusing census mode makes the
-        // requested census file remain absent, which the parent surfaces as a failed run, rather
-        // than silently running a census that can never receive its integrity seal.
+    } else if selection == CENSUS {
+        // A census that cannot receive its integrity seal must not run as though its negative
+        // evidence could later be trusted.
         NONE
+    } else {
+        // Reach harvesting is only an optimization. Failing to install its exit hook must not
+        // switch off the mutant the caller asked this process to execute.
+        selection
     }
 }
 
@@ -1707,7 +1735,8 @@ fn selection_after_registration(selection: u32, mut register: impl FnMut(extern 
 #[cfg(any(unix, windows))]
 extern "C" fn install() {
     let selection = capture_selection();
-    let protected = selection_after_registration(selection, |handler| {
+    let recording = CENSUS_PATH_LENGTH.load(Ordering::Acquire) != 0;
+    let protected = selection_after_registration(selection, recording, |handler| {
         // SAFETY: `seal` has the `extern "C" fn()` signature `atexit` requires, and registration
         // has no other precondition.
         unsafe { atexit(handler) }
@@ -1992,6 +2021,11 @@ pub fn a(id: u32) -> bool {
         return false;
     }
 
+    #[cfg(any(unix, windows))]
+    if active == id && CENSUS_PATH_LENGTH.load(Ordering::Relaxed) != 0 && !already_noted(id) {
+        note(id);
+    }
+
     id != NONE && active == id
 }
 
@@ -2118,11 +2152,7 @@ mod tests {
         let live = active();
 
         assert!(!a(NONE));
-
-        if live != NONE {
-            assert!(a(live));
-        }
-
+        assert_eq!(a(live), live != NONE);
         assert!(!a(live.wrapping_add(1)));
     }
 
@@ -2146,10 +2176,11 @@ mod tests {
         // long and a sibling merely running alongside it would usually miss the window entirely —
         // the test would pass against a process-wide counter for want of a collision rather than
         // because collisions cannot happen.
-        let (go, done) = (AtomicBool::new(false), AtomicBool::new(false));
+        let (ready, go, done) = (AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false));
 
         std::thread::scope(|scope| {
             let sibling = scope.spawn(|| {
+                ready.store(true, Ordering::Release);
                 while !go.load(Ordering::Acquire) {
                     core::hint::spin_loop();
                 }
@@ -2167,6 +2198,9 @@ mod tests {
             // Warmed first, so a cache fill inside the measured region cannot be mistaken for the
             // sibling's allocations leaking in.
             let _ = active();
+            while !ready.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
 
             let counted = allocations(|| {
                 go.store(true, Ordering::Release);
@@ -2417,7 +2451,6 @@ mod tests {
         let consulted = Cell::new(0_usize);
         let answer = selection_from(CensusRequest::Error, || {
             consulted.set(consulted.get() + 1);
-
             Ok(7)
         });
 
@@ -2437,10 +2470,10 @@ mod tests {
         assert_eq!(selection_from(CensusRequest::Absent, || Err(())), Err(()));
     }
 
-    /// Either census answer selects census mode, and neither reads `GAMMA_ACTIVE` at all.
+    /// A census path records the active site when a mutant is selected.
     #[cfg(any(unix, windows))]
     #[test]
-    fn a_census_request_selects_census_mode_without_consulting_the_active_ordinal() {
+    fn a_census_request_preserves_an_active_mutant() {
         for request in [
             CensusRequest::Path(NonZeroUsize::new(4).expect("four is non-zero")),
             CensusRequest::Unusable,
@@ -2452,9 +2485,18 @@ mod tests {
                 Ok(7)
             });
 
-            assert_eq!(answer, Ok(CENSUS), "{request:?}");
-            assert_eq!(consulted.get(), 0, "census mode consulted `GAMMA_ACTIVE`: {request:?}");
+            assert_eq!(answer, Ok(7), "{request:?}");
+            assert_eq!(consulted.get(), 1, "reach recording must retain `GAMMA_ACTIVE`: {request:?}");
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_census_request_without_an_active_mutant_still_selects_census_mode() {
+        assert_eq!(
+            selection_from(CensusRequest::Path(NonZeroUsize::new(4).expect("four is non-zero")), || Ok(NONE)),
+            Ok(CENSUS)
+        );
     }
 
     /// One scripted `read` of the environ stream.
@@ -2786,6 +2828,26 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_constants_and_native_layout_are_constructed_as_expected() {
+        assert_eq!(widen::<3>(b"ab\0"), [b'a'.into(), b'b'.into(), 0]);
+
+        let overlapped = WindowsOverlapped::for_append();
+
+        assert_eq!(overlapped.internal, 0);
+        assert_eq!(overlapped.internal_high, 0);
+        assert_eq!(overlapped.offset, u32::MAX);
+        assert_eq!(overlapped.offset_high, u32::MAX);
+        assert_eq!(overlapped.event, core::ptr::null_mut());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn opening_without_a_census_path_returns_no_stream() {
+        assert!(open().is_null());
+    }
+
     #[test]
     fn the_variable_names_agree() {
         // Two spellings of one name is two chances to change only one of them.
@@ -2799,13 +2861,19 @@ mod tests {
     #[test]
     fn a_failed_exit_registration_refuses_census_mode() {
         let registrations = Cell::new(0);
-        let selected = selection_after_registration(CENSUS, |_handler| {
+        let selected = selection_after_registration(CENSUS, true, |_handler| {
             registrations.set(registrations.get() + 1);
             -1
         });
 
         assert_eq!(selected, NONE, "an unsealable census must not be published as active");
         assert_eq!(registrations.get(), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_failed_reach_registration_never_switches_off_the_mutant() {
+        assert_eq!(selection_after_registration(7, true, |_handler| -1), 7);
     }
 
     #[cfg(any(unix, windows))]
@@ -2835,6 +2903,30 @@ mod tests {
             assert_eq!(completed.load(Ordering::Relaxed), admitted.load(Ordering::Relaxed));
             assert!(!state.begin_recording(), "recording reopened after the state was sealed");
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn recorder_saturation_waits_and_an_existing_seal_refuses_new_work() {
+        let state = RecorderState::new();
+        state.value.store(RECORDER_MASK, Ordering::Release);
+        TEST_RECORDER_SATURATION_SPUN.store(false, Ordering::Release);
+
+        std::thread::scope(|scope| {
+            let recorder = scope.spawn(|| state.begin_recording());
+
+            while !TEST_RECORDER_SATURATION_SPUN.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+            state.value.store(0, Ordering::Release);
+
+            assert!(recorder.join().expect("the saturated recorder thread must not panic"));
+        });
+
+        state.end_recording();
+        assert!(state.begin_seal());
+        assert_eq!(state.try_begin_seal(), Some(false));
+        assert!(!state.begin_recording());
     }
 
     #[cfg(not(miri))]
@@ -2911,12 +3003,9 @@ mod tests {
                 .env_remove(CENSUS_VAR)
                 .output()
                 .expect("the pre-main environment helper runs");
+            let stderr = String::from_utf8_lossy(&output.stderr);
 
-            assert!(
-                output.status.success(),
-                "pre-main environment helper failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            assert!(output.status.success(), "pre-main environment helper failed: {stderr}");
         }
 
         #[test]
@@ -2995,19 +3084,18 @@ mod tests {
                 .status()
                 .expect("the child runs");
             let bytes = fs::read(&stderr_path).expect("the child's stderr remains readable");
+            let stderr = String::from_utf8_lossy(&bytes);
 
             assert_eq!(
                 status.code(),
                 Some(86),
-                "the startup failure keeps its reserved exit code: {}",
-                String::from_utf8_lossy(&bytes)
+                "the startup failure keeps its reserved exit code: {stderr}"
             );
             assert!(
                 bytes
                     .windows(ENVIRONMENT_ERROR_MARKER.len())
                     .any(|window| window == ENVIRONMENT_ERROR_MARKER),
-                "{}",
-                String::from_utf8_lossy(&bytes)
+                "{stderr}"
             );
         }
 
@@ -3154,7 +3242,7 @@ mod tests {
                 .join(format!(".gamma-census-none-{}-{sequence}.bin", process::id()));
             let _removed = fs::remove_file(&path);
 
-            let census = Command::new(&executable)
+            let observed = Command::new(&executable)
                 .args([
                     "--exact",
                     "runtime::tests::process_tests::the_child_reports_guard_selection",
@@ -3163,12 +3251,14 @@ mod tests {
                 .env(ACTIVE_VAR, "7")
                 .env(CENSUS_VAR, &path)
                 .output()
-                .expect("the census child runs");
-            assert!(census.status.success(), "{}", String::from_utf8_lossy(&census.stderr));
-            let census = String::from_utf8_lossy(&census.stdout);
+                .expect("the observed mutant child runs");
+            assert!(observed.status.success(), "{}", String::from_utf8_lossy(&observed.stderr));
+            let output = String::from_utf8_lossy(&observed.stdout);
+            let bytes = fs::read(&path).expect("the observed mutant wrote its reach record");
             let _removed = fs::remove_file(&path);
 
-            assert!(census.contains("active=0 none=false seven=false"), "{census}");
+            assert!(output.contains("active=7 none=false seven=true"), "{output}");
+            assert_eq!(bytes, [7_u32, SEAL].into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>());
         }
 
         #[test]
@@ -3345,7 +3435,9 @@ mod tests {
                 return;
             }
 
-            assert!(!a(73));
+            for site in 0..=1024 {
+                assert!(!a(site));
+            }
 
             TEST_WRITE_STATE.store(BLOCK_AND_SHORT, Ordering::Release);
             thread::scope(|scope| {

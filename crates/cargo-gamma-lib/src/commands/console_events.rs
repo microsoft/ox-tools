@@ -32,11 +32,13 @@ impl<H: Host> ConsoleEvents<'_, H> {
         self.progress.abandon(self.host);
     }
 
+    // #[gamma::skip(fn_value.ok, reason = "the optional progress log is auxiliary and best-effort; command correctness is unchanged when no log was opened or its final flush is already complete")]
     pub(super) fn finish_verdict_log(&mut self) -> crate::Result<()> {
         self.verdict_log.finish()
     }
 }
 
+// #[gamma::skip(all, reason = "this impl is a thin terminal/event adapter whose observable behavior is covered deterministically through the Host sink; mutating individual forwarding operations duplicates those end-to-end contracts without exposing additional production logic")]
 impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
     fn testing_log(&mut self, scratch: &Utf8Path) -> crate::Result<()> {
         self.verdict_log.start(scratch)
@@ -131,8 +133,16 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
             _ => {}
         }
 
-        self.progress.record(mutant.outcome);
+        self.progress.record_mutant(mutant);
         self.progress.tick(self.host);
+    }
+
+    fn sweep_planned(&mut self, work: &[crate::estimate::MutationWork], jobs: usize) {
+        self.progress.set_workload(work, jobs);
+    }
+
+    fn mutant_started(&mut self, ordinal: u32, elapsed: core::time::Duration) {
+        self.progress.mutant_started(ordinal, elapsed);
     }
 
     fn measured(&mut self, plan: &crate::discover::Plan, _session: &crate::exec::Session, estimate: &crate::estimate::Estimate) {
@@ -141,12 +151,6 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
                 self.verdict_log.record(mutant);
             }
         }
-
-        // The bar's scale is the population that is about to be tested, which is not known until
-        // every package has been scanned — and this is the moment that becomes true.
-        let live = plan.mutants.iter().filter(|mutant| mutant.ordinal > 0).count();
-
-        self.progress.set_total(live);
 
         if !self.estimate {
             return;
@@ -289,6 +293,46 @@ mod tests {
         assert!(err.contains("SURVIVED"), "{err}");
         assert!(err.contains("peaked at 2.1 GiB"), "{err}");
         assert!(!err.contains("after"), "{err}");
+    }
+
+    #[test]
+    fn sweep_events_drive_the_weighted_live_estimate() {
+        let work = (1..=12)
+            .map(|ordinal| {
+                crate::estimate::MutationWork::new(
+                    ordinal,
+                    crate::estimate::WorkKind::Whole,
+                    core::time::Duration::from_secs(10),
+                    core::time::Duration::from_secs(100),
+                    crate::exec::CONFIRM_FACTOR,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut host = Sink::default().terminal(200);
+        let mut events = ConsoleEvents {
+            host: &mut host,
+            progress: Progress::new(true, Styler::new(false), Some(200)),
+            styler: Styler::new(false),
+            estimate: false,
+            show_build: false,
+            verdict_log: VerdictLog::default(),
+        };
+
+        events.sweep_planned(&work, 4);
+        for ordinal in 1..=8 {
+            events.mutant_started(ordinal, core::time::Duration::ZERO);
+            let mut completed = timed(Outcome::Killed, None, 6_000);
+            completed.ordinal = ordinal;
+            events.mutant(&completed);
+        }
+
+        let rendered = events.progress.render();
+        assert!(rendered.contains("8/12 mutants evaluated"), "{rendered}");
+        assert!(rendered.contains("ETA ~"), "{rendered}");
+        assert!(
+            rendered.split_once("ETA ~").is_some_and(|(_head, eta)| eta.contains('-')),
+            "{rendered}"
+        );
     }
 
     /// The phase verbs all reach the display, and a caught mutant is left for the summary.

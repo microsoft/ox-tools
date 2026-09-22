@@ -11,7 +11,7 @@ use crate::cfg::CfgSet;
 use crate::model::{MutantId, SiteIndex, mutant_id_with_discriminator, normalize_site_text};
 use crate::ops::registry::{REGISTRY, Selection};
 use crate::parse::SourceFile;
-use crate::schema::{AssignedMutant, Ordinal, instrument};
+use crate::schema::{AssignedMutant, Ordinal, instrument, instrument_with_guards};
 
 fn candidates(source: &str, ops: &str) -> Vec<Candidate> {
     let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
@@ -22,6 +22,62 @@ fn candidates(source: &str, ops: &str) -> Vec<Candidate> {
 
 fn mutators(source: &str, ops: &str) -> Vec<&'static str> {
     candidates(source, ops).into_iter().map(|c| c.mutator).collect()
+}
+
+#[test]
+fn whole_function_and_nested_boolean_mutants_instrument_together() {
+    let source = r"
+mod pb {
+    pub struct AzureEgressTarget {
+        pub host: String,
+    }
+}
+
+pub fn is_azure_egress_clear_request(input: &[pb::AzureEgressTarget]) -> bool {
+    input.len() == 1 && input[0].host.trim().is_empty()
+}
+";
+    let file = SourceFile::parse("test.rs", source.to_owned()).expect("the fixture parses");
+    let definitions = into_definitions(
+        &file,
+        collect(
+            &file,
+            &Selection::parse("fn_value,logical,relational").expect("the selectors resolve"),
+        ),
+    );
+    let assigned: Vec<_> = definitions
+        .iter()
+        .enumerate()
+        .map(|(index, definition)| {
+            AssignedMutant::new(
+                Ordinal::new(u32::try_from(index + 1).expect("the fixture has few mutants")),
+                definition,
+            )
+        })
+        .collect();
+
+    let (instrumented, guards) = instrument_with_guards(file.text(), &assigned).expect("the discovered population instruments");
+
+    assert!(
+        definitions.iter().any(|mutant| mutant.mutator.as_ref() == "fn_value.bool_false"),
+        "{definitions:#?}"
+    );
+    assert!(
+        definitions.iter().any(|mutant| mutant.site.original.contains("&&")),
+        "the fixture must contain nested boolean mutants: {definitions:#?}"
+    );
+    assert_eq!(guards.len(), definitions.len(), "{instrumented}");
+
+    for ordinal in 1..=u32::try_from(definitions.len()).expect("the fixture has few mutants") {
+        assert_eq!(
+            instrumented.matches(&format!("::gamma_rt::a({ordinal}u32)")).count(),
+            1,
+            "ordinal {ordinal} must have exactly one guard:\n{instrumented}"
+        );
+        assert!(guards.contains_key(&ordinal), "ordinal {ordinal} has no recorded guard");
+    }
+
+    let _parsed = parse_file(&instrumented).expect("the complete schema remains valid Rust");
 }
 
 fn with_errors(source: &str, errors: &[&str]) -> Vec<Candidate> {
@@ -876,6 +932,96 @@ fn an_unsuffixed_zero_keeps_its_decrement_candidate() {
 
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].replacement, "-1");
+}
+
+#[test]
+fn an_unsuffixed_zero_in_a_written_unsigned_context_is_not_decremented() {
+    for source in [
+        "fn f() -> usize { 0 }",
+        "fn f() -> usize { return (0); }",
+        "fn f(c: bool) -> usize { if c { 0 } else { 1 } }",
+        "fn f(n: i32) -> usize { match n { 0 => 0, _ => 1 } }",
+        "fn f() { let count: u32 = 0; g(count); }",
+    ] {
+        let found = candidates(source, "literal.int_decrement");
+
+        assert!(found.iter().all(|candidate| candidate.replacement != "-1"), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn zero_decrement_is_preserved_for_signed_and_unknown_contexts() {
+    for source in [
+        "fn f() -> i32 { 0 }",
+        "fn f() { let offset: isize = 0; g(offset); }",
+        "fn f() { g(0); }",
+        "fn f(n: i32) -> usize { if n < 0 { 1 } else { 2 } }",
+    ] {
+        let found = candidates(source, "literal.int_decrement");
+
+        assert_eq!(
+            found.iter().filter(|candidate| candidate.replacement == "-1").count(),
+            1,
+            "{source}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_return_scopes_do_not_inherit_an_unsigned_function_context() {
+    for source in [
+        "fn f() -> u32 { let nested = || -> i32 { return 0; }; nested() as u32 }",
+        "fn f() -> u32 { let nested = async { return 0; }; drop(nested); return 0; }",
+    ] {
+        let found = candidates(source, "literal.int_decrement");
+
+        assert_eq!(
+            found.iter().filter(|candidate| candidate.replacement == "-1").count(),
+            1,
+            "{source}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn an_explicitly_unsigned_closure_has_its_own_return_context() {
+    let source = "fn f() -> i32 { let nested = || -> u32 { return 0; }; nested() as i32 }";
+    let found = candidates(source, "literal.int_decrement");
+
+    assert!(found.iter().all(|candidate| candidate.replacement != "-1"), "{source}: {found:?}");
+}
+
+#[test]
+fn nested_nonnumeric_returns_do_not_inherit_a_numeric_function_context() {
+    for source in [
+        "fn f() -> i32 { let nested = || -> String { return make_string(); }; drop(nested); 1 }",
+        "fn f() -> i32 { let nested = || { return make_string(); }; drop(nested); 1 }",
+        "fn f() -> i32 { let nested = async { return make_string(); }; drop(nested); 1 }",
+    ] {
+        let found = mutators(source, "expr.increment,expr.decrement");
+
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn an_explicitly_typed_closure_uses_its_own_error_context() {
+    let source = "use std::io; fn f() -> Result<u8, io::Error> { let nested = || -> Result<u8, crate::Error> { Ok(1) }; nested() }";
+    let found = mutators(source, "result.ok_to_err");
+
+    assert_eq!(found, vec!["result.ok_to_err"], "{source}: {found:?}");
+}
+
+#[test]
+fn unknown_nested_error_contexts_are_conservative() {
+    for source in [
+        "use std::io; fn f() -> Result<u8, io::Error> { let nested = || { Ok(1) }; nested() }",
+        "use std::io; fn f() -> Result<u8, io::Error> { let nested = async { Ok(1) }; block_on(nested) }",
+    ] {
+        let found = mutators(source, "result.ok_to_err");
+
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
 }
 
 #[test]
@@ -1899,11 +2045,7 @@ fn a_type_named_where_a_value_is_expected_is_not_perturbed() {
     let source = "fn f() { g(PhantomData, Vec::new(), items.iter(), MAX); }";
     let found = candidates(source, "expr");
 
-    // `MAX` is the point of the exception: constants are spelled in the screaming case and are
-    // among the most worthwhile things this family has to offer, so the camel-case rule that
-    // rejects `PhantomData` must not reject them too.
-    assert!(found.iter().any(|c| c.replacement == "(MAX) + 1"), "{found:?}");
-    assert!(found.iter().all(|c| c.replacement.starts_with("(MAX)")), "{found:?}");
+    assert!(found.is_empty(), "names without numeric evidence must remain unknown: {found:?}");
 }
 
 #[test]
@@ -2196,12 +2338,12 @@ fn a_parenthesised_arithmetic_expression_is_still_perturbable() {
     assert!(found.contains(&"expr.increment"), "{found:?}");
 }
 
-/// A screaming-case name whose declaration is not a number is not perturbed.
+/// A constant whose declaration says it is not a number is not perturbed.
 ///
-/// The screaming case is read as evidence of a constant, and a constant is one of the best
-/// things this family has to offer — but the spelling says nothing about the type, and this
-/// codebase alone is full of `const PREFIX: &str`. Adding one to those is `E0369` every time: a
-/// mutant that cannot compile, and a share of a rollback round spent finding that out.
+/// Constants are among the most worthwhile things this family has to offer, but their spelling
+/// says nothing about the type, and this codebase alone is full of `const PREFIX: &str`. Adding one
+/// to those is `E0369` every time: a mutant that cannot compile, and a share of a rollback round
+/// spent finding that out.
 #[test]
 fn a_constant_the_file_declares_as_text_is_not_perturbed() {
     let found = mutators(r#"const PREFIX: &str = "x"; fn f() { g(PREFIX); }"#, "expr");
@@ -2217,6 +2359,40 @@ fn a_constant_the_file_declares_as_a_number_is_still_perturbed() {
     assert!(found.contains(&"expr.increment"), "{found:?}");
 }
 
+#[test]
+fn a_numeric_type_qualifier_proves_an_external_constant_is_numeric() {
+    for source in [
+        "fn f() { g(usize::MAX); }",
+        "use std::usize::MAX; fn f() { g(MAX); }",
+        "use std::usize::MAX as LIMIT; fn f() { g(LIMIT); }",
+    ] {
+        let found = candidates(source, "expr");
+
+        assert!(
+            found.iter().any(|candidate| candidate.mutator == "expr.increment"),
+            "{source}: {found:?}"
+        );
+        assert!(
+            found.iter().any(|candidate| candidate.mutator == "expr.decrement"),
+            "{source}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn screaming_case_and_nonnumeric_qualifiers_do_not_guess_numeric() {
+    for source in [
+        "fn f() { g(JUSTFILE_PATH); }",
+        "fn f() { g(FmtSpan::NONE); }",
+        "fn f() { g(DateTime::UNIX_EPOCH); }",
+        "use tracing_subscriber::fmt::format::FmtSpan as SPAN; fn f() { g(SPAN); }",
+    ] {
+        let found = candidates(source, "expr");
+
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
 /// An associated constant is declared just as plainly as a free one.
 #[test]
 fn an_associated_constant_declared_as_text_is_not_perturbed() {
@@ -2230,9 +2406,8 @@ fn an_associated_constant_declared_as_text_is_not_perturbed() {
 
 /// Two declarations disagreeing about a name leave it unknown rather than letting one win.
 ///
-/// Without type resolution there is no way to say which `MAX` a bare `MAX` reached, so the
-/// screaming-case guess would be as likely to be wrong as right — and being wrong here costs a
-/// build. Neither answer is taken, which for this family means no perturbation.
+/// Without type resolution there is no way to say which `CAP` a bare `CAP` reached, and being wrong
+/// here costs a build. Neither answer is taken, which for this family means no perturbation.
 #[test]
 fn a_constant_two_declarations_disagree_about_is_not_perturbed() {
     let source = r#"struct A; struct B; impl A { const CAP: usize = 1; } impl B { const CAP: &'static str = "b"; } fn f() { g(CAP); }"#;

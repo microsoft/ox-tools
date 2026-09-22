@@ -10,6 +10,7 @@ Every subcommand and every option `cargo-gamma` accepts.
 * [Where settings come from](#where-settings-come-from)
 * [Passing arguments through](#passing-arguments-through)
 * [Understanding uncovered mutants](#understanding-uncovered-mutants)
+* [Exit status](#exit-status)
 * [Full option reference](#full-option-reference)
   * [Accepted by every subcommand](#accepted-by-every-subcommand)
   * [`gamma run`](#gamma-run)
@@ -18,6 +19,8 @@ Every subcommand and every option `cargo-gamma` accepts.
   * [`gamma suppress`](#gamma-suppress)
   * [`gamma unsuppress`](#gamma-unsuppress)
   * [`gamma merge`](#gamma-merge)
+  * [`gamma hints`](#gamma-hints)
+  * [`gamma clean`](#gamma-clean)
   * [`gamma completions`](#gamma-completions)
 
 ## Invoking the tool
@@ -70,7 +73,7 @@ lives in is usually enough to find it:
 | **Running tests** | How the suite is executed per mutant: parallelism, timeouts, which test targets may decide a verdict, and which runner. |
 | **Memory** | The ceiling each test binary runs under, and how it is derived. A mutant can turn bounded allocation into unbounded allocation, which a timeout catches only slowly. |
 | **Scratch tree** | Where the instrumented copy of the workspace lives, and what is copied into it. |
-| **Run control** | What the run does as a whole: gate on a score, resume from a previous run, stop early, or only estimate. |
+| **Run control** | What the run does as a whole: gate on a score, reuse safe knowledge from a previous run, stop early, or only estimate. |
 | **Reporting** | What is written where, and how much detail the console prints. |
 | **Global options** | Color and progress, accepted by every subcommand. |
 
@@ -113,10 +116,12 @@ cargo gamma run --cargo-arg --offline -- --test-threads=1
 
 ## Understanding uncovered mutants
 
-By default, `uncovered` means no selected runtime test activated that mutation site's gamma guard in
-the reachability census. It does not mean that every external coverage report must show the source
-line as missed. With `--whole-test-binaries`, no census runs and this case-level classification is
-unavailable.
+`uncovered` means cargo-gamma obtained complete, deterministic evidence that no selected runtime
+test activated the mutation site's guard. That evidence can come from an opted-in reachability
+census or from sealed whole-binary observations learned while testing another replacement at the
+same stable site. It does not mean that every external coverage report must show the source line as
+missed. `--whole-test-binaries` disables deterministic reach narrowing, so this case-level
+classification is unavailable.
 
 For example, code annotated `#[coverage(off)]` is removed from a coverage tool's denominator but
 remains production code that gamma mutates. A project can therefore report 100% line coverage while
@@ -129,6 +134,41 @@ Respond according to intent: add a runtime test, align the run's features/platfo
 the coverage job, or use a reviewed [suppression](../README.md#suppressing-mutations) for code that
 is intentionally outside the mutation oracle. Gamma does not automatically exclude
 `#[coverage(off)]`, because deliberately uncounted code can still contain behavior worth testing.
+
+## Test environment
+
+Cargo-gamma builds test targets through Cargo and then reuses those binaries directly or through
+nextest. Direct launches reproduce Cargo's runtime environment, including package and manifest
+metadata, build-script environment and `OUT_DIR`, integration-test `CARGO_BIN_EXE_*` paths, the
+selected Cargo/rustup toolchain, the package working directory, and executable and dynamic-library
+search paths. With `--nextest`, cargo-gamma supplies the Cargo context and nextest adds its
+runner-specific `NEXTEST_*` variables.
+
+## Exit status
+
+The process status distinguishes a rejected invocation, a completed campaign whose correctness
+gate failed, and a campaign that could not obtain a complete answer:
+
+| Status | Meaning |
+| ---: | --- |
+| `0` | The command completed and every requested gate or expectation passed. Help and version also return success. |
+| `1` | The command line, configuration, or effective selection was invalid. |
+| `2` | The command completed, but a score gate or source expectation failed, or a requested gate had no complete population to grade. |
+| `3` | The command could not proceed or could not produce the requested complete result. |
+| `70` | An internal cargo-gamma panic reached the top-level boundary. |
+
+Without `--min-score`, an empty or partially completed population does not by itself become a score
+gate failure. Build convergence that leaves stuck mutants is still status `3`, because the selected
+population was not built completely enough to answer.
+
+A failing baseline also returns status `3`. Cargo-gamma lets completing baseline binaries report
+all their test failures, writes each failure under
+`target/cargo-gamma/baseline-failures/<package>/<target>/` (or the equivalent beneath
+`--artifact-dir`). It prints a platform-native `Wrote` path for the canonical diagnostics and each
+failure's `failure.json` and `diags.json`, then one aggregate error directing the reader there. A
+new build clears that directory first, so every retained record belongs to the current run. Because
+the instrumented build has already converged before baselining, these diagnostics retain the full
+mutant population and its known unviable and still-pending outcomes even when the baseline fails.
 
 ## Full option reference
 
@@ -168,6 +208,7 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
+| `--only-survivors-from` | `<PATH>` | Run only mutants that genuinely survived in this cargo-gamma report. |
 
 **Cargo features**
 
@@ -198,6 +239,7 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `--exclude-test` | `<GLOB>` | Do not let these test targets decide a verdict. |
 | `--nextest` |  | Run test binaries through `cargo nextest` for per-test process isolation. |
 | `--test-workspace` |  | Let every workspace package's tests decide a verdict. |
+| `--optimize-test-execution` |  | Measure which individual tests reach each mutation site before testing mutants. |
 | `--whole-test-binaries` |  | Run every selected test in each reachable test binary. |
 
 **Memory**
@@ -345,6 +387,7 @@ cargo gamma suppress [OPTIONS] [-- <TEST_ARGS>...]
 | `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
+| `--only-survivors-from` | `<PATH>` | Run only mutants that genuinely survived in this cargo-gamma report. |
 
 **Cargo features**
 
@@ -375,6 +418,7 @@ cargo gamma suppress [OPTIONS] [-- <TEST_ARGS>...]
 | `--exclude-test` | `<GLOB>` | Do not let these test targets decide a verdict. |
 | `--nextest` |  | Run test binaries through `cargo nextest` for per-test process isolation. |
 | `--test-workspace` |  | Let every workspace package's tests decide a verdict. |
+| `--optimize-test-execution` |  | Measure which individual tests reach each mutation site before testing mutants. |
 | `--whole-test-binaries` |  | Run every selected test in each reachable test binary. |
 
 **Memory**
@@ -570,6 +614,7 @@ cargo gamma hints [OPTIONS]
 | Option | Value | What it does |
 | --- | --- | --- |
 | `--dry-run` |  | Report what would be promoted without writing anything. |
+| `--replace` |  | Replace the complete hints artifact instead of merging the selected population into it. |
 
 ### `gamma clean`
 

@@ -304,6 +304,24 @@ mod tests {
     }
 
     #[test]
+    fn nesting_limit_boundary_is_exact_for_both_entry_points() {
+        let at_limit = format!(
+            "fn f() -> i32 {{ {}1{} }}",
+            "(".repeat(nesting::NESTING_LIMIT - 1),
+            ")".repeat(nesting::NESTING_LIMIT - 1)
+        );
+        let over_limit = format!(
+            "fn f() -> i32 {{ {}1{} }}",
+            "(".repeat(nesting::NESTING_LIMIT),
+            ")".repeat(nesting::NESTING_LIMIT)
+        );
+        assert!(!exceeds_nesting_limit(&at_limit));
+        assert!(exceeds_nesting_limit(&over_limit));
+        SourceFile::parse("at.rs", at_limit).unwrap();
+        SourceFile::parse("over.rs", over_limit).unwrap_err();
+    }
+
+    #[test]
 
     fn read_loads_and_parses_a_file_from_disk() {
         let path = Utf8Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/parse/source_file.rs"));
@@ -328,6 +346,7 @@ mod tests {
         assert_eq!(file.location(0), (1, 1));
         assert_eq!(file.location(3), (1, 4));
         assert_eq!(file.location(10), (2, 1));
+        assert_eq!(file.location(usize::MAX), (2, 11));
     }
 
     #[test]
@@ -427,6 +446,19 @@ mod tests {
     fn a_trailing_newline_does_not_open_a_line() {
         assert_eq!(parse("fn a() {}\n").lines.len(), 1);
         assert_eq!(parse("fn a() {}\nfn b() {}\n").lines.len(), 2);
+    }
+
+    #[test]
+    fn accessors_and_relocation_expose_the_parsed_representation() {
+        let mut file = parse("// comment\nfn a() {}\n");
+        assert_eq!(file.path(), Utf8Path::new("test.rs"));
+        assert_eq!(file.text(), "// comment\nfn a() {}\n");
+        assert_eq!(file.ast().items.len(), 1);
+        assert_eq!(file.comments().len(), 1);
+        assert_eq!(file.slice(&(0..10)), "// comment");
+        assert_eq!(file.slice(&(0..usize::MAX)), "");
+        file.set_path("relocated.rs");
+        assert_eq!(file.path(), Utf8Path::new("relocated.rs"));
     }
 }
 

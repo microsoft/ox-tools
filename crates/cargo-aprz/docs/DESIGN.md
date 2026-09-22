@@ -59,6 +59,54 @@ service continues to use its default. Overriding an address does not change how
 the corresponding provider interprets the responses it receives, so a substitute
 service must speak the same protocol as the one it replaces.
 
+### GitHub credential discovery
+
+GitHub fact collection accepts anonymous access, but a dependency appraisal can
+exhaust anonymous API limits quickly. Credential resolution follows this order:
+
+1. the explicit `--github-token` command-line option;
+2. the `GITHUB_TOKEN` environment variable;
+3. when `--github-token-from-gh` is present, the output of
+   `gh auth token --hostname <host>` when the `gh` executable is available and
+   has an authenticated account for the configured GitHub host;
+4. anonymous access.
+
+`<host>` comes from the effective GitHub service address, so a
+`--github-url`/`APRZ_GITHUB_URL` override can use the matching GitHub Enterprise
+login rather than accidentally querying `github.com`.
+
+GitHub CLI discovery is explicit opt-in rather than a default fallback. Without
+`--github-token-from-gh`, exhausting the explicit and environment sources
+continues anonymously without resolving the effective hostname, searching
+`PATH`, scheduling a blocking lookup, or starting a `gh` process.
+
+When enabled, the `gh` fallback is convenience, not a prerequisite. A missing
+executable, missing login, nonzero `gh auth token` result, blank output, or
+non-UTF-8 output continues anonymously and retains the provider's existing
+rate-limit behavior. A nonblank explicit option is authoritative, as is a
+nonblank environment token; cargo-aprz never invokes `gh` when either applies,
+even when the switch is present. Explicit and environment values are trimmed;
+empty or whitespace-only values are treated as absent so later configured
+sources can continue. On Unix, an environment value can also contain non-UTF-8
+bytes; such a value is likewise unusable as an HTTP credential and treated as
+absent. A rejected environment value is removed from the `gh` child environment
+so the CLI can consult its authenticated account instead of treating the
+environment override as authoritative.
+
+The command is spawned directly without a shell. Its stdout is trimmed and used
+only as the request credential; it is never logged, cached, included in an
+error, or inherited by unrelated child processes. Stderr from a failed
+best-effort lookup is suppressed. Diagnostic tracing reports only the credential
+source, never the token. Before spawning, cargo-aprz resolves `gh` to an absolute
+path by scanning only explicit `PATH` entries; it does not use the process
+current directory unless that directory appears in `PATH`. On Windows, only
+directly executable `.COM` and `.EXE` images are considered, in `PATHEXT`
+ordering; `.BAT` and `.CMD` shims are excluded so lookup never delegates
+argument parsing to `cmd.exe`. Filesystem resolution runs on a blocking worker
+and the child process is awaited asynchronously with a ten-second deadline.
+Expiry terminates the child and continues anonymously, so credential discovery
+does not block an async runtime worker indefinitely.
+
 ## Cache storage
 
 Provider data is stored beneath a platform-specific cache root, partitioned by
