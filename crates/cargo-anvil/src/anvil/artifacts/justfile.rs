@@ -416,6 +416,32 @@ mod tests {
     }
 
     #[test]
+    fn impact_scoped_checks_propagate_scope_resolution_failures() {
+        const CALL: &str = "$include = (& \"{{ just_executable() }}\" _anvil-impact-include";
+        let mut scoped = 0;
+        for (path, body) in CHECK_FILES {
+            let lines: Vec<&str> = body.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if !line.contains(CALL) {
+                    continue;
+                }
+                scoped += 1;
+                assert_eq!(
+                    lines.get(index + 1).copied(),
+                    Some("    $impactExit = $LASTEXITCODE"),
+                    "{path} must capture the impact resolver exit code before using its output"
+                );
+                assert_eq!(
+                    lines.get(index + 2).copied(),
+                    Some("    if ($impactExit -ne 0) { exit $impactExit }"),
+                    "{path} must propagate the impact resolver exit code before using its output"
+                );
+            }
+        }
+        assert_eq!(scoped, 21, "every impact-scoped check must be covered");
+    }
+
+    #[test]
     fn miri_profiles_inherit_the_parallel_artifact_runner() {
         let miri = CHECK_FILES
             .iter()
