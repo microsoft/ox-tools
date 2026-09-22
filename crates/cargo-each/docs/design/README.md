@@ -366,11 +366,13 @@ no-op.
   after the caller returns, and shuts down only after all senders disconnect
   and its retained set is empty. Startup failure therefore aborts before
   command launch. A disconnected handoff reports an infrastructure failure and
-  places the recovered handle in a persistent fallback instead of dropping
-  ownership. A failed kill, observation, bounded reap, reaper startup, or
-  handoff is an infrastructure failure. Unix process groups are not sealed
-  containment: a descendant can escape by creating a new session, so timeout
-  cleanup remains best-effort for escaped descendants.
+  places the recovered handle in a persistent fallback queue before starting an
+  emergency polling reaper. If that thread cannot start, the queue retains
+  ownership and a later failed handoff retries startup. A failed kill,
+  observation, bounded reap, reaper startup, or handoff is an infrastructure
+  failure. Unix process groups are not sealed containment: a descendant can
+  escape by creating a new session, so timeout cleanup remains best-effort for
+  escaped descendants.
 - **Child executable resolution follows `PATH`.** `cargo-each` explicitly
   copies an inherited `PATH` onto every child command. This is equivalent to
   ordinary inheritance on other platforms and makes Windows resolve a relative

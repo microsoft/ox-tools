@@ -160,7 +160,8 @@ reaper started before any command. The reaper checks every retained group
 without blocking on one child, remains the wait owner after the caller
 returns, and exits after all senders disconnect and retained groups are
 collected. Reaper startup and handoff failures are explicit infrastructure
-failures; a failed handoff retains the group handle in a persistent fallback.
+failures; a failed handoff retains the group handle in a persistent fallback
+queue and starts an emergency polling reaper.
 Child commands inherit `PATH` explicitly. On Windows this makes relative
 program lookup honor the inherited `PATH` order instead of preferring an
 unrelated executable beside `cargo-each`.

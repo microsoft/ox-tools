@@ -5,10 +5,11 @@
 //! apply filters, build the plan, and run it.
 
 use std::collections::BTreeSet;
-use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::num::NonZeroUsize;
 use std::panic::{self, UnwindSafe};
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 use std::{fmt, thread};
@@ -639,8 +640,52 @@ impl GroupReaper {
     }
 
     fn handoff(&self, child: GroupChild) -> io::Result<()> {
-        static FAILED_HANDOFFS: OnceLock<Mutex<Vec<GroupChild>>> = OnceLock::new();
-        handoff_group(&self.sender, FAILED_HANDOFFS.get_or_init(|| Mutex::new(Vec::new())), child)
+        let retained = failed_handoffs();
+        let handoff = handoff_group(&self.sender, retained, child);
+        if handoff.is_err()
+            && let Err(error) = start_failed_handoff_reaper(retained)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                format!("process-group reaper channel disconnected; the fallback retained the wait handle but failed to start: {error}"),
+            ));
+        }
+        handoff
+    }
+}
+
+fn failed_handoffs() -> &'static Mutex<Vec<GroupChild>> {
+    static FAILED_HANDOFFS: OnceLock<Mutex<Vec<GroupChild>>> = OnceLock::new();
+    FAILED_HANDOFFS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn start_failed_handoff_reaper(retained: &'static Mutex<Vec<GroupChild>>) -> io::Result<()> {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return Ok(());
+    }
+    match thread::Builder::new()
+        .name("cargo-each-fallback-reaper".to_owned())
+        .spawn(move || poll_failed_handoffs(retained, &RUNNING))
+    {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            RUNNING.store(false, Ordering::Release);
+            Err(error)
+        }
+    }
+}
+
+fn poll_failed_handoffs(retained: &Mutex<Vec<GroupChild>>, running: &AtomicBool) {
+    loop {
+        let mut children = retained.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        children.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+        if children.is_empty() {
+            running.store(false, Ordering::Release);
+            return;
+        }
+        drop(children);
+        thread::sleep(REAPER_POLL_INTERVAL);
     }
 }
 
@@ -665,7 +710,15 @@ struct ReaperEntry<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[mutants::skip] // Process-thread diagnostic for an OS observation failure; behavior is covered through the injected reporter seam.
 fn report_reaper_failure(error: &io::Error) {
-    eprintln!("cargo each: process-group reaper failed to observe a retained group: {error}");
+    let message = error.to_string();
+    let _ = thread::Builder::new()
+        .name("cargo-each-reaper-diagnostic".to_owned())
+        .spawn(move || {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "cargo each: process-group reaper failed to observe a retained group: {message}"
+            );
+        });
 }
 
 #[mutants::skip] // Deleting the disconnected-and-empty shutdown arm hangs by definition; deterministic tests cover polling and exit.
@@ -984,7 +1037,7 @@ mod tests {
     use super::{
         BufferedOutcome, CapturedOutput, CapturedStream, GroupReaper, Invocation, InvocationResult, OutputEmitError, Plan, RunningWorker,
         SnapshotSource, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM, add_infrastructure_failure,
-        combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel, exit_byte,
+        combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel, exit_byte, failed_handoffs,
         failure_stops_launching, finish_capture, handoff_group, panic_description, parallel_failure_exit_code, poll_process_exit,
         poll_reaper, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with, spawn_group,
         spawn_worker, terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure,
@@ -1439,6 +1492,36 @@ mod tests {
         assert_eq!(
             retained.lock().expect("fallback ownership mutex is not poisoned").as_slice(),
             ["owned group"]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns a process group and a fallback reaper thread")]
+    fn disconnected_reaper_handoff_is_eventually_collected() {
+        let (sender, receiver) = mpsc::channel();
+        drop(receiver);
+        let reaper = GroupReaper { sender };
+        let mut command = Command::new("rustc");
+        let _ = command.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
+        let child = spawn_group(command).expect("spawn a short-lived process group");
+
+        let error = reaper.handoff(child).expect_err("the disconnected primary reaper is reported");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !failed_handoffs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            failed_handoffs()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "the fallback reaper must eventually collect a recovered handoff"
         );
     }
 
