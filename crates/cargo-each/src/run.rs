@@ -250,9 +250,13 @@ fn execute_parallel(
         outcomes.sort_by_key(|outcome| outcome.index);
         for indexed in &mut outcomes {
             emit_buffered(&invocations[indexed.index], &mut indexed.outcome).into_app_err("failed to emit buffered command output")?;
-            if first_failure.is_none() && indexed.outcome.result.failed() {
-                first_failure = Some(parallel_failure_exit_code(&indexed.outcome.result));
-            }
+            record_emitted_failure(
+                &indexed.outcome.result,
+                keep_going,
+                &mut any_failed,
+                &mut stop_launching,
+                &mut first_failure,
+            );
         }
         outcomes.clear();
         if stop_launching {
@@ -268,6 +272,25 @@ fn execute_parallel(
         }
     } else {
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+fn record_emitted_failure(
+    result: &InvocationResult,
+    keep_going: bool,
+    any_failed: &mut bool,
+    stop_launching: &mut bool,
+    first_failure: &mut Option<ExitCode>,
+) {
+    if !result.failed() {
+        return;
+    }
+    *any_failed = true;
+    if failure_stops_launching(keep_going, true) {
+        *stop_launching = true;
+    }
+    if first_failure.is_none() {
+        *first_failure = Some(parallel_failure_exit_code(result));
     }
 }
 
@@ -561,9 +584,13 @@ fn wait_for_process<T>(
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn terminate_group_bounded(child: GroupChild, reaper: &GroupReaper) -> io::Result<ExitStatus> {
-    terminate_group_with(child, TERMINATION_GRACE, GroupChild::kill, GroupChild::try_wait, |child| {
-        reaper.handoff(child)
-    })
+    terminate_group_with(
+        child,
+        TERMINATION_GRACE,
+        GroupChild::kill,
+        |child| child.inner().try_wait(),
+        |child| reaper.handoff(child),
+    )
 }
 
 fn terminate_group_with<T>(
@@ -647,7 +674,7 @@ fn failed_handoffs() -> &'static Mutex<Vec<GroupChild>> {
 
 fn start_failed_handoff_reaper(retained: &'static Mutex<Vec<GroupChild>>) -> io::Result<()> {
     static RUNNING: AtomicBool = AtomicBool::new(false);
-    start_failed_handoff_reaper_with(retained, &RUNNING, GroupChild::try_wait, |job| {
+    start_failed_handoff_reaper_with(retained, &RUNNING, GroupChild::try_wait, report_reaper_failure, |job| {
         thread::Builder::new()
             .name("cargo-each-fallback-reaper".to_owned())
             .spawn(job)
@@ -659,12 +686,15 @@ fn start_failed_handoff_reaper_with<T: Send + 'static>(
     retained: &'static Mutex<Vec<T>>,
     running: &'static AtomicBool,
     try_wait: fn(&mut T) -> io::Result<Option<ExitStatus>>,
+    report_failure: fn(&io::Error),
     spawn: impl FnOnce(ReaperJob) -> io::Result<()>,
 ) -> io::Result<()> {
     if running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return Ok(());
     }
-    match spawn(Box::new(move || poll_failed_handoffs(retained, running, try_wait))) {
+    match spawn(Box::new(move || {
+        poll_failed_handoffs(retained, running, try_wait, report_failure);
+    })) {
         Ok(()) => Ok(()),
         Err(error) => {
             running.store(false, Ordering::Release);
@@ -677,10 +707,11 @@ fn poll_failed_handoffs<T>(
     retained: &Mutex<Vec<T>>,
     running: &AtomicBool,
     mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
+    mut report_failure: impl FnMut(&io::Error),
 ) {
     loop {
         let mut children = retained.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        children.retain_mut(|child| !matches!(try_wait(child), Ok(Some(_))));
+        children.retain_mut(|child| retain_after_reaper_observation(try_wait(child), &mut report_failure));
         if children.is_empty() {
             running.store(false, Ordering::Release);
             return;
@@ -721,11 +752,6 @@ fn handoff_group_with_fallback<T>(
     handoff
 }
 
-struct ReaperEntry<T> {
-    child: T,
-    failure_reported: bool,
-}
-
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[mutants::skip] // Process-thread diagnostic for an OS observation failure; behavior is covered through the injected reporter seam.
 fn report_reaper_failure(error: &io::Error) {
@@ -746,35 +772,34 @@ fn poll_reaper<T>(
     mut try_wait: impl FnMut(&mut T) -> io::Result<Option<ExitStatus>>,
     mut report_failure: impl FnMut(&io::Error),
 ) {
-    let mut retained: Vec<ReaperEntry<T>> = Vec::new();
+    let mut retained: Vec<T> = Vec::new();
     let mut connected = true;
     loop {
         if connected {
             match receiver.recv_timeout(REAPER_POLL_INTERVAL) {
-                Ok(child) => retained.push(ReaperEntry {
-                    child,
-                    failure_reported: false,
-                }),
+                Ok(child) => retained.push(child),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => connected = false,
             }
         }
 
-        retained.retain_mut(|entry| match try_wait(&mut entry.child) {
-            Ok(Some(_)) => false,
-            Ok(None) => true,
-            Err(error) => {
-                if !entry.failure_reported {
-                    report_failure(&error);
-                    entry.failure_reported = true;
-                }
-                true
-            }
-        });
+        retained.retain_mut(|child| retain_after_reaper_observation(try_wait(child), &mut report_failure));
 
         match (connected, retained.is_empty()) {
             (false, true) => return,
             _ => thread::sleep(REAPER_POLL_INTERVAL),
+        }
+    }
+}
+
+fn retain_after_reaper_observation(observation: io::Result<Option<ExitStatus>>, report_failure: &mut impl FnMut(&io::Error)) -> bool {
+    match observation {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => true,
+        Err(error) => {
+            report_failure(&error);
+            false
         }
     }
 }
@@ -1059,7 +1084,7 @@ mod tests {
         SnapshotSource, TemporarySnapshot, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
         add_infrastructure_failure, combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel,
         exit_byte, failed_handoffs, failure_stops_launching, finish_capture, handoff_group, handoff_group_with_fallback, panic_description,
-        parallel_failure_exit_code, poll_process_exit, poll_reaper, run_captured, run_captured_with, run_streamed,
+        parallel_failure_exit_code, poll_process_exit, poll_reaper, record_emitted_failure, run_captured, run_captured_with, run_streamed,
         run_streamed_with_timeout, run_streamed_with_timeout_with, spawn_group, spawn_worker, start_failed_handoff_reaper_with,
         terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure, with_reaper_handoff,
     };
@@ -1089,12 +1114,17 @@ mod tests {
     static FALLBACK_TEST_GROUPS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
     static FALLBACK_TEST_RUNNING: AtomicBool = AtomicBool::new(false);
     static FALLBACK_TEST_COLLECTED: AtomicUsize = AtomicUsize::new(0);
+    static FALLBACK_TEST_REPORTED: AtomicUsize = AtomicUsize::new(0);
 
     fn observe_fallback_test_group(state: &mut usize) -> io::Result<Option<ExitStatus>> {
         match *state {
+            3 => Err(io::Error::other("injected terminal fallback observation failure")),
             2 => {
                 *state = 1;
-                Err(io::Error::other("injected fallback observation failure"))
+                Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "injected interrupted fallback observation",
+                ))
             }
             1 => {
                 *state = 0;
@@ -1105,6 +1135,10 @@ mod tests {
                 Ok(Some(successful_status()))
             }
         }
+    }
+
+    fn report_fallback_test_error(_error: &io::Error) {
+        FALLBACK_TEST_REPORTED.fetch_add(1, Ordering::SeqCst);
     }
 
     fn result_infrastructure_message(result: InvocationResult) -> String {
@@ -1247,6 +1281,46 @@ mod tests {
         assert!(failure_stops_launching(false, true));
         assert!(!failure_stops_launching(false, false));
         assert!(!failure_stops_launching(true, true));
+    }
+
+    #[test]
+    fn emitted_capture_failures_update_parallel_scheduler_state() {
+        let result = InvocationResult::Infrastructure("capture read failed".to_owned());
+        let mut any_failed = false;
+        let mut stop_launching = false;
+        let mut first_failure = None;
+        record_emitted_failure(
+            &InvocationResult::Exited(successful_status()),
+            false,
+            &mut any_failed,
+            &mut stop_launching,
+            &mut first_failure,
+        );
+        assert!(!any_failed);
+        assert!(!stop_launching);
+        assert!(first_failure.is_none());
+
+        record_emitted_failure(&result, false, &mut any_failed, &mut stop_launching, &mut first_failure);
+        assert!(any_failed);
+        assert!(stop_launching);
+        assert_eq!(first_failure, Some(ExitCode::from(2)));
+
+        let mut keep_going_failed = false;
+        let mut keep_going_stop = false;
+        let mut keep_going_first = None;
+        record_emitted_failure(&result, true, &mut keep_going_failed, &mut keep_going_stop, &mut keep_going_first);
+        assert!(keep_going_failed);
+        assert!(!keep_going_stop);
+        assert_eq!(keep_going_first, Some(ExitCode::from(2)));
+
+        record_emitted_failure(
+            &InvocationResult::Exited(failed_status(7)),
+            true,
+            &mut keep_going_failed,
+            &mut keep_going_stop,
+            &mut keep_going_first,
+        );
+        assert_eq!(keep_going_first, Some(ExitCode::from(2)), "the first plan-order failure wins");
     }
 
     #[test]
@@ -1458,6 +1532,7 @@ mod tests {
     fn polling_reaper_checks_every_retained_group_and_eventually_collects_them() {
         struct FakeGroup {
             errors_remaining: usize,
+            error_kind: io::ErrorKind,
             polls_remaining: usize,
             collected: Arc<AtomicUsize>,
         }
@@ -1467,16 +1542,25 @@ mod tests {
         let reports = Arc::new(AtomicUsize::new(0));
         let first = FakeGroup {
             errors_remaining: 2,
+            error_kind: io::ErrorKind::Interrupted,
             polls_remaining: 20,
             collected: Arc::clone(&collected),
         };
         let second = FakeGroup {
             errors_remaining: 0,
+            error_kind: io::ErrorKind::Other,
+            polls_remaining: 0,
+            collected: Arc::clone(&collected),
+        };
+        let terminal = FakeGroup {
+            errors_remaining: 1,
+            error_kind: io::ErrorKind::Other,
             polls_remaining: 0,
             collected: Arc::clone(&collected),
         };
         sender.send(first).expect("reaper receiver is connected");
         sender.send(second).expect("reaper receiver is connected");
+        sender.send(terminal).expect("reaper receiver is connected");
         drop(sender);
 
         let worker = thread::spawn({
@@ -1487,7 +1571,7 @@ mod tests {
                     |group| {
                         if group.errors_remaining > 0 {
                             group.errors_remaining -= 1;
-                            return Err(io::Error::other("injected reaper observation failure"));
+                            return Err(io::Error::new(group.error_kind, "injected reaper observation failure"));
                         }
                         if group.polls_remaining == 0 {
                             group.collected.fetch_add(1, Ordering::SeqCst);
@@ -1559,25 +1643,43 @@ mod tests {
         retained.lock().expect("fallback ownership mutex is not poisoned").clear();
         FALLBACK_TEST_RUNNING.store(true, Ordering::Release);
         FALLBACK_TEST_COLLECTED.store(0, Ordering::SeqCst);
-        start_failed_handoff_reaper_with(retained, &FALLBACK_TEST_RUNNING, observe_fallback_test_group, |_| {
-            panic!("an already-running fallback must not spawn another thread");
-        })
+        FALLBACK_TEST_REPORTED.store(0, Ordering::SeqCst);
+        start_failed_handoff_reaper_with(
+            retained,
+            &FALLBACK_TEST_RUNNING,
+            observe_fallback_test_group,
+            report_fallback_test_error,
+            |_| {
+                panic!("an already-running fallback must not spawn another thread");
+            },
+        )
         .expect("an already-running fallback accepts more work");
 
         FALLBACK_TEST_RUNNING.store(false, Ordering::Release);
         retained.lock().expect("fallback ownership mutex is not poisoned").push(2);
-        let error = start_failed_handoff_reaper_with(retained, &FALLBACK_TEST_RUNNING, observe_fallback_test_group, |job| {
-            drop(job);
-            Err(io::Error::other("injected fallback thread failure"))
-        })
+        let error = start_failed_handoff_reaper_with(
+            retained,
+            &FALLBACK_TEST_RUNNING,
+            observe_fallback_test_group,
+            report_fallback_test_error,
+            |job| {
+                drop(job);
+                Err(io::Error::other("injected fallback thread failure"))
+            },
+        )
         .expect_err("fallback thread failure is reported");
         assert!(error.to_string().contains("injected fallback thread failure"));
         assert!(!FALLBACK_TEST_RUNNING.load(Ordering::Acquire));
         assert_eq!(retained.lock().expect("fallback ownership mutex is not poisoned").len(), 1);
 
-        start_failed_handoff_reaper_with(retained, &FALLBACK_TEST_RUNNING, observe_fallback_test_group, |job| {
-            thread::Builder::new().spawn(job).map(drop)
-        })
+        retained.lock().expect("fallback ownership mutex is not poisoned").push(3);
+        start_failed_handoff_reaper_with(
+            retained,
+            &FALLBACK_TEST_RUNNING,
+            observe_fallback_test_group,
+            report_fallback_test_error,
+            |job| thread::Builder::new().spawn(job).map(drop),
+        )
         .expect("fallback polling thread starts");
         let deadline = Instant::now() + Duration::from_secs(1);
         while FALLBACK_TEST_RUNNING.load(Ordering::Acquire) && Instant::now() < deadline {
@@ -1588,6 +1690,7 @@ mod tests {
             "fallback polling thread did not finish"
         );
         assert_eq!(FALLBACK_TEST_COLLECTED.load(Ordering::SeqCst), 1);
+        assert_eq!(FALLBACK_TEST_REPORTED.load(Ordering::SeqCst), 1);
         assert!(retained.lock().expect("fallback ownership mutex is not poisoned").is_empty());
     }
 

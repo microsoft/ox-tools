@@ -150,18 +150,20 @@ cannot move descendant write positions. Cargo-each records each file’s
 current length when the leader completes (or after timeout cleanup), then
 reads exactly that finite snapshot in plan order without loading unbounded
 output into memory. Later writes by background or escaped descendants are
-outside the snapshot, and inherited file handles cannot hold capture open.
-Capture create, reopen, length, seek, and read failures are infrastructure
-failures; files are removed by RAII.
+outside the snapshot. RAII removes cargo-each’s directory entry, but a
+preserved descendant can keep the backing storage allocated and growing
+until its inherited writer closes. Capture create, reopen, length, seek, and
+read failures are infrastructure failures.
 
 Timed-out group termination gets a bounded 250 ms reap grace. If the group
 still has not completed, its handle moves to a cargo-each-local polling
 reaper started before any command. The reaper checks every retained group
 without blocking on one child, remains the wait owner after the caller
 returns, and exits after all senders disconnect and retained groups are
-collected. Reaper startup and handoff failures are explicit infrastructure
-failures; a failed handoff retains the group handle in a persistent fallback
-queue and starts an emergency polling reaper.
+collected. Interrupted observations are retried; terminal observation
+errors are reported and removed. Reaper startup and handoff failures are
+explicit infrastructure failures; a failed handoff retains the group handle
+in a persistent fallback queue and starts an emergency polling reaper.
 Child commands inherit `PATH` explicitly. On Windows this makes relative
 program lookup honor the inherited `PATH` order instead of preferring an
 unrelated executable beside `cargo-each`.

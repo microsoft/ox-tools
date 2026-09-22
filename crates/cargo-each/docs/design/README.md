@@ -349,17 +349,21 @@ no-op.
   intentionally truncated.
   The plan-contiguous wave bound also caps the number of retained capture files.
   A background or escaped descendant can continue and can append through an
-  inherited handle, but it cannot hold capture open and bytes written after
-  finalization are outside the finite snapshot. Capture create, handle-reopen,
-  length, seek, or read failures are infrastructure failures. Each invocation
-  owns both files through emission and removes them through RAII.
+  inherited handle; bytes written after finalization are outside the finite
+  snapshot. RAII removes cargo-each's directory entry after emission, but an
+  untimed descendant that preserves the inherited writer can keep the backing
+  storage allocated and continue growing it until that handle closes. The wave
+  bound therefore limits cargo-each-owned files, not storage retained by
+  preserved descendants. There is no portable way to revoke an inherited file
+  handle without terminating that descendant. Capture create, handle-reopen,
+  length, seek, or read failures are infrastructure failures.
 - **Timeouts terminate jobs or process groups.** A timed-out command is a
   failure. `command-group` creates a job object on Windows and a process group
   on Unix. Both timed streamed and captured execution observe the launched
   leader directly, preserving its exit status even while an ordinary
   background group member remains. The group handle remains available solely
   for deadline termination. At the deadline cargo-each kills that boundary,
-  polls completion with bounded sleeps, and allows 250 ms for the group to
+  polls the direct leader with bounded sleeps, and allows 250 ms for it to
   finish. If it still has not completed, the `GroupChild` moves to one
   cargo-each-local polling reaper started before any child process. The reaper
   polls every retained group rather than blocking forever on one, owns groups
@@ -370,9 +374,11 @@ no-op.
   emergency polling reaper. If that thread cannot start, the queue retains
   ownership and a later failed handoff retries startup. A failed kill,
   observation, bounded reap, reaper startup, or handoff is an infrastructure
-  failure. Unix process groups are not sealed containment: a descendant can
-  escape by creating a new session, so timeout cleanup remains best-effort for
-  escaped descendants.
+  failure. Reaper polling retries interrupted observations; a terminal
+  observation error is reported asynchronously and the unobservable handle is
+  no longer retained forever. Unix process groups are not sealed containment:
+  a descendant can escape by creating a new session, so timeout cleanup remains
+  best-effort for escaped descendants.
 - **Child executable resolution follows `PATH`.** `cargo-each` explicitly
   copies an inherited `PATH` onto every child command. This is equivalent to
   ordinary inheritance on other platforms and makes Windows resolve a relative
