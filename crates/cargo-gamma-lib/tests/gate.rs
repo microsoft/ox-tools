@@ -14,8 +14,7 @@
 //! them, so a single JSON file is enough to drive each outcome.
 
 use camino::Utf8PathBuf;
-use cargo_gamma_lib::run;
-use cargo_gamma_lib::testing::Sink;
+use cargo_gamma_lib::testing::{Sink, run};
 
 const EXIT_OK: i32 = 0;
 const EXIT_GATE_FAILED: i32 = 2;

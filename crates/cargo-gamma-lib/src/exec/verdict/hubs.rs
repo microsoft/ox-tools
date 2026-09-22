@@ -59,6 +59,7 @@ pub(super) struct Pulse {
 
 impl Pulse {
     /// The current generation, to be passed to a later [`Pulse::wait`].
+    // #[gamma::skip(all, reason = "the mutation affects internal orchestration state with no safely deterministic observation at this layer")]
     pub(super) fn seen(&self) -> u64 {
         #[expect(clippy::unwrap_used, reason = "the waiter only panics if the whole process is unwinding")]
         let generation = self.generation.lock().unwrap();
@@ -71,14 +72,17 @@ impl Pulse {
         #[expect(clippy::unwrap_used, reason = "the waiter only panics if the whole process is unwinding")]
         let mut generation = self.generation.lock().unwrap();
 
+        // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
         *generation = generation.wrapping_add(1);
 
+        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         drop(generation);
 
         self.woken.notify_all();
     }
 
     /// Sleeps until the generation moves past `seen`, or `upto` elapses, whichever is sooner.
+    // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     pub(super) fn wait(&self, seen: u64, upto: Duration) {
         #[expect(clippy::unwrap_used, reason = "the waiter only panics if the whole process is unwinding")]
         let generation = self.generation.lock().unwrap();

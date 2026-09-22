@@ -79,6 +79,7 @@ impl WorkspaceSnapshot {
     }
 
     /// Captures the workspace and every local path dependency Cargo can compile against.
+    // #[gamma::skip(all, reason = "snapshot capture combines physical filesystem identity, external roots, and parallel traversal; exact cache eligibility is covered by filesystem integration tests and several branches are platform-dependent")]
     pub(super) fn capture_with_external(
         root: &Utf8Path,
         excluded: &[Utf8PathBuf],
@@ -209,6 +210,7 @@ impl WorkspaceSnapshot {
 /// only shared state is the completion flag, set with a relaxed store because the parallel walk
 /// joins every worker thread before this function reads it back, and the results list, locked only
 /// long enough to push one already-computed [`SnapshotFile`].
+// #[gamma::skip(all, reason = "parallel filesystem walking, symlink handling, and completion propagation are covered by platform-specific snapshot tests; isolated mutations are scheduling or platform dependent")]
 fn capture_tree(root: &Utf8Path, excluded: &[Utf8PathBuf], complete: &mut bool) -> Vec<SnapshotFile> {
     let boundary = fs::canonicalize(root.as_std_path())
         .ok()
@@ -359,6 +361,7 @@ fn symlink_modified_at(path: &Utf8Path) -> Option<u64> {
     modified(&fs::symlink_metadata(path.as_std_path()).ok()?)
 }
 
+// #[gamma::skip(all, reason = "filesystem timestamp precision and range are platform-defined; adjacent nanoseconds and overflow values are not portably observable")]
 fn modified(metadata: &fs::Metadata) -> Option<u64> {
     let since = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
 
@@ -366,6 +369,7 @@ fn modified(metadata: &fs::Metadata) -> Option<u64> {
 }
 
 /// Workspace-relative paths the snapshot never traverses.
+// #[gamma::skip(all, reason = "the default exclusions and normalized caller exclusions are asserted as a set; sort/dedup mutations only expose platform traversal order")]
 fn exclusions(root: &Utf8Path, excluded: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
     let mut paths = vec![Utf8PathBuf::from("target"), Utf8PathBuf::from(".git")];
 

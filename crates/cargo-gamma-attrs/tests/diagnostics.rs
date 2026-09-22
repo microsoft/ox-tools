@@ -60,65 +60,74 @@ fn diagnostic_for(name: &str, source: &str) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[track_caller]
+fn assert_diagnostic(name: &str, source: &str, fragments: &[&str]) {
+    let reported = diagnostic_for(name, source);
+
+    for fragment in fragments {
+        assert!(reported.contains(fragment), "expected `{fragment}` in:\n{reported}");
+    }
+}
+
 #[test]
 fn skip_reports_its_own_name_in_a_malformed_diagnostic() {
-    let source = "#[gamma::skip(reason = performance)]\nfn scaled(a: i64) -> i64 { a * 2 }\n";
-    let reported = diagnostic_for("skip_malformed", source);
-
-    assert!(reported.contains("#[gamma::skip]:"), "{reported}");
-    assert!(reported.contains("`reason` must be a string literal"), "{reported}");
+    assert_diagnostic(
+        "skip_malformed",
+        "#[gamma::skip(reason = performance)]\nfn scaled(a: i64) -> i64 { a * 2 }\n",
+        &["#[gamma::skip]:", "`reason` must be a string literal"],
+    );
 }
 
 #[test]
 fn expect_survived_reports_its_own_name_in_a_malformed_diagnostic() {
-    let source = "#[gamma::expect_survived(tag = 7)]\nfn describe(n: usize) -> usize { n }\n";
-    let reported = diagnostic_for("expect_survived_malformed", source);
-
-    assert!(reported.contains("#[gamma::expect_survived]:"), "{reported}");
-    assert!(reported.contains("`tag` must be a string literal"), "{reported}");
+    assert_diagnostic(
+        "expect_survived_malformed",
+        "#[gamma::expect_survived(tag = 7)]\nfn describe(n: usize) -> usize { n }\n",
+        &["#[gamma::expect_survived]:", "`tag` must be a string literal"],
+    );
 }
 
 #[test]
 fn expect_killed_reports_its_own_name_in_a_malformed_diagnostic() {
-    let source = "#[gamma::expect_killed(reason = 5)]\nfn checksum(bytes: &[u8]) -> usize { bytes.len() }\n";
-    let reported = diagnostic_for("expect_killed_malformed", source);
-
-    assert!(reported.contains("#[gamma::expect_killed]:"), "{reported}");
-    assert!(reported.contains("`reason` must be a string literal"), "{reported}");
+    assert_diagnostic(
+        "expect_killed_malformed",
+        "#[gamma::expect_killed(reason = 5)]\nfn checksum(bytes: &[u8]) -> usize { bytes.len() }\n",
+        &["#[gamma::expect_killed]:", "`reason` must be a string literal"],
+    );
 }
 
 #[test]
 fn value_reports_its_own_name_in_a_malformed_diagnostic() {
-    let source = "#[gamma::value()]\nfn budget() -> u32 { 512 }\n";
-    let reported = diagnostic_for("value_malformed", source);
-
-    assert!(reported.contains("#[gamma::value]:"), "{reported}");
-    assert!(reported.contains("expected one expression"), "{reported}");
+    assert_diagnostic(
+        "value_malformed",
+        "#[gamma::value()]\nfn budget() -> u32 { 512 }\n",
+        &["#[gamma::value]:", "expected one expression"],
+    );
 }
 
 #[test]
 fn test_timeout_multiplier_reports_its_own_name_in_a_malformed_diagnostic() {
-    let source = "#[gamma::test_timeout_multiplier(\"fast\")]\nfn heavy(data: &[u8]) -> usize { data.len() }\n";
-    let reported = diagnostic_for("test_timeout_multiplier_malformed", source);
-
-    assert!(reported.contains("#[gamma::test_timeout_multiplier]:"), "{reported}");
-    assert!(reported.contains("timeout multiplier must be a positive number"), "{reported}");
+    assert_diagnostic(
+        "test_timeout_multiplier_malformed",
+        "#[gamma::test_timeout_multiplier(\"fast\")]\nfn heavy(data: &[u8]) -> usize { data.len() }\n",
+        &["#[gamma::test_timeout_multiplier]:", "timeout multiplier must be a positive number"],
+    );
 }
 
 #[test]
 fn timeout_multiplier_reports_its_own_name_in_a_malformed_diagnostic() {
-    let source = "#[gamma::timeout_multiplier(\"fast\")]\nfn heavy(data: &[u8]) -> usize { data.len() }\n";
-    let reported = diagnostic_for("timeout_multiplier_malformed", source);
-
-    assert!(reported.contains("#[gamma::timeout_multiplier]:"), "{reported}");
-    assert!(reported.contains("timeout multiplier must be a positive number"), "{reported}");
+    assert_diagnostic(
+        "timeout_multiplier_malformed",
+        "#[gamma::timeout_multiplier(\"fast\")]\nfn heavy(data: &[u8]) -> usize { data.len() }\n",
+        &["#[gamma::timeout_multiplier]:", "timeout multiplier must be a positive number"],
+    );
 }
 
 #[test]
 fn gamma_reports_its_own_name_in_a_malformed_diagnostic() {
-    let source = "#[gamma::gamma(\"fast\")]\nfn heavy(data: &[u8]) -> usize { data.len() }\n";
-    let reported = diagnostic_for("gamma_malformed", source);
-
-    assert!(reported.contains("#[gamma::gamma]:"), "{reported}");
-    assert!(reported.contains("timeout multiplier must be a positive number"), "{reported}");
+    assert_diagnostic(
+        "gamma_malformed",
+        "#[gamma::gamma(\"fast\")]\nfn heavy(data: &[u8]) -> usize { data.len() }\n",
+        &["#[gamma::gamma]:", "timeout multiplier must be a positive number"],
+    );
 }

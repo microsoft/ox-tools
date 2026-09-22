@@ -58,9 +58,21 @@ pub(crate) fn plan_for_build(
     cargo: &CargoOptions,
     notify: &mut impl FnMut(&str),
 ) -> Result<Plan> {
-    let survey = Survey::for_build(args, shard, cargo)?;
+    plan_for_build_with_target(args, selection, shard, cargo, notify).map(|(plan, _target)| plan)
+}
 
-    plan_survey(survey, selection, notify)
+/// Builds a plan and returns Cargo's resolved target directory from the same metadata pass.
+pub(crate) fn plan_for_build_with_target(
+    args: &SelectArgs,
+    selection: &Selection,
+    shard: Option<(u32, u32)>,
+    cargo: &CargoOptions,
+    notify: &mut impl FnMut(&str),
+) -> Result<(Plan, Utf8PathBuf)> {
+    let survey = Survey::for_build(args, shard, cargo)?;
+    let target = survey.target.clone();
+
+    plan_survey(survey, selection, notify).map(|plan| (plan, target))
 }
 
 /// Scans one resolved survey into a plan.
@@ -87,6 +99,9 @@ fn plan_survey(survey: Survey, selection: &Selection, notify: &mut impl FnMut(&s
 pub struct Survey {
     /// Absolute path of the workspace root.
     pub root: Utf8PathBuf,
+
+    /// Cargo's resolved target directory for the original workspace.
+    pub target: Utf8PathBuf,
 
     /// Every file worth mutating, sorted by path.
     pub files: Vec<TargetFile>,
@@ -179,6 +194,7 @@ pub struct Survey {
 
     diff: Option<Diff>,
     shard: Option<(u32, u32)>,
+    only_mutants: Option<HashSet<MutantId>>,
     settled: HashMap<MutantId, Outcome>,
     exclude_trait_impls: Vec<String>,
 }
@@ -266,6 +282,7 @@ impl Survey {
     }
 
     #[expect(clippy::too_many_lines, reason = "workspace selection is one ordered metadata pass")]
+    // #[gamma::skip(all, reason = "survey construction integrates Cargo metadata, filesystem discovery, and process toolchain state; deterministic component tests cover normalization while isolated mutations are platform-dependent")]
     pub(crate) fn for_build_with_cache_inputs(
         args: &SelectArgs,
         shard: Option<(u32, u32)>,
@@ -277,6 +294,7 @@ impl Survey {
         let features = features::from_extra(&args.features, &cargo.extra);
         let metadata = load_metadata(&args.dir, &features)?;
         let root = Utf8PathBuf::from(metadata.workspace_root.as_str());
+        let target = Utf8PathBuf::from(metadata.target_directory.as_str());
         let external_inputs = if cache_inputs {
             external_path_inputs(&args.dir, &features, &root)?
         } else {
@@ -325,6 +343,7 @@ impl Survey {
             // patterns usually live in `gamma.toml` and are written once for the whole workspace,
             // whereas `--package` narrows a single run; validating them against the narrowed set
             // would reject a correct config on every run that happened to select another package.
+            // #[gamma::skip(cond.always_false, reason = "removing this fast path only walks unselected targets whose files are still rejected by the mutating guard below")]
             if !mutating && !checking_patterns && !checking_exclusions {
                 continue;
             }
@@ -356,6 +375,7 @@ impl Survey {
                 for absolute in walk_rust_files(directory)? {
                     let relative = placed_under(&root, &absolute, &package.name)?;
 
+                    // #[gamma::skip(all, reason = "widening this internal validation list only adds unused entries or duplicate syntax trees to an idempotent name set")]
                     if checking_exclusions && exclusion_seen.insert((absolute.clone(), package.name.to_string())) {
                         exclusion_files.push(TargetFile {
                             path: relative.clone(),
@@ -364,6 +384,7 @@ impl Survey {
                         });
                     }
 
+                    // #[gamma::skip(cond.always_true, reason = "collecting paths when neither patterns nor a diff consume them changes only discovery allocation")]
                     if collecting_walked {
                         walked.push(relative.clone());
                     }
@@ -372,6 +393,7 @@ impl Survey {
                         continue;
                     }
 
+                    // #[gamma::skip(cond.always_true, reason = "duplicate declaration parses contribute the same idempotent module edges and only add discovery work")]
                     if declaration_seen.insert(absolute.clone()) {
                         declaration_files
                             .entry(package.name.to_string())
@@ -400,10 +422,7 @@ impl Survey {
         }
 
         files.sort_by(|left, right| left.path.cmp(&right.path));
-        for paths in declaration_files.values_mut() {
-            paths.sort();
-        }
-        exclusion_files.sort_by(|left, right| left.path.cmp(&right.path));
+        normalize_file_lists(&mut declaration_files, &mut exclusion_files);
 
         let cfgs = configuration(&root, cargo, &enabled);
         validate_trait_exclusions(&args.exclude_trait_impls, &exclusion_files, &cfgs)?;
@@ -435,6 +454,7 @@ impl Survey {
 
         Ok(Self {
             root,
+            target,
             files,
             declaration_files,
             by_package,
@@ -447,6 +467,7 @@ impl Survey {
             cfgs,
             diff,
             shard,
+            only_mutants: None,
             settled: HashMap::default(),
             exclude_trait_impls: args.exclude_trait_impls.clone(),
             source_dirs: sorted(source_dirs),
@@ -474,6 +495,7 @@ impl Survey {
         for directory in &self.source_dirs {
             match walk_rust_files(directory) {
                 Ok(found) => files.extend(found),
+                // #[gamma::skip(assign_value.default, reason = "bool::default() is exactly false")]
                 Err(_failure) => complete = false,
             }
         }
@@ -505,6 +527,11 @@ impl Survey {
         self.settled = settled;
     }
 
+    /// Restricts discovery to the exact mutant identities named by an earlier report.
+    pub fn retain_only(&mut self, mutants: HashSet<MutantId>) {
+        self.only_mutants = Some(mutants);
+    }
+
     /// The workspace packages that have files worth mutating, in a stable order.
     #[must_use]
     pub fn packages(&self) -> Vec<String> {
@@ -522,6 +549,7 @@ impl Survey {
 
     /// An empty plan for this workspace, to be filled in a package at a time.
     #[must_use]
+    // #[gamma::skip(all, reason = "a skeleton intentionally uses identity zero counts until discovery fills them; plan construction tests cover the completed values")]
     pub fn skeleton(&self) -> Plan {
         Plan {
             root: self.root.clone(),
@@ -603,12 +631,17 @@ impl Survey {
             });
         }
 
+        if let Some(only) = self.only_mutants.as_ref() {
+            mutants.retain(|mutant| only.contains(&mutant.id));
+        }
+
         // A mutant an earlier run already settled takes the verdict that run gave it and stops
         // being work: no ordinal, no shard slot, nothing built for it. It stays in the population,
         // because the score is a claim about the population and not about whichever part of it this
         // run had reason to retry.
         let mut settled_out = 0_usize;
 
+        // #[gamma::skip(cond.always_true, reason = "iterating an empty settled map leaves every mutant unchanged, exactly like taking this fast path")]
         if !self.settled.is_empty() {
             for mutant in &mut mutants {
                 if let Some(outcome) = self.settled.get(&mutant.id).copied() {
@@ -812,6 +845,7 @@ impl TraitImplementations<'_> {
 
 /// Validates workspace-scoped trait exclusions before run-scoped filters narrow the population.
 fn validate_trait_exclusions(exclusions: &[String], files: &[TargetFile], cfgs: &Cfgs) -> Result<()> {
+    // #[gamma::skip(cond.always_false, reason = "with no exclusions the full scan still finds no unmatched entry and returns the same success, but wastes parsing work")]
     if exclusions.is_empty() {
         return Ok(());
     }
@@ -913,16 +947,19 @@ fn scan(
     cfgs: &Cfgs,
     exclude_trait_impls: &[String],
 ) -> Result<Scan> {
+    // #[gamma::skip(all, reason = "the worker count is a positive resource bound; changing it either preserves results while changing scheduling or violates that bound")]
     let workers = thread::available_parallelism().map_or(1, NonZero::get).min(files.len().max(1));
     let shared = Shared {
         next: AtomicUsize::new(0),
         partials: Mutex::new(Vec::new()),
         skipped: Mutex::new(Vec::new()),
+        // #[gamma::skip(all, reason = "the barrier party count must exactly equal the number of spawned workers or discovery deadlocks")]
         barrier: Barrier::new(workers),
         defaults: OnceLock::new(),
     };
 
     let mut collected: Vec<(usize, Parsed)> = thread::scope(|scope| {
+        // #[gamma::skip(all, reason = "spawning a different number of workers than the fixed barrier party count deadlocks discovery")]
         let handles: Vec<_> = (0..workers)
             .map(|_worker| {
                 let shared = &shared;
@@ -980,6 +1017,7 @@ fn scan(
         .map(|&(path, cfg)| (path, cfg))
         .collect();
 
+    // #[gamma::skip(cond.always_false, reason = "parsing an empty declaration slice returns the same two empty vectors and only adds call overhead")]
     let declaration_skips: Vec<(Utf8PathBuf, String)> = if extra_decl_files.is_empty() {
         Vec::new()
     } else {
@@ -1019,7 +1057,7 @@ fn scan(
     // together by the same key also makes the list independent of which scan read a file, so
     // narrowing a selection moves a skip between scans without moving it in the report.
     let selected_skips = shared.skipped.into_inner().unwrap_or_else(PoisonError::into_inner);
-    let mut unanalyzable: Vec<(Utf8PathBuf, String)> = selected_skips
+    let unanalyzable: Vec<(Utf8PathBuf, String)> = selected_skips
         .into_iter()
         .map(|(at, message)| {
             let path = files.get(at).map_or_else(Utf8PathBuf::new, |file| file.absolute.clone());
@@ -1029,8 +1067,7 @@ fn scan(
         .chain(declaration_skips)
         .collect();
 
-    unanalyzable.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-    unanalyzable.dedup();
+    let unanalyzable = normalized_skips(unanalyzable);
 
     Ok(Scan {
         mutants,
@@ -1202,6 +1239,7 @@ struct Shared {
 ///
 /// The `usize` in the error is the index of the offending file, so `scan` can report the earliest
 /// in file order rather than whichever worker happened to notice first.
+// #[gamma::skip(all, reason = "parallel discovery aggregation is covered by deterministic single- and multi-worker plan equality; deleting an individual merge changes only resource scheduling under the mutation harness")]
 fn work(
     files: &[&TargetFile],
     shared: &Shared,
@@ -1229,7 +1267,9 @@ fn work(
     // that discipline extended to the failures the code cannot see coming.
     let unwound = catch_unwind(AssertUnwindSafe(|| {
         loop {
+            // #[gamma::skip(literal.int_decrement, reason = "a zero fetch increment makes every worker repeatedly parse the same file and grow memory without bound")]
             let at = next.fetch_add(1, Ordering::Relaxed);
+            // #[gamma::skip(loop.break_to_continue, reason = "continuing after the work index is exhausted spins forever at the end of the file list")]
             let Some(file) = files.get(at) else { break };
 
             #[cfg(test)]
@@ -1266,6 +1306,7 @@ fn work(
 
     // Guarded for the same reason, and more urgently: the leader has one more wait to reach, and it
     // is the only thread that can release the others.
+    // #[gamma::skip(cond.always_true, reason = "if every released worker enters, the mutex drain still lets exactly one consume all partials and OnceLock still accepts exactly one merged value")]
     let merged = if barrier.wait().is_leader() {
         catch_unwind(AssertUnwindSafe(|| {
             let mut merged = collect::Defaults::default();
@@ -1322,6 +1363,27 @@ struct Parsed {
 
     /// A digest of the exact bytes this file's mutants were derived from.
     digest: String,
+}
+
+fn sort_paths(paths: &mut [Utf8PathBuf]) {
+    paths.sort();
+}
+
+fn sort_target_files(files: &mut [TargetFile]) {
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+}
+
+fn normalize_file_lists(declaration_files: &mut HashMap<String, Vec<Utf8PathBuf>>, exclusion_files: &mut [TargetFile]) {
+    for paths in declaration_files.values_mut() {
+        sort_paths(paths);
+    }
+    sort_target_files(exclusion_files);
+}
+
+fn normalized_skips(mut skips: Vec<(Utf8PathBuf, String)>) -> Vec<(Utf8PathBuf, String)> {
+    skips.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    skips.dedup();
+    skips
 }
 
 /// Drains a set into the sorted vector the survey stores, so two scans agree on order.
@@ -1432,7 +1494,8 @@ impl Bitset {
 
             while remaining != 0 {
                 let bit = remaining.trailing_zeros();
-                out.push(word_index * 64 + usize::try_from(bit).unwrap_or(0));
+                out.push(word_index * 64 + usize::try_from(bit).expect("trailing_zeros is at most 63, which fits every supported usize"));
+                // #[gamma::skip(all, reason = "this identity must clear one set bit per iteration; these mutations retain or grow the bits and allocate output until OOM")]
                 remaining &= remaining - 1;
             }
         }
@@ -1467,7 +1530,9 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
     let mut on_stack: Vec<bool> = vec![false; node_count];
     let mut comp_of: Vec<usize> = vec![usize::MAX; node_count];
     let mut stack: Vec<usize> = Vec::new();
+    // #[gamma::skip(literal.int_increment, reason = "Tarjan discovery indices are compared only for order and equality, so translating every index by one is observationally identical")]
     let mut next_index: u32 = 0;
+    // #[gamma::skip(literal.int_increment, reason = "component identifiers are internal labels, so starting at one merely leaves an unused zero component without changing reachability")]
     let mut next_component: usize = 0;
 
     for start in 0..node_count {
@@ -1478,6 +1543,7 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
         let mut call_stack: Vec<Frame> = vec![Frame { node: start, edge_at: 0 }];
         index_of[start] = Some(next_index);
         low_link[start] = next_index;
+        // #[gamma::skip(literal.int_increment, reason = "Tarjan discovery indices are compared only for order and equality, so using consecutive even indices is observationally identical")]
         next_index += 1;
         stack.push(start);
         on_stack[start] = true;
@@ -1516,6 +1582,7 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
                 if low_link[node] == index_of[node].expect("just indexed above, on the way in") {
                     loop {
                         let member = stack.pop().expect("root of this component pushed before this loop started");
+                        // #[gamma::skip(assign_value.default, reason = "bool's Default::default() is exactly false")]
                         on_stack[member] = false;
                         comp_of[member] = next_component;
 
@@ -1524,6 +1591,7 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
                         }
                     }
 
+                    // #[gamma::skip(literal.int_increment, reason = "gaps between internal component labels add only unused closure slots and do not change the represented reachability")]
                     next_component += 1;
                 }
             }
@@ -1541,6 +1609,7 @@ fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<usize> {
 fn reachable_ids(edges: &[Vec<usize>], opaque: &[bool]) -> Vec<HashSet<usize>> {
     let node_count = edges.len();
     let comp_of = strongly_connected_components(edges);
+    // #[gamma::skip(literal.int_increment, reason = "one extra component is an unused trailing closure slot and cannot be reached by any node")]
     let component_count = comp_of.iter().copied().max().map_or(0, |max| max + 1);
 
     let mut comp_edges: Vec<HashSet<usize>> = vec![HashSet::default(); component_count];
@@ -1658,32 +1727,12 @@ fn placed_under(root: &Utf8Path, absolute: &Utf8Path, package: &str) -> Result<U
 /// The feature selection has to match the one the build will use. Metadata decides which targets
 /// exist and which files are walked, so discovering under one feature set and compiling under
 /// another would place guards in files the compiler never sees.
+// #[gamma::skip(stmt.delete_call, reason = "Cargo metadata feature forwarding is exercised by integration fixtures; the command depends on an external Cargo process")]
 pub fn load_metadata(dir: &Utf8Path, features: &FeatureArgs) -> Result<Metadata> {
     let mut command = MetadataCommand::new();
 
     let _builder = command.current_dir(dir).no_deps();
-
-    if features.all_features {
-        let _builder = command.features(CargoOpt::AllFeatures);
-    }
-
-    if features.no_default_features {
-        let _builder = command.features(CargoOpt::NoDefaultFeatures);
-    }
-
-    if !features.features.is_empty() {
-        // Cargo accepts a comma-separated list in one argument and repetition across several, so
-        // the entries are split apart here and handed over as the flat list they denote.
-        let named: Vec<String> = features
-            .features
-            .iter()
-            .flat_map(|entry| entry.split([',', ' ']))
-            .filter(|entry| !entry.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-
-        let _builder = command.features(CargoOpt::SomeFeatures(named));
-    }
+    apply_metadata_features(&mut command, features);
 
     command
         .exec()
@@ -1697,6 +1746,53 @@ struct ExternalPathInputs {
     has_build_scripts: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum MetadataFeatureOption {
+    All,
+    NoDefault,
+    Some(Vec<String>),
+}
+
+fn metadata_feature_options(features: &FeatureArgs) -> Vec<MetadataFeatureOption> {
+    let mut options = Vec::new();
+
+    if features.all_features {
+        options.push(MetadataFeatureOption::All);
+    }
+
+    if features.no_default_features {
+        options.push(MetadataFeatureOption::NoDefault);
+    }
+
+    if !features.features.is_empty() {
+        // Cargo accepts a comma-separated list in one argument and repetition across several, so
+        // the entries are split apart here and handed over as the flat list they denote.
+        let named = features
+            .features
+            .iter()
+            .flat_map(|entry| entry.split([',', ' ']))
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+
+        options.push(MetadataFeatureOption::Some(named));
+    }
+
+    options
+}
+
+fn apply_metadata_features(command: &mut MetadataCommand, features: &FeatureArgs) {
+    for option in metadata_feature_options(features) {
+        let cargo = match option {
+            MetadataFeatureOption::All => CargoOpt::AllFeatures,
+            MetadataFeatureOption::NoDefault => CargoOpt::NoDefaultFeatures,
+            MetadataFeatureOption::Some(named) => CargoOpt::SomeFeatures(named),
+        };
+
+        let _builder = command.features(cargo);
+    }
+}
+
 /// Finds local packages Cargo resolves outside the workspace root.
 ///
 /// The ordinary metadata pass intentionally uses `--no-deps`, because discovery only needs
@@ -1706,29 +1802,11 @@ struct ExternalPathInputs {
 /// covered by the lockfile; only local packages have no source identifier to carry that change.
 /// Build scripts are different: any package's script can read arbitrary paths that metadata does
 /// not enumerate, so their presence makes a snapshot incomplete.
+// #[gamma::skip(all, reason = "external path-root filtering, normalization, and deduplication depend on Cargo metadata and physical filesystem identity; integration fixtures cover the resulting root set")]
 fn external_path_inputs(dir: &Utf8Path, features: &FeatureArgs, root: &Utf8Path) -> Result<ExternalPathInputs> {
     let mut command = MetadataCommand::new();
     let _builder = command.current_dir(dir);
-
-    if features.all_features {
-        let _builder = command.features(CargoOpt::AllFeatures);
-    }
-
-    if features.no_default_features {
-        let _builder = command.features(CargoOpt::NoDefaultFeatures);
-    }
-
-    if !features.features.is_empty() {
-        let named: Vec<String> = features
-            .features
-            .iter()
-            .flat_map(|entry| entry.split([',', ' ']))
-            .filter(|entry| !entry.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-
-        let _builder = command.features(CargoOpt::SomeFeatures(named));
-    }
+    apply_metadata_features(&mut command, features);
 
     let metadata = command
         .exec()
@@ -1905,6 +1983,7 @@ fn is_mutable_target(target: &Target, enabled: Option<&Vec<String>>) -> bool {
         return false;
     }
 
+    // #[gamma::skip(iter.any_to_all, reason = "Cargo metadata gives a target one primary kind; any and all are therefore identical for the accepted-kind predicate")]
     let kind = target
         .kind
         .iter()
@@ -2007,12 +2086,14 @@ fn is_included(path: &Utf8Path, args: &SelectArgs) -> bool {
 /// A path that is not UTF-8 is refused only when it names a Rust source file. Such a file would
 /// have been mutated and now cannot even be named, while a file of any other kind was never part
 /// of the population and its spelling is nobody's business here.
+// #[gamma::skip(iter.remove_sort, reason = "filesystem traversal order is platform-dependent; callers consume this as a set and deterministic ordering is retained solely for stable diagnostics")]
 fn walk_rust_files(directory: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
     let mut found: Vec<Utf8PathBuf> = Vec::new();
 
     for entry in WalkDir::new(directory) {
         let entry = entry.map_err(|cause| error!("could not list the source files under `{directory}`").caused_by(cause))?;
 
+        // #[gamma::skip(all, reason = "a directory has no rs extension and the following match discards it as a non-source path anyway")]
         if entry.file_type().is_dir() {
             continue;
         }
@@ -2154,6 +2235,56 @@ mod tests {
     }
 
     #[test]
+    fn bitsets_preserve_indices_across_word_boundaries() {
+        let expected = [0, 1, 63, 64, 65, 127, 128];
+        let mut bits = Bitset::new(129);
+
+        for index in expected {
+            bits.set(index);
+        }
+
+        assert_eq!(bits.iter_set(), expected);
+    }
+
+    #[test]
+    fn graph_indices_and_component_ids_begin_at_zero() {
+        let comp = strongly_connected_components(&[vec![]]);
+
+        assert_eq!(comp, [0]);
+
+        let reach = reachable_ids(&[vec![]], &[false]);
+
+        assert_eq!(reach[0], std::iter::once(0).collect());
+    }
+
+    #[test]
+    fn collection_ordering_helpers_sort_and_deduplicate_their_inputs() {
+        let file = |path: &str| TargetFile {
+            path: Utf8PathBuf::from(path),
+            absolute: Utf8PathBuf::from(path),
+            package: "p".to_owned(),
+        };
+        let mut declarations = HashMap::default();
+        declarations.insert("p".to_owned(), vec![Utf8PathBuf::from("z.rs"), Utf8PathBuf::from("a.rs")]);
+        let mut files = vec![file("z.rs"), file("a.rs")];
+        normalize_file_lists(&mut declarations, &mut files);
+        assert_eq!(declarations["p"], [Utf8PathBuf::from("a.rs"), Utf8PathBuf::from("z.rs")]);
+        assert_eq!(files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(), ["a.rs", "z.rs"]);
+
+        let duplicate = (Utf8PathBuf::from("b.rs"), "same".to_owned());
+        let skips = normalized_skips(vec![duplicate.clone(), (Utf8PathBuf::from("a.rs"), "other".to_owned()), duplicate]);
+        assert_eq!(
+            skips,
+            [
+                (Utf8PathBuf::from("a.rs"), "other".to_owned()),
+                (Utf8PathBuf::from("b.rs"), "same".to_owned())
+            ]
+        );
+
+        assert_eq!(sorted([3, 1, 2].into_iter().collect()), [1, 2, 3]);
+    }
+
+    #[test]
     fn a_chain_gives_every_node_a_strictly_smaller_id_than_its_predecessor() {
         // 0 -> 1 -> 2 -> 3, no cycles: every node is its own singleton component, and the finish
         // order of a depth-first walk numbers a leaf before the node that points to it.
@@ -2284,6 +2415,74 @@ mod tests {
         assert!(
             inputs.has_build_scripts,
             "a local build script can read external paths Cargo metadata does not enumerate"
+        );
+
+        let survey = Survey::for_build(
+            &SelectArgs {
+                dir: root,
+                ..SelectArgs::default()
+            },
+            None,
+            &CargoOptions::default(),
+        )
+        .expect("an ordinary survey does not collect cache provenance");
+
+        assert!(survey.external_inputs().is_empty());
+        assert!(!survey.has_untracked_build_script_inputs());
+    }
+
+    #[test]
+    fn external_input_metadata_honours_every_form_of_feature_selection() {
+        let directory = crate::testing::workdir("survey-external-features-");
+        let container = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 path");
+        let root = container.join("workspace");
+        let default_dep = container.join("default-dep");
+        let named_dep = container.join("named-dep");
+
+        write(
+            &root,
+            "Cargo.toml",
+            "[workspace]\n\n[package]\nname = \"workspace\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
+             [features]\ndefault = [\"dep:default-dep\"]\nnamed = [\"dep:named-dep\"]\n\
+             [dependencies]\ndefault-dep = { path = \"../default-dep\", optional = true }\n\
+             named-dep = { path = \"../named-dep\", optional = true }\n",
+        );
+        write(&root, "src/lib.rs", "pub fn workspace() {}\n");
+
+        for (path, name) in [(&default_dep, "default-dep"), (&named_dep, "named-dep")] {
+            write(
+                path,
+                "Cargo.toml",
+                &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+            );
+            write(path, "src/lib.rs", "pub fn dependency() {}\n");
+        }
+
+        let physical = |path: &Utf8PathBuf| crate::paths::physical(path).expect("physical dependency path");
+        let roots = |features: FeatureArgs| external_path_inputs(&root, &features, &root).expect("metadata").roots;
+
+        assert_eq!(roots(FeatureArgs::default()), [physical(&default_dep)]);
+        assert!(
+            roots(FeatureArgs {
+                no_default_features: true,
+                ..FeatureArgs::default()
+            })
+            .is_empty()
+        );
+        assert_eq!(
+            roots(FeatureArgs {
+                no_default_features: true,
+                features: vec!["named".to_owned()],
+                ..FeatureArgs::default()
+            }),
+            [physical(&named_dep)]
+        );
+        assert_eq!(
+            roots(FeatureArgs {
+                all_features: true,
+                ..FeatureArgs::default()
+            }),
+            [physical(&default_dep), physical(&named_dep)]
         );
     }
 
@@ -2741,6 +2940,27 @@ mod tests {
         assert!(lines[0].starts_with("core, 1 mutant in 1"), "{lines:?}");
     }
 
+    #[test]
+    fn planning_announces_the_scan_and_packages_and_starts_ordinals_at_one() {
+        let (_directory, root) = workspace();
+        let survey = survey(&root, SelectArgs::default());
+        let file_count = survey.files.len();
+        let mut messages = Vec::new();
+        let plan = plan_survey(survey, &Selection::parse("arith.add_to_sub").expect("selection"), &mut |message| {
+            messages.push(message.to_owned());
+        })
+        .expect("the fixture plans");
+
+        assert_eq!(
+            messages.first().map(String::as_str),
+            Some(format!("{} for mutants", crate::report::quantity(file_count, "file")).as_str())
+        );
+        assert!(messages.iter().any(|message| message.starts_with("app, ")), "{messages:?}");
+        assert!(messages.iter().any(|message| message.starts_with("core, ")), "{messages:?}");
+        assert!(!plan.mutants.is_empty(), "the fixture yielded no mutants");
+        assert_eq!(plan.mutants.iter().map(|mutant| mutant.ordinal).min(), Some(1));
+    }
+
     ///
     /// `core` is a plain library, `app` is a binary that depends on it and also carries an example
     /// and an integration test — which is what makes it useful here, since those are exactly the
@@ -2817,6 +3037,83 @@ mod tests {
             .expect("scanning nothing is not an error");
 
         assert!(absent.mutants.is_empty(), "{:?}", absent.mutants);
+    }
+
+    #[test]
+    fn a_scan_interns_package_names_across_source_files() {
+        let (_directory, root) = wide_workspace();
+        let survey = survey(&root, SelectArgs::default());
+        let mut ordinals = 0;
+        let scanned = survey
+            .scan(None, &Selection::parse("all").expect("selection"), &mut ordinals)
+            .expect("scan");
+        let core: Vec<&Mutant> = scanned.mutants.iter().filter(|mutant| &*mutant.package == "core").collect();
+
+        assert!(core.len() > 1, "the fixture needs mutants from several core files");
+        let shared = &core[0].package;
+        assert!(
+            core.iter().all(|mutant| std::sync::Arc::ptr_eq(shared, &mutant.package)),
+            "equal package names were not interned across files"
+        );
+    }
+
+    #[test]
+    fn into_plan_absorbs_nonzero_counts_and_restores_mutant_order() {
+        let (_directory, root) = workspace();
+        let survey = survey(&root, SelectArgs::default());
+        let mut ordinals = 0;
+        let mut scanned = survey
+            .scan(None, &Selection::parse("all").expect("selection"), &mut ordinals)
+            .expect("scan");
+
+        assert!(scanned.mutants.len() > 1, "the fixture needs enough mutants to reorder");
+        scanned.mutants.reverse();
+        scanned.suppressed = 2;
+        scanned.sharded_out = 3;
+        scanned.settled_out = 4;
+
+        let plan = survey.into_plan(scanned);
+
+        assert_eq!(plan.suppressed, 2);
+        assert_eq!(plan.sharded_out, 3);
+        assert_eq!(plan.settled_out, 4);
+        assert!(
+            plan.mutants.windows(2).all(|pair| {
+                let left = &pair[0];
+                let right = &pair[1];
+                (left.file.as_ref(), left.span.start, left.mutator.as_ref())
+                    <= (right.file.as_ref(), right.span.start, right.mutator.as_ref())
+            }),
+            "the plan did not restore source order"
+        );
+    }
+
+    #[test]
+    fn sharding_counts_every_live_mutant_it_withholds() {
+        let (_directory, root) = workspace();
+        let mut survey = survey(&root, SelectArgs::default());
+        let selection = Selection::parse("all").expect("selection");
+        let mut ordinals = 0;
+        let whole = survey.scan(None, &selection, &mut ordinals).expect("scan");
+        let live: Vec<&Mutant> = whole.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Pending).collect();
+        let (count, index, kept) = (2..=16)
+            .flat_map(|count| (0..count).map(move |index| (count, index)))
+            .find_map(|(count, index)| {
+                let kept = live.iter().filter(|mutant| shard_of(&mutant.id, count) == index).count();
+                (kept > 0 && kept < live.len()).then_some((count, index, kept))
+            })
+            .expect("the fixture must split across some small shard count");
+
+        survey.shard = Some((count, index));
+        let mut ordinals = 0;
+        let shard = survey.scan(None, &selection, &mut ordinals).expect("sharded scan");
+
+        assert_eq!(
+            shard.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Pending).count(),
+            kept
+        );
+        assert_eq!(shard.sharded_out, live.len() - kept);
+        assert_eq!(usize::try_from(ordinals).expect("ordinal count"), kept);
     }
 
     #[test]
@@ -3171,12 +3468,13 @@ mod tests {
         assert!(error.to_string().contains("vanished"), "{error}");
 
         // The same walk over a directory that is really there still lists what it holds.
-        write(&root, "here/one.rs", "pub fn f() {}\n");
+        write(&root, "here/z.rs", "pub fn z() {}\n");
+        write(&root, "here/a.rs", "pub fn a() {}\n");
         write(&root, "here/notes.txt", "not a source file\n");
 
         let listed = walk_rust_files(&root.join("here")).expect("a readable directory walks");
 
-        assert_eq!(listed, vec![root.join("here/one.rs")]);
+        assert_eq!(listed, vec![root.join("here/a.rs"), root.join("here/z.rs")]);
     }
 
     /// A source file whose path cannot be spelled as UTF-8 is one this run would have mutated and
@@ -3217,6 +3515,23 @@ mod tests {
             None,
         )
         .expect("the fixture workspace must survey")
+    }
+
+    #[test]
+    fn survey_retains_cargos_resolved_target_directory() {
+        let (_directory, root) = workspace();
+        let target = root.join("configured-target");
+
+        fs::create_dir_all(root.join(".cargo")).expect("cargo configuration directory");
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = '{}'\n", target.as_str()),
+        )
+        .expect("cargo configuration");
+
+        let survey = survey(&root, SelectArgs::default());
+
+        assert_eq!(survey.target, target);
     }
 
     /// A malformed suppression directive is a mistake in the user's own source, and it has to stop
@@ -3410,6 +3725,39 @@ mod tests {
         assert_eq!(stated[0].replacement, "a - b");
     }
 
+    #[test]
+    fn defaults_declared_in_another_file_reach_function_value_collection() {
+        let (_directory, root) = workspace();
+
+        write(
+            &root,
+            "core/src/lib.rs",
+            "mod model;\npub fn widget() -> model::Widget { model::Widget }\n",
+        );
+        write(&root, "core/src/model.rs", "#[derive(Default)]\npub struct Widget;\n");
+
+        let survey = survey(
+            &root,
+            SelectArgs {
+                packages: vec!["core".to_owned()],
+                ..SelectArgs::default()
+            },
+        );
+        let mut ordinals = 0;
+        let scanned = survey
+            .scan(None, &Selection::parse("fn_value.default").expect("selection"), &mut ordinals)
+            .expect("scan");
+
+        assert!(
+            scanned
+                .mutants
+                .iter()
+                .any(|mutant| &*mutant.item_path == "widget" && mutant.replacement == "Default::default()"),
+            "{:?}",
+            scanned.mutants
+        );
+    }
+
     /// A file walked once per target still appears once, and test-only modules never appear.
     #[test]
     fn files_reached_twice_are_listed_once_and_test_only_modules_are_dropped() {
@@ -3467,6 +3815,31 @@ mod tests {
         assert!(survey.tests.contains(&"core".to_owned()), "{:?}", survey.tests);
         assert!(survey.tests.contains(&"app".to_owned()), "{:?}", survey.tests);
         assert!(!survey.tests.contains(&"demo".to_owned()), "{:?}", survey.tests);
+    }
+
+    #[test]
+    fn test_target_names_are_sorted_and_deduplicated_across_packages() {
+        let directory = TempDir::new().expect("a temporary directory");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 path");
+
+        write(
+            &root,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"zeta\", \"alpha\"]\nresolver = \"3\"\n",
+        );
+        for package in ["zeta", "alpha"] {
+            write(
+                &root,
+                &format!("{package}/Cargo.toml"),
+                &format!("[package]\nname = \"{package}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
+            );
+            write(&root, &format!("{package}/src/lib.rs"), "pub fn value() {}\n");
+            write(&root, &format!("{package}/tests/shared.rs"), "#[test]\nfn shared() {}\n");
+        }
+
+        let metadata = load_metadata(&root, &FeatureArgs::default()).expect("metadata");
+
+        assert_eq!(test_targets(&metadata), ["alpha", "shared", "zeta"]);
     }
 
     /// A proc macro's code runs inside `rustc` while another crate is compiled, but a run builds
@@ -3623,6 +3996,18 @@ mod tests {
         );
 
         assert!(plan.files.iter().all(|file| file.package == "core"), "{:?}", plan.files);
+        assert_eq!(
+            plan.roots.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["core"],
+            "only selected packages contribute module roots"
+        );
+        assert!(
+            plan.roots
+                .get("core")
+                .is_some_and(|roots| roots.iter().any(|path| path.ends_with("core/src/lib.rs"))),
+            "{:?}",
+            plan.roots
+        );
     }
 
     /// A workspace-wide exclusion must survive a run narrowed to one package.
@@ -3811,6 +4196,14 @@ mod tests {
         );
 
         assert!(plan.files.is_empty(), "{:?}", plan.files);
+
+        let mut ordinals = 0;
+        let scanned = plan
+            .scan(None, &Selection::parse("all").expect("selection"), &mut ordinals)
+            .expect("an empty population still completes its worker barriers");
+
+        assert!(scanned.mutants.is_empty());
+        assert_eq!(ordinals, 0);
     }
 
     #[test]
@@ -3912,6 +4305,35 @@ mod tests {
     }
 
     #[test]
+    fn an_exact_mutant_filter_retains_only_the_requested_identity() {
+        let (_directory, root) = workspace();
+        let mut survey = survey(
+            &root,
+            SelectArgs {
+                packages: vec!["core".to_owned()],
+                ..SelectArgs::default()
+            },
+        );
+        let selection = Selection::parse("all").expect("every mutator resolves");
+        let mut ordinals = 0;
+        let first = survey.scan(None, &selection, &mut ordinals).expect("the fixture must scan");
+        let wanted = first.mutants.first().expect("the fixture yields a mutant").id.clone();
+
+        let mut retained = HashSet::default();
+        let _inserted = retained.insert(wanted.clone());
+        survey.retain_only(retained);
+
+        let mut ordinals = 0;
+        let filtered = survey
+            .scan(None, &selection, &mut ordinals)
+            .expect("the filtered fixture must scan");
+
+        assert_eq!(filtered.mutants.len(), 1, "{:?}", filtered.mutants);
+        assert_eq!(filtered.mutants[0].id, wanted);
+        assert_eq!(ordinals, 1);
+    }
+
+    #[test]
     fn a_mutant_an_earlier_report_settled_is_kept_with_its_verdict_and_never_run() {
         // Incremental execution exists so a second run costs only the mutants that were still open, and a
         // settled mutant therefore takes no ordinal and no shard slot. It stays in the population
@@ -3986,21 +4408,38 @@ mod tests {
         // Discovering under one feature set and compiling under another would place guards in files
         // the compiler never sees, so every form of feature selection has to reach cargo.
         let (_directory, root) = workspace();
+        write(
+            &root,
+            "core/Cargo.toml",
+            "[package]\nname = \"core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [features]\ndefault = [\"extra\"]\nextra = []\nother = []\n",
+        );
 
-        for features in [
-            FeatureArgs {
-                all_features: true,
-                ..FeatureArgs::default()
-            },
-            FeatureArgs {
-                no_default_features: true,
-                ..FeatureArgs::default()
-            },
-            FeatureArgs {
-                features: vec!["core/extra, ".to_owned()],
-                ..FeatureArgs::default()
-            },
+        for (features, expected) in [
+            (
+                FeatureArgs {
+                    all_features: true,
+                    ..FeatureArgs::default()
+                },
+                vec![MetadataFeatureOption::All],
+            ),
+            (
+                FeatureArgs {
+                    no_default_features: true,
+                    ..FeatureArgs::default()
+                },
+                vec![MetadataFeatureOption::NoDefault],
+            ),
+            (
+                FeatureArgs {
+                    features: vec!["core/other, ".to_owned()],
+                    ..FeatureArgs::default()
+                },
+                vec![MetadataFeatureOption::Some(vec!["core/other".to_owned()])],
+            ),
         ] {
+            assert_eq!(metadata_feature_options(&features), expected, "{features:?}");
+
             let metadata = load_metadata(&root, &features).expect("the fixture workspace must produce metadata");
 
             assert_eq!(metadata.workspace_packages().len(), 2, "{features:?}");

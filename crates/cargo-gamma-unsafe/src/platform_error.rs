@@ -149,6 +149,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_owned_operating_system_cause_is_retained_as_the_error_source() {
+        let message = String::from("the owned operation failed");
+        let error = PlatformError::because(
+            Situation::Refused,
+            message.as_str(),
+            io::Error::new(io::ErrorKind::TimedOut, "owned operating-system cause"),
+        );
+
+        assert_eq!(error.to_string(), message);
+        assert_eq!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<io::Error>())
+                .map(io::Error::kind),
+            Some(io::ErrorKind::TimedOut)
+        );
+    }
+
     /// The debug rendering names every field a diagnostic needs, including the situation a caller
     /// branches on, so a logged error is not reduced to its sentence.
     #[test]

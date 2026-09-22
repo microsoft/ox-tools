@@ -37,16 +37,18 @@ mod nextest;
 mod progress;
 #[cfg(target_os = "linux")]
 pub(crate) mod relaunch;
+mod rustc_wrapper;
 mod session;
 mod stall;
 mod sweep;
 mod sync;
 mod test_binary;
+mod test_environment;
 mod verdict;
 mod workspace;
 
 #[doc(inline)]
-pub use build::{OrderingHints, Round, Withdrawal};
+pub use build::{OrderingHints, PackageWithdrawal, Round, Withdrawal};
 #[doc(inline)]
 pub use cargo_options::{BuildLimits, CargoOptions, DEFAULT_ROLLBACK_ROUNDS};
 #[doc(inline)]
@@ -59,16 +61,18 @@ pub use incremental_mode::IncrementalMode;
 #[doc(inline)]
 pub use loader::UNDER_GAMMA_VAR;
 pub(crate) use manifest::RUNTIME_CRATE;
-pub(crate) use measure::run_with_locks;
 #[doc(inline)]
 pub use measure::{Built, Measured, Oracle, measure, run};
+pub(crate) use measure::{FailedMeasurement, run_with_locks};
 #[doc(inline)]
 pub use memory::{DEFAULT_HEADROOM, DEFAULT_MULTIPLIER, Demand, MemoryControl, MemoryPolicy};
 // Named for its subject at this level, where `support` alone would say nothing about what is
 // supported. The module itself is private unless the `internals` feature exposes it.
 pub(crate) use memory::{implied_memory_control, support as memory_support};
+#[doc(hidden)]
+pub use rustc_wrapper::run_if_requested as run_rustc_wrapper_if_requested;
 #[doc(inline)]
-pub use session::{CensusCost, Phases, Session, SweepCost};
+pub use session::{CensusCost, CensusStatus, PackageSweepCost, Phases, Session, SweepCost};
 #[doc(inline)]
 pub use test_binary::TestBinary;
 pub(crate) use verdict::CONFIRM_FACTOR;
@@ -77,7 +81,9 @@ pub use verdict::READERS;
 #[cfg(loom)]
 pub(crate) use verdict::run_loom_models;
 #[cfg(any(test, feature = "internals"))]
-pub(crate) use workspace::cache_lock_identity;
+pub(crate) use workspace::production_campaign_base;
 #[doc(inline)]
-pub use workspace::{Workspace, clean_cache, footprint, gamma_base, scratch_tree};
+pub use workspace::{Workspace, campaign_base, clean_cache, footprint, gamma_base, scratch_tree};
+#[cfg(any(test, feature = "internals"))]
+pub(crate) use workspace::{absolute as absolute_test_path, cache_lock_identity};
 pub(crate) use workspace::{claim_cache, claim_workspace};

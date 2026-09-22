@@ -8,10 +8,12 @@
 //!
 //! A pull-request-time gate that compares per-package line coverage produced
 //! by [`cargo-llvm-cov`] against per-package thresholds carried in
-//! `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
-//! coverage lcov tracefile, resolves each package's base policy from a small
-//! three-layer lookup, applies any matching package target policy, and emits a
-//! verdict table to stdout (and,
+//! `Cargo.toml`. The accompanying `cargo-coverage-gate` binary can either read
+//! existing LCOV tracefiles or collect them through a portable
+//! cargo-llvm-cov and
+//! nextest. It resolves each package's base policy from a small three-layer
+//! lookup, applies any matching package target policy, and emits a verdict
+//! table to stdout (and,
 //! optionally, to a Markdown summary file for CI step summaries). A failing
 //! verdict includes actionable details without relying on a later
 //! coverage-service upload. A coverable line is a distinct LCOV `DA:` record.
@@ -107,8 +109,8 @@
 //! A zero target-specific threshold disables gating on the matching target,
 //! but does not disable test execution or instrumentation. Those test binaries
 //! remain instrumented because they may contribute coverage to other packages.
-//! If cargo-llvm-cov reports that an instrumented run produced no coverage
-//! data, automation can supply an empty lcov tracefile: zero-threshold and
+//! When cargo-llvm-cov discovers only objects with no coverage maps, `run`
+//! writes and evaluates an empty lcov tracefile: zero-threshold and
 //! `expect-no-coverable-lines` packages pass, while positively gated packages
 //! report `NO DATA`.
 //!
@@ -129,21 +131,54 @@
 //! ## Binary usage
 //!
 //! ```text
-//! cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
-//!                      [--target <triple>]
-//!                      [--summary-file <path>] [--quiet]
+//! cargo coverage-gate [EVALUATION OPTIONS]
+//! cargo coverage-gate run [SELECTION] [COLLECTION OPTIONS] [EVALUATION OPTIONS]
 //! ```
 //!
+//! The bare command evaluates existing LCOV files and remains backward
+//! compatible. `cargo coverage-gate run` collects `all-features` and
+//! `no-default-features` coverage with cargo-llvm-cov plus nextest by default,
+//! writes `lcov-all-features.info` and `lcov-no-default.info` under
+//! `target/coverage`, and evaluates those same files in-process. Collection can
+//! be limited with repeatable `--package` selectors; no selectors means the
+//! workspace. Use repeatable `--configuration`, `--coverage-dir`, and `--jobs`
+//! options to customize collection.
+//!
+//! Instrumented collection requires the invoking Cargo and rustc to be nightly
+//! and cargo-llvm-cov 0.9.0 or newer. The command honors inherited `CARGO`,
+//! `RUSTC`, `RUSTUP_TOOLCHAIN`, and `PATH` rather than selecting a toolchain
+//! itself. Every selected package is instrumented regardless of its coverage
+//! policy. Callers may repeat `--no-coverage-target <TRIPLE>` to explicitly run
+//! plain nextest without LCOV or gating on listed targets. `run` resolves one
+//! effective target from explicit `--target` or the rustc host, then passes it
+//! explicitly to test execution, reporting, and evaluation. This deliberately
+//! overrides `CARGO_BUILD_TARGET` and Cargo `build.target` configuration.
+//! `--quiet` suppresses all collection and verdict stdout while preserving
+//! stderr diagnostics and summary output.
+//!
+//! Every feature configuration uses a fresh target beneath private
+//! per-invocation scratch, so collection never runs workspace-wide
+//! `cargo llvm-cov clean` or deletes shared report and test artifacts. Ordinary
+//! Cargo and cargo-llvm-cov target variables point at that same private
+//! configuration directory, including metadata-derived test paths. Ordinary
+//! reports write directly to their stable `--coverage-dir` path. On Windows
+//! error 206, the report child uses deterministic Windows quoting and the
+//! validated `llvm-cov export` arguments are retried through a response file.
+//! That exceptional export is staged beside the stable path and published only
+//! after success or a valid no-data conversion. Concurrent collection must use
+//! distinct coverage directories; private profile isolation does not serialize
+//! stable artifact writers.
+//!
 //! `--lcov` may be repeated; the tracefiles are merged at the line level
-//! (per-line counts summed) so multiple feature-config exports
+//! (line sets combined, coverage retained when any input has a hit) so multiple feature-config exports
 //! (`--all-features`, `--no-default-features`) can be gated together
 //! without a separate, platform-specific merge step.
 //!
 //! Exit codes: `0` if every gated package meets its threshold, `1` if any
-//! gated package falls below its threshold, and `2` for configuration
-//! errors (unparseable lcov, missing data for a gated package, a `--package`
-//! selector that matches no member, an out-of-range `min-lines-percent`
-//! value, …).
+//! gated package falls below its threshold, and `2` for configuration or
+//! operational errors (unparseable lcov, missing data for a gated package, a
+//! `--package` selector that matches no member, failed collection/export, an
+//! out-of-range `min-lines-percent` value, …).
 //!
 //! When `--summary-file` is unset, the binary falls back to
 //! `$GITHUB_STEP_SUMMARY` and then `$COVERAGE_GATE_SUMMARY` to decide
@@ -172,7 +207,8 @@
 //! text via [`EvaluatedReport::render_text`] or GitHub-flavored Markdown via
 //! [`EvaluatedReport::render_markdown`] and reduces to a [`Verdict`] via
 //! [`EvaluatedReport::verdict`]. The accompanying binary loads tracefiles from
-//! disk and orchestrates rendering plus the appropriate exit code.
+//! disk or collects it, then orchestrates rendering plus the appropriate exit
+//! code.
 //!
 //! [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 
@@ -294,8 +330,8 @@ pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &
 /// workspace anchored at `manifest_path` and return the resolved
 /// [`EvaluatedReport`].
 ///
-/// The tracefiles are merged at the line level before evaluation (per-line
-/// counts summed, line sets combined), so passing the `--all-features` and
+/// The tracefiles are merged at the line level before evaluation (line sets
+/// combined, coverage retained when any input has a hit), so passing the `--all-features` and
 /// `--no-default-features` exports yields the same per-package line
 /// coverage as a single merged report — without a platform-specific lcov
 /// merger. An empty slice is treated as an empty report. Packages with

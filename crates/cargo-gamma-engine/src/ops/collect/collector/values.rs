@@ -240,10 +240,10 @@ pub(super) fn tuple_values(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Re
         let choices = values_for(element, depth.saturating_sub(1), types);
         let mut next = Vec::new();
 
-        for existing in &combinations {
+        'combinations: for existing in &combinations {
             for (_name, text) in &choices {
                 if next.len() >= RETURN_WIDTH {
-                    break;
+                    break 'combinations;
                 }
 
                 let mut combination = existing.clone();
@@ -254,6 +254,10 @@ pub(super) fn tuple_values(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Re
         }
 
         combinations = next;
+
+        if combinations.is_empty() {
+            break;
+        }
     }
 
     combinations
@@ -439,16 +443,7 @@ pub(super) fn type_argument(ty: &Type, index: usize) -> Option<&Type> {
 
 /// The path text of a type, so that an associated function can be called on it.
 pub(super) fn type_text(ty: &Type) -> String {
-    match strip(ty) {
-        Type::Path(path) => path
-            .path
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .collect::<Vec<_>>()
-            .join("::"),
-        _ => "Default".to_owned(),
-    }
+    path_text(ty).unwrap_or_else(|| "Default".to_owned())
 }
 
 /// The number of type arguments a path segment carries.
@@ -465,21 +460,28 @@ pub(super) fn type_arguments(segment: &PathSegment) -> usize {
 
 /// The constructor path for a collection type, keeping any qualification the author wrote.
 pub(super) fn collection_ctor(ty: &Type) -> String {
-    let Type::Path(path) = strip(ty) else {
-        return "Vec".to_owned();
-    };
-
-    path.path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>()
-        .join("::")
+    path_text(ty).unwrap_or_else(|| "Vec".to_owned())
 }
 
 /// The constructor for a smart-pointer type.
 pub(super) fn wrapper_ctor(ty: &Type) -> String {
     format!("{}::new", collection_ctor(ty))
+}
+
+/// The written path of a type, without its generic arguments.
+fn path_text(ty: &Type) -> Option<String> {
+    let Type::Path(path) = strip(ty) else {
+        return None;
+    };
+
+    Some(
+        path.path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::"),
+    )
 }
 
 /// Sees through parentheses to the type underneath.
@@ -697,5 +699,126 @@ mod tests {
     #[test]
     fn resolve_type_treats_an_empty_path_as_unknown() {
         assert_eq!(resolve_type(&empty_path_type()), Kind::Unknown);
+    }
+
+    fn texts(values: Vec<ReplacementValue>) -> Vec<String> {
+        values.into_iter().map(|(name, text)| format!("{name}:{text}")).collect()
+    }
+
+    #[test]
+    fn nested_value_generation_has_a_deterministic_oracle() {
+        let abstracts = Vec::new();
+        let imports = HashMap::default();
+        let defaults = Defaults::default();
+        let types = test_types(&abstracts, &imports, &defaults);
+
+        assert_eq!(texts(return_values(&ReturnType::Default, &types)), ["fn_value.unit:()"]);
+        assert_eq!(
+            texts(values_for(&parse_quote!(bool), 0, &types)),
+            ["fn_value.default:Default::default()"]
+        );
+        assert_eq!(
+            texts(values_for(&parse_quote!(Option<bool>), RETURN_DEPTH, &types)),
+            ["fn_value.none:None", "fn_value.some:Some(true)", "fn_value.some:Some(false)"]
+        );
+        assert_eq!(
+            texts(values_for(&parse_quote!(Result<Option<bool>, String>), RETURN_DEPTH, &types)),
+            [
+                "fn_value.ok:Ok(None)",
+                "fn_value.ok:Ok(Some(true))",
+                "fn_value.ok:Ok(Some(false))",
+                "fn_value.err_default:Err(Default::default())",
+            ]
+        );
+        assert_eq!(
+            texts(values_for(&parse_quote!(Vec<bool>), RETURN_DEPTH, &types)),
+            [
+                "fn_value.empty_collection:Vec::new()",
+                "fn_value.one_element:core::iter::once(true).collect()",
+                "fn_value.one_element:core::iter::once(false).collect()",
+            ]
+        );
+        assert_eq!(
+            texts(values_for(&parse_quote!(HashMap<bool, u8>), RETURN_DEPTH, &types)),
+            [
+                "fn_value.empty_collection:HashMap::new()",
+                "fn_value.one_element:core::iter::once((true, 0)).collect()",
+            ]
+        );
+        assert_eq!(
+            texts(values_for(&parse_quote!(Box<bool>), RETURN_DEPTH, &types)),
+            ["fn_value.bool_true:Box::new(true)", "fn_value.bool_false:Box::new(false)"]
+        );
+        assert_eq!(
+            texts(values_for(
+                &parse_quote!(impl DoubleEndedIterator<Item = bool>),
+                RETURN_DEPTH,
+                &types
+            )),
+            [
+                "fn_value.empty_collection:core::iter::empty()",
+                "fn_value.one_element:core::iter::once(true)",
+                "fn_value.one_element:core::iter::once(false)",
+            ]
+        );
+        assert_eq!(
+            texts(values_for(&parse_quote!(&bool), RETURN_DEPTH, &types)),
+            [
+                "fn_value.bool_true:&*Box::leak(Box::new(true))",
+                "fn_value.bool_false:&*Box::leak(Box::new(false))",
+            ]
+        );
+        assert_eq!(
+            texts(values_for(&parse_quote!(&mut bool), RETURN_DEPTH, &types)),
+            [
+                "fn_value.bool_true:Box::leak(Box::new(true))",
+                "fn_value.bool_false:Box::leak(Box::new(false))",
+            ]
+        );
+    }
+
+    #[test]
+    fn tuple_width_and_type_helpers_have_exact_boundaries() {
+        let abstracts = Vec::new();
+        let imports = HashMap::default();
+        let defaults = Defaults::default();
+        let types = test_types(&abstracts, &imports, &defaults);
+        let tuple: Type = parse_quote!((bool, bool, bool, bool));
+        let values = tuple_values(&tuple, RETURN_DEPTH, &types);
+
+        assert_eq!(values.len(), RETURN_WIDTH);
+        assert_eq!(values.first().map(|(_, text)| text.as_str()), Some("(true, true, true, true)"));
+        assert_eq!(values.last().map(|(_, text)| text.as_str()), Some("(true, false, false, false)"));
+        assert_eq!(cap(vec![("x", "x".into()); RETURN_WIDTH + 1]).len(), RETURN_WIDTH);
+
+        let qualified: Type = parse_quote!(std::collections::VecDeque<bool>);
+        assert_eq!(type_text(&qualified), "std::collections::VecDeque");
+        assert_eq!(collection_ctor(&qualified), "std::collections::VecDeque");
+        assert_eq!(wrapper_ctor(&parse_quote!(std::sync::Arc<bool>)), "std::sync::Arc::new");
+        let cow: PathSegment = parse_quote!(Cow<'static, str>);
+        let array: PathSegment = parse_quote!(Array<u8, 4>);
+        assert_eq!(type_arguments(&cow), 1);
+        assert_eq!(type_arguments(&array), 1);
+    }
+
+    #[test]
+    fn type_classification_checks_names_arity_and_iterator_bounds() {
+        let cases = [
+            (parse_quote!(()), Kind::Unit),
+            (parse_quote!(&str), Kind::StaticStr),
+            (parse_quote!(&mut str), Kind::MutStr),
+            (parse_quote!(NonZeroU8), Kind::NonZero),
+            (parse_quote!(NonZero<u8>), Kind::Unknown),
+            (parse_quote!(Vec<bool>), Kind::Collection),
+            (parse_quote!(Vec), Kind::Unknown),
+            (parse_quote!(HashMap<bool, u8>), Kind::Map),
+            (parse_quote!(HashMap<bool>), Kind::Unknown),
+            (parse_quote!(impl FusedIterator<Item = bool>), Kind::Iterator),
+            (parse_quote!(impl Display), Kind::Unknown),
+        ];
+
+        for (ty, expected) in cases {
+            assert_eq!(resolve_type(&ty), expected, "{ty:?}");
+        }
     }
 }

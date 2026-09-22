@@ -8,9 +8,10 @@ use std::borrow::Cow;
 use serde::Deserialize;
 
 use super::report::{
-    FLAKY_PREFIX, FRAMEWORK_NAME, NOT_BUILT_PREFIX, OUT_OF_MEMORY_PREFIX, SUPPORTED_SCHEMA_MAJOR, TIMEOUT_PREFIX, supported_schema_version,
+    FLAKY_PREFIX, FRAMEWORK_NAME, NOT_BUILT_PREFIX, OUT_OF_MEMORY_PREFIX, Report, SUPPORTED_SCHEMA_MAJOR, TIMEOUT_PREFIX,
+    supported_schema_version,
 };
-use crate::model::Outcome;
+use crate::model::{MUTANT_ID_VERSION, MutantId, Outcome};
 use crate::{HashMap, HashSet};
 
 /// The slice of a report a cross-run reader needs.
@@ -110,6 +111,43 @@ pub fn settled_mutants(text: &str) -> Result<HashSet<String>, String> {
         .flat_map(|file| file.mutants.iter())
         .filter(|mutant| mutant.settled_outcome().is_some())
         .map(|mutant| mutant.id.clone().into_owned())
+        .collect())
+}
+
+/// Reads the genuine survivor IDs from a validated cargo-gamma report.
+///
+/// Resource outcomes export as `Survived` because the interchange schema counts them as
+/// undetected. Their reason distinguishes them from mutants for which every test passed.
+///
+/// # Errors
+///
+/// Returns an error for another producer or mutant-identity scheme.
+pub(crate) fn surviving_mutants(report: &Report) -> Result<HashSet<MutantId>, String> {
+    if report.framework.name != FRAMEWORK_NAME {
+        return Err(format!(
+            "the report was written by `{}` rather than by {FRAMEWORK_NAME}",
+            report.framework.name
+        ));
+    }
+
+    let identity_version = report
+        .config
+        .as_ref()
+        .and_then(|config| config.mutant_id_version)
+        .unwrap_or(MUTANT_ID_VERSION);
+
+    if identity_version != MUTANT_ID_VERSION {
+        return Err(format!(
+            "the report uses mutant-ID scheme {identity_version}, but this build uses scheme {MUTANT_ID_VERSION}"
+        ));
+    }
+
+    Ok(report
+        .files
+        .values()
+        .flat_map(|file| file.mutants.iter())
+        .filter(|mutant| mutant.status == "Survived" && mutant.status_reason.is_none())
+        .map(|mutant| MutantId::new(&mutant.id))
         .collect())
 }
 

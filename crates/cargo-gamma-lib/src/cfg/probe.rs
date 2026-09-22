@@ -14,8 +14,12 @@ pub(crate) fn for_build(build: &Build) -> Result<CfgSet> {
         return Ok(CfgSet::unconditional());
     }
 
-    let program = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
+    let program = rustc_program(|name| std::env::var(name));
     for_build_with(build, &program)
+}
+
+fn rustc_program(mut get: impl FnMut(&str) -> std::result::Result<String, std::env::VarError>) -> String {
+    get("RUSTC").unwrap_or_else(|_| "rustc".to_owned())
 }
 
 fn for_build_with(build: &Build, program: impl AsRef<std::ffi::OsStr>) -> Result<CfgSet> {
@@ -44,6 +48,8 @@ fn for_build_with(build: &Build, program: impl AsRef<std::ffi::OsStr>) -> Result
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
 
     #[test]
@@ -52,6 +58,18 @@ mod tests {
         let error = for_build_with(&Build::default(), executable).expect_err("libtest rejects rustc's arguments");
 
         assert!(error.to_string().contains("`rustc --print cfg` failed"), "{error}");
+    }
+
+    #[test]
+    fn the_compiler_override_uses_cargos_rustc_variable() {
+        let requested = RefCell::new(Vec::new());
+        let program = rustc_program(|name| {
+            requested.borrow_mut().push(name.to_owned());
+            Ok("custom-rustc".to_owned())
+        });
+
+        assert_eq!(program, "custom-rustc");
+        assert_eq!(requested.into_inner(), ["RUSTC"]);
     }
 
     #[test]
