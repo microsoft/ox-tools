@@ -4485,27 +4485,33 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 # Unscoped (a collision is a property of the whole workspace, not of the
 # packages a diff happens to touch).
 #
-# Cargo uplifts some build outputs to a shared directory under
-# `target/<profile>/` without a metadata hash: binaries and examples, plus
-# `cdylib`, `dylib`, and `staticlib` libraries. Two workspace packages that
-# name such a target the same way write the same file -- and, on Windows, the
-# same debug-info file, plus the same SBOM sidecar when CI generates one.
-# Cargo reports this as `output filename collision`, warns that it may become
-# a hard error, and keeps building, so the workspace stays green while
-# concurrent jobs race for one path. This recipe turns that warning into a
-# failure before anything is compiled.
+# Cargo compiles each unit into `target/<profile>/deps/` under a
+# metadata-hashed name, then uplifts the root unit of most target kinds to
+# `target/<profile>/` (examples to `target/<profile>/examples/`) under a
+# plain, unhashed name. Two workspace packages whose targets uplift to the
+# same file name therefore write the same file -- and, on Windows, the same
+# import library and debug-info files, plus the same SBOM sidecar when CI
+# generates one. Cargo reports this as `output filename collision`, warns
+# that it may become a hard error, and keeps building, so the workspace
+# stays green while concurrent jobs race for one path. This recipe turns
+# that warning into a failure before anything is compiled.
 #
-# Test and benchmark binaries keep a metadata hash in
-# `target/<profile>/deps/`, as do `lib` and `rlib` libraries and build
-# scripts, so duplicate names there are harmless and are not reported. Cargo
-# already rejects duplicate target names inside a single package, so only
-# cross-package duplicates are reported here.
+# Only test and benchmark binaries and build scripts stay in `deps/`, so
+# duplicate names among those are harmless and are not reported. Everything
+# else uplifts, including an ordinary `lib`: two packages named `foo-bar`
+# and `foo_bar` both uplift to `libfoo_bar.rlib` because target names
+# normalise `-` to `_`, with no explicit `[lib] name` anywhere.
 #
-# Targets are grouped by the file name they produce, not by their crate
-# type: `cdylib` and `dylib` emit the same platform shared-library file, so
-# a collision can cross the two crate types.
+# Targets are grouped by the file name they emit rather than by crate type,
+# because several crate types share one name and must land in one bucket
+# (`cdylib`, `dylib`, and `proc-macro` all emit the platform shared-library
+# file) while others that share a directory must not (an `rlib` and a
+# `cdylib` of the same name emit different files and do not collide).
+#
+# Cargo already rejects duplicate target names inside a single package, so
+# only cross-package duplicates are reported here.
 
-# Check that uplifted binary, example, and library target names are unique.
+# Check that uplifted target names are unique across the workspace.
 [script("pwsh", "-NoProfile")]
 anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -4521,26 +4527,41 @@ anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
         exit 1
     }
 
-    # Crate types Cargo copies out of `deps/` into the profile directory,
-    # mapped to the family of file name they emit. `cdylib` and `dylib` share
-    # a family because they produce the same platform file, so a collision
-    # between them must be caught.
+    # Crate type -> the family of file name it emits. Crate types that emit
+    # the same name share a family; `cargo metadata` reports an ordinary
+    # library as `lib`, not `rlib`, so both spellings are listed.
     $families = [ordered]@{
         'bin' = 'executable'
+        'lib' = 'rust library'
+        'rlib' = 'rust library'
         'cdylib' = 'shared library'
         'dylib' = 'shared library'
+        'proc-macro' = 'shared library'
         'staticlib' = 'static library'
     }
     # The file name each family emits, used to name the contested path.
     $fileNames = @{
-        'executable' = '<name>'
+        'executable' = '<name>[.exe]'
+        'rust library' = 'lib<name>.rlib'
         'shared library' = '[lib]<name>[.so|.dll|.dylib]'
         'static library' = '[lib]<name>[.a|.lib]'
     }
-    # Target kinds that always keep a metadata hash in `deps/`.
+    # How each family is described in the diagnostic.
+    $labels = @{
+        'executable' = 'binary'
+        'rust library' = 'library'
+        'shared library' = 'shared library'
+        'static library' = 'static library'
+    }
+    # The only target kinds Cargo never uplifts: they keep their metadata
+    # hash in `deps/`, so duplicate names among them cannot collide.
     $hashed = @('test', 'bench', 'custom-build')
 
-    $owners = [ordered]@{}
+    # Ordinal on purpose. Cargo keys its own collision check by exact path,
+    # so target names differing only in case are distinct targets to Cargo
+    # and must not be merged here -- a case-insensitive comparer would fail
+    # a workspace that Cargo builds without a warning.
+    $owners = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     foreach ($package in $metadata.packages) {
         if ($metadata.workspace_members -notcontains $package.id) { continue }
         foreach ($target in $package.targets) {
@@ -4550,17 +4571,13 @@ anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
             foreach ($crateType in $target.crate_types) {
                 if (-not $families.Contains($crateType)) { continue }
                 $family = $families[$crateType]
-                $label = if ($isExample) { 'example' } elseif ($family -eq 'executable') { 'binary' } else { $family }
-                # Keyed by family rather than crate type, so two crate types
-                # that emit one file name share a bucket, while families that
-                # emit different names (an executable next to a static
-                # library) stay apart.
-                $key = "$directory $family $($target.name)"
-                if (-not $owners.Contains($key)) {
+                $fileName = $fileNames[$family].Replace('<name>', $target.name)
+                $key = "$directory/$fileName"
+                if (-not $owners.ContainsKey($key)) {
                     $owners[$key] = [pscustomobject]@{
-                        Label = $label
+                        Label = if ($isExample) { 'example' } else { $labels[$family] }
                         Name = $target.name
-                        Path = "$directory/" + $fileNames[$family].Replace('<name>', $target.name)
+                        Path = $key
                         Packages = [System.Collections.Generic.List[string]]::new()
                     }
                 }

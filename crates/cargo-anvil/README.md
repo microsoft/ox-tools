@@ -180,7 +180,7 @@ above compose these recipes into the default policy:
   [`cargo-heather`][__link4],
   [`cargo-ensure-no-cyclic-deps`][__link5],
   [`cargo-ensure-no-default-features`][__link6],
-  and unique uplifted binary, example, and library target names
+  and unique uplifted target names across the workspace
   (`unique-target-names`).
 * **Documentation and repository policy:** Cargo documentation
   (`doc-build`), documentation tests (`doc-test`), generated README checks
@@ -402,7 +402,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbqvoyJEe2_VIbMTrLB5LHQ80b668rAcGBzw8bGT4GrLgcdAthZIGDa2NhcmdvLWFudmlsZjAuMTEuMWtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbkJ5lIQPBs4EbYsC1rAp3YTobPW2RZbJ8uLIbDoQbDzlsBaVhZIGDa2NhcmdvLWFudmlsZjAuMTEuMWtjYXJnb19hbnZpbA
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://embarkstudios.github.io/cargo-deny/

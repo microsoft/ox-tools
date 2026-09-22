@@ -383,32 +383,33 @@ mod tests {
         assert!(!checks.contains("bolero list failed; assuming no targets"));
     }
 
-    /// The collision guard must cover exactly the target kinds Cargo uplifts
-    /// to a shared, hash-free path, and must fail rather than warn.
+    /// The collision guard must group targets by the file name Cargo
+    /// actually emits, and must fail rather than warn.
     #[test]
-    fn unique_target_names_guards_only_uplifted_target_kinds() {
+    fn unique_target_names_guards_every_uplifted_target_kind() {
         let body = CHECK_FILES
             .iter()
             .find_map(|(path, body)| path.ends_with("/unique-target-names.just").then_some(*body))
             .expect("unique-target-names.just is registered in CHECK_FILES above");
-        // Exactly the crate types Cargo copies out of `deps/`; `lib`, `rlib`,
-        // and `proc-macro` keep their metadata hash and cannot collide.
+        // An ordinary library uplifts too, and `cargo metadata` spells it
+        // `lib`, so omitting it would miss the `foo-bar` / `foo_bar` case.
+        assert!(body.contains("'lib' = 'rust library'"));
+        assert!(body.contains("'rlib' = 'rust library'"));
+        // These three emit one platform shared-library file.
         assert!(body.contains("'cdylib' = 'shared library'"));
-        assert!(
-            body.contains("'dylib' = 'shared library'"),
-            "cdylib and dylib emit one file name and must share a bucket"
-        );
+        assert!(body.contains("'dylib' = 'shared library'"));
+        assert!(body.contains("'proc-macro' = 'shared library'"));
+        // A static library shares the directory but not the file name.
         assert!(body.contains("'staticlib' = 'static library'"));
-        // Test, benchmark, and build-script binaries stay in `deps/` even
-        // though their crate type is `bin`.
+        // Only these kinds keep a metadata hash in `deps/`.
         assert!(body.contains("$hashed = @('test', 'bench', 'custom-build')"));
         assert!(
-            body.contains("if (-not $families.Contains($crateType)) { continue }"),
-            "the guard must skip every crate type that is not uplifted"
+            body.contains("$key = \"$directory/$fileName\""),
+            "targets must be keyed by the emitted file name, not by crate type"
         );
         assert!(
-            body.contains("$key = \"$directory $family $($target.name)\""),
-            "targets must be keyed by emitted file name family, not by crate type"
+            body.contains("[System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)"),
+            "keys must compare ordinally; an [ordered] hashtable merges names that differ only in case"
         );
         assert!(
             body.contains("'target/<profile>/examples'"),
@@ -1738,24 +1739,27 @@ mod tests {
         use super::CHECK_FILES;
 
         /// A workspace member: its name plus the names of its uplifted
-        /// example and binary targets, and an optional explicit library
-        /// name and crate type.
+        /// example, binary, and library-crate-type example targets, and an
+        /// optional explicit library name and crate type.
         struct Member<'a> {
             package: &'a str,
             example: &'a str,
             binary: &'a str,
+            library_example: &'a str,
             library: Option<(&'a str, &'a str)>,
         }
 
         impl<'a> Member<'a> {
-            /// A member whose only uplifted targets are its example and its
-            /// binary; its library keeps the default (unique) package name
-            /// and the default, never-uplifted `lib` crate type.
-            fn new(package: &'a str, example: &'a str, binary: &'a str) -> Self {
+            /// A member whose uplifted target names are all derived from its
+            /// package name, so nothing collides unless a test asks for it.
+            /// Its library keeps the default (unique) package target name and
+            /// the default `lib` crate type.
+            fn new(package: &'a str, example: &'a str, binary: &'a str, library_example: &'a str) -> Self {
                 Self {
                     package,
                     example,
                     binary,
+                    library_example,
                     library: None,
                 }
             }
@@ -1787,8 +1791,9 @@ mod tests {
         }
 
         /// Builds a workspace whose members each declare the same duplicated
-        /// `test`, `bench`, and library-crate-type `example` names, plus the
-        /// per-member uplifted example and binary names given by `members`.
+        /// `test` and `bench` names -- the only kinds Cargo never uplifts --
+        /// plus the per-member uplifted example, binary, and
+        /// library-crate-type example names given by `members`.
         fn fixture(members: &[Member<'_>]) -> TempDir {
             let temp = Builder::new()
                 .prefix("anvil repo's [copy] (fork) ")
@@ -1842,10 +1847,11 @@ mod tests {
                         concat!(
                             "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
                             "{library}\n",
-                            "[[example]]\nname = \"library_example\"\npath = \"examples/library_example.rs\"\ncrate-type = [\"lib\"]\n"
+                            "[[example]]\nname = \"{library_example}\"\npath = \"examples/{library_example}.rs\"\ncrate-type = [\"lib\"]\n"
                         ),
                         name = member.package,
-                        library = library
+                        library = library,
+                        library_example = member.library_example
                     ),
                 )
                 .expect("member manifest must be writable");
@@ -1853,7 +1859,7 @@ mod tests {
                 fs::write(package.join(format!("src/bin/{}.rs", member.binary)), "fn main() {}\n").expect("member binary must be writable");
                 fs::write(package.join(format!("examples/{}.rs", member.example)), "fn main() {}\n")
                     .expect("member example must be writable");
-                fs::write(package.join("examples/library_example.rs"), "").expect("library example must be writable");
+                fs::write(package.join(format!("examples/{}.rs", member.library_example)), "").expect("library example must be writable");
                 // Duplicated across members on purpose: cargo keeps a metadata
                 // hash on these, so they must never be reported.
                 fs::write(package.join("tests/shared.rs"), "").expect("member test must be writable");
@@ -1881,14 +1887,15 @@ mod tests {
             )
         }
 
+        /// A bin-crate-type example: uplifts to `examples/<name>`.
         #[test]
         fn fails_when_two_packages_share_an_uplifted_example_name() {
             if !tools_available() {
                 return;
             }
             let temp = fixture(&[
-                Member::new("alpha", "shared", "alpha_tool"),
-                Member::new("beta", "shared", "beta_tool"),
+                Member::new("alpha", "shared", "alpha_tool", "alpha_lib_example"),
+                Member::new("beta", "shared", "beta_tool", "beta_lib_example"),
             ]);
             let output = run(temp.path());
             let diagnostic = combined(&output);
@@ -1898,12 +1905,8 @@ mod tests {
                 "diagnostic must name the kind, the target, and every owning package: {diagnostic}"
             );
             assert!(
-                diagnostic.contains("target/<profile>/examples/shared"),
-                "diagnostic must name the contested path: {diagnostic}"
-            );
-            assert!(
-                !diagnostic.contains("library_example"),
-                "a library-crate-type example is never uplifted and must not be reported: {diagnostic}"
+                diagnostic.contains("target/<profile>/examples/shared[.exe]"),
+                "diagnostic must name the contested file: {diagnostic}"
             );
         }
 
@@ -1913,8 +1916,8 @@ mod tests {
                 return;
             }
             let temp = fixture(&[
-                Member::new("alpha", "alpha_shared", "tool"),
-                Member::new("beta", "beta_shared", "tool"),
+                Member::new("alpha", "alpha_shared", "tool", "alpha_lib_example"),
+                Member::new("beta", "beta_shared", "tool", "beta_lib_example"),
             ]);
             let output = run(temp.path());
             let diagnostic = combined(&output);
@@ -1924,22 +1927,73 @@ mod tests {
                 "duplicate binaries must be reported against the profile directory: {diagnostic}"
             );
             assert!(
-                diagnostic.contains("target/<profile>/tool"),
-                "diagnostic must name the contested path: {diagnostic}"
+                diagnostic.contains("target/<profile>/tool[.exe]"),
+                "diagnostic must name the contested file: {diagnostic}"
+            );
+        }
+
+        /// An ordinary library uplifts its rlib, so two packages sharing a
+        /// library target name collide even with no explicit crate type.
+        /// This is the `foo-bar` / `foo_bar` case that needs no config at all.
+        #[test]
+        fn fails_when_two_packages_share_a_default_library_name() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example").with_library("shared_lib", "lib"),
+                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "lib"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                !output.status.success(),
+                "an ordinary library uplifts its rlib and must be guarded: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("library target 'shared_lib' is declared by 2 workspace packages: alpha, beta"),
+                "diagnostic must report the library: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("target/<profile>/libshared_lib.rlib"),
+                "diagnostic must name the contested file: {diagnostic}"
+            );
+        }
+
+        /// A library-crate-type example uplifts its rlib into the examples
+        /// directory, so duplicate names there collide too.
+        #[test]
+        fn fails_when_two_packages_share_a_library_example_name() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("alpha", "alpha_shared", "alpha_tool", "library_example"),
+                Member::new("beta", "beta_shared", "beta_tool", "library_example"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                !output.status.success(),
+                "a library-crate-type example still uplifts and must be guarded: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("target/<profile>/examples/liblibrary_example.rlib"),
+                "diagnostic must name the contested file: {diagnostic}"
             );
         }
 
         /// `cdylib` and `dylib` emit the same platform file name, so the
         /// collision crosses the two crate types. Keying by crate type would
-        /// silently bucket these apart and miss it.
+        /// bucket these apart and miss it.
         #[test]
         fn fails_when_a_cdylib_and_a_dylib_share_a_library_name() {
             if !tools_available() {
                 return;
             }
             let temp = fixture(&[
-                Member::new("alpha", "alpha_shared", "alpha_tool").with_library("shared_lib", "cdylib"),
-                Member::new("beta", "beta_shared", "beta_tool").with_library("shared_lib", "dylib"),
+                Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example").with_library("shared_lib", "cdylib"),
+                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "dylib"),
             ]);
             let output = run(temp.path());
             let diagnostic = combined(&output);
@@ -1957,16 +2011,38 @@ mod tests {
             );
         }
 
-        /// A static library and a shared library of the same name emit
-        /// different file names, so they must not be reported.
+        /// A proc-macro emits the same platform file as a `cdylib`.
         #[test]
-        fn passes_when_a_staticlib_and_a_cdylib_share_a_library_name() {
+        fn fails_when_a_proc_macro_and_a_cdylib_share_a_library_name() {
             if !tools_available() {
                 return;
             }
             let temp = fixture(&[
-                Member::new("alpha", "alpha_shared", "alpha_tool").with_library("shared_lib", "staticlib"),
-                Member::new("beta", "beta_shared", "beta_tool").with_library("shared_lib", "cdylib"),
+                Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example").with_library("shared_lib", "proc-macro"),
+                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "cdylib"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                !output.status.success(),
+                "a proc-macro and a cdylib of the same name collide and must fail the check: {diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("target/<profile>/[lib]shared_lib[.so|.dll|.dylib]"),
+                "diagnostic must name the platform-specific contested file: {diagnostic}"
+            );
+        }
+
+        /// An rlib and a shared library of the same name emit different file
+        /// names, so they share a directory without colliding.
+        #[test]
+        fn passes_when_an_rlib_and_a_cdylib_share_a_library_name() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example").with_library("shared_lib", "lib"),
+                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "cdylib"),
             ]);
             let output = run(temp.path());
             let diagnostic = combined(&output);
@@ -1976,20 +2052,59 @@ mod tests {
             );
         }
 
+        /// A static library and a shared library of the same name likewise
+        /// emit different file names.
+        #[test]
+        fn passes_when_a_staticlib_and_a_cdylib_share_a_library_name() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example").with_library("shared_lib", "staticlib"),
+                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "cdylib"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                output.status.success(),
+                "families that emit different file names must not be reported: {diagnostic}"
+            );
+        }
+
+        /// Cargo keys its own collision check by exact path, so names that
+        /// differ only in case are distinct targets to Cargo and must not be
+        /// merged here.
+        #[test]
+        fn passes_when_library_names_differ_only_by_case() {
+            if !tools_available() {
+                return;
+            }
+            let temp = fixture(&[
+                Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example").with_library("Shared_lib", "lib"),
+                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "lib"),
+            ]);
+            let output = run(temp.path());
+            let diagnostic = combined(&output);
+            assert!(
+                output.status.success(),
+                "names differing only by case are distinct to Cargo and must not be merged: {diagnostic}"
+            );
+        }
+
         #[test]
         fn passes_when_only_hashed_target_kinds_repeat() {
             if !tools_available() {
                 return;
             }
             let temp = fixture(&[
-                Member::new("alpha", "alpha_shared", "alpha_tool"),
-                Member::new("beta", "beta_shared", "beta_tool"),
+                Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example"),
+                Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example"),
             ]);
             let output = run(temp.path());
             let diagnostic = combined(&output);
             assert!(
                 output.status.success(),
-                "duplicate test, bench, and library-example names must not fail the check: {diagnostic}"
+                "duplicate test and bench names must not fail the check: {diagnostic}"
             );
         }
     }
