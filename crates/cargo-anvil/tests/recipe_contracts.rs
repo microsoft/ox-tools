@@ -551,6 +551,7 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
     // or output-backend markers from the process running the test suite. Tests
     // that exercise those contracts pass the relevant values explicitly.
     command.env_remove("ANVIL_IMPACT");
+    command.env_remove("ANVIL_IMPACT_INPUT_DIR");
     command.env_remove("ANVIL_MIRI_JOBS");
     command.env_remove("GITHUB_ACTIONS");
     command.env_remove("TF_BUILD");
@@ -1273,6 +1274,90 @@ fn the_image_names_its_default_toolchain() {
         "the MSRV is read from the root manifest, so the default must be set before the setup \
          deletes it"
     );
+}
+
+#[test]
+fn container_rejects_impact_input_override_only_in_consume_mode() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    let justfile_path = root.join("Justfile");
+    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
+    justfile.push_str(
+        r#"
+[script("pwsh", "-NoProfile")]
+_anvil-container-engine:
+    Write-Output $env:FAKE_CONTAINER_ENGINE
+
+[script("pwsh", "-NoProfile")]
+_anvil-container-image:
+    Write-Output 'example.invalid/anvil:test'
+
+[script("pwsh", "-NoProfile")]
+_anvil-container-path path:
+    Write-Output '{{path}}'
+"#,
+    );
+    write(&justfile_path, &justfile);
+
+    let engine = root.join("fake-container-engine.ps1");
+    write(
+        &engine,
+        r#"
+($args -join "`n") | Set-Content -LiteralPath $env:FAKE_CONTAINER_LOG
+exit 0
+"#,
+    );
+    let engine_log = root.join("container-engine.log");
+    let input = TempDir::new().unwrap();
+
+    let run = |mode: Option<&str>| {
+        let mut command = just_command(
+            root,
+            &["anvil-container", "echo", "ok"],
+            &[
+                ("ANVIL_IMPACT_INPUT_DIR", input.path().as_os_str()),
+                ("FAKE_CONTAINER_ENGINE", engine.as_os_str()),
+                ("FAKE_CONTAINER_LOG", engine_log.as_os_str()),
+            ],
+        );
+        if let Some(mode) = mode {
+            command.env("ANVIL_IMPACT", mode);
+        }
+        command.output().expect("just is required to verify generated recipe behavior")
+    };
+
+    let consume = run(Some("consume"));
+    assert_failed(&consume, "running a container with an injected consume cache");
+    let consume_stderr = String::from_utf8_lossy(&consume.stderr);
+    assert!(
+        consume_stderr.contains("ANVIL_IMPACT=consume")
+            && consume_stderr.contains("ANVIL_IMPACT_INPUT_DIR")
+            && consume_stderr.contains("cannot honor"),
+        "the refusal must identify the unsupported consume override\nstderr:\n{consume_stderr}"
+    );
+    assert!(
+        !engine_log.exists(),
+        "consume mode must reject the override before invoking the container engine"
+    );
+
+    for mode in [Some("off"), None] {
+        let output = run(mode);
+        assert!(
+            output.status.success(),
+            "an ignored impact-cache override must not block container execution in mode {mode:?}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let arguments = fs::read_to_string(&engine_log).unwrap();
+        assert!(
+            !arguments.contains("ANVIL_IMPACT_INPUT_DIR"),
+            "the host-only cache path must never be forwarded to the container engine:\n{arguments}"
+        );
+        fs::remove_file(&engine_log).unwrap();
+    }
 }
 
 /// `anvil-setup` must not reach workspace MSRV validation: the image runs it
