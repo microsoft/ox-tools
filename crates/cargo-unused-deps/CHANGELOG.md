@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-21
+## [0.2.0] - 2026-09-22
 
 - ✨ Features
 
@@ -12,6 +12,7 @@
 
 - 🐛 Bug Fixes
 
+  - preserve target scope in remediation
   - preserve feature dependency declarations
   - handle feature-forwarding dependencies
   - report target declaration context
@@ -31,6 +32,7 @@
 
 - 📚 Documentation
 
+  - refresh release notes
   - refresh release notes
   - refresh release notes
   - refresh release notes
