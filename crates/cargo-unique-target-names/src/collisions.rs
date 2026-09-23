@@ -176,3 +176,56 @@ pub fn find(metadata: &Metadata) -> Vec<Collision> {
         .map(|((name, owners), files)| Collision { name, owners, files })
         .collect()
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// Crate types Cargo never uplifts have no family, so a future crate type
+    /// is ignored rather than guessed at.
+    #[test]
+    fn crate_types_that_are_never_uplifted_have_no_family() {
+        assert_eq!(Family::of(&CrateType::Unknown("wasm-exotic".to_owned())), None);
+    }
+
+    /// Each uplifted crate type maps to the family whose files it emits.
+    #[test]
+    fn uplifted_crate_types_map_to_their_artifact_family() {
+        assert_eq!(Family::of(&CrateType::Bin), Some(Family::Executable));
+        assert_eq!(Family::of(&CrateType::Lib), Some(Family::RustLibrary));
+        assert_eq!(Family::of(&CrateType::RLib), Some(Family::RustLibrary));
+        assert_eq!(Family::of(&CrateType::CDyLib), Some(Family::SharedLibrary));
+        assert_eq!(Family::of(&CrateType::DyLib), Some(Family::SharedLibrary));
+        assert_eq!(Family::of(&CrateType::ProcMacro), Some(Family::SharedLibrary));
+        assert_eq!(Family::of(&CrateType::StaticLib), Some(Family::StaticLibrary));
+    }
+
+    /// Only the families that emit a debug-info file claim one, which is what
+    /// keeps a binary from contending with an `rlib` of the same name.
+    #[test]
+    fn only_executables_and_shared_libraries_claim_a_debug_info_file() {
+        assert!(Family::Executable.artifacts().contains(&"{name}.pdb"));
+        assert!(Family::SharedLibrary.artifacts().contains(&"{name}.pdb"));
+        assert!(!Family::RustLibrary.artifacts().contains(&"{name}.pdb"));
+        assert!(!Family::StaticLibrary.artifacts().contains(&"{name}.pdb"));
+    }
+
+    /// The report says "file" for one contended path and "files" for several.
+    #[test]
+    fn the_diagnostic_agrees_in_number_with_the_contended_files() {
+        let one = Collision {
+            name: "solo".to_owned(),
+            owners: vec!["alpha (library)".to_owned(), "beta (library)".to_owned()],
+            files: vec!["target/<profile>/libsolo.rlib".to_owned()],
+        };
+        assert!(one.render().contains("they uplift to the same file: "), "{}", one.render());
+
+        let many = Collision {
+            name: "duo".to_owned(),
+            owners: vec!["alpha (binary)".to_owned(), "beta (binary)".to_owned()],
+            files: vec!["target/<profile>/duo[.exe]".to_owned(), "target/<profile>/duo.pdb".to_owned()],
+        };
+        assert!(many.render().contains("they uplift to the same files: "), "{}", many.render());
+    }
+}

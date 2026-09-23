@@ -4,6 +4,9 @@
 //! Drives the built `cargo-unique-target-names` binary against synthetic cargo
 //! workspaces, so the rule is verified end to end rather than as a unit.
 
+// miri cannot sandbox the filesystem and subprocess work these tests do.
+#![cfg(not(miri))]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::{env, fs};
@@ -158,6 +161,10 @@ fn fails_when_two_packages_share_an_uplifted_example_name() {
     assert!(
         diagnostic.contains("target/<profile>/examples/shared.pdb"),
         "every contested file must be listed, not just the primary one: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("they uplift to the same files: "),
+        "an example contends for two files, so the wording is plural: {diagnostic}"
     );
 }
 
@@ -395,6 +402,59 @@ fn fails_when_packages_differing_only_by_case_share_a_binary_name() {
     assert!(
         diagnostic.contains("is declared by 2 workspace packages: Shared (binary), shared (binary)"),
         "both owners must survive: {diagnostic}"
+    );
+}
+
+/// Two static libraries of one name contend for the archive, which is what
+/// gives the static-library family a reason to exist.
+#[test]
+fn fails_when_two_packages_share_a_static_library_name() {
+    let temp = fixture(&[
+        Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example").with_library("shared_lib", "staticlib"),
+        Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "staticlib"),
+    ]);
+    let output = run(temp.path());
+    let diagnostic = combined(&output);
+    assert!(
+        !output.status.success(),
+        "two static libraries of one name collide and must fail the check: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("alpha (static library), beta (static library)"),
+        "diagnostic must report the static-library family: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("target/<profile>/[lib]shared_lib[.a|.lib]"),
+        "diagnostic must name the contested archive: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("they uplift to the same file: "),
+        "a static library contends for exactly one file, so the wording is singular: {diagnostic}"
+    );
+}
+
+/// The manifest can be named explicitly instead of discovered from the
+/// working directory.
+#[test]
+fn accepts_an_explicit_manifest_path() {
+    let temp = fixture(&[
+        Member::new("alpha", "shared", "alpha_tool", "alpha_lib_example"),
+        Member::new("beta", "shared", "beta_tool", "beta_lib_example"),
+    ]);
+    let output = Command::new(binary())
+        .args(["unique-target-names", "--manifest-path"])
+        .arg(temp.path().join("Cargo.toml"))
+        .current_dir(env::temp_dir())
+        .output()
+        .expect("the built binary must be runnable");
+    let diagnostic = combined(&output);
+    assert!(
+        !output.status.success(),
+        "the workspace named by --manifest-path must be the one inspected: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("target 'shared' is declared by 2 workspace packages"),
+        "diagnostic must describe the named workspace: {diagnostic}"
     );
 }
 
