@@ -1356,6 +1356,10 @@ exit 0
             !arguments.contains("ANVIL_IMPACT_INPUT_DIR"),
             "the host-only cache path must never be forwarded to the container engine:\n{arguments}"
         );
+        assert!(
+            !arguments.contains(input.path().to_string_lossy().as_ref()),
+            "the impact-cache host path must never be forwarded to the container engine:\n{arguments}"
+        );
         fs::remove_file(&engine_log).unwrap();
     }
 }
