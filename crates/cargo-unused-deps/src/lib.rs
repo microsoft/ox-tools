@@ -258,7 +258,7 @@ pub fn dispatch(args: &[OsString]) -> Result<ExitCode> {
 /// The cargo subcommand this binary answers to.
 const SUBCOMMAND: &str = "unused-deps";
 
-/// Main entry point for the library, called from the binary crate.
+/// Parse the Cargo subcommand arguments and execute the requested checks.
 ///
 /// Returns [`ExitCode::SUCCESS`] when every catalog entry is inherited or
 /// allowed and the selected package checks find no unused or misplaced
@@ -274,7 +274,7 @@ const SUBCOMMAND: &str = "unused-deps";
 /// Returns an error if a manifest cannot be read or parsed, workspace members
 /// cannot be enumerated, compiler or doctest evidence collection fails, package
 /// selectors are invalid, or a fixed manifest cannot be written back.
-pub fn run() -> Result<ExitCode> {
+fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let Commands::UnusedDeps {
         manifest_path,

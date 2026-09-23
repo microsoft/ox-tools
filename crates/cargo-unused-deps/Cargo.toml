@@ -20,8 +20,8 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-unuse
 all-features = true
 
 [package.metadata.cargo_check_external_types]
-# `anyhow::Error` leaks through the `run` entry point that `main` calls. Mirrors the
-# allowlist entry in `cargo-ensure-no-default-features`, which has the same shape.
+# `anyhow::Error` leaks through the public `dispatch` entry point that `main` calls.
+# Mirrors the allowlist entry in `cargo-ensure-no-default-features`, which has the same shape.
 allowed_external_types = ["anyhow::Result"]
 
 [[bin]]
