@@ -811,7 +811,7 @@ fn handoff_group<T>(sender: &mpsc::Sender<T>, retained: &Mutex<Vec<T>>, child: T
             retained.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(error.0);
             Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
-                "process-group reaper channel disconnected; a persistent fallback retained the wait handle",
+                "process reaper channel disconnected; a persistent fallback retained the wait handle",
             ))
         }
     }
@@ -829,7 +829,7 @@ fn handoff_group_with_fallback<T>(
     {
         return Err(io::Error::new(
             io::ErrorKind::BrokenPipe,
-            format!("process-group reaper channel disconnected; the fallback retained the wait handle but failed to start: {error}"),
+            format!("process reaper channel disconnected; the fallback retained the wait handle but failed to start: {error}"),
         ));
     }
     handoff
@@ -844,7 +844,7 @@ fn report_reaper_failure(error: &io::Error) {
         .spawn(move || {
             let _ = writeln!(
                 io::stderr().lock(),
-                "cargo each: process-group reaper failed to observe a retained group: {message}"
+                "cargo each: process reaper failed to observe a retained wait handle: {message}"
             );
         });
 }
