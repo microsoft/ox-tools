@@ -51,7 +51,7 @@ cargo install cargo-unique-target-names
 When two packages contend for one file:
 
 ```text
-cargo-unique-target-names: target 'basic' is declared by 2 targets: metabench (example), observed (example)
+cargo-unique-target-names: target 'basic' is declared by 2 targets: metabench (example 'basic'), observed (example 'basic')
   they uplift to the same files: target/<profile>/examples/basic.pdb, target/<profile>/examples/basic[.exe]
 
 Rename the reported targets so each one uplifts to its own path.

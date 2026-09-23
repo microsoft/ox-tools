@@ -50,7 +50,7 @@ fn reports_two_packages_sharing_an_uplifted_example_name() {
         Member::new("beta", "shared", "beta_tool", "beta_lib_example"),
     ]);
     assert!(
-        report.contains("target 'shared' is declared by 2 targets: alpha (example), beta (example)"),
+        report.contains("target 'shared' is declared by 2 targets: alpha (example 'shared'), beta (example 'shared')"),
         "{report}"
     );
     assert!(report.contains("target/<profile>/examples/shared[.exe]"), "{report}");
@@ -71,7 +71,7 @@ fn reports_two_packages_sharing_an_uplifted_binary_name() {
         Member::new("beta", "beta_shared", "tool", "beta_lib_example"),
     ]);
     assert!(
-        report.contains("target 'tool' is declared by 2 targets: alpha (binary), beta (binary)"),
+        report.contains("target 'tool' is declared by 2 targets: alpha (binary 'tool'), beta (binary 'tool')"),
         "{report}"
     );
     assert!(report.contains("target/<profile>/tool[.exe]"), "{report}");
@@ -87,7 +87,7 @@ fn reports_default_library_names_that_normalize_to_one_target() {
         Member::new("foo_bar", "score_example", "score_tool", "score_lib_example"),
     ]);
     assert!(
-        report.contains("target 'foo_bar' is declared by 2 targets: foo-bar (library), foo_bar (library)"),
+        report.contains("target 'foo_bar' is declared by 2 targets: foo-bar (library 'foo_bar'), foo_bar (library 'foo_bar')"),
         "{report}"
     );
     assert!(report.contains("target/<profile>/libfoo_bar.rlib"), "{report}");
@@ -127,7 +127,7 @@ fn reports_a_cdylib_and_a_dylib_sharing_a_library_name() {
         Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "dylib"),
     ]);
     assert!(
-        report.contains("alpha (shared library), beta (shared library)"),
+        report.contains("alpha (shared library 'shared_lib'), beta (shared library 'shared_lib')"),
         "the emitted family is reported, not the crate type: {report}"
     );
     assert!(report.contains("target/<profile>/[lib]shared_lib[.so|.dll|.dylib]"), "{report}");
@@ -151,7 +151,10 @@ fn reports_two_packages_sharing_a_static_library_name() {
         Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example").with_library("shared_lib", "staticlib"),
         Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("shared_lib", "staticlib"),
     ]);
-    assert!(report.contains("alpha (static library), beta (static library)"), "{report}");
+    assert!(
+        report.contains("alpha (static library 'shared_lib'), beta (static library 'shared_lib')"),
+        "{report}"
+    );
     assert!(report.contains("target/<profile>/[lib]shared_lib[.a|.lib]"), "{report}");
 }
 
@@ -164,7 +167,7 @@ fn reports_a_binary_and_a_shared_library_sharing_a_debug_info_file() {
         Member::new("alpha", "alpha_shared", "tool", "alpha_lib_example"),
         Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example").with_library("tool", "cdylib"),
     ]);
-    assert!(report.contains("alpha (binary), beta (shared library)"), "{report}");
+    assert!(report.contains("alpha (binary 'tool'), beta (shared library 'tool')"), "{report}");
     assert!(report.contains("target/<profile>/tool.pdb"), "{report}");
     assert!(
         !report.contains("target/<profile>/tool[.exe]"),
@@ -181,7 +184,7 @@ fn reports_both_owners_when_package_names_differ_only_by_case() {
         Member::new("shared", "lower_example", "tool", "lower_lib_example").in_directory("lower"),
     ]);
     assert!(
-        report.contains("is declared by 2 targets: Shared (binary), shared (binary)"),
+        report.contains("is declared by 2 targets: Shared (binary 'tool'), shared (binary 'tool')"),
         "{report}"
     );
 }
@@ -242,6 +245,10 @@ fn reports_binaries_whose_names_differ_only_by_separator() {
         "the debug-info name is normalized and contended: {report}"
     );
     assert!(
+        report.contains("alpha (binary 'foo-bar'), beta (binary 'foo_bar')"),
+        "each owner must name the target as it declares it, or the rename is not actionable: {report}"
+    );
+    assert!(
         !report.contains("[.exe]"),
         "the executables keep their own names and must not be reported: {report}"
     );
@@ -254,7 +261,7 @@ fn reports_binaries_whose_names_differ_only_by_separator() {
 fn reports_a_library_and_a_binary_of_one_name_in_a_single_package() {
     let report = report(&[Member::new("alpha", "alpha_shared", "tool", "alpha_lib_example").with_library("tool", "cdylib")]);
     assert!(
-        report.contains("target 'tool' is declared by 2 targets: alpha (binary), alpha (shared library)"),
+        report.contains("target 'tool' is declared by 2 targets: alpha (binary 'tool'), alpha (shared library 'tool')"),
         "both targets must be named, each with its own kind: {report}"
     );
     assert!(report.contains("target/<profile>/tool.pdb"), "{report}");

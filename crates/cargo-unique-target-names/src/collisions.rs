@@ -101,7 +101,11 @@ struct Contenders {
 pub struct Collision {
     /// The contended target name.
     pub name: String,
-    /// Contending targets, each rendered as `package (how it spells the target)`.
+    /// Contending targets, each rendered as
+    /// `package (kind 'name as that target declares it')`. The declared names
+    /// can differ from the contended one: `foo-bar` and `foo_bar` both derive
+    /// `foo_bar.pdb`, and a rename is only actionable if the report says which
+    /// target spells it which way.
     pub owners: Vec<String>,
     /// Every file the owners contend for.
     pub files: Vec<String>,
@@ -173,7 +177,7 @@ pub fn find(metadata: &Metadata) -> Vec<Collision> {
                         .owners
                         .insert(
                             (package.name.to_string(), target.src_path.clone()),
-                            format!("{} ({})", package.name, label(target, family)),
+                            format!("{} ({} '{}')", package.name, label(target, family), target.name),
                         );
                 }
             }
@@ -243,14 +247,14 @@ mod tests {
     fn the_diagnostic_agrees_in_number_with_the_contended_files() {
         let one = Collision {
             name: "solo".to_owned(),
-            owners: vec!["alpha (library)".to_owned(), "beta (library)".to_owned()],
+            owners: vec!["alpha (library 'solo')".to_owned(), "beta (library 'solo')".to_owned()],
             files: vec!["target/<profile>/libsolo.rlib".to_owned()],
         };
         assert!(one.render().contains("they uplift to the same file: "), "{}", one.render());
 
         let many = Collision {
             name: "duo".to_owned(),
-            owners: vec!["alpha (binary)".to_owned(), "beta (binary)".to_owned()],
+            owners: vec!["alpha (binary 'duo')".to_owned(), "beta (binary 'duo')".to_owned()],
             files: vec!["target/<profile>/duo[.exe]".to_owned(), "target/<profile>/duo.pdb".to_owned()],
         };
         assert!(many.render().contains("they uplift to the same files: "), "{}", many.render());
