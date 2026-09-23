@@ -974,6 +974,7 @@ mod tests {
         use tempfile::{Builder, TempDir};
 
         use super::{TOOLS_JUST, VERSIONS_JUST};
+        use crate::test_support::isolate_powershell_cache;
 
         #[derive(Clone, Copy)]
         enum ResolverOperation {
@@ -1022,7 +1023,14 @@ mod tests {
         }
 
         fn tools_available() -> bool {
-            Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
+            if Command::new("just").arg("--version").output().is_err() {
+                return false;
+            }
+            let cache = TempDir::new().expect("PowerShell availability check requires a temporary cache");
+            let mut command = Command::new("pwsh");
+            command.arg("--version");
+            isolate_powershell_cache(&mut command, cache.path());
+            command.output().is_ok()
         }
 
         fn tool_path(name: &str) -> Option<PathBuf> {
@@ -1041,6 +1049,7 @@ mod tests {
                 .current_dir(root)
                 .env_remove("ANVIL_MSRV_TOOLCHAIN")
                 .env_remove("RUSTUP_TOOLCHAIN");
+            isolate_powershell_cache(&mut command, root);
             command
         }
 

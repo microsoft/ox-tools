@@ -417,6 +417,9 @@ pub(crate) mod workspace;
 /// `artifacts`, `run_app`, …) instead.
 #[doc(hidden)]
 pub mod test_support {
+    use std::path::Path;
+    use std::process::Command;
+
     pub use crate::checksum::checksum_str;
     pub use crate::cli::Cli;
     pub use crate::decision::Decision;
@@ -424,6 +427,20 @@ pub mod test_support {
     pub use crate::plan::Target;
     pub use crate::region::upsert_region;
     pub use crate::run::{RunOutcome, run_update};
+
+    /// Keep concurrent PowerShell test processes from sharing startup-profile data.
+    ///
+    /// PowerShell's profile optimization cache is not safe for concurrent writers.
+    /// Test fixtures launch many short-lived PowerShell processes under nextest, so
+    /// each fixture gets a private cache root.
+    pub fn isolate_powershell_cache(command: &mut Command, fixture_root: &Path) {
+        let cache_root = fixture_root.join("powershell-cache");
+        if cfg!(windows) {
+            command.env("LOCALAPPDATA", cache_root);
+        } else {
+            command.env("XDG_CACHE_HOME", cache_root);
+        }
+    }
 
     /// The rustfmt managed-region id, for integration tests.
     ///
@@ -433,6 +450,27 @@ pub mod test_support {
     #[must_use]
     pub fn rustfmt_region_id() -> &'static str {
         crate::anvil::artifacts::region::RUSTFMT_REGION_ID
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::ffi::OsStr;
+
+        use super::*;
+
+        #[test]
+        fn powershell_cache_is_scoped_to_the_fixture() {
+            let root = Path::new("fixture");
+            let mut command = Command::new("pwsh");
+
+            isolate_powershell_cache(&mut command, root);
+
+            let variable = if cfg!(windows) { "LOCALAPPDATA" } else { "XDG_CACHE_HOME" };
+            let value = command
+                .get_envs()
+                .find_map(|(key, value)| (key == OsStr::new(variable)).then_some(value).flatten());
+            assert_eq!(value, Some(root.join("powershell-cache").as_os_str()));
+        }
     }
 }
 

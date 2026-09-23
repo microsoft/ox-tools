@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use cargo_anvil::test_support::{Cli, run_update};
+use cargo_anvil::test_support::{Cli, isolate_powershell_cache, run_update};
 use tempfile::TempDir;
 
 const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
@@ -65,6 +65,7 @@ fn resolver_hook_executes_with_legacy_and_engine_context_signatures() {
     if !tools_available() {
         return;
     }
+    let cache = TempDir::new().expect("resolver hook test requires a private PowerShell cache");
     let start = CONTAINER
         .find("                    $resolveArgs = @{}")
         .expect("resolver context block");
@@ -102,10 +103,10 @@ fn resolver_hook_executes_with_legacy_and_engine_context_signatures() {
              {invocation}\n\
              Write-Output $resolved\n"
         );
-        let output = Command::new("pwsh")
-            .args(["-NoProfile", "-Command", &script])
-            .output()
-            .expect("pwsh was checked by tools_available");
+        let mut command = Command::new("pwsh");
+        command.args(["-NoProfile", "-Command", &script]);
+        isolate_powershell_cache(&mut command, cache.path());
+        let output = command.output().expect("pwsh was checked by tools_available");
         assert!(
             output.status.success(),
             "resolver fixture failed:\n{}",
@@ -412,7 +413,14 @@ fn seed_include(root: &Path, tier: &str, spec: &str) {
 }
 
 fn tools_available() -> bool {
-    Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
+    if Command::new("just").arg("--version").output().is_err() {
+        return false;
+    }
+    let cache = TempDir::new().expect("PowerShell availability check requires a temporary cache");
+    let mut command = Command::new("pwsh");
+    command.arg("--version");
+    isolate_powershell_cache(&mut command, cache.path());
+    command.output().is_ok()
 }
 
 fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
@@ -547,6 +555,7 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
         .current_dir(root);
     command.env("PATH", path_with_fake_bin(root));
     command.env("FAKE_WORKSPACE_ROOT", root);
+    isolate_powershell_cache(&mut command, root);
     // A fixture is a scratch workspace, so it must not inherit impact scoping
     // or output-backend markers from the process running the test suite. Tests
     // that exercise those contracts pass the relevant values explicitly.
@@ -575,6 +584,7 @@ fn run_just_with_real_cargo(root: &Path, arguments: &[&str]) -> Output {
     let mut command = Command::new("just");
     command.args(["--justfile", "Justfile"]).args(arguments).current_dir(root);
     command.env_remove("ANVIL_IMPACT");
+    isolate_powershell_cache(&mut command, root);
     command.output().expect("just is required to verify generated recipe behavior")
 }
 
