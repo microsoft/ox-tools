@@ -44,16 +44,19 @@ directly (argv, not a shell string) after substituting placeholders.
 
 * `-p` / `--package <SPEC>` — select a member. Repeatable. `SPEC` is a
   package name, a `name@version` spec, or a Unix glob (`tokio-*`).
+* `--package-file <PATH>` — read package specs from a UTF-8 file, one per
+  nonempty line. Repeatable; specs are unioned with `--package`. An empty
+  file explicitly selects no members. One leading UTF-8 byte-order mark is
+  ignored.
 * `--workspace` / `--all` — select every workspace member.
 * `--exclude <SPEC>` — drop a member (with `--workspace`). Repeatable.
 * `--none` — explicitly select zero members (a no-op that exits 0).
 
 When nothing is named the default is cargo `default-members`, exactly
 like `cargo build`; pass `--workspace` for every member. A selector that
-matches no member is an error, so typos fail loudly. A computed selection
-(for example a CI affected-packages set) is fed in as ordinary flags via
-shell expansion — `cargo-each` has no file or environment-variable source
-of its own.
+matches no member is an error, so typos fail loudly. Package files contain
+package specs only: comments, command-line tokens, malformed input, and
+missing, unreadable, or non-UTF-8 files are errors.
 
 ### Filters
 
@@ -82,9 +85,16 @@ can be double-quoted. Expression atoms:
   `--target-required-feature` further narrows targets.
 
 `--keep-going` runs every invocation and exits non-zero if any failed
-(default is fail-fast); `--chdir` runs each per-package or per-target
-command from that member crate root; `--dry-run` prints commands without
-running them.
+(default is fail-fast). `--jobs <N|auto>` bounds concurrent per-package or
+per-target work. Omitting it runs exactly one invocation at a time; `auto`
+resolves once to the machine’s available parallelism. Detection failure is
+reported explicitly without falling back. `--timeout <DURATION>` terminates
+each invocation’s Windows job object or Unix process group independently
+(`250ms`, `30s`, or `2m`). Unix descendants can escape a process group by
+starting a new session, so timeout cleanup is best-effort for those escaped
+descendants.
+`--chdir` runs each per-package or per-target command from that member crate
+root; `--dry-run` prints commands without running them.
 
 ### Placeholders
 
@@ -99,6 +109,9 @@ Substituted inside each command argument:
 * `{packages}` — the cargo selection flags for the resolved set
   (`--workspace` for the whole workspace, else `--package name@version …`);
   valid only in `--once` mode and only as a standalone argument.
+* `{workspace-rust-version}` — the root `[workspace.package].rust-version`,
+  or root `[package].rust-version` in a single-package repository; valid in
+  every mode.
 
 Using a placeholder in the wrong mode is a usage error. Only the tokens
 above are interpreted; any other `{…}` sequence (a typo, or a literal brace
@@ -110,12 +123,57 @@ no brace-escape, so this passthrough is part of the contract.
 An empty resolved selection (via `--none`, or a filter that removes every
 member) is a **successful no-op**: `cargo-each` prints a one-line note and
 exits 0. This is what lets callers drop bespoke nothing-to-do guards.
+Workspace Rust-version validation is lazy: it runs only when the command
+uses `{workspace-rust-version}` and the resolved plan has work, then requires
+every member’s resolved minimum to be present and no newer than the root
+floor. Placeholder mode validation still runs before an empty-plan no-op.
+
+The effective worker count is the requested `--jobs` value capped by plan
+size. An effective count of one uses sequential
+execution with inherited standard input, output, and error even when the
+requested value was larger. A genuinely parallel count disconnects child input and
+buffers stdout and stderr; complete blocks are emitted in deterministic
+plan order. Fail-fast stops launching after the first
+observed failure, waits for running work, and chooses the final failure by
+plan order. `--keep-going` runs the complete plan. Worker panics and
+unexpected worker-channel disconnections become infrastructure-failure
+outcomes instead of blocking the scheduler. Worker launch failures retain
+output already collected at earlier plan indices. Parallel work runs in
+plan-contiguous waves capped by the effective worker count; each completed
+wave is emitted and dropped before the next wave starts, bounding retained
+temporary-file storage. Untimed effective-one execution uses an ordinary
+child, preserving terminal foreground behavior and Ctrl-C delivery; a
+post-spawn wait failure gets bounded child cleanup and reaper ownership.
+Timed and genuinely parallel commands use a job or process group. Without
+`--timeout`, cargo-each observes only the leader and does not kill background
+descendants. Every genuinely parallel invocation redirects stdout and
+stderr directly to separate unique temporary files.
+Child writers and parent readers are separately reopened so parent seeks
+cannot move descendant write positions. Cargo-each records each file’s
+current length when the leader completes (or after timeout cleanup), then
+reads exactly that finite snapshot in plan order without loading unbounded
+output into memory. Later writes by background or escaped descendants are
+outside the snapshot. RAII removes cargo-each’s directory entry, but a
+preserved descendant can keep the backing storage allocated and growing
+until its inherited writer closes. Capture create, reopen, length, seek, and
+read failures are infrastructure failures.
+
+Timed-out group termination gets a bounded 250 ms reap grace. If the group
+still has not completed, its handle moves to a cargo-each-local polling
+reaper started before any command. The reaper checks every retained group
+without blocking on one child, remains the wait owner after the caller
+returns, and exits after all senders disconnect and retained groups are
+collected. Interrupted observations are retried; terminal observation
+errors are reported and removed. Reaper startup and handoff failures are
+explicit infrastructure failures; a failed handoff retains the group handle
+in a persistent fallback queue and starts an emergency polling reaper.
 Child commands inherit `PATH` explicitly. On Windows this makes relative
 program lookup honor the inherited `PATH` order instead of preferring an
 unrelated executable beside `cargo-each`.
-Otherwise the exit code is the first failing command code (fail-fast),
-`1` under `--keep-going` if any command failed, or `2` for a `cargo-each`
-usage error (unknown selector, bad filter expression, misused placeholder).
+Exit `0` means all work succeeded or there was no work. In fail-fast mode a
+command failure returns its code, a timeout returns `1`, and usage,
+configuration, spawn, or post-spawn infrastructure failures return `2`.
+Under `--keep-going`, any failure maps the aggregate result to `1`.
 
 ## Examples
 
