@@ -29,6 +29,15 @@ fn binary() -> PathBuf {
         .join(format!("cargo-unused-deps{}", std::env::consts::EXE_SUFFIX))
 }
 
+fn rustdoc() -> PathBuf {
+    let output = Command::new("rustup")
+        .args(["which", "rustdoc"])
+        .output()
+        .expect("failed to ask rustup for rustdoc");
+    assert!(output.status.success(), "rustup could not find rustdoc");
+    PathBuf::from(String::from_utf8(output.stdout).expect("rustdoc path must be UTF-8").trim())
+}
+
 #[test]
 fn a_bin_only_finding_does_not_try_to_compile_doctests() {
     let dir = TempDir::new().expect("failed to create temp dir");
@@ -156,7 +165,15 @@ fn a_dependency_no_unit_loads_is_unused() {
         "#![allow(unused_crate_dependencies)]\npub fn go() {}\n",
     );
 
-    let report = fixture.report();
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .arg("--workspace")
+        .env("RUSTDOC", rustdoc())
+        .output()
+        .expect("failed to execute the binary");
+    let report = String::from_utf8_lossy(&output.stderr);
 
     assert!(report.contains("dead: no compiled unit loaded it"), "unexpected report: {report}");
 }
@@ -181,6 +198,50 @@ fn encoded_rustflags_are_preserved_by_the_compiler_wrapper() {
     assert!(
         output.status.success(),
         "the wrapper must preserve encoded flags that select dependency-using code: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn an_environment_workspace_wrapper_is_chained() {
+    let fixture = Fixture::new(
+        &["used"],
+        &format!("[dependencies]\n{}", dep("used")),
+        "pub fn go() { used::f(); }\n",
+    );
+    let wrapper_source = fixture.dir.path().join("wrapper.rs");
+    let wrapper = fixture.dir.path().join(format!("wrapper{}", std::env::consts::EXE_SUFFIX));
+    fs::write(
+        &wrapper_source,
+        r#"fn main() {
+    let mut args = std::env::args_os().skip(1);
+    let rustc = args.next().expect("Cargo always supplies rustc");
+    let status = std::process::Command::new(rustc).args(args).status().expect("rustc must start");
+    std::process::exit(status.code().unwrap_or(1));
+}
+"#,
+    )
+    .expect("failed to write wrapper source");
+    let status = Command::new("rustc")
+        .arg(&wrapper_source)
+        .arg("-o")
+        .arg(&wrapper)
+        .status()
+        .expect("failed to compile wrapper");
+    assert!(status.success(), "failed to compile wrapper");
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .env("RUSTC_WORKSPACE_WRAPPER", wrapper)
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(
+        output.status.success(),
+        "the pre-existing workspace wrapper must remain in the compiler chain: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

@@ -202,13 +202,17 @@ fn ensure_no_configured_workspace_wrapper(manifest_path: &Path) -> Result<()> {
         .current_dir(directory)
         .output()
         .context("failed to inspect Cargo compiler-wrapper configuration")?;
-    if !output.status.success() {
+    validate_workspace_wrapper_config(output.status.success(), &output.stdout, &output.stderr)
+}
+
+fn validate_workspace_wrapper_config(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<()> {
+    if !success {
         bail!(
             "failed to inspect Cargo compiler-wrapper configuration:\n{}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(stderr).trim()
         );
     }
-    if has_workspace_wrapper_config(&String::from_utf8_lossy(&output.stdout)) {
+    if has_workspace_wrapper_config(&String::from_utf8_lossy(stdout)) {
         bail!("build.rustc-workspace-wrapper is configured; cargo-unused-deps cannot safely interpose without bypassing it");
     }
     Ok(())
@@ -354,7 +358,7 @@ mod tests {
 
     use super::{
         Evidence, Scope, TargetKind, cargo_or_default, failure_diagnostics, has_workspace_wrapper_config, parse, reported_name,
-        wrapper_command,
+        validate_workspace_wrapper_config, wrapper_command,
     };
 
     #[test]
@@ -389,6 +393,8 @@ mod tests {
             "build.rustc-workspace-wrapper = \"workspace-wrapper\"\n"
         ));
         assert!(!has_workspace_wrapper_config("build.rustc-wrapper = \"outer-wrapper\"\n"));
+        validate_workspace_wrapper_config(false, b"", b"cargo failed").expect_err("Cargo failure must propagate");
+        validate_workspace_wrapper_config(true, b"build.rustc-wrapper = \"outer\"\n", b"").expect("an outer wrapper does not conflict");
     }
 
     #[test]

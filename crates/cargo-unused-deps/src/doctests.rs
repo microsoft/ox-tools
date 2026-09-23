@@ -244,13 +244,17 @@ fn selected_rustdoc() -> Result<OsString> {
         .args(["which", "rustdoc"])
         .output()
         .context("failed to ask rustup for the selected rustdoc")?;
-    if !output.status.success() {
+    rustdoc_from_rustup(output.status.success(), &output.stdout, &output.stderr)
+}
+
+fn rustdoc_from_rustup(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<OsString> {
+    if !success {
         bail!(
             "rustup could not resolve the selected rustdoc:\n{}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(stderr).trim()
         );
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let path = String::from_utf8_lossy(stdout).trim().to_owned();
     if path.is_empty() {
         bail!("rustup returned an empty rustdoc path");
     }
@@ -303,7 +307,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DoctestEvidence, PackageDoctests, clear_capture, read_captures, record, stable_diagnostic_args, tool_or_default, unused_name,
+        DoctestEvidence, PackageDoctests, clear_capture, read_captures, record, rustdoc_from_rustup, stable_diagnostic_args,
+        tool_or_default, unused_name,
     };
 
     #[test]
@@ -376,6 +381,16 @@ mod tests {
     fn tool_selection_honors_an_override_and_has_a_default() {
         assert_eq!(tool_or_default(Some("custom".into()), "rustc"), "custom");
         assert_eq!(tool_or_default(None, "rustc"), "rustc");
+    }
+
+    #[test]
+    fn rustup_must_return_a_nonempty_rustdoc_path() {
+        rustdoc_from_rustup(false, b"", b"not installed").expect_err("a failed rustup invocation is an error");
+        rustdoc_from_rustup(true, b"  \n", b"").expect_err("an empty path is an error");
+        assert_eq!(
+            rustdoc_from_rustup(true, b"toolchain/rustdoc\n", b"").expect("a path is valid"),
+            "toolchain/rustdoc"
+        );
     }
 
     #[test]
