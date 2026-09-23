@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use cargo_metadata::camino::Utf8PathBuf;
 use cargo_metadata::{CrateType, Metadata, Target, TargetKind};
 
 /// The family of build artifacts a crate type emits.
@@ -37,6 +38,11 @@ impl Family {
 
     /// Every uplifted file this family emits, as a display pattern.
     ///
+    /// `{name}` is the target name as written; `{crate}` is that name with `-`
+    /// replaced by `_`, which is what Cargo does when deriving library and
+    /// debug-info file names. An executable keeps its hyphen, so `foo-bar` and
+    /// `foo_bar` produce distinct executables but a single `foo_bar.pdb`.
+    ///
     /// Files whose name derives from another artifact are covered by that
     /// artifact's entry and are deliberately absent: the import library and
     /// export file beside a Windows DLL, and the `<artifact>.cargo-sbom.json`
@@ -44,10 +50,10 @@ impl Family {
     /// that way -- it is `<name>.pdb`, not `<name>.exe.pdb`.
     fn artifacts(self) -> &'static [&'static str] {
         match self {
-            Self::Executable => &["{name}[.exe]", "{name}.pdb"],
-            Self::RustLibrary => &["lib{name}.rlib"],
-            Self::SharedLibrary => &["[lib]{name}[.so|.dll|.dylib]", "{name}.pdb"],
-            Self::StaticLibrary => &["[lib]{name}[.a|.lib]"],
+            Self::Executable => &["{name}[.exe]", "{crate}.pdb"],
+            Self::RustLibrary => &["lib{crate}.rlib"],
+            Self::SharedLibrary => &["[lib]{crate}[.so|.dll|.dylib]", "{crate}.pdb"],
+            Self::StaticLibrary => &["[lib]{crate}[.a|.lib]"],
         }
     }
 
@@ -62,23 +68,31 @@ impl Family {
     }
 }
 
+/// The name Cargo derives for a library or debug-info file: hyphens become
+/// underscores, because they are not valid in a Rust crate name.
+fn crate_name(target: &str) -> String {
+    target.replace('-', "_")
+}
+
 /// Target kinds Cargo always leaves in `deps/` under a metadata-hashed name,
 /// so duplicate names among them can never contend for one file.
 fn is_hashed(kind: &TargetKind) -> bool {
     matches!(kind, TargetKind::Test | TargetKind::Bench | TargetKind::CustomBuild)
 }
 
-/// One contended file and the packages competing for it.
+/// One contended file and the targets competing for it.
 #[derive(Debug)]
 struct Contenders {
     /// The target name every owner spells the same way.
     name: String,
-    /// Maps a package name to how that package spells the target. Keyed by
-    /// package so one package owning several crate types of a name counts once.
-    owners: BTreeMap<String, &'static str>,
+    /// Keyed by package and target source path, so one target counts once even
+    /// when several of its crate types land in one family, while two targets in
+    /// a single package -- a `[lib]` and a `[[bin]]` of one name, which Cargo
+    /// permits -- still count separately.
+    owners: BTreeMap<(String, Utf8PathBuf), String>,
 }
 
-/// A target name contended by the same set of packages.
+/// A target name contended by the same set of targets.
 ///
 /// One name can contend for several files at once (an executable collides on
 /// both its executable and its debug-info file), so the files are grouped to
@@ -87,7 +101,7 @@ struct Contenders {
 pub struct Collision {
     /// The contended target name.
     pub name: String,
-    /// Owning packages, each rendered as `package (how it spells the target)`.
+    /// Contending targets, each rendered as `package (how it spells the target)`.
     pub owners: Vec<String>,
     /// Every file the owners contend for.
     pub files: Vec<String>,
@@ -99,7 +113,7 @@ impl Collision {
     pub fn render(&self) -> String {
         let noun = if self.files.len() == 1 { "file" } else { "files" };
         format!(
-            "target '{}' is declared by {} workspace packages: {}\n  they uplift to the same {}: {}",
+            "target '{}' is declared by {} targets: {}\n  they uplift to the same {}: {}",
             self.name,
             self.owners.len(),
             self.owners.join(", "),
@@ -128,7 +142,7 @@ fn label(target: &Target, family: Family) -> &'static str {
     }
 }
 
-/// Finds every file two or more workspace packages would uplift to.
+/// Finds every file two or more workspace targets would uplift to.
 ///
 /// Iteration order is that of `BTreeMap`, so the report is byte-ordered and
 /// identical on every host, and keys never fold case: two targets whose names
@@ -143,9 +157,13 @@ pub fn find(metadata: &Metadata) -> Vec<Collision> {
                 continue;
             }
             let directory = directory(target);
+            let crate_name = crate_name(&target.name);
             for family in target.crate_types.iter().filter_map(Family::of) {
                 for pattern in family.artifacts() {
-                    let file = format!("{directory}/{}", pattern.replace("{name}", &target.name));
+                    let file = format!(
+                        "{directory}/{}",
+                        pattern.replace("{crate}", &crate_name).replace("{name}", &target.name)
+                    );
                     owners
                         .entry(file)
                         .or_insert_with(|| Contenders {
@@ -153,7 +171,10 @@ pub fn find(metadata: &Metadata) -> Vec<Collision> {
                             owners: BTreeMap::new(),
                         })
                         .owners
-                        .insert(package.name.to_string(), label(target, family));
+                        .insert(
+                            (package.name.to_string(), target.src_path.clone()),
+                            format!("{} ({})", package.name, label(target, family)),
+                        );
                 }
             }
         }
@@ -164,11 +185,7 @@ pub fn find(metadata: &Metadata) -> Vec<Collision> {
         if contenders.owners.len() < 2 {
             continue;
         }
-        let described = contenders
-            .owners
-            .iter()
-            .map(|(package, label)| format!("{package} ({label})"))
-            .collect::<Vec<_>>();
+        let described = contenders.owners.into_values().collect::<Vec<_>>();
         grouped.entry((contenders.name, described)).or_default().push(file);
     }
 
@@ -203,13 +220,22 @@ mod tests {
     }
 
     /// Only the families that emit a debug-info file claim one, which is what
-    /// keeps a binary from contending with an `rlib` of the same name.
+    /// keeps a binary from contending with an `rlib` of the same name. The
+    /// debug-info name is derived, so it uses the `{crate}` placeholder.
     #[test]
     fn only_executables_and_shared_libraries_claim_a_debug_info_file() {
-        assert!(Family::Executable.artifacts().contains(&"{name}.pdb"));
-        assert!(Family::SharedLibrary.artifacts().contains(&"{name}.pdb"));
-        assert!(!Family::RustLibrary.artifacts().contains(&"{name}.pdb"));
-        assert!(!Family::StaticLibrary.artifacts().contains(&"{name}.pdb"));
+        assert!(Family::Executable.artifacts().contains(&"{crate}.pdb"));
+        assert!(Family::SharedLibrary.artifacts().contains(&"{crate}.pdb"));
+        assert!(!Family::RustLibrary.artifacts().contains(&"{crate}.pdb"));
+        assert!(!Family::StaticLibrary.artifacts().contains(&"{crate}.pdb"));
+    }
+
+    /// Hyphens survive in an executable name but not in a derived one.
+    #[test]
+    fn only_derived_file_names_replace_hyphens() {
+        assert_eq!(crate_name("foo-bar"), "foo_bar");
+        assert!(Family::Executable.artifacts().contains(&"{name}[.exe]"));
+        assert!(Family::RustLibrary.artifacts().contains(&"lib{crate}.rlib"));
     }
 
     /// The report says "file" for one contended path and "files" for several.

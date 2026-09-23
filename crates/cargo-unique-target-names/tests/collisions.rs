@@ -50,7 +50,7 @@ fn reports_two_packages_sharing_an_uplifted_example_name() {
         Member::new("beta", "shared", "beta_tool", "beta_lib_example"),
     ]);
     assert!(
-        report.contains("target 'shared' is declared by 2 workspace packages: alpha (example), beta (example)"),
+        report.contains("target 'shared' is declared by 2 targets: alpha (example), beta (example)"),
         "{report}"
     );
     assert!(report.contains("target/<profile>/examples/shared[.exe]"), "{report}");
@@ -71,7 +71,7 @@ fn reports_two_packages_sharing_an_uplifted_binary_name() {
         Member::new("beta", "beta_shared", "tool", "beta_lib_example"),
     ]);
     assert!(
-        report.contains("target 'tool' is declared by 2 workspace packages: alpha (binary), beta (binary)"),
+        report.contains("target 'tool' is declared by 2 targets: alpha (binary), beta (binary)"),
         "{report}"
     );
     assert!(report.contains("target/<profile>/tool[.exe]"), "{report}");
@@ -87,7 +87,7 @@ fn reports_default_library_names_that_normalize_to_one_target() {
         Member::new("foo_bar", "score_example", "score_tool", "score_lib_example"),
     ]);
     assert!(
-        report.contains("target 'foo_bar' is declared by 2 workspace packages: foo-bar (library), foo_bar (library)"),
+        report.contains("target 'foo_bar' is declared by 2 targets: foo-bar (library), foo_bar (library)"),
         "{report}"
     );
     assert!(report.contains("target/<profile>/libfoo_bar.rlib"), "{report}");
@@ -181,7 +181,7 @@ fn reports_both_owners_when_package_names_differ_only_by_case() {
         Member::new("shared", "lower_example", "tool", "lower_lib_example").in_directory("lower"),
     ]);
     assert!(
-        report.contains("is declared by 2 workspace packages: Shared (binary), shared (binary)"),
+        report.contains("is declared by 2 targets: Shared (binary), shared (binary)"),
         "{report}"
     );
 }
@@ -226,4 +226,36 @@ fn accepts_repeated_test_and_bench_names() {
         Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example"),
     ]);
     assert!(report.is_empty(), "{report}");
+}
+
+/// Cargo replaces `-` with `_` when deriving library and debug-info file
+/// names, but not executable names. Two binaries named `foo-bar` and `foo_bar`
+/// therefore produce distinct executables and a single `foo_bar.pdb`.
+#[test]
+fn reports_binaries_whose_names_differ_only_by_separator() {
+    let report = report(&[
+        Member::new("alpha", "alpha_shared", "foo-bar", "alpha_lib_example"),
+        Member::new("beta", "beta_shared", "foo_bar", "beta_lib_example"),
+    ]);
+    assert!(
+        report.contains("target/<profile>/foo_bar.pdb"),
+        "the debug-info name is normalized and contended: {report}"
+    );
+    assert!(
+        !report.contains("[.exe]"),
+        "the executables keep their own names and must not be reported: {report}"
+    );
+}
+
+/// Cargo permits a `[lib]` and a `[[bin]]` of one name in a single package, and
+/// they contend for the debug-info file. Owners are keyed per target, not per
+/// package, so the pair is reported rather than collapsing into one owner.
+#[test]
+fn reports_a_library_and_a_binary_of_one_name_in_a_single_package() {
+    let report = report(&[Member::new("alpha", "alpha_shared", "tool", "alpha_lib_example").with_library("tool", "cdylib")]);
+    assert!(
+        report.contains("target 'tool' is declared by 2 targets: alpha (binary), alpha (shared library)"),
+        "both targets must be named, each with its own kind: {report}"
+    );
+    assert!(report.contains("target/<profile>/tool.pdb"), "{report}");
 }

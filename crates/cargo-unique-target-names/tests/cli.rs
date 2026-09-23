@@ -71,7 +71,7 @@ fn a_contended_workspace_exits_one_and_names_the_remedy() {
     let diagnostic = combined(&output);
     assert_eq!(output.status.code(), Some(1), "{diagnostic}");
     assert!(
-        diagnostic.contains("cargo-unique-target-names: target 'shared' is declared by 2 workspace packages"),
+        diagnostic.contains("cargo-unique-target-names: target 'shared' is declared by 2 targets"),
         "{diagnostic}"
     );
     assert!(

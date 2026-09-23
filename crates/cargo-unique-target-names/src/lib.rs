@@ -75,8 +75,10 @@
 //!   coexist with a binary of the same name.
 //!
 //! Test and benchmark binaries and build scripts keep their metadata hash in
-//! `deps/` and are exempt. Duplicate target names *inside* one package are
-//! already a Cargo error, so only cross-package duplicates are reported.
+//! `deps/` and are exempt. Owners are keyed per target rather than per package,
+//! so a package that contends with itself — Cargo permits a `[lib]` and a
+//! `[[bin]]` of one name, and they share a debug-info file — is reported like
+//! any other pair.
 //!
 //! The Windows debug-info file is considered on every platform, so a
 //! Windows-only collision still fails a Linux run and every leg of a build
@@ -120,7 +122,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Check that no two workspace packages uplift to the same build artifact.
+    /// Check that no two workspace targets uplift to the same build artifact.
+    #[command(version, display_name = "cargo-unique-target-names")]
     UniqueTargetNames(Args),
 }
 

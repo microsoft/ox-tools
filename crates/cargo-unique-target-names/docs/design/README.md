@@ -126,7 +126,12 @@ both spellings map to the rust-library family.
   another artifact. They contend exactly when that artifact does, so keying them
   separately would only duplicate findings. The debug-info file is *not* derived
   that way — it is `name.pdb`, not `name.exe.pdb` — which is why it is keyed.
-- **Duplicates inside one package.** Already a Cargo error.
+- **Nothing on the basis of package boundaries.** Cargo permits a `[lib]` and a
+  `[[bin]]` of one name in a single package, and on Windows they contend for the
+  debug-info file — cargo warns, and the link itself can fail with `LNK1201`.
+  Owners are therefore keyed per *target*, not per package, so a package that
+  contends with itself is reported like any other pair. (Two targets of the
+  *same* kind sharing a name is a Cargo error, and never reaches this tool.)
 
 ### Determinism
 
@@ -192,5 +197,12 @@ made explicitly rather than by accident.
 
 Integration with a specific CI system. The tool is a plain cargo subcommand with
 a meaningful exit code; wiring it into a pipeline belongs to whatever drives the
-build — in this repository, the `unique-target-names` check in
-[`cargo-anvil`](../../../cargo-anvil).
+build.
+
+In this repository that wiring is **follow-up work**, not yet present on `main`:
+a `unique-target-names` check in [`cargo-anvil`](../../../cargo-anvil) will
+invoke this command once the crate is published, because Anvil pins tools by
+published crates.io version. When it lands, the check must be **unscoped** — it
+must not be impact-gated to modified packages, because a collision is a property
+of the whole workspace and only one member of a contending pair needs to appear
+in a diff to create one.
