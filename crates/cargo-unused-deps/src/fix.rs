@@ -241,3 +241,17 @@ fn comments_of(prefix: &str) -> Option<CommentBlock> {
         lines,
     })
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indented_comment_lines_are_counted_as_comments() {
+        let block = comments_of("\n    # grouped dependencies\n        \n").expect("indented comment");
+
+        assert_eq!(block.lines.get(), 1);
+        assert_eq!(block.text, "\n    # grouped dependencies\n        \n");
+    }
+}

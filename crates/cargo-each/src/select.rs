@@ -112,13 +112,11 @@ impl Selection {
                 .collect()
         };
 
-        if !self.exclude.is_empty() {
-            let excluded: HashSet<&str> = resolve_selectors(workspace, &self.exclude)?
-                .into_iter()
-                .map(|m| m.name.as_str())
-                .collect();
-            base.retain(|m| !excluded.contains(m.name.as_str()));
-        }
+        let excluded: HashSet<&str> = resolve_selectors(workspace, &self.exclude)?
+            .into_iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        base.retain(|m| !excluded.contains(m.name.as_str()));
 
         Ok(base)
     }
@@ -291,41 +289,29 @@ fn version_matches(supplied: &str, actual: &Version) -> bool {
 /// (including empty), `?` matches exactly one character. Everything else
 /// matches literally.
 ///
-/// Uses the standard iterative two-pointer algorithm with a single
-/// backtrack point for the most recent `*`, so matching is linear-ish
-/// (`O(len(pattern) * len(name))` worst case) rather than the exponential
-/// blow-up a naive recursive backtracker exhibits on inputs like `*a*a*a…`.
-#[mutants::skip] // Position-counter arithmetic mutants can loop forever; behavioral tests cover every observable case.
+/// Uses dynamic programming, so ambiguous `*` backtracking remains bounded by
+/// `O(len(pattern) * len(name))`.
 fn glob_matches(pattern: &str, name: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let n: Vec<char> = name.chars().collect();
-    let (mut pi, mut ni) = (0usize, 0usize);
-    // The pattern index of the last `*` seen, and the name index it was
-    // matched against — the single point we backtrack to on a mismatch.
-    let mut star: Option<usize> = None;
-    let mut star_ni = 0usize;
-    while ni < n.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
-            pi += 1;
-            ni += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            star_ni = ni;
-            pi += 1;
-        } else if let Some(sp) = star {
-            // Mismatch after a `*`: let that `*` absorb one more name char.
-            pi = sp + 1;
-            star_ni += 1;
-            ni = star_ni;
-        } else {
-            return false;
+    let name: Vec<char> = name.chars().collect();
+    let mut previous = vec![false; name.len() + 1];
+    previous[0] = true;
+
+    for pattern_char in pattern.chars() {
+        let mut current = vec![false; name.len() + 1];
+        if pattern_char == '*' {
+            current[0] = previous[0];
         }
+        for (index, name_char) in name.iter().enumerate() {
+            current[index + 1] = if pattern_char == '*' {
+                previous[index + 1] || current[index]
+            } else {
+                previous[index] && (pattern_char == '?' || pattern_char == *name_char)
+            };
+        }
+        previous = current;
     }
-    // Trailing `*`s in the pattern match the empty remainder.
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
+
+    previous[name.len()]
 }
 
 #[cfg(test)]
@@ -512,7 +498,7 @@ mod tests {
             ..Selection::default()
         };
         let err = sel.resolve(&ws).expect_err("unknown selector must error");
-        assert!(err.to_string().contains("nope-*"));
+        assert_eq!(err.to_string(), "package selector `nope-*` did not match any workspace member");
     }
 
     #[test]
@@ -563,5 +549,53 @@ mod tests {
         assert!(glob_matches("", ""));
         assert!(!glob_matches("", "x"));
         assert!(glob_matches("*", ""));
+    }
+
+    #[test]
+    fn selector_include_exclude_deduplicates_in_workspace_order() {
+        let ws = workspace(&["alpha"]);
+        let selected = Selection {
+            packages: vec!["g*".to_owned(), "*a".to_owned(), "alpha".to_owned()],
+            exclude: vec!["b*".to_owned()],
+            ..Selection::default()
+        }
+        .resolve(&ws)
+        .expect("all include and exclude selectors match");
+        assert_eq!(names(&selected), ["alpha", "gamma"]);
+    }
+
+    #[test]
+    fn none_takes_precedence_over_invalid_selectors() {
+        let ws = workspace(&["alpha"]);
+        let selected = Selection {
+            packages: vec!["missing".to_owned()],
+            exclude: vec!["also-missing".to_owned()],
+            none: true,
+            ..Selection::default()
+        }
+        .resolve(&ws)
+        .expect("--none short-circuits selector resolution");
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn glob_backtracking_and_empty_matches_are_exact() {
+        let cases = [
+            ("a*b", "ab", true),
+            ("a*b", "axxb", true),
+            ("a*b", "axxbc", false),
+            ("*ab", "aaab", true),
+            ("*ab", "aaaa", false),
+            ("a**b", "axxb", true),
+            ("?*?", "ab", true),
+            ("?*?", "a", false),
+            ("*?", "", false),
+            ("***", "", true),
+            ("***", "abc", true),
+            ("α*?", "αβγ", true),
+        ];
+        for (pattern, name, expected) in cases {
+            assert_eq!(glob_matches(pattern, name), expected, "{pattern:?} against {name:?}");
+        }
     }
 }

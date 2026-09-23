@@ -222,53 +222,27 @@ pub(crate) fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -
 fn glob_matches(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let n: Vec<char> = name.chars().collect();
-    glob_inner(&p, 0, &n, 0)
-}
+    let (mut pattern_index, mut name_index) = (0, 0);
+    let (mut star, mut star_match) = (None, 0);
 
-// `pi += 1` and `pi + N` arithmetic on the position counters has
-// cargo-mutants mutations (`*=`, `*`) that would keep the counter from
-// advancing — producing non-terminating mutants whenever a pattern
-// contains `*`. The classifying tests in `glob_matcher_handles_wildcards`
-// catch every behavioral mutation; the only mutations the suite cannot
-// kill in finite time are these arithmetic ones. Skip mutating the body
-// rather than padding the suite with unrelated timeout-guard tests.
-#[mutants::skip]
-fn glob_inner(p: &[char], mut pi: usize, n: &[char], mut ni: usize) -> bool {
-    while pi < p.len() {
-        match p[pi] {
-            '*' => {
-                // Collapse runs of `*` and try every possible match
-                // length for the next literal segment.
-                while pi < p.len() && p[pi] == '*' {
-                    pi += 1;
-                }
-                if pi == p.len() {
-                    return true;
-                }
-                for k in ni..=n.len() {
-                    if glob_inner(p, pi, n, k) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            '?' => {
-                if ni >= n.len() {
-                    return false;
-                }
-                pi += 1;
-                ni += 1;
-            }
-            c => {
-                if ni >= n.len() || n[ni] != c {
-                    return false;
-                }
-                pi += 1;
-                ni += 1;
-            }
+    while name_index < n.len() {
+        if pattern_index < p.len() && (p[pattern_index] == '?' || p[pattern_index] == n[name_index]) {
+            pattern_index += 1;
+            name_index += 1;
+        } else if pattern_index < p.len() && p[pattern_index] == '*' {
+            star = Some(pattern_index);
+            pattern_index = pattern_index.saturating_add(1);
+            star_match = name_index;
+        } else if let Some(star_index) = star {
+            pattern_index = star_index.saturating_add(1);
+            star_match = star_match.saturating_add(1);
+            name_index = star_match;
+        } else {
+            return false;
         }
     }
-    ni == n.len()
+
+    p[pattern_index..].iter().all(|token| *token == '*')
 }
 
 /// Compare `totals` against `threshold` and classify the outcome.
@@ -311,6 +285,8 @@ fn classify_no_coverable_lines(totals: LineTotals) -> Status {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn make_file(path: &str, count: u32, covered: u32) -> FileReport {
@@ -390,6 +366,35 @@ mod tests {
         assert!((beta.percent().unwrap() - 60.0).abs() < f64::EPSILON);
         assert_eq!(beta.diagnostics[0].path, PathBuf::from("src/lib.rs"));
         assert_eq!(beta.diagnostics[0].lines, (61..=100).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn outcomes_and_diagnostics_are_sorted() {
+        let report = make_report(vec![
+            make_file("/repo/crates/zeta/src/z.rs", 2, 0),
+            make_file("/repo/crates/alpha/src/z.rs", 2, 0),
+            make_file("/repo/crates/alpha/src/a.rs", 2, 0),
+        ]);
+        let ws = make_workspace(
+            vec![
+                make_member("zeta", "/repo/crates/zeta", Some(100.0)),
+                make_member("alpha", "/repo/crates/alpha", Some(100.0)),
+            ],
+            None,
+        );
+        let evaluated = evaluate(&report, &ws, &[]).expect("evaluate");
+        assert_eq!(
+            evaluated.outcomes.iter().map(|outcome| outcome.name.as_str()).collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert_eq!(
+            evaluated.outcomes[0]
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.path.as_path())
+                .collect::<Vec<_>>(),
+            [Path::new("src/a.rs"), Path::new("src/z.rs")]
+        );
     }
 
     #[test]
@@ -524,6 +529,12 @@ mod tests {
         // `ni >= n.len()` early-return in the `?` arm).
         assert!(!super::glob_matches("a?", "a"));
         assert!(!super::glob_matches("alpha?", "alpha"));
+        assert!(glob_matches("*a", "a"));
+        assert!(glob_matches("*a", "ba"));
+        assert!(!glob_matches("*a", ""));
+        assert!(!glob_matches("?a", "a"));
+        assert!(glob_matches("ab*cd", "abxxcd"));
+        assert!(!glob_matches(&format!("{}z", "*".repeat(10_000)), &"a".repeat(10_000)));
     }
 
     #[test]

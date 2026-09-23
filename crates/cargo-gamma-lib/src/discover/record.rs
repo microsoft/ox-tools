@@ -3,15 +3,13 @@
 
 //! Build facts and checked hints from the last run.
 
-use std::env;
-#[cfg(test)]
-use std::fs;
 use std::fs::File;
 use std::process::Command;
 use std::slice::Iter;
+use std::{env, fs};
 
 use blake3::Hasher;
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::killers::Killers;
@@ -35,10 +33,16 @@ use crate::{HashMap, HashSet};
 /// nothing. Discarding it instead would throw away the probes and the build order to defend a
 /// question they do not depend on. What moves this number is a change of *meaning* in what is
 /// already there, which no reader could detect for itself.
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
+const LEGACY_VERSION: u32 = 9;
 
 /// The file name under the gamma scratch base.
 const FILE: &str = "last-gamma-run.json";
+const INCOMPLETE_FILE: &str = "incomplete-gamma-learning.json";
+
+const fn yes() -> bool {
+    true
+}
 
 /// How much of a record a reader is willing to believe.
 ///
@@ -52,7 +56,8 @@ pub enum Trust {
 
     /// Test verdicts as well as compiler outcomes.
     ///
-    /// New run records contain no test verdicts, so this cannot add detection credit.
+    /// Test verdicts in the outcome ledger are never marked reusable, so this cannot add detection
+    /// credit.
     Settled,
 }
 
@@ -359,13 +364,11 @@ impl ContextDigest {
     }
 }
 
-/// What an earlier run established about each mutant, and what those findings depended on.
+/// What an earlier run observed about each mutant, and what those findings depended on.
 ///
-/// Of everything a run learns, which mutants failed to compile is both the most expensive to
-/// rediscover and the safest to reuse. Expensive because unviability is found by building, blaming
-/// and building again, and each round is another rebuild of the instrumented tree. Safe because an
-/// unviable mutant is excluded from the score outright, so carrying one forward moves no verdict —
-/// unlike a kill, which is a claim about the test suite and is only adopted when asked for.
+/// The complete outcome ledger supports explicit post-run promotion commands. Incremental
+/// execution reuses only compiler unviability: test outcomes remain durable observations for
+/// suppression and hint promotion but never settle a later run.
 ///
 /// Nothing here is discarded wholesale. The file is read whatever context it was written under, and
 /// each [`Tier`] decides for itself whether this run agrees with it about the terms that tier
@@ -384,8 +387,17 @@ pub struct RunRecord {
     /// depending on some of the terms is not invalidated by the ones it does not depend on.
     context: ContextDigest,
 
-    /// For each source file that holds a recorded mutant, its digest and what was settled there.
+    /// For each source file that holds a recorded mutant, its digest and observed outcomes.
     files: Vec<RecordedFile>,
+
+    /// The mutants selected by the campaign that most recently published this ledger.
+    ///
+    /// The outcome files can also contain unchanged entries carried from earlier narrow campaigns.
+    /// Post-run promotion must distinguish those retained observations from the population whose
+    /// checked-in hints the current campaign is allowed to replace. Records written before this
+    /// field existed treat every outcome as selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    population: Option<Vec<MutantId>>,
 
     /// Every workspace input Cargo could have consulted before this run started.
     ///
@@ -413,6 +425,9 @@ pub struct RunRecord {
     /// Score-neutral knowledge shared with the checked-in hints artifact.
     #[serde(default)]
     generalized: GeneralizedHints,
+
+    #[serde(skip)]
+    replace_knowledge: bool,
 }
 
 /// The test that caught a mutant, and the binary it lives in.
@@ -420,7 +435,7 @@ pub struct RunRecord {
 /// The binary is named by package and target rather than by path because a path is not stable
 /// across runs: the binaries a run judges live in a scratch tree that is rebuilt each time, so a
 /// recorded path would miss every time and the map would be permanently cold.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Killer {
     /// The package whose test binary caught it.
@@ -442,7 +457,7 @@ impl Killer {
 }
 
 /// Schema version for generalized, score-neutral hint tiers.
-pub const GENERALIZED_HINTS_VERSION: u32 = 1;
+pub const GENERALIZED_HINTS_VERSION: u32 = 2;
 
 /// Durable generalized knowledge that can only affect execution order.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -528,14 +543,15 @@ impl<'de> Deserialize<'de> for GeneralizedHints {
         use serde::de::Error as _;
 
         match GeneralizedHintsWire::deserialize(deserializer)? {
-            GeneralizedHintsWire::Compact(compact) => Self::try_from(compact).map_err(D::Error::custom),
+            GeneralizedHintsWire::Compact(compact) => Self::try_from(compact).map(Self::migrated).map_err(D::Error::custom),
             GeneralizedHintsWire::Legacy(legacy) => Ok(Self {
                 version: legacy.version,
                 items: legacy.items,
                 binaries: legacy.binaries,
                 test_sets: legacy.test_sets,
                 reach: legacy.reach,
-            }),
+            }
+            .migrated()),
         }
     }
 }
@@ -674,6 +690,29 @@ fn pool_entry<T: Clone>(pool: &[T], index: u32) -> Result<T, &'static str> {
 }
 
 impl GeneralizedHints {
+    fn migrated(mut self) -> Self {
+        fn reset<T>(candidate: &mut RankedHint<T>) {
+            candidate.seeds = candidate.seeds.max(1);
+            candidate.hits = 0;
+            candidate.misses = 0;
+            candidate.measured_ms = 0;
+            candidate.samples = 0;
+        }
+
+        if self.version != 1 {
+            return self;
+        }
+
+        for candidate in self.items.iter_mut().flat_map(|item| &mut item.candidates) {
+            reset(candidate);
+        }
+        for candidate in self.binaries.iter_mut().flat_map(|file| &mut file.candidates) {
+            reset(candidate);
+        }
+        self.version = GENERALIZED_HINTS_VERSION;
+        self
+    }
+
     /// Returns these tiers only when their schema is understood.
     #[must_use]
     pub fn supported(&self) -> Option<&Self> {
@@ -710,7 +749,12 @@ impl GeneralizedHints {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RankedHint<T> {
     pub candidate: T,
+    /// Exact kills or reach observations that made this candidate eligible for exploration.
+    #[serde(default)]
+    pub seeds: u32,
+    /// Kills produced when this candidate was transferred to another mutant.
     pub hits: u32,
+    /// Misses produced when this candidate was transferred to another mutant.
     pub misses: u32,
     pub measured_ms: u64,
     pub samples: u32,
@@ -721,6 +765,7 @@ impl<T> RankedHint<T> {
     fn map_candidate<U>(&self, candidate: U) -> RankedHint<U> {
         RankedHint {
             candidate,
+            seeds: self.seeds,
             hits: self.hits,
             misses: self.misses,
             measured_ms: self.measured_ms,
@@ -734,6 +779,7 @@ impl RankedHint<u32> {
     fn try_map_candidate<T: Clone>(self, pool: &[T]) -> Result<RankedHint<T>, &'static str> {
         Ok(RankedHint {
             candidate: pool_entry(pool, self.candidate)?,
+            seeds: self.seeds,
             hits: self.hits,
             misses: self.misses,
             measured_ms: self.measured_ms,
@@ -769,7 +815,7 @@ pub struct FileBinaryHints {
 }
 
 /// Stable identity of a mutation site, independent of its generated mutant id.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SiteIdentity {
     pub file: Utf8PathBuf,
     pub item: String,
@@ -868,10 +914,10 @@ struct RecordedFile {
     #[serde(default)]
     package: String,
 
-    /// A digest of the file's bytes as they were when these mutants failed to compile.
+    /// A digest of the file's bytes as they were when these outcomes were observed.
     digest: String,
 
-    /// The file's length in bytes when those mutants failed to compile.
+    /// The file's length in bytes when those outcomes were observed.
     ///
     /// A cheap rejection ahead of the digest: a file of a different length is certainly a different
     /// file, and saying so costs a `stat` where the digest costs a full read. It can only reject —
@@ -892,6 +938,10 @@ struct Entry {
 
     /// The verdict that was reached.
     outcome: Outcome,
+
+    /// Whether this entry belongs to the incremental verdict cache as well as the outcome ledger.
+    #[serde(default = "yes")]
+    reusable: bool,
 
     /// The test that did the killing, when one did.
     ///
@@ -917,6 +967,45 @@ struct Entry {
     /// What the mutant cost to judge, in milliseconds.
     #[serde(default)]
     elapsed_ms: u64,
+
+    /// Existing source policy at the time of discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    suppression: Option<crate::model::Suppression>,
+
+    /// Source identity and location needed by commands that promote persisted outcomes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    site: Option<RecordedSite>,
+}
+
+/// Durable source identity for one recorded outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RecordedSite {
+    pub(crate) mutator: String,
+    pub(crate) item: String,
+    pub(crate) digest: String,
+    pub(crate) occurrence: u32,
+    pub(crate) replacement_index: u32,
+    pub(crate) original: String,
+    pub(crate) replacement: String,
+    pub(crate) shape: crate::ops::collect::Shape,
+    pub(crate) span_start: usize,
+    pub(crate) span_end: usize,
+    pub(crate) line: usize,
+    pub(crate) end_line: usize,
+    pub(crate) column: usize,
+}
+
+/// One complete persisted outcome, including the source generation that located it.
+#[derive(Debug, Clone)]
+pub(crate) struct RecordedOutcome {
+    pub(crate) id: MutantId,
+    pub(crate) outcome: Outcome,
+    pub(crate) file: Utf8PathBuf,
+    pub(crate) package: String,
+    pub(crate) file_digest: String,
+    pub(crate) suppression: Option<crate::model::Suppression>,
+    pub(crate) site: Option<RecordedSite>,
 }
 
 /// Every recorded verdict in a [`RunRecord`], with files in stored order and entries within each
@@ -973,6 +1062,10 @@ const fn settled_verdict(outcome: Outcome) -> bool {
     matches!(outcome, Outcome::CompileError)
 }
 
+fn safe_relative_path(path: &Utf8Path) -> bool {
+    !path.as_str().is_empty() && path.components().all(|component| matches!(component, Utf8Component::Normal(_)))
+}
+
 impl RunRecord {
     /// Captures the workspace before it is copied or executed.
     #[cfg(test)]
@@ -1007,12 +1100,51 @@ impl RunRecord {
         Self::load_raw(base).unwrap_or_default()
     }
 
+    /// Reads score-neutral learning retained by an incomplete incremental sweep.
+    #[must_use]
+    pub(crate) fn load_incomplete(base: &Utf8Path) -> Self {
+        Self::load_raw_from(base, INCOMPLETE_FILE).unwrap_or_default()
+    }
+
+    /// Reads a campaign record for an explicit state-consuming command.
+    ///
+    /// Unlike cache adoption, these commands were requested specifically to act on the record, so
+    /// absence, corruption, oversize input, and unsupported versions are errors rather than a cold
+    /// cache.
+    pub(crate) fn load_required(base: &Utf8Path) -> crate::Result<Self> {
+        let path = base.join(FILE);
+        let file = File::open(&path).map_err(|cause| crate::error::error!("could not read campaign state `{path}`").caused_by(cause))?;
+        let text = input::text(file)
+            .map_err(|cause| crate::error::error!("could not read campaign state `{path}`").caused_by(cause))?
+            .ok_or_else(|| crate::error::error!("campaign state `{path}` exceeds the supported size"))?;
+        let record: Self =
+            serde_json::from_str(&text).map_err(|cause| crate::error::error!("campaign state `{path}` is invalid").caused_by(cause))?;
+
+        if !matches!(record.version, LEGACY_VERSION | VERSION) {
+            return Err(crate::error::error!(
+                "campaign state `{path}` has unsupported version {}; expected {LEGACY_VERSION} or {VERSION}",
+                record.version
+            ));
+        }
+        if !record.paths_are_workspace_relative() {
+            return Err(crate::error::error!(
+                "campaign state `{path}` contains a source path outside the selected workspace"
+            ));
+        }
+
+        Ok(record)
+    }
+
     /// Reads the record from disk, or nothing when it is absent, unreadable or a foreign format.
     fn load_raw(base: &Utf8Path) -> Option<Self> {
-        let text = input::text(File::open(base.join(FILE)).ok()?).ok()??;
+        Self::load_raw_from(base, FILE)
+    }
+
+    fn load_raw_from(base: &Utf8Path, file: &str) -> Option<Self> {
+        let text = input::text(File::open(base.join(file)).ok()?).ok()??;
         let record = serde_json::from_str::<Self>(&text).ok()?;
 
-        (record.version == VERSION).then_some(record)
+        (matches!(record.version, LEGACY_VERSION | VERSION) && record.paths_are_workspace_relative()).then_some(record)
     }
 
     /// What caught each mutant last time, whatever this run's build context is.
@@ -1052,6 +1184,45 @@ impl RunRecord {
             // #[gamma::skip(option.none_to_some, reason = "slice::Iter::default() is an empty iterator, so both states make the first next() advance to the first file")]
             mutants: None,
         }
+    }
+
+    /// Every persisted campaign outcome with its source identity.
+    #[must_use]
+    pub(crate) fn outcomes(&self) -> Vec<RecordedOutcome> {
+        self.files
+            .iter()
+            .flat_map(|file| {
+                file.mutants.iter().map(|entry| RecordedOutcome {
+                    id: entry.id.clone(),
+                    outcome: entry.outcome,
+                    file: file.path.clone(),
+                    package: file.package.clone(),
+                    file_digest: file.digest.clone(),
+                    suppression: entry.suppression.clone(),
+                    site: entry.site.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn selected(&self, id: &MutantId) -> bool {
+        self.population
+            .as_ref()
+            .is_none_or(|population| population.binary_search(id).is_ok())
+    }
+
+    /// Score-neutral promotion entries with their persisted workspace-relative paths.
+    #[must_use]
+    pub(crate) fn promotion_entries(&self) -> Vec<(Utf8PathBuf, MutantId, Outcome)> {
+        self.files
+            .iter()
+            .flat_map(|file| {
+                file.mutants
+                    .iter()
+                    .filter(|entry| self.selected(&entry.id))
+                    .map(|entry| (file.path.clone(), entry.id.clone(), entry.outcome))
+            })
+            .collect()
     }
 
     /// Whether this record holds anything that the [`Tier::Unviability`] rules govern.
@@ -1112,7 +1283,15 @@ impl RunRecord {
 
     /// Replaces exact probes and, when supplied, generalized hints in one atomic record update.
     pub fn store_knowledge(base: &Utf8Path, probes: &HashMap<MutantId, Killer>, generalized: Option<&GeneralizedHints>) {
-        let mut record = Self::load_raw(base).unwrap_or_default();
+        Self::store_knowledge_at(base, FILE, probes, generalized);
+    }
+
+    pub(crate) fn store_incomplete_knowledge(base: &Utf8Path, probes: &HashMap<MutantId, Killer>, generalized: Option<&GeneralizedHints>) {
+        Self::store_knowledge_at(base, INCOMPLETE_FILE, probes, generalized);
+    }
+
+    fn store_knowledge_at(base: &Utf8Path, file: &str, probes: &HashMap<MutantId, Killer>, generalized: Option<&GeneralizedHints>) {
+        let mut record = Self::load_raw_from(base, file).unwrap_or_default();
 
         record.version = VERSION;
         record.hints.clone_from(probes);
@@ -1124,9 +1303,15 @@ impl RunRecord {
             return;
         };
 
-        if let Err(failure) = crate::elements::write(&base.join(FILE), &text) {
+        if let Err(failure) = crate::elements::write(&base.join(file), &text) {
             crate::notes::note(format!("could not save run-record hints: {failure}"));
         }
+    }
+
+    pub(crate) fn replace_knowledge(&mut self, probes: HashMap<MutantId, Killer>, generalized: GeneralizedHints) {
+        self.hints = probes;
+        self.generalized = generalized;
+        self.replace_knowledge = true;
     }
 
     /// What this record settles, given the sources as they are now and how far it is believed.
@@ -1199,6 +1384,10 @@ impl RunRecord {
             }
 
             for entry in &file.mutants {
+                if !entry.reusable {
+                    continue;
+                }
+
                 let admitted = if entry.outcome == Outcome::CompileError {
                     unviability
                         && (workspace_unchanged
@@ -1261,12 +1450,51 @@ impl RunRecord {
             .map(|mutant| ((*mutant.package).to_owned(), vec![Utf8PathBuf::new()]))
             .collect();
 
-        Self::from_snapshot_with_roots(root, mutants, context, inputs, killers, compilation_roots)
+        Self::from_snapshot_with_roots(root, mutants, context, inputs, killers, compilation_roots, true)
     }
 
     #[must_use]
+    #[cfg(test)]
     // #[gamma::skip(all, reason = "snapshot construction, Rust-file filtering, normalization, and deduplication are asserted by deterministic record round trips")]
     pub(crate) fn from_plan_snapshot(plan: &Plan, context: &ContextDigest, inputs: WorkspaceSnapshot, killers: &Killers) -> Option<Self> {
+        Self::from_plan_snapshot_checked(plan, context, inputs, killers, true)
+    }
+
+    /// Builds durable completed-campaign evidence from the source generation captured before work.
+    ///
+    /// Unlike the incremental-cache constructor, this deliberately does not compare the mutable
+    /// live checkout after execution. Consumers validate affected source sites before editing them.
+    #[must_use]
+    pub(crate) fn from_completed_plan_snapshot(
+        plan: &Plan,
+        context: &ContextDigest,
+        inputs: WorkspaceSnapshot,
+        killers: &Killers,
+    ) -> Option<Self> {
+        if !inputs.contains_plan_sources(plan) {
+            return None;
+        }
+
+        Self::from_plan_snapshot_checked(plan, context, inputs, killers, false)
+    }
+
+    fn paths_are_workspace_relative(&self) -> bool {
+        self.files.iter().all(|file| {
+            safe_relative_path(&file.path)
+                && file
+                    .mutants
+                    .iter()
+                    .all(|mutant| mutant.killer_file.as_deref().is_none_or(safe_relative_path))
+        })
+    }
+
+    fn from_plan_snapshot_checked(
+        plan: &Plan,
+        context: &ContextDigest,
+        inputs: WorkspaceSnapshot,
+        killers: &Killers,
+        require_current: bool,
+    ) -> Option<Self> {
         let mut compilation_roots = HashMap::default();
 
         for package in plan.specs.keys() {
@@ -1282,7 +1510,15 @@ impl RunRecord {
             let _previous = compilation_roots.insert(package.clone(), roots);
         }
 
-        Self::from_snapshot_with_roots(&plan.root, &plan.mutants, context, inputs, killers, compilation_roots)
+        Self::from_snapshot_with_roots(
+            &plan.root,
+            &plan.mutants,
+            context,
+            inputs,
+            killers,
+            compilation_roots,
+            require_current,
+        )
     }
 
     // #[gamma::skip(all, reason = "record normalization and duplicate elimination are covered as a whole by snapshot round-trip tests; individual sort/filter mutants add no distinct contract")]
@@ -1293,8 +1529,9 @@ impl RunRecord {
         inputs: WorkspaceSnapshot,
         killers: &Killers,
         compilation_roots: HashMap<String, Vec<Utf8PathBuf>>,
+        require_current: bool,
     ) -> Option<Self> {
-        if !inputs.matches_current(root) {
+        if require_current && !inputs.matches_current(root) {
             return None;
         }
 
@@ -1309,7 +1546,7 @@ impl RunRecord {
             .map(|file| (file.path.clone(), Vec::new()))
             .collect();
 
-        for mutant in mutants.iter().filter(|mutant| settled_verdict(mutant.outcome)) {
+        for mutant in mutants {
             let file = mutant.file.to_path_buf();
             let _known = inputs.file(&file)?;
             let killer_file = if mutant.outcome == Outcome::Killed {
@@ -1317,7 +1554,7 @@ impl RunRecord {
                     killers
                         .verdict_file_for(name)
                         .and_then(|path| path.strip_prefix(root).ok())
-                        .map(Utf8Path::to_path_buf)
+                        .map(|path| Utf8PathBuf::from(path.as_str().replace('\\', "/")))
                 })
             } else {
                 None
@@ -1326,9 +1563,26 @@ impl RunRecord {
             by_file.entry(file).or_default().push(Entry {
                 id: mutant.id.clone(),
                 outcome: mutant.outcome,
+                reusable: settled_verdict(mutant.outcome),
                 killed_by: mutant.killed_by.clone(),
                 killer_file,
                 elapsed_ms: mutant.elapsed_ms,
+                suppression: mutant.suppression.clone(),
+                site: Some(RecordedSite {
+                    mutator: mutant.mutator.to_string(),
+                    item: mutant.item_path.to_string(),
+                    digest: SiteIdentity::from_mutant(mutant).normalized_text,
+                    occurrence: mutant.occurrence,
+                    replacement_index: mutant.replacement_index,
+                    original: mutant.original.to_string(),
+                    replacement: mutant.replacement.to_string(),
+                    shape: mutant.shape,
+                    span_start: mutant.span.start,
+                    span_end: mutant.span.end,
+                    line: mutant.line,
+                    end_line: mutant.end_line,
+                    column: mutant.column,
+                }),
             });
         }
 
@@ -1342,7 +1596,7 @@ impl RunRecord {
 
                 Some(RecordedFile {
                     package: packages.get(&path).cloned().unwrap_or_default(),
-                    path,
+                    path: Utf8PathBuf::from(path.as_str().replace('\\', "/")),
                     digest: input.digest.clone(),
                     size: input.size,
                     mutants,
@@ -1352,14 +1606,20 @@ impl RunRecord {
 
         files.sort_by(|left, right| left.path.cmp(&right.path));
 
+        let mut population: Vec<MutantId> = mutants.iter().map(|mutant| mutant.id.clone()).collect();
+        population.sort();
+        population.dedup();
+
         Some(Self {
             version: VERSION,
             context: context.resolved_at(root),
             files,
+            population: Some(population),
             inputs,
             compilation_roots,
             hints: HashMap::default(),
             generalized: GeneralizedHints::default(),
+            replace_knowledge: false,
         })
     }
 
@@ -1395,6 +1655,30 @@ impl RunRecord {
         if let Err(failure) = crate::elements::write(&base.join(FILE), &text) {
             crate::notes::note(format!("could not save run record: {failure}"));
         }
+    }
+
+    /// Publishes completed campaign evidence independently of incremental-cache eligibility.
+    ///
+    /// An incomplete input snapshot prevents later cache adoption, but it does not invalidate the
+    /// source bytes and verdicts this campaign already observed. Post-campaign commands validate
+    /// their affected source sites when they consume this ledger.
+    pub(crate) fn store_completed(&self, base: &Utf8Path) -> crate::Result<Self> {
+        let earlier = Self::load_raw(base).unwrap_or_default();
+        let merged = self.absorbing(&earlier);
+        let text = serde_json::to_string(&merged)
+            .map_err(|cause| crate::error::error!("could not serialize completed campaign state").caused_by(cause))?;
+
+        match fs::remove_file(base.join(INCOMPLETE_FILE).as_std_path()) {
+            Ok(()) => {}
+            Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+            Err(cause) => {
+                return Err(crate::error::error!("could not clear incomplete campaign learning").caused_by(cause));
+            }
+        }
+        crate::elements::write(&base.join(FILE), &text)
+            .map_err(|cause| crate::error::error!("could not save completed campaign state").caused_by(cause))?;
+
+        Ok(merged)
     }
 
     /// This cache, plus the entries of `earlier` for files this run never visited.
@@ -1472,18 +1756,20 @@ impl RunRecord {
             version: VERSION,
             context: self.context.clone(),
             files,
+            population: self.population.clone(),
             inputs: self.inputs.clone(),
             compilation_roots,
-            hints: if self.hints.is_empty() {
+            hints: if !self.replace_knowledge && self.hints.is_empty() {
                 earlier.hints.clone()
             } else {
                 self.hints.clone()
             },
-            generalized: if self.generalized.is_empty() {
+            generalized: if !self.replace_knowledge && self.generalized.is_empty() {
                 earlier.generalized.clone()
             } else {
                 self.generalized.clone()
             },
+            replace_knowledge: false,
         }
     }
 
@@ -1967,9 +2253,12 @@ mod tests {
         let entry = |id: &str, outcome| Entry {
             id: id.to_owned().into(),
             outcome,
+            reusable: true,
             killed_by: None,
             killer_file: None,
             elapsed_ms: 0,
+            suppression: None,
+            site: None,
         };
         let file = |path: &str, mutants| RecordedFile {
             path: path.into(),
@@ -1988,6 +2277,7 @@ mod tests {
                     vec![entry("second", Outcome::Survived), entry("third", Outcome::CompileError)],
                 ),
             ],
+            population: None,
             ..RunRecord::default()
         };
 
@@ -2100,6 +2390,7 @@ mod tests {
                 item: "subject::add".to_owned(),
                 candidates: vec![RankedHint {
                     candidate: killer.clone(),
+                    seeds: 1,
                     hits: 1,
                     misses: 0,
                     measured_ms: 2,
@@ -2111,6 +2402,7 @@ mod tests {
                 file: "src/lib.rs".into(),
                 candidates: vec![RankedHint {
                     candidate: binary,
+                    seeds: 1,
                     hits: 1,
                     misses: 0,
                     measured_ms: 2,
@@ -2260,7 +2552,7 @@ mod tests {
 
     /// No observed test verdict can become durable evidence about a later run.
     #[test]
-    fn only_compiler_unviability_is_recorded() {
+    fn only_compiler_unviability_is_reused() {
         let (_dir, root) = workspace("record-unsettled-", "fn add() {}");
         let population = [
             mutant("killed", "src/lib.rs", Outcome::Killed),
@@ -2655,12 +2947,54 @@ mod tests {
     }
 
     #[test]
-    fn a_timeout_is_not_stored_for_a_later_run() {
+    fn a_timeout_is_recorded_but_not_reused_for_a_later_run() {
         let (_dir, root) = workspace("record-timeout-", "fn add() {}");
         let record = from_run(&root, &[mutant("timeout", "src/lib.rs", Outcome::Timeout)], &envelope());
+        let outcome = record.outcomes().pop().expect("outcome ledger entry");
+        let site = outcome.site.expect("source identity");
 
-        assert_eq!(record.len(), 0);
+        assert_eq!(record.len(), 1);
         assert!(record.settled(&root, Trust::Settled, &Killers::scan(&[]), &envelope()).0.is_empty());
+        assert_eq!(outcome.id.as_str(), "timeout");
+        assert_eq!(outcome.outcome, Outcome::Timeout);
+        assert_eq!(outcome.file, Utf8Path::new("src/lib.rs"));
+        assert_eq!(outcome.package, "subject");
+        assert_eq!(outcome.file_digest, digest(b"fn add() {}"));
+        assert_eq!(site.mutator, "arith");
+        assert_eq!(site.item, "subject::add");
+        assert_eq!(site.original, "+");
+        assert_eq!(site.replacement, "-");
+        assert_eq!(
+            site.digest,
+            SiteIdentity::from_mutant(&mutant("other-id", "src/lib.rs", Outcome::Survived)).normalized_text
+        );
+    }
+
+    #[test]
+    fn version_ten_round_trips_the_complete_outcome_ledger() {
+        let (_dir, root) = workspace("record-v10-ledger-", "fn add() {}");
+        from_run(
+            &root,
+            &[
+                mutant("timeout", "src/lib.rs", Outcome::Timeout),
+                mutant("oom", "src/lib.rs", Outcome::OutOfMemory),
+            ],
+            &envelope(),
+        )
+        .store(&root, &root);
+        let stored: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join(FILE)).expect("record bytes")).expect("record JSON");
+
+        assert_eq!(stored["version"], VERSION);
+        assert_eq!(stored["files"][0]["path"], "src/lib.rs");
+        assert_eq!(stored["files"][0]["mutants"].as_array().expect("outcomes").len(), 2);
+        assert!(
+            stored["files"][0]["mutants"]
+                .as_array()
+                .expect("outcomes")
+                .iter()
+                .all(|entry| entry["site"].is_object())
+        );
     }
 
     #[test]
@@ -2728,6 +3062,25 @@ mod tests {
             .collect(),
         );
         assert_eq!(fs::read_to_string(root.join(FILE)).expect("prior record"), before);
+    }
+
+    #[test]
+    fn explicitly_consumed_records_reject_paths_outside_the_workspace() {
+        let (_dir, root) = workspace("record-unsafe-path-", "fn add() {}");
+        from_run(&root, &[mutant("escaped", "src/lib.rs", Outcome::Timeout)], &envelope()).store(&root, &root);
+        let mut stored: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join(FILE)).expect("record")).expect("record JSON");
+        stored["files"][0]["path"] = serde_json::Value::String("../outside.rs".to_owned());
+        fs::write(root.join(FILE), serde_json::to_vec(&stored).expect("record JSON")).expect("unsafe record");
+
+        let error = RunRecord::load_required(&root).expect_err("parent traversal must be rejected");
+
+        assert!(error.to_string().contains("outside the selected workspace"), "{error}");
+        assert_eq!(
+            RunRecord::load(&root).len(),
+            0,
+            "best-effort consumers must ignore the unsafe record"
+        );
     }
 
     /// Unviability written under one feature set says nothing about a run under another: it is a

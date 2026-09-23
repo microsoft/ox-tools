@@ -33,7 +33,7 @@ pub(crate) fn run(args: &HeatherArgs) -> Result<(), AppError> {
         run_fix(&files, &config, &project_dir)?;
         Ok(())
     } else {
-        run_check(&files, &config, &project_dir)
+        run_check(&files, &config, &project_dir).map(|_checked| ())
     }
 }
 
@@ -51,9 +51,9 @@ fn load_config(args: &HeatherArgs, project_dir: &Path) -> Result<HeatherConfig, 
     }
 }
 
-fn run_check(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Result<(), AppError> {
+fn run_check(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Result<usize, AppError> {
     let mut failures: usize = 0;
-    let mut checked: usize = 0;
+    let mut checked = 0usize;
 
     for path in files {
         let Some((kind, content)) = read_and_classify(path, config)? else {
@@ -84,7 +84,7 @@ fn run_check(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> R
     }
 
     println!("All {checked} file(s) have correct license headers.");
-    Ok(())
+    Ok(checked)
 }
 
 fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Result<usize, AppError> {
@@ -94,7 +94,7 @@ fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Res
         let Some((kind, content)) = read_and_classify(path, config)? else {
             continue;
         };
-        let mut output: Vec<u8> = Vec::with_capacity(content.len() + 128);
+        let mut output = Vec::with_capacity(content.len());
         let result = cargo_heather::fix(content.as_bytes(), &mut output, &config.header_text, kind)
             .expect("`content` is a String (valid UTF-8) read into memory and `output` is a Vec, so fix's fallible paths -- reader IO/UTF-8 decoding and writer IO -- cannot fail here");
         let relative = make_relative(path, project_dir);
@@ -189,7 +189,7 @@ mod tests {
 
     fn config() -> HeatherConfig {
         HeatherConfig {
-            header_text: "// Copyright".into(),
+            header_text: "Copyright".into(),
             scripts: true,
             dot_toml: false,
             exclude: Vec::new(),
@@ -278,5 +278,31 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let err = write_fixed(&dir, b"x").expect_err("writing to a directory path must fail");
         assert!(err.to_string().contains("failed to write file"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_check_returns_the_exact_number_of_checked_files() {
+        let tmp = TempDir::new().unwrap();
+        let first = tmp.path().join("a.rs");
+        let second = tmp.path().join("b.rs");
+        std::fs::write(&first, "// Copyright\n").unwrap();
+        std::fs::write(&second, "// Copyright\n").unwrap();
+
+        assert_eq!(run_check(&[first, second], &config(), tmp.path()).unwrap(), 2);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_check_reports_the_exact_number_of_failures() {
+        let tmp = TempDir::new().unwrap();
+        let first = tmp.path().join("a.rs");
+        let second = tmp.path().join("b.rs");
+        std::fs::write(&first, "fn a() {}\n").unwrap();
+        std::fs::write(&second, "fn b() {}\n").unwrap();
+
+        let error = run_check(&[first, second], &config(), tmp.path()).unwrap_err();
+
+        assert_eq!(error.to_string(), "2 file(s) have missing or incorrect license headers");
     }
 }

@@ -1,14 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg_attr(
-    not(feature = "internals"),
-    expect(
-        dead_code,
-        reason = "this module exists for `tests/docs.rs`, which is what keeps the README's generated tables honest;                   nothing the tool does at run time reads them, so without the feature that opens the facade the                   module has no caller"
-    )
-)]
-
 //! Reference tables for the documentation, rendered from the registry that defines them.
 //!
 //! The mutator catalog is the tool's public vocabulary: the same names appear on `--mutators`, in every

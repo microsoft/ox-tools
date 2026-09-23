@@ -268,8 +268,7 @@ fn main() {}
     #[test]
     fn fix_shebang_content_with_shebang_only_emits_header_without_body() {
         let s = fix_shebang_content("#!/bin/sh\n", "New", CommentStyle::DoubleSlash, "\n");
-        assert!(s.starts_with("#!/bin/sh\n"), "{s}");
-        assert!(s.contains("// New"), "{s}");
+        assert_eq!(s, "#!/bin/sh\n// New\n");
     }
 
     #[test]
@@ -281,8 +280,7 @@ fn main() {}
     #[test]
     fn fix_script_content_with_no_body_emits_frontmatter_and_header() {
         let s = fix_script_content("#!/usr/bin/env cargo\n---\n// Old\n", "New", CommentStyle::DoubleSlash, "\n");
-        assert!(s.starts_with("#!/usr/bin/env cargo\n---\n"), "{s}");
-        assert!(s.contains("// New"), "{s}");
+        assert_eq!(s, "#!/usr/bin/env cargo\n---\n// New\n");
     }
 
     #[test]
@@ -290,5 +288,14 @@ fn main() {}
         let s = fix_script_content("#!/usr/bin/env cargo\n---\n// Old\nbody\n", "New", CommentStyle::DoubleSlash, "\n");
         assert!(s.contains("// New"), "{s}");
         assert!(s.contains("body"), "{s}");
+    }
+
+    #[test]
+    fn fix_script_content_defaults_missing_frontmatter_lines() {
+        assert_eq!(fix_script_content("", "New", CommentStyle::Hash, "\n"), "\n---\n# New\n");
+        assert_eq!(
+            fix_script_content("#!/usr/bin/env cargo\n", "New", CommentStyle::Hash, "\n"),
+            "#!/usr/bin/env cargo\n---\n# New\n"
+        );
     }
 }

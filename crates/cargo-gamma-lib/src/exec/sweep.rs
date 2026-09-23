@@ -37,6 +37,12 @@ use crate::{Result, notes};
 /// Kept here for the existing shared cost model; sweep workers do not wait for this duration.
 pub(super) const MIN_SCOUT_WAIT: Duration = Duration::from_millis(5);
 
+/// Maximum campaign-wide attempts for an unproductive generalized-hint tier.
+///
+/// Workers reserve one of these slots atomically immediately before launch. Once any attempt hits,
+/// later workers may continue without the bound because the tier has proved productive.
+const GENERALIZED_ZERO_HIT_LIMIT: usize = 8;
+
 /// Describes a mutant stopped by the memory ceiling installed for its test binary.
 ///
 /// Written to say what was measured and against what, because the reader's questions are whether
@@ -675,6 +681,7 @@ struct Tally {
     exact_hits: AtomicUsize,
     generalized_probes: AtomicUsize,
     generalized_hits: AtomicUsize,
+    generalized_rejected: AtomicUsize,
     exact_candidates: AtomicUsize,
     generalized_candidates: AtomicUsize,
     item_candidates: AtomicUsize,
@@ -687,6 +694,9 @@ struct Tally {
     reach_hits: AtomicUsize,
     file_probes: AtomicUsize,
     file_hits: AtomicUsize,
+    item_rejected: AtomicUsize,
+    reach_rejected: AtomicUsize,
+    file_rejected: AtomicUsize,
     census_probes: AtomicUsize,
     census_hits: AtomicUsize,
 
@@ -718,6 +728,7 @@ pub(super) struct Spent {
     pub(super) exact_hits: usize,
     pub(super) generalized_probes: usize,
     pub(super) generalized_hits: usize,
+    pub(super) generalized_rejected: usize,
     pub(super) exact_candidates: usize,
     pub(super) generalized_candidates: usize,
     pub(super) item_candidates: usize,
@@ -730,6 +741,9 @@ pub(super) struct Spent {
     pub(super) reach_hits: usize,
     pub(super) file_probes: usize,
     pub(super) file_hits: usize,
+    pub(super) item_rejected: usize,
+    pub(super) reach_rejected: usize,
+    pub(super) file_rejected: usize,
     pub(super) census_probes: usize,
     pub(super) census_hits: usize,
     pub(super) whole_selections: usize,
@@ -1066,6 +1080,7 @@ pub(super) fn test_all(
                 exact_hits: tally.exact_hits.into_inner(),
                 generalized_probes: tally.generalized_probes.into_inner(),
                 generalized_hits: tally.generalized_hits.into_inner(),
+                generalized_rejected: tally.generalized_rejected.into_inner(),
                 exact_candidates: tally.exact_candidates.into_inner(),
                 generalized_candidates: tally.generalized_candidates.into_inner(),
                 item_candidates: tally.item_candidates.into_inner(),
@@ -1078,6 +1093,9 @@ pub(super) fn test_all(
                 reach_hits: tally.reach_hits.into_inner(),
                 file_probes: tally.file_probes.into_inner(),
                 file_hits: tally.file_hits.into_inner(),
+                item_rejected: tally.item_rejected.into_inner(),
+                reach_rejected: tally.reach_rejected.into_inner(),
+                file_rejected: tally.file_rejected.into_inner(),
                 census_probes: tally.census_probes.into_inner(),
                 census_hits: tally.census_hits.into_inner(),
                 whole_selections: tally.whole_selections.into_inner(),
@@ -1213,6 +1231,46 @@ enum ProbeKind {
 }
 
 impl ProbeKind {
+    fn reserve(self, tally: &Tally) -> bool {
+        let (probes, hits) = match self {
+            Self::Item => (&tally.item_probes, &tally.item_hits),
+            Self::Reach => (&tally.reach_probes, &tally.reach_hits),
+            Self::File => (&tally.file_probes, &tally.file_hits),
+            Self::Exact | Self::Census => {
+                self.attempt(tally);
+                return true;
+            }
+        };
+
+        if hits.load(Ordering::Relaxed) > 0 {
+            let _previous = probes.fetch_add(1, Ordering::Relaxed);
+        } else if probes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < GENERALIZED_ZERO_HIT_LIMIT).then_some(count.saturating_add(1))
+            })
+            .is_err()
+        {
+            if hits.load(Ordering::Relaxed) == 0 {
+                return false;
+            }
+            let _previous = probes.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let _previous = tally.generalized_probes.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn reject(self, tally: &Tally) {
+        let counter = match self {
+            Self::Item => &tally.item_rejected,
+            Self::Reach => &tally.reach_rejected,
+            Self::File => &tally.file_rejected,
+            Self::Exact | Self::Census => return,
+        };
+        let _previous = counter.fetch_add(1, Ordering::Relaxed);
+        let _previous = tally.generalized_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn attempt(self, tally: &Tally) {
         let counter = match self {
             Self::Exact => &tally.exact_probes,
@@ -1264,13 +1322,31 @@ fn probe(
     tally: &Tally,
     kind: ProbeKind,
 ) -> Option<Killer> {
+    kind.attempt(tally);
+    probe_reserved(work, ordinal, binary, hint, timeout_multiplier, sweep, tally, kind)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "reserved probes retain the same execution inputs as ordinary probes"
+)]
+fn probe_reserved(
+    work: &Workspace,
+    active: u32,
+    binary: &TestBinary,
+    hint: &Killer,
+    timeout_multiplier: Option<f64>,
+    sweep: Sweep<'_>,
+    tally: &Tally,
+    kind: ProbeKind,
+) -> Option<Killer> {
     let request = MemoryRequest {
         meter: sweep.meter,
         limit: binary.memory,
     };
 
     let attempt = Attempt {
-        active: Some(ordinal),
+        active: Some(active),
         timeout: binary.budget_for(timeout_multiplier, sweep.timeout_floor),
         stall: sweep.stall,
         request,
@@ -1281,7 +1357,6 @@ fn probe(
     // A probe is one subprocess launched because a hint pointed at it, so it counts as both.
     record_launch(tally);
     let _probes = tally.probes.fetch_add(1, Ordering::Relaxed);
-    kind.attempt(tally);
 
     let verdict = run_binary(work, binary, attempt, sweep.confirm);
 
@@ -1306,7 +1381,7 @@ fn probe(
 /// time out, stall, exceed a memory limit, fail confirmation, or lose its meter. Launch refusal is
 /// covered by the successful filtered launch itself. Earlier binaries are protected by trying the
 /// probe only when canonical iteration reaches this binary.
-fn filtered_kill_is_final(binary: &TestBinary, timeout_multiplier: Option<f64>, sweep: Sweep<'_>) -> bool {
+fn negative_reach_hint_is_final(binary: &TestBinary, timeout_multiplier: Option<f64>, sweep: Sweep<'_>) -> bool {
     reach_hint_is_final(whole_probe_attempt(binary, timeout_multiplier, sweep), sweep.confirm)
 }
 
@@ -1484,24 +1559,37 @@ fn judge_ranked(
     }
 
     let active = ordinal;
-    let mut exact_hits: Vec<Option<Killer>> = vec![None; reachable.len()];
     // #[gamma::skip(all, reason = "the value controls scheduling, accounting, identity, or a conservative bound whose one-step perturbation has no safely deterministic external observation here")]
     let mut binary_runs: Vec<Option<(Verdict, bool)>> = core::iter::repeat_with(|| None).take(reachable.len()).collect();
+    let mut exact_attempted = false;
 
-    // Learned candidates are tried in ranked order, but their verdict is held until canonical
-    // iteration reaches that binary. This gets the useful launch under way first without allowing
-    // a later kill to bypass an earlier timeout, resource result, or flake. Loss of containment is
-    // command-wide, so an unmetered candidate abandons immediately instead of entering the cache.
+    if let Some(exact) = hint
+        && let Some(binary) = reachable.first().copied()
+        && exact.names(&binary.package, &binary.target)
+        && !census_excludes(sweep.census, binary, active)
+        && !negative_excludes(negative, binary, timeout_multiplier, sweep)
+    {
+        exact_attempted = true;
+        if let Some(killer) = probe(work, active, binary, exact, timeout_multiplier, sweep, tally, ProbeKind::Exact) {
+            return killed_by(killer);
+        }
+    }
+
+    // Learned candidates are tried in ranked order. Their outcomes are held until canonical
+    // iteration reaches that binary, so a later candidate cannot outrank an earlier resource
+    // verdict. Loss of containment is command-wide, so an unmetered candidate abandons immediately
+    // instead of entering the cache.
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-    if hint.is_none() {
+    {
         'candidate: for candidate in candidates {
+            let kind = candidate.probe_kind();
+
             match candidate {
                 Candidate::Exact(candidate_hint) => {
-                    let Some((index, binary)) = reachable
+                    let Some(binary) = reachable
                         .iter()
                         .copied()
-                        .enumerate()
-                        .find(|(_index, binary)| candidate_hint.names(&binary.package, &binary.target))
+                        .find(|binary| candidate_hint.names(&binary.package, &binary.target))
                     else {
                         continue 'candidate;
                     };
@@ -1513,13 +1601,13 @@ fn judge_ranked(
                     if negative_excludes(negative, binary, timeout_multiplier, sweep) {
                         continue 'candidate;
                     }
-
-                    if !filtered_kill_is_final(binary, timeout_multiplier, sweep) {
+                    if !kind.reserve(tally) {
+                        kind.reject(tally);
                         continue 'candidate;
                     }
 
                     let started = Instant::now();
-                    let found = probe(
+                    let found = probe_reserved(
                         work,
                         active,
                         binary,
@@ -1536,16 +1624,10 @@ fn judge_ranked(
                     }
 
                     if let Some(killer) = found {
-                        exact_hits[index] = Some(killer);
+                        return killed_by(killer);
                     }
                 }
                 Candidate::ItemBinary(identity) | Candidate::ReachFileBinary(identity) | Candidate::FileBinary(identity) => {
-                    let kind = match candidate {
-                        Candidate::ItemBinary(_) => ProbeKind::Item,
-                        Candidate::ReachFileBinary(_) => ProbeKind::Reach,
-                        Candidate::FileBinary(_) => ProbeKind::File,
-                        Candidate::Exact(_) => unreachable!("handled by the preceding match arm"),
-                    };
                     let Some((index, binary)) = reachable
                         .iter()
                         .copied()
@@ -1569,6 +1651,10 @@ fn judge_ranked(
                     if binary_runs[index].as_ref().is_some() {
                         continue 'candidate;
                     }
+                    if !kind.reserve(tally) {
+                        kind.reject(tally);
+                        continue 'candidate;
+                    }
 
                     let started = Instant::now();
                     let request = MemoryRequest {
@@ -1585,7 +1671,6 @@ fn judge_ranked(
                     };
                     record_launch(tally);
                     let _probes = tally.probes.fetch_add(1, Ordering::Relaxed);
-                    kind.attempt(tally);
                     let run = run_binary_observed(work, binary, attempt, sweep.confirm);
                     let convicted = matches!(run.verdict, Verdict::Failed(_));
                     if convicted {
@@ -1634,19 +1719,10 @@ fn judge_ranked(
             continue 'binary;
         }
 
-        // A hint naming another binary is stale or outside the selected package set. Waiting until
-        // canonical iteration reaches the named binary prevents its kill from bypassing any
-        // earlier Flaky, Pending, resource, or metering outcome.
-        let killer_hint = hint.filter(|hint| hint.names(&binary.package, &binary.target));
-
-        if let Some(hint) = killer_hint
-            && filtered_kill_is_final(binary, timeout_multiplier, sweep)
-            && let Some(killer) = probe(work, active, binary, hint, timeout_multiplier, sweep, tally, ProbeKind::Exact)
+        if !exact_attempted
+            && let Some(exact) = hint.filter(|hint| hint.names(&binary.package, &binary.target))
+            && let Some(killer) = probe(work, active, binary, exact, timeout_multiplier, sweep, tally, ProbeKind::Exact)
         {
-            return killed_by(killer);
-        }
-
-        if let Some(killer) = exact_hits[binary_index].take() {
             return killed_by(killer);
         }
 
@@ -1655,9 +1731,7 @@ fn judge_ranked(
             let _previous = tally.census_candidates.fetch_add(1, Ordering::Relaxed);
             let _previous = tally.available_tests.fetch_add(binary.tests.unwrap_or(0), Ordering::Relaxed);
 
-            if filtered_kill_is_final(binary, timeout_multiplier, sweep)
-                && let Some(killer) = probe_cases(work, active, binary, names, timeout_multiplier, sweep, tally)
-            {
+            if let Some(killer) = probe_cases(work, active, binary, names, timeout_multiplier, sweep, tally) {
                 let _previous = tally.selected_tests.fetch_add(names.len(), Ordering::Relaxed);
                 return killed_by(killer);
             }
@@ -1805,7 +1879,7 @@ fn negative_excludes(
         return false;
     };
 
-    negative.contains(site, binary) && filtered_kill_is_final(binary, timeout_multiplier, sweep)
+    negative.contains(site, binary) && negative_reach_hint_is_final(binary, timeout_multiplier, sweep)
 }
 
 fn killed_by(killer: Killer) -> Judgement {
@@ -1827,7 +1901,7 @@ fn whole_attempt(attempt: Attempt<'_>) -> Attempt<'_> {
 }
 
 fn filtered_run_needs_confirmation(already_whole: bool, selection: &CensusSelection<'_>, verdict: &Verdict) -> bool {
-    !already_whole && matches!(selection, CensusSelection::Selected(_)) && !matches!(verdict, Verdict::Passed)
+    !already_whole && matches!(selection, CensusSelection::Selected(_)) && !matches!(verdict, Verdict::Passed | Verdict::Failed(_))
 }
 
 fn negative_reach_is_final(run: &BinaryRun, only: Only<'_>, deterministic: bool) -> bool {
@@ -1852,35 +1926,23 @@ fn judge_learning(
     tally: &Tally,
 ) -> Judgement {
     let active = ordinal;
-    if deterministic_reach && let Some(hint) = hint {
-        let judged = judge_ranked(
-            work,
-            active,
-            reachable,
-            Some(hint),
-            &[],
-            Some((observed, item_path)),
-            Some((negative, site, deterministic_reach)),
-            timeout_multiplier,
-            sweep,
-            tally,
-        );
-
-        FileLearning::publish(observed, item_path, &judged);
-
-        return judged;
-    }
-
+    let exact = if deterministic_reach { hint } else { None };
     let mut candidates = if deterministic_reach { promoted.to_vec() } else { Vec::new() };
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     if deterministic_reach {
-        candidates.extend(FileLearning::candidates(observed, item_path));
+        let fallback = reachable
+            .iter()
+            .fold(Duration::ZERO, |total, binary| total.saturating_add(binary.baseline));
+        let (learned, rejected) = FileLearning::select_candidates(observed, item_path, fallback);
+        candidates.extend(learned);
+        record_rejections(tally, rejected);
+        record_rejections(tally, bound_candidates(&mut candidates));
     }
     let judged = judge_ranked(
         work,
         active,
         reachable,
-        None,
+        exact,
         &candidates,
         // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
         Some((observed, item_path)),
@@ -1893,6 +1955,60 @@ fn judge_learning(
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     FileLearning::publish(observed, item_path, &judged);
     judged
+}
+
+fn bound_candidates(candidates: &mut Vec<Candidate>) -> [usize; 3] {
+    let before = candidate_tier_counts(candidates);
+    let mut exact = 0;
+    let mut item_binary = 0;
+    let mut reach = 0;
+    let mut file = 0;
+
+    candidates.retain(|candidate| {
+        let count = match candidate {
+            Candidate::Exact(_) => &mut exact,
+            Candidate::ItemBinary(_) => &mut item_binary,
+            Candidate::ReachFileBinary(_) => &mut reach,
+            Candidate::FileBinary(_) => &mut file,
+        };
+        *count += 1;
+
+        *count
+            <= match candidate {
+                Candidate::Exact(_) => 2,
+                Candidate::ItemBinary(_) | Candidate::ReachFileBinary(_) | Candidate::FileBinary(_) => 1,
+            }
+    });
+
+    let after = candidate_tier_counts(candidates);
+    [
+        before[0].saturating_sub(after[0]),
+        before[1].saturating_sub(after[1]),
+        before[2].saturating_sub(after[2]),
+    ]
+}
+
+fn candidate_tier_counts(candidates: &[Candidate]) -> [usize; 3] {
+    let mut counts = [0; 3];
+    for candidate in candidates {
+        counts[match candidate.probe_kind() {
+            ProbeKind::Item => 0,
+            ProbeKind::Reach => 1,
+            ProbeKind::File => 2,
+            ProbeKind::Exact | ProbeKind::Census => unreachable!("generalized candidates never use exact or census accounting"),
+        }] += 1;
+    }
+    counts
+}
+
+fn record_rejections(tally: &Tally, rejected: [usize; 3]) {
+    for (count, counter) in rejected
+        .into_iter()
+        .zip([&tally.item_rejected, &tally.reach_rejected, &tally.file_rejected])
+    {
+        let _previous = counter.fetch_add(count, Ordering::Relaxed);
+        let _previous = tally.generalized_rejected.fetch_add(count, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1943,6 +2059,16 @@ enum Candidate {
     FileBinary(BinaryIdentity),
 }
 
+impl Candidate {
+    fn probe_kind(&self) -> ProbeKind {
+        match self {
+            Self::Exact(_) | Self::ItemBinary(_) => ProbeKind::Item,
+            Self::ReachFileBinary(_) => ProbeKind::Reach,
+            Self::FileBinary(_) => ProbeKind::File,
+        }
+    }
+}
+
 #[cfg(test)]
 impl Candidate {
     fn estimated_cost(&self, reachable: &[&TestBinary]) -> Duration {
@@ -1961,6 +2087,7 @@ impl Candidate {
 #[derive(Clone, Debug)]
 struct RankedCandidate<T> {
     identity: T,
+    seeds: u32,
     hits: u32,
     misses: u32,
     measured: Duration,
@@ -1991,12 +2118,26 @@ impl<T> RankedCandidate<T> {
         self.measured = self.measured.saturating_add(elapsed);
         self.samples = self.samples.saturating_add(1);
     }
+
+    fn is_admissible(&self, fallback: Duration) -> bool {
+        if self.hits == 0 && self.misses >= 2 {
+            return false;
+        }
+        if self.samples == 0 {
+            return true;
+        }
+
+        let average = self.measured / self.samples;
+        let expected = fallback.saturating_mul(self.hits.saturating_add(1)) / self.samples.saturating_add(2);
+        average <= expected
+    }
 }
 
 impl<T: Clone> RankedCandidate<T> {
     fn from_hint<U>(hint: &RankedHint<U>, identity: impl FnOnce(&U) -> T) -> Self {
         Self {
             identity: identity(&hint.candidate),
+            seeds: hint.seeds,
             hits: hint.hits,
             misses: hint.misses,
             measured: Duration::from_millis(hint.measured_ms),
@@ -2008,6 +2149,7 @@ impl<T: Clone> RankedCandidate<T> {
     fn hint<U>(&self, candidate: impl FnOnce(&T) -> U) -> RankedHint<U> {
         RankedHint {
             candidate: candidate(&self.identity),
+            seeds: self.seeds,
             hits: self.hits,
             misses: self.misses,
             measured_ms: elapsed_millis(self.measured),
@@ -2119,7 +2261,7 @@ impl FileLearning {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn candidates(&self, item_path: &str) -> Vec<Candidate> {
+    fn select_candidates(&self, item_path: &str, fallback: Duration) -> (Vec<Candidate>, [usize; 3]) {
         let (mut exact, mut reached, mut reached_file, mut binaries) = {
             let state = self.locked();
             let (exact, reached) = state
@@ -2136,11 +2278,20 @@ impl FileLearning {
         // #[gamma::skip(all, reason = "the ordering or deduplication is retained for deterministic, efficient behavior; the current internal consumer observes the same population")]
         reached_file.sort_by_key(RankedCandidate::score);
         binaries.sort_by_key(RankedCandidate::score);
+        let before = [exact.len() + reached.len(), reached_file.len(), binaries.len()];
+        exact.retain(|candidate| candidate.is_admissible(fallback));
+        reached.retain(|candidate| candidate.is_admissible(fallback));
+        reached_file.retain(|candidate| candidate.is_admissible(fallback));
+        binaries.retain(|candidate| candidate.is_admissible(fallback));
         reached_file.retain(|candidate| !contains_ranked_identity(&reached, &candidate.identity));
         // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         binaries.retain(|candidate| !contains_ranked_identity(&reached, &candidate.identity));
+        exact.truncate(2);
+        reached.truncate(1);
+        reached_file.truncate(1);
+        binaries.truncate(1);
 
-        exact
+        let candidates = exact
             .into_iter()
             .map(|candidate| Candidate::Exact(candidate.identity))
             .chain(reached.into_iter().map(|candidate| Candidate::ItemBinary(candidate.identity)))
@@ -2150,7 +2301,22 @@ impl FileLearning {
                     .map(|candidate| Candidate::ReachFileBinary(candidate.identity)),
             )
             .chain(binaries.into_iter().map(|candidate| Candidate::FileBinary(candidate.identity)))
-            .collect()
+            .collect::<Vec<_>>();
+        let after = candidate_tier_counts(&candidates);
+
+        (
+            candidates,
+            [
+                before[0].saturating_sub(after[0]),
+                before[1].saturating_sub(after[1]),
+                before[2].saturating_sub(after[2]),
+            ],
+        )
+    }
+
+    #[cfg(test)]
+    fn candidates(&self, item_path: &str, fallback: Duration) -> Vec<Candidate> {
+        self.select_candidates(item_path, fallback).0
     }
 
     fn observe(&self, item_path: &str, candidate: &Candidate, hit: bool, elapsed: Duration) {
@@ -2253,7 +2419,8 @@ fn advance_order(state: &mut LearningState) {
 fn reached_candidate(identity: BinaryIdentity, elapsed: Duration, order: u64) -> RankedCandidate<BinaryIdentity> {
     RankedCandidate {
         identity,
-        hits: u32::from(true),
+        seeds: 1,
+        hits: 0,
         misses: u32::from(false),
         measured: elapsed,
         samples: u32::from(true),
@@ -2264,7 +2431,8 @@ fn reached_candidate(identity: BinaryIdentity, elapsed: Duration, order: u64) ->
 fn published_candidate<T>(identity: T, order: u64) -> RankedCandidate<T> {
     RankedCandidate {
         identity,
-        hits: u32::from(true),
+        seeds: 1,
+        hits: 0,
         misses: u32::from(false),
         measured: Duration::ZERO,
         samples: u32::from(false),
@@ -2457,7 +2625,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn file_local_killer_is_probed_only_after_earlier_binaries() {
+    fn file_local_learning_preserves_canonical_precedence() {
         let (_directory, work, mut plan, mut binaries) =
             harness_n("echo 'test tests::caught ... FAILED'; exit 1", Duration::from_secs(30), 2);
         binaries[0].target = "killer".to_owned();
@@ -2496,13 +2664,13 @@ mod tests {
         .expect("two mutants should be swept");
 
         assert!(plan.mutants.iter().all(|mutant| mutant.outcome == Outcome::Killed));
-        assert_eq!(
-            spent.launches, 5,
-            "both mutants must run the earlier binary before the learned hint is checked"
+        assert!(
+            (4..=5).contains(&spent.launches),
+            "each mutant reaches the earlier canonical binary; a ranked candidate may need one separate confirmation: {spent:?}"
         );
-        assert_eq!(
-            spent.probes, 2,
-            "the learned killer is checked only after the earlier binary, then confirmed with the whole binary"
+        assert!(
+            (1..=2).contains(&spent.probes),
+            "the second mutant must exercise learned candidates without bypassing canonical precedence: {spent:?}"
         );
     }
 
@@ -3454,7 +3622,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cached_killer_cannot_bypass_the_canonical_timeout() {
+    fn a_cached_killer_settles_before_a_later_timeout() {
         const SCRIPT: &[&str] = &[
             "when-arg:tests::killer|print:test tests::killer ... FAILED",
             "when-arg:tests::killer|exit:1",
@@ -3489,15 +3657,64 @@ mod tests {
             &tally,
         );
 
-        assert!(matches!(judgement, Judgement::Reached(Outcome::Timeout, None, None)));
-        assert_eq!(tally.probes.load(Ordering::Relaxed), 0);
+        assert!(matches!(judgement, Judgement::Reached(Outcome::Killed, Some(_), None)));
+        assert_eq!(tally.probes.load(Ordering::Relaxed), 1);
         assert_eq!(tally.launches.load(Ordering::Relaxed), 1);
         assert_eq!(tally.exact_candidates.load(Ordering::Relaxed), 1);
-        assert_eq!(tally.whole_selections.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.whole_selections.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    fn a_partial_census_probe_cannot_bypass_the_whole_binary_timeout() {
+    fn a_confirmed_cached_killer_settles_under_all_resource_policies() {
+        const SCRIPT: &[&str] = &[
+            "when-env:GAMMA_ACTIVE|when-arg:tests::killer|print:test tests::killer ... FAILED",
+            "when-env:GAMMA_ACTIVE|when-arg:tests::killer|exit:1",
+            "when-env:GAMMA_ACTIVE|sleep:5000",
+            "exit:0",
+        ];
+
+        if crate::testing::without_memory_support("a cached killer under memory accounting") {
+            return;
+        }
+
+        let (_directory, work, _plan, mut binaries) = helper_harness(SCRIPT);
+        binaries[0].budget = Some(Duration::from_secs(2));
+        binaries[0].memory = Some(1024 * 1024 * 1024);
+        let reachable: Vec<&TestBinary> = binaries.iter().collect();
+        let hint = Killer {
+            package: "subject".to_owned(),
+            target: String::new(),
+            test: "tests::killer".to_owned(),
+        };
+        let tally = Tally::default();
+
+        let judgement = judge(
+            &work,
+            1,
+            &reachable,
+            Some(&hint),
+            None,
+            Sweep {
+                timeout_floor: Duration::ZERO,
+                stall: Stall {
+                    budget: Some(Duration::from_secs(2)),
+                },
+                jobs: 1,
+                meter: true,
+                confirm: true,
+                census: blind(),
+            },
+            &tally,
+        );
+
+        assert!(matches!(judgement, Judgement::Reached(Outcome::Killed, Some(_), None)));
+        assert_eq!(tally.launches.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.probes.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.whole_selections.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_partial_census_kill_settles_before_the_whole_binary_timeout() {
         const SCRIPT: &[&str] = &[
             "when-arg:tests::t0|print:test tests::t0 ... FAILED",
             "when-arg:tests::t0|exit:1",
@@ -3528,15 +3745,15 @@ mod tests {
             &tally,
         );
 
-        assert!(matches!(judgement, Judgement::Reached(Outcome::Timeout, None, None)));
-        assert_eq!(tally.probes.load(Ordering::Relaxed), 0);
+        assert!(matches!(judgement, Judgement::Reached(Outcome::Killed, Some(_), None)));
+        assert_eq!(tally.probes.load(Ordering::Relaxed), 1);
         assert_eq!(tally.launches.load(Ordering::Relaxed), 1);
-        assert_eq!(tally.hinted_fallbacks.load(Ordering::Relaxed), 1);
-        assert_eq!(tally.whole_selections.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.hinted_fallbacks.load(Ordering::Relaxed), 0);
+        assert_eq!(tally.whole_selections.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    fn a_group_census_hint_is_disabled_by_every_canonical_precedence_policy() {
+    fn negative_reach_hints_require_canonical_policy_free_runs() {
         let mut binary = crate::testing::helper();
         binary.budget = None;
         let base = Sweep {
@@ -3548,14 +3765,17 @@ mod tests {
             census: blind(),
         };
 
-        assert!(filtered_kill_is_final(&binary, None, base));
+        assert!(negative_reach_hint_is_final(&binary, None, base));
 
         binary.budget = Some(Duration::from_secs(1));
-        assert!(!filtered_kill_is_final(&binary, None, base), "timeout policy must run canonically");
+        assert!(
+            !negative_reach_hint_is_final(&binary, None, base),
+            "timeout policy must run canonically"
+        );
         binary.budget = None;
 
         assert!(
-            !filtered_kill_is_final(
+            !negative_reach_hint_is_final(
                 &binary,
                 None,
                 Sweep {
@@ -3568,11 +3788,11 @@ mod tests {
             "stall policy must run canonically"
         );
         assert!(
-            !filtered_kill_is_final(&binary, None, Sweep { meter: true, ..base }),
+            !negative_reach_hint_is_final(&binary, None, Sweep { meter: true, ..base }),
             "memory limits and metering failures must run canonically"
         );
         assert!(
-            !filtered_kill_is_final(&binary, None, Sweep { confirm: true, ..base }),
+            !negative_reach_hint_is_final(&binary, None, Sweep { confirm: true, ..base }),
             "confirmation flakes must run canonically"
         );
     }
@@ -3603,8 +3823,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn a_complete_census_failure_is_checked_against_the_whole_binary() {
+    fn a_complete_census_failure_settles_without_a_whole_binary_rerun() {
         const SCRIPT: &[&str] = &[
             "when-arg:tests::t0|print:test tests::t0 ... FAILED",
             "when-arg:tests::t0|exit:1",
@@ -3635,8 +3854,8 @@ mod tests {
             &tally,
         );
 
-        assert!(matches!(judgement, Judgement::Reached(Outcome::Timeout, None, None)));
-        assert_eq!(tally.launches.load(Ordering::Relaxed), 2);
+        assert!(matches!(judgement, Judgement::Reached(Outcome::Killed, Some(_), None)));
+        assert_eq!(tally.launches.load(Ordering::Relaxed), 1);
         assert_eq!(tally.case_selections.load(Ordering::Relaxed), 1);
         assert_eq!(tally.selected_tests.load(Ordering::Relaxed), 1);
     }
@@ -3670,8 +3889,8 @@ mod tests {
         );
 
         assert!(matches!(judgement, Judgement::Reached(Outcome::Flaky, None, Some(_))));
-        assert_eq!(tally.probes.load(Ordering::Relaxed), 0);
-        assert_eq!(tally.launches.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.probes.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.launches.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -3710,11 +3929,10 @@ mod tests {
         );
 
         assert!(matches!(judgement, Judgement::Reached(Outcome::Timeout, None, None)));
-        assert_eq!(tally.launches.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.launches.load(Ordering::Relaxed), 2);
     }
 
     #[test]
-    #[cfg(unix)]
     fn a_partial_census_hint_that_passes_falls_back_to_the_whole_binary() {
         const SCRIPT: &[&str] = &["when-arg:tests::t0|exit:0", "print:test tests::whole ... FAILED", "exit:1"];
 
@@ -4342,11 +4560,11 @@ mod tests {
         learning.publish("subject::a", &Judgement::Reached(Outcome::Killed, Some(killer("tests::a")), None));
         learning.publish("subject::a", &Judgement::Reached(Outcome::Killed, Some(killer("tests::a")), None));
 
-        let same = learning.candidates("subject::a");
+        let same = learning.candidates("subject::a", Duration::MAX);
         assert!(matches!(&same[0], Candidate::Exact(found) if found.test == "tests::a"));
         assert!(matches!(&same[1], Candidate::FileBinary(_)));
 
-        let other = learning.candidates("subject::b");
+        let other = learning.candidates("subject::b", Duration::MAX);
         assert_eq!(other.len(), 1);
         assert!(matches!(&other[0], Candidate::FileBinary(_)));
         let state = learning.locked();
@@ -4375,6 +4593,7 @@ mod tests {
 
         let mut ranked = RankedCandidate {
             identity: killer("tests::a"),
+            seeds: 1,
             hits: 0,
             misses: 0,
             measured: Duration::ZERO,
@@ -4393,9 +4612,21 @@ mod tests {
         assert_eq!(ranked.score(), (0, core::cmp::Reverse(1), Duration::from_millis(9), 9));
 
         let reached = reached_candidate(BinaryIdentity::from_binary(&binary), Duration::from_millis(4), 3);
-        assert_eq!((reached.hits, reached.misses, reached.samples, reached.order), (1, 0, 1, 3));
+        assert_eq!(
+            (reached.seeds, reached.hits, reached.misses, reached.samples, reached.order),
+            (1, 0, 0, 1, 3)
+        );
         let published = published_candidate(killer("tests::a"), 5);
-        assert_eq!((published.hits, published.misses, published.samples, published.order), (1, 0, 0, 5));
+        assert_eq!(
+            (
+                published.seeds,
+                published.hits,
+                published.misses,
+                published.samples,
+                published.order
+            ),
+            (1, 0, 0, 0, 5)
+        );
 
         let mut state = LearningState {
             next_order: u64::MAX,
@@ -4403,6 +4634,74 @@ mod tests {
         };
         advance_order(&mut state);
         assert_eq!(state.next_order, u64::MAX, "learning order saturates instead of wrapping");
+    }
+
+    #[test]
+    fn generalized_admission_requires_transfer_value_and_retires_repeated_misses() {
+        let candidate = |hits, misses, measured, samples| RankedCandidate {
+            identity: killer("tests::candidate"),
+            seeds: 1,
+            hits,
+            misses,
+            measured: Duration::from_millis(measured),
+            samples,
+            order: 0,
+        };
+
+        assert!(candidate(0, 0, 0, 0).is_admissible(Duration::from_millis(30)));
+        assert!(!candidate(0, 2, 2, 2).is_admissible(Duration::from_millis(30)));
+        assert!(!candidate(1, 1, 100, 2).is_admissible(Duration::from_millis(30)));
+        assert!(candidate(1, 1, 10, 2).is_admissible(Duration::from_millis(30)));
+    }
+
+    #[test]
+    fn generalized_candidates_are_bounded_per_tier() {
+        let mut candidates = (0..5)
+            .map(|index| Candidate::Exact(killer(&format!("tests::item_{index}"))))
+            .chain((0..3).map(|index| {
+                Candidate::FileBinary(BinaryIdentity {
+                    package: "subject".to_owned(),
+                    target: format!("file-{index}"),
+                })
+            }))
+            .collect::<Vec<_>>();
+
+        assert_eq!(bound_candidates(&mut candidates), [3, 0, 2]);
+        assert_eq!(candidate_tier_counts(&candidates), [2, 0, 1]);
+    }
+
+    #[test]
+    fn zero_hit_tiers_trip_a_campaign_circuit_breaker() {
+        let tally = Tally::default();
+        tally.item_probes.store(GENERALIZED_ZERO_HIT_LIMIT, Ordering::Relaxed);
+
+        assert!(!ProbeKind::Item.reserve(&tally));
+        ProbeKind::Item.reject(&tally);
+        assert_eq!(tally.item_rejected.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.generalized_rejected.load(Ordering::Relaxed), 1);
+
+        tally.item_hits.store(1, Ordering::Relaxed);
+        assert!(ProbeKind::Item.reserve(&tally), "a productive tier remains available");
+    }
+
+    #[test]
+    fn concurrent_zero_hit_admission_reserves_only_the_campaign_limit() {
+        let tally = Tally::default();
+        let admitted = AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for _worker in 0..(GENERALIZED_ZERO_HIT_LIMIT * 4) {
+                scope.spawn(|| {
+                    if ProbeKind::Item.reserve(&tally) {
+                        let _previous = admitted.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(admitted.load(Ordering::Relaxed), GENERALIZED_ZERO_HIT_LIMIT);
+        assert_eq!(tally.item_probes.load(Ordering::Relaxed), GENERALIZED_ZERO_HIT_LIMIT);
+        assert_eq!(tally.generalized_probes.load(Ordering::Relaxed), GENERALIZED_ZERO_HIT_LIMIT);
     }
 
     #[test]
@@ -4417,6 +4716,7 @@ mod tests {
                             package: "subject".to_owned(),
                             target: "first".to_owned(),
                         },
+                        seeds: 1,
                         hits: 1,
                         misses: 0,
                         measured_ms: 1,
@@ -4428,6 +4728,7 @@ mod tests {
                             package: "subject".to_owned(),
                             target: "second".to_owned(),
                         },
+                        seeds: 1,
                         hits: 1,
                         misses: 0,
                         measured_ms: 1,
@@ -4447,7 +4748,7 @@ mod tests {
         learning.observe("subject::item", &first, false, Duration::from_millis(1));
         learning.observe("subject::item", &first, false, Duration::from_millis(1));
 
-        let candidates = learning.candidates("subject::item");
+        let candidates = learning.candidates("subject::item", Duration::MAX);
         assert!(matches!(&candidates[0], Candidate::FileBinary(binary) if binary.target == "second"));
         let state = learning.locked();
         let demoted = state
@@ -4471,6 +4772,7 @@ mod tests {
                 item: "untouched::item".to_owned(),
                 candidates: vec![RankedHint {
                     candidate: killer("tests::old"),
+                    seeds: 1,
                     hits: 1,
                     misses: 0,
                     measured_ms: 1,
@@ -4595,6 +4897,7 @@ mod tests {
                 item: "subject::changed".to_owned(),
                 candidates: vec![RankedHint {
                     candidate: killer("tests::item"),
+                    seeds: 1,
                     hits: 4,
                     misses: 0,
                     measured_ms: 8,
@@ -4609,6 +4912,7 @@ mod tests {
                         package: "subject".to_owned(),
                         target: "integration".to_owned(),
                     },
+                    seeds: 1,
                     hits: 3,
                     misses: 1,
                     measured_ms: 20,
@@ -4619,7 +4923,7 @@ mod tests {
             ..GeneralizedHints::empty_supported()
         };
         let learning = FileLearning::from_hints(Utf8Path::new("src/lib.rs"), &hints);
-        let candidates = learning.candidates("subject::changed");
+        let candidates = learning.candidates("subject::changed", Duration::MAX);
 
         assert!(matches!(&candidates[0], Candidate::Exact(found) if found.test == "tests::item"));
         assert!(matches!(
@@ -4667,6 +4971,104 @@ mod tests {
         assert_eq!(tally.generalized_hits.load(Ordering::Relaxed), 0);
         assert_eq!(tally.item_probes.load(Ordering::Relaxed), 1);
         assert_eq!(tally.item_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(tally.launches.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_stale_exact_hint_leaves_generalized_candidates_eligible() {
+        let (_directory, work, plan, binaries) = helper_harness(&[
+            "when-arg:tests::stale|exit:0",
+            "when-arg:tests::actual|print:test tests::actual ... FAILED",
+            "when-arg:tests::actual|exit:1",
+            "exit:0",
+        ]);
+        let reachable: Vec<&TestBinary> = binaries.iter().collect();
+        let exact = Killer {
+            package: binaries[0].package.clone(),
+            target: binaries[0].target.clone(),
+            test: "tests::stale".to_owned(),
+        };
+        let candidates = [Candidate::Exact(Killer {
+            test: "tests::actual".to_owned(),
+            ..exact.clone()
+        })];
+        let tally = Tally::default();
+
+        let judged = judge_ranked(
+            &work,
+            plan.mutants[0].ordinal,
+            &reachable,
+            Some(&exact),
+            &candidates,
+            None,
+            None,
+            None,
+            Sweep {
+                timeout_floor: Duration::ZERO,
+                stall: Stall {
+                    budget: Some(Duration::from_secs(1)),
+                },
+                jobs: 1,
+                meter: false,
+                confirm: false,
+                census: blind(),
+            },
+            &tally,
+        );
+
+        assert!(matches!(judged, Judgement::Reached(Outcome::Killed, Some(_), None)));
+        assert_eq!(tally.exact_probes.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.exact_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(tally.generalized_probes.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.generalized_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.launches.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn an_inadmissible_exact_hint_leaves_generalized_candidates_eligible() {
+        const SCRIPT: &[&str] = &[
+            "when-arg:tests::actual|print:test tests::actual ... FAILED",
+            "when-arg:tests::actual|exit:1",
+            "exit:0",
+        ];
+
+        let (_directory, mut work, plan, binaries) = helper_harness(SCRIPT);
+        let mut arguments: Vec<String> = SCRIPT.iter().map(crate::testing::directive).collect();
+        arguments.push("tests::actual".to_owned());
+        work.set_test_args(arguments);
+        let reachable: Vec<&TestBinary> = binaries.iter().collect();
+        let exact = Killer {
+            package: binaries[0].package.clone(),
+            target: binaries[0].target.clone(),
+            test: "tests::excluded".to_owned(),
+        };
+        let candidates = [Candidate::Exact(Killer {
+            test: "tests::actual".to_owned(),
+            ..exact.clone()
+        })];
+        let tally = Tally::default();
+
+        let judged = judge_ranked(
+            &work,
+            plan.mutants[0].ordinal,
+            &reachable,
+            Some(&exact),
+            &candidates,
+            None,
+            None,
+            None,
+            Sweep {
+                confirm: false,
+                ..sweep(Stall::NONE)
+            },
+            &tally,
+        );
+
+        assert!(matches!(judged, Judgement::Reached(Outcome::Killed, Some(_), None)));
+        assert_eq!(tally.exact_probes.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.exact_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(tally.generalized_probes.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.generalized_hits.load(Ordering::Relaxed), 1);
         assert_eq!(tally.launches.load(Ordering::Relaxed), 2);
     }
 
@@ -4838,11 +5240,11 @@ mod tests {
 
         learning.reached("subject::a", &binary, Duration::from_millis(7));
 
-        let same = learning.candidates("subject::a");
+        let same = learning.candidates("subject::a", Duration::MAX);
         assert_eq!(same.len(), 1);
         assert!(matches!(&same[0], Candidate::ItemBinary(identity) if identity.target == "lib"));
 
-        let other = learning.candidates("subject::b");
+        let other = learning.candidates("subject::b", Duration::MAX);
         assert_eq!(other.len(), 1);
         assert!(matches!(&other[0], Candidate::ReachFileBinary(identity) if identity.target == "lib"));
 
@@ -4855,7 +5257,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reach_candidate_is_released_only_at_its_canonical_binary() {
+    fn a_reach_candidate_kill_waits_for_canonical_precedence() {
         let (_directory, work, plan, mut binaries) = helper_harness(&["print:test tests::reached ... FAILED", "exit:1"]);
         binaries[0].target = "earlier".to_owned();
         let mut reached = binaries[0].clone();
@@ -4871,7 +5273,7 @@ mod tests {
             plan.mutants[0].ordinal,
             &reachable,
             None,
-            &learning.candidates("subject::f"),
+            &learning.candidates("subject::f", Duration::MAX),
             Some((&learning, "subject::f")),
             None,
             None,
@@ -5088,13 +5490,13 @@ mod tests {
     }
 
     #[test]
-    fn a_reach_candidate_cannot_bypass_an_earlier_timeout() {
-        let (_directory, work, plan, mut binaries) = helper_harness(&["sleep:200", "exit:0"]);
+    fn an_earlier_unjudged_verdict_takes_precedence_over_a_later_candidate_kill() {
+        let (_directory, work, plan, mut binaries) = helper_harness(&["print:test tests::caught ... FAILED", "exit:1"]);
+        binaries[0].path = work.root.join("missing-test-binary");
         binaries[0].target = "canonical".to_owned();
-        binaries[0].budget = Some(Duration::from_millis(20));
         let mut reached = binaries[0].clone();
+        reached.path = crate::testing::helper().path;
         reached.target = "reached".to_owned();
-        reached.budget = None;
         binaries.push(reached);
         let reachable: Vec<&TestBinary> = binaries.iter().collect();
         let candidate = Candidate::ItemBinary(BinaryIdentity {
@@ -5122,11 +5524,11 @@ mod tests {
             &Tally::default(),
         );
 
-        assert!(matches!(judged, Judgement::Reached(Outcome::Timeout, None, None)));
+        assert!(matches!(judged, Judgement::Reached(Outcome::Pending, None, Some(_))));
     }
 
     #[test]
-    fn a_safe_same_item_exact_candidate_waits_for_canonical_iteration() {
+    fn a_safe_same_item_exact_candidate_settles_immediately() {
         let (_directory, work, _plan, mut binaries) = helper_harness(ONLY_WHEN_FILTERED);
         binaries[0].target = "earlier".to_owned();
         let mut later = binaries[0].clone();
@@ -5167,13 +5569,13 @@ mod tests {
         );
 
         assert!(matches!(judged, Judgement::Reached(Outcome::Killed, Some(_), None)));
-        assert_eq!(tally.launches.load(Ordering::Relaxed), 2);
-        assert_eq!(tally.probes.load(Ordering::Relaxed), 2);
+        assert_eq!(tally.launches.load(Ordering::Relaxed), 1);
+        assert_eq!(tally.probes.load(Ordering::Relaxed), 1);
         assert_eq!(tally.saved.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    fn a_later_candidate_kill_cannot_bypass_an_earlier_unjudged_binary() {
+    fn a_later_candidate_kill_settles_before_an_earlier_unjudged_binary() {
         let (_directory, work, _plan, mut binaries) = helper_harness(ONLY_WHEN_FILTERED);
         binaries[0].path = work.root.join("missing-test-binary");
         binaries[0].target = "earlier".to_owned();
@@ -5210,7 +5612,7 @@ mod tests {
             &tally,
         );
 
-        assert!(matches!(judged, Judgement::Reached(Outcome::Pending, None, Some(_))));
+        assert!(matches!(judged, Judgement::Reached(Outcome::Killed, Some(_), None)));
         assert_eq!(tally.probes.load(Ordering::Relaxed), 1);
     }
 
@@ -5255,7 +5657,7 @@ mod tests {
     }
 
     #[test]
-    fn a_candidate_is_demoted_after_two_misses() {
+    fn a_candidate_is_retired_after_two_transfer_misses() {
         let learning = FileLearning::new();
         learning.publish(
             "subject::a",
@@ -5268,17 +5670,23 @@ mod tests {
         let first = Candidate::Exact(killer("tests::first"));
 
         learning.observe("subject::a", &first, false, Duration::from_millis(20));
-        assert!(matches!(&learning.candidates("subject::a")[0], Candidate::Exact(found) if found.test == "tests::first"));
+        assert!(matches!(&learning.candidates("subject::a", Duration::MAX)[0], Candidate::Exact(found) if found.test == "tests::first"));
         learning.observe("subject::a", &first, false, Duration::from_millis(10));
 
-        assert!(matches!(&learning.candidates("subject::a")[0], Candidate::Exact(found) if found.test == "tests::second"));
+        assert!(matches!(&learning.candidates("subject::a", Duration::MAX)[0], Candidate::Exact(found) if found.test == "tests::second"));
+        assert!(
+            !learning
+                .candidates("subject::a", Duration::MAX)
+                .iter()
+                .any(|candidate| matches!(candidate, Candidate::Exact(found) if found.test == "tests::first"))
+        );
         let state = learning.locked();
         let recorded = state.items["subject::a"]
             .exact
             .iter()
             .find(|candidate| candidate.identity.test == "tests::first")
             .expect("the first candidate remains ranked");
-        assert_eq!((recorded.hits, recorded.misses), (1, 2));
+        assert_eq!((recorded.seeds, recorded.hits, recorded.misses), (1, 0, 2));
         assert_eq!(recorded.measured, Duration::from_millis(30));
         assert_eq!(recorded.samples, 2);
     }
@@ -5537,7 +5945,7 @@ mod tests {
         learning.publish("same", &Judgement::Reached(Outcome::Killed, Some(killer("tests::learned")), None));
         scheduler.complete(0);
         assert_eq!(scheduler.claim(&abandoned), Some(1));
-        assert!(matches!(&learning.candidates("same")[0], Candidate::Exact(found) if found.test == "tests::learned"));
+        assert!(matches!(&learning.candidates("same", Duration::MAX)[0], Candidate::Exact(found) if found.test == "tests::learned"));
         assert_eq!(
             scheduler.claim(&abandoned),
             Some(2),

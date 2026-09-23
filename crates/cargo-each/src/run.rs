@@ -1167,10 +1167,11 @@ mod tests {
         SnapshotSource, StreamedChild, TemporarySnapshot, TreeOutcome, WORKER_PANIC_TEST_PROGRAM, WORKER_SPAWN_ERROR_TEST_PROGRAM,
         add_infrastructure_failure, combine_captured_output, display_duration, effective_worker_count, emit_buffered_to, execute_parallel,
         exit_byte, failed_child_handoffs, failed_handoffs, failure_stops_launching, finish_capture, handoff_group,
-        handoff_group_with_fallback, observe_streamed_child, panic_description, parallel_failure_exit_code, poll_process_exit, poll_reaper,
-        record_emitted_failure, retain_after_reaper_observation, run_captured, run_captured_with, run_streamed, run_streamed_with_timeout,
-        run_streamed_with_timeout_with, spawn_group, spawn_worker, start_failed_handoff_reaper_with, terminate_child_bounded,
-        terminate_group_bounded, terminate_group_with, wait_for_process, wait_for_worker, with_cleanup_failure, with_reaper_handoff,
+        handoff_group_with_fallback, observe_streamed_child, panic_description, parallel_failure_exit_code, parse_predicates,
+        parse_target_kinds, poll_process_exit, poll_reaper, record_emitted_failure, retain_after_reaper_observation, run_captured,
+        run_captured_with, run_streamed, run_streamed_with_timeout, run_streamed_with_timeout_with, shell_join, spawn_group, spawn_worker,
+        start_failed_handoff_reaper_with, terminate_child_bounded, terminate_group_bounded, terminate_group_with, wait_for_process,
+        wait_for_worker, with_cleanup_failure, with_reaper_handoff,
     };
 
     fn invocation(argv: &[&str]) -> Invocation {
@@ -2295,5 +2296,43 @@ mod tests {
     fn tree_outcome_retains_the_invocation_result() {
         let outcome = TreeOutcome::new(InvocationResult::Infrastructure("outcome".to_owned()));
         assert_eq!(result_infrastructure_message(outcome.result), "outcome");
+    }
+
+    #[test]
+    fn shell_join_only_quotes_arguments_containing_whitespace() {
+        assert_eq!(
+            shell_join(&[
+                "cargo".to_owned(),
+                "plain".to_owned(),
+                "two words".to_owned(),
+                "tab\tseparated".to_owned(),
+            ]),
+            "cargo plain \"two words\" \"tab\tseparated\""
+        );
+        assert_eq!(shell_join(&[]), "");
+    }
+
+    #[test]
+    fn predicate_parse_error_has_run_context_and_exact_cause() {
+        let error = parse_predicates(&["feature:".to_owned()]).expect_err("invalid predicate");
+        let rendered = error.to_string();
+        assert!(rendered.starts_with("invalid filter expression"), "{rendered}");
+        assert!(
+            rendered.contains("invalid filter expression `feature:`: empty feature name"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn target_kind_error_has_run_context_and_exact_cause() {
+        let error = parse_target_kinds(&["future-kind".to_owned()]).expect_err("invalid target kind");
+        let rendered = error.to_string();
+        assert!(rendered.contains("> invalid per-target configuration"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "invalid target kind `future-kind`; expected one of: lib, rlib, dylib, cdylib, staticlib, proc-macro, bin, example, test, bench, custom-build"
+            ),
+            "{rendered}"
+        );
     }
 }

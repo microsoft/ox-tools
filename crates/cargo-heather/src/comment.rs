@@ -101,6 +101,7 @@ impl CommentStyle {
     /// Returns `None` for unsupported file types.
     #[must_use]
     pub fn from_path(path: &Path) -> Option<Self> {
+        // #[gamma::skip(option.none_to_some, reason = "path-only detection treats absent and empty content identically")]
         FileKind::detect(path, None).map(FileKind::comment_style)
     }
 
@@ -190,6 +191,15 @@ mod tests {
     #[test]
     fn valid_cargo_script() {
         assert!(is_cargo_script("#!/usr/bin/env cargo\n---\n"));
+        assert_eq!(
+            FileKind::detect(Path::new("script.rs"), Some("#!/usr/bin/env cargo\n---\n")),
+            Some(FileKind::CargoScript)
+        );
+    }
+
+    #[test]
+    fn frontmatter_without_a_shebang_is_not_a_cargo_script() {
+        assert!(!is_cargo_script("not a shebang\n---\n"));
     }
 
     #[test]
@@ -252,5 +262,6 @@ mod tests {
         assert_eq!(FileKind::detect(Path::new("a.ps"), None), None);
         assert_eq!(FileKind::detect(Path::new("a.psd"), None), None);
         assert_eq!(FileKind::detect(Path::new("a.psm"), None), None);
+        assert_eq!(CommentStyle::from_path(Path::new("notes.txt")), None);
     }
 }

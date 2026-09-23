@@ -144,14 +144,19 @@ pub struct MergeArgs {
 /// Arguments for `suppress`.
 #[derive(Debug, Args)]
 pub struct SuppressArgs {
-    /// The run to perform before writing anything.
+    /// Identifies the workspace and campaign cache whose persisted outcomes to promote.
+    ///
+    /// The command does not rerun the campaign. Explicit mutant-selection settings are rejected
+    /// because they cannot narrow a persisted ledger; execution settings retained for command-line
+    /// compatibility do not trigger Cargo metadata, building, or tests. The inherited `--dry-run`
+    /// flag is rejected because only `--dry-run-suppress` previews source edits.
     #[command(flatten)]
     pub run: RunArgs,
 
     /// Print the diff without changing anything.
     ///
-    /// Spelled apart from the run's own `--dry-run`, which stops before building at all: this one
-    /// runs everything and holds back only the source edit.
+    /// Spelled apart from the campaign command's `--dry-run`: this option reads the persisted
+    /// outcomes and validates the affected source, but holds back the source edit.
     #[arg(long, help_heading = "Suppressing")]
     pub dry_run_suppress: bool,
 
@@ -207,9 +212,9 @@ pub struct UnsuppressArgs {
 /// Arguments for `hints`.
 #[derive(Debug, Args, Default)]
 pub struct HintsArgs {
-    /// What to look at.
-    #[command(flatten)]
-    pub select: SelectArgs,
+    /// Path to the workspace or package whose latest completed campaign should be promoted.
+    #[arg(short = 'd', long, value_name = "PATH", default_value = ".")]
+    pub dir: Utf8PathBuf,
 
     /// Read the run record from this cache directory instead of cargo-gamma's default.
     ///
@@ -223,11 +228,11 @@ pub struct HintsArgs {
     #[arg(long, help_heading = "Run control")]
     pub dry_run: bool,
 
-    /// Replace the complete hints artifact instead of merging the selected population into it.
+    /// Replace the complete hints artifact instead of merging the completed campaign into it.
     ///
-    /// Ordinary promotion preserves knowledge outside the selected packages, files, diff and
-    /// mutator set. Use this only after a deliberately complete run when retained knowledge from
-    /// every other scope should be discarded.
+    /// Ordinary promotion preserves knowledge outside the recorded campaign population. Use this
+    /// only after a deliberately complete run when retained knowledge from every other scope
+    /// should be discarded.
     #[arg(long, help_heading = "Run control")]
     pub replace: bool,
 }

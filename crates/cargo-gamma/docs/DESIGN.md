@@ -381,6 +381,13 @@ The resolved Cargo target directory contains
 - incremental campaign records and transient execution data, including census files,
   `last-gamma-run.json`, and `gamma-progress.log`.
 
+The external per-workspace cache holds a small `campaign-location` locator naming the campaign
+base used by the latest completed run. State-consuming commands first ask Cargo for the selected
+directory's current workspace, then accept only the locator owned by that workspace. Failure to
+resolve current workspace identity is an error rather than permission to adopt potentially stale
+state. Completion publishes the record before the locator and advertises postprocessing commands
+only after resolving the locator back to that record.
+
 Normal runs publish `gamma-report.json`, `gamma-report.html`, `gamma-report.sarif`,
 `gamma-perf-advice.md`, and `gamma-diagnostics.json` under the original workspace's
 `target/cargo-gamma/`. `last-gamma-run.json` and `gamma-progress.log` remain reusable cache state
@@ -658,8 +665,16 @@ settle or change a verdict.
 
 Learning generalizes successful exact probes within one run and across promoted run records. Exact
 tests learned from the same `(source file, enclosing item)` are ranked ahead of test binaries that
-killed another mutant in the source file. Hits, misses, and observed cost rank candidates; two
-misses demote an atypical candidate.
+killed another mutant in the source file. Seed evidence records why a candidate may be explored;
+only kills against another mutant count as transfer hits. Transfer hits, misses, and observed cost
+rank candidates. Two transfer misses without a hit retire a candidate until new evidence exists.
+
+Generalized probes are admitted only when their observed cost does not exceed the fallback work
+their smoothed transfer probability can avoid. Unmeasured candidates receive one bounded
+exploration opportunity. Each mutant tries at most two same-item tests and one binary from each
+generalized tier. A tier with eight attempts and no hit stops exploring for that campaign; a hit
+keeps it open. Exact mutant hints and canonical fallback are unaffected, so admission can change
+cost but never a verdict.
 
 Workers choose mutants at assignment time rather than advancing through a fixed queue. The first
 unhinted assignment for an item is its scout. While it runs, workers prefer files with no active
@@ -669,12 +684,25 @@ sleeping for a duration. The scout publishes its exact-test and file/reach learn
 the reservation, so every awakened sibling sees the result. Hinted work is already informed and may
 share an active item.
 
-The durable generalized-hint schema stores those item and file rankings plus interned census reach
-sets keyed by stable source-site identity. It is independently versioned and shared by the run
-record and checked-in hints artifact. Unsupported generalized tiers are ignored without discarding
-exact per-mutant probes. Diagnostics report candidates, attempts, and hits separately for exact
-mutant hints and for generalized item, reach, file, and census tiers. Every generalized candidate
+The durable generalized-hint schema stores seed and transfer evidence for those item and file
+rankings plus interned census reach sets keyed by stable source-site identity. It is independently
+versioned and shared by the run record and checked-in hints artifact. Version-one rankings are
+migrated by retaining their identities as seed evidence and resetting the conflated transfer
+statistics. Unsupported generalized tiers are ignored without discarding exact per-mutant probes.
+Diagnostics report candidates, attempts, hits, and rejected candidates separately for exact mutant
+hints and for generalized item, reach, file, and census tiers. Every admitted generalized candidate
 is rerun before use; persistence never turns reach or historical ordering into a verdict.
+
+Hint promotion is a projection of persisted campaign state, not another discovery pass. After
+resolving and validating the current workspace identity, it uses the campaign ledger's persisted
+workspace-relative source paths without a source walk, parsing, or mutant regeneration. Stale
+identities remain safe because every hint is checked before use. Incremental promotion preserves
+unrelated entries; `--replace` intentionally drops them and requires a valid completed campaign
+record before changing the artifact. Older records that lack an exact path preserve supported
+generalized and compiler-ordering knowledge while omitting the unmappable exact entry. Incremental
+promotion treats a missing, corrupt, oversized, or unsupported campaign record as no promotable
+knowledge; replacement and commands that reconstruct source edits, such as `cargo gamma suppress`,
+load the record strictly and report those conditions as errors.
 
 Ordinary mutant launches reuse the census wire protocol to report whether the active guard was
 reached, without another subprocess. Positive observations promote that binary for later mutants
@@ -684,8 +712,10 @@ while deterministic reach narrowing is enabled. Filtered, failed, incomplete, or
 observations never establish absence. Reports count launches avoided by sweep-derived reach
 evidence separately from other learned-order savings.
 
-The first observed test failure settles a mutant, so remaining tests are stopped. This is safe only
-when harness output is unambiguous; modes that interleave user output with harness protocol disable
+The first observed test failure settles a mutant, so remaining tests are stopped. Direct libtest
+processes are supervised and terminated when their unambiguous `FAILED` announcement is observed;
+cargo-gamma does not pass libtest's unstable `--fail-fast` flag to stable harnesses. Nextest uses
+its supported fail-fast option. Modes that interleave user output with harness protocol disable
 early interpretation and fall back to the process exit status.
 
 ## Executing mutants safely
@@ -805,8 +835,21 @@ cached workspaces.
 Build scripts can read paths Cargo does not declare. When their complete input set cannot be known,
 unviability reuse is disabled rather than guessed.
 
-`--incremental no` and dry runs do not probe cache context, resolve cache-only external inputs,
-hash the workspace, or load a prior campaign record.
+`--incremental no` does not probe cache context, resolve cache-only external inputs, or load a
+prior campaign record. A real completed run still snapshots its workspace source generation and
+writes the outcome ledger used by explicit postprocessing commands; that evidence is never adopted
+by the run that records it. Because every measured run publishes this state, including
+`--incremental no`, measured runs for one workspace are serialized by its process-held workspace
+lock. Dry runs neither adopt nor write campaign state and do not take that lock.
+
+Incremental-cache eligibility and completed-campaign publication are separate decisions. An
+incomplete conservative input snapshot—for example, because a build script can read undeclared
+paths—prevents later verdict reuse, but does not discard source bytes and outcomes the completed
+campaign already observed. The completed ledger is published from that captured generation and
+postprocessing commands validate each affected current source site when they consume it. Publishing
+learning first must not leave a knowledge-only record in place of the final ledger; publication
+failure preserves the prior complete generation, is reported explicitly, and suppresses advice for
+a command whose required outcomes were not saved.
 
 ### Durable hints and suppressions
 
@@ -824,17 +867,20 @@ opposite failure policy. It refuses an existing artifact it cannot understand ra
 unknown knowledge with a partial generation; `--replace` is the explicit permission to discard it.
 That refusal includes an unsupported independently versioned generalized section, whose future
 fields cannot be preserved by today's typed serializer. Publication and legacy migration cleanup
-compare against the exact YAML and JSON bytes used for the merge, so another writer's intervening
-generation causes a conflict instead of being overwritten.
-
-Legacy JSON formats remain read-only migration inputs while no YAML artifact exists. YAML is
-published atomically and read back before the JSON input is removed, so interruption cannot leave
-the workspace without a complete artifact.
+compare against the exact YAML bytes used for the merge, so another writer's intervening generation
+causes a conflict instead of being overwritten. YAML is published atomically and read back before
+success is reported, so interruption cannot leave a partially written artifact.
 
 Suppression is different. It is a reviewed policy decision and therefore lives in source or
 configuration, not in an ephemeral cache. A cache directory must always be safe to delete without
 losing accepted policy. A run that produces a timeout or out-of-memory verdict points to
-`cargo gamma suppress`, which writes the corresponding reviewed suppression.
+`cargo gamma suppress`, which reads the persisted outcome ledger and writes the corresponding
+reviewed suppression after using Cargo metadata to validate the current workspace identity, but
+without synchronization, compilation, baselining, or test execution. The ledger records stable
+identity, verdict, workspace-relative source, mutator, source-site identity and location, and
+source-generation evidence. Suppression edits only
+uniquely matched unchanged or moved sites, reports stale or ambiguous sites instead of guessing,
+and verifies the source-level effect transactionally without altering the ledger or progress log.
 
 ### Sharding and merging
 
@@ -902,6 +948,12 @@ One verdict model feeds every output surface:
 - the diagnostics bundle records campaign phases and measurements;
 - the progress journal preserves completed verdict lines if a campaign is interrupted.
 
+Report source content comes from a retained snapshot inside the synchronized campaign workspace,
+validated against the digest discovery recorded before publication. The original checkout may
+change or delete files after discovery without changing the report. Artifact keys, locations,
+diagnostics, console descriptions, and `projectRoot` nevertheless retain original
+workspace-relative and original-project identities; cache paths are never published.
+
 `--only-survivors-from` reads a compatible cargo-gamma JSON report and intersects its genuine
 survivor IDs with the population discovered from the current source. Timeout and memory-limit
 outcomes are not selected even though the interchange schema exports them as `Survived`. This
@@ -914,8 +966,21 @@ The JSON report is written straight from the verdict model rather than rebuilt t
 tree first, and is validated in that form. Object keys follow schema declaration order, and
 per-file entries follow path order, making output byte-for-byte reproducible across runs.
 
-Console guidance is labelled `Hint`; incomplete, truncated, or unsaved output is labelled
-`warning`. Routine internal adjustments are silent.
+After findings, one blank line introduces a compact ordered footer: `Summary:`, `Stats  :` for an
+executed campaign, an actionable `Note   :` and indented entries for idle directives, the
+conditional suppression note, the conditional hints-promotion reminder, then one `Wrote  :` line
+per published artifact. The stats line reports elapsed wall time, distinct participating test
+binaries, mutant-test subprocess launches, and exact plus generalized hint probes that killed
+their mutant. It is absent for dry runs and runs that never reached test execution. All labels
+start in column one, use the same width and styled emphasis, and artifact paths use the host's
+native separators. Hints promotion is recommended only when the successfully persisted campaign
+state is resolvable through the same locator used by the command and would add, correct, or remove
+exact killer or compiler-ordering knowledge in the checked-in hints artifact. Generalized
+seed/transfer counter churn alone does not trigger the reminder. Suppression is recommended only
+when that same resolvable state contains the timeout or out-of-memory outcomes the command will
+consume.
+Incomplete, truncated, or unsaved output is labelled `warning`. Routine internal adjustments are
+silent.
 
 Everything a rendered artifact shows that the repository controls — paths, source fragments, test
 names, mutator notes, and a build tool's own diagnostics — is control-character encoded before it
@@ -1008,8 +1073,8 @@ Tests that change process-wide state which cannot be restored — an interrupt r
 told a run is ending, a fixed set of watch slots — must run in a process of their own or against an
 isolated injected instance. Left in the shared one, they decide what unrelated tests are able to do
 next, and which tests those are depends on the harness's scheduling rather than on anything the
-suite states. The remaining production-handler isolation gap is tracked explicitly in
-[TODO.md](TODO.md#t1-isolate-tests-from-the-production-interrupt-registry).
+suite states. Production-handler exercises therefore run in child processes, while registry and
+cgroup lifetime tests use isolated registries with injected recording killers.
 
 ### Live completion estimate
 
@@ -1031,7 +1096,9 @@ campaign's cost composition changes. The measured pre-sweep model remains a prio
 results cannot immediately dominate it; as representative evidence accumulates, observed outcome
 shares and service times narrow and move the range. No estimate is shown until either enough
 predicted work or a larger minimum population has completed. The display presents a low-to-high
-range while meaningful uncertainty remains instead of implying point accuracy.
+range while meaningful uncertainty remains instead of implying point accuracy. ETA endpoints use
+rounded whole seconds, minutes, or hours; fractional units would imply more precision than the
+model provides.
 
 ## Costs and limitations
 

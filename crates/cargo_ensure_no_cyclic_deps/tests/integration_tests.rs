@@ -114,3 +114,15 @@ fn test_command_without_() {
     // We expect success since the oxidizer workspace shouldn't have cycles
     cmd.assert().success();
 }
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn missing_manifest_reports_metadata_context() {
+    let missing_manifest = get_fixture_path("does-not-exist").join("Cargo.toml");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cargo-ensure-no-cyclic-deps"));
+    cmd.arg("ensure-no-cyclic-deps").arg("--manifest-path").arg(missing_manifest);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Failed to load cargo metadata"));
+}

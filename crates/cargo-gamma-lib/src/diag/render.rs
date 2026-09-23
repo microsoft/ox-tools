@@ -212,7 +212,7 @@ fn write_phases(text: &mut String, session: &Session) {
     if let Some(sweep) = &phases.sweep {
         let _ = writeln!(
             text,
-            "          sweep {}, {} launches, {} probes, {} saved ({} from reach; exact {}/{}, generalized {}/{})",
+            "          sweep {}, {} launches, {} probes, {} saved ({} from reach; exact {}/{}, generalized {}/{}, {} rejected)",
             human(sweep.elapsed),
             sweep.launches,
             sweep.probes,
@@ -222,6 +222,7 @@ fn write_phases(text: &mut String, session: &Session) {
             sweep.exact_probes,
             sweep.generalized_hits,
             sweep.generalized_probes,
+            sweep.generalized_rejected,
         );
         let _ = writeln!(
             text,
@@ -804,7 +805,7 @@ mod tests {
         assert!(text.contains("phases    copy 1.0s, preflight 2.0s, baseline 2.0s"), "{text}");
         assert!(text.contains("census 8.0s, 1681 tests over 30 binaries"), "{text}");
         assert!(
-            text.contains("sweep 42.0s, 47 launches, 12 probes, 9 saved (4 from reach; exact 4/5, generalized 3/7)"),
+            text.contains("sweep 42.0s, 47 launches, 12 probes, 9 saved (4 from reach; exact 4/5, generalized 3/7, 0 rejected)"),
             "{text}"
         );
     }

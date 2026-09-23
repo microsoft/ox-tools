@@ -35,10 +35,12 @@ cargo-platform = { workspace = true }
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 lcov = { workspace = true }
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 semver = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+mutants = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
