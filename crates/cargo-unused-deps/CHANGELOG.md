@@ -12,6 +12,7 @@
 
 - 🐛 Bug Fixes
 
+  - harden scoped evidence
   - preserve target scope in remediation
   - preserve feature dependency declarations
   - handle feature-forwarding dependencies

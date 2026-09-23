@@ -285,6 +285,7 @@ fn run() -> Result<ExitCode> {
         fix,
         require_workspace,
     } = cli.command;
+    let manifest_path = workspace_manifest_of(&manifest_path)?;
 
     let package_context = if package_checks_selected(&packages, workspace) {
         let selection = PackageSelection {
@@ -318,6 +319,37 @@ fn run() -> Result<ExitCode> {
 #[mutants::skip]
 fn package_checks_selected(packages: &[String], workspace: bool) -> bool {
     !packages.is_empty() || workspace
+}
+
+/// Resolve any member manifest to the root manifest Cargo associates with it.
+fn workspace_manifest_of(manifest_path: &Path) -> Result<PathBuf> {
+    let manifest = detect::read_manifest(manifest_path)?;
+    if matches!(detect::catalog(&manifest)?, Catalog::Workspace(_)) {
+        return Ok(manifest_path.to_path_buf());
+    }
+
+    let supplied = manifest_path
+        .canonicalize()
+        .context(format!("failed to resolve {}", manifest_path.display()))?;
+    let package_dir = supplied
+        .parent()
+        .expect("a canonical manifest file path always has a parent directory");
+
+    for ancestor in package_dir.ancestors().skip(1) {
+        let candidate = ancestor.join("Cargo.toml");
+        if !candidate.is_file() {
+            continue;
+        }
+        let document = detect::read_manifest(&candidate)?;
+        if !matches!(detect::catalog(&document)?, Catalog::Workspace(_)) {
+            continue;
+        }
+        if members_of(&candidate)?.iter().any(|member| member == &supplied) {
+            return Ok(candidate);
+        }
+    }
+
+    Ok(manifest_path.to_path_buf())
 }
 
 /// Cargo-style package selection for compiler-backed checks.

@@ -167,6 +167,73 @@ fn recognizes_the_dotted_inheritance_form() {
 }
 
 #[test]
+fn a_member_manifest_still_checks_the_workspace_root_catalog() {
+    let dir = workspace(
+        "[workspace]\nmembers = [\"member\"]\n\n[workspace.dependencies]\nunused = \"1\"\n",
+        &[("member", "")],
+    );
+
+    let (success, _, stderr) = outcome(&run(&dir.path().join("member").join("Cargo.toml"), &[]));
+
+    assert!(!success, "the root catalog has an unused entry");
+    assert!(stderr.contains("- unused"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains(&dir.path().join("Cargo.toml").display().to_string()),
+        "the finding must name the root manifest: {stderr}"
+    );
+}
+
+#[test]
+fn a_nested_standalone_crate_does_not_adopt_an_ancestor_package_manifest() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    for path in [dir.path().to_path_buf(), dir.path().join("nested")] {
+        fs::create_dir_all(path.join("src")).expect("failed to create source dir");
+        fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"standalone\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("failed to write manifest");
+        fs::write(path.join("src").join("lib.rs"), "").expect("failed to write source");
+    }
+    let nested = dir.path().join("nested").join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&nested, &[]));
+
+    assert!(success, "a standalone crate has no workspace catalog: {stderr}");
+    assert!(
+        stderr.contains(&nested.display().to_string()),
+        "the note must name the supplied manifest: {stderr}"
+    );
+}
+
+#[test]
+fn an_excluded_crate_does_not_adopt_the_enclosing_workspace_catalog() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = []\nexclude = [\"nested\"]\n\n[workspace.dependencies]\nunused = \"1\"\n",
+    )
+    .expect("failed to write workspace manifest");
+    let nested_dir = dir.path().join("nested");
+    fs::create_dir_all(nested_dir.join("src")).expect("failed to create source dir");
+    fs::write(
+        nested_dir.join("Cargo.toml"),
+        "[package]\nname = \"standalone\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("failed to write manifest");
+    fs::write(nested_dir.join("src").join("lib.rs"), "").expect("failed to write source");
+    let nested = nested_dir.join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&nested, &[]));
+
+    assert!(success, "an excluded crate has no workspace catalog: {stderr}");
+    assert!(
+        stderr.contains(&nested.display().to_string()),
+        "the note must name the supplied manifest: {stderr}"
+    );
+}
+
+#[test]
 fn a_declaration_that_does_not_inherit_does_not_count() {
     // The member declares `serde` itself rather than drawing it from the
     // catalog, so the catalog entry is still inherited by nobody.
