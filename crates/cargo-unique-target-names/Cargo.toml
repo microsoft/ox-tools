@@ -1,0 +1,42 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-unique-target-names"
+description = "A cargo subcommand that detects workspace targets which uplift to the same build artifact"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["oxidizer", "cargo", "subcommand", "workspace", "ci"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-unique-target-names"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.cargo_check_external_types]
+# `anyhow::Error` leaks through the `run` entry point that `main` calls. Mirrors the
+# allowlist entry in `cargo-ensure-no-default-features`, which has the same shape.
+allowed_external_types = ["anyhow::Result"]
+
+[[bin]]
+name = "cargo-unique-target-names"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true, features = ["std"] }
+cargo_metadata = { workspace = true }
+clap = { workspace = true, features = ["std", "derive", "color", "help", "error-context", "usage"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

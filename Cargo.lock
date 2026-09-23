@@ -711,6 +711,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-unique-target-names"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cargo_metadata",
+ "clap",
+ "tempfile",
+]
+
+[[package]]
 name = "cargo-unused-deps"
 version = "0.1.0"
 dependencies = [
