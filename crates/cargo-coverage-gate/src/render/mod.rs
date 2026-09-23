@@ -82,14 +82,21 @@ fn format_delta(outcome: &PackageOutcome) -> String {
         return "-<0.1pp".to_owned();
     }
 
-    // Ordinary values use the displayed precision of one decimal place.
+    // Ordinary values use the displayed precision of one decimal place. Once
+    // `delta` clears the sub-precision guard above, its rounded tenth can
+    // never land back on zero (rounding a value whose magnitude is already
+    // >= `DELTA_DISPLAY_PRECISION - DELTA_BOUNDARY_TOLERANCE` cannot produce
+    // `0.0`), so a `rounded < 0.0` branch here is unreachable and would be an
+    // equivalent mutant against `rounded <= 0.0`. Checking `is_sign_positive`
+    // after handling zero explicitly avoids that redundant comparison.
     let rounded = (delta * 10.0).round() / 10.0;
-    if rounded > 0.0 {
+    if rounded == 0.0 {
+        return "0.0pp".to_owned();
+    }
+    if rounded.is_sign_positive() {
         format!("+{rounded:.1}pp")
-    } else if rounded < 0.0 {
-        format!("{rounded:.1}pp")
     } else {
-        "0.0pp".to_owned()
+        format!("{rounded:.1}pp")
     }
 }
 
