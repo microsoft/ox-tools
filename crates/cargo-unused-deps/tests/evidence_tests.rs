@@ -230,20 +230,22 @@ fn an_environment_workspace_wrapper_is_chained() {
         .expect("failed to compile wrapper");
     assert!(status.success(), "failed to compile wrapper");
 
-    let output = command()
-        .arg("unused-deps")
-        .arg("--manifest-path")
-        .arg(fixture.dir.path().join("Cargo.toml"))
-        .args(["--package", "main"])
-        .env("RUSTC_WORKSPACE_WRAPPER", wrapper)
-        .output()
-        .expect("failed to execute the binary");
+    for variable in ["RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"] {
+        let output = command()
+            .arg("unused-deps")
+            .arg("--manifest-path")
+            .arg(fixture.dir.path().join("Cargo.toml"))
+            .args(["--package", "main"])
+            .env(variable, &wrapper)
+            .output()
+            .expect("failed to execute the binary");
 
-    assert!(
-        output.status.success(),
-        "the pre-existing workspace wrapper must remain in the compiler chain: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        assert!(
+            output.status.success(),
+            "{variable} must remain in the compiler chain: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
@@ -378,6 +380,35 @@ fn duplicate_target_declarations_are_not_judged_from_shared_extern_evidence() {
         output.status.success(),
         "rustc evidence cannot distinguish duplicate target declarations: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn the_same_key_in_different_sections_is_judged_from_each_sections_evidence() {
+    let fixture = Fixture::new(
+        &["helper"],
+        &format!("[dependencies]\n{}\n[build-dependencies]\n{}", dep("helper"), dep("helper")),
+        "pub fn go() {}\n",
+    )
+    .with_file("build.rs", "fn main() { helper::f(); }\n");
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "the unused normal declaration must still be reported");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[dependencies] helper: no compiled unit loaded it"),
+        "unexpected report: {stderr}"
+    );
+    assert!(
+        !stderr.contains("[build-dependencies] helper:"),
+        "the used build declaration must remain clean: {stderr}"
     );
 }
 
@@ -991,16 +1022,22 @@ fn misplaced_finding_does_not_collect_unneeded_doctest_evidence() {
 
 #[test]
 fn a_configured_workspace_wrapper_is_not_silently_replaced() {
-    let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n").with_file(
-        "../.cargo/config.toml",
+    let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
+    let caller = TempDir::new().expect("failed to create caller directory");
+    fs::create_dir(caller.path().join(".cargo")).expect("failed to create caller Cargo config directory");
+    fs::write(
+        caller.path().join(".cargo").join("config.toml"),
         "[build]\nrustc-workspace-wrapper = \"workspace-wrapper\"\n",
-    );
+    )
+    .expect("failed to write caller Cargo configuration");
 
     let output = command()
         .arg("unused-deps")
         .arg("--manifest-path")
         .arg(fixture.dir.path().join("Cargo.toml"))
         .args(["--package", "main"])
+        .current_dir(caller.path())
+        .env_remove("RUSTC_BOOTSTRAP")
         .output()
         .expect("failed to execute the binary");
 

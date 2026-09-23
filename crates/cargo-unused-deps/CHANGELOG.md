@@ -12,6 +12,7 @@
 
 - 🐛 Bug Fixes
 
+  - resolve member workspace roots
   - harden scoped evidence
   - preserve target scope in remediation
   - preserve feature dependency declarations

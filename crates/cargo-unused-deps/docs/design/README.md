@@ -117,10 +117,13 @@ error: could not compile `main` (lib test) due to 1 previous error
 ```
 
 So the lint level belongs to *this tool's own invocation* and nowhere else. The tool
-installs a chaining `RUSTC_WRAPPER` and appends `--force-warn
+installs a chaining `RUSTC_WORKSPACE_WRAPPER` and appends `--force-warn
 unused_crate_dependencies` after Cargo has resolved configured and environment flags.
-`--force-warn` cannot be lowered by crate attributes, and a caller's existing wrapper
-is invoked behind this one. Each analysis gets a fresh temporary `--target-dir`
+`--force-warn` cannot be lowered by crate attributes. Cargo's outer wrapper remains
+outside this one, and an environment-selected workspace wrapper is invoked behind it.
+The tool reads the stable Cargo configuration hierarchy for the caller's working
+directory and refuses to replace a file-configured workspace wrapper whose executable
+cannot be chained safely. Each analysis gets a fresh temporary `--target-dir`
 because Cargo does not replay lint diagnostics for cached artifacts; ordinary builds
 stay silent and stale evidence cannot cross invocations.
 
@@ -259,9 +262,11 @@ no explicit feature shadows that name. These declarations are excluded from sour
 findings before compiler evidence is judged.
 
 Rustc identifies an extern name, not the manifest declaration that introduced it. When
-the same dependency key appears in more than one dependency or target table, the tool
-cannot attribute one lint report to one declaration safely and suppresses source findings
-for that key. The catalog check remains unaffected.
+the same dependency key appears more than once within one dependency section's target
+tables, the tool cannot attribute one lint report to one declaration safely and suppresses
+source findings for that key and section. Normal, development, and build declarations use
+distinct evidence, so a repeated key across those sections remains independently judged.
+The catalog check remains unaffected.
 
 ### Also evaluated, and not used
 

@@ -7,12 +7,14 @@
 //! `unused_crate_dependencies` lint for its own build and reading the
 //! diagnostics cargo forwards as JSON.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::{env, fs};
 
 use anyhow::{Context, Result, bail};
+use toml_edit::DocumentMut;
 
 /// The diagnostic this tool listens for.
 const LINT: &str = "unused_crate_dependencies";
@@ -163,8 +165,11 @@ pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, a
     let mut command = Command::new(cargo());
     command.arg("check").arg("--manifest-path").arg(manifest_path).args(selection);
     let wrapper = std::env::current_exe().context("failed to locate this executable to use as the rustc wrapper")?;
-    ensure_no_configured_workspace_wrapper(manifest_path)?;
-    if let Some(inner) = std::env::var_os("RUSTC_WORKSPACE_WRAPPER") {
+    ensure_no_configured_workspace_wrapper()?;
+    let inner = std::env::var_os("RUSTC_WORKSPACE_WRAPPER")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER").filter(|value| !value.is_empty()));
+    if let Some(inner) = inner {
         command.env(INNER_WRAPPER_VAR, inner);
     }
     command.env("RUSTC_WORKSPACE_WRAPPER", wrapper).env(WRAPPER_VAR, "1");
@@ -191,37 +196,78 @@ pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, a
     parse(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Refuse to replace a Cargo-configured workspace wrapper we cannot chain safely.
-fn ensure_no_configured_workspace_wrapper(manifest_path: &Path) -> Result<()> {
-    let directory = manifest_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let output = Command::new(cargo())
-        .args(["-Z", "unstable-options", "config", "get"])
-        .current_dir(directory)
-        .output()
-        .context("failed to inspect Cargo compiler-wrapper configuration")?;
-    validate_workspace_wrapper_config(output.status.success(), &output.stdout, &output.stderr)
-}
-
-fn validate_workspace_wrapper_config(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<()> {
-    if !success {
-        bail!(
-            "failed to inspect Cargo compiler-wrapper configuration:\n{}",
-            String::from_utf8_lossy(stderr).trim()
-        );
-    }
-    if has_workspace_wrapper_config(&String::from_utf8_lossy(stdout)) {
-        bail!("build.rustc-workspace-wrapper is configured; cargo-unused-deps cannot safely interpose without bypassing it");
+/// Refuse to replace a file-configured workspace wrapper we cannot chain safely.
+fn ensure_no_configured_workspace_wrapper() -> Result<()> {
+    let current_dir = env::current_dir().context("failed to locate the current directory for Cargo configuration discovery")?;
+    for path in cargo_config_paths(&current_dir) {
+        if !path.is_file() {
+            continue;
+        }
+        let contents = fs::read_to_string(&path).context(format!("failed to read Cargo configuration {}", path.display()))?;
+        if has_workspace_wrapper_config(&contents).context(format!("failed to parse Cargo configuration {}", path.display()))? {
+            bail!(
+                "{} configures a workspace rustc wrapper; cargo-unused-deps cannot safely interpose without bypassing it",
+                path.display()
+            );
+        }
     }
     Ok(())
 }
 
-fn has_workspace_wrapper_config(config: &str) -> bool {
-    config
-        .lines()
-        .any(|line| line.trim_start().starts_with("build.rustc-workspace-wrapper ="))
+/// Cargo configuration files read for a command launched from `current_dir`.
+fn cargo_config_paths(current_dir: &Path) -> Vec<PathBuf> {
+    let mut seen = BTreeSet::new();
+    current_dir
+        .ancestors()
+        .map(|ancestor| ancestor.join(".cargo"))
+        .chain(cargo_home(current_dir))
+        .flat_map(|directory| [directory.join("config.toml"), directory.join("config")])
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+fn cargo_home(current_dir: &Path) -> Option<PathBuf> {
+    cargo_home_in(
+        current_dir,
+        env::var_os("CARGO_HOME"),
+        env::var_os("HOME"),
+        env::var_os("USERPROFILE"),
+    )
+}
+
+fn cargo_home_in(
+    current_dir: &Path,
+    cargo_home: Option<OsString>,
+    home: Option<OsString>,
+    user_profile: Option<OsString>,
+) -> Option<PathBuf> {
+    if let Some(configured) = cargo_home.filter(|value| !value.is_empty()) {
+        let configured = PathBuf::from(configured);
+        return Some(if configured.is_absolute() {
+            configured
+        } else {
+            current_dir.join(configured)
+        });
+    }
+
+    home.filter(|value| !value.is_empty())
+        .or_else(|| user_profile.filter(|value| !value.is_empty()))
+        .map(|home| PathBuf::from(home).join(".cargo"))
+}
+
+fn has_workspace_wrapper_config(config: &str) -> Result<bool> {
+    let document = config.parse::<DocumentMut>()?;
+    let build_wrapper = document
+        .get("build")
+        .and_then(toml_edit::Item::as_table_like)
+        .is_some_and(|build| build.get("rustc-workspace-wrapper").is_some());
+    let environment_wrapper = document
+        .get("env")
+        .and_then(toml_edit::Item::as_table_like)
+        .is_some_and(|environment| {
+            environment.get("RUSTC_WORKSPACE_WRAPPER").is_some() || environment.get("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER").is_some()
+        });
+    Ok(build_wrapper || environment_wrapper)
 }
 
 /// Run as Cargo's rustc wrapper and make the evidence lint non-overridable.
@@ -354,11 +400,11 @@ fn reported_name(message: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::{
-        Evidence, Scope, TargetKind, cargo_or_default, failure_diagnostics, has_workspace_wrapper_config, parse, reported_name,
-        validate_workspace_wrapper_config, wrapper_command,
+        Evidence, Scope, TargetKind, cargo_home_in, cargo_or_default, failure_diagnostics, has_workspace_wrapper_config, parse,
+        reported_name, wrapper_command,
     };
 
     #[test]
@@ -389,12 +435,44 @@ mod tests {
 
     #[test]
     fn configured_workspace_wrappers_are_detected() {
-        assert!(has_workspace_wrapper_config(
-            "build.rustc-workspace-wrapper = \"workspace-wrapper\"\n"
-        ));
-        assert!(!has_workspace_wrapper_config("build.rustc-wrapper = \"outer-wrapper\"\n"));
-        validate_workspace_wrapper_config(false, b"", b"cargo failed").expect_err("Cargo failure must propagate");
-        validate_workspace_wrapper_config(true, b"build.rustc-wrapper = \"outer\"\n", b"").expect("an outer wrapper does not conflict");
+        assert!(has_workspace_wrapper_config("build.rustc-workspace-wrapper = \"workspace-wrapper\"\n").expect("configuration is valid"));
+        assert!(
+            has_workspace_wrapper_config("[env]\nCARGO_BUILD_RUSTC_WORKSPACE_WRAPPER = \"workspace-wrapper\"\n")
+                .expect("configuration is valid")
+        );
+        assert!(!has_workspace_wrapper_config("build.rustc-wrapper = \"outer-wrapper\"\n").expect("configuration is valid"));
+        has_workspace_wrapper_config("[build").expect_err("malformed Cargo configuration must fail");
+    }
+
+    #[test]
+    fn cargo_home_follows_cargo_environment_precedence() {
+        let current = Path::new("workspace");
+        let absolute = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            cargo_home_in(current, Some("relative-home".into()), None, None),
+            Some(current.join("relative-home"))
+        );
+        assert_eq!(
+            cargo_home_in(current, Some(absolute.clone().into()), Some("ignored".into()), None),
+            Some(absolute)
+        );
+        assert_eq!(
+            cargo_home_in(current, None, Some("home".into()), Some("profile".into())),
+            Some(PathBuf::from("home").join(".cargo"))
+        );
+        assert_eq!(
+            cargo_home_in(current, None, None, Some("profile".into())),
+            Some(PathBuf::from("profile").join(".cargo"))
+        );
+        assert_eq!(
+            cargo_home_in(current, Some(OsString::new()), Some("home".into()), None),
+            Some(PathBuf::from("home").join(".cargo"))
+        );
+        assert_eq!(
+            cargo_home_in(current, None, Some(OsString::new()), Some("profile".into())),
+            Some(PathBuf::from("profile").join(".cargo"))
+        );
+        assert_eq!(cargo_home_in(current, None, None, None), None);
     }
 
     #[test]
