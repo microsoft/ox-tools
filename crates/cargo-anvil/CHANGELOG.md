@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-18
+
+- ✨ Features
+
+  - split managed lint regions
+  - lint empty braced structs
+
+- 🐛 Bug Fixes
+
+  - scope coverage reports to affected packages ([#190](https://github.com/microsoft/ox-tools/pull/190))
+
+- ♻️ Code Refactoring
+
+  - centralize lint overrides
+
+- 🧩 Miscellaneous
+
+  - Merge origin/main into feat/anvil-empty-struct-lint
+
 ## [0.11.1] - 2026-09-21
 
 - 🐛 Bug Fixes

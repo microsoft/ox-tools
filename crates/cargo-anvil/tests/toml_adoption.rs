@@ -30,7 +30,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use cargo_anvil::test_support::{Cli, RunOutcome, Target, run_update};
+use cargo_anvil::test_support::{Cli, Decision, Manifest, RunOutcome, Target, checksum_str, run_update};
 use tempfile::TempDir;
 
 /// A workspace with nothing in it but the manifest anvil needs to find, plus
@@ -214,11 +214,244 @@ members = [\"crates/*\"]
 # House rule, not in anvil's catalog.
 rust.a_custom_lint = \"warn\"
 rust.unsafe_op_in_unsafe_fn = \"warn\"
+
+[profile.release]
+lto = \"thin\"
+incremental = false
 ";
     let tmp = workspace_with("Cargo.toml", before);
     let outcome = run(&tmp);
 
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    let document: toml_edit::DocumentMut = after.parse().unwrap();
+    assert_eq!(document["workspace"]["lints"]["rust"]["a_custom_lint"].as_str(), Some("warn"));
+    assert_eq!(document["profile"]["release"]["lto"].as_str(), Some("thin"));
+    assert_eq!(document["profile"]["release"]["incremental"].as_bool(), Some(false));
     insta::assert_snapshot!("keeps_an_unmanaged_dotted_lint", report(before, &tmp, "Cargo.toml", &outcome));
+}
+
+#[test]
+fn replaces_the_combined_lint_region_without_losing_local_lints() {
+    let old_body = "[workspace.lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
+    let before = format!(
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n\
+         # >>> anvil-managed: anvil-workspace-lints\n{old_body}\
+         # <<< anvil-managed: anvil-workspace-lints\n\n\
+         # Repository-specific lint policy.\n\
+         rust.missing_docs = \"warn\"\n\
+         clippy.panic = \"warn\"\n"
+    );
+    let tmp = workspace_with("Cargo.toml", &before);
+    let mut manifest = Manifest::default();
+    manifest.set_region("Cargo.toml", "anvil-workspace-lints", checksum_str(old_body));
+    manifest.save(tmp.path()).unwrap();
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(outcome.plan.refusals().is_empty(), "{:?}\n{after}", outcome.plan.refusals());
+    let document: toml_edit::DocumentMut = after.parse().unwrap();
+    assert!(!after.contains("anvil-workspace-lints"));
+    assert!(after.contains("[workspace.lints.rust]\n"));
+    assert_eq!(document["workspace"]["lints"]["rust"]["missing_docs"].as_str(), Some("warn"));
+    assert!(after.contains("[workspace.lints.clippy]\n"));
+    assert_eq!(document["workspace"]["lints"]["clippy"]["panic"].as_str(), Some("warn"));
+    assert!(!after.contains("rust.missing_docs"), "{after}");
+    assert!(!after.contains("clippy.panic"), "{after}");
+
+    let second = run(&tmp);
+    assert!(
+        second.plan.items().iter().all(|item| item.decision == Decision::InSync),
+        "the migration must settle in one run: {:?}",
+        second.plan.items()
+    );
+}
+
+#[test]
+fn combined_lint_migration_preserves_other_lint_namespaces() {
+    let old_body = "[workspace.lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
+    let before = format!(
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n\
+         # >>> anvil-managed: anvil-workspace-lints\n{old_body}\
+         # <<< anvil-managed: anvil-workspace-lints\n\n\
+         rust.missing_docs = \"warn\"\n\
+         other.custom = \"warn\"\n"
+    );
+    let tmp = workspace_with("Cargo.toml", &before);
+    let mut manifest = Manifest::default();
+    manifest.set_region("Cargo.toml", "anvil-workspace-lints", checksum_str(old_body));
+    manifest.save(tmp.path()).unwrap();
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(outcome.plan.refusals().is_empty(), "{:?}\n{after}", outcome.plan.refusals());
+    let document: toml_edit::DocumentMut = after.parse().unwrap();
+    assert_eq!(document["workspace"]["lints"]["rust"]["missing_docs"].as_str(), Some("warn"));
+    assert_eq!(document["workspace"]["lints"]["other"]["custom"].as_str(), Some("warn"));
+
+    let second = run(&tmp);
+    assert!(
+        second.plan.items().iter().all(|item| item.decision == Decision::InSync),
+        "the migration must settle in one run: {:?}",
+        second.plan.items()
+    );
+}
+
+#[test]
+fn empty_combined_lint_region_still_migrates_following_local_lints() {
+    let old_body = "";
+    let before = "\
+[workspace]
+resolver = \"2\"
+members = [\"crates/*\"]
+
+# >>> anvil-managed: anvil-workspace-lints
+# <<< anvil-managed: anvil-workspace-lints
+
+rust.missing_docs = \"warn\"
+clippy.panic = \"warn\"
+";
+    let tmp = workspace_with("Cargo.toml", before);
+    let mut manifest = Manifest::default();
+    manifest.set_region("Cargo.toml", "anvil-workspace-lints", checksum_str(old_body));
+    manifest.save(tmp.path()).unwrap();
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(outcome.plan.refusals().is_empty(), "{:?}\n{after}", outcome.plan.refusals());
+    let document: toml_edit::DocumentMut = after.parse().unwrap();
+    assert_eq!(document["workspace"]["lints"]["rust"]["missing_docs"].as_str(), Some("warn"));
+    assert_eq!(document["workspace"]["lints"]["clippy"]["panic"].as_str(), Some("warn"));
+    assert!(!after.contains("anvil-workspace-lints"));
+}
+
+#[test]
+fn untracked_combined_lint_region_is_refused() {
+    let old_body = "[workspace.lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
+    let before = format!(
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n\
+         # >>> anvil-managed: anvil-workspace-lints\n{old_body}\
+         # <<< anvil-managed: anvil-workspace-lints\n"
+    );
+    let tmp = workspace_with("Cargo.toml", &before);
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(
+        outcome
+            .plan
+            .refusals()
+            .iter()
+            .any(|item| item.contains("manifest does not record it as owned")),
+        "{:?}",
+        outcome.plan.refusals()
+    );
+    assert_eq!(after, before);
+}
+
+#[test]
+fn untracked_single_crate_combined_lint_region_is_refused() {
+    let old_body = "[lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
+    let before = format!(
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         # >>> anvil-managed: anvil-lints\n{old_body}\
+         # <<< anvil-managed: anvil-lints\n"
+    );
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("Cargo.toml"), &before);
+    write(&tmp.path().join("src/lib.rs"), "");
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(
+        outcome
+            .plan
+            .refusals()
+            .iter()
+            .any(|item| item.contains("manifest does not record it as owned")),
+        "{:?}",
+        outcome.plan.refusals()
+    );
+    assert_eq!(after, before);
+}
+
+#[test]
+fn edited_combined_lint_region_is_refused() {
+    let old_body = "[workspace.lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
+    let edited_body = "[workspace.lints]\nrust.unsafe_op_in_unsafe_fn = \"deny\"\n";
+    let before = format!(
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n\
+         # >>> anvil-managed: anvil-workspace-lints\n{edited_body}\
+         # <<< anvil-managed: anvil-workspace-lints\n"
+    );
+    let tmp = workspace_with("Cargo.toml", &before);
+    let mut manifest = Manifest::default();
+    manifest.set_region("Cargo.toml", "anvil-workspace-lints", checksum_str(old_body));
+    manifest.save(tmp.path()).unwrap();
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(
+        outcome
+            .plan
+            .refusals()
+            .iter()
+            .any(|item| item.contains("legacy managed region 'anvil-workspace-lints' contains edits")),
+        "{:?}",
+        outcome.plan.refusals()
+    );
+    assert_eq!(after, before);
+}
+
+#[test]
+fn empty_combined_lint_region_after_external_parent_table_is_refused() {
+    let old_body = "";
+    let before = "\
+[workspace]
+resolver = \"2\"
+members = [\"crates/*\"]
+
+[workspace.lints]
+rust.unreachable_pub = \"warn\"
+
+# >>> anvil-managed: anvil-workspace-lints
+# <<< anvil-managed: anvil-workspace-lints
+
+rust.missing_docs = \"warn\"
+";
+    let tmp = workspace_with("Cargo.toml", before);
+    let mut manifest = Manifest::default();
+    manifest.set_region("Cargo.toml", "anvil-workspace-lints", checksum_str(old_body));
+    manifest.save(tmp.path()).unwrap();
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(!outcome.plan.refusals().is_empty(), "{after}");
+    assert_eq!(after, before);
+}
+
+#[test]
+fn replaces_the_single_crate_combined_lint_region() {
+    let old_body = "[lints]\nrust.unsafe_op_in_unsafe_fn = \"warn\"\n";
+    let before = format!(
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         # >>> anvil-managed: anvil-lints\n{old_body}\
+         # <<< anvil-managed: anvil-lints\n\n\
+         rust.missing_docs = \"warn\"\n"
+    );
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("Cargo.toml"), &before);
+    write(&tmp.path().join("src/lib.rs"), "");
+    let mut manifest = Manifest::default();
+    manifest.set_region("Cargo.toml", "anvil-lints", checksum_str(old_body));
+    manifest.save(tmp.path()).unwrap();
+
+    let outcome = run(&tmp);
+    let after = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    assert!(outcome.plan.refusals().is_empty(), "{:?}\n{after}", outcome.plan.refusals());
+    let document: toml_edit::DocumentMut = after.parse().unwrap();
+    assert_eq!(document["lints"]["rust"]["missing_docs"].as_str(), Some("warn"));
+    assert!(after.contains("anvil-managed: anvil-rust-lints"));
+    assert!(!after.contains("anvil-managed: anvil-lints\n"));
 }
 
 /// Catalog arrays-of-tables are unsupported, but user bin targets survive.

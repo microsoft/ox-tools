@@ -1,0 +1,5 @@
+# Rustdoc lint policy. Repository-specific rustdoc lints can follow this
+# region as bare keys in the same table.
+broken_intra_doc_links = "warn"
+missing_crate_level_docs = "warn"
+unescaped_backticks = "warn"
