@@ -258,6 +258,11 @@ names it. A bare feature member names an implicit optional-dependency feature on
 no explicit feature shadows that name. These declarations are excluded from source
 findings before compiler evidence is judged.
 
+Rustc identifies an extern name, not the manifest declaration that introduced it. When
+the same dependency key appears in more than one dependency or target table, the tool
+cannot attribute one lint report to one declaration safely and suppresses source findings
+for that key. The catalog check remains unaffected.
+
 ### Also evaluated, and not used
 
 **`cargo machete`** walks every `.rs` file and regex-matches each dependency's name.

@@ -17,10 +17,10 @@ use anyhow::{Context, Result, bail};
 /// The diagnostic this tool listens for.
 const LINT: &str = "unused_crate_dependencies";
 
-/// Marks an invocation of this binary as Cargo's rustc wrapper.
+/// Marks an invocation of this binary as Cargo's workspace rustc wrapper.
 pub const WRAPPER_VAR: &str = "CARGO_UNUSED_DEPS_RUSTC_WRAPPER";
 
-/// Preserves a caller-provided rustc wrapper behind this tool's wrapper.
+/// Preserves a caller-provided workspace wrapper behind this tool's wrapper.
 const INNER_WRAPPER_VAR: &str = "CARGO_UNUSED_DEPS_INNER_RUSTC_WRAPPER";
 
 /// What a cargo target is, for the purpose of reading its evidence.
@@ -163,10 +163,11 @@ pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, a
     let mut command = Command::new(cargo());
     command.arg("check").arg("--manifest-path").arg(manifest_path).args(selection);
     let wrapper = std::env::current_exe().context("failed to locate this executable to use as the rustc wrapper")?;
-    if let Some(inner) = std::env::var_os("RUSTC_WRAPPER") {
+    ensure_no_configured_workspace_wrapper(manifest_path)?;
+    if let Some(inner) = std::env::var_os("RUSTC_WORKSPACE_WRAPPER") {
         command.env(INNER_WRAPPER_VAR, inner);
     }
-    command.env("RUSTC_WRAPPER", wrapper).env(WRAPPER_VAR, "1");
+    command.env("RUSTC_WORKSPACE_WRAPPER", wrapper).env(WRAPPER_VAR, "1");
 
     if all_targets {
         command.arg("--all-targets");
@@ -190,11 +191,41 @@ pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, a
     parse(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Refuse to replace a Cargo-configured workspace wrapper we cannot chain safely.
+fn ensure_no_configured_workspace_wrapper(manifest_path: &Path) -> Result<()> {
+    let directory = manifest_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let output = Command::new(cargo())
+        .args(["-Z", "unstable-options", "config", "get"])
+        .current_dir(directory)
+        .output()
+        .context("failed to inspect Cargo compiler-wrapper configuration")?;
+    if !output.status.success() {
+        bail!(
+            "failed to inspect Cargo compiler-wrapper configuration:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if has_workspace_wrapper_config(&String::from_utf8_lossy(&output.stdout)) {
+        bail!("build.rustc-workspace-wrapper is configured; cargo-unused-deps cannot safely interpose without bypassing it");
+    }
+    Ok(())
+}
+
+fn has_workspace_wrapper_config(config: &str) -> bool {
+    config
+        .lines()
+        .any(|line| line.trim_start().starts_with("build.rustc-workspace-wrapper ="))
+}
+
 /// Run as Cargo's rustc wrapper and make the evidence lint non-overridable.
 ///
 /// Cargo has already resolved config and environment rustflags before invoking
-/// the wrapper, so appending here preserves every active flag source. A
-/// pre-existing wrapper is chained with Cargo's standard wrapper protocol.
+/// the wrapper, so appending here preserves every active flag source. Cargo's
+/// outer `RUSTC_WRAPPER`/`CARGO_BUILD_RUSTC_WRAPPER` remains outside this
+/// workspace wrapper, while an existing workspace wrapper is chained inside it.
 pub fn wrapper(args: &[OsString]) -> Result<ExitCode> {
     let (rustc, rustc_args) = args.split_first().context("rustc wrapper was invoked without a compiler path")?;
     let mut command = wrapper_command(std::env::var_os(INNER_WRAPPER_VAR), rustc);
@@ -321,7 +352,10 @@ mod tests {
     use std::ffi::OsString;
     use std::path::Path;
 
-    use super::{Evidence, Scope, TargetKind, cargo_or_default, failure_diagnostics, parse, reported_name, wrapper_command};
+    use super::{
+        Evidence, Scope, TargetKind, cargo_or_default, failure_diagnostics, has_workspace_wrapper_config, parse, reported_name,
+        wrapper_command,
+    };
 
     #[test]
     fn target_kinds_are_classified_explicitly() {
@@ -347,6 +381,14 @@ mod tests {
         let chained = wrapper_command(Some("sccache".into()), &rustc);
         assert_eq!(chained.get_program(), "sccache");
         assert_eq!(chained.get_args().collect::<Vec<_>>(), ["rustc"]);
+    }
+
+    #[test]
+    fn configured_workspace_wrappers_are_detected() {
+        assert!(has_workspace_wrapper_config(
+            "build.rustc-workspace-wrapper = \"workspace-wrapper\"\n"
+        ));
+        assert!(!has_workspace_wrapper_config("build.rustc-wrapper = \"outer-wrapper\"\n"));
     }
 
     #[test]

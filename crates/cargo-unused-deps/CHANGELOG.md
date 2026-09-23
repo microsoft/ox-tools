@@ -39,6 +39,7 @@
   - refresh release notes
   - refresh release notes
   - refresh release notes
+  - refresh release notes
   - refresh 0.2.0 changelog
   - generate 0.2.0 changelog
 

@@ -294,6 +294,33 @@ fn target_specific_misplaced_remediation_preserves_the_predicate() {
 }
 
 #[test]
+fn duplicate_target_declarations_are_not_judged_from_shared_extern_evidence() {
+    let fixture = Fixture::new(
+        &["dead"],
+        &format!(
+            "[target.'cfg(all())'.dependencies]\n{}\n[target.'cfg(any())'.dependencies]\n{}",
+            dep("dead"),
+            dep("dead")
+        ),
+        "pub fn go() {}\n",
+    );
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(
+        output.status.success(),
+        "rustc evidence cannot distinguish duplicate target declarations: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn filtered_success_does_not_claim_every_dependency_is_used() {
     let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
     let output = command()
@@ -868,6 +895,58 @@ fn misplaced_only_skips_doctests_for_unselected_unused_dev_findings() {
     assert!(
         output.status.success(),
         "an unselected unused dev finding must not trigger doctest collection: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn misplaced_finding_does_not_collect_unneeded_doctest_evidence() {
+    let fixture = Fixture::new(
+        &["helper"],
+        &format!("[dependencies]\n{}", dep("helper")),
+        "/// ```rust\n/// this is not rust\n/// ```\npub fn go() {}\n",
+    )
+    .with_file("tests/it.rs", "#[test]\nfn t() { helper::f(); }\n");
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main", "--check", "misplaced"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "the selected misplaced finding fails the check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("helper: only development units load it"),
+        "unexpected report: {stderr}"
+    );
+    assert!(
+        !stderr.contains("failed while collecting doctest evidence"),
+        "doctests cannot change this verdict"
+    );
+}
+
+#[test]
+fn a_configured_workspace_wrapper_is_not_silently_replaced() {
+    let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n").with_file(
+        "../.cargo/config.toml",
+        "[build]\nrustc-workspace-wrapper = \"workspace-wrapper\"\n",
+    );
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "an unchainable configured wrapper must fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot safely interpose without bypassing it"),
+        "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

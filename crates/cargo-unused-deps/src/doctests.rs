@@ -205,6 +205,7 @@ pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, sh
     let capture = target_dir.join(format!("doctests-{package}"));
     clear_capture(&capture)?;
     std::fs::create_dir(&capture).context(format!("failed to create {}", capture.display()))?;
+    let rustdoc = selected_rustdoc()?;
 
     let cargo = tool_or_default(std::env::var_os("CARGO"), "cargo");
     let output = Command::new(cargo)
@@ -218,7 +219,7 @@ pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, sh
         .arg("--target-dir")
         .arg(target_dir)
         .env("RUSTDOC", shim_path)
-        .envs(std::env::var_os("RUSTDOC").map(|rustdoc| (INNER_RUSTDOC_VAR, rustdoc)))
+        .env(INNER_RUSTDOC_VAR, rustdoc)
         .env(RUSTDOC_WRAPPER_VAR, "1")
         .env(CAPTURE_VAR, &capture)
         .output()
@@ -232,6 +233,28 @@ pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, sh
     }
 
     read_captures(&capture)
+}
+
+/// Resolve the rustdoc selected by the current rustup toolchain before replacing it.
+fn selected_rustdoc() -> Result<OsString> {
+    if let Some(rustdoc) = std::env::var_os("RUSTDOC") {
+        return Ok(rustdoc);
+    }
+    let output = Command::new("rustup")
+        .args(["which", "rustdoc"])
+        .output()
+        .context("failed to ask rustup for the selected rustdoc")?;
+    if !output.status.success() {
+        bail!(
+            "rustup could not resolve the selected rustdoc:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if path.is_empty() {
+        bail!("rustup returned an empty rustdoc path");
+    }
+    Ok(OsString::from(path))
 }
 
 /// Use an environment-selected tool or its conventional executable name.

@@ -304,6 +304,23 @@ fn fix_removes_the_entries_and_keeps_the_rest_intact() {
 }
 
 #[test]
+fn invalid_package_selection_cannot_apply_a_catalog_fix() {
+    let root = "[workspace]\nmembers = [\"member\"]\n\n[workspace.dependencies]\nunused = \"1\"\n";
+    let dir = workspace(root, &[("member", "")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&manifest, &["--fix", "--package", "missing"]));
+
+    assert!(!success, "an invalid selector must fail: {stderr}");
+    assert!(stderr.contains("did not match any workspace member"), "unexpected stderr: {stderr}");
+    assert_eq!(
+        fs::read_to_string(&manifest).expect("failed to read manifest"),
+        root,
+        "selector validation must happen before --fix writes"
+    );
+}
+
+#[test]
 fn fix_carries_a_removed_group_header_to_the_next_survivor() {
     let root = concat!(
         "[workspace]\nmembers = [\"member\"]\n\n",

@@ -286,19 +286,25 @@ fn run() -> Result<ExitCode> {
         require_workspace,
     } = cli.command;
 
-    let mut failed = false;
-
-    // The catalog question is workspace-global and always runs. Package
-    // selection applies only to checks backed by compile evidence.
-    failed |= catalog_check(&manifest_path, fix, require_workspace)? != ExitCode::SUCCESS;
-
-    if package_checks_selected(&packages, workspace) {
+    let package_context = if package_checks_selected(&packages, workspace) {
         let selection = PackageSelection {
             packages,
             workspace,
             exclude,
         };
-        failed |= source_checks(&manifest_path, &selection, &checks)?;
+        let workspace = workspace_of(&manifest_path)?;
+        let selected = selection.resolve(&workspace.packages)?;
+        Some((selection.flags(), workspace, selected))
+    } else {
+        None
+    };
+
+    // The catalog question is workspace-global and always runs. Package
+    // selection applies only to checks backed by compile evidence.
+    let mut failed = catalog_check(&manifest_path, fix, require_workspace)? != ExitCode::SUCCESS;
+
+    if let Some((selection_flags, workspace, selected)) = package_context {
+        failed |= source_checks(&manifest_path, &selection_flags, &workspace, &selected, &checks)?;
     }
 
     Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS })
@@ -381,16 +387,19 @@ fn resolve_selectors(packages: &[verdict::Package], selectors: &[String], allow_
 /// The checks that read compile evidence: unused declarations and misplaced ones.
 ///
 /// Returns whether anything was found.
-fn source_checks(manifest_path: &Path, selection: &PackageSelection, checks: &[Check]) -> Result<bool> {
-    let workspace = workspace_of(manifest_path)?;
-    let selected = selection.resolve(&workspace.packages)?;
-    let selection_flags = selection.flags();
+fn source_checks(
+    manifest_path: &Path,
+    selection_flags: &[OsString],
+    workspace: &Workspace,
+    selected: &BTreeSet<PathBuf>,
+    checks: &[Check],
+) -> Result<bool> {
     let plain_target_dir = workspace.evidence_target_dir.path().join("plain");
     let all_target_dir = workspace.evidence_target_dir.path().join("all-targets");
     // Two passes: default targets first, where a report can only have come from
     // a target's single plain unit, then everything.
-    let plain = evidence::gather(manifest_path, &selection_flags, &plain_target_dir, false)?;
-    let all = evidence::gather(manifest_path, &selection_flags, &all_target_dir, true)?;
+    let plain = evidence::gather(manifest_path, selection_flags, &plain_target_dir, false)?;
+    let all = evidence::gather(manifest_path, selection_flags, &all_target_dir, true)?;
 
     // Doctest evidence can only ever spare a dependency, never accuse one, so
     // it is gathered lazily: judge first without it, then compile the doctests
@@ -399,21 +408,23 @@ fn source_checks(manifest_path: &Path, selection: &PackageSelection, checks: &[C
     // builds and one per package.
     let mut candidates = verdict::judge(
         &workspace.packages,
-        &selected,
+        selected,
         &plain,
         &all,
         &doctests::DoctestEvidence::default(),
         &workspace.allowed,
     );
-    if !Check::Unused.wanted(checks) {
-        // Doctests can turn an unused normal dependency into a misplaced one,
-        // but they cannot affect dev/build declarations when only misplaced
-        // findings were requested.
-        candidates.retain(|finding| finding.section == Section::Normal);
-    }
-    let doctests = doctest_evidence(manifest_path, &workspace, &candidates)?;
+    candidates.retain(|finding| {
+        // Doctests can spare unused normal/dev declarations and can turn an
+        // unused normal declaration into a misplaced one. They cannot affect
+        // build dependencies or a declaration already proven misplaced.
+        finding.verdict == Verdict::Unused
+            && finding.section != Section::Build
+            && (Check::Unused.wanted(checks) || finding.section == Section::Normal)
+    });
+    let doctests = doctest_evidence(manifest_path, workspace, &candidates)?;
 
-    let findings = verdict::judge(&workspace.packages, &selected, &plain, &all, &doctests, &workspace.allowed);
+    let findings = verdict::judge(&workspace.packages, selected, &plain, &all, &doctests, &workspace.allowed);
 
     let wanted: Vec<&verdict::Finding> = findings
         .iter()

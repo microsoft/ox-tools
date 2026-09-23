@@ -3,7 +3,7 @@
 
 //! Judging: folding compile evidence into one verdict per declaration.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::detect::{Declared, Section};
@@ -89,7 +89,18 @@ pub fn judge(
             continue;
         }
 
+        let mut declarations_per_extern = BTreeMap::new();
         for declared in &package.declared {
+            *declarations_per_extern.entry(declared.extern_name()).or_insert(0usize) += 1;
+        }
+
+        for declared in &package.declared {
+            // Rustc reports the extern name, not the manifest declaration that
+            // put it in scope. When the same key appears in several target or
+            // dependency tables, one report cannot be attributed safely.
+            if declarations_per_extern.get(&declared.extern_name()) != Some(&1) {
+                continue;
+            }
             if declared.feature_referenced || allowed.contains(&declared.name) || package.allowed.contains(&declared.name) {
                 continue;
             }
