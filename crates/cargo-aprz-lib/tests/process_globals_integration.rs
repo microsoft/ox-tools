@@ -65,6 +65,8 @@ async fn cli_uses_the_platform_cache_directory_and_installs_a_logger() {
         &service_uri,
         "--github-url",
         &service_uri,
+        "--github-token",
+        "integration-github-token",
         "--codeberg-url",
         &service_uri,
         "--advisory-url",

@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-anvil"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -539,11 +539,13 @@ dependencies = [
  "assert_cmd",
  "cargo_metadata",
  "clap",
+ "command-group",
  "mutants",
  "ohno",
  "predicates",
  "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -889,6 +891,16 @@ checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes",
  "memchr",
+]
+
+[[package]]
+name = "command-group"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a68fa787550392a9d58f44c21a3022cfb3ea3e2458b7f85d3b399d0ceeccf409"
+dependencies = [
+ "nix 0.27.1",
+ "winapi",
 ]
 
 [[package]]
@@ -3089,7 +3101,7 @@ dependencies = [
  "combine",
  "libc",
  "mach2",
- "nix",
+ "nix 0.30.1",
  "sysctl",
  "thiserror 2.0.20",
  "widestring",
@@ -3110,6 +3122,17 @@ name = "mutants"
 version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
+
+[[package]]
+name = "nix"
+version = "0.27.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "libc",
+]
 
 [[package]]
 name = "nix"

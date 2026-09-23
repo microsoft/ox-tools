@@ -935,6 +935,8 @@ doctest
 doctests
 stdin
 superset
+nonblocking
 SHA
 upserts
 EWMA
+Untimed

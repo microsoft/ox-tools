@@ -161,6 +161,25 @@ Independently configurable tables have separate catalog regions:
 
 * `deny.toml`: advisories, licenses, bans, sources.
 * `spellcheck.toml`: root settings, `[Hunspell]`, `[Hunspell.quirks]`.
+* root `Cargo.toml`: Rust, rustdoc, and Clippy lint subtables.
+
+The lint regions own `[workspace.lints.rust]`, `[workspace.lints.rustdoc]`, and
+`[workspace.lints.clippy]` in workspaces, or the corresponding `[lints.*]`
+tables in single-crate repositories. A repository extends a subtable with bare
+lint names after that region's closing sentinel. Keeping each namespace in its
+own region lets `cargo sort --grouped` treat the managed and repository-owned
+blocks as independent groups without moving a sentinel through another lint
+namespace.
+
+An unchanged or empty old combined `anvil-workspace-lints` or root `anvil-lints`
+block retires in the same run that introduces the three replacements. An edited
+old block remains tracked and causes a refusal rather than being overwritten or
+retired. During a successful migration, repository-owned dotted assignments
+below the old region are rewritten into bare assignments under the matching new
+subtable. Their values and comments are preserved; assignments outside the
+three lint namespaces are unaffected. An empty legacy block cannot identify its
+parent table when that parent is also declared outside the block, so this
+ambiguous layout is refused and left unchanged for manual reconciliation.
 
 For example, a repository's `[Hunspell] transform_regex = ["^[0-9]+$"]`
 stays under `[Hunspell]` below `anvil-spellcheck-hunspell`, not under quirks.

@@ -19,11 +19,12 @@
 //! because TOML rejects a duplicate table header outright. See
 //! [`adopt_unmanaged_toml_tables`].
 //! The `id` is globally unique within the catalog (e.g. `anvil-imports`,
-//! `anvil-workspace-lints`).
+//! `anvil-workspace-rust-lints`).
 //!
 //! Empty bodies are regenerated; nonempty edits require reconciliation.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use ohno::{AppError, app_err, bail};
 use toml_edit::{Item, Key, RawString, Table};
@@ -592,6 +593,34 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
     boundaries.extend(protected.iter().map(|range| range.start));
     boundaries.sort_unstable();
 
+    for (legacy_id, parent) in [
+        ("anvil-workspace-lints", ["workspace", "lints"].as_slice()),
+        ("anvil-lints", ["lints"].as_slice()),
+    ] {
+        if matches!(find_region(text, legacy_id, syntax), Ok(Some(region)) if region.is_empty())
+            && candidates.iter().any(|table| table.path == parent)
+        {
+            return TomlAdoption::Unrelocatable {
+                table: parent.join("."),
+                tail_table: tail.join("."),
+            };
+        }
+    }
+    if let Some(adoption) = adopt_dotted_child_assignments(text, &managed, &candidates, &boundaries, &protected) {
+        return adoption;
+    }
+    let legacy_masked = mask_legacy_lint_region_to_header(text, syntax);
+    if legacy_masked != masked
+        && let Some(legacy_candidates) = headed_tables(&legacy_masked)
+    {
+        let mut legacy_boundaries: Vec<usize> = legacy_candidates.iter().map(|table| table.header.start).collect();
+        legacy_boundaries.extend(protected.iter().map(|range| range.start));
+        legacy_boundaries.sort_unstable();
+        if let Some(adoption) = adopt_dotted_child_assignments(text, &managed, &legacy_candidates, &legacy_boundaries, &protected) {
+            return adoption;
+        }
+    }
+
     let mut deletions: Vec<ByteRange> = Vec::new();
     let mut residue = String::new();
 
@@ -599,6 +628,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         if candidate.array_of_tables {
             continue;
         }
+
         let Some(managed_values) = managed
             .iter()
             .find(|table| !table.array_of_tables && table.path == candidate.path)
@@ -659,6 +689,204 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         text: out,
         residue: tidy_residue(&residue, text_newline(text)),
     }
+}
+
+fn mask_legacy_lint_region_to_header(text: &str, syntax: CommentSyntax) -> String {
+    let mut masked = mask_managed_regions(text, syntax).into_bytes();
+    for (id, header) in [("anvil-workspace-lints", "[workspace.lints]"), ("anvil-lints", "[lints]")] {
+        let Ok(Some(region)) = find_region(text, id, syntax) else {
+            continue;
+        };
+        let start = if let Some(relative) = region.body_str().find(header) {
+            region.body.start + relative
+        } else if region.is_empty() {
+            region.body.start
+        } else {
+            continue;
+        };
+        let end = start + header.len();
+        masked[start..end].copy_from_slice(&text.as_bytes()[start..end]);
+        if region.is_empty() {
+            masked[start..end].copy_from_slice(header.as_bytes());
+        }
+    }
+    String::from_utf8(masked).expect("masking preserves UTF-8 and only restores original UTF-8 slices")
+}
+
+pub(crate) fn legacy_lint_region_id(region_id: &str) -> Option<&'static str> {
+    match region_id {
+        "anvil-workspace-rust-lints" | "anvil-workspace-rustdoc-lints" | "anvil-workspace-clippy-lints" => Some("anvil-workspace-lints"),
+        "anvil-rust-lints" | "anvil-rustdoc-lints" | "anvil-clippy-lints" => Some("anvil-lints"),
+        _ => None,
+    }
+}
+
+pub(crate) fn lint_region_placement(region_id: &str, current: Option<&str>) -> Option<RegionPlacement> {
+    const WORKSPACE: &[&str] = &[
+        "anvil-workspace-rust-lints",
+        "anvil-workspace-rustdoc-lints",
+        "anvil-workspace-clippy-lints",
+    ];
+    const SINGLE_CRATE: &[&str] = &["anvil-rust-lints", "anvil-rustdoc-lints", "anvil-clippy-lints"];
+    let order = if WORKSPACE.contains(&region_id) {
+        WORKSPACE
+    } else if SINGLE_CRATE.contains(&region_id) {
+        SINGLE_CRATE
+    } else {
+        return None;
+    };
+    let Some(text) = current else {
+        return Some(RegionPlacement::End);
+    };
+    if matches!(find_region(text, region_id, CommentSyntax::Hash), Ok(Some(_))) {
+        return Some(RegionPlacement::End);
+    }
+    let position = order
+        .iter()
+        .position(|candidate| *candidate == region_id)
+        .expect("region membership was established above");
+    for successor in order.iter().skip(position).skip(1) {
+        if let Ok(Some(region)) = find_region(text, successor, CommentSyntax::Hash) {
+            return Some(RegionPlacement::At(region.start_line.start));
+        }
+    }
+
+    let retiring: BTreeSet<String> = ["anvil-workspace-lints", "anvil-lints"].into_iter().map(str::to_owned).collect();
+    let parseable = mask_retiring_managed_regions(text, CommentSyntax::Hash, &retiring);
+    let before_profiles = headed_tables(&parseable).and_then(|tables| {
+        tables
+            .into_iter()
+            .filter(|table| table.path.first().is_some_and(|root| root == "patch" || root == "profile"))
+            .map(|table| table.header.start)
+            .min()
+    });
+    let before_legacy = retiring
+        .iter()
+        .filter_map(|id| find_region(text, id, CommentSyntax::Hash).ok().flatten())
+        .map(|region| region.start_line.start)
+        .min();
+    Some(RegionPlacement::At(
+        before_profiles.into_iter().chain(before_legacy).min().unwrap_or(text.len()),
+    ))
+}
+
+/// Move dotted assignments from a headed parent table into a managed child
+/// table. For example, introducing `[workspace.lints.rust]` must turn an
+/// existing `rust.missing_docs = "warn"` under `[workspace.lints]` into the
+/// bare `missing_docs = "warn"` residue that follows the new region.
+fn adopt_dotted_child_assignments(
+    text: &str,
+    managed: &[HeadedTable],
+    candidates: &[HeadedTable],
+    boundaries: &[usize],
+    protected: &[ByteRange],
+) -> Option<TomlAdoption> {
+    let [managed] = managed else {
+        return None;
+    };
+    let (namespace, parent_path) = managed.path.split_last()?;
+    let candidate = candidates
+        .iter()
+        .find(|table| !table.array_of_tables && table.path == parent_path)?;
+    let end = boundary_after(boundaries, candidate.header.start, text.len());
+    let mut deletions = Vec::new();
+    let mut residue = String::new();
+    let mut parent_residue = String::new();
+    let is_final_lint_namespace = namespace == "clippy" && parent_path.last().is_some_and(|segment| segment == "lints");
+
+    for entry in &candidate.entries {
+        let start = protected
+            .iter()
+            .find(|range| (range.start..range.end).contains(&entry.span.start))
+            .map_or(entry.span.start, |range| range.end);
+        if entry.path.first().is_none_or(|segment| segment != namespace) {
+            if is_final_lint_namespace {
+                parent_residue.push_str(&text[start..entry.span.end.min(end)]);
+                deletions.push(ByteRange {
+                    start,
+                    end: entry.span.end.min(end),
+                });
+            }
+            continue;
+        }
+        if entry.path.len() == 1 {
+            return Some(TomlAdoption::Unrelocatable {
+                table: parent_path.iter().chain(entry.path.iter()).cloned().collect::<Vec<_>>().join("."),
+                tail_table: managed.path.join("."),
+            });
+        }
+        let relative_path = &entry.path[1..];
+        match managed.values.get(relative_path) {
+            Some(managed_value) if *managed_value == entry.value => {}
+            Some(managed_value) => {
+                return Some(TomlAdoption::Conflict {
+                    table: candidate.path.join("."),
+                    key: candidate
+                        .path
+                        .iter()
+                        .chain(entry.path.iter())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("."),
+                    managed: managed_value.clone(),
+                    hand_written: entry.value.clone(),
+                });
+            }
+            None => {
+                let source = &text[start..entry.span.end.min(end)];
+                let bare = strip_dotted_namespace(source, namespace)
+                    .expect("the parsed entry starts with the namespace selected by the filter above");
+                residue.push_str(&bare);
+            }
+        }
+        deletions.push(ByteRange {
+            start,
+            end: entry.span.end.min(end),
+        });
+    }
+    if !parent_residue.trim().is_empty() {
+        writeln!(residue, "[{}]", parent_path.join(".")).expect("writing to a String cannot fail");
+        residue.push_str(&parent_residue);
+    }
+
+    if deletions.is_empty() {
+        return None;
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for range in deletions {
+        out.push_str(&text[cursor..range.start]);
+        cursor = range.end;
+    }
+    out.push_str(&text[cursor..]);
+    Some(TomlAdoption::Adopted {
+        text: out,
+        residue: tidy_residue(&residue, text_newline(text)),
+    })
+}
+
+fn strip_dotted_namespace(source: &str, namespace: &str) -> Option<String> {
+    let prefixes = [format!("{namespace}."), format!("\"{namespace}\"."), format!("'{namespace}'.")];
+    let (offset, prefix_len) = source
+        .split_inclusive('\n')
+        .scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.len();
+            Some((start, line))
+        })
+        .find_map(|(start, line)| {
+            let indentation = line.len() - line.trim_start().len();
+            prefixes
+                .iter()
+                .find(|prefix| line[indentation..].starts_with(prefix.as_str()))
+                .map(|prefix| (start + indentation, prefix.len()))
+        })?;
+
+    let mut out = String::with_capacity(source.len() - prefix_len);
+    out.push_str(&source[..offset]);
+    out.push_str(&source[offset + prefix_len..]);
+    Some(out)
 }
 
 /// Trim the blank lines that bounded the residue inside the table it came
@@ -2267,5 +2495,111 @@ mod tests {
             "the region under consideration is left readable:\n{masked}"
         );
         assert!(!masked.contains("yanked = \"deny\""), "the other region is blanked:\n{masked}");
+    }
+
+    #[test]
+    fn legacy_lint_mask_restores_only_a_nonleading_table_header() {
+        let text = "# >>> anvil-managed: anvil-workspace-lints\n\
+                    # old catalog\n\
+                    [workspace.lints]\n\
+                    rust.unsafe_code = \"warn\"\n\
+                    # <<< anvil-managed: anvil-workspace-lints\n";
+        let masked = mask_legacy_lint_region_to_header(text, SYN);
+
+        assert!(
+            masked.contains("[workspace.lints]"),
+            "the parent table remains parseable:\n{masked}"
+        );
+        assert!(!masked.contains("# old catalog"), "other legacy content stays masked:\n{masked}");
+        assert!(!masked.contains("rust.unsafe_code"), "managed assignments stay masked:\n{masked}");
+    }
+
+    #[test]
+    fn legacy_lint_mask_ignores_a_region_without_its_expected_parent_header() {
+        let text = "# >>> anvil-managed: anvil-workspace-lints\n\
+                    [workspace.metadata]\n\
+                    policy = true\n\
+                    # <<< anvil-managed: anvil-workspace-lints\n";
+
+        assert_eq!(mask_legacy_lint_region_to_header(text, SYN), mask_managed_regions(text, SYN));
+    }
+
+    #[test]
+    fn lint_region_placement_uses_the_next_namespace_and_canonical_table_boundary() {
+        let clippy = "# >>> anvil-managed: anvil-workspace-clippy-lints\n\
+                      [workspace.lints.clippy]\n\
+                      # <<< anvil-managed: anvil-workspace-clippy-lints\n";
+        let with_profile = format!("{clippy}\n[profile.release]\nlto = true\n");
+
+        assert_eq!(
+            lint_region_placement("anvil-workspace-rustdoc-lints", Some(&with_profile)),
+            Some(RegionPlacement::At(0)),
+            "rustdoc belongs before the existing Clippy region"
+        );
+        assert_eq!(
+            lint_region_placement("anvil-workspace-clippy-lints", Some(&with_profile)),
+            Some(RegionPlacement::End),
+            "an existing region updates in place"
+        );
+        assert_eq!(
+            lint_region_placement("anvil-workspace-rust-lints", Some("[profile.release]\nlto = true\n")),
+            Some(RegionPlacement::At(0)),
+            "the first lint table precedes Cargo profiles"
+        );
+        assert_eq!(lint_region_placement("unrelated", Some(&with_profile)), None);
+        assert_eq!(
+            lint_region_placement("anvil-rust-lints", None),
+            Some(RegionPlacement::End),
+            "a new host appends its first region"
+        );
+    }
+
+    #[test]
+    fn differing_dotted_child_assignment_is_a_conflict() {
+        let adoption = adopt_unmanaged_toml_tables(
+            "[workspace.lints]\nrust.unsafe_op_in_unsafe_fn = \"deny\"\n",
+            "[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"warn\"\n",
+            SYN,
+        );
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Conflict {
+                table: "workspace.lints".to_owned(),
+                key: "workspace.lints.rust.unsafe_op_in_unsafe_fn".to_owned(),
+                managed: "\"warn\"".to_owned(),
+                hand_written: "\"deny\"".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn exact_namespace_inline_table_is_refused_instead_of_panicking() {
+        let adoption = adopt_unmanaged_toml_tables(
+            "[workspace.lints]\nrust = { missing_docs = \"warn\" }\n",
+            "[workspace.lints.rust]\nunsafe_op_in_unsafe_fn = \"warn\"\n",
+            SYN,
+        );
+
+        assert_eq!(
+            adoption,
+            TomlAdoption::Unrelocatable {
+                table: "workspace.lints.rust".to_owned(),
+                tail_table: "workspace.lints.rust".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn dotted_namespace_stripping_preserves_leading_trivia_and_quoted_namespaces() {
+        assert_eq!(
+            strip_dotted_namespace("\n# policy\n  \"rust\".missing_docs = \"warn\"\n", "rust"),
+            Some("\n# policy\n  missing_docs = \"warn\"\n".to_owned())
+        );
+        assert_eq!(
+            strip_dotted_namespace("'rust'.missing_docs = \"warn\"\n", "rust"),
+            Some("missing_docs = \"warn\"\n".to_owned())
+        );
+        assert_eq!(strip_dotted_namespace("clippy.panic = \"warn\"\n", "rust"), None);
     }
 }

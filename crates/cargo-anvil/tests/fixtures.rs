@@ -106,12 +106,14 @@ fn single_crate_emits_crate_lints_and_justfiles() {
     run(&tmp);
 
     let cargo = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+    for region in ["anvil-rust-lints", "anvil-rustdoc-lints", "anvil-clippy-lints"] {
+        assert!(
+            cargo.contains(&format!("anvil-managed: {region}")),
+            "single-crate fixture should receive the per-crate {region} region; got:\n{cargo}"
+        );
+    }
     assert!(
-        cargo.contains("anvil-managed: anvil-lints"),
-        "single-crate fixture should receive the per-crate lints region; got:\n{cargo}"
-    );
-    assert!(
-        !cargo.contains("anvil-workspace-lints"),
+        !cargo.contains("anvil-workspace-rust-lints"),
         "single-crate fixture must not receive the workspace lints region"
     );
 
@@ -280,10 +282,16 @@ fn migration_preserves_user_content() {
         cargo.contains("lto = \"thin\""),
         "user-authored [profile.release] must survive migration; got:\n{cargo}"
     );
-    assert!(
-        cargo.contains("anvil-workspace-lints"),
-        "anvil workspace lints region must be spliced into Cargo.toml"
-    );
+    for region in [
+        "anvil-workspace-rust-lints",
+        "anvil-workspace-rustdoc-lints",
+        "anvil-workspace-clippy-lints",
+    ] {
+        assert!(
+            cargo.contains(&format!("anvil-managed: {region}")),
+            "anvil workspace {region} region must be spliced into Cargo.toml"
+        );
+    }
 
     // The defect this fixture used to hide: the hand-written `[advisories]`
     // declares an `ignore` list the managed body does not, so adoption cannot

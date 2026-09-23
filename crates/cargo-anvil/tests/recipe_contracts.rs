@@ -373,9 +373,16 @@ if ($args -contains 'bolero' -and $args -contains 'list') {
     exit [int]$env:FAKE_BOLERO_LIST_EXIT
 }
 if ($args -contains 'llvm-cov' -and $args -contains 'report' -and $env:FAKE_LLVM_COV_REPORT_206) {
-    $command = "$([char]34)$($env:FAKE_LLVM_COV_PATH)$([char]34) export -format=lcov -instr-profile=fake.profdata -object fake-object.exe"
+    $quote = if ($env:FAKE_LLVM_COV_SINGLE_QUOTES) { [char]39 } else { [char]34 }
+    $arguments = if ($env:FAKE_LLVM_COV_SINGLE_QUOTES) {
+        "'-format=lcov' '-instr-profile=fake.profdata' '-object' 'fake-object.exe'"
+    } else {
+        '-format=lcov -instr-profile=fake.profdata -object fake-object.exe'
+    }
+    $command = "$quote$($env:FAKE_LLVM_COV_PATH)$quote export $arguments"
     if ($env:FAKE_LLVM_COV_MULTILINE) {
-        $command = $command.Replace(' -object', "`n-object")
+        $objectArgument = if ($env:FAKE_LLVM_COV_SINGLE_QUOTES) { " '-object'" } else { ' -object' }
+        $command = $command.Replace($objectArgument, "`n$($objectArgument.TrimStart())")
     }
     Write-Output (
         "error: failed to generate report: could not execute process $([char]96)$command$([char]96) " +
@@ -411,7 +418,7 @@ fn write(path: &Path, contents: &str) {
 
 /// Seed the impact cache that scoped check recipes read via
 /// `_anvil-impact-include`, standing in for a completed `anvil-impact` run.
-/// Without a cache file the recipes fall back to their tier default
+/// Outside consume mode, a missing cache falls back to the tier default
 /// (`--workspace` for the affected tier), so tests that exercise a scoped run
 /// must plant the include file the recipe consumes.
 fn seed_include(root: &Path, tier: &str, spec: &str) {
@@ -598,6 +605,42 @@ fn assert_failed(output: &Output, context: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn scoped_check_propagates_missing_consumed_impact_cache() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("fmt.just", FMT), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-rustfmt-validate-prereqs",
+            "anvil-component-nightly-rustfmt-install",
+            "anvil-tool-cargo-each-validate-prereqs",
+            "anvil-tool-cargo-each-install installer",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-fmt"],
+        &[("ANVIL_IMPACT", OsStr::new("consume")), ("FAKE_CARGO_LOG", log.as_os_str())],
+    );
+
+    assert_failed(&output, "missing consumed impact cache");
+    // anvil-impact is stubbed here, so the only component that can report a
+    // missing include file is the resolver called from inside anvil-fmt --
+    // which proves the recipe body ran and propagated, rather than just
+    // failing to load the fixture or tripping the dependency's own guard.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("include_modified.txt"),
+        "the scoped check must surface the resolver's own cache-missing error\nstderr:\n{stderr}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!log.exists(), "the scoped command must not run after impact scope resolution fails");
 }
 
 fn assert_miri_cargo_calls(cargo_calls: &str) {
@@ -2393,6 +2436,10 @@ fn coverage_reports_use_requested_package_scope() {
 
 #[cfg(all(windows, not(target_arch = "aarch64")))]
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end fixture covers successful and failed response-file retries"
+)]
 fn windows_coverage_report_retries_error_206_with_response_file() {
     if !tools_available() {
         return;
@@ -2420,7 +2467,10 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
          Add-Content -LiteralPath $env:FAKE_LLVM_COV_LOG -Value ($Remaining -join ' ')\n\
          $response = $Remaining | Where-Object { $_.StartsWith('@') } | Select-Object -First 1\n\
          if (-not $response) { exit 2 }\n\
-         Add-Content -LiteralPath $env:FAKE_LLVM_COV_RESPONSE_LOG -Value (Get-Content -LiteralPath $response.Substring(1) -Raw)\n\
+         $responseContent = Get-Content -LiteralPath $response.Substring(1) -Raw\n\
+         if ($responseContent -match \"'\") { exit 3 }\n\
+         if ($responseContent -notmatch '-instr-profile=fake.profdata') { exit 4 }\n\
+         Add-Content -LiteralPath $env:FAKE_LLVM_COV_RESPONSE_LOG -Value $responseContent\n\
          Write-Output 'TN:'\n\
          if ($env:FAKE_LLVM_COV_EXIT) { exit [int]$env:FAKE_LLVM_COV_EXIT }\n\
          exit 0\n",
@@ -2433,6 +2483,7 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("measured")),
             ("FAKE_LLVM_COV_REPORT_206", OsStr::new("1")),
             ("FAKE_LLVM_COV_MULTILINE", OsStr::new("1")),
+            ("FAKE_LLVM_COV_SINGLE_QUOTES", OsStr::new("1")),
             ("FAKE_LLVM_COV_PATH", llvm_cov.as_os_str()),
             ("FAKE_LLVM_COV_LOG", llvm_cov_log.as_os_str()),
             ("FAKE_LLVM_COV_RESPONSE_LOG", response_log.as_os_str()),
@@ -2449,7 +2500,11 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
     assert_eq!(invocations.lines().count(), 2, "invocations:\n{invocations}");
     assert_eq!(invocations.matches("export @").count(), 2, "invocations:\n{invocations}");
     let responses = fs::read_to_string(&response_log).unwrap();
-    assert_eq!(responses.matches("-object fake-object.exe").count(), 2, "responses:\n{responses}");
+    assert_eq!(
+        responses.matches("\n\"-object\" \"fake-object.exe\"").count(),
+        2,
+        "both reports must preserve the multiline command shape:\n{responses}"
+    );
     for config in ["all-features", "no-default"] {
         let report = tmp.path().join(format!("target/coverage/lcov-{config}.info"));
         assert_eq!(fs::read_to_string(report).unwrap().trim(), "TN:");
@@ -2476,6 +2531,12 @@ fn windows_coverage_report_retries_error_206_with_response_file() {
         ],
     );
     assert_failed(&failed, "failed response-file fallback");
+    let invocations = fs::read_to_string(&llvm_cov_log).unwrap();
+    assert_eq!(
+        invocations.lines().count(),
+        3,
+        "both quote styles must reach llvm-cov:\n{invocations}"
+    );
     let failed_report = tmp.path().join("target/coverage/lcov-all-features.info");
     assert!(!failed_report.exists(), "failed response-file fallback must remove partial report");
     assert!(

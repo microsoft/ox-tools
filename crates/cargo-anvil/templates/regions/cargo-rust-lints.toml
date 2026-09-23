@@ -1,0 +1,25 @@
+# Rust compiler lint policy. Repository-specific Rust lints can follow this
+# region as bare keys in the same table.
+ambiguous_negative_literals = "warn"
+missing_debug_implementations = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+# `unexpected_cfgs` is on-by-default at warn since Rust 1.80; combined
+# with the catalog's `-D warnings` cloud-workflow policy, any custom cfg name
+# becomes a hard build failure. Pre-declare the cfgs that
+# `cargo llvm-cov` sets so the recommended coverage-exclusion pattern
+# `#[cfg_attr(coverage_nightly, coverage(off))]` works out of the box.
+# Adopters who need additional cfg names take ownership of this one
+# assignment (edit the check-cfg array); anvil's drift detector will
+# emit a `.anvil-proposed` sibling on future catalog bumps so the
+# customization is preserved.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(coverage,coverage_nightly)',
+    'cfg(loom)',
+    'cfg(miri_race_coverage)',
+    'cfg(miri_strict_provenance)',
+    'cfg(miri_tree_borrows)',
+] }

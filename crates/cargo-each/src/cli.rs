@@ -3,7 +3,9 @@
 
 //! Command-line interface definitions for `cargo-each`.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Args, Parser};
 
@@ -35,6 +37,11 @@ pub(crate) struct EachArgs {
     /// `name@version` spec, or a Unix glob (`tokio-*`).
     #[arg(short = 'p', long = "package", value_name = "SPEC")]
     pub(crate) packages: Vec<String>,
+
+    /// Read package specs from a UTF-8 file, one per nonempty line.
+    /// Repeatable; specs are unioned with --package.
+    #[arg(long = "package-file", value_name = "PATH")]
+    pub(crate) package_files: Vec<PathBuf>,
 
     /// Select every workspace member.
     #[arg(long, visible_alias = "all")]
@@ -87,6 +94,19 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) keep_going: bool,
 
+    /// Run at most N per-package or per-target commands concurrently. Use
+    /// `auto` to detect available parallelism once. Defaults to 1. Buffered
+    /// output is redirected to unique temporary files and emitted in plan order.
+    /// Only an effective count above 1 disconnects child standard input for capture.
+    #[arg(long, default_value_t = NonZeroUsize::MIN, value_name = "N|auto", value_parser = parse_jobs)]
+    pub(crate) jobs: NonZeroUsize,
+
+    /// Terminate each invocation's Windows job or Unix process group after this
+    /// duration. Unix descendants can escape by starting a new session. Accepts
+    /// a positive integer followed by `ms`, `s`, or `m`.
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
+    pub(crate) timeout: Option<Duration>,
+
     /// Print the fully-substituted commands without executing them.
     #[arg(long)]
     pub(crate) dry_run: bool,
@@ -101,15 +121,126 @@ pub(crate) struct EachArgs {
     pub(crate) command: Vec<String>,
 }
 
+fn parse_jobs(value: &str) -> Result<NonZeroUsize, String> {
+    parse_jobs_with(value, std::thread::available_parallelism)
+}
+
+fn parse_jobs_with(value: &str, available_parallelism: impl FnOnce() -> std::io::Result<NonZeroUsize>) -> Result<NonZeroUsize, String> {
+    if value == "auto" {
+        available_parallelism().map_err(|error| format!("failed to detect available parallelism for `--jobs auto`: {error}"))
+    } else {
+        value
+            .parse()
+            .map_err(|error| format!("expected a positive integer or `auto`: {error}"))
+    }
+}
+
+fn parse_duration(value: &str) -> Result<Duration, String> {
+    enum Unit {
+        Milliseconds,
+        Seconds,
+        Minutes,
+    }
+
+    let (digits, unit) = if let Some(digits) = value.strip_suffix("ms") {
+        (digits, Unit::Milliseconds)
+    } else if let Some(digits) = value.strip_suffix('s') {
+        (digits, Unit::Seconds)
+    } else if let Some(digits) = value.strip_suffix('m') {
+        (digits, Unit::Minutes)
+    } else {
+        return Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
+    };
+    if digits.is_empty() {
+        return Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
+    }
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
+    }
+    let amount = digits.parse::<u64>().map_err(|error| format!("duration is too large: {error}"))?;
+    if amount == 0 {
+        return Err("duration must be greater than zero".to_owned());
+    }
+    match unit {
+        Unit::Milliseconds => Ok(Duration::from_millis(amount)),
+        Unit::Seconds => Ok(Duration::from_secs(amount)),
+        Unit::Minutes => amount
+            .checked_mul(60)
+            .map(Duration::from_secs)
+            .ok_or_else(|| "duration is too large".to_owned()),
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser as _};
 
     use super::*;
 
     #[test]
     fn cli_definition_is_well_formed() {
         CargoCli::command().debug_assert();
+    }
+
+    #[test]
+    fn jobs_default_is_one() {
+        let CargoCli::Each(args) =
+            CargoCli::try_parse_from(["cargo", "each", "--", "echo"]).expect("documented minimal invocation must parse");
+        assert_eq!(args.jobs, NonZeroUsize::MIN);
+    }
+
+    #[test]
+    fn parses_positive_and_auto_jobs() {
+        assert_eq!(
+            parse_jobs_with("7", || panic!("numeric jobs must not detect parallelism")),
+            Ok(NonZeroUsize::new(7).expect("literal seven is nonzero"))
+        );
+
+        let mut detections = 0;
+        let jobs = parse_jobs_with("auto", || {
+            detections += 1;
+            Ok(NonZeroUsize::new(8).expect("literal eight is nonzero"))
+        });
+        assert_eq!(jobs, Ok(NonZeroUsize::new(8).expect("literal eight is nonzero")));
+        assert_eq!(detections, 1);
+    }
+
+    #[test]
+    fn rejects_invalid_jobs() {
+        for value in ["0", "-1", "bogus", "AUTO"] {
+            assert!(parse_jobs(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn reports_auto_jobs_detection_failure() {
+        let error = parse_jobs_with("auto", || Err(std::io::Error::other("parallelism unavailable")))
+            .expect_err("detection failure must not fall back");
+        assert_eq!(
+            error,
+            "failed to detect available parallelism for `--jobs auto`: parallelism unavailable"
+        );
+    }
+
+    #[test]
+    fn parses_documented_durations() {
+        assert_eq!(parse_duration("250ms"), Ok(Duration::from_millis(250)));
+        assert_eq!(parse_duration("30s"), Ok(Duration::from_secs(30)));
+        assert_eq!(parse_duration("2m"), Ok(Duration::from_mins(2)));
+    }
+
+    #[test]
+    fn rejects_zero_malformed_and_overflowing_durations() {
+        for value in ["0s", "1", "1h", "-1s", "1.5s", "ms", "18446744073709551615m"] {
+            assert!(parse_duration(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn malformed_duration_uses_the_grammar_diagnostic() {
+        let expected = Err("expected a positive integer followed by `ms`, `s`, or `m`".to_owned());
+        assert_eq!(parse_duration("ms"), expected);
+        assert_eq!(parse_duration("1.5s"), expected);
     }
 }
