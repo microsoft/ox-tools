@@ -261,12 +261,12 @@ names it. A bare feature member names an implicit optional-dependency feature on
 no explicit feature shadows that name. These declarations are excluded from source
 findings before compiler evidence is judged.
 
-Rustc identifies an extern name, not the manifest declaration that introduced it. When
-the same dependency key appears more than once within one dependency section's target
-tables, the tool cannot attribute one lint report to one declaration safely and suppresses
-source findings for that key and section. Normal, development, and build declarations use
-distinct evidence, so a repeated key across those sections remains independently judged.
-The catalog check remains unaffected.
+Rustc identifies an extern name, not the manifest declaration that introduced it. Normal
+and development declarations share one runtime extern in development units, so the tool
+suppresses source findings when that extern appears more than once across their target or
+dependency tables. Build declarations belong to a separate build-script target and remain
+independently attributable: a key repeated once at runtime and once for the build script is
+still judged in both domains. The catalog check remains unaffected.
 
 ### Also evaluated, and not used
 

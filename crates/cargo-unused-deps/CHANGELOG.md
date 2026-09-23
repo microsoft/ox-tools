@@ -12,6 +12,7 @@
 
 - 🐛 Bug Fixes
 
+  - preserve scoped wrapper evidence
   - resolve member workspace roots
   - harden scoped evidence
   - preserve target scope in remediation

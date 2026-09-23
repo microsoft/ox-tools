@@ -177,8 +177,9 @@ fn a_member_manifest_still_checks_the_workspace_root_catalog() {
 
     assert!(!success, "the root catalog has an unused entry");
     assert!(stderr.contains("- unused"), "unexpected stderr: {stderr}");
+    let normalized_stderr = stderr.replace(r"\\?\", "");
     assert!(
-        stderr.contains(&dir.path().join("Cargo.toml").display().to_string()),
+        normalized_stderr.contains(&dir.path().join("Cargo.toml").display().to_string()),
         "the finding must name the root manifest: {stderr}"
     );
 }

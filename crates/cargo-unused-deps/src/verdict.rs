@@ -92,16 +92,16 @@ pub fn judge(
         let mut declarations_per_scope = BTreeMap::new();
         for declared in &package.declared {
             *declarations_per_scope
-                .entry((declared.extern_name(), declared.section))
+                .entry((declared.extern_name(), declared.section == Section::Build))
                 .or_insert(0usize) += 1;
         }
 
         for declared in &package.declared {
             // Rustc reports the extern name, not the manifest declaration that
-            // put it in scope. Duplicate declarations within one evidence
-            // scope cannot be attributed safely; declarations in different
-            // sections use distinct evidence and remain independently judged.
-            if declarations_per_scope.get(&(declared.extern_name(), declared.section)) != Some(&1) {
+            // put it in scope. Normal and development declarations share the
+            // same runtime extern in development units; build declarations use
+            // a separate build-script target and can be judged independently.
+            if declarations_per_scope.get(&(declared.extern_name(), declared.section == Section::Build)) != Some(&1) {
                 continue;
             }
             if declared.feature_referenced || allowed.contains(&declared.name) || package.allowed.contains(&declared.name) {

@@ -216,7 +216,16 @@ fn an_environment_workspace_wrapper_is_chained() {
         r#"fn main() {
     let mut args = std::env::args_os().skip(1);
     let rustc = args.next().expect("Cargo always supplies rustc");
-    let status = std::process::Command::new(rustc).args(args).status().expect("rustc must start");
+    let args: Vec<_> = args.collect();
+    if let Some(log) = std::env::var_os("WRAPPER_LOG") {
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new().create(true).append(true).open(log).expect("log must open"),
+            "{args:?}"
+        )
+        .expect("log must be writable");
+    }
+    let status = std::process::Command::new(rustc).args(&args).status().expect("rustc must start");
     std::process::exit(status.code().unwrap_or(1));
 }
 "#,
@@ -231,12 +240,14 @@ fn an_environment_workspace_wrapper_is_chained() {
     assert!(status.success(), "failed to compile wrapper");
 
     for variable in ["RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"] {
+        let log = fixture.dir.path().join(format!("{variable}.log"));
         let output = command()
             .arg("unused-deps")
             .arg("--manifest-path")
             .arg(fixture.dir.path().join("Cargo.toml"))
             .args(["--package", "main"])
             .env(variable, &wrapper)
+            .env("WRAPPER_LOG", &log)
             .output()
             .expect("failed to execute the binary");
 
@@ -244,6 +255,12 @@ fn an_environment_workspace_wrapper_is_chained() {
             output.status.success(),
             "{variable} must remain in the compiler chain: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            fs::read_to_string(log)
+                .expect("the chained wrapper must write its log")
+                .contains("unused_crate_dependencies"),
+            "{variable} must run behind the evidence wrapper and receive its lint arguments"
         );
     }
 }
@@ -384,7 +401,7 @@ fn duplicate_target_declarations_are_not_judged_from_shared_extern_evidence() {
 }
 
 #[test]
-fn the_same_key_in_different_sections_is_judged_from_each_sections_evidence() {
+fn normal_and_build_duplicates_are_judged_from_independent_evidence() {
     let fixture = Fixture::new(
         &["helper"],
         &format!("[dependencies]\n{}\n[build-dependencies]\n{}", dep("helper"), dep("helper")),
@@ -409,6 +426,30 @@ fn the_same_key_in_different_sections_is_judged_from_each_sections_evidence() {
     assert!(
         !stderr.contains("[build-dependencies] helper:"),
         "the used build declaration must remain clean: {stderr}"
+    );
+}
+
+#[test]
+fn normal_and_dev_duplicates_are_not_judged_from_their_shared_runtime_extern() {
+    let fixture = Fixture::new(
+        &["helper"],
+        &format!("[dependencies]\n{}\n[dev-dependencies]\n{}", dep("helper"), dep("helper")),
+        "pub fn go() {}\n",
+    )
+    .with_file("tests/it.rs", "#[test]\nfn t() { helper::f(); }\n");
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(
+        output.status.success(),
+        "runtime evidence cannot distinguish normal and dev declarations sharing one extern: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -1042,6 +1083,37 @@ fn a_configured_workspace_wrapper_is_not_silently_replaced() {
         .expect("failed to execute the binary");
 
     assert!(!output.status.success(), "an unchainable configured wrapper must fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot safely interpose without bypassing it"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_cargo_home_workspace_wrapper_is_not_silently_replaced() {
+    let fixture = Fixture::new(&["dead"], &format!("[dependencies]\n{}", dep("dead")), "pub fn go() {}\n");
+    let caller = TempDir::new().expect("failed to create caller directory");
+    let cargo_home = caller.path().join("cargo-home");
+    fs::create_dir(&cargo_home).expect("failed to create Cargo home");
+    fs::write(
+        cargo_home.join("config.toml"),
+        "[build]\nrustc-workspace-wrapper = \"workspace-wrapper\"\n",
+    )
+    .expect("failed to write Cargo home configuration");
+
+    let output = command()
+        .arg("unused-deps")
+        .arg("--manifest-path")
+        .arg(fixture.dir.path().join("Cargo.toml"))
+        .args(["--package", "main"])
+        .current_dir(caller.path())
+        .env("CARGO_HOME", cargo_home)
+        .env_remove("RUSTC_BOOTSTRAP")
+        .output()
+        .expect("failed to execute the binary");
+
+    assert!(!output.status.success(), "an unchainable Cargo home wrapper must fail");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("cannot safely interpose without bypassing it"),
         "unexpected stderr: {}",

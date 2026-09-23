@@ -66,7 +66,7 @@ pub struct ManifestInput {
 }
 
 /// Which manifest table declared a dependency.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     /// `[dependencies]`, including its `[target.'cfg(…)']` forms.
     Normal,
