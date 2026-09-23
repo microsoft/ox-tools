@@ -505,7 +505,7 @@ dependencies = [
  "tar",
  "tempfile",
  "terminal_size",
- "tick 0.7.0",
+ "tick",
  "tokio",
  "toml",
  "url",
@@ -640,7 +640,7 @@ dependencies = [
  "serde_json",
  "syn 3.0.4",
  "tempfile",
- "tick 0.7.0",
+ "tick",
  "toml",
  "toml_edit 0.25.13+spec-1.1.0",
  "walkdir",
@@ -1255,16 +1255,6 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "fast_time"
-version = "0.1.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37f47559135cddc2c472ba58e45bc466afd016ccc1602a90ccb364c92d765ee7"
-dependencies = [
- "libc",
- "windows 0.62.2",
 ]
 
 [[package]]
@@ -2873,9 +2863,9 @@ dependencies = [
 
 [[package]]
 name = "layered"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87dd7e1c7a2e2af4f821ca43899afdd156d2ed3c84c98bc39552e5455fa3d9f0"
+checksum = "890c9bf58f33d88a0fe262f38a1471e7e755c33ebc5898a2eea3d60734410e7b"
 dependencies = [
  "tower-layer",
 ]
@@ -3119,25 +3109,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
-]
-
-[[package]]
-name = "nm"
-version = "0.1.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "537b02df290014878652b07696856ced9cbdc517b2ca4d57752d1a39c7a39515"
-dependencies = [
- "nm_impl",
-]
-
-[[package]]
-name = "nm_impl"
-version = "0.1.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b27a3189e39c8052db6fb1d3b61d75ce036442a15170c81520cf334e1523886e"
-dependencies = [
- "fast_time",
- "num-traits",
 ]
 
 [[package]]
@@ -4126,15 +4097,15 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seatbelt"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48fcb0be762bbf3f3b046147041bd333f536cabfb8d2f414c76da7137d73746c"
+checksum = "6f37bbf969e7ac5e1176f350c66cdf1b2f9f060188426edca0845cbf99231434"
 dependencies = [
  "fastrand",
  "layered",
  "recoverable",
- "thread_aware 0.11.0",
- "tick 0.6.0",
+ "thread_aware",
+ "tick",
 ]
 
 [[package]]
@@ -4604,15 +4575,6 @@ dependencies = [
 
 [[package]]
 name = "thread_aware"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a51b2adee4e72d04bbdb051253a511e04e70fbffd00721bbd9e57bc45c2b29a"
-dependencies = [
- "nm",
-]
-
-[[package]]
-name = "thread_aware"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "82f2d8f0aa7bc71a23d3d7a29f3fa900ba9c8eaa77f4dd26555d5971876965f1"
@@ -4637,17 +4599,6 @@ dependencies = [
 
 [[package]]
 name = "tick"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf8b890df44ed42f77de97f2aa630091bf96fac578ca2a93953e8aee926ebcba"
-dependencies = [
- "futures-core",
- "pin-project-lite",
- "thread_aware 0.11.0",
-]
-
-[[package]]
-name = "tick"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4113fd2019bd88cdf4d718962b35d128558765719e1bde7dd0755187878131f5"
@@ -4656,7 +4607,7 @@ dependencies = [
  "jiff",
  "performables",
  "pin-project-lite",
- "thread_aware 0.12.0",
+ "thread_aware",
  "tokio",
 ]
 
