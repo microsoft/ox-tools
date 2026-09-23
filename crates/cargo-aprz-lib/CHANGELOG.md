@@ -1,11 +1,5 @@
 # Changelog
 
-## [1.1.2] - 2026-09-03
-
-- 🐛 Bug Fixes
-
-  - drop directories and humantime-serde dependencies ([#145](https://github.com/microsoft/ox-tools/pull/145))
-
 ## [Unreleased]
 
 ## [1.2.0] - 2026-09-23
@@ -24,6 +18,12 @@
 
 - `MPL-2.0` is now part of the default allowed-license list, matching the file-level copyleft
   licenses commonly accepted alongside permissive ones
+
+## [1.1.2] - 2026-09-03
+
+- 🐛 Bug Fixes
+
+  - drop directories and humantime-serde dependencies ([#145](https://github.com/microsoft/ox-tools/pull/145))
 
 ## 1.1.0 - 2026-08-07
 
