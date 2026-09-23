@@ -14,7 +14,7 @@
 //! metadata-hashed name, then uplifts the root unit of most target kinds to
 //! `target/<profile>/` (examples to `target/<profile>/examples/`) under a
 //! plain name carrying no hash. Two workspace packages whose targets uplift to
-//! same file therefore write the same file. Cargo reports this as `output
+//! the same file therefore write the same file. Cargo reports this as `output
 //! filename collision`, warns that it may become a hard error, and keeps
 //! building -- so the workspace stays green while the last writer wins and
 //! concurrent jobs race for one path. This tool turns that warning into a

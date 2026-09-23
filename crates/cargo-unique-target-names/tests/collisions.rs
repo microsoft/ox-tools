@@ -266,3 +266,18 @@ fn reports_a_library_and_a_binary_of_one_name_in_a_single_package() {
     );
     assert!(report.contains("target/<profile>/tool.pdb"), "{report}");
 }
+
+/// Two target declarations may point at one source file, so target identity
+/// cannot be the source path. A `[lib]` and a `[[bin]]` of one name both built
+/// from `src/lib.rs` still contend for the debug-info file.
+#[test]
+fn reports_two_targets_that_share_one_source_file() {
+    let report = report(&[Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example")
+        .with_library("twin", "cdylib")
+        .with_extra_manifest("[[bin]]\nname = \"twin\"\npath = \"src/lib.rs\"\n")]);
+    assert!(
+        report.contains("target 'twin' is declared by 2 targets: alpha (binary 'twin'), alpha (shared library 'twin')"),
+        "targets sharing a source file must still count separately: {report}"
+    );
+    assert!(report.contains("target/<profile>/twin.pdb"), "{report}");
+}

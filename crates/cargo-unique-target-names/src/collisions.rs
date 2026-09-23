@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 
-use cargo_metadata::camino::Utf8PathBuf;
 use cargo_metadata::{CrateType, Metadata, Target, TargetKind};
 
 /// The family of build artifacts a crate type emits.
@@ -68,6 +67,13 @@ impl Family {
     }
 }
 
+/// A target's kind, flattened into a key. Together with the package and the
+/// target name this identifies a declaration: Cargo rejects two targets of one
+/// kind sharing a name, but permits a `[lib]` and a `[[bin]]` of one name,
+/// even when both point at the same source file.
+fn kind_key(target: &Target) -> String {
+    target.kind.iter().map(ToString::to_string).collect::<Vec<_>>().join("+")
+}
 /// The name Cargo derives for a library or debug-info file: hyphens become
 /// underscores, because they are not valid in a Rust crate name.
 fn crate_name(target: &str) -> String {
@@ -85,11 +91,13 @@ fn is_hashed(kind: &TargetKind) -> bool {
 struct Contenders {
     /// The target name every owner spells the same way.
     name: String,
-    /// Keyed by package and target source path, so one target counts once even
+    /// Keyed by package and target identity, so one target counts once even
     /// when several of its crate types land in one family, while two targets in
     /// a single package -- a `[lib]` and a `[[bin]]` of one name, which Cargo
-    /// permits -- still count separately.
-    owners: BTreeMap<(String, Utf8PathBuf), String>,
+    /// permits, even pointing at the same source file -- still count
+    /// separately. Name and kind together identify a declaration: Cargo
+    /// rejects two targets of one kind sharing a name.
+    owners: BTreeMap<(String, String, String), String>,
 }
 
 /// A target name contended by the same set of targets.
@@ -176,7 +184,7 @@ pub fn find(metadata: &Metadata) -> Vec<Collision> {
                         })
                         .owners
                         .insert(
-                            (package.name.to_string(), target.src_path.clone()),
+                            (package.name.to_string(), target.name.clone(), kind_key(target)),
                             format!("{} ({} '{}')", package.name, label(target, family), target.name),
                         );
                 }

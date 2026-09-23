@@ -19,6 +19,7 @@ pub struct Member {
     binary: String,
     library_example: String,
     library: Option<(String, String)>,
+    extra_manifest: Option<String>,
 }
 
 impl Member {
@@ -33,6 +34,7 @@ impl Member {
             binary: binary.to_owned(),
             library_example: library_example.to_owned(),
             library: None,
+            extra_manifest: None,
         }
     }
 
@@ -50,6 +52,14 @@ impl Member {
     #[must_use]
     pub fn in_directory(mut self, directory: &str) -> Self {
         directory.clone_into(&mut self.directory);
+        self
+    }
+
+    /// The same, with extra manifest text appended -- an additional target
+    /// declaration a test needs that the standard shape does not provide.
+    #[must_use]
+    pub fn with_extra_manifest(mut self, extra: &str) -> Self {
+        self.extra_manifest = Some(extra.to_owned());
         self
     }
 }
@@ -104,6 +114,12 @@ fn write_workspace(root: &Path, members: &[Member]) {
             ),
         )
         .expect("member manifest must be writable");
+        if let Some(extra) = &member.extra_manifest {
+            let mut manifest = fs::read_to_string(package.join("Cargo.toml")).expect("member manifest must be readable");
+            manifest.push('\n');
+            manifest.push_str(extra);
+            fs::write(package.join("Cargo.toml"), manifest).expect("member manifest must be writable");
+        }
         fs::write(package.join("src/lib.rs"), "").expect("member library must be writable");
         fs::write(package.join(format!("src/bin/{}.rs", member.binary)), "fn main() {}\n").expect("member binary must be writable");
         fs::write(package.join(format!("examples/{}.rs", member.example)), "fn main() {}\n").expect("member example must be writable");
