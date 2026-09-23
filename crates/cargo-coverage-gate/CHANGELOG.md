@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-23
+
+- ✨ Features
+
+  - orchestrate coverage collection ([#179](https://github.com/microsoft/ox-tools/pull/179))
+
+- 🐛 Bug Fixes
+
+  - eliminate unkillable format_delta mutant ([#197](https://github.com/microsoft/ox-tools/pull/197))
+
 ## [0.5.0] - 2026-09-14
 
 - ✨ Features

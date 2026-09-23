@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+## [1.2.0] - 2026-09-23
+
+- ✨ Features
+
+  - discover tokens from GitHub CLI ([#175](https://github.com/microsoft/ox-tools/pull/175))
+  - replace legacy CI with aggregate gate ([#158](https://github.com/microsoft/ox-tools/pull/158))
+
 ## [1.1.2] - 2026-09-03
 
 - 🐛 Bug Fixes
