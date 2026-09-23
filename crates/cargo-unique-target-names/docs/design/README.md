@@ -78,7 +78,7 @@ code, so a caller can tell "broken" from "contended" without parsing output.
 ### Output
 
 ```text
-cargo-unique-target-names: target 'basic' is declared by 2 workspace packages: metabench (example), observed (example)
+cargo-unique-target-names: target 'basic' is declared by 2 targets: metabench (example), observed (example)
   they uplift to the same files: target/<profile>/examples/basic.pdb, target/<profile>/examples/basic[.exe]
 
 Rename the reported targets so each one uplifts to its own path.
