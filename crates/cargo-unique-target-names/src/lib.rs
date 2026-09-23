@@ -58,8 +58,9 @@
 //! All workspace targets uplift to their own path
 //! ```
 //!
-//! The tool exits with code 0 when every uplifted file has one owner, or code 1
-//! otherwise.
+//! The tool exits with code 0 when every uplifted file has one owner, code 1
+//! when at least one is contended, and code 2 when the workspace could not be
+//! read at all -- so a broken workspace is distinguishable from a finding.
 //!
 //! # What is and is not reported
 //!
@@ -80,19 +81,27 @@
 //! The Windows debug-info file is considered on every platform, so a
 //! Windows-only collision still fails a Linux run and every leg of a build
 //! matrix agrees.
+//!
+//! Two hazards Cargo itself does not warn about are deliberately not reported:
+//! dep-info files, which collapse by file stem, and target names differing only
+//! in case on a case-insensitive filesystem. Both are recorded in the crate's
+//! design document.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-mod collisions;
+pub mod collisions;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
 use cargo_metadata::MetadataCommand;
 use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Effects};
 use clap::{Parser, Subcommand};
+
+/// Exit code for a workspace whose metadata could not be read, kept distinct
+/// from the collision code so a caller can tell "broken" from "contended".
+pub const EXIT_UNREADABLE_WORKSPACE: u8 = 2;
 
 const CLAP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
@@ -124,12 +133,13 @@ struct Args {
 
 /// Runs the check and returns the process exit code.
 ///
-/// # Errors
-///
-/// Returns an error when `cargo metadata` cannot be run or its output cannot be
-/// understood, so a broken workspace fails loudly rather than reporting a clean
-/// result.
-pub fn run() -> Result<ExitCode> {
+/// Returns [`ExitCode::SUCCESS`] when every uplifted file has one owner,
+/// [`ExitCode::FAILURE`] when at least one is contended, and
+/// [`EXIT_UNREADABLE_WORKSPACE`] when the workspace could not be read at all --
+/// a broken workspace must not be reportable as clean, and must be
+/// distinguishable from a genuine finding.
+#[must_use]
+pub fn run() -> ExitCode {
     let Commands::UniqueTargetNames(args) = Cli::parse().command;
 
     let mut command = MetadataCommand::new();
@@ -137,17 +147,23 @@ pub fn run() -> Result<ExitCode> {
     if let Some(path) = args.manifest_path {
         command.manifest_path(path);
     }
-    let metadata = command.exec().context("failed to read workspace metadata from cargo")?;
+    let metadata = match command.exec() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            eprintln!("cargo-unique-target-names: failed to read workspace metadata from cargo: {error}");
+            return ExitCode::from(EXIT_UNREADABLE_WORKSPACE);
+        }
+    };
 
     let collisions = collisions::find(&metadata);
     if collisions.is_empty() {
         println!("All workspace targets uplift to their own path");
-        return Ok(ExitCode::SUCCESS);
+        return ExitCode::SUCCESS;
     }
 
     for collision in &collisions {
         eprintln!("cargo-unique-target-names: {}", collision.render());
     }
     eprintln!("\nRename the reported targets so each one uplifts to its own path.");
-    Ok(ExitCode::FAILURE)
+    ExitCode::FAILURE
 }

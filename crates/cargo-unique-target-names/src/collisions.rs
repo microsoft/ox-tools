@@ -78,10 +78,11 @@ struct Contenders {
     owners: BTreeMap<String, &'static str>,
 }
 
-/// A target name contended by the same set of packages, and every file they
-/// contend for. One name can contend for several files at once (an executable
-/// collides on both its executable and its debug-info file), so the files are
-/// grouped to keep the report to one entry per contended target.
+/// A target name contended by the same set of packages.
+///
+/// One name can contend for several files at once (an executable collides on
+/// both its executable and its debug-info file), so the files are grouped to
+/// keep the report to one entry per contended target.
 #[derive(Debug)]
 pub struct Collision {
     /// The contended target name.

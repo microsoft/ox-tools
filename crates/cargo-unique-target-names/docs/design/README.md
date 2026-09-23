@@ -69,10 +69,11 @@ cargo unique-target-names [--manifest-path <PATH>]
 |------|----------------------------------------------------------------------|
 | 0    | Every uplifted file has exactly one owner.                            |
 | 1    | At least one file is contended; each is reported on stderr.           |
-| other| `cargo metadata` could not be run or understood; the workspace is broken. |
+| 2    | `cargo metadata` could not be run or understood; the workspace is broken. |
 
-A workspace that cannot be read is an error rather than a pass, so a misconfigured
-repository cannot report itself clean.
+A workspace that cannot be read is an error rather than a pass, so a
+misconfigured repository cannot report itself clean — and it carries its own
+code, so a caller can tell "broken" from "contended" without parsing output.
 
 ### Output
 
@@ -134,7 +135,8 @@ and output is byte-ordered. Two consequences are deliberate:
 
 - Target names differing only in case stay distinct, matching Cargo, which keys
   its own collision check by exact path. Folding them would fail a workspace
-  Cargo builds without complaint.
+  Cargo builds without complaint. This is a deliberate *miss* on
+  case-insensitive filesystems — see §6.
 - The report reads identically on every host, with no dependence on locale
   collation.
 
@@ -146,7 +148,47 @@ Windows should fail a Linux run too, and every leg of a build matrix should
 agree on the verdict. The cost is that a Linux-only workspace could in principle
 be told about a file it never emits; that is the intended trade.
 
-## 6. Out of scope
+## 6. Known misses
+
+The rule reports what Cargo reports. Cargo's own `output filename collision`
+check does not cover every way a workspace can lose a build artifact, so the
+following hazards are real and are **not** currently reported. Both were
+verified on Windows; neither produces a Cargo warning.
+
+### Dep-info files collapse by file stem
+
+Cargo writes a dep-info file named after the artifact's *file stem*, not its
+full name: `tool.d`, not `tool.lib.d`. On MSVC the stems of `tool.exe`,
+`tool.lib`, and `tool.dll` all collapse to `tool`, so families this document
+treats as disjoint do contend for the dep-info file. A workspace with
+`staticlib tool` in one package and `cdylib tool` in another produces a single
+`tool.d` describing only the `cdylib`; the static library's dep-info is gone. By
+the same naming rule this also applies on Linux, where `libtool.a` and
+`libtool.so` both stem to `libtool.d`.
+
+Extending the model would mean keying a `{stem}.d` artifact per family, with the
+stem differing per platform (`tool` on Windows, `libtool` on Unix for the
+library families). Under the platform-independence rule above that would make
+almost every same-named pair contend, leaving only the executable/rust-library
+pair disjoint — a materially stricter tool than "what Cargo warns about".
+
+### Case-insensitive filesystems
+
+On NTFS and on a default macOS volume, two libraries whose target names differ
+only in case resolve to one file. A workspace with `[lib] name = "Shared_lib"`
+in one package and `[lib] name = "shared_lib"` in another builds without a
+Cargo warning and produces a single `libShared_lib.rlib`. The ordinal keying
+described above reproduces Cargo's verdict and therefore reproduces this miss.
+
+Reporting it would mean treating case-insensitive duplicates as a distinct
+finding, and — to keep verdicts identical across a build matrix — reporting them
+on case-sensitive hosts too, where no file is actually lost.
+
+Both extensions are deliberate open questions rather than oversights: they trade
+Goal 2 (match Cargo) against Goal 1 (prevent the race), and that trade should be
+made explicitly rather than by accident.
+
+## 7. Out of scope
 
 Integration with a specific CI system. The tool is a plain cargo subcommand with
 a meaningful exit code; wiring it into a pipeline belongs to whatever drives the

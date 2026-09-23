@@ -18,14 +18,12 @@
 //! cargo unique-target-names --manifest-path path/to/Cargo.toml
 //! ```
 //!
-//! The tool exits with code 0 when every uplifted file has one owner, or code 1
-//! otherwise.
+//! Exits 0 when every uplifted file has one owner, 1 when any is contended, and
+//! 2 when the workspace could not be read.
 
 use std::process::ExitCode;
 
-use anyhow::Result;
-
-fn main() -> Result<ExitCode> {
+fn main() -> ExitCode {
     // TODO: This could be a main.rs only crate, but CI complains when processing bin-only crates:
     //  https://github.com/rust-lang/cargo/issues/15231.
     cargo_unique_target_names::run()

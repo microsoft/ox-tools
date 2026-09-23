@@ -63,8 +63,9 @@ When everything checks out:
 All workspace targets uplift to their own path
 ```
 
-The tool exits with code 0 when every uplifted file has one owner, or code 1
-otherwise.
+The tool exits with code 0 when every uplifted file has one owner, code 1
+when at least one is contended, and code 2 when the workspace could not be
+read at all – so a broken workspace is distinguishable from a finding.
 
 ## What is and is not reported
 
@@ -85,6 +86,11 @@ already a Cargo error, so only cross-package duplicates are reported.
 The Windows debug-info file is considered on every platform, so a
 Windows-only collision still fails a Linux run and every leg of a build
 matrix agrees.
+
+Two hazards Cargo itself does not warn about are deliberately not reported:
+dep-info files, which collapse by file stem, and target names differing only
+in case on a case-insensitive filesystem. Both are recorded in the crate’s
+design document.
 
 
 <hr/>
