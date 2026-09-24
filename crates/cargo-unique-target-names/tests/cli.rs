@@ -18,7 +18,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use cargo_unique_target_names::{EXIT_UNREADABLE_WORKSPACE, Outcome, run};
+use cargo_unique_target_names::{EXIT_UNREADABLE_WORKSPACE, EXIT_USAGE, Outcome, run};
 use common::{Member, workspace};
 
 /// Runs the tool the way Cargo invokes it: `cargo unique-target-names ...`,
@@ -81,4 +81,39 @@ fn an_unreadable_workspace_exits_with_its_own_code() {
         "a broken workspace must not share an exit code with a finding: {diagnostic}"
     );
     assert!(diagnostic.contains("failed to read workspace metadata from cargo"), "{diagnostic}");
+}
+
+/// A command line clap rejects must come back as an outcome rather than
+/// terminating the caller, and must not borrow the exit code that already
+/// means "the workspace could not be read".
+#[test]
+fn a_rejected_command_line_carries_its_own_code() {
+    let outcome = run(["cargo", "unique-target-names", "--no-such-option"]);
+    let diagnostic = outcome.render();
+    assert!(matches!(outcome, Outcome::Usage(_)), "{diagnostic}");
+    assert_eq!(outcome.exit_code(), EXIT_USAGE, "{diagnostic}");
+    assert_ne!(
+        outcome.exit_code(),
+        EXIT_UNREADABLE_WORKSPACE,
+        "a bad invocation must not look like a broken workspace: {diagnostic}"
+    );
+    assert!(diagnostic.contains("--no-such-option"), "{diagnostic}");
+    assert!(
+        !outcome.is_informational(),
+        "a rejected command line belongs on stderr: {diagnostic}"
+    );
+}
+
+/// Help and version are requests, not failures: clap reports them as errors,
+/// but they succeed and belong on stdout.
+#[test]
+fn asking_for_help_or_version_succeeds() {
+    for request in ["--help", "--version"] {
+        let outcome = run(["cargo", "unique-target-names", request]);
+        let diagnostic = outcome.render();
+        assert!(matches!(outcome, Outcome::Help(_)), "{request}: {diagnostic}");
+        assert_eq!(outcome.exit_code(), 0, "{request}: {diagnostic}");
+        assert!(outcome.is_informational(), "{request}: {diagnostic}");
+        assert!(!diagnostic.is_empty(), "{request}: clap's answer must be carried out");
+    }
 }

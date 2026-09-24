@@ -64,8 +64,10 @@ All workspace targets uplift to their own path
 ```
 
 The tool exits with code 0 when every uplifted file has one owner, code 1
-when at least one is contended, and code 2 when the workspace could not be
-read at all – so a broken workspace is distinguishable from a finding.
+when at least one is contended, code 2 when the workspace could not be read
+at all, and code 3 when the command line itself was rejected. Each cause has
+its own code, so a broken workspace, a bad invocation and a genuine finding
+are never confused for one another.
 
 ## What is and is not reported
 

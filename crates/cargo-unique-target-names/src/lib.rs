@@ -59,8 +59,10 @@
 //! ```
 //!
 //! The tool exits with code 0 when every uplifted file has one owner, code 1
-//! when at least one is contended, and code 2 when the workspace could not be
-//! read at all -- so a broken workspace is distinguishable from a finding.
+//! when at least one is contended, code 2 when the workspace could not be read
+//! at all, and code 3 when the command line itself was rejected. Each cause has
+//! its own code, so a broken workspace, a bad invocation and a genuine finding
+//! are never confused for one another.
 //!
 //! # What is and is not reported
 //!
@@ -107,6 +109,13 @@ pub use crate::collisions::Collision;
 /// from the collision code so a caller can tell "broken" from "contended".
 pub const EXIT_UNREADABLE_WORKSPACE: u8 = 2;
 
+/// Exit code for a command line the tool rejected.
+///
+/// Clap's own default for a usage error is 2, which this crate has already
+/// given a meaning; a rejected invocation carries its own code so it cannot be
+/// mistaken for a workspace that could not be read.
+pub const EXIT_USAGE: u8 = 3;
+
 const CLAP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
     .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
@@ -138,6 +147,9 @@ struct Args {
 
 /// What a check found: the verdict, the text that describes it, and the exit
 /// code it maps to.
+///
+/// Every way the command can end is one of these variants, including a
+/// rejected command line, so calling [`run`] never terminates the caller.
 #[derive(Debug)]
 pub enum Outcome {
     /// Every uplifted file has exactly one owner.
@@ -147,6 +159,12 @@ pub enum Outcome {
     /// The workspace metadata could not be read, so no verdict is possible --
     /// a broken workspace must not be reportable as clean.
     Unreadable(String),
+    /// The command line was rejected, and this is what clap would have printed
+    /// about it.
+    Usage(String),
+    /// `--help` or `--version` was asked for, and this is the answer. Not a
+    /// failure: it carries the success code.
+    Help(String),
 }
 
 impl Outcome {
@@ -154,10 +172,18 @@ impl Outcome {
     #[must_use]
     pub const fn exit_code(&self) -> u8 {
         match self {
-            Self::Clean => 0,
+            Self::Clean | Self::Help(_) => 0,
             Self::Contended(_) => 1,
             Self::Unreadable(_) => EXIT_UNREADABLE_WORKSPACE,
+            Self::Usage(_) => EXIT_USAGE,
         }
+    }
+
+    /// Whether this outcome belongs on stdout. Findings, failures and rejected
+    /// command lines go to stderr; a clean verdict and requested help do not.
+    #[must_use]
+    pub const fn is_informational(&self) -> bool {
+        matches!(self, Self::Clean | Self::Help(_))
     }
 
     /// The full text the tool prints for this outcome.
@@ -176,6 +202,7 @@ impl Outcome {
             Self::Unreadable(error) => {
                 format!("cargo-unique-target-names: failed to read workspace metadata from cargo: {error}")
             }
+            Self::Usage(message) | Self::Help(message) => message.clone(),
         }
     }
 }
@@ -208,20 +235,37 @@ pub fn check(manifest_path: Option<&Path>) -> Outcome {
 /// Parses `args` as the command line, runs the check, prints the report, and
 /// returns the outcome.
 ///
-/// This is the whole of the command: `main` does nothing but hand it
-/// [`std::env::args_os`] and turn the returned [`Outcome::exit_code`] into a
-/// process exit code, so the contract is observable without spawning anything.
+/// This never terminates the caller: a command line clap rejects, and a
+/// `--help` or `--version` request, both come back as an [`Outcome`] like any
+/// other result. `main` does nothing but hand this [`std::env::args_os`] and
+/// turn the returned [`Outcome::exit_code`] into a process exit code, so the
+/// whole contract is observable in-process.
 #[must_use]
 pub fn run<I, T>(args: I) -> Outcome
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let Commands::UniqueTargetNames(arguments) = Cli::parse_from(args).command;
-    let outcome = check(arguments.manifest_path.as_deref());
-    match outcome {
-        Outcome::Clean => println!("{}", outcome.render()),
-        Outcome::Contended(_) | Outcome::Unreadable(_) => eprintln!("{}", outcome.render()),
+    let outcome = match Cli::try_parse_from(args) {
+        Ok(cli) => {
+            let Commands::UniqueTargetNames(arguments) = cli.command;
+            check(arguments.manifest_path.as_deref())
+        }
+        Err(error) => {
+            // Clap reports `--help` and `--version` as errors too, and says
+            // which stream each belongs on; only the genuine failures are.
+            let message = error.render().ansi().to_string().trim_end().to_owned();
+            if error.use_stderr() {
+                Outcome::Usage(message)
+            } else {
+                Outcome::Help(message)
+            }
+        }
+    };
+    if outcome.is_informational() {
+        println!("{}", outcome.render());
+    } else {
+        eprintln!("{}", outcome.render());
     }
     outcome
 }

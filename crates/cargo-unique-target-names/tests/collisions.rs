@@ -22,7 +22,7 @@ fn report(members: &[Member]) -> String {
     match check(Some(&temp.path().join("Cargo.toml"))) {
         Outcome::Clean => String::new(),
         Outcome::Contended(collisions) => collisions.iter().map(Collision::render).collect::<Vec<_>>().join("\n"),
-        Outcome::Unreadable(error) => panic!("the fixture workspace must be readable by cargo: {error}"),
+        other => panic!("the fixture workspace must be readable by cargo: {}", other.render()),
     }
 }
 

@@ -20,8 +20,9 @@
 //! cargo unique-target-names --manifest-path path/to/Cargo.toml
 //! ```
 //!
-//! Exits 0 when every uplifted file has one owner, 1 when any is contended, and
-//! 2 when the workspace could not be read.
+//! Exits 0 when every uplifted file has one owner, 1 when any is contended, 2
+//! when the workspace could not be read, and 3 when the command line was
+//! rejected.
 
 use std::env;
 use std::process::ExitCode;

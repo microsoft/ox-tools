@@ -71,13 +71,20 @@ cargo unique-target-names [--manifest-path <PATH>]
 
 | Code | Meaning                                                              |
 |------|----------------------------------------------------------------------|
-| 0    | Every uplifted file has exactly one owner.                            |
+| 0    | Every uplifted file has exactly one owner, or `--help` / `--version` was asked for. |
 | 1    | At least one file is contended; each is reported on stderr.           |
 | 2    | `cargo metadata` could not be run or understood; the workspace is broken. |
+| 3    | The command line was rejected.                                        |
 
 A workspace that cannot be read is an error rather than a pass, so a
 misconfigured repository cannot report itself clean — and it carries its own
 code, so a caller can tell "broken" from "contended" without parsing output.
+
+A rejected command line carries a third code rather than clap's default of 2,
+which this tool has already spent on an unreadable workspace. Parsing is done
+with `try_parse_from`, so no path through the library terminates its caller:
+every ending, including a bad invocation and a `--help` request, comes back as
+an `Outcome`.
 
 ### Output
 
