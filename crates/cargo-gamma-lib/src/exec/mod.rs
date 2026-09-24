@@ -58,6 +58,7 @@ pub(crate) use config::{available_parallelism, resolve_jobs};
 pub use events::Events;
 #[doc(inline)]
 pub use incremental_mode::IncrementalMode;
+pub(crate) use killers::Killers;
 #[doc(inline)]
 pub use loader::UNDER_GAMMA_VAR;
 pub(crate) use manifest::RUNTIME_CRATE;
@@ -80,10 +81,12 @@ pub(crate) use verdict::CONFIRM_FACTOR;
 pub use verdict::READERS;
 #[cfg(loom)]
 pub(crate) use verdict::run_loom_models;
+#[cfg(test)]
+pub(crate) use workspace::mark_cache_owned_for_test;
 #[cfg(any(test, feature = "internals"))]
 pub(crate) use workspace::production_campaign_base;
 #[doc(inline)]
 pub use workspace::{Workspace, campaign_base, clean_cache, footprint, gamma_base, scratch_tree};
 #[cfg(any(test, feature = "internals"))]
 pub(crate) use workspace::{absolute as absolute_test_path, cache_lock_identity};
-pub(crate) use workspace::{claim_cache, claim_workspace};
+pub(crate) use workspace::{campaign_base_from_state, claim_cache, claim_campaign_state, claim_workspace, remember_campaign_base};

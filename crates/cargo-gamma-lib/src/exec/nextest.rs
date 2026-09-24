@@ -88,7 +88,7 @@ impl Harness {
     ///
     /// Returns an error if nextest does not know the binary, which means the two disagree about what
     /// was built.
-    pub(super) fn command(&self, work: &Workspace, binary: &TestBinary, only: &[&str]) -> Result<Command> {
+    pub(super) fn command(&self, work: &Workspace, binary: &TestBinary, only: &[&str], fail_fast: bool) -> Result<Command> {
         let id = self.id(&binary.path)?;
         let mut command = Command::new(nextest_binary());
 
@@ -117,6 +117,9 @@ impl Harness {
         // so workspace configuration cannot hide the runtime marker and turn infrastructure
         // failure into a mutation kill.
         let _ = command.args(["--failure-output", "immediate-final"]);
+        if fail_fast {
+            let _ = command.arg("--fail-fast");
+        }
 
         // A test target that defines no tests is ordinary — a `src/bin` with no `#[test]` in it
         // still gets a harness — and nextest treats an empty run as an error by default. Run
@@ -449,7 +452,7 @@ mod tests {
         let harness = Harness::fake(&[("/t/deps/nxspike-abc", "nxspike")]);
 
         let command = harness
-            .command(&work, &crate::testing::test_binary("/t/deps/nxspike-abc"), &[])
+            .command(&work, &crate::testing::test_binary("/t/deps/nxspike-abc"), &[], false)
             .expect("a known binary yields a command");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
@@ -490,12 +493,28 @@ mod tests {
 
         let harness = Harness::fake(&[("/t/deps/nxspike-abc", "nxspike")]);
         let command = harness
-            .command(&work, &crate::testing::test_binary("/t/deps/nxspike-abc"), &[])
+            .command(&work, &crate::testing::test_binary("/t/deps/nxspike-abc"), &[], false)
             .expect("a known binary yields a command");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(args.last().map(String::as_str), Some("pass"));
         assert!(!args.iter().any(|arg| arg == "--"), "{args:?}");
+    }
+
+    #[test]
+    fn a_mutant_command_tells_nextest_to_stop_after_its_first_failure() {
+        let (_scratch, work) = crate::testing::helper_workspace("nextest-fail-fast", &[]);
+        let harness = Harness::fake(&[("/t/deps/nxspike-abc", "nxspike")]);
+
+        let command = harness
+            .command(&work, &crate::testing::test_binary("/t/deps/nxspike-abc"), &[], true)
+            .expect("a known binary yields a command");
+        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "--fail-fast").count(), 1);
+        let fail_fast = args.iter().position(|arg| arg == "--fail-fast").expect("fail-fast argument");
+        let separator = args.iter().position(|arg| arg == "--").unwrap_or(usize::MAX);
+        assert!(fail_fast < separator, "{args:?}");
     }
 
     #[test]
@@ -506,7 +525,9 @@ mod tests {
         work.set_test_environment(&binary.package_id, "CARGO_PKG_NAME", "nextest-package");
         let harness = Harness::fake(&[("/t/deps/nxspike-abc", "nxspike")]);
 
-        let command = harness.command(&work, &binary, &[]).expect("a known binary yields a command");
+        let command = harness
+            .command(&work, &binary, &[], false)
+            .expect("a known binary yields a command");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(command.get_program(), "cargo-nextest");
@@ -570,7 +591,7 @@ mod tests {
         let harness = Harness::fake(&[("/t/deps/nxspike-abc", "nxspike")]);
 
         let failure = harness
-            .command(&work, &crate::testing::test_binary("/t/deps/stranger-def"), &[])
+            .command(&work, &crate::testing::test_binary("/t/deps/stranger-def"), &[], false)
             .unwrap_err()
             .to_string();
 
@@ -591,7 +612,12 @@ mod tests {
 
         let harness = Harness::fake(&[("/t/deps/nxspike-abc", "nxspike")]);
         let command = harness
-            .command(&work, &crate::testing::test_binary("/t/deps/nxspike-abc"), &["tests::parses"])
+            .command(
+                &work,
+                &crate::testing::test_binary("/t/deps/nxspike-abc"),
+                &["tests::parses"],
+                false,
+            )
             .expect("a known binary yields a command");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
@@ -616,7 +642,12 @@ mod tests {
 
         let harness = Harness::fake(&[("/t/deps/nxspike-abc", "nxspike")]);
         let command = harness
-            .command(&work, &crate::testing::test_binary("/t/deps/nxspike-abc"), &["tests::parses"])
+            .command(
+                &work,
+                &crate::testing::test_binary("/t/deps/nxspike-abc"),
+                &["tests::parses"],
+                false,
+            )
             .expect("a known binary yields a command");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
@@ -624,7 +655,7 @@ mod tests {
 
         // A whole-binary run still needs it: a target with no tests at all is ordinary.
         let whole = harness
-            .command(&work, &crate::testing::test_binary("/t/deps/nxspike-abc"), &[])
+            .command(&work, &crate::testing::test_binary("/t/deps/nxspike-abc"), &[], false)
             .expect("a known binary yields a command");
         let whole: Vec<_> = whole.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
@@ -648,6 +679,7 @@ mod tests {
                 &work,
                 &crate::testing::test_binary("/t/deps/nxspike-abc"),
                 &["tests::parses", "tests::rejects"],
+                false,
             )
             .expect("a known binary yields a command");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();

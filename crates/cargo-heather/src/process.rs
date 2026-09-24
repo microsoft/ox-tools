@@ -45,15 +45,10 @@ pub fn check<R: Read>(mut reader: R, expected_header: &str, kind: FileKind) -> i
 pub fn fix<R: Read, W: Write>(mut reader: R, mut writer: W, expected_header: &str, kind: FileKind) -> io::Result<CheckResult> {
     let mut content = String::new();
     reader.read_to_string(&mut content)?;
-    if checker::check(&content, expected_header, kind) == CheckResult::Ok {
-        writer.write_all(content.as_bytes())?;
-        Ok(CheckResult::Ok)
-    } else {
-        let line_ending = if content.contains("\r\n") { "\r\n" } else { "\n" };
-        let (result, new_content) = checker::fix(&content, expected_header, kind, line_ending);
-        writer.write_all(new_content.as_bytes())?;
-        Ok(result)
-    }
+    let line_ending = if content.contains("\r\n") { "\r\n" } else { "\n" };
+    let (result, new_content) = checker::fix(&content, expected_header, kind, line_ending);
+    writer.write_all(new_content.as_bytes())?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -70,9 +65,10 @@ mod tests {
         let result = fix(&input[..], &mut output, HEADER, FileKind::Rust).unwrap();
         assert_eq!(result, CheckResult::Missing);
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("\r\n"), "output must use CRLF when input uses CRLF, got: {text:?}");
-        assert!(!text.contains("\r\n\r\n\r\n"), "must not have triple CRLF, got: {text:?}");
-        assert!(text.ends_with("fn main() {}\r\n"));
+        assert_eq!(
+            text,
+            "// Copyright (c) Microsoft Corporation.\r\n// Licensed under the MIT License.\r\n\r\nfn main() {}\r\n"
+        );
     }
 
     #[test]

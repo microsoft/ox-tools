@@ -19,23 +19,38 @@ use crate::discover::Plan;
 use crate::error::{Error, error};
 use crate::exec;
 use crate::model::{Mutant, Outcome};
-use crate::report::{Listings, Progress, Styler, encode_controls, quantity};
+use crate::report::{Listings, Progress, Stats, Styler, encode_controls, quantity};
 #[cfg(any(test, feature = "internals"))]
 use crate::testing::pause_after_cache_adoption;
 
 const GITHUB_ACTIONS: &str = "GITHUB_ACTIONS";
 
+#[cfg(test)]
+fn missing_hints(mode: exec::IncrementalMode, root: &Utf8Path) -> bool {
+    mode.is_enabled() && crate::discover::Hints::is_missing(root)
+}
+
 /// Which of the bulk outcome listings the caller asked for.
-const fn listings(args: &RunArgs, announced: bool) -> Listings {
+const fn listings(args: &RunArgs, announced: bool, promotable: Option<bool>, suppressible: Option<bool>) -> Listings {
     Listings {
         killed: args.show_killed,
         unviable: args.show_unviable,
         announced,
+        promotable,
+        suppressible,
+        stats: None,
     }
 }
 
-fn missing_hints(mode: exec::IncrementalMode, root: &Utf8Path) -> bool {
-    mode.is_enabled() && crate::discover::Hints::is_missing(root)
+fn stats(session: &exec::Session, elapsed: Duration) -> Stats {
+    let sweep = session.phases.sweep.as_ref();
+
+    Stats {
+        elapsed,
+        binaries: session.binaries.len(),
+        launches: sweep.map_or(0, |cost| cost.launches),
+        successful_hints: sweep.map_or(0, |cost| cost.exact_hits + cost.generalized_hits),
+    }
 }
 
 /// Loads `gamma.toml` and folds it into `args`.
@@ -175,18 +190,61 @@ fn emit_reports<H: Host>(
     dropped: &[String],
     styler: Styler,
 ) -> crate::Result<()> {
+    emit_reports_from(
+        host,
+        args,
+        plan,
+        &ReportContents {
+            source_root: None,
+            advice,
+            tests,
+            dropped,
+        },
+        styler,
+    )
+}
+
+struct ReportContents<'a> {
+    source_root: Option<&'a Utf8Path>,
+    advice: Option<&'a str>,
+    tests: Option<usize>,
+    dropped: &'a [String],
+}
+
+fn emit_reports_from<H: Host>(
+    host: &mut H,
+    args: &RunArgs,
+    plan: &Plan,
+    contents: &ReportContents<'_>,
+    styler: Styler,
+) -> crate::Result<()> {
     let documents = Documents::resolve(args, &plan.root);
-    let report = crate::elements::build(plan, crate::elements::Thresholds::default(), Some(run_info(args, tests, dropped)))?;
+    let report = crate::elements::build_from(
+        plan,
+        contents.source_root,
+        crate::elements::Thresholds::default(),
+        Some(run_info(args, contents.tests, contents.dropped)),
+    )?;
     let mut stream = host.error();
 
     crate::elements::write_json(&report, &documents.json)?;
-    writeln!(stream, "{} {}", styler.verb("Wrote"), documents.json)?;
+    writeln!(
+        stream,
+        "{} {}",
+        styler.footer_wrote(),
+        encode_controls(&platform_path(&documents.json))
+    )?;
 
     crate::html::write_page(&report, &documents.html)?;
-    writeln!(stream, "{} {}", styler.verb("Wrote"), documents.html)?;
+    writeln!(
+        stream,
+        "{} {}",
+        styler.footer_wrote(),
+        encode_controls(&platform_path(&documents.html))
+    )?;
     drop(stream);
 
-    emit_ci(host, args, plan, advice, styler)?;
+    emit_ci(host, args, plan, contents.advice, styler)?;
 
     Ok(())
 }
@@ -200,7 +258,7 @@ fn emit_ci<H: Host>(host: &mut H, args: &RunArgs, plan: &Plan, advice: Option<&s
 
     let mut stream = host.error();
 
-    writeln!(stream, "{} {path}", styler.verb("Wrote"))?;
+    writeln!(stream, "{} {}", styler.footer_wrote(), encode_controls(&platform_path(&path)))?;
 
     if let Some(truncation) = truncation {
         // Saying so is the whole difference between a report that is smaller than the truth and
@@ -470,6 +528,7 @@ fn adopted_from_cache(plan: &Plan, cached: &crate::HashMap<crate::model::MutantI
 /// on how the population happened to be narrowed.
 ///
 /// See [`crate::suppress::idle`] for exactly which directives reach here.
+#[cfg(test)]
 fn report_idle<H: Host>(host: &mut H, plan: &Plan, styler: Styler) -> crate::Result<()> {
     if plan.idle.is_empty() {
         return Ok(());
@@ -502,35 +561,6 @@ fn report_cache<H: Host>(host: &mut H, adopted: usize, styler: Styler) -> crate:
         "{} {} known not to compile, carried forward rather than rebuilt",
         styler.verb("Cached"),
         quantity(adopted, "mutant")
-    )?;
-
-    Ok(())
-}
-
-/// Says which part of the build context cost this run the record's unviability.
-///
-/// Only the tier that was refused is reported. Unviability is a claim about what compiles, so it
-/// requires every term of the context; the probes and the build order the same record holds require
-/// none and are used regardless. Saying "the cache did not apply" would send the reader through
-/// their whole configuration, and would also be wrong — most of the record still applied.
-// #[gamma::skip(all, reason = "this diagnostic-only formatter is covered by exact sink output; its choice of the first moved axis has no effect when there is only one axis and multi-axis output preserves the full ordered list")]
-fn report_context<H: Host>(host: &mut H, moved: &[crate::discover::Term], styler: Styler) -> crate::Result<()> {
-    let Some(first) = moved.first() else {
-        return Ok(());
-    };
-
-    let named: Vec<&str> = moved.iter().map(|term| term.name()).collect();
-    let axes = if moved.len() == 1 {
-        first.name().to_owned()
-    } else {
-        named.join(", ")
-    };
-
-    writeln!(
-        host.error(),
-        "{} the record's unviability: {} differs from the run that wrote it. Its build order is still used, so the mutants that failed last time are compiled first",
-        styler.note("Rebuilding"),
-        axes
     )?;
 
     Ok(())
@@ -583,13 +613,14 @@ fn cache_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
     })
 }
 
-struct IncrementalPreparation {
+struct RecordPreparation {
     base: Utf8PathBuf,
     context: crate::discover::ContextDigest,
     inputs: crate::discover::WorkspaceSnapshot,
+    killers: crate::discover::Killers,
 }
 
-impl IncrementalPreparation {
+impl RecordPreparation {
     fn for_run(args: &RunArgs, survey: &crate::discover::Survey, context: crate::discover::ContextDigest) -> Self {
         let base = exec::campaign_base(&survey.root, &survey.target, args.measure.cache_dir.as_deref());
         let inputs = crate::discover::RunRecord::snapshot_with_external(
@@ -599,14 +630,69 @@ impl IncrementalPreparation {
             survey.has_untracked_build_script_inputs(),
         );
 
-        Self { base, context, inputs }
+        Self {
+            base,
+            context,
+            inputs,
+            killers: survey.killers(),
+        }
     }
 }
 
-fn incremental_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
-    let mode = args.incremental.unwrap_or(exec::IncrementalMode::Build);
+fn incremental_enabled(args: &RunArgs) -> bool {
+    !args.dry_run && args.incremental.unwrap_or(exec::IncrementalMode::Build).is_enabled()
+}
 
-    (!args.dry_run && mode.is_enabled()).then(|| cache_context(args)).flatten()
+#[cfg(test)]
+fn incremental_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
+    incremental_enabled(args).then(|| cache_context(args)).flatten()
+}
+
+fn postprocessing_contexts(
+    args: &RunArgs,
+    observed: Option<crate::discover::ContextDigest>,
+) -> Option<(crate::discover::ContextDigest, Option<crate::discover::ContextDigest>)> {
+    (!args.dry_run).then(|| {
+        let reusable = incremental_enabled(args).then(|| observed.clone()).flatten();
+        (observed.unwrap_or_default(), reusable)
+    })
+}
+
+fn store_completed_record(
+    prepared: RecordPreparation,
+    plan: &Plan,
+    learning: Option<&crate::exec::Killers>,
+) -> crate::Result<(bool, bool)> {
+    let Some(mut record) =
+        crate::discover::RunRecord::from_completed_plan_snapshot(plan, &prepared.context, prepared.inputs, &prepared.killers)
+    else {
+        return Err(crate::error::error!(
+            "could not construct completed campaign state from the captured source generation"
+        ));
+    };
+
+    if let Some(learning) = learning {
+        learning.stage(&mut record, &plan.mutants);
+    }
+
+    let stored = record.store_completed(&prepared.base)?;
+    let reachable = exec::remember_campaign_base(&plan.root, &prepared.base)
+        && exec::campaign_base_from_state(&plan.root, None).as_ref() == Some(&prepared.base);
+
+    Ok(postprocessing_advice(&plan.root, &stored, reachable))
+}
+
+fn postprocessing_advice(root: &Utf8Path, stored: &crate::discover::RunRecord, reachable: bool) -> (bool, bool) {
+    if !reachable {
+        return (false, false);
+    }
+
+    let suppressible = stored
+        .outcomes()
+        .iter()
+        .any(|entry| matches!(entry.outcome, Outcome::Timeout | Outcome::OutOfMemory));
+
+    (crate::discover::Hints::record_promotion_is_useful(root, stored), suppressible)
 }
 
 /// Settles everything the measured run needs from the command line.
@@ -647,18 +733,6 @@ pub(super) fn run_config(args: &RunArgs, styler: Styler) -> exec::Config {
             .map_or_else(|| exec::Config::default().timeout_floor, Duration::from_secs_f64),
         ..exec::Config::default()
     }
-}
-
-/// Discovers, runs and reports, returning everything the caller needs to judge the run.
-///
-/// Returns the whole [`Executed`], not just the plan it produced. `suppress` derives source edits
-/// from these verdicts, and a run that could not build part of its population has verdicts for the
-/// rest and none at all for that part — which is a decision only the caller can make, so the
-/// stuck builds travel with the plan rather than being dropped on the way out. Split out of
-/// [`run_session`] so `suppress` can act on the verdicts rather than re-deriving them from a
-/// second run.
-pub(super) fn execute<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<Executed> {
-    measured(host, args, progress_when, styler)
 }
 
 /// What a run produced: the plan, and whatever the build could not be made to compile.
@@ -765,8 +839,9 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     // describing different builds — a dry run included, since its listing is a claim about what a
     // real run would do.
     let config = run_config(args, styler);
-    let context = incremental_context(args);
-    let mut survey = crate::discover::Survey::for_build_with_cache_inputs(&args.select, shard, &config.cargo, context.is_some())?;
+    let observed_context = incremental_enabled(args).then(|| cache_context(args)).flatten();
+    let contexts = postprocessing_contexts(args, observed_context);
+    let mut survey = crate::discover::Survey::for_build_with_cache_inputs(&args.select, shard, &config.cargo, incremental_enabled(args))?;
 
     if let Some(path) = args.only_survivors_from.as_ref() {
         let report = crate::merge::read_limited(path, u64::MAX)?.report;
@@ -779,17 +854,18 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let artifact_dir = Documents::directory(args, &survey.root);
     fs::create_dir_all(&artifact_dir).map_err(|cause| error!("could not create artifact directory `{artifact_dir}`").caused_by(cause))?;
 
-    let incremental = context.map(|context| IncrementalPreparation::for_run(args, &survey, context));
-    let cache_locks = if should_claim_cache(incremental.is_some(), args.dry_run) {
+    let (record_context, reusable_context) = contexts.map_or((None, None), |(record, reusable)| (Some(record), reusable));
+    let record = record_context.map(|context| RecordPreparation::for_run(args, &survey, context));
+    let cache_locks = if should_claim_cache(record.is_some(), args.dry_run) {
         Some(exec::claim_cache(&survey.root, &survey.target, args.measure.cache_dir.as_deref())?)
     } else {
         None
     };
     #[cfg(any(test, feature = "internals"))]
     let cache_lock_identity = cache_locks.as_ref().map(exec::cache_lock_identity);
-    let (cached, _declined, moved) = incremental.as_ref().map_or_else(
+    let (cached, _declined, _moved) = reusable_context.as_ref().zip(record.as_ref()).map_or_else(
         || (crate::HashMap::default(), 0, Vec::new()),
-        |prepared| adopt(args, &mut survey, &prepared.base, Some(&prepared.context), &prepared.inputs),
+        |(context, prepared)| adopt(args, &mut survey, &prepared.base, Some(context), &prepared.inputs),
     );
 
     // A dry run reports on the whole population and builds nothing, so there is no package-by-
@@ -800,8 +876,6 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         let plan = survey.into_plan(scanned);
 
         progress.finish(host);
-        report_idle(host, &plan, styler)?;
-
         if plan.mutants.is_empty() {
             let _ = writeln!(host.error(), "no mutants were generated");
 
@@ -811,7 +885,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
             });
         }
 
-        crate::report::summarize(host, &plan, styler, listings(args, false))?;
+        crate::report::summarize(host, &plan, styler, listings(args, false, None, None))?;
         emit_reports(host, args, &plan, None, None, &[], styler)?;
         emit_diag(host, args, &plan, None, started, styler)?;
 
@@ -868,6 +942,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         built,
         stuck,
         dropped,
+        learning,
     } = outcome?;
 
     let log_failure = log_result.err();
@@ -883,10 +958,9 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     // Written from the whole population so an adopted cache is preserved. Failing here is not failing the run:
     // every verdict has already been reached, and a scratch file that could not be written must
     // only ever cost the next run some time.
-    let mode = args.incremental.unwrap_or(exec::IncrementalMode::Build);
-    if let Some(IncrementalPreparation { base, context, inputs }) = incremental
-        && let Some(record) = crate::discover::RunRecord::from_plan_snapshot(&plan, &context, inputs, &crate::discover::Killers::default())
-    {
+    let mut promotable = false;
+    let mut suppressible = false;
+    if let Some(prepared) = record {
         let record_locks = if built.is_none() {
             match exec::claim_cache(&plan.root, &survey.target, args.measure.cache_dir.as_deref()) {
                 Ok(locks) => Some(locks),
@@ -900,16 +974,25 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         };
 
         if built.is_some() || record_locks.is_some() {
-            record.store(&base, &plan.root);
+            match store_completed_record(prepared, &plan, learning.as_ref()) {
+                Ok((stored_promotable, stored_suppressible)) => {
+                    promotable = stored_promotable;
+                    suppressible = stored_suppressible;
+                }
+                Err(failure) => {
+                    writeln!(
+                        host.error(),
+                        "{} completed campaign state was not saved: {failure}",
+                        styler.warning()
+                    )?;
+                }
+            }
         }
     }
 
     let adopted = adopted_from_cache(&plan, &cached);
 
     report_cache(host, adopted, styler)?;
-    report_context(host, &moved, styler)?;
-    report_idle(host, &plan, styler)?;
-
     if plan.mutants.is_empty() {
         let _ = writeln!(host.error(), "no mutants were generated");
         warn_auxiliary(host, log_failure.as_ref(), styler);
@@ -922,7 +1005,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     // suppressed, sharded away, already settled, or never built — and it is written before the
     // failure is reported, because a report that exists is the whole point of getting this far.
     let Some(mut built) = built else {
-        crate::report::summarize(host, &plan, styler, listings(args, announced))?;
+        crate::report::summarize(host, &plan, styler, listings(args, announced, Some(promotable), Some(suppressible)))?;
 
         emit_reports(host, args, &plan, stuck_panel(&stuck).as_deref(), None, &dropped, styler)?;
         emit_diag(host, args, &plan, None, started, styler)?;
@@ -933,29 +1016,34 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         return Ok(Executed { plan: Some(plan), stuck });
     };
 
+    built.work.snapshot_report_sources(&plan)?;
+
     if args.leak_dirs {
         let tree = exec::scratch_tree(&plan.root, args.measure.cache_dir.as_deref());
 
         writeln!(host.error(), "{} {tree}", styler.verb("Kept"))?;
     }
 
-    crate::report::summarize(host, &plan, styler, listings(args, announced))?;
-    let has_suppressible_mutants = plan
-        .mutants
-        .iter()
-        .any(|mutant| matches!(mutant.outcome, Outcome::Timeout | Outcome::OutOfMemory));
-    crate::report::session_notes(
-        host,
-        &built.session,
-        missing_hints(mode, &plan.root),
-        has_suppressible_mutants,
-        styler,
-    )?;
+    let mut footer = listings(args, announced, Some(promotable), Some(suppressible));
+    footer.stats = Some(stats(&built.session, started.elapsed()));
+    crate::report::summarize(host, &plan, styler, footer)?;
+    crate::report::session_notes(host, &built.session, false, false, styler)?;
 
     let wall = started.elapsed();
     let panel = summary_panel(args, &plan, &built.session, &stuck, &dropped, wall);
 
-    emit_reports(host, args, &plan, Some(&panel), built.session.tests, &dropped, styler)?;
+    emit_reports_from(
+        host,
+        args,
+        &plan,
+        &ReportContents {
+            source_root: Some(&built.work.report_source_root()),
+            advice: Some(&panel),
+            tests: built.session.tests,
+            dropped: &dropped,
+        },
+        styler,
+    )?;
     emit_advice(host, args, &plan, &built.session, wall, styler)?;
     emit_diag(host, args, &plan, Some(&built.session), started, styler)?;
     report_dropped(host, &dropped, styler)?;
@@ -974,8 +1062,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     Ok(Executed { plan: Some(plan), stuck })
 }
 
-fn should_claim_cache(incremental: bool, dry_run: bool) -> bool {
-    incremental && !dry_run
+fn should_claim_cache(persisting_record: bool, dry_run: bool) -> bool {
+    persisting_record && !dry_run
 }
 
 fn clear_baseline_failures(artifact_dir: &Utf8Path) -> crate::Result<()> {
@@ -1011,7 +1099,7 @@ fn emit_failure_artifacts<H: Host>(
         let _ = writeln!(
             events.host.error(),
             "{} {}",
-            events.styler.verb("Wrote"),
+            events.styler.footer_wrote(),
             encode_controls(&platform_path(&canonical))
         );
     }
@@ -1036,7 +1124,7 @@ fn emit_failure_artifacts<H: Host>(
             let _ = writeln!(
                 events.host.error(),
                 "{} {}",
-                events.styler.verb("Wrote"),
+                events.styler.footer_wrote(),
                 encode_controls(&platform_path(&path))
             );
         }
@@ -1050,7 +1138,7 @@ fn emit_failure_artifacts<H: Host>(
             let _ = writeln!(
                 events.host.error(),
                 "{} {}",
-                events.styler.verb("Wrote"),
+                events.styler.footer_wrote(),
                 encode_controls(&platform_path(&diagnostics))
             );
         }
@@ -1230,7 +1318,7 @@ fn emit_diag_bundle_to<H: Host>(
     path: &Utf8Path,
 ) -> crate::Result<()> {
     write_diag_bundle_to(args, plan, session, started, path)?;
-    writeln!(host.error(), "{} {}", styler.verb("Wrote"), path)?;
+    writeln!(host.error(), "{} {}", styler.footer_wrote(), encode_controls(&platform_path(path)))?;
 
     Ok(())
 }
@@ -1285,7 +1373,7 @@ fn emit_advice<H: Host>(
     crate::elements::write(&path, &advice)
         .map_err(|cause| crate::error::error!("could not write the advice to `{path}`").caused_by(cause))?;
 
-    writeln!(host.error(), "{} {path}", styler.verb("Wrote"))?;
+    writeln!(host.error(), "{} {}", styler.footer_wrote(), encode_controls(&platform_path(&path)))?;
 
     Ok(())
 }
@@ -1387,7 +1475,179 @@ mod tests {
     }
 
     #[test]
-    fn cache_claiming_requires_incremental_state_and_a_real_run() {
+    fn disabled_incremental_still_persists_postprocessing_state_without_adoption() {
+        let args = RunArgs {
+            incremental: Some(exec::IncrementalMode::No),
+            ..RunArgs::default()
+        };
+        let (record_context, reusable) = postprocessing_contexts(&args, None).expect("real runs prepare a record");
+        let plan = plan();
+        let base = plan.root.join("campaign-state");
+        let _locks = exec::claim_cache(&plan.root, &plan.root.join("target"), Some(&base)).expect("owned campaign cache");
+        let inputs = crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false);
+        let prepared = RecordPreparation {
+            base: base.clone(),
+            context: record_context,
+            inputs,
+            killers: crate::discover::Killers::default(),
+        };
+        let killer = crate::discover::Killer {
+            package: "subject".to_owned(),
+            target: "lib".to_owned(),
+            test: "tests::caught".to_owned(),
+        };
+        let mut learning = crate::exec::Killers::default();
+        learning.record(plan.mutants[0].id.clone(), killer.clone());
+
+        let (promotable, _suppressible) = store_completed_record(prepared, &plan, Some(&learning)).expect("completed campaign publication");
+        let stored = crate::discover::RunRecord::load_required(&base).expect("completed campaign state");
+
+        assert!(reusable.is_none(), "disabled incremental mode must not admit prior outcomes");
+        assert!(promotable, "newly learned probes remain promotable");
+        assert_eq!(stored.outcomes().len(), plan.mutants.len());
+        assert_eq!(stored.probes().get(&plan.mutants[0].id), Some(&killer));
+    }
+
+    #[test]
+    fn completed_campaign_atomically_clears_stale_learning() {
+        let plan = plan();
+        let base = plan.root.join("campaign-state");
+        let stale = core::iter::once((
+            plan.mutants[0].id.clone(),
+            crate::discover::Killer {
+                package: "subject".to_owned(),
+                target: "lib".to_owned(),
+                test: "tests::stale".to_owned(),
+            },
+        ))
+        .collect();
+        crate::discover::RunRecord::store_probes(&base, &stale);
+        let prepared = RecordPreparation {
+            inputs: crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false),
+            base: base.clone(),
+            context: crate::discover::record_context(&crate::discover::RecordContext {
+                toolchain: Some("test"),
+                ..crate::discover::RecordContext::default()
+            })
+            .expect("record context"),
+            killers: crate::discover::Killers::default(),
+        };
+
+        store_completed_record(prepared, &plan, Some(&crate::exec::Killers::default())).expect("completed campaign publication");
+
+        assert!(
+            crate::discover::RunRecord::load_required(&base)
+                .expect("completed campaign state")
+                .probes()
+                .is_empty(),
+            "the completed campaign's empty learning replaces stale probes"
+        );
+    }
+
+    #[test]
+    fn completed_campaign_records_the_killing_tests_source_file() {
+        let mut plan = plan();
+        let source = format!("{}\n#[test]\nfn caught() {{}}\n", plan.files[0].source.as_deref().expect("source"));
+        fs::write(&plan.files[0].absolute, &source).expect("source with killing test");
+        plan.files[0].source = Some(source.clone());
+        let _previous = plan
+            .digests
+            .insert(plan.files[0].path.clone(), crate::discover::digest(source.as_bytes()));
+        plan.mutants[0].outcome = Outcome::Killed;
+        plan.mutants[0].killed_by = Some("caught".to_owned());
+        let base = plan.root.join("campaign-state");
+        let _locks = exec::claim_cache(&plan.root, &plan.root.join("target"), Some(&base)).expect("owned campaign cache");
+        let prepared = RecordPreparation {
+            inputs: crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false),
+            base: base.clone(),
+            context: crate::discover::ContextDigest::default(),
+            killers: crate::discover::Killers::scan(&[plan.files[0].absolute.clone()]),
+        };
+
+        store_completed_record(prepared, &plan, None).expect("completed campaign publication");
+
+        let record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(base.join("last-gamma-run.json")).expect("completed record")).expect("record JSON");
+        let recorded = record["files"]
+            .as_array()
+            .expect("recorded files")
+            .iter()
+            .flat_map(|file| file["mutants"].as_array().expect("recorded mutants"))
+            .find(|entry| entry["id"] == plan.mutants[0].id.as_str())
+            .expect("killed mutant");
+
+        assert_eq!(recorded["killer_file"], "src/lib.rs");
+    }
+
+    #[test]
+    fn completed_resource_outcomes_survive_an_incomplete_or_changed_cache_snapshot() {
+        let mut plan = plan();
+        plan.mutants[0].outcome = Outcome::Timeout;
+        plan.mutants[1].outcome = Outcome::OutOfMemory;
+        let base = plan.root.join("campaign-state");
+        let _locks = exec::claim_cache(&plan.root, &plan.root.join("target"), Some(&base)).expect("owned campaign cache");
+        assert!(exec::remember_campaign_base(&plan.root, &base), "owned campaign locator");
+        assert_eq!(exec::campaign_base_from_state(&plan.root, None), Some(base.clone()));
+        let inputs = crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], true);
+        let prepared = RecordPreparation {
+            base: base.clone(),
+            context: crate::discover::ContextDigest::default(),
+            inputs,
+            killers: crate::discover::Killers::default(),
+        };
+        let probes = core::iter::once((
+            plan.mutants[0].id.clone(),
+            crate::discover::Killer {
+                package: "subject".to_owned(),
+                target: "lib".to_owned(),
+                test: "tests::caught".to_owned(),
+            },
+        ))
+        .collect();
+        crate::discover::RunRecord::store_probes(&base, &probes);
+        fs::write(&plan.files[0].absolute, "pub fn changed_during_campaign() {}\n").expect("change live source");
+
+        let (promotable, suppressible) =
+            store_completed_record(prepared, &plan, None).expect("completed campaign state does not require cache eligibility");
+        let stored = crate::discover::RunRecord::load_required(&base).expect("completed campaign state");
+        let outcomes: crate::HashMap<_, _> = stored.iter().map(|(id, outcome)| (id.to_owned(), outcome)).collect();
+
+        assert!(promotable, "the intermediate exact learning is preserved");
+        assert!(suppressible, "the completed ledger contains resource outcomes");
+        assert_eq!(
+            postprocessing_advice(&plan.root, &stored, false),
+            (false, false),
+            "commands that cannot resolve the record must not be recommended"
+        );
+        assert_eq!(outcomes.get(plan.mutants[0].id.as_str()), Some(&Outcome::Timeout));
+        assert_eq!(outcomes.get(plan.mutants[1].id.as_str()), Some(&Outcome::OutOfMemory));
+        assert_eq!(stored.probes().get(&plan.mutants[0].id), probes.get(&plan.mutants[0].id));
+    }
+
+    #[test]
+    fn completed_campaign_rejects_a_snapshot_from_before_discovery() {
+        let mut plan = plan();
+        let base = plan.root.join("campaign-state");
+        let prepared = RecordPreparation {
+            inputs: crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false),
+            base,
+            context: crate::discover::ContextDigest::default(),
+            killers: crate::discover::Killers::default(),
+        };
+        let changed = "pub fn changed() -> bool { true }\n";
+        fs::write(&plan.files[0].absolute, changed).expect("changed source");
+        plan.files[0].source = Some(changed.to_owned());
+        let _previous = plan
+            .digests
+            .insert(plan.files[0].path.clone(), crate::discover::digest(changed.as_bytes()));
+
+        let error = store_completed_record(prepared, &plan, None).expect_err("stale pre-discovery snapshot must not be published");
+
+        assert!(error.to_string().contains("captured source generation"), "{error}");
+    }
+
+    #[test]
+    fn cache_claiming_requires_persisted_state_and_a_real_run() {
         assert!(should_claim_cache(true, false));
         assert!(!should_claim_cache(false, false));
         assert!(!should_claim_cache(true, true));
@@ -1471,19 +1731,28 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(dir.keep()).expect("utf8");
         let src = root.join("src");
         fs::create_dir(&src).expect("src");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        )
+        .expect("manifest");
         let source = "pub fn less(a: i32, b: i32) -> bool { a < b }\n";
         let absolute = src.join("lib.rs");
         fs::write(&absolute, source).expect("source");
         let start = source.find("a < b").expect("span");
 
+        let mut digests = crate::HashMap::default();
+        let _previous = digests.insert(Utf8PathBuf::from("src/lib.rs"), crate::discover::digest(source.as_bytes()));
+
         Plan {
             skipped: Vec::new(),
-            digests: crate::HashMap::default(),
+            digests,
             root,
             files: vec![TargetFile {
                 path: Utf8PathBuf::from("src/lib.rs"),
                 absolute,
                 package: "subject".to_owned(),
+                source: Some(source.to_owned()),
             }],
             mutants: vec![mutant(start, Outcome::Survived, 120), mutant(start, Outcome::NoCoverage, 80)],
             suppressed: 0,
@@ -1674,6 +1943,24 @@ mod tests {
     }
 
     #[test]
+    fn footer_stats_use_sweep_launches_and_confirmed_hint_hits() {
+        let mut measured = session();
+        measured.phases.sweep = Some(exec::SweepCost {
+            launches: 821,
+            exact_hits: 384,
+            generalized_hits: 2,
+            ..exec::SweepCost::default()
+        });
+
+        let footer = stats(&measured, Duration::from_mins(42));
+
+        assert_eq!(footer.elapsed, Duration::from_mins(42));
+        assert_eq!(footer.binaries, 0);
+        assert_eq!(footer.launches, 821);
+        assert_eq!(footer.successful_hints, 386);
+    }
+
+    #[test]
     fn advice_uses_elapsed_wall_time_for_concurrent_baselines_and_sparse_workers() {
         let mut measured = session();
         measured.build = Duration::from_secs(7);
@@ -1790,6 +2077,18 @@ mod tests {
         assert!(base.join("gamma-report.json").exists());
         assert!(base.join("gamma-report.html").exists());
         assert!(base.join("gamma-report.sarif").exists());
+        let output = host.err();
+        for path in [
+            base.join("gamma-report.json"),
+            base.join("gamma-report.html"),
+            base.join("gamma-report.sarif"),
+        ] {
+            let rendered = platform_path(&path);
+            assert!(
+                output.contains(&format!("Wrote  : {rendered}")),
+                "{path} was not announced with a native aligned label in:\n{output}",
+            );
+        }
     }
 
     #[test]
@@ -2030,7 +2329,7 @@ mod tests {
         assert!(parsed["phases"]["baseline"]["elapsedMs"].is_number(), "{text}");
         assert!(parsed["phases"]["census"].is_null(), "no census ran, so it is omitted: {text}");
 
-        assert!(err.contains(path.as_str()), "{err}");
+        assert!(err.contains(&platform_path(&path)), "{err}");
     }
 
     #[test]
@@ -2090,7 +2389,7 @@ mod tests {
             )
         );
         let err = host.err();
-        assert_eq!(err.matches("Wrote ").count(), 5, "{err}");
+        assert_eq!(err.matches("Wrote  :").count(), 5, "{err}");
         for path in [
             Documents::resolve(&args, &plan.root).diag,
             first.join("failure.json"),

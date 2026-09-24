@@ -18,7 +18,7 @@ mod diagnostics;
 pub(crate) mod markdown;
 pub(crate) mod text;
 
-pub(crate) use diagnostics::{MAX_DIAGNOSTIC_LINES, diagnostic_line_count, failure_detail, format_line_ranges};
+pub(crate) use diagnostics::{MAX_DIAGNOSTIC_LINES, diagnostic_line_count, displayed_diagnostics, failure_detail, format_line_ranges};
 
 use crate::threshold::ThresholdSource;
 use crate::verdict::{PackageOutcome, Status};

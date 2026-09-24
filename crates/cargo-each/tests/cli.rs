@@ -902,7 +902,11 @@ fn chdir_with_once_is_a_usage_error() {
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("--chdir").and(predicate::str::contains("--once")));
+        .stderr(
+            predicate::str::contains("failed to build command plan")
+                .and(predicate::str::contains("--chdir"))
+                .and(predicate::str::contains("--once")),
+        );
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -999,7 +1003,7 @@ fn unknown_selector_is_a_usage_error() {
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("did not match"));
+        .stderr(predicate::str::contains("failed to resolve package selection").and(predicate::str::contains("did not match")));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -1011,7 +1015,21 @@ fn bad_filter_expression_is_a_usage_error() {
         .assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("invalid filter expression"));
+        .stderr(
+            predicate::str::contains("> invalid filter expression").and(predicate::str::contains("invalid filter expression `nonsense`")),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn metadata_load_error_has_exact_run_context() {
+    let missing = PathBuf::from("cargo-each-fixture-that-does-not-exist").join("Cargo.toml");
+    each(&missing)
+        .args(["--workspace", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("> failed to load workspace"));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -1039,6 +1057,30 @@ fn executes_command_and_propagates_failure() {
         .args(["-p", "alpha", "--", "cargo", "this-subcommand-does-not-exist"])
         .assert()
         .failure();
+}
+
+#[cfg(windows)]
+#[cfg_attr(miri, ignore = "spawns cargo-each and a child process; miri supports neither")]
+#[test]
+fn fail_fast_propagates_exact_child_status() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["-p", "alpha", "--", "cmd", "/C", "exit", "37"])
+        .assert()
+        .failure()
+        .code(37);
+}
+
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "spawns cargo-each and a child process; miri supports neither")]
+#[test]
+fn fail_fast_propagates_exact_child_status() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["-p", "alpha", "--", "sh", "-c", "exit 37"])
+        .assert()
+        .failure()
+        .code(37);
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]

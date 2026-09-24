@@ -62,7 +62,20 @@ The default storage layout keeps the synchronized source, vendored runtime, and
 stable workspace lock under the platform cache home. Cargo artifacts, census
 data, and reusable campaign records live under
 `<resolved-target>/cargo-gamma/cache/<workspace-identity>`. An explicit
-`--cache-dir` keeps all of those entries together at the selected path.
+`--cache-dir` keeps all of those entries together at the selected path. A
+`campaign-location` file under the external per-workspace cache points
+state-consuming commands at the latest successfully published campaign base.
+The record is published first; footer advice is enabled only after that locator
+resolves back to the published record. State-consuming commands accept a
+workspace member as `--dir`: they resolve its current owning workspace through
+Cargo metadata, then accept only a persisted locator or cache owner for that
+workspace identity. If current workspace identity cannot be resolved, they fail
+rather than adopting potentially stale state.
+
+Every measured campaign, including `--incremental no`, publishes completed
+campaign state and therefore holds the process-held workspace lock for its
+lifetime. Measured campaigns for one workspace are serialized. Dry runs publish
+no state and do not take that lock.
 
 ## Public contract
 
@@ -136,10 +149,21 @@ Cargo selection is a package subset retain their narrowed graph throughout.
 
 Instrumentation reads the synchronized scratch tree rather than re-reading the
 live checkout after discovery. Each copied source is checked against the
-generation digest recorded when its mutants were discovered. If they differ,
-those mutants receive the explicit `notbuilt` outcome: their spans do not
-describe the tree being tested, so emitting no guard is not treated as an
-internal instrumentation failure and splicing them at plausible-but-wrong
+generation digest recorded when its mutants were discovered after that source
+is scanned and before its current stage is instrumented. Earlier stages are not
+revalidated while their guards remain in the synchronized tree. The comparison
+omits a leading UTF-8 byte-order mark, matching discovery and parsing. A
+mismatch stops the campaign and asks the user to rerun after edits settle rather
+than attributing build or mutation results to the earlier source generation.
+Before completed evidence is published, the
+same discovery digests are checked against the pre-execution input snapshot;
+this prevents a source edit between snapshot capture and synchronization from
+giving a different generation the snapshot's provenance. A pre-execution test
+declaration scan also gives completed killed outcomes the workspace-relative
+file identity of an unambiguous killer, so later validation does not accept a
+same-named test moved elsewhere. Instrumentation
+repeats the generation check before splicing; a later mismatch gives affected
+mutants the explicit `notbuilt` outcome, and splicing at plausible-but-wrong
 offsets is never attempted.
 
 Diff paths are resolved to the workspace-relative Rust files discovered by the
@@ -153,23 +177,87 @@ incremental records are read under a 256 MiB bound. An oversized diff is a
 usage error, while oversized optimization artifacts are ignored under the same
 fail-open contract as corrupt or foreign-version artifacts.
 
-Checked-in hints use grouped YAML schema version 3. Incremental promotion
-upserts exact and generalized knowledge from the selected population while
-preserving every absence that partial discovery cannot prove stale; explicit
-`--replace` is the destructive whole-artifact operation. The hints context
+Checked-in hints use grouped YAML schema version 3. `cargo gamma hints` reads
+the persisted campaign record directly: after resolving and validating the
+current workspace identity, it performs no source walk, parse, or mutation
+discovery, and therefore accepts no mutant selection flags: it promotes the
+completed campaign population exactly as recorded. The completed ledger may
+retain unchanged outcomes from earlier narrow campaigns for incremental reuse,
+but it separately records the latest
+campaign population so promotion cannot remove or republish hints for those
+carried outcomes. Incremental promotion upserts exact and generalized knowledge
+while preserving unrelated entries and exact hints for `pending`, `notbuilt`,
+or `ignored` mutants that the campaign did not judge; explicit `--replace` is
+the destructive whole-artifact operation and requires a valid completed
+campaign record before changing an existing artifact. Generalized item, file,
+and reach
+knowledge is projected onto the completed record's persisted file and site
+identities before either merge mode, so replacement cannot republish scheduling
+knowledge inherited from scopes outside that campaign. Promotion holds the
+workspace lock across a second campaign-locator resolution, campaign-record
+selection, artifact publication, and verification, so a
+concurrently completing campaign cannot be followed by hints derived from the
+record it replaced. Version-10 campaign
+records persist workspace-relative paths for exact identities. Version-9
+records retain safely usable generalized and compiler-ordering knowledge but
+omit exact probes whose path was never recorded rather than inventing one. The hints context
 contains only the generating HEAD commit and UTC date because hints are
-revalidated scheduling advice, not context-gated evidence. JSON schemas 1 and
-2 are read-only migration inputs and are removed only after the YAML
-replacement has been published and verified. Generalized schema version 1
-interns repeated killing-test and binary identities, and stable reach sites
-persist the engine-owned site digest rather than normalized source text.
-Readers still accept the pre-interning version-1 representation so an existing
-artifact can be promoted without discarding its knowledge.
+revalidated scheduling advice, not context-gated evidence. The independently
+versioned generalized schema is version 2. It distinguishes seed observations
+from cross-mutant transfer hits and misses, interns repeated killing-test and
+binary identities, and persists stable reach sites with the engine-owned site
+digest rather than normalized source text. Version-1 generalized data is read
+conservatively: candidate identities become seeds, while conflated transfer
+statistics and measured costs are reset before the in-memory schema advances
+to version 2. Promotion output reports only records added, updated, removed,
+and preserved; aggregate hint and mutant counts remain available from the
+artifact rather than being repeated in the command status line.
 
-Reports use the same source generation from which their mutant spans were
-derived. If an analyzed source changes before report construction, the run
-refuses to publish reports that would combine the completed verdicts with the
-new source.
+Campaign records use schema version 10 and contain a complete outcome ledger:
+stable mutant ID, outcome, workspace-relative file, mutator, source-site
+identity and location, replacement identity, existing suppression state, and
+the discovered file digest. Incremental execution still reuses only compiler
+unviability. `cargo gamma suppress` normally resolves the persisted ledger
+after using Cargo metadata to validate the current workspace identity. It
+performs no workspace synchronization, builds, baselines, or tests. Explicit
+package, file, mutator, diff, shard, feature, and configuration selections are
+rejected because they cannot narrow an already persisted campaign ledger. The inherited run
+`--dry-run` flag is also rejected rather than ignored; only
+`--dry-run-suppress` previews source edits. The command parses only
+affected current source files, relocates a uniquely matching unchanged site, reports missing or
+ambiguous sites as stale, and verifies the resulting source policy
+transactionally. Persisted campaign locators are accepted only after Cargo resolves the selected
+directory's current workspace and the located cache's owner marker names that
+workspace. If current workspace identity cannot be resolved, the command fails
+rather than adopting potentially stale state. Record source paths containing
+roots or parent traversal are rejected before edit planning.
+Verification unions separately tagged directives that share a source line and
+rejects any edit whose syntactic scope would suppress an ineligible mutant. A
+rejected edit reports source locations, mutation descriptions, and prior
+verdicts rather than internal mutant IDs, then restores every changed file. The
+workspace lock is held from ledger selection through source publication and
+verification, so a finishing campaign cannot replace the evidence part-way
+through a suppression. It never rewrites the campaign
+record or progress log.
+
+Reports use a retained source snapshot in a fresh sidecar under cargo-gamma's
+private cache, outside the synchronized campaign workspace. The snapshot is
+populated from the original text discovery read, including a leading UTF-8
+byte-order mark when present. Generation digests and mutation spans use the
+normalized text discovery parsed. The snapshot is validated against those
+digests before publication and used even when the original checkout changes or
+deletes files. Report identities remain rooted at the original workspace and
+use original workspace-relative paths;
+cache paths never enter JSON, HTML, SARIF, annotations, or diagnostics. Runs
+that never build retain the discovered source in the plan and publish from it.
+
+The completed console footer is a single ordered block: `Summary:`, `Stats  :`
+for an executed campaign, an actionable `Note   :` for idle directives
+followed by indented entries, conditional suppression and hints-promotion
+notes, and `Wrote  :` artifact notices. The hints reminder depends on an
+addition, correction, or removal in exact killer or compiler-ordering
+knowledge learned by this campaign, not on whether `gamma-hints.yaml` already
+exists or on generalized counter churn.
 
 ### Redirected cache security
 

@@ -4,7 +4,7 @@
 [package]
 name = "cargo-coverage-gate"
 description = "A cargo subcommand that gates pull requests on per-package line coverage measured by cargo-llvm-cov"
-version = "0.5.0"
+version = "0.6.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "coverage", "ci"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
@@ -35,10 +35,12 @@ cargo-platform = { workspace = true }
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 lcov = { workspace = true }
-mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 semver = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+mutants = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

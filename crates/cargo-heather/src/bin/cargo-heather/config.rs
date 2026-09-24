@@ -216,6 +216,7 @@ fn find_workspace_root(package_cargo_toml: &Path) -> Result<(PathBuf, CargoManif
 
         match current.parent() {
             Some(parent) => current = parent,
+            // #[gamma::skip(loop.break_to_continue, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-22")]
             None => break,
         }
     }
@@ -330,6 +331,15 @@ mod tests {
         assert!(!cfg.header_text.is_empty());
         assert!(cfg.scripts); // default true
         assert!(!cfg.dot_toml); // default false
+        assert!(cfg.exclude.is_empty());
+    }
+
+    #[test]
+    fn inherited_license_defaults_enable_scripts_and_disable_dot_toml() {
+        let cfg = HeatherConfig::with_defaults("header".to_owned());
+
+        assert!(cfg.scripts);
+        assert!(!cfg.dot_toml);
         assert!(cfg.exclude.is_empty());
     }
 

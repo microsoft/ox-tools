@@ -417,17 +417,26 @@ everything else the tree has ever built too, so expect a run with it on to be sl
 
 Reports normally go to `target/cargo-gamma` in the original workspace. `--artifact-dir` moves
 all five together and creates the destination if needed; `--cache-dir` never changes them.
+Report source is read from the campaign’s retained synchronized snapshot and checked against
+discovery digests, while file keys, locations, and `projectRoot` continue to name the original
+workspace. Editing or deleting the original checkout after discovery therefore cannot mix source
+generations into a completed report.
 
-Every run writes what it learned to `last-gamma-run.json` in the cache: which mutants did not
-compile and which test killed each mutant. A repeated run reads it back (enabled by default with
-`--incremental build`), so it avoids rediscovering compiler unviability and tries the previous
-killer when canonical iteration reaches its binary. Killer tests are hints, not cached verdicts:
-every mutant is executed again before it contributes to the score. Reusing unviability requires
-the same compiler, Cargo configuration, and
+A completed measured campaign writes its complete outcome ledger to `last-gamma-run.json` in
+the cache. With incremental reuse enabled, that atomic record also carries score-neutral
+scheduling knowledge. If an incremental campaign fails part-way through, it leaves the completed
+ledger untouched and writes only its best-effort scheduling knowledge to
+`incomplete-gamma-learning.json`; the next completed campaign consumes and clears that separate
+cache. Dry runs write neither file, and `--incremental no` does not read or write incomplete
+learning. A repeated incremental run reads the completed record and incomplete learning, so it
+avoids rediscovering compiler unviability and tries the previous killer when canonical iteration
+reaches its binary. Killer tests are hints, not cached verdicts: every mutant is executed again
+before it contributes to the score. Reusing unviability requires the same compiler, Cargo configuration, and
 build policy plus unchanged compilation inputs. See
 [What a run remembers](#what-a-run-remembers) for the details; `--incremental no` performs a cold
-run. `cargo gamma hints` promotes the parts that cannot move a score into `gamma-hints.yaml`,
-which you can commit so a fresh CI container starts warm.
+run. `cargo gamma hints` promotes the parts that cannot move a score directly from that record,
+after using Cargo metadata to validate the current workspace identity but without source
+discovery, into `gamma-hints.yaml`, which you can commit so a fresh CI container starts warm.
 
 Control how the tree is compiled and how the tests are invoked:
 
@@ -662,8 +671,14 @@ A surviving mutant is an observation about your test suite. When triaging surviv
 
 #### Fixing timeouts, out-of-memory and unviable mutants
 
-Some sites cannot usefully be mutated — a hand-written spin loop, a driver poll, a reactor. `fix`
-runs the suite and writes the suppression for you:
+Some sites cannot usefully be mutated — a hand-written spin loop, a driver poll, a reactor.
+`suppress` promotes outcomes from the latest completed campaign and writes the suppression
+without workspace synchronization, rebuilding, baselining, or rerunning tests. A valid
+persisted workspace locator avoids Cargo metadata; without one, or whenever `--cache-dir` is
+explicit, the command uses metadata to resolve and validate the selected workspace.
+It validates only affected source files against the persisted site identity and leaves both
+`last-gamma-run.json` and `gamma-progress.log` unchanged. Use `--dry-run-suppress` to preview
+source edits; the inherited run flag `--dry-run` is rejected rather than silently editing:
 
 ```bash
 cargo gamma suppress --dry-run-suppress             # print the diff, change nothing
@@ -921,10 +936,12 @@ Both `reason` and `tag` are optional, but a `skip` with no `reason` is a decisio
 
 ##### When a suppression stops earning its place
 
-A run names every `skip` directive that suppressed nothing:
+A run names every `skip` directive that suppressed nothing after its summary and points to the
+applying form of `unsuppress`:
 
 ```text
-Unused 2 skip directives suppressed nothing and may no longer be needed
+Summary: 127 mutants (120 killed, 4 survived, 1 timed out, 0 out of memory, 2 uncovered => 94.5%)
+Note   : 2 superfluous skip directives could be removed with `cargo gamma unsuppress --apply`
   src/parse.rs:118: skip(arith) — the compiler folds this
   src/hash.rs:42: skip(literal)
 ```
@@ -1250,8 +1267,8 @@ run or shard whose scores will be compared or merged.
 
 Every cold run — such as a fresh CI container where `target/` is not preserved — starts with an
 empty killer map and an unguided build, on exactly the runs that cost the most.
-`cargo gamma hints` promotes scheduling information that cannot move a score into a file you
-can commit:
+`cargo gamma hints` promotes scheduling information that cannot move a score directly from the
+latest persisted campaign into a file you can commit:
 
 ```bash
 cargo gamma run                       # learn killer tests and unviable mutants
@@ -1286,11 +1303,9 @@ the artifact generation rather than gating hints or attributing retained entries
 Incremental promotion refuses an existing artifact it cannot understand rather than replacing
 unknown knowledge with a partial generation; `--replace` is the explicit permission to discard
 it. This includes a newer independently versioned generalized section, whose future fields
-cannot be round-tripped by today’s serializer. YAML or legacy JSON changed by another writer
-after loading is left intact and reported as a conflict.
-Legacy JSON versions 1 and 2 remain readable while YAML is absent and are removed only after a
-YAML replacement has been published and verified. Malformed, foreign, and unsupported artifacts
-remain safe to ignore.
+cannot be round-tripped by today’s serializer. YAML changed by another writer after loading is
+left intact and reported as a conflict. Malformed, foreign, and unsupported artifacts remain
+safe to ignore.
 
 #### Running only the tests that reach the mutant
 
@@ -1386,9 +1401,14 @@ flowchart TD
 |The hints file|`gamma-hints.yaml`|Forever, and through review|Never — every hint is checked|
 |A skip directive|Your source|Forever, and through review|Always — you wrote it|
 
-The record is the tool’s own memory and it is written on every run. It holds compiler unviability
-and checked killer hints alongside a cryptographic snapshot of compilation inputs. It is keyed by
-the mutant’s content id, which hashes the file, the item path, the mutator and the replacement.
+The completed record is the tool’s durable memory and is published only after a measured
+campaign finishes. It holds the complete outcome ledger and, for incremental campaigns,
+compiler unviability and checked killer hints alongside a cryptographic snapshot of compilation
+inputs. A failed incremental campaign writes only best-effort scheduling knowledge to
+`incomplete-gamma-learning.json`; it never replaces the completed ledger. Dry runs write no
+campaign state, and `--incremental no` neither reads nor writes incomplete learning. Records are
+keyed by the mutant’s content id, which hashes the file, the item path, the mutator and the
+replacement.
 
 A run adopts only compiler unviability under a matching build context. Test outcomes are
 observations that can vary even when every captured input is unchanged, so they are never reused.

@@ -231,3 +231,32 @@ pub fn partition(catalog: &WorkspaceCatalog, inherited: &BTreeSet<String>) -> (V
 
     (unused, stale)
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary filesystem manifests")]
+    fn inheritance_retains_every_exact_manifest_input() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let first = directory.path().join("first.toml");
+        let second = directory.path().join("second.toml");
+        let first_text = "[dependencies]\nserde = { workspace = true }\n";
+        let second_text = "[dev-dependencies]\ninsta = { workspace = true }\n";
+        fs::write(&first, first_text).expect("first manifest");
+        fs::write(&second, second_text).expect("second manifest");
+
+        let inheritance = inherited(&[first.clone(), second.clone()]).expect("inheritance");
+
+        assert_eq!(inheritance.keys, BTreeSet::from(["insta".to_owned(), "serde".to_owned()]));
+        assert_eq!(inheritance.inputs.len(), 2);
+        assert_eq!(inheritance.inputs[0].path, first);
+        assert_eq!(inheritance.inputs[0].contents, first_text);
+        assert_eq!(inheritance.inputs[1].path, second);
+        assert_eq!(inheritance.inputs[1].contents, second_text);
+    }
+}

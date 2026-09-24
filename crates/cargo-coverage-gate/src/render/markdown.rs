@@ -9,10 +9,11 @@
 //! design doc.
 
 use std::io;
+use std::num::NonZeroUsize;
 
 use crate::render::{
-    MAX_DIAGNOSTIC_LINES, diagnostic_line_count, failure_detail, files, format_delta, format_line_ranges, format_lines, format_source,
-    format_status_markdown, format_threshold, result_summary,
+    MAX_DIAGNOSTIC_LINES, diagnostic_line_count, displayed_diagnostics, failure_detail, files, format_delta, format_line_ranges,
+    format_lines, format_source, format_status_markdown, format_threshold, result_summary,
 };
 use crate::verdict::Report;
 
@@ -38,11 +39,11 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
 
     writeln!(out, "**Result:** {}", result_summary(&report.outcomes))?;
     write_failure_details(out, report)?;
-    if report.unattributed > 0 {
+    if let Some(unattributed) = NonZeroUsize::new(report.unattributed) {
         writeln!(
             out,
             "_Note: {} had paths outside any workspace member and were not attributed._",
-            files(report.unattributed),
+            files(unattributed.get()),
         )?;
     }
     Ok(())
@@ -62,22 +63,11 @@ fn write_failure_details(out: &mut dyn io::Write, report: &Report) -> io::Result
     writeln!(out, "#### Failure details")?;
     for (outcome, detail) in failures {
         writeln!(out, "- **{}:** {}", outcome.name, detail)?;
-        let mut remaining = MAX_DIAGNOSTIC_LINES;
-        for diagnostic in &outcome.diagnostics {
-            if remaining == 0 {
-                break;
-            }
-            let displayed = diagnostic.lines.len().min(remaining);
-            writeln!(
-                out,
-                "  - `{}`: {}",
-                diagnostic.path.display(),
-                format_line_ranges(&diagnostic.lines[..displayed])
-            )?;
-            remaining -= displayed;
+        for (path, lines) in displayed_diagnostics(outcome) {
+            writeln!(out, "  - `{}`: {}", path.display(), format_line_ranges(lines))?;
         }
         let omitted = diagnostic_line_count(outcome).saturating_sub(MAX_DIAGNOSTIC_LINES);
-        if omitted > 0 {
+        if let Some(omitted) = NonZeroUsize::new(omitted) {
             writeln!(out, "  - ... {omitted} more line locations omitted")?;
         }
     }
@@ -121,6 +111,7 @@ mod tests {
         assert!(s.starts_with("### coverage-gate"));
         assert!(s.contains("| Package | Lines |"));
         assert!(s.contains("|-------|------:|"));
+        assert!(!s.contains("#### Failure details"));
     }
 
     #[test]
@@ -202,11 +193,11 @@ mod tests {
     fn renders_unattributed_warning_when_present() {
         let report = Report {
             outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
-            unattributed: 2,
+            unattributed: 1,
         };
         let s = render_to_string(&report);
         assert!(s.contains("_Note:"), "expected italicized unattributed warning, got:\n{s}");
-        assert!(s.contains("2 files"));
+        assert!(s.contains("1 file"));
     }
 
     #[test]

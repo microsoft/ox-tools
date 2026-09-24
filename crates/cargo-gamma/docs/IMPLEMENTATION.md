@@ -27,6 +27,13 @@ artifacts and campaign state live under
 directory keeps the all-in-one layout. Published reports remain under the
 artifact directory rather than reusable cache state.
 
+The external cache also carries `campaign-location`, an atomically written
+pointer to the campaign base used by the latest completed run. Completion
+writes and serializes the merged record first, retains that merged value in
+memory, publishes the locator second, and enables postprocessing notes only
+when the same locator lookup used by `hints` and `suppress` resolves the
+record.
+
 The default cache name is a pinned BLAKE3-derived physical-workspace identity
 used by both locations. The stable process-held lock remains under the platform
 cache home, so deleting the Cargo target cannot create a second lock domain.
@@ -61,11 +68,15 @@ Cold same-item siblings wait for their scout to publish exact-test, file, and
 safe same-site negative reach learning before they become eligible.
 
 Checked-in hints use version-3 YAML grouped by source file, with repeated killer
-identities interned per file. Promotion joins the run record to the current
-selected population. Incremental promotion upserts that knowledge and preserves
-other scopes; `--replace` rebuilds from the selection. Both modes publish
-against the exact generation read, verify the replacement, and remove legacy
-JSON only if its generation is unchanged.
+identities interned per file and generalized schema-v2 identities interned
+globally. Promotion projects workspace-relative identities directly from the
+persisted campaign record; it performs no population rediscovery. Incremental
+promotion upserts that campaign's knowledge and preserves other scopes;
+`--replace` rebuilds from the campaign population. Both modes publish against
+the exact generation read and verify the replacement. YAML generations are
+scanned for forbidden references before strict deserialization begins.
+Incremental generalized merging and change accounting use keyed Fx tables,
+then restore canonical ordering before publication.
 
 ## Test fixtures
 
@@ -76,8 +87,7 @@ last-resort harness protection outside mutation campaigns.
 
 Tests requiring a host capability are ignored with an explicit reason when the
 suite is run generally and fail when invoked specifically without that
-capability. Registry mechanics use isolated instances where the call path
-permits injection. The remaining tests that call the production interrupt
-handler against process-global state are recorded as correctness work in
-[`TODO.md`](TODO.md#t1-isolate-tests-from-the-production-interrupt-registry),
-rather than being described as isolated before they are.
+capability. Registry and cgroup mechanics use isolated registries and recording
+killers. Tests that must exercise the production signal handler run in child
+processes, so they cannot leak process-global interrupt state or direct a
+fabricated process group from the main test process.

@@ -61,8 +61,6 @@
 //!
 //! The tool exits with code 0 if all dependencies are well-formed, or code 1 otherwise.
 
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-
 mod validation;
 
 use std::path::PathBuf;

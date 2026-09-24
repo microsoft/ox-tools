@@ -59,6 +59,24 @@ impl Styler {
         self.column(text, Style::new().bold().green())
     }
 
+    /// Renders a final-footer label without the ordinary Cargo status-column padding.
+    #[must_use]
+    pub(crate) fn footer(self, text: &str) -> String {
+        self.apply(text, Style::new().bold().green())
+    }
+
+    /// Renders an aligned final-footer note label.
+    #[must_use]
+    pub(crate) fn footer_note(self) -> String {
+        self.footer("Note   :")
+    }
+
+    /// Renders an aligned final-footer artifact label.
+    #[must_use]
+    pub(crate) fn footer_wrote(self) -> String {
+        self.footer("Wrote  :")
+    }
+
     /// Renders a status verb for something that was skipped rather than done.
     #[must_use]
     pub fn note(self, text: &str) -> String {
@@ -152,6 +170,15 @@ mod tests {
 
         assert!(styler.verb("Found").contains('\x1b'));
         assert!(styler.outcome(Outcome::Survived).contains('\x1b'));
+    }
+
+    #[test]
+    fn final_footer_labels_share_the_same_emphasis() {
+        let styler = Styler::new(true);
+        let summary = styler.footer("Summary:").replace("Summary:", "");
+
+        assert_eq!(summary, styler.footer_note().replace("Note   :", ""));
+        assert_eq!(summary, styler.footer_wrote().replace("Wrote  :", ""));
     }
 
     #[test]

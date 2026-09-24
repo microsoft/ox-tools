@@ -91,9 +91,15 @@ pub(crate) fn write_streamed(path: &Utf8Path, fill: impl FnOnce(&mut dyn io::Wri
 /// replace the destination in the syscall interval between the comparison and rename and be
 /// overwritten. The directory lock closes that interval only for writers using this API.
 pub(crate) fn write_if_unchanged(workspace: &Utf8Path, path: &Utf8Path, expected: Option<&str>, contents: &str) -> Result<Publication> {
+    let _lock = crate::exec::claim_workspace(workspace)?;
+
+    write_if_unchanged_locked(path, expected, contents)
+}
+
+/// Atomically replaces `path` only when it still holds `expected`, under a lock held by the caller.
+pub(crate) fn write_if_unchanged_locked(path: &Utf8Path, expected: Option<&str>, contents: &str) -> Result<Publication> {
     let destination = crate::paths::physical(path)?;
     create_parents(&destination)?;
-    let _lock = crate::exec::claim_workspace(workspace)?;
     let scratch = scratch_path(&destination);
 
     stage(&scratch, write_bytes(contents), Some(&destination)).map_err(|cause| discard(&scratch, path, cause))?;
@@ -121,9 +127,14 @@ pub(crate) fn remove_if_unchanged(workspace: &Utf8Path, path: &Utf8Path, expecte
     let destination = crate::paths::physical(path)?;
     let _lock = crate::exec::claim_workspace(workspace)?;
 
-    before_publication(&destination);
+    remove_if_unchanged_locked(&destination, path, expected)
+}
 
-    if !matches_contents(&destination, Some(expected))
+/// Removes `path` only when it still holds `expected`, under a lock held by the caller.
+pub(crate) fn remove_if_unchanged_locked(destination: &Utf8Path, path: &Utf8Path, expected: &str) -> Result<Publication> {
+    before_publication(destination);
+
+    if !matches_contents(destination, Some(expected))
         .map_err(|cause| error!("could not check `{path}` before removing it").caused_by(cause))?
     {
         return Ok(Publication::Conflict);
@@ -131,7 +142,7 @@ pub(crate) fn remove_if_unchanged(workspace: &Utf8Path, path: &Utf8Path, expecte
 
     fs::remove_file(destination.as_std_path()).map_err(|cause| error!("could not remove `{path}`").caused_by(cause))?;
 
-    match published(&destination) {
+    match published(destination) {
         Ok(()) => Ok(Publication::Published),
         Err(cause) => Ok(Publication::PublishedUndurable(
             error!("could not remove `{path}`").caused_by(cause),

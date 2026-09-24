@@ -131,8 +131,6 @@ impl CoverageReport {
                     uncovered_lines.push(line);
                 }
             }
-            sort_line_numbers(&mut coverable_lines);
-            sort_line_numbers(&mut uncovered_lines);
             files.push(FileReport {
                 filename,
                 lines_total: total,
@@ -157,10 +155,6 @@ fn merge_line_coverage(merged: &mut LineCoverage, report: lcov::Report) {
                 .or_insert(is_covered);
         }
     }
-}
-
-fn sort_line_numbers(lines: &mut [u32]) {
-    lines.sort_unstable();
 }
 
 #[cfg(test)]
@@ -190,13 +184,6 @@ mod tests {
         assert_eq!(f.lines_covered, 3);
         assert_eq!(f.coverable_lines, vec![1, 2, 3, 4]);
         assert_eq!(f.uncovered_lines, vec![3]);
-    }
-
-    #[test]
-    fn line_numbers_are_sorted_explicitly() {
-        let mut lines = [8, 2, 5, 3];
-        sort_line_numbers(&mut lines);
-        assert_eq!(lines, [2, 3, 5, 8]);
     }
 
     #[test]
@@ -311,8 +298,35 @@ DA:2,0
 end_of_record
 ";
         let report = CoverageReport::from_strs(&[file_x, file_y]).expect("merge parses");
-        // Two inputs naming distinct files merge into two entries.
-        assert_eq!(report.files.len(), 2);
+        assert_eq!(
+            report
+                .files
+                .iter()
+                .map(|file| file.filename.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            ["/repo/crates/x/src/lib.rs", "/repo/crates/y/src/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn files_are_sorted_by_path_not_test_name() {
+        let input = "\
+TN:z-test
+SF:/repo/crates/a/src/lib.rs
+DA:9,0
+DA:2,1
+end_of_record
+TN:a-test
+SF:/repo/crates/z/src/lib.rs
+DA:8,0
+DA:1,1
+end_of_record
+";
+        let report = CoverageReport::from_str(input).expect("parses");
+        assert_eq!(report.files[0].filename, PathBuf::from("/repo/crates/a/src/lib.rs"));
+        assert_eq!(report.files[0].coverable_lines, [2, 9]);
+        assert_eq!(report.files[0].uncovered_lines, [9]);
+        assert_eq!(report.files[1].filename, PathBuf::from("/repo/crates/z/src/lib.rs"));
     }
 
     #[test]
