@@ -34,7 +34,7 @@ These are the crates built out of this repo:
 - [`cargo-gamma`](./crates/cargo-gamma/README.md) - Fast mutation testing for Rust
 - [`cargo-heather`](./crates/cargo-heather/README.md) - A cargo subcommand to validate license headers in Rust, TOML, PowerShell, Just, and env source files
 - [`cargo-unique-target-names`](./crates/cargo-unique-target-names/README.md) - A cargo subcommand that detects workspace targets which uplift to the same build artifact
-- [`cargo-unused-deps`](./crates/cargo-unused-deps/README.md) - A Cargo subcommand that reports [workspace.dependencies] entries no workspace member inherits
+- [`cargo-unused-deps`](./crates/cargo-unused-deps/README.md) - A Cargo subcommand that finds unused and misplaced dependencies
 
 ## About this Repo
 

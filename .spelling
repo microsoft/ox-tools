@@ -931,6 +931,10 @@ symlinked
 uninherited
 closers
 unmanaged
+doctest
+doctests
+stdin
+superset
 nonblocking
 SHA
 upserts

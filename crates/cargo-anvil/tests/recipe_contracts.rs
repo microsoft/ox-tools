@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use cargo_anvil::test_support::{Cli, isolate_powershell_cache, run_update};
@@ -47,6 +48,18 @@ const CONTAINER_DOCKERIGNORE: &str = include_str!("../templates/anvil/container/
 // Any nonzero value works; naming it prevents tests from implying an external exit-code contract.
 const ARBITRARY_FAILURE_EXIT: &str = "23";
 
+/// Serializes PowerShell interpreter startup within this libtest process.
+///
+/// PowerShell#26940 can corrupt assembly-name parsing when constrained runners
+/// start many interpreters concurrently. Individual recipes may still exercise
+/// their own intentional child-process parallelism while this guard prevents
+/// unrelated tests from starting competing PowerShell hosts.
+static POWERSHELL_PROCESS_LOCK: Mutex<()> = Mutex::new(());
+
+fn powershell_process_lock() -> MutexGuard<'static, ()> {
+    POWERSHELL_PROCESS_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 // The Miri fixture mirrors the production protocol rather than executing Rust:
 // fake Cargo supplies workspace metadata and compiler-artifact JSON, fake rustc
 // identifies the pinned toolchain sysroot, and cargo-miri under that sysroot
@@ -65,6 +78,7 @@ fn resolver_hook_executes_with_legacy_and_engine_context_signatures() {
     if !tools_available() {
         return;
     }
+    let _powershell = powershell_process_lock();
     let cache = TempDir::new().expect("resolver hook test requires a private PowerShell cache");
     let start = CONTAINER
         .find("                    $resolveArgs = @{}")
@@ -413,14 +427,18 @@ fn seed_include(root: &Path, tier: &str, spec: &str) {
 }
 
 fn tools_available() -> bool {
-    if Command::new("just").arg("--version").output().is_err() {
-        return false;
-    }
-    let cache = TempDir::new().expect("PowerShell availability check requires a temporary cache");
-    let mut command = Command::new("pwsh");
-    command.arg("--version");
-    isolate_powershell_cache(&mut command, cache.path());
-    command.output().is_ok()
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        if Command::new("just").arg("--version").output().is_err() {
+            return false;
+        }
+        let _powershell = powershell_process_lock();
+        let cache = TempDir::new().expect("PowerShell availability check requires a private cache");
+        let mut command = Command::new("pwsh");
+        command.arg("--version");
+        isolate_powershell_cache(&mut command, cache.path());
+        command.output().is_ok()
+    })
 }
 
 fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
@@ -575,12 +593,14 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
 }
 
 fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Output {
+    let _powershell = powershell_process_lock();
     just_command(root, arguments, environment)
         .output()
         .expect("just is required to verify generated recipe behavior")
 }
 
 fn run_just_with_real_cargo(root: &Path, arguments: &[&str]) -> Output {
+    let _powershell = powershell_process_lock();
     let mut command = Command::new("just");
     command.args(["--justfile", "Justfile"]).args(arguments).current_dir(root);
     command.env_remove("ANVIL_IMPACT");
@@ -651,6 +671,7 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     if !tools_available() {
         return;
     }
+    let _powershell = powershell_process_lock();
     let tmp = fixture(
         &[("miri.just", MIRI)],
         &[

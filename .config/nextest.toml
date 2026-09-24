@@ -1,7 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Every case in cargo-anvil's pr_title and impact suites starts PowerShell.
+# Every case in cargo-anvil's pr_title and impact suites, many cases in
+# recipe_contracts, and the stable-toolchain resolver unit tests start
+# PowerShell.
 # PowerShell intermittently aborts while parsing an assembly name during
 # startup (PowerShell/PowerShell#26940), and concurrent interpreter startups
 # on constrained runners hit that abort often enough to fail the suite. The
@@ -16,5 +18,5 @@
 powershell = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(pr_title) | binary(impact)'
+filter = 'binary(pr_title) | binary(impact) | binary(recipe_contracts) | test(~stable_toolchain_resolver_tests)'
 test-group = 'powershell'

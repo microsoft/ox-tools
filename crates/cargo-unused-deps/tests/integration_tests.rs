@@ -167,6 +167,69 @@ fn recognizes_the_dotted_inheritance_form() {
 }
 
 #[test]
+fn a_member_manifest_still_checks_the_workspace_root_catalog() {
+    let dir = workspace(
+        "[workspace]\nmembers = [\"member\"]\n\n[workspace.dependencies]\nunused = \"1\"\n",
+        &[("member", "")],
+    );
+
+    let (success, _, stderr) = outcome(&run(&dir.path().join("member").join("Cargo.toml"), &[]));
+
+    assert!(!success, "the root catalog has an unused entry");
+    assert!(stderr.contains("- unused"), "unexpected stderr: {stderr}");
+}
+
+#[test]
+fn a_nested_standalone_crate_does_not_adopt_an_ancestor_package_manifest() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    for path in [dir.path().to_path_buf(), dir.path().join("nested")] {
+        fs::create_dir_all(path.join("src")).expect("failed to create source dir");
+        fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"standalone\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("failed to write manifest");
+        fs::write(path.join("src").join("lib.rs"), "").expect("failed to write source");
+    }
+    let nested = dir.path().join("nested").join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&nested, &[]));
+
+    assert!(success, "a standalone crate has no workspace catalog: {stderr}");
+    assert!(
+        stderr.contains(&nested.display().to_string()),
+        "the note must name the supplied manifest: {stderr}"
+    );
+}
+
+#[test]
+fn an_excluded_crate_does_not_adopt_the_enclosing_workspace_catalog() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = []\nexclude = [\"nested\"]\n\n[workspace.dependencies]\nunused = \"1\"\n",
+    )
+    .expect("failed to write workspace manifest");
+    let nested_dir = dir.path().join("nested");
+    fs::create_dir_all(nested_dir.join("src")).expect("failed to create source dir");
+    fs::write(
+        nested_dir.join("Cargo.toml"),
+        "[package]\nname = \"standalone\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("failed to write manifest");
+    fs::write(nested_dir.join("src").join("lib.rs"), "").expect("failed to write source");
+    let nested = nested_dir.join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&nested, &[]));
+
+    assert!(success, "an excluded crate has no workspace catalog: {stderr}");
+    assert!(
+        stderr.contains(&nested.display().to_string()),
+        "the note must name the supplied manifest: {stderr}"
+    );
+}
+
+#[test]
 fn a_declaration_that_does_not_inherit_does_not_count() {
     // The member declares `serde` itself rather than drawing it from the
     // catalog, so the catalog entry is still inherited by nobody.
@@ -208,9 +271,9 @@ fn honors_the_allow_list_and_reports_stale_entries() {
     let root = concat!(
         "[workspace]\nmembers = [\"member\"]\n\n",
         "[workspace.metadata.unused-deps]\nallowed = [\"kept\", \"stale\"]\n\n",
-        "[workspace.dependencies]\nkept = \"1\"\nstale = \"1\"\n",
+        "[workspace.dependencies]\nkept = \"1\"\n",
     );
-    let dir = workspace(root, &[("member", "[dependencies]\nstale = { workspace = true }\n")]);
+    let dir = workspace(root, &[("member", "")]);
     let manifest = dir.path().join("Cargo.toml");
 
     let (success, stdout, stderr) = outcome(&run(&manifest, &[]));
@@ -218,7 +281,7 @@ fn honors_the_allow_list_and_reports_stale_entries() {
     assert!(success, "an allowed entry does not fail the run: {stderr}");
     assert!(stdout.contains("explicitly allowed"), "unexpected stdout: {stdout}");
     assert!(
-        stderr.contains("'stale' is allowed but is inherited or not declared"),
+        stderr.contains("'stale' is allowed but is not declared by the workspace or any member"),
         "unexpected stderr: {stderr}"
     );
     assert!(
@@ -301,6 +364,23 @@ fn fix_removes_the_entries_and_keeps_the_rest_intact() {
     // A fixed manifest is clean on the next run.
     let (success, _, _) = outcome(&run(&manifest, &[]));
     assert!(success, "the fixed manifest should pass");
+}
+
+#[test]
+fn invalid_package_selection_cannot_apply_a_catalog_fix() {
+    let root = "[workspace]\nmembers = [\"member\"]\n\n[workspace.dependencies]\nunused = \"1\"\n";
+    let dir = workspace(root, &[("member", "")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&manifest, &["--fix", "--package", "missing"]));
+
+    assert!(!success, "an invalid selector must fail: {stderr}");
+    assert!(stderr.contains("did not match any workspace member"), "unexpected stderr: {stderr}");
+    assert_eq!(
+        fs::read_to_string(&manifest).expect("failed to read manifest"),
+        root,
+        "selector validation must happen before --fix writes"
+    );
 }
 
 #[test]
