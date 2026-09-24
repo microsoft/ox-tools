@@ -1421,7 +1421,7 @@ mod tests {
         root
     }
 
-    use crate::testing::{Broken, Sink, fails_at_every_line, workdir};
+    use crate::testing::{Broken, Sink, fails_at_every_line, private_system_tempdir, workdir};
 
     #[derive(Debug, Default)]
     struct ClosedResults {
@@ -1481,7 +1481,7 @@ mod tests {
             ..RunArgs::default()
         };
         let (record_context, reusable) = postprocessing_contexts(&args, None).expect("real runs prepare a record");
-        let plan = plan();
+        let (plan, _directory) = private_plan();
         let base = plan.root.join("campaign-state");
         let _locks = exec::claim_cache(&plan.root, &plan.root.join("target"), Some(&base)).expect("owned campaign cache");
         let inputs = crate::discover::RunRecord::snapshot_with_external(&plan.root, &base, &[], false);
@@ -1546,7 +1546,7 @@ mod tests {
 
     #[test]
     fn completed_campaign_records_the_killing_tests_source_file() {
-        let mut plan = plan();
+        let (mut plan, _directory) = private_plan();
         let source = format!("{}\n#[test]\nfn caught() {{}}\n", plan.files[0].source.as_deref().expect("source"));
         fs::write(&plan.files[0].absolute, &source).expect("source with killing test");
         plan.files[0].source = Some(source.clone());
@@ -1581,7 +1581,7 @@ mod tests {
 
     #[test]
     fn completed_resource_outcomes_survive_an_incomplete_or_changed_cache_snapshot() {
-        let mut plan = plan();
+        let (mut plan, _directory) = private_plan();
         plan.mutants[0].outcome = Outcome::Timeout;
         plan.mutants[1].outcome = Outcome::OutOfMemory;
         let base = plan.root.join("campaign-state");
@@ -1729,6 +1729,16 @@ mod tests {
     fn plan() -> Plan {
         let dir = workdir("run-plan-");
         let root = Utf8PathBuf::from_path_buf(dir.keep()).expect("utf8");
+        plan_at(root)
+    }
+
+    fn private_plan() -> (Plan, tempfile::TempDir) {
+        let dir = private_system_tempdir("secure-run-plan-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        (plan_at(root), dir)
+    }
+
+    fn plan_at(root: Utf8PathBuf) -> Plan {
         let src = root.join("src");
         fs::create_dir(&src).expect("src");
         fs::write(
