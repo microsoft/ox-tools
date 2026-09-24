@@ -14,10 +14,11 @@ use syn::spanned::Spanned as _;
 use syn::token::Comma;
 use syn::visit::{self, Visit};
 use syn::{
-    Arm, Attribute, BinOp, Block, Expr, ExprAsync, ExprBinary, ExprBreak, ExprCall, ExprClosure, ExprContinue, ExprForLoop, ExprIf,
-    ExprIndex, ExprLit, ExprLoop, ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat, ExprReturn, ExprStruct, ExprUnary,
-    ExprWhile, FnArg, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemFn, ItemConst, ItemFn, ItemImpl, ItemMod, ItemStatic,
-    ItemTrait, Lit, Local, Macro, Member, Pat, RangeLimits, ReturnType, Signature, Stmt, TraitItemConst, TraitItemFn, Type, UnOp, Variant,
+    Arm, Attribute, BinOp, Block, Expr, ExprAsync, ExprBinary, ExprBreak, ExprCall, ExprCast, ExprClosure, ExprContinue, ExprForLoop,
+    ExprIf, ExprIndex, ExprLit, ExprLoop, ExprMatch, ExprMethodCall, ExprRange, ExprReference, ExprRepeat, ExprReturn, ExprStruct,
+    ExprUnary, ExprWhile, FnArg, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemFn, ItemConst, ItemFn, ItemImpl, ItemMod,
+    ItemStatic, ItemTrait, Lit, Local, Macro, Member, Pat, RangeLimits, ReturnType, Signature, Stmt, TraitItemConst, TraitItemFn, Type,
+    UnOp, Variant,
 };
 
 use super::stated::stated_range;
@@ -47,7 +48,7 @@ use predicates::{
     returns_result, stmt_attrs,
 };
 use tables::{binary_replacements, in_place_reorder, method_renames};
-use types::{Types, returns_undefaultable_error, undefaulted_parameters};
+use types::{Types, is_abstract_type, returns_undefaultable_error, undefaulted_parameters};
 use values::{Kind, resolve_type, return_values};
 
 use super::defaults::{DefaultPaths, standard_defaulted_parameters};
@@ -151,6 +152,15 @@ pub(super) struct Collector<'a> {
 
     /// Zero literals in value-producing positions whose surrounding syntax requires unsigned.
     unsigned_zeros: Vec<Range<usize>>,
+
+    /// Default-valued replacements disproved by an explicit expected type.
+    inadmissible_defaults: Vec<Range<usize>>,
+
+    /// The explicit return type of the function or closure currently being traversed.
+    expected_return: Option<Type>,
+
+    /// `continue;` statements whose deletion would give a value-producing branch the unit type.
+    undeletable_continues: Vec<Range<usize>>,
 
     /// Whether the enclosing function returns a `Result` whose error type comes from another crate.
     ///
@@ -313,6 +323,9 @@ impl<'a> Collector<'a> {
             numeric_return: false,
             unsigned_return: UnsignedReturn::Other,
             unsigned_zeros: Vec::new(),
+            inadmissible_defaults: Vec::new(),
+            expected_return: None,
+            undeletable_continues: Vec::new(),
             foreign_error_return: false,
             bindings: HashMap::default(),
             fields: indexes.fields,
@@ -626,6 +639,10 @@ impl<'a> Collector<'a> {
         let Stmt::Expr(expression, Some(_)) = statement else {
             return;
         };
+
+        if matches!(expression, Expr::Continue(_)) && self.undeletable_continues.contains(&statement.span().byte_range()) {
+            return;
+        }
 
         let mutator = match expression {
             // A call whose result is thrown away is being run for its effect, which is exactly the
@@ -1089,8 +1106,13 @@ impl<'a> Collector<'a> {
         let outer = self.numeric_return;
         let outer_unsigned = self.unsigned_return;
         let outer_error = self.foreign_error_return;
+        let outer_expected = self.expected_return.take();
+        let generic_depth = self.generics.len();
+
+        self.generics.extend(undefaulted_parameters(&sig.generics, &self.default_paths));
 
         self.numeric_return = is_numeric_return(&sig.output);
+        self.expected_return = return_type(&sig.output).cloned();
         self.unsigned_return = match &sig.output {
             ReturnType::Type(_, ty) if is_unsigned_binding(ty) => UnsignedReturn::BodyPending,
             _other => UnsignedReturn::Other,
@@ -1098,7 +1120,7 @@ impl<'a> Collector<'a> {
         self.foreign_error_return = returns_undefaultable_error(
             &sig.output,
             &Types {
-                abstracts: &[],
+                abstracts: &self.generics,
                 imports: &self.imports,
                 defaults: self.defaults,
                 self_type: self.impl_self_type.as_ref(),
@@ -1132,6 +1154,8 @@ impl<'a> Collector<'a> {
         self.numeric_return = outer;
         self.unsigned_return = outer_unsigned;
         self.foreign_error_return = outer_error;
+        self.expected_return = outer_expected;
+        self.generics.truncate(generic_depth);
         result
     }
 
@@ -1143,8 +1167,10 @@ impl<'a> Collector<'a> {
         let outer_numeric = self.numeric_return;
         let outer_unsigned = self.unsigned_return;
         let outer_error = self.foreign_error_return;
+        let outer_expected = self.expected_return.take();
 
         self.numeric_return = output.is_some_and(is_numeric_return);
+        self.expected_return = output.and_then(return_type).cloned();
         self.unsigned_return = match output {
             Some(ReturnType::Type(_, ty)) if is_unsigned_binding(ty) => UnsignedReturn::BodyPending,
             _other => UnsignedReturn::Other,
@@ -1168,6 +1194,7 @@ impl<'a> Collector<'a> {
         self.numeric_return = outer_numeric;
         self.unsigned_return = outer_unsigned;
         self.foreign_error_return = outer_error;
+        self.expected_return = outer_expected;
         result
     }
 
@@ -1178,6 +1205,35 @@ impl<'a> Collector<'a> {
         let result = body(self);
         self.unsigned_zeros.truncate(outer);
         result
+    }
+
+    /// Visits an expression with replacement validity read from its explicit expected type.
+    fn in_typed_expression<T>(&mut self, expression: &Expr, expected: &Type, body: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.inadmissible_defaults.len();
+        inadmissible_default_spans(
+            expression,
+            expected,
+            &Types {
+                abstracts: &self.generics,
+                imports: &self.imports,
+                defaults: self.defaults,
+                self_type: self.impl_self_type.as_ref(),
+                self_associated: Some(&self.impl_self_associated),
+            },
+            &mut self.inadmissible_defaults,
+        );
+        let result = body(self);
+        self.inadmissible_defaults.truncate(outer);
+        result
+    }
+
+    /// Visits a function body with its trailing expression checked against the declared return type.
+    fn in_typed_block<T>(&mut self, block: &Block, expected: &Type, body: impl FnOnce(&mut Self) -> T) -> T {
+        let Some(Stmt::Expr(tail, None)) = block.stmts.last() else {
+            return body(self);
+        };
+
+        self.in_typed_expression(tail, expected, body)
     }
 
     /// Notes whether a `let` leaves its binding empty for a later assignment to settle.
@@ -1347,6 +1403,80 @@ fn unsigned_zero_spans(expression: &Expr, spans: &mut Vec<Range<usize>>) {
     }
 }
 
+/// Records variant replacements whose required default is disproved by an explicit expected type.
+fn inadmissible_default_spans(expression: &Expr, expected: &Type, types: &Types<'_>, spans: &mut Vec<Range<usize>>) {
+    let rejects_default = |ty: &Type| is_abstract_type(ty, types.abstracts) || types.lacks_default(ty);
+
+    match expression {
+        Expr::Path(path) if path.path.is_ident("None") && resolve_type(expected) == Kind::Option => {
+            if values::type_argument(expected, 0).is_some_and(rejects_default) {
+                spans.push(expression.span().byte_range());
+            }
+        }
+        Expr::Call(call) if resolve_type(expected) == Kind::Result => match callee_name(&call.func).as_deref() {
+            Some("Ok") if values::type_argument(expected, 1).is_some_and(rejects_default) => {
+                spans.push(expression.span().byte_range());
+            }
+            Some("Err") if values::type_argument(expected, 0).is_some_and(rejects_default) => {
+                spans.push(expression.span().byte_range());
+            }
+            _ => {}
+        },
+        Expr::Paren(paren) => inadmissible_default_spans(&paren.expr, expected, types, spans),
+        Expr::Group(group) => inadmissible_default_spans(&group.expr, expected, types, spans),
+        Expr::Block(block) => {
+            if let Some(Stmt::Expr(tail, None)) = block.block.stmts.last() {
+                inadmissible_default_spans(tail, expected, types, spans);
+            }
+        }
+        Expr::If(branch) => {
+            if let Some(Stmt::Expr(tail, None)) = branch.then_branch.stmts.last() {
+                inadmissible_default_spans(tail, expected, types, spans);
+            }
+            if let Some((_, otherwise)) = &branch.else_branch {
+                inadmissible_default_spans(otherwise, expected, types, spans);
+            }
+        }
+        Expr::Match(matched) => {
+            for arm in &matched.arms {
+                inadmissible_default_spans(&arm.body, expected, types, spans);
+            }
+        }
+        _ => {}
+    }
+}
+
+const fn return_type(output: &ReturnType) -> Option<&Type> {
+    match output {
+        ReturnType::Default => None,
+        ReturnType::Type(_, ty) => Some(ty),
+    }
+}
+
+/// Returns a final `continue;` whose deletion changes this block's value from diverging to unit.
+fn trailing_continue(block: &Block) -> Option<Range<usize>> {
+    match block.stmts.last() {
+        Some(statement @ Stmt::Expr(Expr::Continue(_), Some(_))) => Some(statement.span().byte_range()),
+        _ => None,
+    }
+}
+
+/// Returns whether an expression's syntax proves that its value is not unit.
+fn explicitly_nonunit(expression: &Expr) -> bool {
+    match expression {
+        Expr::Lit(_) | Expr::Array(_) | Expr::Repeat(_) | Expr::Struct(_) | Expr::Reference(_) => true,
+        Expr::Tuple(tuple) => !tuple.elems.is_empty(),
+        Expr::Paren(paren) => explicitly_nonunit(&paren.expr),
+        Expr::Group(group) => explicitly_nonunit(&group.expr),
+        Expr::Block(block) => block
+            .block
+            .stmts
+            .last()
+            .is_some_and(|statement| matches!(statement, Stmt::Expr(tail, None) if explicitly_nonunit(tail))),
+        _ => false,
+    }
+}
+
 #[expect(
     clippy::renamed_function_params,
     reason = "syn names every visitor parameter `i`, which says nothing about what it is"
@@ -1387,11 +1517,16 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         }
 
         if let Pat::Type(typed) = &node.pat
-            && is_unsigned_binding(&typed.ty)
             && let Some(init) = &node.init
         {
             visit::visit_pat(self, &node.pat);
-            self.in_unsigned_expression(&init.expr, |collector| collector.visit_expr(&init.expr));
+            self.in_typed_expression(&init.expr, &typed.ty, |collector| {
+                if is_unsigned_binding(&typed.ty) {
+                    collector.in_unsigned_expression(&init.expr, |collector| collector.visit_expr(&init.expr));
+                } else {
+                    collector.visit_expr(&init.expr);
+                }
+            });
             if let Some((_, diverge)) = &init.diverge {
                 self.visit_expr(diverge);
             }
@@ -1410,7 +1545,11 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 collector.function(&node.attrs, &node.sig, &node.block);
                 collector.in_function(&node.sig, |collector| {
                     collector.in_const(node.sig.constness.is_some(), |collector| {
-                        visit::visit_item_fn(collector, node);
+                        if let Some(expected) = return_type(&node.sig.output) {
+                            collector.in_typed_block(&node.block, expected, |collector| visit::visit_item_fn(collector, node));
+                        } else {
+                            visit::visit_item_fn(collector, node);
+                        }
                     });
                 });
             });
@@ -1427,7 +1566,11 @@ impl<'ast> Visit<'ast> for Collector<'_> {
                 collector.function(&node.attrs, &node.sig, &node.block);
                 collector.in_function(&node.sig, |collector| {
                     collector.in_const(node.sig.constness.is_some(), |collector| {
-                        visit::visit_impl_item_fn(collector, node);
+                        if let Some(expected) = return_type(&node.sig.output) {
+                            collector.in_typed_block(&node.block, expected, |collector| visit::visit_impl_item_fn(collector, node));
+                        } else {
+                            visit::visit_impl_item_fn(collector, node);
+                        }
                     });
                 });
             });
@@ -1651,7 +1794,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
 
                 collector.in_function(&node.sig, |collector| {
                     collector.in_const(node.sig.constness.is_some(), |collector| {
-                        visit::visit_trait_item_fn(collector, node);
+                        if let Some(body) = node.default.as_ref()
+                            && let Some(expected) = return_type(&node.sig.output)
+                        {
+                            collector.in_typed_block(body, expected, |collector| visit::visit_trait_item_fn(collector, node));
+                        } else {
+                            visit::visit_trait_item_fn(collector, node);
+                        }
                     });
                 });
             });
@@ -1719,7 +1868,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_closure(&mut self, node: &'ast ExprClosure) {
-        self.in_nested_return_context(Some(&node.output), |collector| visit::visit_expr_closure(collector, node));
+        self.in_nested_return_context(Some(&node.output), |collector| {
+            if let Some(expected) = return_type(&node.output) {
+                collector.in_typed_expression(&node.body, expected, |collector| visit::visit_expr_closure(collector, node));
+            } else {
+                visit::visit_expr_closure(collector, node);
+            }
+        });
     }
 
     fn visit_expr_async(&mut self, node: &'ast ExprAsync) {
@@ -1743,7 +1898,37 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_expr_if(&mut self, node: &'ast ExprIf) {
         self.condition("cond.negate", "cond.always_true", "cond.always_false", &node.cond);
 
+        let outer = self.undeletable_continues.len();
+        if let Some((_, otherwise)) = &node.else_branch {
+            if explicitly_nonunit(otherwise)
+                && let Some(span) = trailing_continue(&node.then_branch)
+            {
+                self.undeletable_continues.push(span);
+            }
+
+            let then_value = node.then_branch.stmts.last().and_then(|statement| match statement {
+                Stmt::Expr(tail, None) => Some(tail),
+                _ => None,
+            });
+            if then_value.is_some_and(explicitly_nonunit)
+                && let Expr::Block(block) = &**otherwise
+                && let Some(span) = trailing_continue(&block.block)
+            {
+                self.undeletable_continues.push(span);
+            }
+        }
+
         visit::visit_expr_if(self, node);
+        self.undeletable_continues.truncate(outer);
+    }
+
+    fn visit_expr_cast(&mut self, node: &'ast ExprCast) {
+        if is_unsigned_binding(&node.ty) {
+            self.in_unsigned_expression(&node.expr, |collector| collector.visit_expr(&node.expr));
+            visit::visit_type(self, &node.ty);
+        } else {
+            visit::visit_expr_cast(self, node);
+        }
     }
 
     fn visit_expr_while(&mut self, node: &'ast ExprWhile) {
@@ -1908,8 +2093,12 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         if node.args.len() == 1 {
             match callee_name(&node.func).as_deref() {
                 Some("Some") => self.emit("option.some_to_none", node.span(), "None", 0),
-                Some("Ok") if !self.foreign_error_return => self.emit("result.ok_to_err", node.span(), "Err(Default::default())", 0),
-                Some("Err") => self.emit("result.err_to_ok", node.span(), "Ok(Default::default())", 0),
+                Some("Ok") if !self.foreign_error_return && !self.inadmissible_defaults.contains(&node.span().byte_range()) => {
+                    self.emit("result.ok_to_err", node.span(), "Err(Default::default())", 0);
+                }
+                Some("Err") if !self.inadmissible_defaults.contains(&node.span().byte_range()) => {
+                    self.emit("result.err_to_ok", node.span(), "Ok(Default::default())", 0);
+                }
                 _ => {}
             }
         }
@@ -1920,7 +2109,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
         // A bare `None` in expression position. Patterns never reach here, because `visit_pat`
         // stops the traversal before a pattern's interior is examined at all.
-        if node.path.is_ident("None") {
+        if node.path.is_ident("None") && !self.inadmissible_defaults.contains(&node.span().byte_range()) {
             self.emit("option.none_to_some", node.span(), "Some(Default::default())", 0);
         }
 
@@ -1973,12 +2162,22 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             self.perturb_proven(value);
         }
 
-        if matches!(self.unsigned_return, UnsignedReturn::BodyPending | UnsignedReturn::BodyEntered)
+        let visit = |collector: &mut Self| {
+            if matches!(collector.unsigned_return, UnsignedReturn::BodyPending | UnsignedReturn::BodyEntered)
+                && let Some(value) = node.expr.as_ref()
+            {
+                collector.in_unsigned_expression(value, |collector| collector.visit_expr(value));
+            } else {
+                visit::visit_expr_return(collector, node);
+            }
+        };
+
+        if let Some(expected) = self.expected_return.clone()
             && let Some(value) = node.expr.as_ref()
         {
-            self.in_unsigned_expression(value, |collector| collector.visit_expr(value));
+            self.in_typed_expression(value, &expected, visit);
         } else {
-            visit::visit_expr_return(self, node);
+            visit(self);
         }
     }
 

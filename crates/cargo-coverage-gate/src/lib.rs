@@ -385,6 +385,10 @@ pub fn evaluate_many_for_target(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -420,5 +424,28 @@ mod tests {
         };
         let report = EvaluatedReport { inner };
         assert_eq!(report.unattributed_count(), 0);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata and rustc")]
+    fn evaluate_many_without_explicit_target_resolves_the_host() {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join("alpha/src")).expect("create member");
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n",
+        )
+        .expect("write workspace manifest");
+        fs::write(
+            tmp.path().join("alpha/Cargo.toml"),
+            "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [package.metadata.coverage-gate.target.'cfg(any(windows, unix))']\n\
+             min-lines-percent = 0\n",
+        )
+        .expect("write member manifest");
+        fs::write(tmp.path().join("alpha/src/lib.rs"), "").expect("write member source");
+
+        let evaluated = evaluate_many(&[], Some(&tmp.path().join("Cargo.toml")), &[]).expect("host target resolves");
+        assert_eq!(evaluated.verdict(), Verdict::Pass);
     }
 }

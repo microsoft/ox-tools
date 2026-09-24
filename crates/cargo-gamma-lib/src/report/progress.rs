@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use super::Styler;
 use super::text::{VERB_WIDTH, continuation, quantity};
-use crate::advise::human;
 use crate::commands::Host;
 use crate::estimate::{LiveEstimate, MutationWork};
 use crate::model::Outcome;
@@ -27,6 +26,35 @@ const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 /// remainder makes it collapse to nothing the moment the caption grows, and makes it twitch by a
 /// column every time a counter gains a digit.
 const BAR_WIDTH: usize = 25;
+
+/// Renders an intentionally coarse duration for a live estimate.
+fn eta(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+
+    if seconds < 90 {
+        let rounded = seconds
+            .saturating_add(u64::from(duration.subsec_nanos() >= 500_000_000))
+            .max(u64::from(!duration.is_zero()));
+        return format!("{rounded}s");
+    }
+
+    if seconds < 90 * 60 {
+        return format!("{}m", seconds.saturating_add(30) / 60);
+    }
+
+    format!("{}h", seconds.saturating_add(30 * 60) / (60 * 60))
+}
+
+fn eta_range(remaining: crate::estimate::Remaining) -> String {
+    let low = eta(remaining.low);
+    let high = eta(remaining.high);
+
+    if low == high {
+        format!(", ETA ~{low}")
+    } else {
+        format!(", ETA ~{low}-{high}")
+    }
+}
 
 /// The live progress display.
 ///
@@ -573,13 +601,7 @@ impl Progress {
     /// already printed above, and from the summary at the end.
     #[must_use]
     pub fn render(&self) -> String {
-        let estimate = self.remaining().map_or_else(String::new, |remaining| {
-            if remaining.low == remaining.high {
-                format!(", ETA ~{}", human(remaining.low))
-            } else {
-                format!(", ETA ~{}-{}", human(remaining.low), human(remaining.high))
-            }
-        });
+        let estimate = self.remaining().map_or_else(String::new, eta_range);
 
         #[expect(clippy::cast_precision_loss, reason = "the operand is a bar width")]
         #[expect(
@@ -1030,6 +1052,28 @@ mod tests {
         }
 
         assert!(progress.render().contains("ETA"), "{}", progress.render());
+    }
+
+    #[test]
+    fn time_estimates_use_only_whole_units() {
+        assert_eq!(eta(Duration::from_millis(250)), "1s");
+        assert_eq!(eta(Duration::from_millis(1_499)), "1s");
+        assert_eq!(eta(Duration::from_millis(1_500)), "2s");
+        assert_eq!(eta(Duration::from_secs(89)), "89s");
+        assert_eq!(eta(Duration::from_secs(90)), "2m");
+        assert_eq!(eta(Duration::from_secs(10 * 60 + 29)), "10m");
+        assert_eq!(eta(Duration::from_secs(10 * 60 + 30)), "11m");
+        assert_eq!(eta(Duration::from_mins(90)), "2h");
+    }
+
+    #[test]
+    fn equal_rounded_estimate_bounds_are_rendered_once() {
+        let rendered = eta_range(crate::estimate::Remaining {
+            low: Duration::from_millis(1_100),
+            high: Duration::from_millis(1_400),
+        });
+
+        assert_eq!(rendered, ", ETA ~1s");
     }
 
     #[test]

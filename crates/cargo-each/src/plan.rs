@@ -214,12 +214,7 @@ fn packages_flags(members: &[&Member], packages: PackagesExpansion) -> Vec<Strin
     if packages == PackagesExpansion::Workspace {
         return vec!["--workspace".to_owned()];
     }
-    let mut flags = Vec::with_capacity(members.len() * 2);
-    for m in members {
-        flags.push("--package".to_owned());
-        flags.push(m.spec());
-    }
-    flags
+    members.iter().flat_map(|member| ["--package".to_owned(), member.spec()]).collect()
 }
 
 #[cfg(test)]
@@ -405,6 +400,49 @@ mod tests {
         assert_eq!(plan.invocations.len(), 1);
         assert_eq!(plan.invocations[0].label.as_deref(), Some("alpha::loom"));
         assert_eq!(plan.invocations[0].argv, ["cargo", "test", "-p", "alpha", "--test", "loom"]);
+    }
+
+    #[test]
+    fn per_target_matches_when_any_target_kind_is_requested() {
+        let mut a = member("alpha");
+        a.targets.push(MemberTarget {
+            name: "multi-kind".to_owned(),
+            kinds: [TargetKind::Bin, TargetKind::Example].into_iter().collect(),
+            required_features: BTreeSet::new(),
+        });
+        let kinds = [TargetKind::Example, TargetKind::Test].into_iter().collect();
+        let required = BTreeSet::new();
+        let plan = Plan::build(
+            &[&a],
+            &cmd(&["echo", "{target}"]),
+            BuildOptions {
+                mode: Mode::PerTarget,
+                chdir: false,
+                packages: PackagesExpansion::Explicit,
+                target_kinds: &kinds,
+                target_required_features: &required,
+                workspace_rust_version: None,
+            },
+        )
+        .expect("one matching kind is sufficient");
+        assert_eq!(
+            plan.invocations,
+            [Invocation {
+                label: Some("alpha::multi-kind".to_owned()),
+                argv: cmd(&["echo", "multi-kind"]),
+                work_dir: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn explicit_package_flags_preserve_member_order() {
+        let a = member("alpha");
+        let b = member("beta");
+        assert_eq!(
+            packages_flags(&[&b, &a], PackagesExpansion::Explicit),
+            ["--package", "beta@1.2.3", "--package", "alpha@1.2.3"]
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use cargo_metadata::semver::Version;
-use cargo_metadata::{MetadataCommand, TargetKind};
+use cargo_metadata::{Metadata, MetadataCommand, TargetKind};
 use serde_json::Value;
 
 use crate::error::{EachError, LoadMetadataError, WorkspaceManifestParseError, WorkspaceManifestReadError, WorkspaceRustVersionError};
@@ -103,12 +103,7 @@ impl Workspace {
     /// example a missing or invalid manifest.
     #[ohno::enrich_err("failed to load cargo workspace metadata")]
     pub(crate) fn load(manifest_path: Option<&Path>) -> Result<Self, EachError> {
-        let mut cmd = MetadataCommand::new();
-        cmd.no_deps();
-        if let Some(path) = manifest_path {
-            cmd.manifest_path(path);
-        }
-        let metadata = cmd.exec().map_err(LoadMetadataError::caused_by)?;
+        let metadata = load_metadata(manifest_path).map_err(LoadMetadataError::caused_by)?;
 
         let mut members: Vec<Member> = metadata
             .workspace_packages()
@@ -268,6 +263,21 @@ fn parse_rust_version(value: &str) -> Result<Version, String> {
     Ok(parsed)
 }
 
+// #[gamma::skip(all, reason = "replacing the configured command with its default makes integration tests traverse dependency metadata until the mutation-test budget expires; the exact argument-vector test covers this adapter")]
+#[mutants::skip] // The default-command replacement traverses dependency metadata until timeout; the exact argument-vector test covers this adapter.
+fn metadata_command(manifest_path: Option<&Path>) -> MetadataCommand {
+    let mut command = MetadataCommand::new();
+    command.no_deps();
+    if let Some(path) = manifest_path {
+        command.manifest_path(path);
+    }
+    command
+}
+
+fn load_metadata(manifest_path: Option<&Path>) -> cargo_metadata::Result<Metadata> {
+    metadata_command(manifest_path).exec()
+}
+
 /// Parse a supported Cargo target-kind spelling.
 #[must_use]
 pub(crate) fn parse_target_kind(kind: &str) -> Option<TargetKind> {
@@ -414,5 +424,65 @@ mod tests {
             .workspace_rust_version()
             .expect_err("a non-string root floor must fail");
         assert!(error.to_string().contains("must be a string"));
+    }
+
+    #[test]
+    fn metadata_command_is_no_deps_and_preserves_manifest_path() {
+        let manifest = Path::new("some-workspace/Cargo.toml");
+        let command = metadata_command(Some(manifest)).cargo_command();
+        let args: Vec<String> = command.get_args().map(|argument| argument.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            args,
+            [
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--manifest-path",
+                &manifest.to_string_lossy(),
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    fn loaded_members_and_targets_have_stable_sort_order() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let root = fixture.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"zeta\", \"alpha\"]\n",
+        )
+        .expect("workspace manifest");
+        for name in ["zeta", "alpha"] {
+            let directory = root.join(name);
+            fs::create_dir_all(directory.join("src")).expect("source directory");
+            fs::create_dir_all(directory.join("examples")).expect("examples directory");
+            fs::write(
+                directory.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                     [[example]]\nname = \"z-example\"\npath = \"examples/z.rs\"\n\
+                     [[example]]\nname = \"a-example\"\npath = \"examples/a.rs\"\n"
+                ),
+            )
+            .expect("member manifest");
+            fs::write(directory.join("src/lib.rs"), "").expect("library source");
+            fs::write(directory.join("src/main.rs"), "fn main() {}\n").expect("binary source");
+            fs::write(directory.join("examples/z.rs"), "fn main() {}\n").expect("z example");
+            fs::write(directory.join("examples/a.rs"), "fn main() {}\n").expect("a example");
+        }
+
+        let workspace = Workspace::load(Some(&root.join("Cargo.toml"))).expect("load fixture");
+        assert_eq!(
+            workspace.members.iter().map(|member| member.name.as_str()).collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        for member in &workspace.members {
+            let actual: Vec<_> = member.targets.iter().map(|target| (&target.name, &target.kinds)).collect();
+            let mut sorted = actual.clone();
+            sorted.sort();
+            assert_eq!(actual, sorted, "targets for {} must be sorted by name then kind", member.name);
+        }
     }
 }

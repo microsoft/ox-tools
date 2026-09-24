@@ -24,9 +24,11 @@ pub(super) fn header_matches(extracted: &str, expected_header: &str) -> bool {
 pub(super) fn normalize_to_lines(text: &str) -> Vec<String> {
     let mut lines: Vec<String> = text.lines().map(|l| l.trim_end().to_owned()).collect();
     while lines.first().is_some_and(String::is_empty) {
+        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-22")]
         lines.remove(0);
     }
     while lines.last().is_some_and(String::is_empty) {
+        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-22")]
         lines.pop();
     }
     lines

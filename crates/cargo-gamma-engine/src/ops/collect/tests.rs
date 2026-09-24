@@ -939,6 +939,7 @@ fn an_unsuffixed_zero_in_a_written_unsigned_context_is_not_decremented() {
     for source in [
         "fn f() -> usize { 0 }",
         "fn f() -> usize { return (0); }",
+        "fn f() -> usize { (0 as usize) }",
         "fn f(c: bool) -> usize { if c { 0 } else { 1 } }",
         "fn f(n: i32) -> usize { match n { 0 => 0, _ => 1 } }",
         "fn f() { let count: u32 = 0; g(count); }",
@@ -1814,6 +1815,21 @@ fn a_continue_is_not_changed_to_a_valueless_break_in_a_value_producing_loop() {
 }
 
 #[test]
+fn a_continue_is_not_deleted_when_its_branch_would_become_unit() {
+    let source = "fn f(flag: bool) -> i32 { loop { let value = if flag { continue; } else { 1 }; break value; } }";
+
+    assert!(candidates(source, "loop.delete_continue").is_empty());
+}
+
+#[test]
+fn continue_deletion_is_preserved_when_the_sibling_type_is_inferred() {
+    let source = "fn f(flag: bool) { loop { let value = if flag { continue; } else { make_value() }; consume(value); } }";
+    let found = candidates(source, "loop.delete_continue");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
 fn a_labelled_continue_is_not_changed_to_a_valueless_break_in_its_value_producing_loop() {
     let source = "fn f(flag: bool) -> i32 { 'outer: loop { while flag { continue 'outer; } break 'outer 1; } }";
 
@@ -2122,6 +2138,80 @@ fn option_and_result_construction_is_mutated_both_ways() {
 
     let found = mutators("fn f(flag: bool) { let _ = if flag { Ok(1) } else { Err(2) }; }", "result");
 
+    assert!(found.contains(&"result.ok_to_err"), "{found:?}");
+    assert!(found.contains(&"result.err_to_ok"), "{found:?}");
+}
+
+#[test]
+fn explicit_expected_types_reject_impossible_default_payloads() {
+    let source = "
+        fn f(flag: bool) {
+            let _: Option<std::time::Instant> = if flag { None } else { Some(std::time::Instant::now()) };
+            let _: Result<u32, std::io::Error> = Ok(1);
+            let _: Result<std::time::Instant, u32> = Err(1);
+        }
+    ";
+    let found = mutators(source, "option.none_to_some,result.ok_to_err,result.err_to_ok");
+
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn explicit_return_types_reject_impossible_default_payloads() {
+    let source = "
+        fn tail() -> Option<std::time::Instant> { None }
+        fn explicit() -> Option<std::time::Instant> { return None; }
+        fn nested() {
+            fn inner() -> Option<std::time::Instant> { None }
+            let closure = || -> Option<std::time::Instant> { None };
+            consume((inner, closure));
+        }
+    ";
+    let found = candidates(source, "option.none_to_some");
+
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn explicit_return_types_keep_defaultable_option_payloads() {
+    let source = "
+        fn outer() -> Option<u32> {
+            fn inner() -> Option<u32> { None }
+            let closure = || -> Option<u32> { return None; };
+            consume((inner, closure));
+            None
+        }
+    ";
+    let found = candidates(source, "option.none_to_some");
+
+    assert_eq!(found.len(), 3, "{found:?}");
+}
+
+#[test]
+fn function_generics_without_default_bounds_reject_default_payloads() {
+    let source = "
+        fn tail<T>() -> Option<T> { None }
+        fn local<T>() { let _: Option<T> = None; }
+        fn defaultable<T: Default>() -> Option<T> { None }
+    ";
+    let found = candidates(source, "option.none_to_some");
+
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].item_path.as_ref(), "defaultable");
+}
+
+#[test]
+fn inferred_replacement_payloads_remain_candidates() {
+    let source = "
+        fn f(flag: bool) {
+            let option = if flag { None } else { Some(make_value()) };
+            let result = if flag { Ok(make_value()) } else { Err(make_error()) };
+            consume((option, result));
+        }
+    ";
+    let found = mutators(source, "option.none_to_some,result.ok_to_err,result.err_to_ok");
+
+    assert!(found.contains(&"option.none_to_some"), "{found:?}");
     assert!(found.contains(&"result.ok_to_err"), "{found:?}");
     assert!(found.contains(&"result.err_to_ok"), "{found:?}");
 }

@@ -38,6 +38,94 @@ pub struct Listings {
     /// progress is off — the listing is the only place the results appear, and it is not optional:
     /// stdout carries the results.
     pub announced: bool,
+
+    /// Whether `cargo gamma hints` would add, correct, or remove scheduling knowledge.
+    ///
+    /// `None` retains plan-based inference for callers that are not a completed campaign.
+    pub promotable: Option<bool>,
+
+    /// Whether persisted campaign state contains the resource outcomes suppression consumes.
+    ///
+    /// `None` retains outcome-based inference for callers that are not a completed campaign.
+    pub suppressible: Option<bool>,
+
+    /// Campaign-efficiency measurements to print after the outcome summary.
+    ///
+    /// Absent for dry runs and runs that never reached test execution.
+    pub stats: Option<Stats>,
+}
+
+/// Compact campaign-efficiency measurements for the final footer.
+#[derive(Debug, Clone, Copy)]
+pub struct Stats {
+    /// Wall time from command start until the completed campaign summary.
+    pub elapsed: core::time::Duration,
+
+    /// Distinct test binaries participating in the campaign.
+    pub binaries: usize,
+
+    /// Test-binary subprocesses launched while evaluating mutants.
+    pub launches: usize,
+
+    /// Exact and generalized hint probes that killed their mutant.
+    pub successful_hints: usize,
+}
+
+fn irregular_quantity(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
+fn outcome_blocks(plan: &Plan, styler: Styler, listings: Listings) -> Vec<(String, Vec<String>)> {
+    let mut blocks = Vec::new();
+    let survivors: Vec<&Mutant> = plan.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Survived).collect();
+
+    if !survivors.is_empty() && !listings.announced {
+        blocks.push((
+            styler.outcome(Outcome::Survived),
+            survivors.iter().map(|mutant| mutant.describe()).collect(),
+        ));
+    }
+
+    for outcome in [Outcome::Timeout, Outcome::OutOfMemory, Outcome::Flaky] {
+        if listings.announced && outcome != Outcome::Flaky {
+            continue;
+        }
+
+        let lines: Vec<String> = plan
+            .mutants
+            .iter()
+            .filter(|mutant| mutant.outcome == outcome)
+            .map(|mutant| {
+                mutant
+                    .note
+                    .as_deref()
+                    .map_or_else(|| mutant.describe(), |note| format!("{}: {note}", mutant.describe()))
+            })
+            .collect();
+
+        if !lines.is_empty() {
+            blocks.push((styler.outcome(outcome), lines));
+        }
+    }
+
+    for (requested, outcome) in [(listings.killed, Outcome::Killed), (listings.unviable, Outcome::CompileError)] {
+        if !requested {
+            continue;
+        }
+
+        let lines: Vec<String> = plan
+            .mutants
+            .iter()
+            .filter(|mutant| mutant.outcome == outcome)
+            .map(Mutant::describe)
+            .collect();
+
+        if !lines.is_empty() {
+            blocks.push((styler.outcome(outcome), lines));
+        }
+    }
+
+    blocks
 }
 
 /// Names the mutants this run did not itself test, as a tail for the summary line.
@@ -132,90 +220,8 @@ pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: L
     skipped(host, plan, styler)?;
 
     let summary = Summary::of(&plan.mutants);
-    let heading = styler.verb("Summary");
-    let survivors: Vec<&Mutant> = plan.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Survived).collect();
-
-    // Gathered before anything is written so that the blank lines between them can be placed
-    // without the writing having to know what comes next: every block is preceded by one, and one
-    // more closes the last of them.
-    let mut blocks: Vec<(String, Vec<String>)> = Vec::new();
-
-    // The survivors are the output. Everything else is bookkeeping about how they were found, so
-    // they get listed in full, each one a file and line the reader can go straight to.
-    if !survivors.is_empty() && !listings.announced {
-        blocks.push((
-            styler.outcome(Outcome::Survived),
-            survivors.iter().map(|mutant| mutant.describe()).collect(),
-        ));
-    }
-
-    // Three outcomes that would otherwise leave no trace beyond a number in the summary line, each
-    // listed with the note the run built for it.
-    //
-    // Timeouts and memory exhaustion count as undetected because no assertion rejected the mutant.
-    // They are listed separately because each is a repeated cost until it is suppressed or fixed,
-    // and a memory ceiling set too tight can still misclassify a healthy mutant,
-    // and its note carries both numbers so the reader can tell which happened. A flake is the one
-    // outcome whose remedy is a test that already exists, and it is deliberately never folded in
-    // with the survivors — it scores as neither a detection nor a gap, so without its own block the
-    // count would be all there was, and a count with no names in it cannot be acted on.
-    for outcome in [Outcome::Timeout, Outcome::OutOfMemory, Outcome::Flaky] {
-        if listings.announced && outcome != Outcome::Flaky {
-            continue;
-        }
-
-        let lines: Vec<String> = plan
-            .mutants
-            .iter()
-            .filter(|mutant| mutant.outcome == outcome)
-            // The heading already names the outcome. Only a note that adds something — which
-            // test stalled, how far past the ceiling, which test is unreliable — earns a place.
-            .map(|mutant| {
-                mutant
-                    .note
-                    .as_deref()
-                    .map_or_else(|| mutant.describe(), |note| format!("{}: {note}", mutant.describe()))
-            })
-            .collect();
-
-        if !lines.is_empty() {
-            blocks.push((styler.outcome(outcome), lines));
-        }
-    }
-
-    // Killed mutants are the bulk of a healthy run and say nothing a reader has to act on, so they
-    // are listed only when asked for. Seeing them is how a user confirms the suite is testing what
-    // they think it is, rather than passing for some unrelated reason.
-    if listings.killed {
-        let killed: Vec<String> = plan
-            .mutants
-            .iter()
-            .filter(|mutant| mutant.outcome == Outcome::Killed)
-            .map(Mutant::describe)
-            .collect();
-
-        if !killed.is_empty() {
-            blocks.push((styler.outcome(Outcome::Killed), killed));
-        }
-    }
-
-    // An unviable mutant is not a finding about the code, but it is not nothing either: it is
-    // usually a place the encoding could not express, so naming it is what makes the gap fixable.
-    // A large workspace produces thousands of them, though, and printing every one buries the
-    // survivors that are the actual result, so the count on the summary line stands in for the
-    // list unless the list was asked for.
-    if listings.unviable {
-        let unviable: Vec<String> = plan
-            .mutants
-            .iter()
-            .filter(|mutant| mutant.outcome == Outcome::CompileError)
-            .map(Mutant::describe)
-            .collect();
-
-        if !unviable.is_empty() {
-            blocks.push((styler.outcome(Outcome::CompileError), unviable));
-        }
-    }
+    let heading = styler.footer("Summary:");
+    let blocks = outcome_blocks(plan, styler, listings);
 
     let mut stream = host.output();
 
@@ -227,9 +233,7 @@ pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: L
         }
     }
 
-    if !blocks.is_empty() {
-        writeln!(stream)?;
-    }
+    writeln!(stream)?;
 
     // One line for the whole result. Everything a run knows about itself — what it built, what it
     // could not compile, what it was told to skip — is bookkeeping about how the number was
@@ -273,6 +277,51 @@ pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: L
         )?;
     }
 
+    if let Some(stats) = listings.stats {
+        writeln!(
+            stream,
+            "{} {} elapsed, {}, {} launched, {}",
+            styler.footer("Stats  :"),
+            crate::advise::human(stats.elapsed),
+            irregular_quantity(stats.binaries, "test binary", "test binaries"),
+            irregular_quantity(stats.launches, "test process", "test processes"),
+            quantity(stats.successful_hints, "successful hint"),
+        )?;
+    }
+
+    let note = styler.footer_note();
+    if !plan.idle.is_empty() {
+        writeln!(
+            stream,
+            "{note} {} could be removed with `cargo gamma unsuppress --apply`",
+            quantity(plan.idle.len(), "superfluous skip directive")
+        )?;
+        for idle in &plan.idle {
+            let reason = idle.reason.as_ref().map_or_else(String::new, |reason| format!(" — {reason}"));
+            writeln!(stream, "  {}:{}: skip({}){reason}", idle.file, idle.line, idle.selectors)?;
+        }
+    }
+
+    let suppressible = listings.suppressible.unwrap_or(summary.timeout > 0 || summary.out_of_memory > 0);
+    if suppressible {
+        writeln!(
+            stream,
+            "{note} Run `cargo gamma suppress` to automatically suppress timed-out and out-of-memory mutants"
+        )?;
+    }
+
+    let promotable = listings.promotable.unwrap_or_else(|| {
+        plan.mutants
+            .iter()
+            .any(|mutant| mutant.outcome == Outcome::CompileError || mutant.killed_by.is_some())
+    });
+    if promotable {
+        writeln!(
+            stream,
+            "{note} Run `cargo gamma hints` to update your hint file and accelerate subsequent cargo-gamma runs"
+        )?;
+    }
+
     Ok(())
 }
 
@@ -293,8 +342,8 @@ pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: L
 pub fn session_notes<H: Host>(
     host: &mut H,
     session: &Session,
-    hints_missing: bool,
-    has_suppressible_mutants: bool,
+    _hints_missing: bool,
+    _has_suppressible_mutants: bool,
     styler: Styler,
 ) -> Result<()> {
     let mut stream = host.error();
@@ -314,22 +363,6 @@ pub fn session_notes<H: Host>(
             "{} {} not consulted, so a survivor here may be one they would have caught",
             styler.note("Oracle"),
             quantity(session.filtered, "test target")
-        )?;
-    }
-
-    if hints_missing {
-        writeln!(
-            stream,
-            "{} run `cargo gamma hints` to create `gamma-hints.yaml` to speed up subsequent runs",
-            styler.note("Hint")
-        )?;
-    }
-
-    if has_suppressible_mutants {
-        writeln!(
-            stream,
-            "{} run `cargo gamma suppress` to automatically suppress timed-out and out-of-memory mutants",
-            styler.note("Hint")
         )?;
     }
 
@@ -372,6 +405,7 @@ mod tests {
                 path: Utf8PathBuf::from("src/a.rs"),
                 absolute: Utf8PathBuf::from("/w/src/a.rs"),
                 package: "subject".to_owned(),
+                source: None,
             }],
             mutants: vec![
                 mutant(1, Outcome::Killed),
@@ -398,6 +432,9 @@ mod tests {
             killed: false,
             unviable: false,
             announced,
+            promotable: None,
+            suppressible: None,
+            stats: None,
         };
 
         summarize(&mut host, plan, Styler::new(false), listings).expect("summarize");
@@ -452,6 +489,9 @@ mod tests {
                 killed: false,
                 unviable: false,
                 announced: false,
+                promotable: None,
+                suppressible: None,
+                stats: None,
             },
         );
 
@@ -461,7 +501,37 @@ mod tests {
                 "\n",
                 "    SURVIVED src/a.rs:2:5: replace a > b with a >= b [relational.gt_to_ge]\n",
                 "\n",
-                "     Summary 1 mutant (0 killed, 1 survived, 0 timed out, 0 out of memory, 0 uncovered => 0.0%)\n",
+                "Summary: 1 mutant (0 killed, 1 survived, 0 timed out, 0 out of memory, 0 uncovered => 0.0%)\n",
+            )
+        );
+    }
+
+    #[test]
+    fn campaign_stats_follow_the_summary() {
+        let mut population = plan();
+        population.mutants = vec![mutant(1, Outcome::Killed)];
+
+        let text = rendered_with(
+            &population,
+            Listings {
+                promotable: Some(false),
+                suppressible: Some(false),
+                stats: Some(Stats {
+                    elapsed: Duration::from_mins(42),
+                    binaries: 12,
+                    launches: 821,
+                    successful_hints: 386,
+                }),
+                ..Listings::default()
+            },
+        );
+
+        assert_eq!(
+            text,
+            concat!(
+                "\n",
+                "Summary: 1 mutant (1 killed, 0 survived, 0 timed out, 0 out of memory, 0 uncovered => 100.0%)\n",
+                "Stats  : 42m elapsed, 12 test binaries, 821 test processes launched, 386 successful hints\n",
             )
         );
     }
@@ -530,31 +600,177 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_hints_file_suggests_creating_one() {
-        let mut host = Sink::default();
+    fn learned_knowledge_suggests_updating_hints() {
+        let mut population = plan();
+        let mut killed = mutant(2, Outcome::Killed);
+        killed.killed_by = Some("tests::caught".to_owned());
+        population.mutants = vec![killed];
 
-        session_notes(&mut host, &session(false), true, false, Styler::new(false)).expect("notes");
+        let text = rendered_with(&population, Listings::default());
 
-        let text = String::from_utf8(host.err).expect("UTF-8");
+        assert!(text.ends_with("Note   : Run `cargo gamma hints` to update your hint file and accelerate subsequent cargo-gamma runs\n"));
+    }
+
+    #[test]
+    fn final_footer_order_labels_and_actionable_entries_are_exact() {
+        let mut population = plan();
+        let mut killed = mutant(1, Outcome::Killed);
+        killed.killed_by = Some("tests::caught".to_owned());
+        population.mutants = vec![killed, mutant(2, Outcome::Timeout)];
+        population.idle = vec![crate::suppress::Idle {
+            file: "src/a.rs".into(),
+            line: 9,
+            selectors: "relational".to_owned(),
+            reason: Some("the site no longer produces a mutant".to_owned()),
+        }];
+
+        let text = rendered_with(&population, Listings::default());
+        let footer = text.split("Summary:").nth(1).expect("summary footer");
 
         assert_eq!(
-            text,
-            "        Hint run `cargo gamma hints` to create `gamma-hints.yaml` to speed up subsequent runs\n"
+            format!("Summary:{footer}"),
+            concat!(
+                "Summary: 2 mutants (1 killed, 0 survived, 1 timed out, 0 out of memory, 0 uncovered => 50.0%)\n",
+                "Note   : 1 superfluous skip directive could be removed with `cargo gamma unsuppress --apply`\n",
+                "  src/a.rs:9: skip(relational) — the site no longer produces a mutant\n",
+                "Note   : Run `cargo gamma suppress` to automatically suppress timed-out and out-of-memory mutants\n",
+                "Note   : Run `cargo gamma hints` to update your hint file and accelerate subsequent cargo-gamma runs\n",
+            )
         );
     }
 
     #[test]
-    fn suppressible_mutants_suggest_the_suppress_command() {
-        let mut host = Sink::default();
+    fn a_blank_line_introduces_the_summary_when_no_result_listing_precedes_it() {
+        let mut population = plan();
+        let mut killed = mutant(1, Outcome::Killed);
+        killed.killed_by = Some("tests::caught".to_owned());
+        population.mutants = vec![killed];
 
-        session_notes(&mut host, &session(false), false, true, Styler::new(false)).expect("notes");
-
-        let text = String::from_utf8(host.err).expect("UTF-8");
-
-        assert_eq!(
-            text,
-            "        Hint run `cargo gamma suppress` to automatically suppress timed-out and out-of-memory mutants\n"
+        let text = rendered_with(
+            &population,
+            Listings {
+                promotable: Some(false),
+                suppressible: Some(false),
+                ..Listings::default()
+            },
         );
+
+        assert!(text.starts_with("\nSummary:"), "{text:?}");
+    }
+
+    #[test]
+    fn plural_idle_directives_are_counted_and_listed_after_the_summary() {
+        let mut population = plan();
+        population.mutants = vec![mutant(1, Outcome::Survived)];
+        population.idle = vec![
+            crate::suppress::Idle {
+                file: "src/a.rs".into(),
+                line: 3,
+                selectors: "arith".to_owned(),
+                reason: None,
+            },
+            crate::suppress::Idle {
+                file: "src/b.rs".into(),
+                line: 7,
+                selectors: "all".to_owned(),
+                reason: Some("obsolete".to_owned()),
+            },
+        ];
+
+        let text = rendered_with(&population, Listings::default());
+
+        assert!(text.contains("Note   : 2 superfluous skip directives could be removed with `cargo gamma unsuppress --apply`\n"));
+        assert!(text.contains("  src/a.rs:3: skip(arith)\n"));
+        assert!(text.contains("  src/b.rs:7: skip(all) — obsolete\n"));
+        assert!(text.find("Summary:").expect("summary") < text.find("Note   :").expect("note"));
+    }
+
+    #[test]
+    fn inapplicable_footer_notes_are_omitted() {
+        let mut population = plan();
+        population.mutants = vec![mutant(1, Outcome::Survived)];
+
+        let text = rendered_with(&population, Listings::default());
+
+        assert!(!text.contains("unsuppress --apply"), "{text}");
+        assert!(!text.contains("cargo gamma suppress"), "{text}");
+        assert!(!text.contains("cargo gamma hints"), "{text}");
+    }
+
+    #[test]
+    fn an_existing_hints_file_does_not_hide_new_promotion_advice() {
+        let directory = crate::testing::workdir("summary-existing-hints-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        std::fs::write(root.join("gamma-hints.yaml"), "existing: true\n").expect("existing hints");
+        let mut population = plan();
+        population.root = root;
+        let mut killed = mutant(1, Outcome::Killed);
+        killed.killed_by = Some("tests::caught".to_owned());
+        population.mutants = vec![killed];
+
+        let text = rendered_with(&population, Listings::default());
+
+        assert!(text.contains("Note   : Run `cargo gamma hints`"), "{text}");
+    }
+
+    #[test]
+    fn persisted_generalized_only_knowledge_shows_promotion_advice() {
+        let mut population = plan();
+        population.mutants = vec![mutant(1, Outcome::Survived)];
+
+        let text = rendered_with(
+            &population,
+            Listings {
+                promotable: Some(true),
+                ..Listings::default()
+            },
+        );
+
+        assert!(text.contains("Note   : Run `cargo gamma hints`"), "{text}");
+    }
+
+    #[test]
+    fn an_explicit_empty_persisted_record_suppresses_plan_based_promotion_inference() {
+        let mut population = plan();
+        let mut killed = mutant(1, Outcome::Killed);
+        killed.killed_by = Some("tests::caught".to_owned());
+        population.mutants = vec![killed];
+
+        let text = rendered_with(
+            &population,
+            Listings {
+                promotable: Some(false),
+                ..Listings::default()
+            },
+        );
+
+        assert!(!text.contains("cargo gamma hints"), "{text}");
+    }
+
+    #[test]
+    fn suppressible_mutants_suggest_the_suppress_command() {
+        let mut population = plan();
+        population.mutants = vec![mutant(2, Outcome::Timeout)];
+
+        let text = rendered_with(&population, Listings::default());
+
+        assert!(text.ends_with("Note   : Run `cargo gamma suppress` to automatically suppress timed-out and out-of-memory mutants\n"));
+    }
+
+    #[test]
+    fn an_unpersisted_resource_outcome_does_not_advertise_suppression() {
+        let mut population = plan();
+        population.mutants = vec![mutant(2, Outcome::Timeout)];
+
+        let text = rendered_with(
+            &population,
+            Listings {
+                suppressible: Some(false),
+                ..Listings::default()
+            },
+        );
+
+        assert!(!text.contains("cargo gamma suppress"), "{text}");
     }
 
     #[test]
@@ -721,6 +937,9 @@ mod tests {
             killed: true,
             unviable: false,
             announced: true,
+            promotable: None,
+            suppressible: None,
+            stats: None,
         };
 
         let text = rendered_with(&plan(), listings);
@@ -747,6 +966,9 @@ mod tests {
                 killed: true,
                 unviable: false,
                 announced: false,
+                promotable: None,
+                suppressible: None,
+                stats: None,
             },
         );
 
@@ -770,6 +992,9 @@ mod tests {
             killed: true,
             unviable: false,
             announced: true,
+            promotable: None,
+            suppressible: None,
+            stats: None,
         };
 
         let text = rendered_with(&population, listings);
@@ -790,6 +1015,9 @@ mod tests {
             killed: false,
             unviable: true,
             announced: true,
+            promotable: None,
+            suppressible: None,
+            stats: None,
         };
 
         let text = rendered_with(&population, listings);
@@ -880,6 +1108,9 @@ mod tests {
             killed: true,
             unviable: true,
             announced: true,
+            promotable: None,
+            suppressible: None,
+            stats: None,
         };
 
         fails_at_every_line(4, |host| summarize(host, &plan(), Styler::new(false), listings));
@@ -896,6 +1127,9 @@ mod tests {
             killed: false,
             unviable: false,
             announced: false,
+            promotable: None,
+            suppressible: None,
+            stats: None,
         };
 
         fails_at_every_line(1, |host| summarize(host, &plan, Styler::new(false), listings));
@@ -907,7 +1141,7 @@ mod tests {
         fails_at_every_line(1, |host| session_notes(host, &session(true), false, false, Styler::new(false)));
     }
 
-    /// `session_notes` writes up to four separate lines, one for each condition it has something
+    /// `session_notes` writes separate lines for each exceptional session condition
     /// to say about, and every one of those writes ends in the same `?`. A pipe can close between
     /// any two lines just as easily as before the first, so a suite that only ever closed it at
     /// the very start would leave two more `?` operators that had never been shown to propagate
@@ -936,6 +1170,6 @@ mod tests {
             phases: Phases::default(),
         };
 
-        fails_at_every_line(4, |host| session_notes(host, &session, true, true, Styler::new(false)));
+        fails_at_every_line(2, |host| session_notes(host, &session, true, true, Styler::new(false)));
     }
 }

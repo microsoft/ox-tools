@@ -208,10 +208,8 @@ reach-test sets.
 Its `context` contains the repository HEAD SHA and UTC generation date only.
 Those fields explain where the artifact generation came from; they do not gate
 score-neutral hints or attribute incrementally retained knowledge to that
-commit. Legacy JSON versions 1 and 2 remain readable while no YAML artifact
-exists. The next successful promotion publishes and verifies YAML before
-removing JSON. Malformed artifacts, foreign producers, and unsupported
-versions are ignored rather than partially trusted.
+commit. Malformed artifacts, foreign producers, and unsupported versions are
+ignored rather than partially trusted.
 
 **Output:**
 
@@ -426,6 +424,16 @@ The first valid detection stops testing that mutant. Candidate results from a
 later binary are held until canonical iteration reaches that binary, so they
 cannot bypass an earlier timeout, resource failure, flake, or metering error.
 
+Generalized evidence distinguishes the exact kill or reach observation that
+seeded a candidate from transfer evidence gathered against other mutants. A
+candidate is admitted only while its smoothed transfer probability can repay
+its measured launch cost from the fallback work it may avoid. Unmeasured
+candidates may be explored once; two misses without a transfer hit retire
+them. One mutant tries at most two same-item tests and one candidate binary
+from each generalized tier. After eight attempts without a hit, that tier's
+campaign-wide circuit breaker rejects further exploration. Exact hints and
+canonical fallback remain available.
+
 **Output:** one mutant outcome, elapsed time, optional killing test, and
 optional diagnostic note.
 
@@ -453,8 +461,9 @@ the reservation wakes waiters, so a related follow-on assignment observes the
 completed learning. Hinted mutants are not spaced, but their checked result is
 published before their reservation is released in the same way.
 
-**Output:** updated in-memory exact killers, ranked item/file candidates, and
-safe exact-site reach exclusions for work that has not started yet.
+**Output:** updated in-memory exact killers, bounded ranked item/file
+candidates with separate seed and transfer evidence, and safe exact-site reach
+exclusions for work that has not started yet.
 
 ## 10. Persistence and reporting
 
@@ -475,7 +484,8 @@ After the sweep:
   complete versus partial evidence;
 - selection diagnostics count whole, case-selected, hinted-fallback, and
   uncovered decisions, plus selected and available named tests;
-- hint funnels report candidates, attempts, and hits for exact mutant hints and
+- hint funnels report candidates, attempts, hits, and economically, cap-, or
+  circuit-breaker-rejected opportunities for exact mutant hints and
   generalized item, reach, file, and census tiers;
 - package sweep timelines report first start, final completion, and wall span
   relative to sweep start. These spans can overlap under concurrency and are
@@ -495,6 +505,10 @@ independently versioned generalized data, which today's serializer cannot
 round-trip without losing future fields. Publication and legacy cleanup compare
 against the exact YAML and JSON bytes used by the merge, so a concurrent update
 is left intact and reported as a conflict.
+
+The generalized section uses schema version 2, separating seed observations
+from transfer hits and misses. Version-1 identities migrate as seeds while
+their formerly conflated transfer statistics and measured cost reset.
 
 Persisted knowledge changes ordering and selection only. It never carries a
 verdict into a new campaign without executing the relevant test again.

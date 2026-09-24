@@ -27,7 +27,7 @@ use crate::{HashMap, HashSet};
 /// one filtered process and is discarded. Nothing here can move a verdict, so nothing here needs
 /// invalidating.
 #[derive(Debug, Default)]
-pub(super) struct Killers {
+pub(crate) struct Killers {
     /// The killing test of each mutant that had one, keyed by [`crate::model::Mutant::id`].
     ///
     /// Keyed by id rather than by position or line because the id hashes the file, item path,
@@ -54,12 +54,15 @@ impl Killers {
         let mut entries = promoted.probes();
         let mut generalized = promoted.generalized();
         let record = RunRecord::load(base);
+        let incomplete = RunRecord::load_incomplete(base);
 
         // The record last, so this machine's own last answer wins over the committed one wherever
         // both name a mutant: a probe is checked either way, but the fresher guess is likelier to
         // convict, and paying for the stale one first would be paying for a test twice.
         entries.extend(record.probes().iter().map(|(id, killer)| (id.clone(), killer.clone())));
         Self::merge_generalized(&mut generalized, record.generalized());
+        entries.extend(incomplete.probes().iter().map(|(id, killer)| (id.clone(), killer.clone())));
+        Self::merge_generalized(&mut generalized, incomplete.generalized());
 
         Self { entries, generalized }
     }
@@ -70,7 +73,7 @@ impl Killers {
     }
 
     /// Records what caught a mutant this run.
-    pub(super) fn record(&mut self, id: MutantId, killer: Killer) {
+    pub(crate) fn record(&mut self, id: MutantId, killer: Killer) {
         let _previous = self.entries.insert(id, killer);
     }
 
@@ -79,7 +82,7 @@ impl Killers {
     /// Called when a run's own verdict for a mutant names no test — the mutant survived, or was
     /// caught by something other than a failing assertion. Keeping the old entry would make the
     /// run after this one pay for a probe that has already been shown not to convict.
-    pub(super) fn forget(&mut self, id: &str) {
+    pub(crate) fn forget(&mut self, id: &str) {
         let _previous = self.entries.remove(id);
     }
 
@@ -87,7 +90,7 @@ impl Killers {
         &self.generalized
     }
 
-    pub(super) fn replace_generalized(&mut self, generalized: GeneralizedHints) {
+    pub(crate) fn replace_generalized(&mut self, generalized: GeneralizedHints) {
         self.generalized = generalized;
     }
 
@@ -107,15 +110,22 @@ impl Killers {
     /// A run that could not write this has still produced every verdict it was asked for, and
     /// failing it over a scratch file would turn an optimization into a dependency.
     pub(super) fn store(&self, base: &Utf8Path, population: &[Mutant]) {
+        let probes = self.current_probes(population);
+
+        RunRecord::store_incomplete_knowledge(base, &probes, Some(&self.generalized));
+    }
+
+    pub(crate) fn stage(&self, record: &mut RunRecord, population: &[Mutant]) {
+        record.replace_knowledge(self.current_probes(population), self.generalized.clone());
+    }
+
+    fn current_probes(&self, population: &[Mutant]) -> HashMap<MutantId, Killer> {
         let current: HashSet<&MutantId> = population.iter().map(|mutant| &mutant.id).collect();
-        let probes: HashMap<MutantId, Killer> = self
-            .entries
+        self.entries
             .iter()
             .filter(|(id, _killer)| current.contains(id))
             .map(|(id, killer)| (id.clone(), killer.clone()))
-            .collect();
-
-        RunRecord::store_knowledge(base, &probes, Some(&self.generalized));
+            .collect()
     }
 
     fn merge_generalized(target: &mut GeneralizedHints, newer: GeneralizedHints) {
@@ -288,6 +298,7 @@ mod tests {
     fn ranked<T>(candidate: T) -> RankedHint<T> {
         RankedHint {
             candidate,
+            seeds: 1,
             hits: 1,
             misses: 2,
             measured_ms: 3,

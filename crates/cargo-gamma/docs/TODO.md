@@ -12,9 +12,6 @@ deleted; this file is not a changelog or a record of rejected work.
 - [F2](#f2) — Checkpoint and resume long-running campaigns
 - [F3](#f3) — Native fork-server test harness as a `cargo test`/nextest replacement
 
-### Testing
-- [T1](#t1) — Isolate tests from the production interrupt registry
-
 ## Performance
 
 <a id="p3"></a>
@@ -124,39 +121,3 @@ documentation explicitly discloses the instrumented-tree caveats a team must acc
 their primary test runner.
 
 **See also:** P3 (this mode's execution engine)
-
----
-
-## Testing
-
-<a id="t1"></a>
-### T1 — Isolate tests from the production interrupt registry
-
-**Area:** `cargo-gamma-unsafe` interrupt and cgroup tests · **Priority:** High · **Effort:** Medium
-**Confidence:** High · **Scope:** five process-global test interactions — exhaustive
-**Trigger:** libtest schedules production-handler tests before or concurrently with cgroup watch tests
-
-Two tests call the production signal handler directly, permanently latching the process-global
-registry's interrupt state. Cgroup tests use that same registry with fabricated process-group IDs
-41 and 42. Once interrupted, registering either ID immediately invokes the production
-`kill_group`, and a concurrent handler sweep does the same. The test binary can therefore send a
-real `SIGKILL` to an unrelated host process group that happens to own either numeric ID, while
-later tests also inherit interrupt state they did not arrange.
-
-- `crates/cargo-gamma-unsafe/src/interrupt.rs:112-116` — registry interruption is deliberately
-  never cleared
-- `crates/cargo-gamma-unsafe/src/interrupt.rs:193-211` and
-  `crates/cargo-gamma-unsafe/src/interrupt.rs:264-284` — claiming after interruption and sweeping
-  invoke the supplied killer
-- `crates/cargo-gamma-unsafe/src/interrupt.rs:469-471` and
-  `crates/cargo-gamma-unsafe/src/interrupt.rs:575-581` — production paths supply a real
-  `kill(-group, SIGKILL)`
-- `crates/cargo-gamma-unsafe/src/interrupt.rs:755-777` — tests call the production handler against
-  the global registry
-- `crates/cargo-gamma-unsafe/src/cgroup.rs:932-933` and
-  `crates/cargo-gamma-unsafe/src/cgroup.rs:976-1080` — cgroup tests register IDs 41 and 42 through
-  that registry
-
-**Done when:** handler tests mutate only an isolated registry or run in child processes, cgroup
-tests inject a recording killer instead of using the production registry, and order-randomized
-parallel execution cannot signal a real process group or leak interrupt state between tests.

@@ -7,7 +7,6 @@ use super::cli::HintsArgs;
 use super::dispatch::EXIT_OK;
 use super::host::Host;
 use crate::discover::{Hints, RunRecord, hints_path};
-use crate::exec::{CargoOptions, campaign_base};
 use crate::report::{Styler, quantity};
 
 /// Implements `hints`.
@@ -19,7 +18,8 @@ use crate::report::{Styler, quantity};
 /// Everything this does that a copy does not is one of those problems:
 ///
 /// - it admits only the tiers that cannot move a score, and drops the rest on the floor;
-/// - it joins against the population as it stands now, so the file does not grow forever;
+/// - it uses the workspace-relative identities persisted by the selected campaign instead of
+///   rediscovering and reparsing the current population;
 /// - it stamps the format version and the tool that wrote it;
 /// - it writes atomically and reads back what it wrote.
 ///
@@ -30,22 +30,33 @@ use crate::report::{Styler, quantity};
 /// Publication compares against the exact bytes used for the merge so concurrent writers cannot
 /// silently replace one another.
 /// Implements `hints` with the configuration generation dispatch already resolved.
-pub(super) fn hints_with_cargo<H: Host>(host: &mut H, args: &HintsArgs, styler: Styler, cargo: &CargoOptions) -> crate::Result<i32> {
-    let selection = args.select.selection()?;
-
-    // Deliberately unsharded. A shard sees a fraction of the population, so promoting from one
-    // would drop every hint outside it — the file would be correct and almost empty, and each shard
-    // in a matrix would fight the others over it.
-    let (plan, target) = crate::discover::plan_for_build_with_target(&args.select, &selection, None, cargo, &mut |_| {})?;
-
-    let base = campaign_base(&plan.root, &target, args.cache_dir.as_deref());
-    let record = RunRecord::load(&base);
-    let (existing, generation, legacy_generation) = Hints::load_for_promotion(&plan.root, args.replace)?;
-    let promoted = Hints::promoted(&record, &plan.mutants);
-    let merged = Hints::merged(&existing, promoted, args.replace, &plan.root)?;
+pub(super) fn hints<H: Host>(host: &mut H, args: &HintsArgs, styler: Styler) -> crate::Result<i32> {
+    let selected = crate::paths::physical(&args.dir)?;
+    let (root, base, _lock) = crate::exec::claim_campaign_state(&selected, args.cache_dir.as_deref())?;
+    let record = if args.replace {
+        RunRecord::load_required(&base)?
+    } else {
+        RunRecord::load(&base)
+    };
+    let (existing, generation) = Hints::load_for_promotion(&root, args.replace)?;
+    let (promoted, omitted) = Hints::promoted_record(&record);
+    let merged = if args.replace {
+        Hints::merged(&existing, promoted, true, &root)?
+    } else {
+        Hints::merged_record(&existing, promoted, &record, &root)?
+    };
     let changes = merged.changes_from(&existing);
 
-    if merged.is_empty() && existing.is_empty() && generation.is_none() && legacy_generation.is_none() && !args.replace {
+    if omitted > 0 {
+        writeln!(
+            host.error(),
+            "{} {} was outside the current campaign population or had no persisted source path and could not be promoted; generalized knowledge was preserved",
+            styler.warning(),
+            quantity(omitted, "exact hint")
+        )?;
+    }
+
+    if merged.is_empty() && existing.is_empty() && generation.is_none() && !args.replace {
         writeln!(
             host.error(),
             "{} nothing to promote: no run under `{base}` has recorded a killing test, build-order hint, or generalized test-order hint for the current population",
@@ -55,19 +66,13 @@ pub(super) fn hints_with_cargo<H: Host>(host: &mut H, args: &HintsArgs, styler: 
         return Ok(EXIT_OK);
     }
 
-    let path = hints_path(&plan.root);
+    let path = hints_path(&root);
 
     if args.dry_run {
-        let counts = merged.counts();
-
         writeln!(
             host.error(),
-            "{} `{path}` would carry {}, {}, and {}, for {}; {}, {}, {}, and {}",
+            "{} `{path}`: {}, {}, {}, and {}",
             styler.verb("Preview"),
-            quantity(counts.probes, "killing test"),
-            quantity(counts.ordering, "build-order hint"),
-            quantity(counts.generalized, "generalized hint"),
-            quantity(counts.mutants, "mutant"),
             format_args!("{} added", quantity(changes.added, "record")),
             format_args!("{} updated", quantity(changes.updated, "record")),
             format_args!("{} removed", quantity(changes.removed, "record")),
@@ -80,19 +85,15 @@ pub(super) fn hints_with_cargo<H: Host>(host: &mut H, args: &HintsArgs, styler: 
     let promotion = if !args.replace && generation.is_some() && changes.is_empty() {
         merged.counts()
     } else {
-        merged.write_from(&path, generation.as_deref(), legacy_generation.as_deref())?
+        merged.write_from_locked(&path, generation.as_deref())?
     };
 
     let verb = if promotion.changed { "Wrote" } else { "Unchanged" };
 
     writeln!(
         host.error(),
-        "{} `{path}`: {}, {}, and {}, for {}; {}, {}, {}, and {}",
+        "{} `{path}`: {}, {}, {}, and {}",
         styler.verb(verb),
-        quantity(promotion.probes, "killing test"),
-        quantity(promotion.ordering, "build-order hint"),
-        quantity(promotion.generalized, "generalized hint"),
-        quantity(promotion.mutants, "mutant"),
         format_args!("{} added", quantity(changes.added, "record")),
         format_args!("{} updated", quantity(changes.updated, "record")),
         format_args!("{} removed", quantity(changes.removed, "record")),

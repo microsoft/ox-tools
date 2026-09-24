@@ -25,14 +25,6 @@ conflicts with `--optimize-test-execution`; use it when tests have
 non-deterministic reachability and every selected case in a reachable binary
 must run for each mutant.
 
-## Hints artifact
-
-`cargo gamma hints` now writes `gamma-hints.yaml`. The new version can read a
-legacy `gamma-hints.json` while no YAML artifact exists, then migrates it on
-the next successful promotion and removes the verified JSON input. Older
-cargo-gamma versions cannot read the YAML artifact, so mixed-version
-installations do not share a compatible promoted-hints format.
-
 ## Baseline-failure artifacts
 
 The single `baseline-failure.json` artifact has been replaced by a

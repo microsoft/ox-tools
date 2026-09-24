@@ -836,7 +836,7 @@ fn a_red_baseline_is_reported_rather_than_measured() {
     assert!(output.contains("baseline measurement failed due to 1 test failures"), "{output}");
     assert!(output.contains("baseline-failures for details"), "{output}");
     assert!(!output.contains("test `always_fails` failed"), "{output}");
-    assert_eq!(output.matches("Wrote ").count(), 3, "{output}");
+    assert_eq!(output.matches("Wrote  :").count(), 3, "{output}");
     assert!(output.contains("gamma-diagnostics.json"), "{output}");
     assert!(output.contains("failure.json"), "{output}");
     assert!(output.contains("diags.json"), "{output}");
@@ -1025,6 +1025,8 @@ fn a_foreign_config_is_reported_as_unread() {
 fn suppressing_writes_a_directive_that_actually_suppresses_the_mutant() {
     step_aside_if_nested!();
     let dir = workspace(UNVIABLE);
+    let (campaign_code, campaign_output) = session(&dir, &["--mutators", "fn_value.some_default"]);
+    assert_eq!(campaign_code, EXIT_OK, "{campaign_output}");
     let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
     let mut host = Sink::default();
     let code = run(
@@ -1035,8 +1037,6 @@ fn suppressing_writes_a_directive_that_actually_suppresses_the_mutant() {
             "suppress".to_owned(),
             "--eligible".to_owned(),
             "unviable".to_owned(),
-            "--mutators".to_owned(),
-            "fn_value.some_default".to_owned(),
             "--dir".to_owned(),
             path.to_string(),
         ],
@@ -1066,6 +1066,8 @@ fn suppressing_writes_a_directive_that_actually_suppresses_the_mutant() {
 fn suppressing_a_dry_run_prints_a_diff_and_changes_nothing() {
     step_aside_if_nested!();
     let dir = workspace(UNVIABLE);
+    let (campaign_code, campaign_output) = session(&dir, &["--mutators", "fn_value.some_default"]);
+    assert_eq!(campaign_code, EXIT_OK, "{campaign_output}");
     let before = fs::read_to_string(dir.path().join("src/lib.rs")).expect("could not read the source");
     let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
     let mut host = Sink::default();
@@ -1078,8 +1080,6 @@ fn suppressing_a_dry_run_prints_a_diff_and_changes_nothing() {
             "--dry-run-suppress".to_owned(),
             "--eligible".to_owned(),
             "unviable".to_owned(),
-            "--mutators".to_owned(),
-            "fn_value.some_default".to_owned(),
             "--dir".to_owned(),
             path.to_string(),
         ],
@@ -1100,6 +1100,8 @@ fn suppressing_refuses_to_touch_a_survivor() {
     // The guarantee the whole feature rests on, asserted through the CLI rather than the parser,
     // because the parser is not what a user reaches for.
     let dir = workspace(SUBJECT);
+    let (campaign_code, campaign_output) = session(&dir, &[]);
+    assert_eq!(campaign_code, EXIT_OK, "{campaign_output}");
     let path = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("path is not UTF-8");
     let mut host = Sink::default();
     let code = run(
@@ -1182,7 +1184,7 @@ fn two_shards_merge_into_one_score() {
 
     let whole = single
         .lines()
-        .find_map(|line| line.trim_start().strip_prefix("Summary "))
+        .find_map(|line| line.strip_prefix("Summary: "))
         .and_then(|line| line.split_whitespace().next())
         .and_then(|count| count.parse::<usize>().ok())
         .expect("the plan reports how many mutants it found");
