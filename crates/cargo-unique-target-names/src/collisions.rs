@@ -86,34 +86,30 @@ fn is_hashed(kind: &TargetKind) -> bool {
     matches!(kind, TargetKind::Test | TargetKind::Bench | TargetKind::CustomBuild)
 }
 
-/// One contended file and the targets competing for it.
-#[derive(Debug)]
-struct Contenders {
-    /// The target name every owner spells the same way.
-    name: String,
-    /// Keyed by package and target identity, so one target counts once even
-    /// when several of its crate types land in one family, while two targets in
-    /// a single package -- a `[lib]` and a `[[bin]]` of one name, which Cargo
-    /// permits, even pointing at the same source file -- still count
-    /// separately. Name and kind together identify a declaration: Cargo
-    /// rejects two targets of one kind sharing a name.
-    owners: BTreeMap<(String, String, String), String>,
-}
-
-/// A target name contended by the same set of targets.
+/// The targets competing for one set of files.
 ///
-/// One name can contend for several files at once (an executable collides on
-/// both its executable and its debug-info file), so the files are grouped to
-/// keep the report to one entry per contended target.
+/// Keyed by package and target identity, so one target counts once even when
+/// several of its crate types land in one family, while two targets in a single
+/// package -- a `[lib]` and a `[[bin]]` of one name, which Cargo permits, even
+/// pointing at the same source file -- still count separately. Name and kind
+/// together identify a declaration: Cargo rejects two targets of one kind
+/// sharing a name.
+type Contenders = BTreeMap<(String, String, String), String>;
+
+/// A set of files contended by the same set of targets.
+///
+/// One set of targets can contend for several files at once (two executables
+/// collide on both the executable and its debug-info file), so the files are
+/// grouped to keep the report to one entry per contending set.
+///
+/// The contended file is what the report leads with, rather than a target name,
+/// because the owners need not spell the name the same way: `foo-bar` and
+/// `foo_bar` both derive `foo_bar.pdb`, so no single name describes them both.
 #[derive(Debug)]
 pub struct Collision {
-    /// The contended target name.
-    pub name: String,
     /// Contending targets, each rendered as
-    /// `package (kind 'name as that target declares it')`. The declared names
-    /// can differ from the contended one: `foo-bar` and `foo_bar` both derive
-    /// `foo_bar.pdb`, and a rename is only actionable if the report says which
-    /// target spells it which way.
+    /// `package (kind 'name as that target declares it')`, so a rename is
+    /// actionable without opening a manifest.
     pub owners: Vec<String>,
     /// Every file the owners contend for.
     pub files: Vec<String>,
@@ -125,12 +121,11 @@ impl Collision {
     pub fn render(&self) -> String {
         let noun = if self.files.len() == 1 { "file" } else { "files" };
         format!(
-            "target '{}' is declared by {} targets: {}\n  they uplift to the same {}: {}",
-            self.name,
+            "{} targets uplift to the same {}: {}\n  declared by {}",
             self.owners.len(),
-            self.owners.join(", "),
             noun,
-            self.files.join(", ")
+            self.files.join(", "),
+            self.owners.join(", ")
         )
     }
 }
@@ -176,35 +171,24 @@ pub fn find(metadata: &Metadata) -> Vec<Collision> {
                         "{directory}/{}",
                         pattern.replace("{crate}", &crate_name).replace("{name}", &target.name)
                     );
-                    owners
-                        .entry(file)
-                        .or_insert_with(|| Contenders {
-                            name: target.name.clone(),
-                            owners: BTreeMap::new(),
-                        })
-                        .owners
-                        .insert(
-                            (package.name.to_string(), target.name.clone(), kind_key(target)),
-                            format!("{} ({} '{}')", package.name, label(target, family), target.name),
-                        );
+                    owners.entry(file).or_default().insert(
+                        (package.name.to_string(), target.name.clone(), kind_key(target)),
+                        format!("{} ({} '{}')", package.name, label(target, family), target.name),
+                    );
                 }
             }
         }
     }
 
-    let mut grouped: BTreeMap<(String, Vec<String>), Vec<String>> = BTreeMap::new();
+    let mut grouped: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
     for (file, contenders) in owners {
-        if contenders.owners.len() < 2 {
+        if contenders.len() < 2 {
             continue;
         }
-        let described = contenders.owners.into_values().collect::<Vec<_>>();
-        grouped.entry((contenders.name, described)).or_default().push(file);
+        grouped.entry(contenders.into_values().collect()).or_default().push(file);
     }
 
-    grouped
-        .into_iter()
-        .map(|((name, owners), files)| Collision { name, owners, files })
-        .collect()
+    grouped.into_iter().map(|(owners, files)| Collision { owners, files }).collect()
 }
 
 #[cfg(test)]
@@ -254,17 +238,15 @@ mod tests {
     #[test]
     fn the_diagnostic_agrees_in_number_with_the_contended_files() {
         let one = Collision {
-            name: "solo".to_owned(),
             owners: vec!["alpha (library 'solo')".to_owned(), "beta (library 'solo')".to_owned()],
             files: vec!["target/<profile>/libsolo.rlib".to_owned()],
         };
-        assert!(one.render().contains("they uplift to the same file: "), "{}", one.render());
+        assert!(one.render().contains("uplift to the same file: "), "{}", one.render());
 
         let many = Collision {
-            name: "duo".to_owned(),
             owners: vec!["alpha (binary 'duo')".to_owned(), "beta (binary 'duo')".to_owned()],
             files: vec!["target/<profile>/duo[.exe]".to_owned(), "target/<profile>/duo.pdb".to_owned()],
         };
-        assert!(many.render().contains("they uplift to the same files: "), "{}", many.render());
+        assert!(many.render().contains("uplift to the same files: "), "{}", many.render());
     }
 }

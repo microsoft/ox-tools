@@ -46,8 +46,8 @@
 //! When two packages contend for one file:
 //!
 //! ```text
-//! cargo-unique-target-names: target 'basic' is declared by 2 targets: metabench (example 'basic'), observed (example 'basic')
-//!   they uplift to the same files: target/<profile>/examples/basic.pdb, target/<profile>/examples/basic[.exe]
+//! cargo-unique-target-names: 2 targets uplift to the same files: target/<profile>/examples/basic.pdb, target/<profile>/examples/basic[.exe]
+//!   declared by metabench (example 'basic'), observed (example 'basic')
 //!
 //! Rename the reported targets so each one uplifts to its own path.
 //! ```
@@ -91,15 +91,17 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-pub mod collisions;
+mod collisions;
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use cargo_metadata::MetadataCommand;
 use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Effects};
 use clap::{Parser, Subcommand};
+
+pub use crate::collisions::Collision;
 
 /// Exit code for a workspace whose metadata could not be read, kept distinct
 /// from the collision code so a caller can tell "broken" from "contended".
@@ -134,39 +136,92 @@ struct Args {
     manifest_path: Option<PathBuf>,
 }
 
-/// Runs the check and returns the process exit code.
-///
-/// Returns [`ExitCode::SUCCESS`] when every uplifted file has one owner,
-/// [`ExitCode::FAILURE`] when at least one is contended, and
-/// [`EXIT_UNREADABLE_WORKSPACE`] when the workspace could not be read at all --
-/// a broken workspace must not be reportable as clean, and must be
-/// distinguishable from a genuine finding.
-#[must_use]
-pub fn run() -> ExitCode {
-    let Commands::UniqueTargetNames(args) = Cli::parse().command;
+/// What a check found: the verdict, the text that describes it, and the exit
+/// code it maps to.
+#[derive(Debug)]
+pub enum Outcome {
+    /// Every uplifted file has exactly one owner.
+    Clean,
+    /// At least one file is contended by two or more targets.
+    Contended(Vec<Collision>),
+    /// The workspace metadata could not be read, so no verdict is possible --
+    /// a broken workspace must not be reportable as clean.
+    Unreadable(String),
+}
 
+impl Outcome {
+    /// The process exit code for this outcome.
+    #[must_use]
+    pub const fn exit_code(&self) -> u8 {
+        match self {
+            Self::Clean => 0,
+            Self::Contended(_) => 1,
+            Self::Unreadable(_) => EXIT_UNREADABLE_WORKSPACE,
+        }
+    }
+
+    /// The full text the tool prints for this outcome.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Self::Clean => "All workspace targets uplift to their own path".to_owned(),
+            Self::Contended(collisions) => {
+                let findings = collisions
+                    .iter()
+                    .map(|collision| format!("cargo-unique-target-names: {}", collision.render()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{findings}\n\nRename the reported targets so each one uplifts to its own path.")
+            }
+            Self::Unreadable(error) => {
+                format!("cargo-unique-target-names: failed to read workspace metadata from cargo: {error}")
+            }
+        }
+    }
+}
+
+/// Checks the workspace containing `manifest_path`, or the one discovered from
+/// the current directory when it is `None`.
+///
+/// Reads `cargo metadata --no-deps` itself, so a caller needs nothing from
+/// cargo's own crates to run the rule.
+#[must_use]
+pub fn check(manifest_path: Option<&Path>) -> Outcome {
     let mut command = MetadataCommand::new();
     command.no_deps();
-    if let Some(path) = args.manifest_path {
+    if let Some(path) = manifest_path {
         command.manifest_path(path);
     }
-    let metadata = match command.exec() {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            eprintln!("cargo-unique-target-names: failed to read workspace metadata from cargo: {error}");
-            return ExitCode::from(EXIT_UNREADABLE_WORKSPACE);
+    match command.exec() {
+        Ok(metadata) => {
+            let collisions = collisions::find(&metadata);
+            if collisions.is_empty() {
+                Outcome::Clean
+            } else {
+                Outcome::Contended(collisions)
+            }
         }
-    };
-
-    let collisions = collisions::find(&metadata);
-    if collisions.is_empty() {
-        println!("All workspace targets uplift to their own path");
-        return ExitCode::SUCCESS;
+        Err(error) => Outcome::Unreadable(error.to_string()),
     }
+}
 
-    for collision in &collisions {
-        eprintln!("cargo-unique-target-names: {}", collision.render());
+/// Parses `args` as the command line, runs the check, prints the report, and
+/// returns the outcome.
+///
+/// This is the whole of the command: `main` does nothing but hand it
+/// [`std::env::args_os`] and turn the returned [`Outcome::exit_code`] into a
+/// process exit code, so the contract is observable without spawning anything.
+#[must_use]
+pub fn run<I, T>(args: I) -> Outcome
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let Commands::UniqueTargetNames(arguments) = Cli::parse_from(args).command;
+    let outcome = check(arguments.manifest_path.as_deref());
+    match outcome {
+        Outcome::Clean => println!("{}", outcome.render()),
+        Outcome::Contended(_) | Outcome::Unreadable(_) => eprintln!("{}", outcome.render()),
     }
-    eprintln!("\nRename the reported targets so each one uplifts to its own path.");
-    ExitCode::FAILURE
+    outcome
 }

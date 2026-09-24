@@ -1,49 +1,35 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! The process contract: exit codes and the text written to stdout and stderr.
+//! The command-line contract: the argument vector Cargo passes, the exit code
+//! each verdict maps to, and the text the tool prints.
 //!
-//! These are the only tests that run the built binary, because the exit code
-//! and the streams are the tool's interface to a CI pipeline and cannot be
-//! observed by calling the library. The collision rule itself is tested through
-//! the library in `collisions.rs`.
+//! These call `run` directly rather than spawning the built binary. `main` does
+//! nothing but hand `std::env::args_os` to `run` and turn the outcome's exit
+//! code into a process exit code, so a subprocess would exercise the same code
+//! behind a process boundary and observe less of it.
 
-// miri cannot sandbox the subprocess and filesystem work these tests do.
+// miri cannot sandbox the filesystem work these fixtures do, nor the `cargo
+// metadata` subprocess that reads them.
 #![cfg(not(miri))]
 
 mod common;
 
-use std::path::PathBuf;
-use std::process::{Command, Output};
-use std::{env, fs};
+use std::fs;
+use std::path::Path;
 
+use cargo_unique_target_names::{EXIT_UNREADABLE_WORKSPACE, Outcome, run};
 use common::{Member, workspace};
 
-/// The binary under test, as cargo built it next to the integration test.
-fn binary() -> PathBuf {
-    let mut path = env::current_exe().expect("the test binary must have a path");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.join(format!("cargo-unique-target-names{}", env::consts::EXE_SUFFIX))
-}
-
-fn run(manifest: &std::path::Path) -> Output {
-    Command::new(binary())
-        .args(["unique-target-names", "--manifest-path"])
-        .arg(manifest)
-        .current_dir(env::temp_dir())
-        .output()
-        .expect("the built binary must be runnable")
-}
-
-fn combined(output: &Output) -> String {
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
+/// Runs the tool the way Cargo invokes it: `cargo unique-target-names ...`,
+/// with the subcommand name as the first argument after the driver.
+fn invoke(manifest: &Path) -> Outcome {
+    run([
+        "cargo".as_ref(),
+        "unique-target-names".as_ref(),
+        "--manifest-path".as_ref(),
+        manifest.as_os_str(),
+    ])
 }
 
 #[test]
@@ -52,9 +38,9 @@ fn a_clean_workspace_exits_zero_and_says_so() {
         Member::new("alpha", "alpha_shared", "alpha_tool", "alpha_lib_example"),
         Member::new("beta", "beta_shared", "beta_tool", "beta_lib_example"),
     ]);
-    let output = run(&temp.path().join("Cargo.toml"));
-    let diagnostic = combined(&output);
-    assert_eq!(output.status.code(), Some(0), "{diagnostic}");
+    let outcome = invoke(&temp.path().join("Cargo.toml"));
+    let diagnostic = outcome.render();
+    assert_eq!(outcome.exit_code(), 0, "{diagnostic}");
     assert!(
         diagnostic.contains("All workspace targets uplift to their own path"),
         "{diagnostic}"
@@ -67,11 +53,11 @@ fn a_contended_workspace_exits_one_and_names_the_remedy() {
         Member::new("alpha", "shared", "alpha_tool", "alpha_lib_example"),
         Member::new("beta", "shared", "beta_tool", "beta_lib_example"),
     ]);
-    let output = run(&temp.path().join("Cargo.toml"));
-    let diagnostic = combined(&output);
-    assert_eq!(output.status.code(), Some(1), "{diagnostic}");
+    let outcome = invoke(&temp.path().join("Cargo.toml"));
+    let diagnostic = outcome.render();
+    assert_eq!(outcome.exit_code(), 1, "{diagnostic}");
     assert!(
-        diagnostic.contains("cargo-unique-target-names: target 'shared' is declared by 2 targets"),
+        diagnostic.contains("cargo-unique-target-names: 2 targets uplift to the same files"),
         "{diagnostic}"
     );
     assert!(
@@ -87,11 +73,11 @@ fn an_unreadable_workspace_exits_with_its_own_code() {
     let temp = tempfile::tempdir().expect("temporary directory must be creatable");
     let manifest = temp.path().join("Cargo.toml");
     fs::write(&manifest, "this is not a manifest\n").expect("manifest must be writable");
-    let output = run(&manifest);
-    let diagnostic = combined(&output);
+    let outcome = invoke(&manifest);
+    let diagnostic = outcome.render();
     assert_eq!(
-        output.status.code(),
-        Some(i32::from(cargo_unique_target_names::EXIT_UNREADABLE_WORKSPACE)),
+        outcome.exit_code(),
+        EXIT_UNREADABLE_WORKSPACE,
         "a broken workspace must not share an exit code with a finding: {diagnostic}"
     );
     assert!(diagnostic.contains("failed to read workspace metadata from cargo"), "{diagnostic}");

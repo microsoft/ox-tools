@@ -34,8 +34,8 @@ creates it.
    the answer arrives in seconds and does not depend on compiling anything.
 2. **Match Cargo exactly.** Report what Cargo warns about — no more, so a clean
    workspace is never rejected, and no less, so the guard is worth having.
-3. **Name the contended file.** A diagnostic that names the target, every owning
-   package, how each package spells it, and the exact path they contend for is
+3. **Name the contended file.** A diagnostic that names the exact path being
+   contended, every owning target, and how each one spells its name is
    actionable without opening a manifest.
 4. **Platform-independent verdict.** Every leg of a build matrix reaches the
    same conclusion, so a Windows-only collision is not invisible to a Linux run.
@@ -47,7 +47,11 @@ creates it.
 - Building anything. The tool reads `cargo metadata --no-deps` and never invokes
   a compiler.
 - Renaming targets. The tool reports; the human chooses the new name.
-- Policing duplicate names *within* one package. Cargo already rejects those.
+- Policing duplicate targets of the *same kind* within one package — two
+  `[[bin]]` sections with one name. Cargo rejects those itself, so they never
+  reach this tool. Targets of *different* kinds in one package are a different
+  matter: Cargo permits a `[lib]` and a `[[bin]]` of one name, they contend for
+  the debug-info file, and this tool reports them like any other pair (§5).
 - Enforcing a naming convention. Uniqueness of uplifted paths is the only
   invariant; what the unique names look like is a project decision.
 
@@ -78,11 +82,16 @@ code, so a caller can tell "broken" from "contended" without parsing output.
 ### Output
 
 ```text
-cargo-unique-target-names: target 'basic' is declared by 2 targets: metabench (example 'basic'), observed (example 'basic')
-  they uplift to the same files: target/<profile>/examples/basic.pdb, target/<profile>/examples/basic[.exe]
+cargo-unique-target-names: 2 targets uplift to the same files: target/<profile>/examples/basic.pdb, target/<profile>/examples/basic[.exe]
+  declared by metabench (example 'basic'), observed (example 'basic')
 
 Rename the reported targets so each one uplifts to its own path.
 ```
+
+The contended file leads, rather than a target name, because the owners need
+not spell the name the same way: packages `foo-bar` and `foo_bar` both derive
+`foo_bar.pdb`, so no single name describes both. Each owner therefore carries
+the name its own target declares, which is what makes the rename actionable.
 
 File names are shown as patterns rather than resolved per platform, because the
 verdict is platform-independent: `[lib]name[.so|.dll|.dylib]` stands for the one

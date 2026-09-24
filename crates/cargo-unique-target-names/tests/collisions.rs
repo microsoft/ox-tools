@@ -3,8 +3,8 @@
 
 //! The collision rule, exercised through the library against synthetic cargo
 //! workspaces. The rule is the crate's substance, so it is tested by calling
-//! `find` directly rather than through the binary; `cli.rs` covers the process
-//! contract that can only be observed by running the tool.
+//! `check` directly rather than through the binary; `cli.rs` covers the
+//! command-line contract.
 
 // miri cannot sandbox the filesystem work these fixtures do, nor the `cargo
 // metadata` subprocess that reads them.
@@ -12,33 +12,18 @@
 
 mod common;
 
-use std::path::Path;
-
-use cargo_metadata::{Metadata, MetadataCommand};
-use cargo_unique_target_names::collisions::{Collision, find};
+use cargo_unique_target_names::{Collision, Outcome, check};
 use common::{Member, workspace};
 
-fn metadata(root: &Path) -> Metadata {
-    MetadataCommand::new()
-        .no_deps()
-        .manifest_path(root.join("Cargo.toml"))
-        .exec()
-        .expect("the fixture workspace must be readable by cargo")
-}
-
 /// The collisions found in a workspace built from `members`, rendered as the
-/// tool would print them.
+/// tool would print them, or the empty string when there are none.
 fn report(members: &[Member]) -> String {
     let temp = workspace(members);
-    found(&metadata(temp.path()))
-        .iter()
-        .map(Collision::render)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn found(metadata: &Metadata) -> Vec<Collision> {
-    find(metadata)
+    match check(Some(&temp.path().join("Cargo.toml"))) {
+        Outcome::Clean => String::new(),
+        Outcome::Contended(collisions) => collisions.iter().map(Collision::render).collect::<Vec<_>>().join("\n"),
+        Outcome::Unreadable(error) => panic!("the fixture workspace must be readable by cargo: {error}"),
+    }
 }
 
 /// A bin-crate-type example uplifts to `examples/<name>` and its debug-info
@@ -50,7 +35,7 @@ fn reports_two_packages_sharing_an_uplifted_example_name() {
         Member::new("beta", "shared", "beta_tool", "beta_lib_example"),
     ]);
     assert!(
-        report.contains("target 'shared' is declared by 2 targets: alpha (example 'shared'), beta (example 'shared')"),
+        report.contains("declared by alpha (example 'shared'), beta (example 'shared')"),
         "{report}"
     );
     assert!(report.contains("target/<profile>/examples/shared[.exe]"), "{report}");
@@ -59,7 +44,7 @@ fn reports_two_packages_sharing_an_uplifted_example_name() {
         "every contested file must be listed, not just the primary one: {report}"
     );
     assert!(
-        report.contains("they uplift to the same files: "),
+        report.contains("2 targets uplift to the same files: "),
         "an example contends for two files, so the wording is plural: {report}"
     );
 }
@@ -71,10 +56,13 @@ fn reports_two_packages_sharing_an_uplifted_binary_name() {
         Member::new("beta", "beta_shared", "tool", "beta_lib_example"),
     ]);
     assert!(
-        report.contains("target 'tool' is declared by 2 targets: alpha (binary 'tool'), beta (binary 'tool')"),
+        report.contains("2 targets uplift to the same files: target/<profile>/tool.pdb, target/<profile>/tool[.exe]"),
         "{report}"
     );
-    assert!(report.contains("target/<profile>/tool[.exe]"), "{report}");
+    assert!(
+        report.contains("declared by alpha (binary 'tool'), beta (binary 'tool')"),
+        "{report}"
+    );
 }
 
 /// The motivating accident: Cargo has already normalized `-` to `_` in the
@@ -87,7 +75,7 @@ fn reports_default_library_names_that_normalize_to_one_target() {
         Member::new("foo_bar", "score_example", "score_tool", "score_lib_example"),
     ]);
     assert!(
-        report.contains("target 'foo_bar' is declared by 2 targets: foo-bar (library 'foo_bar'), foo_bar (library 'foo_bar')"),
+        report.contains("declared by foo-bar (library 'foo_bar'), foo_bar (library 'foo_bar')"),
         "{report}"
     );
     assert!(report.contains("target/<profile>/libfoo_bar.rlib"), "{report}");
@@ -103,7 +91,7 @@ fn reports_two_packages_sharing_an_explicit_library_name() {
     ]);
     assert!(report.contains("target/<profile>/libshared_lib.rlib"), "{report}");
     assert!(
-        report.contains("they uplift to the same file: "),
+        report.contains("2 targets uplift to the same file: "),
         "an rlib contends for exactly one file, so the wording is singular: {report}"
     );
 }
@@ -183,8 +171,9 @@ fn reports_both_owners_when_package_names_differ_only_by_case() {
         Member::new("Shared", "upper_example", "tool", "upper_lib_example").in_directory("upper"),
         Member::new("shared", "lower_example", "tool", "lower_lib_example").in_directory("lower"),
     ]);
+    assert!(report.contains("2 targets uplift to the same files"), "{report}");
     assert!(
-        report.contains("is declared by 2 targets: Shared (binary 'tool'), shared (binary 'tool')"),
+        report.contains("declared by Shared (binary 'tool'), shared (binary 'tool')"),
         "{report}"
     );
 }
@@ -234,6 +223,10 @@ fn accepts_repeated_test_and_bench_names() {
 /// Cargo replaces `-` with `_` when deriving library and debug-info file
 /// names, but not executable names. Two binaries named `foo-bar` and `foo_bar`
 /// therefore produce distinct executables and a single `foo_bar.pdb`.
+///
+/// No single target name describes both owners here, which is why the report
+/// leads with the contended file rather than a name: a headline naming either
+/// spelling would be wrong for the other owner.
 #[test]
 fn reports_binaries_whose_names_differ_only_by_separator() {
     let report = report(&[
@@ -241,12 +234,16 @@ fn reports_binaries_whose_names_differ_only_by_separator() {
         Member::new("beta", "beta_shared", "foo_bar", "beta_lib_example"),
     ]);
     assert!(
-        report.contains("target/<profile>/foo_bar.pdb"),
-        "the debug-info name is normalized and contended: {report}"
+        report.contains("2 targets uplift to the same file: target/<profile>/foo_bar.pdb"),
+        "the contended file is the headline, and its name is normalized: {report}"
     );
     assert!(
-        report.contains("alpha (binary 'foo-bar'), beta (binary 'foo_bar')"),
+        report.contains("declared by alpha (binary 'foo-bar'), beta (binary 'foo_bar')"),
         "each owner must name the target as it declares it, or the rename is not actionable: {report}"
+    );
+    assert!(
+        !report.contains("targets uplift to the same file: target/<profile>/foo-bar"),
+        "the report must not headline a name only one owner declares: {report}"
     );
     assert!(
         !report.contains("[.exe]"),
@@ -261,10 +258,13 @@ fn reports_binaries_whose_names_differ_only_by_separator() {
 fn reports_a_library_and_a_binary_of_one_name_in_a_single_package() {
     let report = report(&[Member::new("alpha", "alpha_shared", "tool", "alpha_lib_example").with_library("tool", "cdylib")]);
     assert!(
-        report.contains("target 'tool' is declared by 2 targets: alpha (binary 'tool'), alpha (shared library 'tool')"),
+        report.contains("2 targets uplift to the same file: target/<profile>/tool.pdb"),
+        "{report}"
+    );
+    assert!(
+        report.contains("declared by alpha (binary 'tool'), alpha (shared library 'tool')"),
         "both targets must be named, each with its own kind: {report}"
     );
-    assert!(report.contains("target/<profile>/tool.pdb"), "{report}");
 }
 
 /// Two target declarations may point at one source file, so target identity
@@ -276,8 +276,11 @@ fn reports_two_targets_that_share_one_source_file() {
         .with_library("twin", "cdylib")
         .with_extra_manifest("[[bin]]\nname = \"twin\"\npath = \"src/lib.rs\"\n")]);
     assert!(
-        report.contains("target 'twin' is declared by 2 targets: alpha (binary 'twin'), alpha (shared library 'twin')"),
+        report.contains("2 targets uplift to the same file: target/<profile>/twin.pdb"),
+        "{report}"
+    );
+    assert!(
+        report.contains("declared by alpha (binary 'twin'), alpha (shared library 'twin')"),
         "targets sharing a source file must still count separately: {report}"
     );
-    assert!(report.contains("target/<profile>/twin.pdb"), "{report}");
 }
