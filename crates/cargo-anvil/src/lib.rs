@@ -430,11 +430,11 @@ pub mod test_support {
 
     /// Keep concurrent PowerShell test processes from sharing startup-profile data.
     ///
-    /// PowerShell's profile optimization cache is not safe for concurrent writers.
+    /// The profile optimization cache used by PowerShell is not safe for concurrent writers.
     /// Test fixtures launch many short-lived PowerShell processes under nextest, so
     /// each fixture gets a private cache root.
     pub fn isolate_powershell_cache(command: &mut Command, fixture_root: &Path) {
-        let cache_root = fixture_root.join("powershell-cache");
+        let cache_root = fixture_root.join("target/anvil/powershell-cache");
         if cfg!(windows) {
             command.env("LOCALAPPDATA", cache_root);
         } else {
@@ -469,7 +469,7 @@ pub mod test_support {
             let value = command
                 .get_envs()
                 .find_map(|(key, value)| (key == OsStr::new(variable)).then_some(value).flatten());
-            assert_eq!(value, Some(root.join("powershell-cache").as_os_str()));
+            assert_eq!(value, Some(root.join("target/anvil/powershell-cache").as_os_str()));
         }
     }
 }

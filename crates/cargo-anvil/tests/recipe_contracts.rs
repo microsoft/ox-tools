@@ -1720,8 +1720,12 @@ fn semver_exit_code_contract_is_executed() {
         "has no lib target",
         "no library targets found",
         "version 1.0.0 is yanked: target/semver-checks/git-origin_main/crates/fixture",
+        concat!(
+            "error[E0080]: unicode-properties and unicode-ident must use the same Unicode version\n",
+            "target/semver-checks/git-origin_main/crates/fixture"
+        ),
     ] {
-        let bin_to_lib = run_just(
+        let unusable_baseline = run_just(
             tmp.path(),
             &["anvil-semver-check"],
             &[
@@ -1732,13 +1736,18 @@ fn semver_exit_code_contract_is_executed() {
             ],
         );
         assert!(
-            bin_to_lib.status.success(),
-            "bin-to-lib exit 101 wording '{output}' should succeed:\n{}",
-            String::from_utf8_lossy(&bin_to_lib.stderr)
+            unusable_baseline.status.success(),
+            "unusable-baseline exit 101 wording '{output}' should succeed:\n{}",
+            String::from_utf8_lossy(&unusable_baseline.stderr)
         );
+        assert!(!tmp.path().join("target/anvil/comments/semver.md").exists());
     }
 
-    for (exit, output) in [("101", "operational failure"), ("42", "unexpected failure")] {
+    for (exit, output) in [
+        ("101", "operational failure"),
+        ("101", "unicode-properties and unicode-ident must use the same Unicode version"),
+        ("42", "unexpected failure"),
+    ] {
         let inconclusive = run_just(
             tmp.path(),
             &["anvil-semver-check"],

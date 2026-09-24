@@ -18,6 +18,7 @@
 #     baseline ("package `<name>` not found in ...").
 #   - crates where the branch baseline lacks a lib target the
 #     current source has (bin -> bin+lib transition).
+#   - baseline dependencies that no longer resolve to a compatible set.
 # We pre-filter to publishable library crates from cargo metadata, skip
 # packages whose current manifest path is absent from the baseline,
 # then run cargo-semver-checks per-package and tolerate the remaining
@@ -167,8 +168,8 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         } elseif ($semverExit -eq 101) {
             # Exit 101 means the check could not complete. Some conditions
             # intentionally have no usable branch baseline: a package renamed
-            # in place, a baseline bin becoming a library, or a dependency
-            # version in the baseline becoming yanked after that commit landed.
+            # in place, a baseline bin becoming a library, or baseline
+            # dependencies that no longer resolve to a usable set.
             $packageMissing = $output.Contains(('package `{0}` not found in' -f $p))
             $manifestParseFailed = $output.Contains('possibly due to errors:')
             $renamedPackage = $packageMissing -and -not $manifestParseFailed
@@ -176,8 +177,12 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
                                       $output.Contains('no library targets found')
             $baselineDependencyYanked = $output.Contains('is yanked') -and
                                         ($output -match 'target[\\/]+semver-checks[\\/]+git-')
-            if ($renamedPackage -or $baselineLibraryMissing -or $baselineDependencyYanked) {
-                Write-Host "  $p has no usable branch baseline; skipping (renamed, bin->lib, or yanked baseline dependency)" -ForegroundColor Yellow
+            $baselineUnicodeMismatch = $output.Contains(
+                'unicode-properties and unicode-ident must use the same Unicode version'
+            ) -and ($output -match 'target[\\/]+semver-checks[\\/]+git-')
+            if ($renamedPackage -or $baselineLibraryMissing -or
+                $baselineDependencyYanked -or $baselineUnicodeMismatch) {
+                Write-Host "  $p has no usable branch baseline; skipping (renamed, bin->lib, or unusable baseline dependencies)" -ForegroundColor Yellow
             } else {
                 Write-Warning "anvil-semver-check: $p could not be checked (cargo-semver-checks exit 101):`n$output"
                 $inconclusive.Add('#### `' + $p + '` (exit 101)') | Out-Null
