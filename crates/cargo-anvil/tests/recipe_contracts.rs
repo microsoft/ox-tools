@@ -281,14 +281,6 @@ if ($args -contains 'metadata') {
     $metadata | ConvertTo-Json -Depth 8 -Compress
     exit 0
 }
-if ($args -contains 'rustdoc') {
-    $targetDir = $args[[Array]::IndexOf($args, '--target-dir') + 1]
-    $libName = if ($env:FAKE_LIB_NAME) { $env:FAKE_LIB_NAME } else { 'fixture' }
-    $json = [System.IO.Path]::Combine($targetDir, 'doc', "$($libName.Replace('-', '_')).json")
-    [System.IO.Directory]::CreateDirectory((Split-Path -Parent $json)) | Out-Null
-    Set-Content -LiteralPath $json -Value '{}'
-    exit [int]$env:FAKE_RUSTDOC_EXIT
-}
 if ($args -contains 'miri') {
     if ($args -contains 'setup') {
         Write-Output ([System.IO.Path]::Combine($env:FAKE_WORKSPACE_ROOT, 'fake-miri-sysroot'))
@@ -404,23 +396,6 @@ if ($args -contains 'install' -and $args -contains '--version') {
 exit [int]$env:FAKE_CARGO_DEFAULT_EXIT
 "#;
 
-const FAKE_GIT_PS1: &str = r#"
-if ($args[0] -eq 'rev-parse') {
-    Write-Output 'fake-base-sha'
-    exit 0
-}
-if ($args[0] -eq 'worktree' -and $args[1] -eq 'add') {
-    $path = $args[$args.Count - 2]
-    [System.IO.Directory]::CreateDirectory($path) | Out-Null
-    Set-Content -LiteralPath ([System.IO.Path]::Combine($path, 'Cargo.toml')) -Value @'
-[package]
-name = "fixture"
-version = "0.1.0"
-'@
-}
-exit 0
-"#;
-
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
@@ -489,7 +464,7 @@ _anvil-impact-include tier:
     let bin = tmp.path().join("fake-bin");
     fs::create_dir_all(&bin).unwrap();
     write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
-    write(&bin.join("git.ps1"), FAKE_GIT_PS1);
+    write(&bin.join("git.ps1"), "exit 0\n");
     write(
         &bin.join("rustc.ps1"),
         r"
@@ -1695,8 +1670,6 @@ fn semver_exit_code_contract_is_executed() {
     let tmp = fixture(
         &[("helpers.just", HELPERS), ("semver.just", SEMVER), ("impact.just", IMPACT)],
         &[
-            "anvil-toolchain-nightly-validate-prereqs",
-            "anvil-toolchain-nightly-install",
             "anvil-tool-cargo-semver-checks-validate-prereqs",
             "anvil-tool-cargo-semver-checks-install installer",
             "anvil-impact",
@@ -1725,6 +1698,45 @@ fn semver_exit_code_contract_is_executed() {
     let findings_comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
     assert!(findings_comment.contains("Potential breaking changes"));
     assert!(findings_comment.contains("breaking change"));
+
+    let renamed = run_just(
+        tmp.path(),
+        &["anvil-semver-check"],
+        &[
+            common[0],
+            common[1],
+            ("FAKE_SEMVER_EXIT", OsStr::new("101")),
+            ("FAKE_SEMVER_OUTPUT", OsStr::new("package `fixture` not found in the baseline")),
+        ],
+    );
+    assert!(
+        renamed.status.success(),
+        "accepted exit 101 should succeed:\n{}",
+        String::from_utf8_lossy(&renamed.stderr)
+    );
+    assert!(!tmp.path().join("target/anvil/comments/semver.md").exists());
+
+    for output in [
+        "has no lib target",
+        "no library targets found",
+        "version 1.0.0 is yanked: target/semver-checks/git-origin_main/crates/fixture",
+    ] {
+        let bin_to_lib = run_just(
+            tmp.path(),
+            &["anvil-semver-check"],
+            &[
+                common[0],
+                common[1],
+                ("FAKE_SEMVER_EXIT", OsStr::new("101")),
+                ("FAKE_SEMVER_OUTPUT", OsStr::new(output)),
+            ],
+        );
+        assert!(
+            bin_to_lib.status.success(),
+            "bin-to-lib exit 101 wording '{output}' should succeed:\n{}",
+            String::from_utf8_lossy(&bin_to_lib.stderr)
+        );
+    }
 
     for (exit, output) in [("101", "operational failure"), ("42", "unexpected failure")] {
         let inconclusive = run_just(
@@ -1850,8 +1862,6 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
             SEMVER,
             "anvil-semver-check",
             &[
-                "anvil-toolchain-nightly-validate-prereqs",
-                "anvil-toolchain-nightly-install",
                 "anvil-tool-cargo-semver-checks-validate-prereqs",
                 "anvil-tool-cargo-semver-checks-install installer",
                 "anvil-impact",
@@ -2251,8 +2261,6 @@ fn semver_skips_non_publishable_libraries() {
     let tmp = fixture(
         &[("helpers.just", HELPERS), ("semver.just", SEMVER), ("impact.just", IMPACT)],
         &[
-            "anvil-toolchain-nightly-validate-prereqs",
-            "anvil-toolchain-nightly-install",
             "anvil-tool-cargo-semver-checks-validate-prereqs",
             "anvil-tool-cargo-semver-checks-install installer",
             "anvil-impact",
@@ -2283,8 +2291,6 @@ fn semver_includes_libraries_restricted_to_named_registries() {
     let tmp = fixture(
         &[("helpers.just", HELPERS), ("semver.just", SEMVER), ("impact.just", IMPACT)],
         &[
-            "anvil-toolchain-nightly-validate-prereqs",
-            "anvil-toolchain-nightly-install",
             "anvil-tool-cargo-semver-checks-validate-prereqs",
             "anvil-tool-cargo-semver-checks-install installer",
             "anvil-impact",
@@ -2308,7 +2314,11 @@ fn semver_includes_libraries_restricted_to_named_registries() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(fs::read_to_string(log).unwrap().contains("semver-checks --current-rustdoc"));
+    assert!(
+        fs::read_to_string(log)
+            .unwrap()
+            .contains("semver-checks --package named-registry --baseline-rev base")
+    );
 }
 
 #[test]

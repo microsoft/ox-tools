@@ -2803,8 +2803,8 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Affected tier (compares changed crates' current API against locked rustdoc
-# JSON built from the PR target branch; only changed crates' surface is at risk).
+# Affected tier (compares changed crates' current API against the PR
+# target branch baseline; only changed crates' surface is at risk).
 #
 # Several real-world conditions aren't actually SemVer violations:
 #   - bin-only crates have no API to compare (reported as a missing lib target).
@@ -2817,14 +2817,13 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 #     current source has (bin -> bin+lib transition).
 # We pre-filter to publishable library crates from cargo metadata, skip
 # packages whose current manifest path is absent from the baseline,
-# use structured baseline metadata to skip renamed and bin-to-lib packages,
-# then build both rustdoc inputs with each revision's Cargo.lock before
-# running cargo-semver-checks per package.
+# then run cargo-semver-checks per-package and tolerate the remaining
+# "no-comparable-baseline" failure modes.
 #
 # Findings policy: cargo-semver-checks is *advisory*. Real SemVer
 # findings and operational failures do NOT fail the recipe -- breaking
-# changes between unreleased commits are normal, while a failed comparison
-# is not evidence that the PR broke the API. Instead, either
+# changes between unreleased commits are normal, while an unbuildable
+# baseline is not evidence that the PR broke the API. Instead, either
 # outcome writes a markdown advisory body to
 # `target/anvil/comments/semver.md`; when the tree is clean we remove
 # that file. Anvil preflight failures before cargo-semver-checks still
@@ -2838,10 +2837,10 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # skip/splat preamble, this recipe stays multi-step: cargo-metadata
 # filter to publishable library crates (cargo-semver-checks --workspace
 # fails on bin-only workspaces), intersect the affected set ($include) with that
-# set, verify the PR branch baseline is present, materialize it as a
-# temporary worktree, classify comparable packages from Cargo metadata,
-# build locked rustdoc JSON in both trees, then invoke per-crate against
-# those artifacts.
+# set, verify the PR branch baseline is present, skip newly-added
+# manifest paths, then invoke per-crate against that baseline with
+# special handling for renamed crates ("package `<name>` not found in
+# ...") and bin->bin+lib transitions (reported as a missing lib target).
 
 # Check affected crates for semantic versioning violations.
 [script("pwsh", "-NoProfile")]
@@ -2915,130 +2914,89 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     #
     # The jobs that run this recipe check out full history (GitHub
     # pr-fast: fetch-depth: 0; ADO: the default full checkout), so the
-    # baseline commit is already present locally and no fetch is needed.
-    # If the baseline is genuinely absent (a shallow local
+    # baseline commit is already present locally and no fetch is needed:
+    # cargo-semver-checks reads only that one commit's tree (via gix, no
+    # history walk). If the baseline is genuinely absent (a shallow local
     # clone, or a mis-configured job) we fail loudly with actionable
     # guidance rather than silently misreporting an unresolvable baseline
     # as a breaking change.
-    $base = (& "{{just_executable()}}" _anvil-base-ref).Trim()
-    $baseSha = @(& git rev-parse --verify "$base^{commit}" 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $baseSha.Count -ne 1) {
+    $base = (& "{{just_executable()}}" _anvil-base-ref)
+    $base = $base.Trim()
+    & git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
         Write-Error "anvil-semver-check: baseline '$base' is not present in this clone (shallow/truncated history? fetch it or unshallow)."
         exit 1
     }
-    $baseSha = ([string]$baseSha[0]).Trim()
     $findings = New-Object System.Collections.Generic.List[string]
     $inconclusive = New-Object System.Collections.Generic.List[string]
-    function Add-Inconclusive([string]$heading, [string]$output) {
-        $inconclusive.Add('#### `' + $heading + '`') | Out-Null
-        $inconclusive.Add('') | Out-Null
-        $inconclusive.Add('```') | Out-Null
-        foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
-            $inconclusive.Add($line.TrimEnd()) | Out-Null
-        }
-        $inconclusive.Add('```') | Out-Null
-        $inconclusive.Add('') | Out-Null
-    }
-
-    $tmpRoot = $env:RUNNER_TEMP
-    if (-not $tmpRoot) { $tmpRoot = $env:AGENT_TEMPDIRECTORY }
-    if (-not $tmpRoot) { $tmpRoot = [System.IO.Path]::GetTempPath() }
-    $baselineRoot = Join-Path $tmpRoot "anvil-semver-baseline-$PID-$([guid]::NewGuid().ToString('N'))"
-    $rustdocRoot = Join-Path $meta.workspace_root 'target/anvil/semver-rustdoc'
-    $currentTarget = Join-Path $rustdocRoot 'current'
-    $baselineTarget = Join-Path $rustdocRoot 'baseline'
-    $currentLockArgs = @(if (Test-Path (Join-Path $meta.workspace_root 'Cargo.lock')) { '--locked' })
-    $env:GIT_LFS_SKIP_SMUDGE = '1'
-    & git worktree add --detach $baselineRoot $baseSha 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "anvil-semver-check: failed to create baseline worktree at $baselineRoot"
-        exit 1
-    }
-    try {
-        $baselineLockArgs = @(if (Test-Path (Join-Path $baselineRoot 'Cargo.lock')) { '--locked' })
-        $baselineMetadataJson = & cargo @stableArgs metadata --manifest-path (Join-Path $baselineRoot 'Cargo.toml') --no-deps --format-version 1 @baselineLockArgs
+    foreach ($p in $packages) {
+        # A manifest absent at its current workspace-relative path did
+        # not exist on the PR base, so this is a newly-added crate (or a
+        # moved crate with no same-path baseline). Treat it as having no
+        # comparable path baseline, so cargo-semver-checks need not run.
+        $manifestPath = [System.IO.Path]::GetRelativePath(
+            $meta.workspace_root,
+            $libPkgs[$p].manifest_path
+        ).Replace('\', '/')
+        $baselineManifest = '{0}:{1}' -f $base, $manifestPath
+        & git cat-file -e $baselineManifest 2>$null
         if ($LASTEXITCODE -ne 0) {
-            Write-Error 'anvil-semver-check: baseline cargo metadata failed'
-            exit $LASTEXITCODE
-        }
-        try {
-            $baselineMeta = $baselineMetadataJson | ConvertFrom-Json
-        } catch {
-            Write-Error "anvil-semver-check: could not parse baseline cargo metadata output: $_"
-            exit 1
-        }
-        $baselineByManifest = @{}
-        foreach ($baselinePkg in $baselineMeta.packages) {
-            $relative = [System.IO.Path]::GetRelativePath(
-                $baselineMeta.workspace_root,
-                $baselinePkg.manifest_path
-            ).Replace('\', '/')
-            $baselineByManifest[$relative] = $baselinePkg
+            Write-Host "anvil-semver-check: $p has no manifest at '$manifestPath' in baseline $base; skipping (new or moved crate)" -ForegroundColor Yellow
+            continue
         }
 
-        foreach ($p in $packages) {
-            $currentPkg = $libPkgs[$p]
-            $manifestPath = [System.IO.Path]::GetRelativePath(
-                $meta.workspace_root,
-                $currentPkg.manifest_path
-            ).Replace('\', '/')
-            $baselinePkg = $baselineByManifest[$manifestPath]
-            if (-not $baselinePkg) {
-                Write-Host "anvil-semver-check: $p has no manifest at '$manifestPath' in baseline $base; skipping (new or moved crate)" -ForegroundColor Yellow
-                continue
+        Write-Host "anvil-semver-check: $p (baseline $base)"
+        $outputLines = @(& cargo @stableArgs semver-checks --package $p --baseline-rev $base 2>&1)
+        $semverExit = $LASTEXITCODE
+        $output = ($outputLines | Out-String)
+        if ($semverExit -eq 100) {
+            # cargo-semver-checks 0.49+ reserves exit 100 for a completed
+            # check with deny-level SemVer findings. These are advisory.
+            Write-Host $output
+            $findings.Add('#### `' + $p + '`') | Out-Null
+            $findings.Add('') | Out-Null
+            $findings.Add('```') | Out-Null
+            foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
+                $findings.Add($line.TrimEnd()) | Out-Null
             }
-            $baselineLibTargets = @($baselinePkg.targets | Where-Object { $_.kind -contains 'lib' })
-            if ($baselinePkg.name -ne $p -or $baselineLibTargets.Count -eq 0) {
-                Write-Host "anvil-semver-check: $p has no comparable package/library at '$manifestPath' in baseline $base; skipping" -ForegroundColor Yellow
-                continue
-            }
-
-            Write-Host "anvil-semver-check: $p (baseline $base)"
-            $currentLibTarget = @($currentPkg.targets | Where-Object { $_.kind -contains 'lib' })[0]
-            $currentJson = Join-Path $currentTarget "doc/$($currentLibTarget.name.Replace('-', '_')).json"
-            $baselineJson = Join-Path $baselineTarget "doc/$($baselineLibTargets[0].name.Replace('-', '_')).json"
-            Remove-Item -LiteralPath $currentJson, $baselineJson -ErrorAction SilentlyContinue
-
-            $currentOutputLines = @(& cargo '+{{ rust_nightly }}' rustdoc @currentLockArgs --manifest-path $currentPkg.manifest_path --all-features --lib --target-dir $currentTarget -- -Z unstable-options --output-format json 2>&1)
-            $currentExit = $LASTEXITCODE
-            $currentOutput = ($currentOutputLines | Out-String)
-            if ($currentExit -ne 0) {
-                Write-Warning "anvil-semver-check: $p current rustdoc build failed (exit ${currentExit}):`n$currentOutput"
-                Add-Inconclusive "$p (current rustdoc exit $currentExit)" $currentOutput
-                continue
-            }
-
-            $baselineOutputLines = @(& cargo '+{{ rust_nightly }}' rustdoc @baselineLockArgs --manifest-path $baselinePkg.manifest_path --all-features --lib --target-dir $baselineTarget -- -Z unstable-options --output-format json 2>&1)
-            $baselineExit = $LASTEXITCODE
-            $baselineOutput = ($baselineOutputLines | Out-String)
-            if ($baselineExit -ne 0) {
-                Write-Warning "anvil-semver-check: $p baseline rustdoc build failed (exit ${baselineExit}):`n$baselineOutput"
-                Add-Inconclusive "$p (baseline rustdoc exit $baselineExit)" $baselineOutput
-                continue
-            }
-
-            $outputLines = @(& cargo @stableArgs semver-checks --current-rustdoc $currentJson --baseline-rustdoc $baselineJson 2>&1)
-            $semverExit = $LASTEXITCODE
-            $output = ($outputLines | Out-String)
-            if ($semverExit -eq 100) {
-                # cargo-semver-checks 0.49+ reserves exit 100 for a completed
-                # check with deny-level SemVer findings. These are advisory.
-                Write-Host $output
-                $findings.Add('#### `' + $p + '`') | Out-Null
-                $findings.Add('') | Out-Null
-                $findings.Add('```') | Out-Null
+            $findings.Add('```') | Out-Null
+            $findings.Add('') | Out-Null
+        } elseif ($semverExit -eq 101) {
+            # Exit 101 means the check could not complete. Some conditions
+            # intentionally have no usable branch baseline: a package renamed
+            # in place, a baseline bin becoming a library, or a dependency
+            # version in the baseline becoming yanked after that commit landed.
+            $packageMissing = $output.Contains(('package `{0}` not found in' -f $p))
+            $manifestParseFailed = $output.Contains('possibly due to errors:')
+            $renamedPackage = $packageMissing -and -not $manifestParseFailed
+            $baselineLibraryMissing = $output.Contains('has no lib target') -or
+                                      $output.Contains('no library targets found')
+            $baselineDependencyYanked = $output.Contains('is yanked') -and
+                                        ($output -match 'target[\\/]+semver-checks[\\/]+git-')
+            if ($renamedPackage -or $baselineLibraryMissing -or $baselineDependencyYanked) {
+                Write-Host "  $p has no usable branch baseline; skipping (renamed, bin->lib, or yanked baseline dependency)" -ForegroundColor Yellow
+            } else {
+                Write-Warning "anvil-semver-check: $p could not be checked (cargo-semver-checks exit 101):`n$output"
+                $inconclusive.Add('#### `' + $p + '` (exit 101)') | Out-Null
+                $inconclusive.Add('') | Out-Null
+                $inconclusive.Add('```') | Out-Null
                 foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
-                    $findings.Add($line.TrimEnd()) | Out-Null
+                    $inconclusive.Add($line.TrimEnd()) | Out-Null
                 }
-                $findings.Add('```') | Out-Null
-                $findings.Add('') | Out-Null
-            } elseif ($semverExit -ne 0) {
-                Write-Warning "anvil-semver-check: $p could not be checked (cargo-semver-checks exit ${semverExit}):`n$output"
-                Add-Inconclusive "$p (exit $semverExit)" $output
+                $inconclusive.Add('```') | Out-Null
+                $inconclusive.Add('') | Out-Null
             }
+        } elseif ($semverExit -ne 0) {
+            Write-Warning "anvil-semver-check: $p failed with unexpected cargo-semver-checks exit code ${semverExit}:`n$output"
+            $inconclusive.Add('#### `' + $p + '` (exit ' + $semverExit + ')') | Out-Null
+            $inconclusive.Add('') | Out-Null
+            $inconclusive.Add('```') | Out-Null
+            foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
+                $inconclusive.Add($line.TrimEnd()) | Out-Null
+            }
+            $inconclusive.Add('```') | Out-Null
+            $inconclusive.Add('') | Out-Null
         }
-    } finally {
-        & git worktree remove --force $baselineRoot 2>$null | Out-Null
     }
     [System.IO.Directory]::CreateDirectory((Split-Path -Parent $commentFile)) | Out-Null
     if ($findings.Count -gt 0 -or $inconclusive.Count -gt 0) {
@@ -3079,11 +3037,11 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-semver-check` recipe.
 [group("anvil-setup")]
-anvil-semver-check-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-semver-checks-install installer)
+anvil-semver-check-setup installer="install": (anvil-tool-cargo-semver-checks-install installer)
 
 # Validate prerequisites for the `anvil-semver-check` recipe.
 [group("anvil-setup")]
-anvil-semver-check-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-semver-checks-validate-prereqs
+anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-prereqs
 
 === justfiles/anvil/checks/spellcheck.just ===
 # Copyright (c) Microsoft Corporation.
