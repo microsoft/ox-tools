@@ -435,9 +435,12 @@ pub mod test_support {
     /// each fixture gets a private cache root.
     pub fn isolate_powershell_cache(command: &mut Command, fixture_root: &Path) {
         let cache_root = fixture_root.join("target/anvil/powershell-cache");
-        if cfg!(windows) {
+        #[cfg(windows)]
+        {
             command.env("LOCALAPPDATA", cache_root);
-        } else {
+        }
+        #[cfg(not(windows))]
+        {
             command.env("XDG_CACHE_HOME", cache_root);
         }
     }
