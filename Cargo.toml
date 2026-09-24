@@ -114,9 +114,6 @@ toml = { version = "1.1.4", default-features = false }
 toml_edit = { version = "0.25.13", default-features = false, features = ["parse", "display"] }
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
-# ra-ap-rustc_lexer requires unicode-ident and unicode-properties to use the
-# same Unicode tables. unicode-properties 0.1.4 uses Unicode 17.
-unicode-ident = { version = "=1.0.24", default-features = false }
 url = { version = "2.5.8", default-features = false }
 vu128 = { version = "1.1.0", default-features = false }
 walkdir = { version = "2.5.0", default-features = false }
