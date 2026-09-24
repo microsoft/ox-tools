@@ -11,4 +11,5 @@ Please see each crate's change log below:
 - [`cargo-ensure-no-default-features`](./crates/cargo-ensure-no-default-features/CHANGELOG.md)
 - [`cargo-gamma`](./crates/cargo-gamma/CHANGELOG.md)
 - [`cargo-heather`](./crates/cargo-heather/CHANGELOG.md)
+- [`cargo-unique-target-names`](./crates/cargo-unique-target-names/CHANGELOG.md)
 - [`cargo-unused-deps`](./crates/cargo-unused-deps/CHANGELOG.md)
