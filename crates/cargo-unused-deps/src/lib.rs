@@ -119,7 +119,7 @@
 //! ❌ Found 1 dependency problem:
 //!
 //!   my-crate [dependencies] once_cell: no compiled unit loaded it.
-//!       remove it, or gate the declaration to where it is used.
+//!       remove it from [dependencies], or preserve that scope while narrowing where it is declared.
 //! ```
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
