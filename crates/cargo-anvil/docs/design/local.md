@@ -810,3 +810,89 @@ Per the four customization tiers in [README.md §7](./README.md#7-customization)
 Customizing the *contents* of `justfiles/anvil/*.just` is supported — they're owned files,
 so editing them flips them to "dirty" and the next `update` writes a `.anvil-proposed`
 sibling instead of overwriting. See [updates.md](./updates.md) for the lifecycle.
+
+## 9. Platform-specific mutation configuration
+
+### Why this is needed
+
+Cargo-mutants 27.1.0 discovers and mutates Rust source without evaluating
+platform-conditional compilation. Its [documented limitations][mutants-cfg]
+explicitly warn that functions for other platforms can be reported as missed.
+For example, it can change a function guarded by `#[cfg(windows)]` during a Linux
+run. The source is mutated, but the compiler excludes that function, so the
+change introduces no behavioral mutation into the code under test. The tests
+continue to pass and cargo-mutants reports `MISSED`: a false indication of a
+test gap on that platform, not a mutation those tests could have detected.
+This does not establish test coverage on the platform where the function is
+actually compiled.
+
+There is no native platform-conditional exclusion table in that version's
+[configuration schema][mutants-config-source]: `exclude_globs` and `exclude_re`
+are unconditional lists. A conditional skip attribute is not a workaround:
+the [attribute documentation][mutants-attributes] states that cargo-mutants does
+not evaluate the `cfg_attr` condition. Thus
+`#[cfg_attr(windows, mutants::skip)]` suppresses mutations on other platforms too.
+
+Anvil therefore selects a complete native configuration for the current OS,
+using cargo-mutants' existing [`--config` option][mutants-config-file].
+Duplicating common policy is intentional: it avoids both a custom metadata
+schema and an Anvil-owned configuration merger while retaining native matching.
+
+### File selection
+
+`anvil-mutants-diff` and `anvil-mutants-full` select an optional native
+cargo-mutants configuration by the executing host OS:
+
+| Host | Preferred configuration |
+|------|-------------------------|
+| Linux | `.cargo/mutants.linux.toml` |
+| Windows | `.cargo/mutants.windows.toml` |
+| Other hosts | `.cargo/mutants.<os>.toml`, using Just's `os()` name |
+
+If that file exists at the workspace root, both recipes pass
+`--config=.cargo/mutants.<os>.toml`. Otherwise neither recipe adds a config
+argument: cargo-mutants reads `.cargo/mutants.toml`, or uses its defaults if
+that file is absent. Files for other hosts do not affect selection.
+The same OS configuration applies across architectures.
+A selected file that cannot be read or parsed fails in cargo-mutants; it does
+not fall back to another configuration.
+
+Each platform file is a **complete native configuration**. Cargo-mutants does
+not merge it with `.cargo/mutants.toml`: duplicate shared exclusions, regexes,
+features, test-package settings, and other policy where needed. For example,
+platform files can each retain the common exclusions and add native
+`exclude_globs` for the other platform's packages, directories, or source files.
+There is no Anvil metadata schema, glob matcher, or configuration merger.
+
+Selection uses only Just's `os()`, `path_exists()`, and conditional expressions;
+it does not launch PowerShell, Bash, Cargo metadata, or a helper executable.
+The existing recipe wrappers and prerequisites still use PowerShell, but this
+selector does not depend on their interpreter and can remain when they migrate.
+The selected OS is the native host, not a cross-compilation target.
+
+Existing impact and Windows ARM skips, diff scoping, baseline defaults, worker
+counts, and exit-code handling are unchanged. Plain `cargo mutants` and legacy
+recipes do not automatically select these platform filenames. Keep their
+existing `.cargo/mutants.toml` unchanged during side-by-side adoption, and pass
+`--config` explicitly when reproducing a platform-specific run without Anvil.
+
+### Future direction: conditional source attributes
+
+Cargo-gamma's implementation already [covers conditional `gamma::skip`
+attributes][gamma-conditional-skips], including not suppressing a site when its
+`cfg_attr` predicate is false. Once a suitable release is available and adopted
+by Anvil, conditional source attributes such as
+`#[cfg_attr(windows, gamma::skip)]` are expected to be preferable for
+source-local platform exceptions: the policy stays beside the affected code
+and need not be duplicated across OS configuration files.
+
+This is a future migration option, not a backend change in this feature.
+Existing `mutants::skip` annotations would need review because
+[cargo-gamma does not interpret them][gamma-mutants-skips].
+
+[mutants-cfg]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/book/src/limitations.md#limitations-and-known-bugs
+[mutants-config-source]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/src/config.rs
+[mutants-attributes]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/book/src/attrs.md
+[mutants-config-file]: https://github.com/sourcefrog/cargo-mutants/blob/v27.1.0/book/src/config-file.md
+[gamma-conditional-skips]: https://github.com/microsoft/ox-tools/blob/f683d6a9041fe5a32a6f09fa64d82a5000378d55/crates/cargo-gamma-lib/src/suppress/tests.rs#L177-L215
+[gamma-mutants-skips]: https://github.com/microsoft/ox-tools/blob/f683d6a9041fe5a32a6f09fa64d82a5000378d55/crates/cargo-gamma-lib/src/suppress/tests.rs#L35-L61
