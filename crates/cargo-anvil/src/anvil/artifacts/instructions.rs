@@ -35,7 +35,7 @@ mod tests {
         assert!(CARGO_ANVIL_INSTRUCTIONS.contains("just anvil-setup"));
         assert!(CARGO_ANVIL_INSTRUCTIONS.contains("just anvil-pr-fast"));
         assert!(CARGO_ANVIL_INSTRUCTIONS.contains("just anvil-<check>"));
-        assert!(CARGO_ANVIL_INSTRUCTIONS.contains("just` 1.46.0 or newer"));
+        assert!(CARGO_ANVIL_INSTRUCTIONS.contains("just` 1.47.0 or newer"));
         assert!(CARGO_ANVIL_INSTRUCTIONS.contains("In a local-only installation"));
     }
 

@@ -4,69 +4,27 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
-# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+anvil_msrv_toolchain_arg := if env("ANVIL_MSRV_TOOLCHAIN", "") == "" {
+    quote("+{workspace-rust-version}")
+} else {
+    "+" + env("ANVIL_MSRV_TOOLCHAIN")
+}
 
-# Run affected-package tests under the declared MSRV.
-[script("pwsh", "-NoProfile")]
+anvil_msrv_install_prefix := if env("ANVIL_MSRV_TOOLCHAIN", "") == "" { "" } else { "# " }
+
+# Run affected-package tests under the declared public MSRV or the explicitly
+# provisioned internal mapping.
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
-    $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
-    $resolverExit = $LASTEXITCODE
-    if ($resolverExit -ne 0) { exit $resolverExit }
-    $toolchain = $toolchainOutput.Trim()
-    if ([string]::IsNullOrWhiteSpace($toolchain)) {
-        Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'
-        exit 0
-    }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    # `--tests` = lib/bin unit tests + integration tests. NOT `--all-targets`,
-    # which adds `--benches`: `cargo test` EXECUTES bench harnesses, and a
-    # `harness = false` bench needs a driver binary this group never installs.
-    # Benches/examples stay compile-only (`anvil-bench`, `anvil-examples`).
-    # `--tests` over `--lib --bins --tests`: `--lib` fails on bin-only packages.
-    & cargo "+$toolchain" test @pkg --tests --all-features --locked
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo "+$toolchain" test @pkg --tests --locked
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_msrv_toolchain_arg }} test '{packages}' --tests --all-features --locked
+    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_msrv_toolchain_arg }} test '{packages}' --tests --locked
 
-# Install the declared MSRV toolchain only when this check is required.
+# Install the declared public MSRV. An internal mapping names a toolchain the
+# environment must provision, so setup deliberately does not mutate it.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
-anvil-msrv-test-setup installer="install":
-    & "{{ just_executable() }}" _anvil-resolve-stable install-msrv
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
+    {{ anvil_msrv_install_prefix }}cargo each --workspace --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
 
-# Validate the MSRV prerequisite.
+# Validate the effective MSRV toolchain without rustup auto-install behavior.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
-anvil-msrv-test-validate-prereqs:
-    $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
-    $resolverExit = $LASTEXITCODE
-    if ($resolverExit -ne 0) { exit $resolverExit }
-    $toolchain = $toolchainOutput.Trim()
-    if ([string]::IsNullOrWhiteSpace($toolchain)) { exit 0 }
-    $previousAutoInstall = $env:RUSTUP_AUTO_INSTALL
-    try {
-        $env:RUSTUP_AUTO_INSTALL = '0'
-        & cargo "+$toolchain" --version
-        $cargoExit = $LASTEXITCODE
-    } finally {
-        if ($null -eq $previousAutoInstall) {
-            Remove-Item Env:RUSTUP_AUTO_INSTALL -ErrorAction SilentlyContinue
-        } else {
-            $env:RUSTUP_AUTO_INSTALL = $previousAutoInstall
-        }
-    }
-    if ($cargoExit -ne 0) {
-        $hint = if ($env:ANVIL_MSRV_TOOLCHAIN) {
-            'provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV'
-        } else {
-            'run: just anvil-msrv-test-setup'
-        }
-        [Console]::Error.WriteLine("anvil: MSRV toolchain '$toolchain' is unavailable; $hint")
-        exit $cargoExit
-    }
+anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
+    cargo each --workspace --once -- rustup run {{ replace(anvil_msrv_toolchain_arg, "+", "") }} rustc --version

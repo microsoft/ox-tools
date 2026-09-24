@@ -8,7 +8,7 @@ This is the top-level design document. It captures the why, the principles, and 
 user-visible shape of the tool. Detail lives in companion documents:
 
 - [checks.md](./checks.md) — the opinionated check catalog, the group/tier structure
-- [local.md](./local.md) — the `justfiles/anvil/` layout, recipe surface, and customization.
+- [local.md](./local.md) — the composed `.anvil/anvil.just` recipe surface and customization.
 - [updates.md](./updates.md) — ownership, TOML adoption, marker recovery, and retirement.
 - [extensibility.md](./extensibility.md) — how downstream tools ship their own brand + catalog.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
@@ -124,7 +124,7 @@ Corollaries that drive every section below:
   `Cargo.toml`, and `[lints]` in each member crate's `Cargo.toml`, plus `.delta.toml` and
   `rustfmt.toml`). Outside those sections,
   the user's content is preserved verbatim. Everything else is in tool-owned files under
-  `justfiles/anvil/` and the backend-specific cloud workflows directories.
+  `.anvil/` and the backend-specific discovery locations.
 
 ## 5. User Experience
 
@@ -163,7 +163,7 @@ catalog: sha256:5e9d…
 ```
 
 The checksum tells apart two builds that report the same version but carry different catalogs (a
-development-time situation); the same value is recorded as `catalog_checksum` in `.anvil.lock`
+development-time situation); the same value is recorded as `catalog_checksum` in `.anvil/manifest.toml`
 (see [updates.md §1](./updates.md#1-the-manifest)). The `--version` help text notes that the
 second line is the catalog checksum.
 
@@ -179,7 +179,7 @@ hand and reruns without that backend.
 **Single-tool guard.** A repository is managed by exactly one anvil-family tool (the base
 `cargo-anvil` or a downstream tool built on the same engine — see
 [extensibility.md](./extensibility.md)). Each run checks the `tool` field recorded in
-`.anvil.lock`; if it names a *different* tool, the run refuses immediately and writes nothing
+`.anvil/manifest.toml`; if it names a *different* tool, the run refuses immediately and writes nothing
 (including under `--dry-run`). `--force` overrides the guard for that run and switches ownership:
 the tool proceeds and rewrites the lock's `tool` (and `tool_version` / `catalog_checksum`) to
 itself. Without `--force`, switching tools is otherwise a manual step. See
@@ -223,8 +223,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --check
 ```
 
-The same commands appear as the body of the corresponding `just` recipes under
-`justfiles/anvil/checks/`, so they are discoverable by reading that check's file. The fallback
+The same commands appear in the corresponding recipe sections of
+`.anvil/anvil.just`, so they remain discoverable without cargo-anvil. The fallback
 covers core hygiene only — coverage, miri, mutants, etc. still require their respective tools.
 
 ## 6. Repo Layout
@@ -233,7 +233,7 @@ The tool produces a small set of files. They fall into three categories:
 
 - **owned** — the tool fully writes the file. There is no in-file checksum line; anvil
   tracks ownership and last-rendered content in a sidecar manifest at the repo root
-  (`.anvil.lock`). An advisory one-line `# Managed by cargo-anvil` comment may appear
+  (`.anvil/manifest.toml`). An advisory one-line `# Managed by cargo-anvil` comment may appear
   at the top of each owned file, but it carries no metadata. Updates apply
   automatically when the user hasn't touched the file. If the user edits the file, the
   next `update` writes a `.anvil-proposed` sibling **only if the template has changed
@@ -255,10 +255,13 @@ semantics and proposals. See [updates.md](./updates.md#strict-ownership).
 
 ```text
 repo/
-├── .anvil.lock                                    sidecar manifest tracking last-rendered checksums (see updates.md)
+├── .anvil/
+│   ├── manifest.toml                              sidecar manifest tracking last-rendered checksums
+│   ├── anvil.just                                 composed owned recipe file (see local.md)
+│   ├── container/                                 container image definition (see containers.md)
+│   ├── github/actions/                            GitHub local actions
+│   └── ado/                                       ADO implementation templates
 ├── Justfile                                       managed-region: anvil-imports
-├── justfiles/anvil/                               owned (see local.md)
-├── .anvil/container/                              owned — the container image definition (see containers.md)
 ├── Cargo.toml                                     managed-regions: anvil-{workspace-,}{rust,rustdoc,clippy}-lints
 ├── crates/<member>/Cargo.toml                     managed-region: anvil-lints (one per workspace member)
 ├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
@@ -273,32 +276,24 @@ repo/
 │   ├── instructions/cargo-anvil.instructions.md    owned, emitted for every backend
 │   ├── skills/cargo-anvil-adoption/SKILL.md        owned, emitted for every backend
 │   │
-│   ├── actions/ and workflows/                    only if --backend github (or autodetected) — see github.md
-│   ├── actions/anvil-setup/                         owned   (setup action and Just problem matcher)
-│   ├── actions/anvil-run-group/                     owned   (shared group action and capture script)
-│   ├── actions/anvil-report-status/                 owned   (supplemental commit-status reporter)
-│   ├── actions/anvil-impact/                        owned   (impact analysis action)
+│   ├── workflows/                                 only if --backend github (or autodetected) — see github.md
 │   ├── workflows/anvil-pr-impl.yml                  owned   (reusable workflow doing the wiring)
 │   ├── workflows/anvil-scheduled-impl.yml             owned
 │   ├── workflows/anvil-pr.yml                       owned   (root workflow: triggers/permissions/runner)
 │   ├── workflows/anvil-scheduled.yml                  owned
 │   └── skills/code-review/SKILL.md                  owned   (GitHub PR review guidance)
 │
-└── .pipelines/                                    only if --backend ado (or autodetected) — see ado.md
-    ├── anvil/pr.yml                                 owned   (stages template doing the wiring)
-    ├── anvil/scheduled.yml                            owned
-    ├── anvil/steps/*.yml                            owned   (per-group step templates)
+└── .pipelines/                                    ADO registration stubs only
     ├── anvil-pr.yml                                 owned   (root pipeline: triggers/pool/optional extends:)
     └── anvil-scheduled.yml                            owned
 ```
 
 Detail on each host:
 
-- **`Justfile` and `justfiles/anvil/*.just`** — see [local.md](./local.md).
+- **`Justfile` and `.anvil/anvil.just`** — see [local.md](./local.md).
 - **`.anvil/container/`** — the container image definition: a `Dockerfile` and
   its build-context ignore file, plus an optional `hooks.ps1` supplying
-  credentials. `justfiles/` holds `.just` recipes and nothing else, so these
-  live in a tool-owned directory of their own; see
+  credentials. These live in the consolidated tool-owned directory; see
   [containers.md](./containers.md).
 - **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries separate
   `anvil-workspace-rust-lints`, `anvil-workspace-rustdoc-lints`, and
@@ -351,7 +346,7 @@ Detail on each host:
   Anvil runs. The caller's `RUSTUP_TOOLCHAIN` is an input override only and is inherited by
   child commands rather than rewritten or exported by Anvil.
 
-The tool's persistent state lives in `.anvil.lock` at the repo root — the sidecar
+The tool's persistent state lives in `.anvil/manifest.toml` — the sidecar
 manifest tracking last-rendered checksums per owned file and per managed region. See
 [updates.md §1](./updates.md#1-the-manifest). All other state — including owned-file stubs —
 lives in the affected file itself; see [updates.md](./updates.md).

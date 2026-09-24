@@ -28,7 +28,7 @@ runs:
     # We follow it with just the cargo-delta install (the only tool
     # this composite needs). This keeps the impact stage lean -- it's
     # the critical-path gating dep for every PR-tier group job.
-    - uses: ./.github/actions/anvil-setup
+    - uses: ./.anvil/github/actions/setup
       with:
         group: none
     - name: Install cargo-delta

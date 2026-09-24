@@ -13,11 +13,8 @@
 # setup region copies the context whole, this file decides what the image
 # contains.
 #
-# The context is narrowed to `justfiles/anvil/` rather than all of `justfiles/`
-# so that a cold build does not stream unrelated trees to the daemon. The
-# recipes are copied to drive `just anvil-setup`, which needs the whole tree to
-# parse, and the whole tree is hashed into the image tag: the tier, group and
-# check recipes decide which tools `anvil-setup` reaches, not just the catalog.
+# The composed `.anvil/anvil.just` is copied to drive `just anvil-setup` and is
+# hashed into the image tag.
 #
 # `.anvil/container/` is admitted because the Dockerfile is composed: the gaps
 # between anvil's regions exist for a repository to add its own instructions,
@@ -28,23 +25,15 @@
 # the same set -- including the `.anvil-proposed` siblings both exclude, which
 # are anvil's review artifacts rather than build inputs.
 #
-# The root `Cargo.toml` is admitted for the declared MSRV, the only build input
-# that lives in repository source rather than in the recipe tree. The workspace
-# members it names stay out: they are a checkout, and the image is not one.
-#
 # Both spellings are admitted and neither is required: a repository that pins
 # by other means gets an image whose compiler is the declared MSRV, and
 # admitting only the TOML would give one that pins with the extensionless file
 # an image that disagreed with its own checkout.
 *
-!justfiles
-justfiles/*
-!justfiles/anvil
-justfiles/anvil/**/*.anvil-proposed
 !.anvil
 .anvil/*
+!.anvil/anvil.just
 !.anvil/container
 .anvil/container/**/*.anvil-proposed
 !rust-toolchain.toml
 !rust-toolchain
-!Cargo.toml

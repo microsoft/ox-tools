@@ -13,10 +13,10 @@ need to change:
    users who need to customize edit in place and accept the proposal-on-update flow.
    anvil's emitted root pipelines contain **no** references to compliance harnesses —
    wrapping with 1ESPT is purely a user-side edit.
-2. **Stages templates** (`anvil/pr.yml`, `anvil/scheduled.yml`), containing the impact job
+2. **Stages templates** (`.anvil/ado/pr.yml`, `.anvil/ado/scheduled.yml`), containing the impact job
    and the per-group jobs with all the dependency / output-variable plumbing. These
    change when anvil's groups or impact wiring evolve; most users won't ever edit them.
-3. **Per-group step templates** (`anvil/steps/*.yml`). Each is a multi-step template that
+3. **Per-group step templates** (`.anvil/ado/steps/*.yml`). Each is a multi-step template that
    runs setup + the matching `just anvil-<tier>-<group>` recipe.
 
 See also:
@@ -46,25 +46,25 @@ The PR pipeline:
 flowchart LR
     pr_evt([PR build-validation<br/>branch policy]):::trigger
     pr_root[".pipelines/<br/>anvil-pr.yml<br/>(root, ~15 lines)"]:::root
-    pr_stages[".pipelines/anvil/pr.yml<br/>(stages template)"]:::impl
+    pr_stages[".anvil/ado/pr.yml<br/>(stages template)"]:::impl
     impact_s["stage: impact_linux + stage: impact_windows<br/>(2 stages;<br/>outputs consumed by every group below)"]:::stage
     pr_fast_s["stage: pr_fast<br/>linux + windows jobs"]:::stage
     pr_test_s["stage: pr_test<br/>linux + windows jobs"]:::stage
     pr_msrv_s["stage: pr_msrv<br/>linux + windows jobs"]:::stage
     pr_runtime_analysis_s["stage: pr_runtime_analysis<br/>linux + windows jobs"]:::stage
     pr_mutants_s["stage: pr_mutants<br/>linux + windows jobs"]:::stage
-    impact_step[".pipelines/anvil/<br/>steps/impact.yml"]:::step
-    impact_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
-    fast_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
-    test_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
-    msrv_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
-    runtime_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
-    mutants_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
-    fast_step[".pipelines/anvil/<br/>steps/pr-fast.yml"]:::step
-    test_step[".pipelines/anvil/<br/>steps/pr-test.yml"]:::step
-    msrv_step[".pipelines/anvil/<br/>steps/pr-msrv.yml"]:::step
-    runtime_step[".pipelines/anvil/<br/>steps/pr-runtime-analysis.yml"]:::step
-    mutants_step[".pipelines/anvil/<br/>steps/pr-mutants.yml"]:::step
+    impact_step[".anvil/ado/<br/>steps/impact.yml"]:::step
+    impact_setup[".anvil/ado/<br/>steps/setup.yml"]:::step
+    fast_setup[".anvil/ado/<br/>steps/setup.yml"]:::step
+    test_setup[".anvil/ado/<br/>steps/setup.yml"]:::step
+    msrv_setup[".anvil/ado/<br/>steps/setup.yml"]:::step
+    runtime_setup[".anvil/ado/<br/>steps/setup.yml"]:::step
+    mutants_setup[".anvil/ado/<br/>steps/setup.yml"]:::step
+    fast_step[".anvil/ado/<br/>steps/pr-fast.yml"]:::step
+    test_step[".anvil/ado/<br/>steps/pr-test.yml"]:::step
+    msrv_step[".anvil/ado/<br/>steps/pr-msrv.yml"]:::step
+    runtime_step[".anvil/ado/<br/>steps/pr-runtime-analysis.yml"]:::step
+    mutants_step[".anvil/ado/<br/>steps/pr-mutants.yml"]:::step
     publish_coverage["PublishCodeCoverageResults@2"]:::external
     fast_just["just anvil-pr-fast"]:::recipe
     fast_setup_just["just anvil-setup"]:::recipe
@@ -137,19 +137,19 @@ The scheduled pipeline (same colour key):
 flowchart LR
     sched_evt([schedule]):::trigger
     sched_root[".pipelines/<br/>anvil-scheduled.yml<br/>(root)"]:::root
-    sched_stages[".pipelines/anvil/scheduled.yml<br/>(stages template)"]:::impl
+    sched_stages[".anvil/ado/scheduled.yml<br/>(stages template)"]:::impl
     stest_s["stage: scheduled_test<br/>linux + windows jobs"]:::stage
     sadv_s["stage: scheduled_advisories<br/>linux + windows jobs"]:::stage
     sexh_s["stage: scheduled_exhaustive<br/>linux + windows jobs"]:::stage
     srun_s["stage: scheduled_runtime_analysis<br/>linux + windows jobs"]:::stage
-    stest_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
-    sadv_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
-    srun_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
-    sexh_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
-    stest_step[".pipelines/anvil/<br/>steps/scheduled-test.yml"]:::step
-    sadv_step[".pipelines/anvil/<br/>steps/scheduled-advisories.yml"]:::step
-    srun_step[".pipelines/anvil/<br/>steps/scheduled-runtime-analysis.yml"]:::step
-    sexh_step[".pipelines/anvil/<br/>steps/scheduled-exhaustive.yml"]:::step
+    stest_setup[".anvil/ado/<br/>steps/setup.yml"]:::step
+    sadv_setup[".anvil/ado/<br/>steps/setup.yml"]:::step
+    srun_setup[".anvil/ado/<br/>steps/setup.yml"]:::step
+    sexh_setup[".anvil/ado/<br/>steps/setup.yml"]:::step
+    stest_step[".anvil/ado/<br/>steps/scheduled-test.yml"]:::step
+    sadv_step[".anvil/ado/<br/>steps/scheduled-advisories.yml"]:::step
+    srun_step[".anvil/ado/<br/>steps/scheduled-runtime-analysis.yml"]:::step
+    sexh_step[".anvil/ado/<br/>steps/scheduled-exhaustive.yml"]:::step
     publish_coverage["PublishCodeCoverageResults@2"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
     stest_setup_just["just anvil-setup"]:::recipe
@@ -202,9 +202,10 @@ Note the ADO topology differs from GitHub Actions in two places:
 
 ```text
 .pipelines/
-├── anvil-pr.yml                    owned   (root PR pipeline)
-├── anvil-scheduled.yml               owned   (root scheduled pipeline)
-└── anvil/
+├── anvil-pr.yml                    owned   (root PR pipeline registration)
+└── anvil-scheduled.yml             owned   (root scheduled pipeline registration)
+
+.anvil/ado/
     ├── pr.yml                      owned   (PR-tier stages template)
     ├── scheduled.yml               owned   (scheduled-tier stages template)
     ├── custom-pr-stages.yml        owned-but-user-customizable
@@ -233,7 +234,7 @@ Note the ADO topology differs from GitHub Actions in two places:
         └── scheduled-exhaustive.yml  owned
 ```
 
-All files are regular owned files tracked by the sidecar `.anvil.lock` manifest
+All files are regular owned files tracked by `.anvil/manifest.toml`
 (no in-file checksum line; see [updates.md §1](./updates.md#1-the-manifest)).
 `steps/job.yml` deserves special mention: it is emitted as owned (so first-time
 adoption gets a working file with no extra steps), but is *expected* to be
@@ -264,11 +265,11 @@ adopter adds their own `pr:` block).
 trigger: none
 
 stages:
-- template: anvil/pr.yml
+- template: ../.anvil/ado/pr.yml
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
-- template: anvil/custom-pr-stages.yml
+- template: ../.anvil/ado/custom/pr-stages.yml
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
@@ -289,11 +290,11 @@ schedules:
   always: true
 
 stages:
-- template: anvil/scheduled.yml
+- template: ../.anvil/ado/scheduled.yml
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
-- template: anvil/custom-scheduled-stages.yml
+- template: ../.anvil/ado/custom/scheduled-stages.yml
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
@@ -311,8 +312,8 @@ trigger — without forking the anvil-owned root pipeline or stages template. Ea
 pipeline therefore references a per-tier **`custom-*-stages.yml`** after the anvil
 stages:
 
-- `.pipelines/anvil/custom-pr-stages.yml` — runs in the PR pipeline.
-- `.pipelines/anvil/custom-scheduled-stages.yml` — runs on the schedule.
+- `.anvil/ado/custom/pr-stages.yml` — runs in the PR pipeline.
+- `.anvil/ado/custom/scheduled-stages.yml` — runs on the schedule.
 
 anvil emits each as an empty `stages: []` stub that declares the `linuxPool` /
 `windowsPool` parameters the root passes (so custom stages can reuse the same pools).
@@ -345,7 +346,7 @@ extends:
   parameters:
     pool: { name: <your-default-1ESPT-pool> }
     stages:
-    - template: /.pipelines/anvil/pr.yml@self
+    - template: /.anvil/ado/pr.yml@self
       parameters:
         linuxPool:   { name: <your-1ESPT-linux-pool> }
         windowsPool: { name: <your-1ESPT-windows-pool> }
@@ -388,7 +389,7 @@ MSRV setup ensures the declared root MSRV is available through rustup.
 ### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
 
 Every job in `pr.yml` and `scheduled.yml` is rendered through a wrapper template at
-`.pipelines/anvil/steps/job.yml` rather than declared inline. The wrapper exists
+`.anvil/ado/steps/job.yml` rather than declared inline. The wrapper exists
 to give adopters whose ADO instance requires extension templates (1ES PT,
 SubstratePT, M365PT, custom corporate templates) a single, narrow place to inject
 the per-job boilerplate those templates require — `templateContext:` blocks,
@@ -496,8 +497,8 @@ internal adopters will customize.
 ### 4.2 Repository check hooks
 
 Repository-specific prerequisites and finalization belong in
-`.pipelines/anvil/hooks/before-checks.yml` and
-`.pipelines/anvil/hooks/after-checks.yml`, rather than in the generated job
+`.anvil/ado/hooks/before-checks.yml` and
+`.anvil/ado/hooks/after-checks.yml`, rather than in the generated job
 wrapper. Both are ADO-only step templates, emitted with `steps: []`. Repository
 edits survive regeneration; a later change to the catalog default produces an
 `.anvil-proposed` sibling instead of overwriting customized steps.
@@ -512,7 +513,7 @@ post-job processing intact.
 For example, a repository can include its own prerequisite template:
 
 ```yaml
-# .pipelines/anvil/hooks/before-checks.yml
+# .anvil/ado/hooks/before-checks.yml
 steps:
   - template: /ci/native-prerequisites.yml
 ```
@@ -557,7 +558,7 @@ relative to `steps/job.yml`.
 Approximate shape (anvil writes this verbatim; users normally don't edit it):
 
 ```yaml
-# .pipelines/anvil/pr.yml   (owned by cargo-anvil)
+# .anvil/ado/pr.yml   (owned by cargo-anvil)
 parameters:
   - name: linuxPool
     type: object
@@ -709,7 +710,7 @@ dependency — the same code path as a local run. Moving a check between groups 
 catalog change.
 
 ```yaml
-# .pipelines/anvil/steps/pr-fast.yml  (owned by cargo-anvil)
+# .anvil/ado/steps/pr-fast.yml  (owned by cargo-anvil)
 steps:
 - template: setup.yml
 # ADO has no PR-title predefined variable (System.PullRequest.Title does
@@ -774,7 +775,7 @@ takes a single `group` parameter that controls which recipes run:
 - any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
   `just anvil-<group>-setup` -- only the tools, components, and toolchains
   that group actually needs. Every per-group step template
-  (`.pipelines/anvil/steps/<group>.yml`) passes its own group name here, so a
+  (`.anvil/ado/steps/<group>.yml`) passes its own group name here, so a
   `pr-fast` matrix leg never installs cargo-mutants.
 
 The template expects the caller to provide the Rust/rustup bootstrap and
@@ -886,7 +887,7 @@ For repos with an existing 1ESPT-extending pipeline, adopting anvil is increment
    conflict with the repo's existing ones, or edit the existing pipelines to call out to
    `anvil/pr.yml` / `anvil/scheduled.yml`.
 3. In the repo's existing pipeline, add a stage that does
-   `template: /.pipelines/anvil/pr.yml@self` under `parameters.stages` of the 1ESPT
+   `template: /.anvil/ado/pr.yml@self` under `parameters.stages` of the 1ESPT
    `extends:` block.
 4. Verify the stage runs green on a PR.
 5. Optionally split into individual group stages by hand if the compliance template

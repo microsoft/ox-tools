@@ -1,8 +1,6 @@
 # Generated-file and recipe consolidation
 
-> **Status:** Proposed. This document defines the target contract for the
-> consolidation work. The other design documents continue to describe the
-> implemented layout until this proposal lands.
+> **Status:** Implemented.
 
 This design reduces the visible Anvil footprint, moves command policy out of
 shell programs, and preserves catalog extensibility when the generated recipe
@@ -33,9 +31,6 @@ repo/
 ├── .anvil/
 │   ├── manifest.toml
 │   ├── anvil.just
-│   ├── config/
-│   │   ├── delta.toml
-│   │   └── spellcheck.toml
 │   ├── container/
 │   │   ├── Dockerfile
 │   │   ├── Dockerfile.dockerignore
@@ -83,11 +78,6 @@ user-composed and keeps the existing managed-region ownership contract.
   repository.
 - ADO implementation, customization, and step templates move from
   `.pipelines/anvil/` to `.anvil/ado/`.
-- `.delta.toml` becomes `.anvil/config/delta.toml`; every invocation supplies
-  the path explicitly.
-- `spellcheck.toml` becomes `.anvil/config/spellcheck.toml`; every invocation
-  supplies `--cfg`, and dictionary paths are adjusted relative to the new
-  location.
 
 ### 2.2 Files that stay outside `.anvil/`
 
@@ -103,6 +93,13 @@ user-composed and keeps the existing managed-region ownership contract.
   Anvil-specific wrapper.
 - `deny.toml` could move by passing `cargo deny --config`, but stays at the root
   so direct invocations continue to discover security policy.
+- `.delta.toml` stays at the root as a managed-region host because repositories
+  commonly own parser and exclusion policy around Anvil's trip-wire region.
+  cargo-delta accepts only one config and has no include/layering mechanism, so
+  moving only the managed region would silently discard repository policy.
+- `spellcheck.toml` remains a managed-region host for the same ownership
+  reason. cargo-spellcheck accepts one config, and repositories may own
+  settings around Anvil's Hunspell regions.
 - `.gitattributes` stays where Git discovers it.
 - `<path>.anvil-proposed` remains beside the conflicted host or owned file.
 - The two ADO root files remain as stable registration and trigger stubs.
@@ -133,12 +130,11 @@ target iteration belongs to `cargo-each`; Git and impact analysis belongs to
 `cargo-delta`; coverage collection belongs to `cargo-coverage-gate`; and a
 domain tool owns authentication or output peculiar to its own service.
 
-The local `anvil-impact` invocation always passes cargo-delta
-`--dirty workspace`. This preserves the current safety contract: tracked or
-non-ignored untracked work widens all three package files to the complete
-workspace instead of failing or silently under-scoping. `ANVIL_IMPACT=consume`
-reads an already-produced artifact and does not invoke cargo-delta;
-`ANVIL_IMPACT=off` bypasses it and gives checks `--workspace` directly.
+The local `anvil-impact` invocation relies on cargo-delta's managed mode, which
+includes committed, staged, unstaged, deleted, and non-ignored untracked files.
+`ANVIL_IMPACT=consume` reads already-produced package files and does not invoke
+cargo-delta; `ANVIL_IMPACT=off` bypasses it and gives checks `--workspace`
+directly.
 
 No umbrella `cargo-anvil-runner` is introduced. Such a binary would duplicate
 the responsibilities of the domain tools, create another bootstrap dependency,
@@ -265,7 +261,8 @@ coverage, manage containers, or call cloud APIs.
 - Own its snapshot cache and write outputs atomically.
 - Emit canonical package identity and modified, affected, and required package
   files directly consumable by cargo-each.
-- Detect a dirty working tree and apply the caller-selected conservative policy.
+- Include committed, staged, unstaged, deleted, and non-ignored untracked
+  changes in the managed impact calculation.
 
 It does not execute checks.
 
@@ -296,7 +293,7 @@ The catalog gains a third artifact kind:
 ```rust
 pub struct OwnedFileSectionSpec {
     pub path: &'static str,
-    pub id: &'static str,
+    pub id: String,
     pub body: String,
     pub gate: Option<Backend>,
 }
@@ -317,8 +314,15 @@ one physical file.
 The existing catalog verbs remain uniform:
 
 ```rust
-.replace_artifact(artifacts::justfile::clippy().with_body(our_clippy))
-.without_artifact(artifacts::justfile::bolero())
+.replace_artifact(
+    artifacts::justfile::recipe("anvil-clippy")
+        .expect("built-in recipe")
+        .with_body(our_clippy),
+)
+.without_artifact(
+    artifacts::justfile::recipe("anvil-bolero")
+        .expect("built-in recipe"),
+)
 .with_artifact(Artifact::owned_file_section(
     ".anvil/anvil.just",
     "command:myorg-check",
@@ -333,22 +337,14 @@ The builder rejects:
 - a section path claimed as a managed-region host;
 - inconsistent backend gates among sections composing one file.
 
-No Just parser is required. The catalog already knows each section boundary
-before composition, and disk drift remains a whole-file decision.
+No Just parser is required at update time. The built-in registry splits its
+static source templates into top-level recipe sections before constructing the
+catalog, and disk drift remains a whole-file decision.
 
-For `.just` output, each section declares exactly one logical top-level item and
-uses a kind-qualified id from the namespace that Just enforces:
-`command:<name>` for recipes and aliases, `assignment:<name>` for variables,
-and `setting:<name>` for settings such as `set lazy`. Public recipes, private
-helpers, assignments, aliases, and settings are separate sections rather than
-hidden additional declarations inside another section. A duplicate Just symbol
-is therefore a duplicate `(path, id)` and fails during catalog construction
-instead of making the complete generated file unparsable later.
-
-A body whose declaration does not match its id, or which declares additional
-top-level items, is an invalid catalog, analogous to an owned file whose body is
-not valid for its extension. Built-in catalog tests render and parse the
-complete Justfile to enforce the convention.
+For `.just` output, every built-in recipe uses a `recipe:<name>` id. Template
+preambles containing settings and related assignments use stable
+`source:<template>` ids, and the default alias has its own id. Built-in tests
+assert recipe-id uniqueness and render and parse the complete Justfile.
 
 Backend gates apply to the composed physical file, not independently to
 arbitrary fragments. Every section for one path must carry the same gate,
@@ -379,8 +375,8 @@ The first run that carries this design:
 3. composes `.anvil/anvil.just`;
 4. retires untouched files under `justfiles/anvil/` and keeps edited files as
    ownership-transferred orphans;
-5. moves untouched backend/config files and preserves edited old files using
-   the normal owned-file rules;
+5. moves untouched backend files and preserves edited old files using the
+   normal owned-file rules;
 6. leaves stable ADO stubs and unavoidable GitHub/discovery files in place.
 
 Upgrade tests seed the previous manifest and cover untouched, edited, missing,

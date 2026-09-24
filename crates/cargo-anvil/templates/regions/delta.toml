@@ -3,6 +3,7 @@ trip_wire_patterns = [
     ".ado/**",
     ".cargo/**",
     ".delta.toml",
+    ".anvil/**",
     ".editorconfig",
     ".github/**",
     ".pipelines/**",
@@ -14,10 +15,8 @@ trip_wire_patterns = [
     "codecov.yml",
     "deny.toml",
     "justfile",
-    "justfiles/**",
     "rust-toolchain.toml",
     "rustfmt.toml",
     "scripts/**",
-    "spellcheck.toml",
     "unstable-rustfmt.toml",
 ]

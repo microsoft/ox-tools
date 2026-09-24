@@ -114,31 +114,31 @@ fn render_group_step(group: &str) -> String {
 #[cfg(test)]
 #[must_use]
 fn group_step_path(group: &str) -> String {
-    format!(".pipelines/anvil/steps/{group}.yml")
+    format!(".anvil/ado/steps/{group}.yml")
 }
 
 /// `.pipelines/anvil/steps/setup.yml`.
 #[must_use]
 pub fn setup_step() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/steps/setup.yml", SETUP_STEP)
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/steps/setup.yml", SETUP_STEP)
 }
 
 /// `.pipelines/anvil/steps/impact.yml`.
 #[must_use]
 pub fn impact_step() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/steps/impact.yml", IMPACT_STEP)
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/steps/impact.yml", IMPACT_STEP)
 }
 
 /// `.pipelines/anvil/steps/advisory-comments.yml`.
 #[must_use]
 pub fn advisory_comments() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/steps/advisory-comments.yml", ADVISORY_COMMENTS_STEP)
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/steps/advisory-comments.yml", ADVISORY_COMMENTS_STEP)
 }
 
 /// `.pipelines/anvil/steps/job.yml` — the dirty-file job wrapper.
 #[must_use]
 pub fn job_wrapper() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/steps/job.yml", JOB_WRAPPER)
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/steps/job.yml", JOB_WRAPPER)
 }
 
 /// Repository check prerequisites, emitted at `.pipelines/anvil/hooks/before-checks.yml`.
@@ -160,7 +160,7 @@ pub fn job_wrapper() -> Artifact {
 /// ```
 #[must_use]
 pub fn before_checks() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/hooks/before-checks.yml", BEFORE_CHECKS)
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/hooks/before-checks.yml", BEFORE_CHECKS)
 }
 
 /// Repository check finalization, emitted at `.pipelines/anvil/hooks/after-checks.yml`.
@@ -178,19 +178,19 @@ pub fn before_checks() -> Artifact {
 /// ```
 #[must_use]
 pub fn after_checks() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/hooks/after-checks.yml", AFTER_CHECKS)
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/hooks/after-checks.yml", AFTER_CHECKS)
 }
 
 /// `.pipelines/anvil/pr.yml` — the PR-tier stages template.
 #[must_use]
 pub fn pr_stages() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/pr.yml", PR_STAGES)
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/pr.yml", PR_STAGES)
 }
 
 /// `.pipelines/anvil/scheduled.yml` — the scheduled-tier stages template.
 #[must_use]
 pub fn scheduled_stages() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/scheduled.yml", SCHEDULED_STAGES)
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/scheduled.yml", SCHEDULED_STAGES)
 }
 
 /// `.pipelines/anvil/custom-pr-stages.yml` — the repo-owned extension point
@@ -203,18 +203,14 @@ pub fn scheduled_stages() -> Artifact {
 /// overwrite), exactly like `steps/job.yml`.
 #[must_use]
 pub fn custom_pr_stages() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/custom-pr-stages.yml", CUSTOM_PR_STAGES)
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/custom/pr-stages.yml", CUSTOM_PR_STAGES)
 }
 
 /// `.pipelines/anvil/custom-scheduled-stages.yml` — the repo-owned extension
 /// point for scheduled-tier stages. See [`custom_pr_stages`].
 #[must_use]
 pub fn custom_scheduled_stages() -> Artifact {
-    Artifact::backend_file(
-        Backend::Ado,
-        ".pipelines/anvil/custom-scheduled-stages.yml",
-        CUSTOM_SCHEDULED_STAGES,
-    )
+    Artifact::backend_file(Backend::Ado, ".anvil/ado/custom/scheduled-stages.yml", CUSTOM_SCHEDULED_STAGES)
 }
 
 /// `.pipelines/anvil-pr.yml` — the PR root pipeline.
@@ -234,18 +230,15 @@ pub fn scheduled_root_pipeline() -> Artifact {
 /// Each `(group, path)` pair's `path` must equal [`group_step_path`] for its
 /// group (asserted in tests); the body is [`render_group_step`].
 pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
-    ("pr-fast", ".pipelines/anvil/steps/pr-fast.yml"),
-    ("pr-test", ".pipelines/anvil/steps/pr-test.yml"),
-    ("pr-msrv", ".pipelines/anvil/steps/pr-msrv.yml"),
-    ("pr-runtime-analysis", ".pipelines/anvil/steps/pr-runtime-analysis.yml"),
-    ("pr-mutants", ".pipelines/anvil/steps/pr-mutants.yml"),
-    ("scheduled-test", ".pipelines/anvil/steps/scheduled-test.yml"),
-    ("scheduled-advisories", ".pipelines/anvil/steps/scheduled-advisories.yml"),
-    (
-        "scheduled-runtime-analysis",
-        ".pipelines/anvil/steps/scheduled-runtime-analysis.yml",
-    ),
-    ("scheduled-exhaustive", ".pipelines/anvil/steps/scheduled-exhaustive.yml"),
+    ("pr-fast", ".anvil/ado/steps/pr-fast.yml"),
+    ("pr-test", ".anvil/ado/steps/pr-test.yml"),
+    ("pr-msrv", ".anvil/ado/steps/pr-msrv.yml"),
+    ("pr-runtime-analysis", ".anvil/ado/steps/pr-runtime-analysis.yml"),
+    ("pr-mutants", ".anvil/ado/steps/pr-mutants.yml"),
+    ("scheduled-test", ".anvil/ado/steps/scheduled-test.yml"),
+    ("scheduled-advisories", ".anvil/ado/steps/scheduled-advisories.yml"),
+    ("scheduled-runtime-analysis", ".anvil/ado/steps/scheduled-runtime-analysis.yml"),
+    ("scheduled-exhaustive", ".anvil/ado/steps/scheduled-exhaustive.yml"),
 ];
 
 /// All ADO backend artifacts in emission order.
@@ -327,7 +320,7 @@ mod tests {
         assert!(!SETUP_STEP.contains("Cargo.toml | Cargo.lock"));
         assert!(SETUP_STEP.contains("'rust-toolchain.toml'"));
         assert!(!SETUP_STEP.contains("restoreKeys:"));
-        assert!(SETUP_STEP.contains("$minimum = [version]'1.46.0'"));
+        assert!(SETUP_STEP.contains("$minimum = [version]'1.47.0'"));
         assert!(SETUP_STEP.contains("cargo-anvil requires just >= $minimum"));
         let fingerprint = SETUP_STEP
             .find("anvil setup (fingerprint repository toolchain)")
@@ -531,8 +524,8 @@ mod tests {
     }
 
     #[test]
-    fn group_step_path_is_under_pipelines() {
-        assert_eq!(group_step_path("scheduled-test"), ".pipelines/anvil/steps/scheduled-test.yml");
+    fn group_step_path_is_under_anvil() {
+        assert_eq!(group_step_path("scheduled-test"), ".anvil/ado/steps/scheduled-test.yml");
     }
 
     #[test]
@@ -645,31 +638,31 @@ mod tests {
     }
 
     #[test]
-    fn custom_stages_artifacts_are_under_pipelines_anvil() {
+    fn custom_stages_artifacts_are_under_anvil_ado() {
         match custom_pr_stages() {
             Artifact::OwnedFile(spec) => {
-                assert_eq!(spec.path, ".pipelines/anvil/custom-pr-stages.yml");
+                assert_eq!(spec.path, ".anvil/ado/custom/pr-stages.yml");
                 assert_eq!(spec.gate, Some(Backend::Ado));
             }
-            Artifact::Region(_) => panic!("expected owned file"),
+            Artifact::OwnedFileSection(_) | Artifact::Region(_) => panic!("expected owned file"),
         }
         match custom_scheduled_stages() {
             Artifact::OwnedFile(spec) => {
-                assert_eq!(spec.path, ".pipelines/anvil/custom-scheduled-stages.yml");
+                assert_eq!(spec.path, ".anvil/ado/custom/scheduled-stages.yml");
                 assert_eq!(spec.gate, Some(Backend::Ado));
             }
-            Artifact::Region(_) => panic!("expected owned file"),
+            Artifact::OwnedFileSection(_) | Artifact::Region(_) => panic!("expected owned file"),
         }
     }
 
     #[test]
     fn root_pipelines_reference_their_custom_stages_extension() {
         assert!(
-            PR_ROOT_PIPELINE.contains("template: anvil/custom-pr-stages.yml"),
+            PR_ROOT_PIPELINE.contains("template: ../.anvil/ado/custom/pr-stages.yml"),
             "PR root must reference the custom-pr-stages extension point"
         );
         assert!(
-            SCHEDULED_ROOT_PIPELINE.contains("template: anvil/custom-scheduled-stages.yml"),
+            SCHEDULED_ROOT_PIPELINE.contains("template: ../.anvil/ado/custom/scheduled-stages.yml"),
             "scheduled root must reference the custom-scheduled-stages extension point"
         );
     }

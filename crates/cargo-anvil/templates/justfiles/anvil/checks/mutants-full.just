@@ -10,23 +10,16 @@
 # workspace regardless of diff.
 
 # Run exhaustive mutation testing across the workspace.
-[script("pwsh", "-NoProfile")]
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
-    $ErrorActionPreference = 'Stop'
-    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
-        Write-Host 'anvil-mutants-full: aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
-        exit 0
-    }
-    & cargo {{_anvil_stable_toolchain_args}} mutants --workspace --no-shuffle --jobs 0
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    {{ mutants_command_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --workspace --no-shuffle --jobs 0
 
 # --- scheduled-exhaustive members (mutants-full reuses cargo-mutants;
 #     cargo-hack and bench are dedicated tools) ---
 
 # Install prerequisites for the `anvil-mutants-full` recipe.
 [group("anvil-setup")]
-anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install installer)
+anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-mutants-full` recipe.
 [group("anvil-setup")]
-anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
+anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs anvil-tool-cargo-each-validate-prereqs

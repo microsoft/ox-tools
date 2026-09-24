@@ -42,14 +42,14 @@ decision genuinely requires the user.
 1. Inspect the current branch, working tree, repository root, and remotes.
 2. Read `AGENTS.md`, nested instruction files, design docs, and contributor
    documentation.
-3. Inspect `.anvil.lock`, generated files, and any `.anvil-proposed` siblings.
+3. Inspect `.anvil/manifest.toml`, generated files, and any `.anvil-proposed` siblings.
 4. Run `cargo anvil --dry-run`. Classify every proposed update, refusal,
    customized file, disabled item, and stale manifest entry.
 5. If Anvil prerequisites are missing, run `just anvil-setup` and retry.
 
 Do not use `--force` merely to make the run succeed. Use it only when the
 repository is intentionally switching from a different tool recorded in
-`.anvil.lock`.
+`.anvil/manifest.toml`.
 
 ## 2. Inventory the existing build system
 
@@ -147,7 +147,7 @@ After equivalence is established:
 - delete legacy workflows, scheduled jobs, setup actions, recipes, and scripts
   whose complete behavior is now owned by Anvil;
 - remove duplicate tool-version files and updaters when
-  `justfiles/anvil/versions.just` is the authoritative list;
+  `.anvil/anvil.just` contains the authoritative generated pins;
 - update badges, contributor documentation, and agent instructions to name the
   Anvil workflows and recipes;
 - retain scripts and pipelines only for requirements outside Anvil's scope, and

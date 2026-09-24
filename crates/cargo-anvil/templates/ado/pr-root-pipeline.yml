@@ -6,14 +6,14 @@
 trigger: none
 
 stages:
-  - template: anvil/pr.yml
+  - template: ../.anvil/ado/pr.yml
     parameters:
       linuxPool: { vmImage: ubuntu-latest }
       windowsPool: { vmImage: windows-latest }
   # Repo-owned extension point: add your own PR-tier stages in
-  # anvil/custom-pr-stages.yml (emitted as an empty stub) without editing
+  # ../.anvil/ado/custom/pr-stages.yml (emitted as an empty stub) without editing
   # this anvil-owned root pipeline.
-  - template: anvil/custom-pr-stages.yml
+  - template: ../.anvil/ado/custom/pr-stages.yml
     parameters:
       linuxPool: { vmImage: ubuntu-latest }
       windowsPool: { vmImage: windows-latest }

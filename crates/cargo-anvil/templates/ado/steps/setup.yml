@@ -41,7 +41,7 @@ steps:
   # version does not affect this cache's contents.
   - task: Cache@2
     inputs:
-      key: 'anvil-v3 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | "$(anvil_toolchain_fingerprint)" | .cargo/config.toml | justfiles/anvil/versions.just'
+      key: 'anvil-v4 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | "$(anvil_toolchain_fingerprint)" | .cargo/config.toml | .anvil/anvil.just'
       path: |
         $(HOME)/.cargo/registry/cache/
         $(HOME)/.cargo/registry/index/
@@ -51,7 +51,7 @@ steps:
     displayName: anvil setup (cache cargo home)
 
   - pwsh: |
-      $minimum = [version]'1.46.0'
+      $minimum = [version]'1.47.0'
       $installed = if (Get-Command just -ErrorAction SilentlyContinue) {
         [version]((& just --version) -replace '^just\s+', '')
       } else {

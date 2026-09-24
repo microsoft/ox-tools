@@ -20,21 +20,11 @@
 [script("pwsh", "-NoProfile")]
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
         exit 0
     }
-    if ($include -eq '--skip') {
-        Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs no affected packages; skipping'
-        exit 0
-    }
-    # Resolve the diff base via the shared resolver (single source of truth
-    # across the impact steps and this recipe; see _anvil-base-ref).
-    $base = (& "{{just_executable()}}" _anvil-base-ref)
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $base = '{{ replace(anvil_base_ref, "'", "''") }}'
     # cargo-mutants --in-diff takes a FILE path containing a unified
     # diff, not a git revision range. Write the diff to a temp file
     # first. RUNNER_TEMP (GH) and AGENT_TEMPDIRECTORY (ADO) point at
@@ -52,15 +42,15 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     # not a behaviour change for it.
     git diff "$base" --output=$diff_path
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo {{_anvil_stable_toolchain_args}} mutants --in-diff $diff_path --no-shuffle --jobs 0
+    & cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --in-diff $diff_path --no-shuffle --jobs 0
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-mutants members ---
 
 # Install prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
-anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-mutants-install installer)
+anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-mutants-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
-anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
+anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs anvil-tool-cargo-each-validate-prereqs

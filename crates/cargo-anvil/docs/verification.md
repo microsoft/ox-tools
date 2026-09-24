@@ -3,7 +3,7 @@
 This document defines how `cargo-anvil` is kept correct over time. The headline mechanism
 is dogfooding — the `microsoft/ox-tools` repo, where cargo-anvil itself lives, uses
 `cargo anvil` to manage its own cloud workflows. Every PR that touches the catalog or the
-emitters produces a visible diff in `.github/` and `justfiles/anvil/`, then runs through
+emitters produces a visible diff in `.github/` and `.anvil/`, then runs through
 the regenerated cloud workflows on the same commit. A broken emitter or catalog fails the PR's own
 checks immediately.
 
@@ -29,7 +29,7 @@ See also:
 ### 2.1 Self-hosting (primary)
 
 `microsoft/ox-tools` is the canonical adopter of `cargo-anvil`. Its `.github/workflows/`,
-`.github/actions/`, `justfiles/anvil/`, and the `anvil-workspace-rust-lints`,
+`.anvil/`, and the `anvil-workspace-rust-lints`,
 `anvil-workspace-rustdoc-lints`, and `anvil-workspace-clippy-lints` regions in
 `Cargo.toml` are all emitted by `cargo anvil` against the in-repo version of the binary. There
 is no manual maintenance of these files after the initial migration.
@@ -65,7 +65,7 @@ emitted files via [`insta`][insta]. Template edits then surface as reviewable di
 PRs — `cargo insta review` accepts them.
 
 Snapshot files live committed under `tests/snapshots/`, one per backend combination.
-The `.anvil.lock` manifest is filtered out of the snapshot input to keep the snapshots
+The `.anvil/manifest.toml` manifest is filtered out of the snapshot input to keep the snapshots
 stable across version bumps (the manifest carries `rendered_by = "cargo-anvil <ver>"`
 which would otherwise churn on every release).
 
@@ -77,7 +77,7 @@ files on disk:
 
 | Fixture            | What it pins                                                                                                                        |
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------------|
-| `single-crate/`    | Non-workspace repo. Validates the `[lints]` (vs `[workspace.lints]`) branch and that the full `justfiles/anvil/` tree is written. |
+| `single-crate/`    | Non-workspace repo. Validates the `[lints]` (vs `[workspace.lints]`) branch and that `.anvil/anvil.just` is written. |
 | `opt-outs/`        | A user-emptied managed region stays empty across re-runs (steady-state opt-out, `LeaveAlone` decision).                              |
 | `customized/`      | A user edit inside a managed region is preserved verbatim across re-runs when the template is unchanged (`LeaveAlone` decision).     |
 | `migration/`       | A repo with pre-existing hand-written `Justfile`, `deny.toml`, and `[profile.release]` in `Cargo.toml`. Ox-check splices its regions without losing the user content. |
@@ -100,7 +100,7 @@ Run as part of `anvil-pr-fast` against ox-tools's emitted output:
 - **`actionlint`** on every emitted `.github/workflows/*.yml` and
   `.github/actions/*/action.yml`. Catches GitHub-Actions-specific errors that plain
   YAML validation misses.
-- **`just --summary --unstable`** on every `justfiles/anvil/*.just`. Verifies recipes
+- **`just --summary --unstable`** on `.anvil/anvil.just`. Verifies recipes
   parse and dependency graph is well-formed.
 - **`taplo check`** on every TOML file anvil writes to. Verifies the post-edit file is
   still parsable TOML and conforms to the cargo schema where applicable.
@@ -112,7 +112,7 @@ Run as part of `anvil-pr-fast` against ox-tools's emitted output:
 A small in-process schema-validation suite at
 `crates/cargo-anvil/tests/schemas.rs` covers the subset that can be
 checked without external tooling (TOML parseability of every emitted
-TOML region/file, the `.anvil.lock` schema, etc.).
+TOML region/file, the `.anvil/manifest.toml` schema, etc.).
 
 ### 2.5 Manual release verification
 
@@ -154,7 +154,7 @@ jobs:
       - name: Assert no drift
         run: |
           if ! ./target/debug/cargo-anvil anvil --dry-run; then
-            echo "::error::cargo-anvil would change generated files or .anvil.lock." \
+            echo "::error::cargo-anvil would change generated files or .anvil/manifest.toml." \
                  "Run 'cargo anvil' locally and commit the diff."
             exit 1
           fi
@@ -165,7 +165,7 @@ jobs:
 ```
 
 The `regenerate-check` job runs on every PR. If a change leaves either emitted
-content or `.anvil.lock` out of date, this fails with an actionable message.
+content or `.anvil/manifest.toml` out of date, this fails with an actionable message.
 After that, the standard `anvil-pr-impl.yml` reusable workflow runs every group,
 exactly as in any consumer repo.
 
@@ -255,9 +255,9 @@ Acknowledged limits of this strategy:
 | `crates/cargo-anvil/tests/pr_title.rs`              | Behavioral coverage for accepted titles, rejection diagnostics, and unset-or-empty-title skipping. |
 | `.github/workflows/anvil-pr.yml`                    | Hand-written self-validation wrapper (the one bootstrap file).          |
 | `.github/workflows/anvil-pr-impl.yml` (and friends) | Regenerated by `cargo anvil`. Subject to the regenerate-check.    |
-| `justfiles/anvil/*.just`                            | Regenerated. Subject to the regenerate-check.                           |
+| `.anvil/anvil.just`                                | Regenerated. Subject to the regenerate-check.                           |
 | `Cargo.toml` (anvil workspace lint regions)        | Regenerated. Subject to the regenerate-check.                           |
-| `.anvil.lock`                                       | The manifest itself. Diffed on every PR.                                |
+| `.anvil/manifest.toml`                              | The manifest itself. Diffed on every PR.                                |
 | `docs/release-checklist.md`                         | Pre-publish checks for things dogfooding misses.                        |
 
 ## 7. Future work

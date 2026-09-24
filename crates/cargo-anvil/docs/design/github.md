@@ -15,7 +15,7 @@ need to change:
    impact jobs and the per-group jobs with all the impact-artifact upload/download
    plumbing. These change when anvil's groups or impact wiring evolve; most users won't
    ever edit them.
-3. **Shared composite actions** (`.github/actions/anvil-*/`). The reusable
+3. **Shared composite actions** (`.anvil/github/actions/*/`). The reusable
    workflows pass a constant group name to one `anvil-run-group` action, which
    runs setup plus the matching `just anvil-<tier>-<group>` recipe and surfaces
    the concrete failure without duplicating group membership. See
@@ -63,9 +63,9 @@ flowchart LR
     pr_runtime_analysis_job["pr-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_mutants_job["pr-mutants<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     required_checks["required-checks<br/>(single branch-protection context)"]:::job
-    impact_act[".github/actions/<br/>anvil-impact"]:::action
-    setup_act[".github/actions/<br/>anvil-setup"]:::action
-    run_group_act[".github/actions/<br/>anvil-run-group"]:::action
+    impact_act[".anvil/github/actions/<br/>impact"]:::action
+    setup_act[".anvil/github/actions/<br/>setup"]:::action
+    run_group_act[".anvil/github/actions/<br/>run-group"]:::action
     codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
     impact_just["just anvil-impact"]:::recipe
     fast_just["just anvil-pr-fast"]:::recipe
@@ -130,8 +130,8 @@ flowchart LR
     srun_job["scheduled-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     sexh_job["scheduled-exhaustive<br/>matrix: linux, windows"]:::job
     publish_job["publish-failure<br/>upsert incident issue"]:::job
-    setup_act[".github/actions/<br/>anvil-setup"]:::action
-    run_group_act[".github/actions/<br/>anvil-run-group"]:::action
+    setup_act[".anvil/github/actions/<br/>setup"]:::action
+    run_group_act[".anvil/github/actions/<br/>run-group"]:::action
     codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
     github_issues["GitHub Issues"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
@@ -183,16 +183,16 @@ are emitted for GitHub, ADO, and local-only installations. They are shown here
 alongside the GitHub-gated files so the on-disk tree is complete.
 
 ```text
+.anvil/github/actions/
+├── setup/action.yml                   owned   (install just + group-scoped catalog tools)
+├── setup/just-problem-matcher.json    owned   (annotate failing Just recipes)
+├── run-group/action.yml               owned   (orchestrate any Just group)
+├── report-status/action.yml           owned   (publish per-job commit statuses)
+└── impact/action.yml                  owned   (compute and upload impact)
+
 .github/
 ├── instructions/
 │   └── cargo-anvil.instructions.md    owned   (repository-wide setup and verification guidance; all backends)
-├── actions/
-│   ├── anvil-setup/action.yml         owned   (install just + group-scoped catalog tools)
-│   ├── anvil-setup/just-problem-matcher.json
-│   │                                  owned   (annotate failing Just recipes)
-│   ├── anvil-run-group/action.yml      owned   (orchestrate any Just group)
-│   ├── anvil-report-status/action.yml  owned   (publish per-job commit statuses)
-│   ├── anvil-impact/action.yml        owned   (runs `just anvil-impact`, uploads impact artifact; omitted if .delta.toml disabled)
 ├── skills/
 │   ├── cargo-anvil-adoption/SKILL.md  owned   (post-generation cleanup workflow; all backends)
 │   └── code-review/SKILL.md           owned   (GitHub PR review guidance)
@@ -203,7 +203,7 @@ alongside the GitHub-gated files so the on-disk tree is complete.
     └── anvil-scheduled.yml              owned
 ```
 
-All files are regular owned files tracked by the sidecar `.anvil.lock` manifest
+All files are regular owned files tracked by `.anvil/manifest.toml`
 (no in-file checksum line; see [updates.md §1](./updates.md#1-the-manifest)). Users
 who customize the root workflow take ownership through the standard dirty-file
 flow.
@@ -348,13 +348,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
-      - uses: ./.github/actions/anvil-impact   # runs `just anvil-impact` + upload-artifact anvil-impact-Linux
+      - uses: ./.anvil/github/actions/impact   # runs `just anvil-impact` + upload-artifact anvil-impact-Linux
   impact-windows:
     runs-on: ${{ inputs.windows_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
-      - uses: ./.github/actions/anvil-impact   # uploads anvil-impact-Windows
+      - uses: ./.anvil/github/actions/impact   # uploads anvil-impact-Windows
 
   pr-fast:
     name: "Check Group: Fast Checks (${{ matrix.os }})"
@@ -377,7 +377,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-fast
           impact_mode: consume   # scoped checks read the downloaded cache
@@ -404,7 +404,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-test
           impact_mode: consume
@@ -427,7 +427,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-msrv
           impact_mode: consume
@@ -543,7 +543,7 @@ reusable workflow). Moving a check between groups or buckets remains a pure
 catalog change.
 
 ```yaml
-# .github/actions/anvil-run-group/action.yml  (owned)
+# .anvil/github/actions/run-group/action.yml  (owned)
 name: anvil-run-group
 description: Run an Anvil Just group and report its result.
 inputs:
@@ -570,7 +570,7 @@ runs:
   using: composite
   steps:
     - id: setup
-      uses: ./.github/actions/anvil-setup
+      uses: ./.anvil/github/actions/setup
       with:
         group: ${{ inputs.group }}
         free-disk-space: ${{ inputs.free-disk-space }}
@@ -597,7 +597,7 @@ runs:
     - name: Publish supplemental Anvil commit status
       if: always() && inputs.publish_commit_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
-      uses: ./.github/actions/anvil-report-status
+      uses: ./.anvil/github/actions/report-status
       with:
         group: ${{ inputs.group }}
         setup_outcome: ${{ steps.setup.outcome }}
@@ -809,11 +809,11 @@ Other groups retain the action's disabled default.
 
 ## 6. Impact scoping
 
-`.github/actions/anvil-impact/action.yml` is a composite action that runs the shared
+`.anvil/github/actions/impact/action.yml` is a composite action that runs the shared
 `anvil-impact` recipe — the same impact building block adopters run locally (see
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe)). It:
 
-1. `./.github/actions/anvil-setup` with `group: none` (bootstrap rust + just +
+1. `./.anvil/github/actions/setup` with `group: none` (bootstrap rust + just +
    cache; no catalog tools).
 2. `just anvil-tool-cargo-delta-install binstall` -- the only tool this composite
    needs. **This is the only job that runs cargo-delta to compute the impact

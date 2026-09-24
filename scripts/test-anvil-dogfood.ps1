@@ -242,7 +242,7 @@ function Remove-AnvilImages([string]$Prefix) {
 # the same reason the image installs by running `anvil-setup` instead of
 # carrying its own list.
 function Get-PinnedTools {
-    $versions = Join-Path $RepoRoot 'justfiles/anvil/versions.just'
+    $versions = Join-Path $RepoRoot '.anvil/anvil.just'
     $tools = [ordered]@{}
     foreach ($line in (Get-Content -LiteralPath $versions)) {
         if ($line -match '^\s*([a-z0-9_]+)_version\s*:=\s*"([^"]+)"') {
@@ -289,7 +289,7 @@ function Invoke-Suite([string]$EngineName) {
         -WorkingDirectory $RepoRoot -AllowFailure
     Assert-Equal 'the committed anvil tree is current (cargo anvil --dry-run)' 0 $dryRun.ExitCode
 
-    foreach ($artifact in @('.anvil/container/Dockerfile', '.anvil/container/Dockerfile.dockerignore', 'justfiles/anvil/container.just')) {
+    foreach ($artifact in @('.anvil/container/Dockerfile', '.anvil/container/Dockerfile.dockerignore', '.anvil/anvil.just')) {
         Assert-That "$artifact is present" (Test-Path -LiteralPath (Join-Path $RepoRoot $artifact))
     }
 
@@ -382,7 +382,7 @@ function Invoke-Suite([string]$EngineName) {
         (-not ("$($reuse.StdOut)`n$($reuse.StdErr)" -match 'building |Step 1/|FROM ')) `
         'a rebuild happened when the tag should have resolved'
 
-    Write-Section "$EngineName : every recipe file defines the image"
+    Write-Section "$EngineName : the composed recipe file defines the image"
 
     # `just anvil-setup` reaches the install recipes through the tier, group and
     # check recipes, so the routing decides *whether* a tool is installed as
@@ -401,11 +401,7 @@ function Invoke-Suite([string]$EngineName) {
     Assert-That 'a baseline tag is available' ([bool]$baseline)
 
     $cases = @(
-        @{ File = 'justfiles/anvil/checks/clippy.just'; Why = 'a check carries the setup dependency that installs its tool' }
-        @{ File = 'justfiles/anvil/container.just';     Why = 'the driver passes the build args, secrets and PreBuild output into the build' }
-        @{ File = 'justfiles/anvil/tiers.just';         Why = 'a tier decides which groups, and so which setups, are reached' }
-        @{ File = 'justfiles/anvil/versions.just';      Why = 'a pin decides which build is installed' }
-        @{ File = 'justfiles/anvil/tools.just';         Why = 'the install recipes decide what is installed' }
+        @{ File = '.anvil/anvil.just'; Why = 'the composed file carries checks, routing, pins, setup, and the container driver' }
     )
 
     foreach ($case in $cases) {
@@ -433,13 +429,14 @@ function Invoke-Suite([string]$EngineName) {
     # it actually occurred in: a group drops a check's `-setup` dependency, so
     # the image installs one tool fewer, while tools.just and versions.just are
     # untouched. The tag has to move or the reduced image is reused forever.
-    $group = Join-Path $RepoRoot 'justfiles/anvil/groups/pr-fast.just'
+    $group = Join-Path $RepoRoot '.anvil/anvil.just'
     if (Test-Path -LiteralPath $group -PathType Leaf) {
         $groupBackup = [System.IO.Path]::GetTempFileName()
         Copy-Item -LiteralPath $group -Destination $groupBackup -Force
         try {
-            $kept = @(Get-Content -LiteralPath $group | Where-Object { $_ -notmatch 'anvil-spellcheck-setup' })
-            Set-Content -LiteralPath $group -Value $kept
+            $content = Get-Content -LiteralPath $group -Raw
+            $content = $content -replace '(?m)^    \(anvil-spellcheck-setup installer\) \\\r?\n', ''
+            Set-Content -LiteralPath $group -Value $content -NoNewline
             Assert-That 'dropping a setup dependency renames the image' ((Get-ImageReference) -ne $baseline) `
                 'the installed tool set changed while the tag did not'
         } finally {

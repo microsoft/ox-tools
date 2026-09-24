@@ -80,8 +80,6 @@ const DOCKERFILE_TOOLS: &str = include_str!("../../../templates/anvil/container/
 const DOCKERFILE_SETUP: &str = include_str!("../../../templates/anvil/container/Dockerfile.setup.region");
 const DOCKERFILE_ENTRY: &str = include_str!("../../../templates/anvil/container/Dockerfile.entry.region");
 
-const RECIPE_PATH: &str = "justfiles/anvil/container.just";
-
 /// The composed Dockerfile the managed regions are spliced into.
 const DOCKERFILE_PATH: &str = ".anvil/container/Dockerfile";
 
@@ -121,21 +119,41 @@ pub fn composed_host() -> ComposedHost {
 /// The full container artifact group.
 #[must_use]
 pub fn all() -> Vec<Artifact> {
-    vec![
-        recipe(),
+    let mut artifacts = recipes();
+    artifacts.extend([
         dockerignore(),
         dockerfile_base_image(),
         dockerfile_base(),
         dockerfile_tools(),
         dockerfile_setup(),
         dockerfile_entry(),
-    ]
+    ]);
+    artifacts
 }
 
-/// The `anvil-container` recipe and its private helpers.
+/// Every top-level container recipe and helper as its own catalog section.
+#[must_use]
+pub fn recipes() -> Vec<Artifact> {
+    super::justfile::template_sections("container", RECIPE)
+}
+
+/// The public `anvil-container` recipe.
+///
+/// # Panics
+///
+/// Panics when the embedded container template no longer defines the
+/// `anvil-container` recipe, which is a catalog construction bug.
 #[must_use]
 pub fn recipe() -> Artifact {
-    Artifact::owned_file(RECIPE_PATH, RECIPE)
+    recipes()
+        .into_iter()
+        .find(|artifact| {
+            matches!(
+                artifact,
+                Artifact::OwnedFileSection(section) if section.id == "recipe:anvil-container"
+            )
+        })
+        .expect("the embedded container template defines anvil-container")
 }
 
 fn dockerfile_region(id: &'static str, body: &'static str) -> Artifact {
@@ -260,7 +278,7 @@ mod tests {
             .iter()
             .map(|artifact| match artifact {
                 Artifact::OwnedFile(spec) => spec.path,
-                Artifact::Region(_) => panic!("expected an owned file"),
+                Artifact::OwnedFileSection(_) | Artifact::Region(_) => panic!("expected an owned file"),
             })
             .collect()
     }
@@ -270,7 +288,7 @@ mod tests {
             .iter()
             .filter_map(|artifact| match artifact {
                 Artifact::Region(spec) => Some(spec.id.as_str()),
-                Artifact::OwnedFile(_) => None,
+                Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) => None,
             })
             .collect()
     }
@@ -295,14 +313,24 @@ mod tests {
     }
 
     #[test]
-    fn group_is_two_owned_files_and_five_dockerfile_regions() {
+    fn group_is_one_owned_file_one_just_section_and_five_dockerfile_regions() {
         let all = all();
         let owned: Vec<_> = all
             .iter()
             .filter(|artifact| matches!(artifact, Artifact::OwnedFile(_)))
             .cloned()
             .collect();
-        assert_eq!(paths(&owned), [RECIPE_PATH, DOCKERIGNORE_PATH]);
+        assert_eq!(paths(&owned), [DOCKERIGNORE_PATH]);
+        assert!(
+            all.iter().any(|artifact| {
+                matches!(
+                    artifact,
+                    Artifact::OwnedFileSection(section)
+                        if section.path == ".anvil/anvil.just" && section.id == "recipe:anvil-container"
+                )
+            }),
+            "the container recipe must be a section of the composed Justfile"
+        );
         assert_eq!(region_ids(&all), DOCKERFILE_REGION_ORDER);
     }
 
@@ -425,8 +453,9 @@ mod tests {
 
     #[test]
     fn build_context_admits_only_what_the_image_copies() {
-        assert!(DOCKERIGNORE.contains("!justfiles"));
-        assert!(DOCKERIGNORE.contains("!Cargo.toml"));
+        assert!(DOCKERIGNORE.contains("!.anvil/anvil.just"));
+        assert!(!DOCKERIGNORE.contains("justfiles"));
+        assert!(!DOCKERIGNORE.contains("!Cargo.toml"));
         assert!(DOCKERIGNORE.contains("!rust-toolchain.toml"));
         assert!(DOCKERIGNORE.contains("!rust-toolchain\n"));
     }
@@ -1005,12 +1034,9 @@ mod tests {
     }
 
     #[test]
-    fn the_build_context_stays_scoped_to_the_recipe_tree() {
-        // The whole tree is copied because `just` must parse it, but nothing
-        // outside it is: an unscoped context streams every stale `target/` to
-        // the daemon on each build.
-        assert!(DOCKERIGNORE.contains("justfiles/*\n!justfiles/anvil\n"));
-        assert!(!DOCKERIGNORE.contains("!justfiles\n!rust-toolchain.toml"));
+    fn the_build_context_stays_scoped_to_the_composed_recipe_file() {
+        assert!(DOCKERIGNORE.contains(".anvil/*\n!.anvil/anvil.just\n!.anvil/container\n"));
+        assert!(!DOCKERIGNORE.contains("!justfiles"));
     }
 
     #[test]
@@ -1094,7 +1120,7 @@ mod tests {
                 assert_eq!(spec.id.as_str(), "anvil-container-base-image");
                 assert_eq!(spec.host, HostSelector::Path(DOCKERFILE_PATH.to_owned()));
             }
-            Artifact::OwnedFile(_) => panic!("the Dockerfile regions must stay regions"),
+            Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) => panic!("the Dockerfile regions must stay regions"),
         }
         assert_eq!(replaced.body(), "ARG BASE_IMAGE=example.invalid/base\n");
         assert_eq!(dockerfile_setup().body(), DOCKERFILE_SETUP);

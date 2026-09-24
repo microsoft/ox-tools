@@ -143,7 +143,7 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
         && !args.force
     {
         bail!(
-            "this repository is managed by '{owner}' (per .anvil.lock); refusing to run '{current}'. \
+            "this repository is managed by '{owner}' (per .anvil/manifest.toml); refusing to run '{current}'. \
              A repository must be managed by a single anvil-family tool. Run '{owner}' instead, \
              or re-run with --force to switch this repository to '{current}'."
         );
@@ -171,7 +171,7 @@ fn live_region_keys(repo_root: &Path, workspace: &Workspace, catalog: &Catalog) 
         .iter()
         .filter_map(|artifact| match artifact {
             Artifact::Region(spec) => Some(spec),
-            Artifact::OwnedFile(_) => None,
+            Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) => None,
         })
         .flat_map(|spec| {
             region_host_paths(workspace, spec)
@@ -223,12 +223,54 @@ fn build_plan(
             Artifact::Region(spec) => {
                 push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, &mut composed, spec)?;
             }
+            Artifact::OwnedFileSection(_) => {}
         }
+    }
+
+    for file in compose_owned_file_sections(catalog, backends) {
+        let path = resolve_existing_case_insensitive(repo_root, file.path);
+        plan.push(plan_owned_file(repo_root, manifest, &path, &file.body)?);
     }
 
     plan_removals(repo_root, manifest, &mut plan, &mut hosts, &composed)?;
 
     Ok(plan)
+}
+
+struct ComposedOwnedFile {
+    path: &'static str,
+    body: String,
+}
+
+fn compose_owned_file_sections(catalog: &Catalog, backends: &[Backend]) -> Vec<ComposedOwnedFile> {
+    let mut positions = HashMap::<&'static str, usize>::new();
+    let mut files = Vec::<ComposedOwnedFile>::new();
+
+    for artifact in catalog.artifacts() {
+        let Artifact::OwnedFileSection(spec) = artifact else {
+            continue;
+        };
+        if spec.gate.is_some_and(|gate| !backends.contains(&gate)) {
+            continue;
+        }
+        let index = *positions.entry(spec.path).or_insert_with(|| {
+            files.push(ComposedOwnedFile {
+                path: spec.path,
+                body: String::new(),
+            });
+            files.len() - 1
+        });
+        let body = spec.body.trim_matches(['\r', '\n']);
+        if !files[index].body.is_empty() {
+            files[index].body.push_str("\n\n");
+        }
+        files[index].body.push_str(body);
+    }
+
+    for file in &mut files {
+        file.body.push('\n');
+    }
+    files
 }
 
 /// In-memory accumulator of host-file text, shared across every region
@@ -351,7 +393,15 @@ fn push_region_at(
     if !settle_composed_host(repo_root, manifest, plan, hosts, composed, &host, spec)? {
         return Ok(());
     }
-    let current = hosts.get_or_read(repo_root, &host)?;
+    let mut current = hosts.get_or_read(repo_root, &host)?;
+    if current.is_none()
+        && host.eq_ignore_ascii_case(artifacts::justfile::JUSTFILE_PATH)
+        && spec.id.as_str() == artifacts::justfile::JUSTFILE_REGION_ID
+    {
+        let scaffold = artifacts::justfile::scaffold().to_owned();
+        hosts.set(&host, scaffold.clone());
+        current = Some(scaffold);
+    }
     if let Some(declared) = composed_host
         && !declared.order.contains(&spec.id.as_str())
     {
@@ -1142,6 +1192,36 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    #[test]
+    fn owned_file_sections_compose_in_catalog_order_with_canonical_spacing() {
+        use crate::catalog::CliMeta;
+
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file_section(".anvil/example", "first", "first\n\n"))
+            .with_artifact(Artifact::owned_file_section(".anvil/example", "second", "\nsecond"))
+            .build()
+            .unwrap();
+
+        let files = compose_owned_file_sections(&catalog, &[]);
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, ".anvil/example");
+        assert_eq!(files[0].body, "first\n\nsecond\n");
+    }
+
+    #[test]
+    fn backend_gated_sections_emit_only_for_the_selected_backend() {
+        use crate::catalog::CliMeta;
+
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::backend_file_section(Backend::GitHub, ".anvil/example", "github", "body"))
+            .build()
+            .unwrap();
+
+        assert!(compose_owned_file_sections(&catalog, &[]).is_empty());
+        assert_eq!(compose_owned_file_sections(&catalog, &[Backend::GitHub])[0].body, "body\n");
+    }
+
     /// `plan_removals` resolves the host's casing before deciding what to
     /// remove, so this must too. A lock that records `Deny.toml` for a file now
     /// spelled `deny.toml` still owns that region, and the same pass is about
@@ -1610,21 +1690,15 @@ mod tests {
 
         for expected in [
             "Justfile",
-            "justfiles/anvil/mod.just",
-            "justfiles/anvil/helpers.just",
-            "justfiles/anvil/checks/fmt.just",
-            "justfiles/anvil/checks/miri.just",
-            "justfiles/anvil/groups/pr-fast.just",
-            "justfiles/anvil/groups/scheduled-exhaustive.just",
-            "justfiles/anvil/tiers.just",
-            "justfiles/anvil/tools.just",
-            "justfiles/anvil/versions.just",
+            ".anvil/anvil.just",
+            ".anvil/manifest.toml",
+            ".anvil/container/Dockerfile",
+            ".anvil/container/Dockerfile.dockerignore",
             "deny.toml",
             "rustfmt.toml",
             ".delta.toml",
             "spellcheck.toml",
             "clippy.toml",
-            ".anvil.lock",
         ] {
             assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after update");
         }
@@ -1640,6 +1714,9 @@ mod tests {
         let member_manifest = fs::read_to_string(tmp.path().join("crates/alpha/Cargo.toml")).unwrap();
         assert!(member_manifest.contains("# >>> anvil-managed: anvil-lints"));
         assert!(member_manifest.contains("workspace = true"));
+        let justfile = fs::read_to_string(tmp.path().join("Justfile")).unwrap();
+        assert!(justfile.contains("set unstable"));
+        assert!(justfile.contains("set windows-shell"));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -1670,8 +1747,8 @@ mod tests {
         let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!outcome.applied);
         assert!(outcome.plan.has_changes());
-        assert!(!tmp.path().join("justfiles/anvil/tools.just").exists());
-        assert!(!tmp.path().join(".anvil.lock").exists());
+        assert!(!tmp.path().join(".anvil/anvil.just").exists());
+        assert!(!Manifest::path_for(tmp.path()).exists());
     }
 
     #[mutants::skip]
@@ -1691,7 +1768,7 @@ mod tests {
 
         assert!(!outcome.applied);
         assert_eq!(outcome.plan.dry_run_exit_code(), 1);
-        assert!(outcome.plan.summary(Some(&manifest)).contains(".anvil.lock"));
+        assert!(outcome.plan.summary(Some(&manifest)).contains(".anvil/manifest.toml"));
         assert_eq!(fs::read_to_string(Manifest::path_for(tmp.path())).unwrap(), stale_lock);
     }
 
@@ -2167,7 +2244,7 @@ mod tests {
         let catalog = Catalog::anvil();
         let outcome = run_update(&catalog, &args, tmp.path()).unwrap();
         assert!(outcome.applied, "force should proceed as a normal update");
-        assert!(tmp.path().join("justfiles/anvil/tools.just").is_file());
+        assert!(tmp.path().join(".anvil/anvil.just").is_file());
         let saved = Manifest::load(tmp.path()).unwrap();
         assert_eq!(saved.tool.as_deref(), Some("anvil"), "force rewrites the lock owner");
         assert_eq!(saved.catalog_checksum, Some(catalog.checksum()));
@@ -2352,11 +2429,11 @@ mod tests {
         assert!(outcome.applied);
         assert_eq!(outcome.backends, vec![Backend::GitHub]);
         for expected in [
-            ".github/actions/anvil-setup/action.yml",
-            ".github/actions/anvil-setup/just-problem-matcher.json",
-            ".github/actions/anvil-run-group/action.yml",
-            ".github/actions/anvil-report-status/action.yml",
-            ".github/actions/anvil-impact/action.yml",
+            ".anvil/github/actions/setup/action.yml",
+            ".anvil/github/actions/setup/just-problem-matcher.json",
+            ".anvil/github/actions/run-group/action.yml",
+            ".anvil/github/actions/report-status/action.yml",
+            ".anvil/github/actions/impact/action.yml",
             ".github/workflows/anvil-pr-impl.yml",
             ".github/workflows/anvil-scheduled-impl.yml",
             ".github/workflows/anvil-pr.yml",
@@ -2400,20 +2477,20 @@ mod tests {
         assert!(outcome.applied);
         assert_eq!(outcome.backends, vec![Backend::Ado]);
         for expected in [
-            ".pipelines/anvil/steps/setup.yml",
-            ".pipelines/anvil/steps/impact.yml",
-            ".pipelines/anvil/steps/advisory-comments.yml",
-            ".pipelines/anvil/steps/pr-fast.yml",
-            ".pipelines/anvil/steps/pr-test.yml",
-            ".pipelines/anvil/steps/pr-msrv.yml",
-            ".pipelines/anvil/steps/pr-runtime-analysis.yml",
-            ".pipelines/anvil/steps/pr-mutants.yml",
-            ".pipelines/anvil/steps/scheduled-test.yml",
-            ".pipelines/anvil/steps/scheduled-advisories.yml",
-            ".pipelines/anvil/steps/scheduled-runtime-analysis.yml",
-            ".pipelines/anvil/steps/scheduled-exhaustive.yml",
-            ".pipelines/anvil/pr.yml",
-            ".pipelines/anvil/scheduled.yml",
+            ".anvil/ado/steps/setup.yml",
+            ".anvil/ado/steps/impact.yml",
+            ".anvil/ado/steps/advisory-comments.yml",
+            ".anvil/ado/steps/pr-fast.yml",
+            ".anvil/ado/steps/pr-test.yml",
+            ".anvil/ado/steps/pr-msrv.yml",
+            ".anvil/ado/steps/pr-runtime-analysis.yml",
+            ".anvil/ado/steps/pr-mutants.yml",
+            ".anvil/ado/steps/scheduled-test.yml",
+            ".anvil/ado/steps/scheduled-advisories.yml",
+            ".anvil/ado/steps/scheduled-runtime-analysis.yml",
+            ".anvil/ado/steps/scheduled-exhaustive.yml",
+            ".anvil/ado/pr.yml",
+            ".anvil/ado/scheduled.yml",
             ".pipelines/anvil-pr.yml",
             ".pipelines/anvil-scheduled.yml",
         ] {
