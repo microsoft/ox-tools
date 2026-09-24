@@ -2234,26 +2234,7 @@ mod tests {
     use std::os::windows::fs::symlink_dir;
 
     use super::*;
-
-    /// Redirected-cache fixtures must not inherit permissions from the repository checkout:
-    /// containerized build agents may mount that checkout under a non-sticky shared directory,
-    /// which is exactly an unsafe cache ancestry the production check must reject.
-    fn private_system_tempdir(prefix: &str) -> tempfile::TempDir {
-        let mut builder = tempfile::Builder::new();
-
-        builder.prefix(prefix);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            builder.permissions(fs::Permissions::from_mode(0o700));
-        }
-
-        builder
-            .tempdir()
-            .expect("the redirected-cache fixture should be creatable in the system temporary directory")
-    }
+    use crate::testing::private_system_tempdir;
 
     /// A capture that succeeded hands back exactly what the command printed.
     #[test]

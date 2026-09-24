@@ -1,0 +1,271 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! A cargo sub-command that fails when two workspace packages own targets which
+//! uplift to the same build artifact.
+#![doc(
+    html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-unique-target-names/logo.png"
+)]
+#![doc(
+    html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-unique-target-names/favicon.ico"
+)]
+//!
+//! Cargo compiles each unit into `target/<profile>/deps/` under a
+//! metadata-hashed name, then uplifts the root unit of most target kinds to
+//! `target/<profile>/` (examples to `target/<profile>/examples/`) under a
+//! plain name carrying no hash. Two workspace packages whose targets uplift to
+//! the same file therefore write the same file. Cargo reports this as `output
+//! filename collision`, warns that it may become a hard error, and keeps
+//! building -- so the workspace stays green while the last writer wins and
+//! concurrent jobs race for one path. This tool turns that warning into a
+//! failure before anything is compiled.
+//!
+//! The most likely way to hit it needs no configuration at all: Cargo
+//! normalizes `-` to `_` in the default library target name, so packages
+//! `foo-bar` and `foo_bar` in one workspace both uplift to `libfoo_bar.rlib`.
+//!
+//! # Usage
+//!
+//! Run this command in a cargo workspace or crate directory:
+//!
+//! ```bash
+//! cargo unique-target-names
+//! ```
+//!
+//! The `--manifest-path` option lets you point at an explicit `Cargo.toml`.
+//! Without it, the manifest is discovered from the current directory.
+//!
+//! # Installation
+//!
+//! ```bash
+//! cargo install cargo-unique-target-names
+//! ```
+//!
+//! # Example Output
+//!
+//! When two packages contend for one file:
+//!
+//! ```text
+//! cargo-unique-target-names: 2 targets uplift to the same files: target/<profile>/examples/basic.pdb, target/<profile>/examples/basic[.exe]
+//!   declared by metabench (example 'basic'), observed (example 'basic')
+//!
+//! Rename the reported targets so each one uplifts to its own path.
+//! ```
+//!
+//! When everything checks out:
+//!
+//! ```text
+//! All workspace targets uplift to their own path
+//! ```
+//!
+//! The tool exits with code 0 when every uplifted file has one owner, code 1
+//! when at least one is contended, code 2 when the workspace could not be read
+//! at all, and code 3 when the command line itself was rejected. Each cause has
+//! its own code, so a broken workspace, a bad invocation and a genuine finding
+//! are never confused for one another.
+//!
+//! # What is and is not reported
+//!
+//! Targets are keyed by *every* file they uplift, because the relationship
+//! between crate type and file runs both ways:
+//!
+//! - `cdylib`, `dylib`, and `proc-macro` all emit one platform shared library,
+//!   so a collision crosses those crate types;
+//! - an executable and a shared library emit different primary files
+//!   (`tool.exe`, `tool.dll`) but both write `tool.pdb`;
+//! - an `rlib` and a `staticlib` emit no uplifted debug-info file, so they
+//!   coexist with a binary of the same name.
+//!
+//! Test and benchmark binaries and build scripts keep their metadata hash in
+//! `deps/` and are exempt. Owners are keyed per target rather than per package,
+//! so a package that contends with itself — Cargo permits a `[lib]` and a
+//! `[[bin]]` of one name, and they share a debug-info file — is reported like
+//! any other pair.
+//!
+//! The Windows debug-info file is considered on every platform, so a
+//! Windows-only collision still fails a Linux run and every leg of a build
+//! matrix agrees.
+//!
+//! Two hazards Cargo itself does not warn about are deliberately not reported:
+//! dep-info files, which collapse by file stem, and target names differing only
+//! in case on a case-insensitive filesystem. Both are recorded in the crate's
+//! design document.
+
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
+mod collisions;
+
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use cargo_metadata::MetadataCommand;
+use clap::builder::Styles;
+use clap::builder::styling::{AnsiColor, Effects};
+use clap::{Parser, Subcommand};
+
+pub use crate::collisions::Collision;
+
+/// Exit code for a workspace whose metadata could not be read, kept distinct
+/// from the collision code so a caller can tell "broken" from "contended".
+pub const EXIT_UNREADABLE_WORKSPACE: u8 = 2;
+
+/// Exit code for a command line the tool rejected.
+///
+/// Clap's own default for a usage error is 2, which this crate has already
+/// given a meaning; a rejected invocation carries its own code so it cannot be
+/// mistaken for a workspace that could not be read.
+pub const EXIT_USAGE: u8 = 3;
+
+const CLAP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::Cyan.on_default());
+
+/// Cargo subcommand that keeps uplifted target names unique across a workspace.
+#[derive(Parser, Debug)]
+#[command(bin_name = "cargo", version, about, author)]
+#[command(styles = CLAP_STYLES)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Check that no two workspace targets uplift to the same build artifact.
+    #[command(version, display_name = "cargo-unique-target-names")]
+    UniqueTargetNames(Args),
+}
+
+#[derive(Parser, Debug)]
+struct Args {
+    /// Path to the `Cargo.toml` to inspect.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+}
+
+/// What a check found: the verdict, the text that describes it, and the exit
+/// code it maps to.
+///
+/// Every way the command can end is one of these variants, including a
+/// rejected command line, so calling [`run`] never terminates the caller.
+#[derive(Debug)]
+pub enum Outcome {
+    /// Every uplifted file has exactly one owner.
+    Clean,
+    /// At least one file is contended by two or more targets.
+    Contended(Vec<Collision>),
+    /// The workspace metadata could not be read, so no verdict is possible --
+    /// a broken workspace must not be reportable as clean.
+    Unreadable(String),
+    /// The command line was rejected, and this is what clap would have printed
+    /// about it.
+    Usage(String),
+    /// `--help` or `--version` was asked for, and this is the answer. Not a
+    /// failure: it carries the success code.
+    Help(String),
+}
+
+impl Outcome {
+    /// The process exit code for this outcome.
+    #[must_use]
+    pub const fn exit_code(&self) -> u8 {
+        match self {
+            Self::Clean | Self::Help(_) => 0,
+            Self::Contended(_) => 1,
+            Self::Unreadable(_) => EXIT_UNREADABLE_WORKSPACE,
+            Self::Usage(_) => EXIT_USAGE,
+        }
+    }
+
+    /// Whether this outcome belongs on stdout. Findings, failures and rejected
+    /// command lines go to stderr; a clean verdict and requested help do not.
+    #[must_use]
+    pub const fn is_informational(&self) -> bool {
+        matches!(self, Self::Clean | Self::Help(_))
+    }
+
+    /// The full text the tool prints for this outcome.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Self::Clean => "All workspace targets uplift to their own path".to_owned(),
+            Self::Contended(collisions) => {
+                let findings = collisions
+                    .iter()
+                    .map(|collision| format!("cargo-unique-target-names: {}", collision.render()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{findings}\n\nRename the reported targets so each one uplifts to its own path.")
+            }
+            Self::Unreadable(error) => {
+                format!("cargo-unique-target-names: failed to read workspace metadata from cargo: {error}")
+            }
+            Self::Usage(message) | Self::Help(message) => message.clone(),
+        }
+    }
+}
+
+/// Checks the workspace containing `manifest_path`, or the one discovered from
+/// the current directory when it is `None`.
+///
+/// Reads `cargo metadata --no-deps` itself, so a caller needs nothing from
+/// cargo's own crates to run the rule.
+#[must_use]
+pub fn check(manifest_path: Option<&Path>) -> Outcome {
+    let mut command = MetadataCommand::new();
+    command.no_deps();
+    if let Some(path) = manifest_path {
+        command.manifest_path(path);
+    }
+    match command.exec() {
+        Ok(metadata) => {
+            let collisions = collisions::find(&metadata);
+            if collisions.is_empty() {
+                Outcome::Clean
+            } else {
+                Outcome::Contended(collisions)
+            }
+        }
+        Err(error) => Outcome::Unreadable(error.to_string()),
+    }
+}
+
+/// Parses `args` as the command line, runs the check, prints the report, and
+/// returns the outcome.
+///
+/// This never terminates the caller: a command line clap rejects, and a
+/// `--help` or `--version` request, both come back as an [`Outcome`] like any
+/// other result. `main` does nothing but hand this [`std::env::args_os`] and
+/// turn the returned [`Outcome::exit_code`] into a process exit code, so the
+/// whole contract is observable in-process.
+#[must_use]
+pub fn run<I, T>(args: I) -> Outcome
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let outcome = match Cli::try_parse_from(args) {
+        Ok(cli) => {
+            let Commands::UniqueTargetNames(arguments) = cli.command;
+            check(arguments.manifest_path.as_deref())
+        }
+        Err(error) => {
+            // Clap reports `--help` and `--version` as errors too, and says
+            // which stream each belongs on; only the genuine failures are.
+            let message = error.render().ansi().to_string().trim_end().to_owned();
+            if error.use_stderr() {
+                Outcome::Usage(message)
+            } else {
+                Outcome::Help(message)
+            }
+        }
+    };
+    if outcome.is_informational() {
+        println!("{}", outcome.render());
+    } else {
+        eprintln!("{}", outcome.render());
+    }
+    outcome
+}
