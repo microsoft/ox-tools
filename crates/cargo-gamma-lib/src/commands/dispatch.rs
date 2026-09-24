@@ -13,7 +13,7 @@ use super::clean::clean;
 use super::cli::{Cli, Command, SelectArgs};
 use super::completions::completions;
 use super::explain::explain;
-use super::hints::hints_with_cargo;
+use super::hints::hints;
 use super::host::Host;
 use super::list::list_with_cargo;
 use super::merge::merge;
@@ -21,7 +21,6 @@ use super::run::{configure, run_session};
 use super::suppress::suppress;
 use super::unsuppress::unsuppress_with_cargo;
 use crate::config::Config;
-use crate::error::error;
 use crate::report::Styler;
 
 /// The multiple of each test binary's baseline duration a mutant is allowed when nothing says otherwise.
@@ -271,17 +270,7 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
         }
 
         Command::Explain(args) => explain(host, &args),
-        Command::Suppress(mut args) => {
-            configure(host, &mut args.run, styler)?;
-            check_shard(&args.run.select)?;
-
-            #[cfg(target_os = "linux")]
-            if let Some(code) = relaunch_for_memory_control(host, &args.run) {
-                return Ok(code);
-            }
-
-            suppress(host, &args, cli.progress, styler)
-        }
+        Command::Suppress(args) => suppress(host, &args, cli.progress, styler),
 
         Command::Unsuppress(mut args) => {
             let config = Config::resolve(&args.select)?;
@@ -293,16 +282,7 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
 
         Command::Merge(args) => merge(host, &args, styler),
 
-        Command::Hints(mut args) => {
-            // Before the merge, so that a shard count sitting in the committed configuration for
-            // the benefit of the matrix does not stop the one job that promotes the artifact.
-            refuse_shard(&args.select)?;
-
-            let config = Config::resolve(&args.select)?;
-            let cargo = config.cargo_options();
-            config.apply_selection(&mut args.select)?;
-            hints_with_cargo(host, &args, styler, &cargo)
-        }
+        Command::Hints(args) => hints(host, &args, styler),
 
         Command::Clean(args) => clean(host, &args, styler),
 
@@ -327,25 +307,6 @@ fn check_shard(select: &SelectArgs) -> crate::Result<()> {
     let _shard = select.shard()?;
 
     Ok(())
-}
-
-/// Refuses the shard flags on the one command that deliberately ignores them.
-///
-/// `hints` promotes an artifact from the whole population, because a shard sees a fraction of it and
-/// promoting from one would publish an almost-empty artifact while every other job in the matrix
-/// overwrote it. That is the right behaviour, but accepting the flags and then ignoring them is not
-/// how to have it: a user who adds `hints` to an existing sharded matrix step, where
-/// `--shard-index ${{ matrix.i }}` is already on the line, would get exactly the race the design
-/// avoids and no diagnostic at all. Refusing says which command they want instead.
-fn refuse_shard(select: &SelectArgs) -> crate::Result<()> {
-    if select.shard_count.is_none() && select.shard_index.is_none() {
-        return Ok(());
-    }
-
-    Err(error!(
-        "`hints` is deliberately unsharded: it promotes from the whole population, because a shard sees a fraction of it and every job in the matrix would race to overwrite the artifact. Drop `--shard-count` and `--shard-index`, and promote from one job rather than all of them"
-    )
-    .usage())
 }
 
 #[cfg(test)]
@@ -559,33 +520,62 @@ mod tests {
         });
     }
 
-    /// The command that promotes an artifact from the whole population has no use for a shard, and
-    /// accepting the flags anyway would let someone add it to a sharded matrix step and get every
-    /// job overwriting the same file — the race the design already refuses to run.
+    /// Promotion consumes the completed campaign exactly as recorded, so accepting selection flags
+    /// would imply a narrowing that this state-only command cannot perform.
     #[test]
-    fn a_sharded_hints_is_refused_rather_than_quietly_promoting_from_everything() {
+    fn hints_rejects_mutant_selection_flags() {
         crate::notes::alone(|| {
-            let dir = crate_dir("dispatch-shard-hints-", None);
+            let dir = crate_dir("dispatch-selected-hints-", None);
+            let root = dir.path().to_string_lossy().into_owned();
+            let mut host = crate::testing::Sink::default();
+
+            let code = run(&mut host, ["cargo-gamma", "gamma", "hints", "--dir", &root, "--package", "subject"]);
+
+            assert_eq!(code, EXIT_USAGE, "{}", host.out());
+            assert!(
+                host.err().contains("unexpected argument") && host.err().contains("--package"),
+                "{}",
+                host.err()
+            );
+        });
+    }
+
+    /// Suppression consumes the completed campaign exactly as recorded, so accepting a selection
+    /// flag must not silently widen the requested package back to the whole ledger.
+    #[test]
+    fn suppress_rejects_mutant_selection_flags() {
+        crate::notes::alone(|| {
+            let dir = crate_dir("dispatch-selected-suppress-", None);
             let root = dir.path().to_string_lossy().into_owned();
             let mut host = crate::testing::Sink::default();
 
             let code = run(
                 &mut host,
-                [
-                    "cargo-gamma",
-                    "gamma",
-                    "hints",
-                    "--dir",
-                    &root,
-                    "--shard-index",
-                    "1",
-                    "--shard-count",
-                    "4",
-                ],
+                ["cargo-gamma", "gamma", "suppress", "--dir", &root, "--package", "subject"],
             );
 
             assert_eq!(code, EXIT_USAGE, "{}", host.out());
-            assert!(host.err().contains("deliberately unsharded"), "{}", host.err());
+            assert!(
+                host.err().contains("--package") && host.err().contains("completed campaign"),
+                "{}",
+                host.err()
+            );
+        });
+    }
+
+    /// The inherited run flag must never look like a safe preview while the state-only command
+    /// proceeds to edit source.
+    #[test]
+    fn suppress_rejects_the_runs_dry_run_flag() {
+        crate::notes::alone(|| {
+            let dir = crate_dir("dispatch-run-dry-suppress-", None);
+            let root = dir.path().to_string_lossy().into_owned();
+            let mut host = crate::testing::Sink::default();
+
+            let code = run(&mut host, ["cargo-gamma", "gamma", "suppress", "--dir", &root, "--dry-run"]);
+
+            assert_eq!(code, EXIT_USAGE, "{}", host.out());
+            assert!(host.err().contains("--dry-run-suppress"), "{}", host.err());
         });
     }
 
@@ -618,22 +608,22 @@ mod tests {
         });
     }
 
-    /// Exactly the discovery commands fold `gamma.toml` selection keys in before discovery;
-    /// `explain` deliberately does not.
+    /// Commands that still perform discovery fold `gamma.toml` selection keys in; state-only
+    /// promotion accepts no selection flags, and `explain` deliberately does not use the file.
     ///
     /// A `packages` key in the file, together with `--workspace` on the command line, is a
     /// contradiction that only `apply_selection` (through `validate_effective`) catches — clap sees
     /// only the flag. So a command that reaches that diagnostic is one that folded the file's
     /// selection in, and one that runs clean is one that did not. Removing `apply_selection` from
-    /// the `list`, `unsuppress`, or `hints` arm, or adding it to `explain`, flips exactly one of
-    /// these assertions. It stops at the merge, before any build, so it stays a cheap unit test.
+    /// the `list` or `unsuppress` arm, or adding it to `explain`, flips exactly one of these
+    /// assertions. It stops at the merge, before any build, so it stays a cheap unit test.
     #[test]
     fn only_the_discovery_commands_apply_config_selection() {
         crate::notes::alone(|| {
             let dir = crate_dir("dispatch-config-selection-", Some("packages = [\"subject\"]\n"));
             let root = dir.path().to_string_lossy().into_owned();
 
-            for command in ["list", "unsuppress", "hints"] {
+            for command in ["list", "unsuppress"] {
                 let mut host = crate::testing::Sink::default();
                 let code = run(&mut host, ["cargo-gamma", "gamma", command, "--workspace", "--dir", &root]);
 
@@ -641,6 +631,10 @@ mod tests {
                 assert!(host.err().contains("packages"), "`{command}`: {}", host.err());
                 assert!(host.err().contains("workspace"), "`{command}`: {}", host.err());
             }
+
+            let mut host = crate::testing::Sink::default();
+            let code = run(&mut host, ["cargo-gamma", "gamma", "hints", "--dir", &root]);
+            assert_eq!(code, EXIT_OK, "hints unexpectedly performed discovery: {}", host.err());
 
             // `explain` resolves a named subject, not a selection, so the file never reaches it and
             // the whole `relational` family is still explained.

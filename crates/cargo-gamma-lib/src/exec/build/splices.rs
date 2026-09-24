@@ -453,6 +453,7 @@ mod tests {
             path: Utf8PathBuf::from(path),
             absolute: root.join(path),
             package: "subject".to_owned(),
+            source: None,
         };
         let mut first = crate::fixtures::mutant();
         first.ordinal = 1;
@@ -522,6 +523,7 @@ mod tests {
             path: path.clone(),
             absolute: root.join(&path),
             package: "subject".to_owned(),
+            source: None,
         };
         let mut splices = Splices::default();
         assert_eq!(splices.original(&work, &file).unwrap().parsed, "first");

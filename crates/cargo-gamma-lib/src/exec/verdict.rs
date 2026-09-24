@@ -630,7 +630,7 @@ pub(crate) const CONFIRM_FACTOR: u32 = 3;
 /// `cargo test` would have started it. Run under nextest, both are nextest's business: it forwards
 /// the arguments after `--` and sets each test's working directory to its own package root, so
 /// imposing one here would make it resolve the whole workspace relative to a single package.
-fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>) -> Result<Command, String> {
+fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>, fail_fast: bool) -> Result<Command, String> {
     let Some(harness) = work.runner() else {
         let mut command = Command::new(binary.path.as_std_path());
         let names = only.names();
@@ -662,14 +662,15 @@ fn launcher(work: &Workspace, binary: &TestBinary, only: Only<'_>) -> Result<Com
             let _ = command.args(user.flags());
             let _ = command.args(allowed).arg("--exact");
         }
-
         let _ = command.current_dir(working_directory(work, binary).as_std_path());
         work.inherit_test_cache_home(&mut command);
 
         return Ok(command);
     };
 
-    harness.command(work, binary, &only.names()).map_err(|cause| cause.to_string())
+    harness
+        .command(work, binary, &only.names(), fail_fast)
+        .map_err(|cause| cause.to_string())
 }
 
 /// Turns a runner's non-zero exit into a verdict about the mutant.
@@ -880,7 +881,7 @@ fn run_with(
         };
     }
 
-    let mut command = match launcher(work, binary, attempt.only) {
+    let mut command = match launcher(work, binary, attempt.only, attempt.active.is_some()) {
         Ok(command) => command,
         Err(reason) => return (Verdict::Unmetered(reason), MemoryUsage::default(), None),
     };
@@ -4180,7 +4181,7 @@ mod tests {
 
         work.set_runner(nextest::Harness::fake(&[("/t/deps/nxspike-abc", "nxspike")]));
 
-        let reason = launcher(&work, &crate::testing::test_binary("/t/deps/stranger-def"), Only::All)
+        let reason = launcher(&work, &crate::testing::test_binary("/t/deps/stranger-def"), Only::All, false)
             .expect_err("an unknown binary cannot be launched");
 
         assert!(reason.contains("/t/deps/stranger-def"), "{reason}");
@@ -4223,7 +4224,7 @@ mod tests {
     fn a_run_without_a_runner_invokes_the_binary_itself() {
         let (_scratch, work) = crate::testing::helper_workspace("launch-direct", &["exit:0"]);
         let binary = crate::testing::helper();
-        let command = launcher(&work, &binary, Only::All).expect("a direct launch needs nothing from a runner");
+        let command = launcher(&work, &binary, Only::All, false).expect("a direct launch needs nothing from a runner");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
         let cache_home = command
             .get_envs()
@@ -4235,6 +4236,41 @@ mod tests {
         assert!(cache_home.is_some(), "a nested Cargo Gamma process could escape the test cache");
     }
 
+    #[test]
+    fn a_direct_mutant_run_uses_no_unstable_harness_flags_or_forced_thread_count() {
+        let (_scratch, mut work) = crate::testing::helper_workspace("launch-direct-fail-fast", &["exit:0"]);
+        let binary = crate::testing::helper();
+        work.set_test_args(vec!["module::selected".to_owned(), "--skip".to_owned(), "module::slow".to_owned()]);
+
+        let command = launcher(&work, &binary, Only::All, true).expect("a direct launch needs nothing from a runner");
+        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+
+        assert_eq!(&args[args.len() - 3..], ["module::selected", "--skip", "module::slow"]);
+        assert!(!args.iter().any(|arg| arg == "--fail-fast"), "{args:?}");
+        assert!(!args.iter().any(|arg| arg.starts_with("--test-threads")), "{args:?}");
+    }
+
+    #[test]
+    fn a_direct_mutant_launch_is_accepted_by_the_real_stable_libtest_harness() {
+        let (_scratch, work) = crate::testing::helper_workspace("launch-direct-stable-libtest", &[]);
+        let executable = std::env::current_exe().expect("the test harness has an executable path");
+        let executable = executable.to_str().expect("the test harness path is UTF-8");
+        let binary = crate::testing::test_binary(executable);
+        let mut command = launcher(&work, &binary, Only::One("exec::verdict::tests::stable_libtest_child_passes"), true)
+            .expect("a direct launch needs nothing from a runner");
+
+        let output = command.output().expect("the current test harness can be launched");
+
+        assert!(
+            output.status.success(),
+            "stable libtest rejected the mutant launch:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn stable_libtest_child_passes() {}
+
     /// A run narrowed to one test asks libtest for that name and for an exact match.
     ///
     /// Both halves matter. Without `--exact` the name is a substring filter, so `parses` would drag
@@ -4245,7 +4281,7 @@ mod tests {
     fn a_run_narrowed_to_one_test_asks_for_it_by_name_and_exactly() {
         let (_scratch, work) = crate::testing::helper_workspace("launch-filtered", &["exit:0"]);
         let binary = crate::testing::helper();
-        let command = launcher(&work, &binary, Only::One("tests::parses")).expect("a direct launch needs nothing from a runner");
+        let command = launcher(&work, &binary, Only::One("tests::parses"), false).expect("a direct launch needs nothing from a runner");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(args, vec!["--gamma-step=exit:0", "tests::parses", "--exact"]);
@@ -4261,7 +4297,7 @@ mod tests {
         let (_scratch, work) = crate::testing::helper_workspace("launch-censused", &["exit:0"]);
         let binary = crate::testing::helper();
         let names = ["tests::parses", "tests::rejects"];
-        let command = launcher(&work, &binary, Only::These(&names)).expect("a direct launch needs nothing from a runner");
+        let command = launcher(&work, &binary, Only::These(&names), false).expect("a direct launch needs nothing from a runner");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(args, vec!["--gamma-step=exit:0", "tests::parses", "tests::rejects", "--exact"]);
@@ -4276,7 +4312,7 @@ mod tests {
     fn a_census_selection_with_no_names_runs_the_binary_whole() {
         let (_scratch, work) = crate::testing::helper_workspace("launch-censused-empty", &["exit:0"]);
         let binary = crate::testing::helper();
-        let command = launcher(&work, &binary, Only::These(&[])).expect("a direct launch needs nothing from a runner");
+        let command = launcher(&work, &binary, Only::These(&[]), false).expect("a direct launch needs nothing from a runner");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(args, vec!["--gamma-step=exit:0"]);
@@ -4296,7 +4332,7 @@ mod tests {
 
         work.set_test_args(vec!["allowed".to_owned()]);
 
-        let refusal = launcher(&work, &binary, Only::One("tests::excluded")).expect_err("the selection is empty");
+        let refusal = launcher(&work, &binary, Only::One("tests::excluded"), false).expect_err("the selection is empty");
 
         assert!(refusal.contains("harness filters allow"), "{refusal}");
     }
@@ -4314,7 +4350,7 @@ mod tests {
 
         work.set_test_args(vec!["--skip".to_owned(), "slow".to_owned(), "allowed".to_owned()]);
 
-        let command = launcher(&work, &binary, Only::One("tests::allowed_case")).expect("the selection is not empty");
+        let command = launcher(&work, &binary, Only::One("tests::allowed_case"), false).expect("the selection is not empty");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(args, vec!["--skip", "slow", "tests::allowed_case", "--exact"]);
@@ -4329,7 +4365,7 @@ mod tests {
         work.set_test_args(vec!["allowed".to_owned()]);
 
         let names = ["tests::allowed_one", "tests::excluded", "tests::allowed_two"];
-        let command = launcher(&work, &binary, Only::These(&names)).expect("the selection is not empty");
+        let command = launcher(&work, &binary, Only::These(&names), false).expect("the selection is not empty");
         let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
 
         assert_eq!(args, vec!["tests::allowed_one", "tests::allowed_two", "--exact"]);

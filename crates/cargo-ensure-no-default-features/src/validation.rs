@@ -330,6 +330,20 @@ members = ["crate1"]
     }
 
     #[test]
+    fn workspace_dependencies_must_be_a_table() {
+        let result = validate_dependencies(
+            r#"
+[workspace]
+members = []
+dependencies = "invalid"
+"#,
+            &[],
+        );
+
+        assert_eq!(result.unwrap_err().to_string(), "[workspace.dependencies] is not a table");
+    }
+
+    #[test]
     fn test_validate_workspace_dependencies_empty_dependencies() {
         let content = r#"
 [workspace]
@@ -428,6 +442,22 @@ version = "0.1.0"
         assert!(result.is_err());
         let err_msg = format!("{:?}", result.unwrap_err());
         assert!(err_msg.contains("No [workspace.dependencies] or [dependencies] section found"));
+    }
+
+    #[test]
+    fn package_dependencies_must_be_a_table() {
+        let result = validate_dependencies(
+            r#"
+dependencies = "invalid"
+
+[package]
+name = "my-crate"
+version = "0.1.0"
+"#,
+            &[],
+        );
+
+        assert_eq!(result.unwrap_err().to_string(), "[dependencies] is not a table");
     }
 
     #[test]

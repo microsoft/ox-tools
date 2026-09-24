@@ -4,10 +4,11 @@
 //! Fixed-width plain-text verdict table.
 
 use std::io;
+use std::num::NonZeroUsize;
 
 use crate::render::{
-    MAX_DIAGNOSTIC_LINES, diagnostic_line_count, failure_detail, files, format_delta, format_line_ranges, format_lines, format_source,
-    format_status_text, format_threshold, result_summary,
+    MAX_DIAGNOSTIC_LINES, diagnostic_line_count, displayed_diagnostics, failure_detail, files, format_delta, format_line_ranges,
+    format_lines, format_source, format_status_text, format_threshold, result_summary,
 };
 use crate::verdict::Report;
 
@@ -31,10 +32,7 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
         .collect();
 
     // Column widths: header vs widest row, whichever is wider.
-    let mut widths = [0_usize; 6];
-    for (i, h) in HEADERS.iter().enumerate() {
-        widths[i] = h.chars().count();
-    }
+    let mut widths = std::array::from_fn(|index| HEADERS[index].chars().count());
     for row in &rows {
         for (i, cell) in row.iter().enumerate() {
             widths[i] = widths[i].max(cell.chars().count());
@@ -52,11 +50,11 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
 
     writeln!(out, "Result: {}", result_summary(&report.outcomes))?;
     write_failure_details(out, report)?;
-    if report.unattributed > 0 {
+    if let Some(unattributed) = NonZeroUsize::new(report.unattributed) {
         writeln!(
             out,
             "Note: {} had paths outside any workspace member and were not attributed.",
-            files(report.unattributed),
+            files(unattributed.get()),
         )?;
     }
     Ok(())
@@ -76,22 +74,11 @@ fn write_failure_details(out: &mut dyn io::Write, report: &Report) -> io::Result
     writeln!(out, "Failure details:")?;
     for (outcome, detail) in failures {
         writeln!(out, "  {}: {}", outcome.name, detail)?;
-        let mut remaining = MAX_DIAGNOSTIC_LINES;
-        for diagnostic in &outcome.diagnostics {
-            if remaining == 0 {
-                break;
-            }
-            let displayed = diagnostic.lines.len().min(remaining);
-            writeln!(
-                out,
-                "    {}: {}",
-                diagnostic.path.display(),
-                format_line_ranges(&diagnostic.lines[..displayed])
-            )?;
-            remaining -= displayed;
+        for (path, lines) in displayed_diagnostics(outcome) {
+            writeln!(out, "    {}: {}", path.display(), format_line_ranges(lines))?;
         }
         let omitted = diagnostic_line_count(outcome).saturating_sub(MAX_DIAGNOSTIC_LINES);
-        if omitted > 0 {
+        if let Some(omitted) = NonZeroUsize::new(omitted) {
             writeln!(out, "    ... {omitted} more line locations omitted")?;
         }
     }
@@ -168,6 +155,39 @@ mod tests {
         assert!(s.contains("OK"));
         assert!(s.contains("package"));
         assert!(s.contains("all packages meet their threshold"));
+        assert!(!s.contains("Failure details:"));
+    }
+
+    #[test]
+    fn empty_report_uses_header_widths_and_zero_based_layout() {
+        let rendered = render_to_string(&Report {
+            outcomes: Vec::new(),
+            unattributed: 0,
+        });
+        assert_eq!(
+            rendered,
+            concat!(
+                "coverage-gate\n",
+                "\n",
+                "  Package  Lines  Threshold  Δ vs threshold  Status  Source\n",
+                "  ───────  ─────  ─────────  ──────────────  ──────  ──────\n",
+                "  ───────  ─────  ─────────  ──────────────  ──────  ──────\n",
+                "Result: all packages meet their threshold.\n",
+            )
+        );
+    }
+
+    #[test]
+    fn column_widths_match_the_widest_header_or_cell_exactly() {
+        let report = Report {
+            outcomes: vec![outcome("long-package", 100, 100, 80.0, ThresholdSource::Package, Status::Ok)],
+            unattributed: 0,
+        };
+        let rendered = render_to_string(&report);
+        let lines = rendered.lines().collect::<Vec<_>>();
+        assert_eq!(lines[2], "  Package        Lines  Threshold  Δ vs threshold  Status  Source ");
+        assert_eq!(lines[3], "  ────────────  ──────  ─────────  ──────────────  ──────  ───────");
+        assert_eq!(lines[4], "  long-package  100.0%      80.0%         +20.0pp  OK      package");
     }
 
     #[test]

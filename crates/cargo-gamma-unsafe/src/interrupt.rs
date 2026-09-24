@@ -235,6 +235,35 @@ impl Registry {
         slot
     }
 
+    /// Claims a process-group slot and its cgroup kill handle as one registration.
+    #[cfg(target_os = "linux")]
+    fn claim_with_cgroup<K: Fn(i32), C: Fn(i32)>(
+        &self,
+        group: i32,
+        cgroup: &Cgroup,
+        terminate_processes: &K,
+        terminate_boundary: &C,
+    ) -> Option<(usize, usize, i32)> {
+        let slot = self.claim(group, terminate_processes)?;
+        let Some(handle) = cgroup.kill_handle() else {
+            self.release(slot, group);
+            return None;
+        };
+
+        if cgroup.is_watched() {
+            self.release(slot, group);
+            return None;
+        }
+
+        let descriptor = handle.raw();
+        let Some(cgroup_slot) = self.claim_cgroup(descriptor, terminate_boundary) else {
+            self.release(slot, group);
+            return None;
+        };
+
+        Some((slot, cgroup_slot, descriptor))
+    }
+
     /// Stops watching a cgroup descriptor and waits for a sweep that already took it.
     #[cfg(target_os = "linux")]
     fn release_cgroup(&self, slot: usize, descriptor: i32) {
@@ -483,28 +512,14 @@ impl Spawning {
     #[cfg(target_os = "linux")]
     #[must_use]
     pub fn watch_cgroup(&self, group: i32, cgroup: Option<&mut Cgroup>) -> Option<usize> {
-        let slot = self.watch(group)?;
+        let Some(cgroup) = cgroup else {
+            return self.watch(group);
+        };
+        let (slot, cgroup_slot, descriptor) = self.0.claim_with_cgroup(group, cgroup, &kill_group, &kill_cgroup)?;
 
-        if let Some(cgroup) = cgroup
-            && let Some(handle) = cgroup.kill_handle()
-        {
-            if cgroup.is_watched() {
-                self.0.release(slot, group);
-
-                return None;
-            }
-
-            let Some(cgroup_slot) = self.0.claim_cgroup(handle.raw(), &kill_cgroup) else {
-                self.0.release(slot, group);
-
-                return None;
-            };
-
-            // The unique cgroup borrow keeps the descriptor's owning file live while the registry
-            // slot is recorded in its one-shot watch state.
-            cgroup.watched_at(cgroup_slot, handle.raw());
-        }
-
+        // The unique cgroup borrow keeps the descriptor's owning file live while the registry slot
+        // is recorded in its one-shot watch state.
+        cgroup.watched_at(cgroup_slot, descriptor);
         Some(slot)
     }
 }
@@ -540,16 +555,64 @@ pub fn watched(slot: usize) -> i32 {
     registry().holding(slot)
 }
 
-/// What a slot holds in full: its process group, and the cgroup kill descriptor paired with it.
+/// An isolated interrupt registry for cgroup lifetime tests.
 ///
-/// Crate-internal test support for the cgroup lifetime regression in [`crate::cgroup`], which has
-/// to prove the *descriptor* left the registry and not merely the group id beside it. Not offered
-/// beyond this crate: a raw descriptor read out of the registry is of no use to anyone who is not
-/// asserting about the registry itself.
+/// Its killers are supplied by each operation, so fabricated process-group identifiers can never
+/// reach the production `kill_group`.
 #[cfg(all(test, target_os = "linux", not(miri)))]
-#[must_use]
-pub(crate) fn watched_cgroup(slot: usize) -> Option<i32> {
-    registry().holding_cgroup(slot)
+#[derive(Clone, Copy)]
+pub(crate) struct TestRegistry(&'static Registry);
+
+#[cfg(all(test, target_os = "linux", not(miri)))]
+impl fmt::Debug for TestRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TestRegistry")
+    }
+}
+
+#[cfg(all(test, target_os = "linux", not(miri)))]
+impl TestRegistry {
+    pub(crate) fn spawning() -> Self {
+        let registry = Box::leak(Box::new(Registry::new()));
+        registry.open();
+        Self(registry)
+    }
+
+    pub(crate) fn watch_cgroup<K: Fn(i32), C: Fn(i32)>(
+        self,
+        group: i32,
+        cgroup: &mut Cgroup,
+        group_killer: &K,
+        cgroup_killer: &C,
+    ) -> Option<usize> {
+        let (slot, cgroup_slot, descriptor) = self.0.claim_with_cgroup(group, cgroup, group_killer, cgroup_killer)?;
+        cgroup.watched_at_for_test(cgroup_slot, descriptor, self);
+        Some(slot)
+    }
+
+    pub(crate) fn watched(self, slot: usize) -> i32 {
+        self.0.holding(slot)
+    }
+
+    pub(crate) fn watch<K: Fn(i32)>(self, group: i32, kill_group: &K) -> Option<usize> {
+        self.0.claim(group, kill_group)
+    }
+
+    pub(crate) fn watched_cgroup(self, slot: usize) -> Option<i32> {
+        self.0.holding_cgroup(slot)
+    }
+
+    pub(crate) fn forget(self, slot: usize, group: i32) {
+        self.0.release(slot, group);
+    }
+
+    pub(crate) fn release_cgroup(self, slot: usize, descriptor: i32) {
+        self.0.release_cgroup(slot, descriptor);
+    }
+
+    pub(crate) fn close<K: Fn(i32), C: Fn(i32)>(self, group_killer: &K, cgroup_killer: &C) -> Option<i32> {
+        self.0.close_with(group_killer, cgroup_killer)
+    }
 }
 
 /// Stops watching a group, leaving a slot some other spawn has since claimed alone.
@@ -679,6 +742,16 @@ mod tests {
                 die(libc::SIGTERM);
             }
             "handler" => handler(libc::SIGTERM),
+            "handler-survivable" => {
+                handler(libc::SIGCHLD);
+                assert_eq!(registry().signal(), libc::SIGCHLD);
+            }
+            "handler-deferred-survivable" => {
+                let spawning = spawning();
+                handler(libc::SIGCHLD);
+                assert_eq!(registry().signal(), libc::SIGCHLD);
+                drop(spawning);
+            }
             other => panic!("unknown process case {other}"),
         }
     }
@@ -753,9 +826,7 @@ mod tests {
     /// is not fatal by default.
     #[test]
     fn the_production_handler_dies_of_a_survivable_signal_when_nothing_is_spawning() {
-        handler(libc::SIGCHLD);
-
-        assert_eq!(registry().signal(), libc::SIGCHLD);
+        assert!(run_process_case("handler-survivable").success());
     }
 
     /// The production handler defers to the spawner when a window is open, and the spawner —
@@ -767,15 +838,7 @@ mod tests {
     /// of the handoff run for real and this process survives to report it.
     #[test]
     fn the_production_handler_defers_to_the_spawner_which_then_dies_itself() {
-        let spawning = spawning();
-
-        handler(libc::SIGCHLD);
-
-        assert_eq!(registry().signal(), libc::SIGCHLD, "the handler still records the interrupt");
-
-        // `Spawning::drop` finds this the last window and this run already interrupted, so it dies
-        // of `SIGCHLD` here — surviving, since that signal is not fatal by default.
-        drop(spawning);
+        assert!(run_process_case("handler-deferred-survivable").success());
     }
 
     #[test]

@@ -573,35 +573,11 @@ Promote what a run learned about speed into a file the workspace can check in
 cargo gamma hints [OPTIONS]
 ```
 
-**Selecting what to mutate**
+**Options**
 
 | Option | Value | What it does |
 | --- | --- | --- |
-| `-d`, `--dir` | `<PATH>` | Path to the workspace or package to analyze. Defaults to `.`. |
-| `--mutators` | `<SELECTORS>` | Mutators to apply, as a comma-separated selector list. |
-| `--file` | `<GLOB>` | Only mutate files matching these glob patterns. |
-| `--exclude-file` | `<GLOB>` | Skip files matching these glob patterns. |
-| `--shard-count` | `<COUNT>` | Number of shards to divide the mutants into. |
-| `--shard-index` | `<INDEX>` | Which shard to run, from 0. |
-| `-D`, `--in-diff` | `<PATH>` | Only mutate lines added or changed by this unified diff, or `-` for standard input. |
-| `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
-| `--workspace` |  | Mutate every package in the workspace. |
-| `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
-
-**Cargo features**
-
-| Option | Value | What it does |
-| --- | --- | --- |
-| `--features` | `<FEATURES>` | Cargo features to activate, comma-separated or repeated. |
-| `--all-features` |  | Activate every feature of every selected package. |
-| `--no-default-features` |  | Do not activate the `default` feature. |
-
-**Configuration**
-
-| Option | Value | What it does |
-| --- | --- | --- |
-| `--config` | `<PATH>` | Read configuration from this file instead of `gamma.toml`. |
-| `--no-config` |  | Ignore the configuration file entirely. |
+| `-d`, `--dir` | `<PATH>` | Path to the workspace or package whose latest completed campaign should be promoted. Defaults to `.`. |
 
 **Cache**
 
@@ -614,7 +590,7 @@ cargo gamma hints [OPTIONS]
 | Option | Value | What it does |
 | --- | --- | --- |
 | `--dry-run` |  | Report what would be promoted without writing anything. |
-| `--replace` |  | Replace the complete hints artifact instead of merging the selected population into it. |
+| `--replace` |  | Replace the complete hints artifact instead of merging the completed campaign into it. |
 
 ### `gamma clean`
 

@@ -34,7 +34,13 @@ pub(crate) struct AttributionOutcome<'f> {
 pub(crate) fn attribute<'f>(files: &'f [FileReport], members: &[Member]) -> AttributionOutcome<'f> {
     // Longest-prefix-first: when paths nest, the deeper member wins.
     let mut order: Vec<usize> = (0..members.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(members[i].manifest_dir.components().count()));
+    order.sort_by(|&left, &right| {
+        members[right]
+            .manifest_dir
+            .components()
+            .count()
+            .cmp(&members[left].manifest_dir.components().count())
+    });
 
     let mut out = AttributionOutcome::default();
     'files: for f in files {

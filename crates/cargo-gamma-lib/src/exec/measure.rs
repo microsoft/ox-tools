@@ -5,8 +5,10 @@
 
 use core::fmt::Write as _;
 use core::time::Duration;
+use std::fs;
 use std::time::Instant;
 
+use camino::Utf8PathBuf;
 use cargo_gamma_process::MemoryRequest;
 
 use super::baseline::{Baseline, measure_baseline};
@@ -61,6 +63,7 @@ pub(crate) fn run_with_locks(
         built,
         stuck,
         dropped,
+        ..
     } = measure_with_locks(survey, selection, config, events, locks, failed)?;
 
     // Nothing was live, so nothing was copied, built or measured. The plan still describes every
@@ -71,6 +74,7 @@ pub(crate) fn run_with_locks(
             built: None,
             stuck,
             dropped,
+            learning: None,
         });
     };
 
@@ -175,16 +179,14 @@ pub(crate) fn run_with_locks(
     let swept = test_all(&built.work, &mut plan, &reach, sweep, narrowed, &mut killers, events);
     let sweep_elapsed = sweep_started.elapsed();
 
-    // Written even when the sweep failed. A run that stopped partway still learned which test
-    // caught every mutant it got to, and discarding that would make an abandoned run cost the next
-    // one as much as it cost this one.
-    // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-    if incremental {
-        // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-        store_learning(&killers, &base, &plan.mutants);
-    }
-
-    let spent = swept?;
+    let spent = match swept {
+        Ok(spent) => spent,
+        Err(failure) => {
+            // An incomplete campaign has no completed record to carry its partial learning.
+            store_incomplete_learning(incremental, &killers, &base, &plan.mutants);
+            return Err(failure);
+        }
+    };
 
     // `None` when nothing was swept: the phase is recorded as absent rather than as a real phase
     // that happened to cost nothing, which is what [`Phases::sweep`] documents its `Option` to mean.
@@ -196,6 +198,7 @@ pub(crate) fn run_with_locks(
         built: Some(built),
         stuck,
         dropped,
+        learning: Some(killers),
     })
 }
 
@@ -339,6 +342,7 @@ fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) -> Option<S
         exact_hits: spent.exact_hits,
         generalized_probes: spent.generalized_probes,
         generalized_hits: spent.generalized_hits,
+        generalized_rejected: spent.generalized_rejected,
         exact_candidates: spent.exact_candidates,
         generalized_candidates: spent.generalized_candidates,
         item_candidates: spent.item_candidates,
@@ -351,6 +355,9 @@ fn sweep_cost(spent: Option<super::sweep::Spent>, elapsed: Duration) -> Option<S
         reach_hits: spent.reach_hits,
         file_probes: spent.file_probes,
         file_hits: spent.file_hits,
+        item_rejected: spent.item_rejected,
+        reach_rejected: spent.reach_rejected,
+        file_rejected: spent.file_rejected,
         census_probes: spent.census_probes,
         census_hits: spent.census_hits,
         whole_selections: spent.whole_selections,
@@ -406,6 +413,12 @@ fn store_learning(killers: &Killers, base: &camino::Utf8Path, mutants: &[crate::
     killers.store(base, mutants);
 }
 
+fn store_incomplete_learning(incremental: bool, killers: &Killers, base: &camino::Utf8Path, mutants: &[crate::model::Mutant]) {
+    if incremental {
+        store_learning(killers, base, mutants);
+    }
+}
+
 /// What a run worked out before testing a single mutant.
 #[derive(Debug)]
 pub struct Measured {
@@ -433,6 +446,8 @@ pub struct Measured {
     /// suite. Unlike [`Self::stuck`] this does not fail the run; it qualifies it, so it is carried
     /// into the report rather than only printed.
     pub dropped: Vec<String>,
+
+    pub(crate) learning: Option<Killers>,
 }
 
 /// A built tree and what measuring it revealed.
@@ -810,6 +825,7 @@ fn measure_with_locks(
             built: None,
             stuck,
             dropped,
+            learning: None,
         });
     }
 
@@ -848,6 +864,7 @@ fn measure_with_locks(
             built: None,
             stuck,
             dropped,
+            learning: None,
         });
     }
 
@@ -906,6 +923,7 @@ fn measure_with_locks(
         built: Some(Built { work, session, oracle }),
         stuck,
         dropped,
+        learning: None,
     })
 }
 
@@ -913,6 +931,23 @@ fn measure_with_locks(
 fn announce_compile_fail_costs(survey: &Survey, config: &Config, events: &mut dyn Events) {
     let targets = survey.compile_fail.as_slice();
     warn_about_compile_fail_targets(targets, &survey.selected, config, events);
+}
+
+fn validate_synchronized_sources(work: &Workspace, digests: &HashMap<Utf8PathBuf, String>) -> Result<()> {
+    for (path, expected) in digests {
+        let synchronized = work.root.join(path);
+        let source = fs::read_to_string(synchronized.as_std_path())
+            .map_err(|cause| error!("could not validate synchronized source `{path}`").caused_by(cause))?;
+
+        if crate::discover::digest(crate::parse::strip_bom(&source).as_bytes()) != *expected {
+            return Err(error!(
+                "source `{}` changed between discovery and workspace synchronization; rerun cargo gamma after edits have settled",
+                path
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
@@ -1080,12 +1115,14 @@ fn load_ordering_hints(survey: &Survey, config: &Config) -> crate::HashSet<crate
 
     let base = campaign_base(&survey.root, &survey.target, config.cache_dir.as_deref());
     let record = crate::discover::RunRecord::load(&base);
+    let incomplete = crate::discover::RunRecord::load_incomplete(&base);
     let checked_in = crate::discover::Hints::load(&survey.root);
 
     record
         .ordering()
         .into_iter()
         .map(crate::model::MutantId::new)
+        .chain(incomplete.ordering().into_iter().map(crate::model::MutantId::new))
         .chain(checked_in.ordering().into_iter().map(crate::model::MutantId::new))
         .collect()
 }
@@ -1109,6 +1146,7 @@ fn converge_stages(
 ) -> Result<Staged> {
     let mut ordinals = u32::default();
     let mut staged = Staged::default();
+    let source_indices = plan.source_indices();
 
     for stage in &crate::discover::stages(&survey.packages(), &survey.reach) {
         let name = stage_name(stage);
@@ -1125,7 +1163,8 @@ fn converge_stages(
             let scanned = survey.scan(Some(package), selection, &mut ordinals)?;
 
             live = live.saturating_add(live_mutants(&scanned.mutants));
-            plan.absorb(scanned);
+            validate_synchronized_sources(work, &scanned.digests)?;
+            plan.absorb_indexed(scanned, &source_indices);
         }
 
         // A package with nothing to run is still named. A crate that quietly takes no part in a run
@@ -1484,14 +1523,104 @@ fn calibrate_stall(baseline: &Baseline, config: &Config) -> Stall {
 
 #[cfg(test)]
 mod tests {
-    use camino::{Utf8Path, Utf8PathBuf};
+    use camino::Utf8Path;
 
     use super::*;
-    use crate::discover::{Killer, ReachCluster, SiteIdentity};
+    use crate::discover::{Killer, ReachCluster, SiteIdentity, TargetFile};
     use crate::exec::memory::{Demand, MemoryControl};
     use crate::fixtures;
     use crate::model::Mutant;
     use crate::testing::Recorder;
+
+    #[test]
+    fn synchronized_workspace_must_match_the_discovered_source_generation() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 workspace");
+        fs::create_dir_all(root.join("src").as_std_path()).expect("source directory");
+        fs::write(root.join("src/lib.rs").as_std_path(), "pub fn changed() {}\n").expect("changed source");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let mut plan = stuck_plan(Vec::new());
+        plan.root.clone_from(&root);
+        plan.files.push(TargetFile {
+            path: Utf8PathBuf::from("src/lib.rs"),
+            absolute: root.join("src/lib.rs"),
+            package: "subject".to_owned(),
+            source: Some("pub fn original() {}\n".to_owned()),
+        });
+        let _previous = plan
+            .digests
+            .insert(Utf8PathBuf::from("src/lib.rs"), crate::discover::digest(b"pub fn original() {}\n"));
+
+        let error = validate_synchronized_sources(&work, &plan.digests).expect_err("changed copied source must stop the run");
+
+        assert!(
+            error
+                .to_string()
+                .contains("source `src/lib.rs` changed between discovery and workspace synchronization"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn synchronized_workspace_generation_ignores_the_parsed_byte_order_mark() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 workspace");
+        fs::create_dir_all(root.join("src").as_std_path()).expect("source directory");
+        fs::write(root.join("src/lib.rs").as_std_path(), "\u{feff}pub fn original() {}\n").expect("source with BOM");
+        let work = Workspace::adopt(root.clone(), root.join("target"));
+        let mut plan = stuck_plan(Vec::new());
+        plan.root.clone_from(&root);
+        plan.files.push(TargetFile {
+            path: Utf8PathBuf::from("src/lib.rs"),
+            absolute: root.join("src/lib.rs"),
+            package: "subject".to_owned(),
+            source: Some("pub fn original() {}\n".to_owned()),
+        });
+        let _previous = plan
+            .digests
+            .insert(Utf8PathBuf::from("src/lib.rs"), crate::discover::digest(b"pub fn original() {}\n"));
+
+        validate_synchronized_sources(&work, &plan.digests).expect("BOM-normalized source must match discovery");
+    }
+
+    #[test]
+    fn incomplete_non_incremental_campaign_preserves_existing_learning() {
+        let directory = tempfile::tempdir().expect("temporary campaign state");
+        let base = Utf8Path::from_path(directory.path()).expect("UTF-8 campaign state");
+        let mutant = fixtures::mutant();
+        let killer = Killer {
+            package: "subject".to_owned(),
+            target: "lib".to_owned(),
+            test: "tests::caught".to_owned(),
+        };
+        crate::discover::RunRecord::store_probes(base, &core::iter::once((mutant.id.clone(), killer.clone())).collect());
+
+        store_incomplete_learning(false, &Killers::default(), base, std::slice::from_ref(&mutant));
+
+        assert_eq!(crate::discover::RunRecord::load(base).probes().get(&mutant.id), Some(&killer));
+    }
+
+    #[test]
+    fn incomplete_incremental_campaign_keeps_learning_out_of_the_completed_record() {
+        let directory = tempfile::tempdir().expect("temporary campaign state");
+        let base = Utf8Path::from_path(directory.path()).expect("UTF-8 campaign state");
+        let mutant = fixtures::mutant();
+        let killer = Killer {
+            package: "subject".to_owned(),
+            target: "lib".to_owned(),
+            test: "tests::caught".to_owned(),
+        };
+        let mut killers = Killers::default();
+        killers.record(mutant.id.clone(), killer.clone());
+
+        store_incomplete_learning(true, &killers, base, std::slice::from_ref(&mutant));
+
+        assert!(crate::discover::RunRecord::load(base).probes().is_empty());
+        assert_eq!(
+            crate::discover::RunRecord::load_incomplete(base).probes().get(&mutant.id),
+            Some(&killer)
+        );
+    }
 
     #[test]
     fn whole_workspace_selection_requires_wide_stages() {

@@ -265,8 +265,21 @@ mod tests {
 
     #[test]
     fn per_package_tokens_expand() {
-        let out = substitute(&args(&["check-external-types", "--manifest-path", "{manifest}"]), &pkg()).expect("substitute");
-        assert_eq!(out, ["check-external-types", "--manifest-path", "/ws/cargo-anvil/Cargo.toml"]);
+        let out = substitute(
+            &args(&["{name}", "{spec}", "{version}", "{manifest}", "{name}:{version}:{name}"]),
+            &pkg(),
+        )
+        .expect("substitute");
+        assert_eq!(
+            out,
+            [
+                "cargo-anvil",
+                "cargo-anvil@0.4.0",
+                "0.4.0",
+                "/ws/cargo-anvil/Cargo.toml",
+                "cargo-anvil:0.4.0:cargo-anvil",
+            ]
+        );
     }
 
     #[test]
@@ -278,7 +291,10 @@ mod tests {
     #[test]
     fn packages_token_rejected_in_per_package_mode() {
         let err = substitute(&args(&["clippy", "{packages}"]), &pkg()).expect_err("misuse");
-        assert!(err.to_string().contains("{packages}"));
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{packages}` cannot be used here: only valid in --once mode"
+        );
     }
 
     #[test]
@@ -298,7 +314,10 @@ mod tests {
             workspace_rust_version: None,
         };
         let err = substitute(&args(&["test", "--package", "{name}"]), &ph).expect_err("misuse");
-        assert!(err.to_string().contains("{name}"));
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{name}` cannot be used here: per-package token is not valid in --once mode"
+        );
     }
 
     #[test]
@@ -308,7 +327,10 @@ mod tests {
             workspace_rust_version: None,
         };
         let err = substitute(&args(&["test", "--test", "{target}"]), &ph).expect_err("misuse");
-        assert!(err.to_string().contains("{target}"));
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{target}` cannot be used here: per-target token is not valid in --once mode"
+        );
     }
 
     #[test]
@@ -318,7 +340,10 @@ mod tests {
             workspace_rust_version: None,
         };
         let err = substitute(&args(&["x={packages}"]), &ph).expect_err("misuse");
-        assert!(err.to_string().contains("stand alone"));
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{packages}` cannot be used here: must stand alone as a whole argument (it expands to multiple tokens)"
+        );
     }
 
     #[test]
@@ -331,14 +356,37 @@ mod tests {
             target: "loom".to_owned(),
             workspace_rust_version: None,
         };
-        let out = substitute(&args(&["test", "-p", "{name}", "--test", "{target}"]), &ph).expect("substitute");
-        assert_eq!(out, ["test", "-p", "cargo-anvil", "--test", "loom"]);
+        let out = substitute(
+            &args(&["{name}", "{spec}", "{version}", "{manifest}", "{target}", "{target}:{name}"]),
+            &ph,
+        )
+        .expect("substitute");
+        assert_eq!(
+            out,
+            [
+                "cargo-anvil",
+                "cargo-anvil@0.4.0",
+                "0.4.0",
+                "/ws/cargo-anvil/Cargo.toml",
+                "loom",
+                "loom:cargo-anvil",
+            ]
+        );
     }
 
     #[test]
     fn target_token_is_rejected_in_per_package_mode() {
         let err = substitute(&args(&["echo", "{target}"]), &pkg()).expect_err("misuse");
-        assert!(err.to_string().contains("per-target"));
+        assert_eq!(
+            err.to_string(),
+            "placeholder `{target}` cannot be used here: only valid in per-target mode"
+        );
+    }
+
+    #[test]
+    fn unknown_and_brace_like_tokens_pass_through_verbatim() {
+        let input = args(&["{manfiest}", "x={Name}", "{", "}"]);
+        assert_eq!(substitute(&input, &pkg()).expect("substitute"), input);
     }
 
     #[test]

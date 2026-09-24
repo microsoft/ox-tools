@@ -13,6 +13,11 @@ The cgroup registration is one-shot and non-copying. Its drop removes the
 descriptor, waits for active sweeps, and only then permits the owned file to
 close.
 
+Production signal-handler tests execute in child processes so installed
+handlers and process-global registries cannot leak into unrelated tests.
+Registry and cgroup unit tests use isolated registries and recording killers;
+they never signal fabricated process groups from the main test process.
+
 ## Linux cgroups
 
 Creation opens `cgroup.kill` before launch and installs a `pre_exec` write to

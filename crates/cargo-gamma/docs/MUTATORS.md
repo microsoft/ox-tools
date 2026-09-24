@@ -312,6 +312,11 @@ if item.is_invalid() { break; }
 if item.is_terminal() { }
 ```
 
+Control-flow replacements are omitted when the surrounding syntax proves they cannot type-check.
+For example, deleting a trailing `continue;` from one arm of a value-producing `if` would leave
+that arm as `()` while the sibling arm produces a value. Cases that depend on inferred types remain
+in the population and are left for the compiler-withdrawal pass.
+
 ### `range`
 
 Moves a range's endpoint by one rather than rewriting `..` as `..=`, since the two literal spellings are different types and a rewrite could never type-check as one arm of the mutant's guarding `if`. A surviving mutant means no test is sensitive to whether the range's own endpoint is included.
@@ -332,6 +337,10 @@ On an unsigned endpoint that is already zero, `inclusive_to_exclusive` underflow
 ### `literal`
 
 Replaces a literal constant with a nearby one of the same kind: an integer zeroed, set to one, incremented, or decremented; a boolean flipped; a string emptied or replaced. A surviving mutant means the suite never asserts the literal's *exact* value, only that it is present, non-zero, or non-empty.
+
+An explicitly unsigned zero is not decremented. Explicit evidence includes a suffix, cast, return
+type, or directly enclosing binding annotation; names and unresolved API signatures are not treated
+as type evidence.
 
 ```rust
 // original
@@ -418,6 +427,10 @@ fn find_user(id: UserId) -> Option<User> { users.get(&id).cloned() }
 fn find_user(id: UserId) -> Option<User> { None }
 ```
 
+When an explicit expected type proves that the payload cannot implement `Default`, the
+`None`-to-`Some` candidate is omitted. Inferred and otherwise ambiguous payload types remain
+eligible.
+
 ### `result`
 
 The same present/absent question as `option`, but for success and failure: `Ok(v)` to `Err(Default::default())`, and back. A surviving mutant means no test distinguishes the success path from the failure path — often because an error is only logged, or a `?` silently propagates without the caller's behavior ever differing.
@@ -429,6 +442,10 @@ fn parse_amount(s: &str) -> Result<Decimal, ParseError> { s.parse().map_err(Pars
 // result.ok_to_err
 fn parse_amount(s: &str) -> Result<Decimal, ParseError> { Err(Default::default()) }
 ```
+
+The same conservative check omits `Ok`-to-`Err` and `Err`-to-`Ok` candidates when an explicit
+expected type proves that the synthesized payload cannot implement `Default`. Ambiguous cases
+remain eligible for compiler withdrawal.
 
 ### `iter`
 

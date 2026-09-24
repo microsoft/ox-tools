@@ -55,6 +55,7 @@ pub(crate) const fn cache_lock_identity(locks: &CacheLocks) -> usize {
 
 /// Identifies the workspace allowed to reuse a cache directory.
 const CACHE_OWNER: &str = ".cargo-gamma-owner";
+const CAMPAIGN_LOCATION: &str = "campaign-location";
 
 /// The private cache home propagated only by Cargo Gamma's own test harness.
 const TEST_CACHE_HOME_VAR: &str = "CARGO_GAMMA_TEST_CACHE_HOME";
@@ -529,8 +530,43 @@ impl Workspace {
     }
 
     /// Root of the copied tree, which is where a runner is pointed at the workspace.
-    pub(super) fn root(&self) -> &Utf8Path {
+    pub(crate) fn root(&self) -> &Utf8Path {
         &self.root
+    }
+
+    pub(crate) fn report_source_root(&self) -> Utf8PathBuf {
+        self.base.join(".cargo-gamma-report-source")
+    }
+
+    pub(crate) fn snapshot_report_sources(&self, plan: &crate::discover::Plan) -> Result<()> {
+        let root = self.report_source_root();
+        match fs::symlink_metadata(root.as_std_path()) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(error!("report source directory `{root}` is a link"));
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                fs::remove_dir_all(root.as_std_path())
+                    .map_err(|cause| error!("could not clear report source directory `{root}`").caused_by(cause))?;
+            }
+            Ok(_) => return Err(error!("report source path `{root}` is not a directory")),
+            Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+            Err(cause) => {
+                return Err(error!("could not inspect report source directory `{root}`").caused_by(cause));
+            }
+        }
+        fs::create_dir(root.as_std_path()).map_err(|cause| error!("could not create report source directory `{root}`").caused_by(cause))?;
+
+        for file in &plan.files {
+            let Some(source) = file.source.as_ref() else { continue };
+            let destination = root.join(&file.path);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent.as_std_path())
+                    .map_err(|cause| error!("could not create report source directory `{parent}`").caused_by(cause))?;
+            }
+            fs::write(destination.as_std_path(), source)
+                .map_err(|cause| error!("could not retain report source `{destination}`").caused_by(cause))?;
+        }
+        Ok(())
     }
 
     /// The arguments every test binary is launched with.
@@ -930,6 +966,164 @@ pub fn campaign_base(root: &Utf8Path, target: &Utf8Path, cache: Option<&Utf8Path
     let base = cache.map_or_else(|| default_campaign_base(&root, target), Utf8Path::to_owned);
 
     absolute(&base)
+}
+
+/// Resolves persisted campaign state, validating its workspace identity against Cargo's current
+/// workspace topology.
+#[must_use]
+pub(crate) fn campaign_base_from_state(root: &Utf8Path, cache: Option<&Utf8Path>) -> Option<Utf8PathBuf> {
+    campaign_state_from(root, cache).ok().map(|(_root, base)| base)
+}
+
+/// Resolves the workspace root and persisted campaign base for a state-consuming command.
+pub(crate) fn campaign_state_from(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
+    let selected = physical(selected);
+
+    if let Some(cache) = cache {
+        let (root, _target) = metadata_workspace(&selected)
+            .ok_or_else(|| error!("could not resolve the selected workspace before validating `--cache-dir`").usage())?;
+        let base = gamma_base(&root, Some(cache));
+        validate_campaign_state_owner(&root, &base)?;
+
+        return Ok((root, base));
+    }
+
+    let metadata = metadata_workspace(&selected)
+        .ok_or_else(|| error!("could not resolve the selected workspace before locating campaign state").usage())?;
+
+    for ancestor in selected.ancestors() {
+        let root = physical(ancestor);
+        let locator = gamma_base(&root, None).join(CAMPAIGN_LOCATION);
+
+        if let Ok(text) = fs::read_to_string(locator.as_std_path()) {
+            let located = Utf8PathBuf::from(text.trim());
+            if same_existing_path(&metadata.0, &root)
+                && located.is_absolute()
+                && cache_owner_root(&located).is_some_and(|owner| same_existing_path(&owner, &root))
+            {
+                return Ok((root, located));
+            }
+        }
+    }
+
+    let (root, target) = metadata;
+
+    let base = campaign_base(&root, &target, None);
+    match fs::symlink_metadata(base.as_std_path()) {
+        Ok(_) => validate_campaign_state_owner(&root, &base)?,
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+        Err(cause) => {
+            return Err(error!("could not inspect the campaign state at `{base}` before validating its owner").caused_by(cause));
+        }
+    }
+    Ok((root, base))
+}
+
+fn validate_campaign_state_owner(root: &Utf8Path, base: &Utf8Path) -> Result<()> {
+    let owner = cache_owner_root(base);
+    if owner.as_ref().is_some_and(|owner| same_existing_path(owner, root)) {
+        return Ok(());
+    }
+
+    let owner = owner.as_deref().map_or("<unowned>", Utf8Path::as_str);
+    Err(error!("the cache at `{base}` is not owned by the selected workspace `{root}` (owner marker resolves to `{owner}`)").usage())
+}
+
+/// Resolves campaign state while holding the selected workspace's publication lock.
+///
+/// Resolution is repeated after the lock is acquired because a completing campaign publishes its
+/// locator under that lock. The second resolution therefore observes either the completed
+/// campaign's locator or the same state as the first resolution, never the stale locator that led
+/// this command to the lock.
+pub(crate) fn claim_campaign_state(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf, File)> {
+    let (root, _base) = campaign_state_from(selected, cache)?;
+    let lock = claim_workspace(&root)?;
+    let (locked_root, base) = campaign_state_from(selected, cache)?;
+
+    if !same_existing_path(&root, &locked_root) {
+        return Err(error!(
+            "the selected workspace changed from `{root}` to `{locked_root}` while cargo-gamma was acquiring its state lock; retry the command"
+        ));
+    }
+
+    Ok((root, base, lock))
+}
+
+fn cache_owner_root(base: &Utf8Path) -> Option<Utf8PathBuf> {
+    let base_metadata = fs::symlink_metadata(base.as_std_path()).ok()?;
+    if !base_metadata.is_dir() || base_metadata.file_type().is_symlink() {
+        return None;
+    }
+
+    let owner = base.join(CACHE_OWNER);
+    let owner_metadata = fs::symlink_metadata(owner.as_std_path()).ok()?;
+    if !owner_metadata.is_file() || owner_metadata.file_type().is_symlink() || owner_metadata.len() > MAX_CACHE_OWNER_LEN {
+        return None;
+    }
+    let text = fs::read_to_string(owner.as_std_path()).ok()?;
+    let recorded = Utf8PathBuf::from(text);
+    if !recorded.is_absolute() {
+        return None;
+    }
+    let root = physical(&recorded);
+
+    Some(root)
+}
+
+fn same_existing_path(left: &Utf8Path, right: &Utf8Path) -> bool {
+    #[cfg(windows)]
+    {
+        let left = left.as_str().strip_prefix(r"\\?\").unwrap_or(left.as_str());
+        let right = right.as_str().strip_prefix(r"\\?\").unwrap_or(right.as_str());
+
+        left.eq_ignore_ascii_case(right)
+    }
+
+    #[cfg(not(windows))]
+    match (
+        fs::canonicalize(left.as_std_path()).ok(),
+        fs::canonicalize(right.as_std_path()).ok(),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _unresolved => false,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn mark_cache_owned_for_test(root: &Utf8Path, base: &Utf8Path) {
+    fs::write(base.join(CACHE_OWNER), physical(root).as_str()).expect("test cache owner");
+    assert!(cache_owner_root(base).is_some(), "test cache owner must resolve");
+}
+
+fn metadata_workspace(selected: &Utf8Path) -> Option<(Utf8PathBuf, Utf8PathBuf)> {
+    let mut command = cargo_metadata::MetadataCommand::new();
+    let _command = command.current_dir(selected).no_deps();
+    let metadata = command.exec().ok()?;
+
+    Some((
+        physical(Utf8Path::new(metadata.workspace_root.as_str())),
+        physical(Utf8Path::new(metadata.target_directory.as_str())),
+    ))
+}
+
+/// Remembers where the default campaign state for a workspace lives.
+///
+/// Returns whether the locator was published. Postprocessing advice depends on this: a campaign
+/// record that exists but cannot be found by the advised command is not actionable.
+pub(crate) fn remember_campaign_base(root: &Utf8Path, base: &Utf8Path) -> bool {
+    let root = physical(root);
+    if !cache_owner_root(base).is_some_and(|owner| same_existing_path(&owner, &root)) {
+        return false;
+    }
+
+    let locator = gamma_base(&root, None).join(CAMPAIGN_LOCATION);
+    match crate::elements::write(&locator, base.as_str()) {
+        Ok(()) => true,
+        Err(failure) => {
+            crate::notes::note(format!("could not save campaign-state location: {failure}"));
+            false
+        }
+    }
 }
 
 fn default_campaign_base(root: &Utf8Path, target: &Utf8Path) -> Utf8PathBuf {
@@ -2357,6 +2551,7 @@ mod tests {
             path: Utf8PathBuf::from("crate/src/lib.rs"),
             absolute: root.join("crate/src/lib.rs"),
             package: "inside".to_owned(),
+            source: None,
         }];
 
         assert_eq!(work.manifest_of("inside", &files), Some(root.join("crate/Cargo.toml")));
@@ -2364,6 +2559,50 @@ mod tests {
 
         fs::remove_file(root.join("crate/Cargo.toml")).expect("inner manifest");
         assert_eq!(work.manifest_of("inside", &files), None);
+    }
+
+    #[test]
+    fn report_sources_use_a_fresh_sidecar_outside_the_copied_workspace() {
+        let temporary = tempfile::tempdir().expect("temporary cache");
+        let base = Utf8PathBuf::from_path_buf(temporary.path().to_path_buf()).expect("UTF-8 cache");
+        let root = base.join("workspace");
+        let target = base.join("target");
+        fs::create_dir_all(root.join(".cargo-gamma-report-source")).expect("copied collision");
+        fs::write(root.join(".cargo-gamma-report-source/sentinel"), "workspace").expect("workspace sentinel");
+        fs::create_dir_all(base.join(".cargo-gamma-report-source")).expect("old sidecar");
+        fs::write(base.join(".cargo-gamma-report-source/stale"), "old").expect("stale sidecar");
+        fs::create_dir_all(&target).expect("target");
+        let work = unsettled(&base, &root, &target);
+        let plan = crate::discover::Plan {
+            root: root.clone(),
+            files: vec![TargetFile {
+                path: Utf8PathBuf::from("src/lib.rs"),
+                absolute: root.join("src/lib.rs"),
+                package: "subject".to_owned(),
+                source: Some("pub fn answer() -> i32 { 42 }\n".to_owned()),
+            }],
+            mutants: Vec::new(),
+            suppressed: 0,
+            idle: Vec::new(),
+            sharded_out: 0,
+            settled_out: 0,
+            skipped: Vec::new(),
+            digests: crate::HashMap::default(),
+            reach: crate::HashMap::default(),
+            specs: crate::HashMap::default(),
+        };
+
+        work.snapshot_report_sources(&plan).expect("source snapshot");
+
+        assert_eq!(
+            fs::read_to_string(base.join(".cargo-gamma-report-source/src/lib.rs")).expect("retained source"),
+            "pub fn answer() -> i32 { 42 }\n"
+        );
+        assert!(!base.join(".cargo-gamma-report-source/stale").exists());
+        assert_eq!(
+            fs::read_to_string(root.join(".cargo-gamma-report-source/sentinel")).expect("copied collision remains untouched"),
+            "workspace"
+        );
     }
 
     #[test]
@@ -3697,6 +3936,162 @@ mod tests {
     }
 
     #[test]
+    fn campaign_state_walks_from_a_member_to_the_persisted_workspace_locator() {
+        let directory = crate::testing::workdir("workspace-campaign-member-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("workspace path is UTF-8");
+        let member = root.join("member");
+        let base = root.join("campaign");
+        let cache_home = Utf8PathBuf::from_path_buf(directory.path().join("cache-home")).expect("cache path is UTF-8");
+        fs::create_dir_all(&member).expect("workspace member");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"member\"]\nresolver = \"3\"\n").expect("workspace manifest");
+        fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("member manifest");
+        fs::create_dir_all(member.join("src")).expect("member source");
+        fs::write(member.join("src/lib.rs"), "").expect("member library");
+        fs::create_dir_all(&base).expect("campaign base");
+        fs::write(base.join(CACHE_OWNER), physical(&root).as_str()).expect("campaign owner");
+
+        crate::testing::with_cache_home_at(cache_home, || {
+            assert!(remember_campaign_base(&root, &base));
+
+            let (resolved, located) = campaign_state_from(&member, None).expect("persisted campaign state");
+
+            assert_eq!(resolved, physical(&root));
+            assert_eq!(located, base);
+        });
+    }
+
+    #[test]
+    fn campaign_state_ignores_a_locator_for_a_former_inner_workspace() {
+        let directory = crate::testing::workdir("workspace-campaign-stale-inner-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("workspace path is UTF-8");
+        let member = root.join("member");
+        let old_base = member.join("old-campaign");
+        let cache_home = Utf8PathBuf::from_path_buf(directory.path().join("cache-home")).expect("cache path is UTF-8");
+        fs::create_dir_all(member.join("src")).expect("member source");
+        fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("member manifest");
+        fs::write(member.join("src/lib.rs"), "").expect("member library");
+        fs::create_dir_all(&old_base).expect("former campaign base");
+        fs::write(old_base.join(CACHE_OWNER), physical(&member).as_str()).expect("former campaign owner");
+
+        crate::testing::with_cache_home_at(cache_home, || {
+            assert!(remember_campaign_base(&member, &old_base));
+            fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"member\"]\nresolver = \"3\"\n")
+                .expect("outer workspace manifest");
+
+            let (resolved, located) = campaign_state_from(&member, None).expect("current campaign state");
+
+            assert_eq!(resolved, physical(&root));
+            assert_ne!(located, old_base);
+        });
+    }
+
+    #[test]
+    fn campaign_state_does_not_adopt_a_foreign_locator_as_fallback_state() {
+        let directory = crate::testing::workdir("workspace-campaign-foreign-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("workspace path is UTF-8");
+        let member = root.join("member");
+        let foreign_root = Utf8PathBuf::from_path_buf(directory.path().join("foreign")).expect("foreign path is UTF-8");
+        let foreign_base = foreign_root.join("campaign");
+        let cache_home = Utf8PathBuf::from_path_buf(directory.path().join("cache-home")).expect("cache path is UTF-8");
+        fs::create_dir_all(&member).expect("workspace member");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"member\"]\nresolver = \"3\"\n").expect("workspace manifest");
+        fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("member manifest");
+        fs::create_dir_all(member.join("src")).expect("member source");
+        fs::write(member.join("src/lib.rs"), "").expect("member library");
+        fs::create_dir_all(&foreign_base).expect("foreign campaign");
+        fs::write(foreign_base.join(CACHE_OWNER), physical(&foreign_root).as_str()).expect("foreign owner");
+
+        crate::testing::with_cache_home_at(cache_home, || {
+            let locator = gamma_base(&root, None).join(CAMPAIGN_LOCATION);
+            fs::create_dir_all(locator.parent().expect("locator parent")).expect("locator directory");
+            fs::write(&locator, foreign_base.as_str()).expect("foreign locator");
+
+            let error = campaign_state_from(&member, None).expect_err("foreign locator cannot become fallback state");
+
+            assert!(error.to_string().contains("is not owned by the selected workspace"), "{error}");
+        });
+    }
+
+    #[test]
+    fn explicit_campaign_cache_rejects_a_foreign_owner() {
+        let directory = crate::testing::workdir("workspace-campaign-explicit-foreign-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("workspace path is UTF-8");
+        let foreign = Utf8PathBuf::from_path_buf(directory.path().join("foreign")).expect("foreign path is UTF-8");
+        fs::create_dir_all(root.join("src")).expect("workspace source");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        )
+        .expect("workspace manifest");
+        fs::write(root.join("src/lib.rs"), "").expect("workspace library");
+        fs::create_dir_all(&foreign).expect("foreign cache");
+        fs::write(foreign.join(CACHE_OWNER), physical(&foreign).as_str()).expect("foreign owner");
+
+        let error = campaign_state_from(&root, Some(&foreign)).expect_err("foreign explicit cache");
+
+        assert!(error.to_string().contains("is not owned by the selected workspace"), "{error}");
+    }
+
+    #[test]
+    fn metadata_fallback_rejects_campaign_state_owned_by_another_workspace() {
+        let directory = crate::testing::workdir("workspace-campaign-derived-foreign-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("workspace path is UTF-8");
+        let target = root.join("target");
+        let foreign = Utf8PathBuf::from_path_buf(directory.path().join("foreign")).expect("foreign path is UTF-8");
+        fs::create_dir_all(root.join("src")).expect("workspace source");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        )
+        .expect("workspace manifest");
+        fs::write(root.join("src/lib.rs"), "").expect("workspace library");
+        let base = campaign_base(&root, &target, None);
+        fs::create_dir_all(&base).expect("campaign base");
+        fs::write(base.join(CACHE_OWNER), physical(&foreign).as_str()).expect("foreign owner");
+
+        let error = campaign_state_from(&root, None).expect_err("foreign derived campaign state");
+
+        assert!(error.to_string().contains("is not owned by the selected workspace"), "{error}");
+    }
+
+    #[test]
+    fn metadata_fallback_uses_cargos_resolved_target_directory() {
+        let directory = crate::testing::workdir("workspace-campaign-target-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("workspace")).expect("workspace path is UTF-8");
+        fs::create_dir_all(root.join("src")).expect("source directory");
+        fs::create_dir_all(root.join(".cargo")).expect("cargo configuration directory");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\n\n[package]\nname = \"subject\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .expect("manifest");
+        fs::write(root.join("src/lib.rs"), "").expect("source");
+        fs::write(root.join(".cargo/config.toml"), "[build]\ntarget-dir = \"configured-target\"\n").expect("cargo configuration");
+        let mut command = cargo_metadata::MetadataCommand::new();
+        let metadata = command.current_dir(&root).no_deps().exec().expect("cargo metadata");
+        let expected_target = physical(Utf8Path::new(metadata.target_directory.as_str()));
+        let (_, resolved_target) = metadata_workspace(&root).expect("metadata workspace");
+
+        let (resolved, located) = campaign_state_from(&root, None).expect("metadata campaign state");
+
+        assert_eq!(resolved_target, expected_target);
+        assert_eq!(resolved, physical(&root));
+        assert_eq!(physical(&located), physical(&campaign_base(&root, &expected_target, None)));
+    }
+
+    #[test]
     fn a_shared_target_keeps_workspace_campaigns_separate() {
         let target = absolute(Utf8Path::new("/shared-target"));
         let first = production_campaign_base(Utf8Path::new("/workspace/one"), &target);
@@ -4157,6 +4552,7 @@ mod tests {
         let work = unsettled_at(root, Utf8PathBuf::from("/scratch/rt"));
         let files = vec![TargetFile {
             package: "pkg".to_owned(),
+            source: None,
             path: Utf8PathBuf::from("crate/src/lib.rs"),
             absolute: Utf8PathBuf::from("/source/crate/src/lib.rs"),
         }];
@@ -4176,6 +4572,7 @@ mod tests {
         let work = unsettled_at(root, Utf8PathBuf::from("/scratch/rt"));
         let files = vec![TargetFile {
             package: "pkg".to_owned(),
+            source: None,
             path: Utf8PathBuf::from("crate/src/lib.rs"),
             absolute: Utf8PathBuf::from("/source/crate/src/lib.rs"),
         }];
@@ -4195,6 +4592,7 @@ mod tests {
         let work = unsettled_at(root, Utf8PathBuf::from("/scratch/rt"));
         let files = vec![TargetFile {
             package: "pkg".to_owned(),
+            source: None,
             path: Utf8PathBuf::from("crate/src/lib.rs"),
             absolute: Utf8PathBuf::from("/source/crate/src/lib.rs"),
         }];
@@ -4224,6 +4622,7 @@ mod tests {
         let work = unsettled_at(root, runtime);
         let files = vec![TargetFile {
             package: "pkg".to_owned(),
+            source: None,
             path: Utf8PathBuf::from("crate/src/lib.rs"),
             absolute: Utf8PathBuf::from("/source/crate/src/lib.rs"),
         }];
@@ -4354,6 +4753,7 @@ mod tests {
             path: Utf8PathBuf::from("link/src/lib.rs"),
             absolute: root.join("link/src/lib.rs"),
             package: "pkg".to_owned(),
+            source: None,
         }];
 
         assert_eq!(work.manifest_of("pkg", &files), None);

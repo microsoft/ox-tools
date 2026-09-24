@@ -110,6 +110,21 @@ impl Plan {
     /// A run scans a package, instruments it and builds it before moving to the next, so the plan
     /// is assembled a package at a time rather than handed over complete.
     pub fn absorb(&mut self, scanned: super::Scanned) {
+        let files = self.source_indices();
+        self.absorb_indexed(scanned, &files);
+    }
+
+    /// Indexes mutable source slots once for a package-by-package discovery sequence.
+    pub(crate) fn source_indices(&self) -> HashMap<Utf8PathBuf, usize> {
+        self.files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.path.clone(), index))
+            .collect()
+    }
+
+    /// Folds one package's scan into the plan using a shared source-file index.
+    pub(crate) fn absorb_indexed(&mut self, scanned: super::Scanned, files: &HashMap<Utf8PathBuf, usize>) {
         let super::Scanned {
             mutants,
             suppressed,
@@ -118,6 +133,7 @@ impl Plan {
             settled_out,
             skipped,
             digests,
+            sources,
         } = scanned;
 
         self.mutants.extend(mutants);
@@ -127,6 +143,13 @@ impl Plan {
         self.settled_out = self.settled_out.saturating_add(settled_out);
         self.skipped.extend(skipped);
         self.digests.extend(digests);
+        for (path, source) in sources {
+            if let Some(index) = files.get(&path)
+                && let Some(file) = self.files.get_mut(*index)
+            {
+                file.source = Some(source);
+            }
+        }
     }
 
     /// Puts the mutants in report order, once every package has been absorbed.
@@ -230,6 +253,7 @@ mod tests {
             settled_out: 4,
             skipped: vec!["src/broken.rs: could not parse".to_owned()],
             digests: std::iter::once((Utf8PathBuf::from("z.rs"), "digest".to_owned())).collect(),
+            sources: HashMap::default(),
         };
 
         plan.absorb(scanned);
@@ -240,6 +264,35 @@ mod tests {
         assert_eq!(plan.settled_out, 4);
         assert_eq!(plan.skipped, ["src/broken.rs: could not parse"]);
         assert_eq!(plan.digests[Utf8Path::new("z.rs")], "digest");
+    }
+
+    #[test]
+    fn indexed_absorption_places_each_retained_source_directly() {
+        let mut plan = plan(&[]);
+        plan.files = ["a.rs", "b.rs"]
+            .into_iter()
+            .map(|path| TargetFile {
+                path: Utf8PathBuf::from(path),
+                absolute: Utf8PathBuf::from("/workspace").join(path),
+                package: "subject".to_owned(),
+                source: None,
+            })
+            .collect();
+        let files = plan.source_indices();
+        let scanned = super::super::Scanned {
+            sources: [
+                (Utf8PathBuf::from("b.rs"), "pub fn b() {}\n".to_owned()),
+                (Utf8PathBuf::from("absent.rs"), "ignored".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            ..super::super::Scanned::default()
+        };
+
+        plan.absorb_indexed(scanned, &files);
+
+        assert_eq!(plan.files[0].source, None);
+        assert_eq!(plan.files[1].source.as_deref(), Some("pub fn b() {}\n"));
     }
 
     #[test]

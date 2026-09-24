@@ -19,7 +19,7 @@ pub use progress::Progress;
 #[doc(inline)]
 pub use styler::Styler;
 #[doc(inline)]
-pub use summary::{Listings, session_notes, skipped, summarize};
+pub use summary::{Listings, Stats, session_notes, skipped, summarize};
 pub(crate) use text::{bytes, score, unstyled};
 #[doc(inline)]
 pub use text::{continuation, quantity};

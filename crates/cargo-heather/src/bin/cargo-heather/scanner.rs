@@ -33,7 +33,7 @@ pub(crate) fn find_source_files(project_dir: &Path, exclude_path: Option<&Path>,
         })
         .collect();
 
-    let mut files: Vec<PathBuf> = WalkDir::new(project_dir)
+    let files: Vec<PathBuf> = WalkDir::new(project_dir)
         .into_iter()
         .filter_entry(|entry| !should_skip_dir(entry))
         .filter_map(Result::ok)
@@ -65,6 +65,10 @@ pub(crate) fn find_source_files(project_dir: &Path, exclude_path: Option<&Path>,
         })
         .collect();
 
+    sort_files(files)
+}
+
+fn sort_files(mut files: Vec<PathBuf>) -> Vec<PathBuf> {
     files.sort();
     files
 }
@@ -81,4 +85,59 @@ fn should_skip_dir(entry: &walkdir::DirEntry) -> bool {
     }
 
     SKIP_DIRS.iter().any(|skip| name == *skip)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn config(exclude: Vec<String>) -> HeatherConfig {
+        HeatherConfig {
+            header_text: "header".to_owned(),
+            scripts: true,
+            dot_toml: false,
+            exclude,
+        }
+    }
+
+    #[test]
+    fn sort_files_orders_paths() {
+        assert_eq!(
+            sort_files(vec!["z.rs".into(), "a.rs".into(), "m.rs".into()]),
+            vec![PathBuf::from("a.rs"), PathBuf::from("m.rs"), PathBuf::from("z.rs")]
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    fn non_directory_entries_are_not_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("target");
+        std::fs::write(&path, "file").unwrap();
+        let entry = WalkDir::new(tmp.path())
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|entry| entry.path() == path)
+            .unwrap();
+
+        assert!(!should_skip_dir(&entry));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    fn any_matching_exclusion_removes_a_file() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("included")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("excluded")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("other-exclusion")).unwrap();
+        std::fs::write(tmp.path().join("included/a.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("excluded/b.rs"), "").unwrap();
+        let cfg = config(vec!["other-exclusion".to_owned(), "excluded".to_owned()]);
+
+        let files = find_source_files(tmp.path(), None, &cfg);
+
+        assert_eq!(files, vec![tmp.path().join("included/a.rs")]);
+    }
 }

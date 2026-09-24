@@ -25,7 +25,9 @@
 
 #[cfg(test)]
 use core::cell::RefCell;
-use std::fs::{self, File};
+#[cfg(test)]
+use std::fs;
+use std::fs::File;
 use std::io::ErrorKind;
 use std::process::{Command, Stdio};
 
@@ -44,15 +46,8 @@ use crate::{HashMap, HashSet, Result};
 /// The artifact's file name.
 const FILE: &str = "gamma-hints.yaml";
 
-/// The JSON artifact accepted only as migration input.
-const LEGACY_FILE: &str = "gamma-hints.json";
-
 /// What the artifact format is; a file written by any other version is ignored rather than read.
 const VERSION: u32 = 3;
-
-/// JSON formats accepted during the YAML transition.
-const LEGACY_FLAT_VERSION: u32 = 1;
-const LEGACY_GROUPED_VERSION: u32 = 2;
 
 /// Producer prefix written into artifacts whose schema cargo-gamma owns.
 const TOOL_PREFIX: &str = "cargo-gamma ";
@@ -61,11 +56,6 @@ const TOOL_PREFIX: &str = "cargo-gamma ";
 #[must_use]
 pub fn path(root: &Utf8Path) -> Utf8PathBuf {
     root.join(FILE)
-}
-
-/// Where the read-only migration input lives.
-fn legacy_path(root: &Utf8Path) -> Utf8PathBuf {
-    root.join(LEGACY_FILE)
 }
 
 /// Repository provenance for one generated artifact.
@@ -170,51 +160,6 @@ struct Hint {
     unviable: bool,
 }
 
-#[derive(Deserialize)]
-struct Header {
-    version: u32,
-    tool: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LegacyFlatHints {
-    #[serde(rename = "version")]
-    _version: u32,
-    #[serde(rename = "tool")]
-    _tool: String,
-    #[serde(rename = "context")]
-    _context: super::record::ContextDigest,
-    mutants: Vec<LegacyHint>,
-    #[serde(default)]
-    generalized: GeneralizedHints,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LegacyHint {
-    file: Utf8PathBuf,
-    id: MutantId,
-    #[serde(default)]
-    killer: Option<Killer>,
-    #[serde(default)]
-    unviable: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LegacyGroupedHints {
-    #[serde(rename = "version")]
-    _version: u32,
-    #[serde(rename = "tool")]
-    _tool: String,
-    #[serde(rename = "context")]
-    _context: super::record::ContextDigest,
-    files: Vec<FileHints>,
-    #[serde(default)]
-    generalized: GeneralizedHints,
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GroupedHints {
@@ -314,15 +259,7 @@ impl Hints {
     /// version control must never become.
     #[must_use]
     pub fn load(root: &Utf8Path) -> Self {
-        let current = path(root);
-
-        match fs::metadata(current.as_std_path()) {
-            Ok(_) => return Self::read(&current).unwrap_or_default(),
-            Err(cause) if cause.kind() == ErrorKind::NotFound => {}
-            Err(_unreadable) => return Self::default(),
-        }
-
-        Self::read_legacy(&legacy_path(root)).unwrap_or_default()
+        Self::read(&path(root)).unwrap_or_default()
     }
 
     /// Reads the artifact and captures the exact YAML generation used by an explicit promotion.
@@ -330,34 +267,23 @@ impl Hints {
     /// Automatic consumers remain best-effort through [`Hints::load`]. Promotion is different:
     /// replacing knowledge the command could not understand would make ordinary incremental
     /// promotion destructive. `replace` is the explicit opt-in to discard such knowledge.
-    pub(crate) fn load_for_promotion(root: &Utf8Path, replace: bool) -> Result<(Self, Option<String>, Option<String>)> {
+    pub(crate) fn load_for_promotion(root: &Utf8Path, replace: bool) -> Result<(Self, Option<String>)> {
         let current = path(root);
 
         if let Some(text) = existing_text(&current)? {
             return match Self::parse(&text) {
-                Some(hints) if replace || hints.generalized.supported().is_some() => Ok((hints, Some(text), None)),
+                Some(hints) if replace || hints.generalized.supported().is_some() => Ok((hints, Some(text))),
                 Some(_hints) => Err(error!(
                     "`{current}` contains generalized hints this cargo-gamma cannot preserve, so incremental promotion would not preserve them; use `--replace` to discard them explicitly"
                 )),
-                None if replace => Ok((Self::default(), Some(text), None)),
+                None if replace => Ok((Self::default(), Some(text))),
                 None => Err(error!(
                     "`{current}` is not a supported cargo-gamma hints artifact, so incremental promotion would not preserve it; use `--replace` to discard it explicitly"
                 )),
             };
         }
 
-        let legacy = legacy_path(root);
-        let Some(text) = existing_text(&legacy)? else {
-            return Ok((Self::default(), None, None));
-        };
-
-        match Self::parse_legacy(&text) {
-            Some(hints) => Ok((hints, None, Some(text))),
-            None if replace => Ok((Self::default(), None, Some(text))),
-            None => Err(error!(
-                "`{legacy}` is not a supported cargo-gamma hints artifact, so incremental promotion would not preserve it; use `--replace` to discard it explicitly"
-            )),
-        }
+        Ok((Self::default(), None))
     }
 
     /// Whether this workspace has never had a checked-in hints artifact.
@@ -365,10 +291,9 @@ impl Hints {
     /// An unreadable, corrupt or foreign-version file is present even though it cannot provide
     /// hints, so it must not trigger advice to create the file that is already there.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn is_missing(root: &Utf8Path) -> bool {
-        [path(root), legacy_path(root)]
-            .iter()
-            .all(|path| matches!(fs::metadata(path.as_std_path()), Err(cause) if cause.kind() == ErrorKind::NotFound))
+        matches!(fs::metadata(path(root).as_std_path()), Err(cause) if cause.kind() == ErrorKind::NotFound)
     }
 
     /// Reads and validates the artifact at `path`, or nothing when it cannot be trusted.
@@ -383,64 +308,12 @@ impl Hints {
             return None;
         }
 
-        let header = yaml_serde::from_str::<Header>(text).ok()?;
-
-        if header.version != VERSION || !Self::valid_tool(&header.tool) {
+        let grouped = yaml_serde::from_str::<GroupedHints>(text).ok()?;
+        if grouped.version != VERSION || !Self::valid_tool(&grouped.tool) {
             return None;
         }
 
-        Self::from_grouped(yaml_serde::from_str(text).ok()?)
-    }
-
-    /// Reads either historical JSON schema while no YAML artifact exists.
-    fn read_legacy(path: &Utf8Path) -> Option<Self> {
-        let text = input::text(File::open(path.as_std_path()).ok()?).ok()??;
-
-        Self::parse_legacy(&text)
-    }
-
-    fn parse_legacy(text: &str) -> Option<Self> {
-        let header = serde_json::from_str::<Header>(text).ok()?;
-
-        if !Self::valid_tool(&header.tool) {
-            return None;
-        }
-
-        match header.version {
-            LEGACY_GROUPED_VERSION => Self::from_legacy_grouped(serde_json::from_str(text).ok()?),
-            LEGACY_FLAT_VERSION => Some(Self::from_legacy_flat(serde_json::from_str(text).ok()?)),
-            _unsupported => None,
-        }
-    }
-
-    fn from_legacy_flat(legacy: LegacyFlatHints) -> Self {
-        let mut hints = Self {
-            version: VERSION,
-            tool: format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION")),
-            context: HintContext::default(),
-            mutants: legacy
-                .mutants
-                .into_iter()
-                .map(|hint| Hint {
-                    file: hint.file,
-                    id: hint.id,
-                    killer: hint.killer,
-                    unviable: hint.unviable,
-                })
-                .collect(),
-            generalized: legacy.generalized,
-        };
-        hints.normalize();
-        hints
-    }
-
-    fn from_legacy_grouped(grouped: LegacyGroupedHints) -> Option<Self> {
-        Self::from_files(
-            grouped.files,
-            grouped.generalized,
-            HintContext::default(),
-            format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION")),
-        )
+        Self::from_grouped(grouped)
     }
 
     fn from_grouped(grouped: GroupedHints) -> Option<Self> {
@@ -540,33 +413,10 @@ impl Hints {
     /// resolved to a valid commit ID.
     pub(crate) fn merged(existing: &Self, promoted: Self, replacement: impl Into<Replacement>, root: &Utf8Path) -> Result<Self> {
         let replace = matches!(replacement.into(), Replacement::WholeArtifact);
-
-        if !replace && existing.generalized.supported().is_none() && (existing.generalized.version != 0 || !existing.generalized.is_empty())
-        {
-            return Err(error!(
-                "the existing artifact contains a generalized hints version this cargo-gamma cannot preserve incrementally; use `--replace` to discard it explicitly"
-            ));
-        }
-
-        let migrating = !path(root).exists() && legacy_path(root).exists();
-        let mut merged = if replace {
-            promoted
-        } else {
-            let mut output = existing.clone();
-
-            for incoming in promoted.mutants {
-                output.mutants.retain(|hint| hint.file != incoming.file || hint.id != incoming.id);
-                output.mutants.push(incoming);
-            }
-
-            output.generalized = merge_generalized(&output.generalized, &promoted.generalized)?;
-            output
-        };
-
-        merged.normalize();
+        let mut merged = Self::merged_knowledge(existing, promoted, replace)?;
         let knowledge_changed = !merged.same_knowledge(existing);
 
-        if knowledge_changed || migrating || replace {
+        if knowledge_changed || replace {
             merged.context = HintContext::capture(root)?;
             merged.version = VERSION;
             merged.tool = format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION"));
@@ -577,33 +427,128 @@ impl Hints {
         Ok(merged)
     }
 
+    /// Merges a campaign promotion, replacing exact knowledge for every mutant that campaign
+    /// selected while retaining entries outside its population.
+    pub(crate) fn merged_record(existing: &Self, promoted: Self, record: &RunRecord, root: &Utf8Path) -> Result<Self> {
+        let mut retained = existing.clone();
+        let selected: HashSet<(Utf8PathBuf, MutantId)> = record
+            .promotion_entries()
+            .into_iter()
+            .filter(|(_file, _id, outcome)| replaces_exact_hint(*outcome))
+            .map(|(file, id, _outcome)| (file, id))
+            .collect();
+        retained
+            .mutants
+            .retain(|hint| !selected.contains(&(hint.file.clone(), hint.id.clone())));
+
+        let mut merged = Self::merged_knowledge(&retained, promoted, false)?;
+        let knowledge_changed = !merged.same_knowledge(existing);
+
+        if knowledge_changed {
+            merged.context = HintContext::capture(root)?;
+            merged.version = VERSION;
+            merged.tool = format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION"));
+        } else {
+            merged.context.clone_from(&existing.context);
+        }
+
+        Ok(merged)
+    }
+
+    /// Whether ordinary promotion would change scheduling knowledge for this campaign.
+    #[must_use]
+    pub(crate) fn record_promotion_is_useful(root: &Utf8Path, record: &RunRecord) -> bool {
+        let Ok((existing, _generation)) = Self::load_for_promotion(root, false) else {
+            return false;
+        };
+        let (promoted, _omitted) = Self::promoted_record(record);
+        let selected: HashSet<(Utf8PathBuf, MutantId)> = record
+            .promotion_entries()
+            .into_iter()
+            .filter(|(_file, _id, outcome)| replaces_exact_hint(*outcome))
+            .map(|(file, id, _outcome)| (file, id))
+            .collect();
+        let mut exact: std::collections::BTreeMap<_, _> = existing
+            .mutants
+            .iter()
+            .filter(|hint| !selected.contains(&(hint.file.clone(), hint.id.clone())))
+            .cloned()
+            .map(|hint| ((hint.file.clone(), hint.id.clone()), hint))
+            .collect();
+        exact.extend(
+            promoted
+                .mutants
+                .into_iter()
+                .map(|hint| ((hint.file.clone(), hint.id.clone()), hint)),
+        );
+
+        exact.into_values().ne(existing.mutants)
+    }
+
+    fn merged_knowledge(existing: &Self, promoted: Self, replace: bool) -> Result<Self> {
+        if !replace && existing.generalized.supported().is_none() && (existing.generalized.version != 0 || !existing.generalized.is_empty())
+        {
+            return Err(error!(
+                "the existing artifact contains a generalized hints version this cargo-gamma cannot preserve incrementally; use `--replace` to discard it explicitly"
+            ));
+        }
+
+        let mut merged = if replace {
+            promoted
+        } else {
+            let mut output = existing.clone();
+            let mut exact: std::collections::BTreeMap<(Utf8PathBuf, MutantId), Hint> = output
+                .mutants
+                .into_iter()
+                .map(|hint| ((hint.file.clone(), hint.id.clone()), hint))
+                .collect();
+            exact.extend(
+                promoted
+                    .mutants
+                    .into_iter()
+                    .map(|hint| ((hint.file.clone(), hint.id.clone()), hint)),
+            );
+            output.mutants = exact.into_values().collect();
+
+            output.generalized = merge_generalized(&output.generalized, &promoted.generalized)?;
+            output
+        };
+
+        merged.normalize();
+        Ok(merged)
+    }
+
     /// Counts logical entry changes without treating provenance refresh as scheduling knowledge.
     #[must_use]
     pub fn changes_from(&self, previous: &Self) -> HintChanges {
         let mut changes = HintChanges::default();
 
-        compare_entries(
+        compare_entries_or_preserved(
             &previous.mutants,
             &self.mutants,
-            |left, right| left.file == right.file && left.id == right.id,
+            |entry| (entry.file.clone(), entry.id.clone()),
             &mut changes,
         );
-        compare_entries(
+        compare_entries_or_preserved(
             &previous.generalized.items,
             &self.generalized.items,
-            |left, right| left.file == right.file && left.item == right.item,
+            |entry| (entry.file.clone(), entry.item.clone()),
             &mut changes,
         );
-        compare_entries(
+        compare_entries_or_preserved(
             &previous.generalized.binaries,
             &self.generalized.binaries,
-            |left, right| left.file == right.file,
+            |entry| entry.file.clone(),
             &mut changes,
         );
 
-        let previous_reach = reach_entries(&previous.generalized);
-        let current_reach = reach_entries(&self.generalized);
-        compare_entries(&previous_reach, &current_reach, |(left, _), (right, _)| left == right, &mut changes);
+        if previous.generalized.reach == self.generalized.reach && previous.generalized.test_sets == self.generalized.test_sets {
+            changes.preserved += self.generalized.reach.len();
+        } else {
+            let previous_reach = reach_entries(&previous.generalized);
+            let current_reach = reach_entries(&self.generalized);
+            compare_entries(&previous_reach, &current_reach, |(site, _)| site.clone(), &mut changes);
+        }
 
         changes
     }
@@ -663,22 +608,108 @@ impl Hints {
         }
     }
 
+    /// Builds an artifact directly from persisted campaign state.
+    ///
+    /// Exact probes outside the current campaign population, including version-9 probes whose
+    /// records carried no source path, are omitted explicitly rather than guessed. Their
+    /// generalized and compiler-ordering knowledge can still be promoted.
+    #[must_use]
+    pub(crate) fn promoted_record(record: &RunRecord) -> (Self, usize) {
+        let probes = record.probes();
+        let mut omitted = 0;
+        let mut mutants = Vec::new();
+        let mut recorded = std::collections::BTreeSet::new();
+
+        for (file, id, outcome) in record.promotion_entries() {
+            let _ = recorded.insert(id.clone());
+            if !replaces_exact_hint(outcome) {
+                continue;
+            }
+
+            let killer = probes.get(&id).cloned();
+            let unviable = tier_of(outcome) == Some(Tier::Ordering);
+            if !unviable && killer.is_none() {
+                continue;
+            }
+
+            mutants.push(Hint {
+                file,
+                id,
+                killer,
+                unviable,
+            });
+        }
+
+        // A probe outside the promotable population has no matching persisted promotion entry.
+        omitted += probes.keys().filter(|id| !recorded.contains(*id)).count();
+        mutants.sort_by(|left, right| left.file.cmp(&right.file).then_with(|| left.id.cmp(&right.id)));
+        mutants.dedup_by(|left, right| left.file == right.file && left.id == right.id);
+
+        (
+            Self {
+                version: VERSION,
+                tool: format!("{TOOL_PREFIX}{}", env!("CARGO_PKG_VERSION")),
+                context: HintContext::default(),
+                mutants,
+                generalized: Self::generalized_for_record(&record.generalized(), record),
+            },
+            omitted,
+        )
+    }
+
     fn valid_tool(tool: &str) -> bool {
         tool.strip_prefix(TOOL_PREFIX).is_some_and(|version| !version.trim().is_empty())
     }
 
     fn generalized_for(source: &GeneralizedHints, population: &[Mutant]) -> GeneralizedHints {
-        let files: HashSet<&Utf8Path> = population.iter().map(|mutant| mutant.file.as_ref()).collect();
-        let items: HashSet<(&Utf8Path, &str)> = population
+        let files: HashSet<Utf8PathBuf> = population.iter().map(|mutant| mutant.file.to_path_buf()).collect();
+        let items: HashSet<(Utf8PathBuf, String)> = population
             .iter()
-            .map(|mutant| (mutant.file.as_ref(), mutant.item_path.as_ref()))
+            .map(|mutant| (mutant.file.to_path_buf(), mutant.item_path.to_string()))
             .collect();
         let sites: HashSet<super::record::SiteIdentity> = population.iter().map(super::record::SiteIdentity::from_mutant).collect();
+        Self::generalized_for_identities(source, &files, &items, &sites)
+    }
+
+    fn generalized_for_record(source: &GeneralizedHints, record: &RunRecord) -> GeneralizedHints {
+        let selected: HashSet<MutantId> = record.promotion_entries().into_iter().map(|(_file, id, _outcome)| id).collect();
+        let outcomes: Vec<_> = record
+            .outcomes()
+            .into_iter()
+            .filter(|outcome| selected.contains(&outcome.id))
+            .collect();
+        let files: HashSet<Utf8PathBuf> = outcomes.iter().map(|outcome| outcome.file.clone()).collect();
+        let items: HashSet<(Utf8PathBuf, String)> = outcomes
+            .iter()
+            .filter_map(|outcome| outcome.site.as_ref().map(|site| (outcome.file.clone(), site.item.clone())))
+            .collect();
+        let sites: HashSet<super::record::SiteIdentity> = outcomes
+            .into_iter()
+            .filter_map(|outcome| {
+                outcome.site.map(|site| super::record::SiteIdentity {
+                    file: outcome.file,
+                    item: site.item,
+                    mutator: site.mutator,
+                    normalized_text: site.digest,
+                    occurrence: site.occurrence,
+                })
+            })
+            .collect();
+
+        Self::generalized_for_identities(source, &files, &items, &sites)
+    }
+
+    fn generalized_for_identities(
+        source: &GeneralizedHints,
+        files: &HashSet<Utf8PathBuf>,
+        items: &HashSet<(Utf8PathBuf, String)>,
+        sites: &HashSet<super::record::SiteIdentity>,
+    ) -> GeneralizedHints {
         let mut output = GeneralizedHints::empty_supported();
         output.items = source
             .items
             .iter()
-            .filter(|entry| items.contains(&(entry.file.as_path(), entry.item.as_str())))
+            .filter(|entry| items.contains(&(entry.file.clone(), entry.item.clone())))
             .cloned()
             .collect();
         output
@@ -687,7 +718,7 @@ impl Hints {
         output.binaries = source
             .binaries
             .iter()
-            .filter(|entry| files.contains(entry.file.as_path()))
+            .filter(|entry| files.contains(&entry.file))
             .cloned()
             .collect();
         output.binaries.sort_by(|left, right| left.file.cmp(&right.file));
@@ -702,6 +733,7 @@ impl Hints {
             tests.dedup();
             reach.push((cluster.site.clone(), tests));
         }
+
         reach.sort_by(|(left, _), (right, _)| site_key(left).cmp(&site_key(right)));
         output.test_sets = reach.iter().map(|(_, tests)| tests.clone()).collect();
         output
@@ -742,17 +774,20 @@ impl Hints {
     /// rather than absorbed.
     pub fn write(&self, path: &Utf8Path) -> Result<Promotion> {
         let before = existing_text(path)?;
-        let legacy = if before.is_none() {
-            existing_text(&legacy_path(path.parent().unwrap_or_else(|| Utf8Path::new("."))))?
-        } else {
-            None
-        };
-
-        self.write_from(path, before.as_deref(), legacy.as_deref())
+        self.write_from(path, before.as_deref())
     }
 
     /// Publishes against the exact generation from which this artifact was derived.
-    pub(crate) fn write_from(&self, path: &Utf8Path, before: Option<&str>, legacy_before: Option<&str>) -> Result<Promotion> {
+    pub(crate) fn write_from(&self, path: &Utf8Path, before: Option<&str>) -> Result<Promotion> {
+        self.write_from_with_lock(path, before, false)
+    }
+
+    /// Publishes against the caller's workspace lock.
+    pub(crate) fn write_from_locked(&self, path: &Utf8Path, before: Option<&str>) -> Result<Promotion> {
+        self.write_from_with_lock(path, before, true)
+    }
+
+    fn write_from_with_lock(&self, path: &Utf8Path, before: Option<&str>, locked: bool) -> Result<Promotion> {
         let text = self.rendered()?;
         let workspace = path.parent().unwrap_or_else(|| Utf8Path::new("."));
 
@@ -764,16 +799,15 @@ impl Hints {
         }
 
         if before == Some(text.as_str()) {
-            match remove_legacy(workspace, legacy_before)? {
-                LegacyRemoval::Removed => {}
-                LegacyRemoval::RemovedUndurable(cause) => return Err(cause),
-            }
             return Ok(self.promotion(false));
         }
 
-        match crate::elements::write_if_unchanged(workspace, path, before, &text)
-            .map_err(|cause| error!("could not write `{path}`").caused_by(cause))?
-        {
+        let publication = if locked {
+            crate::elements::write_if_unchanged_locked(path, before, &text)
+        } else {
+            crate::elements::write_if_unchanged(workspace, path, before, &text)
+        };
+        match publication.map_err(|cause| error!("could not write `{path}`").caused_by(cause))? {
             Publication::Conflict => {
                 return Err(error!(
                     "`{path}` changed while these hints were being promoted; the newer generation was left alone"
@@ -788,15 +822,8 @@ impl Hints {
         after_publication(path);
 
         match Self::verified(path, self) {
-            Ok(()) => {
-                match remove_legacy(workspace, legacy_before) {
-                    Ok(LegacyRemoval::Removed) => {}
-                    Ok(LegacyRemoval::RemovedUndurable(cause)) => return Err(cause),
-                    Err(cause) => return Err(restored(workspace, path, before, &text, cause)),
-                }
-                Ok(self.promotion(true))
-            }
-            Err(cause) => Err(restored(workspace, path, before, &text, cause)),
+            Ok(()) => Ok(self.promotion(true)),
+            Err(cause) => Err(restored(workspace, path, before, &text, cause, locked)),
         }
     }
 
@@ -837,6 +864,10 @@ impl Hints {
     }
 }
 
+fn replaces_exact_hint(outcome: Outcome) -> bool {
+    !matches!(outcome, Outcome::Pending | Outcome::NotBuilt | Outcome::Ignored)
+}
+
 /// Whether YAML is malformed or contains anchor or alias syntax.
 ///
 /// The generated format never emits references. Refusing them keeps parsing cost proportional to
@@ -874,52 +905,6 @@ fn existing_text(path: &Utf8Path) -> Result<Option<String>> {
             ),
         Err(cause) if cause.kind() == ErrorKind::NotFound => Ok(None),
         Err(cause) => Err(error!("`{path}` is already there and could not be read, so it must not be replaced").caused_by(cause)),
-    }
-}
-
-enum LegacyRemoval {
-    /// The legacy artifact was absent or its removal was durably committed.
-    Removed,
-    /// The legacy artifact was removed, but the parent-directory sync failed.
-    RemovedUndurable(crate::error::Error),
-}
-
-#[cfg(test)]
-thread_local! {
-    static FAIL_LEGACY_REMOVAL_DURABILITY: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-fn fail_next_legacy_removal_durability() {
-    FAIL_LEGACY_REMOVAL_DURABILITY.set(true);
-}
-
-#[cfg(test)]
-fn injected_legacy_removal_failure() -> bool {
-    FAIL_LEGACY_REMOVAL_DURABILITY.replace(false)
-}
-
-#[cfg(not(test))]
-const fn injected_legacy_removal_failure() -> bool {
-    false
-}
-
-/// Removes the read-only JSON migration input after YAML is known to be complete.
-fn remove_legacy(workspace: &Utf8Path, before: Option<&str>) -> Result<LegacyRemoval> {
-    let Some(before) = before else {
-        return Ok(LegacyRemoval::Removed);
-    };
-    let legacy = legacy_path(workspace);
-
-    match crate::elements::remove_if_unchanged(workspace, &legacy, before)? {
-        Publication::Published if injected_legacy_removal_failure() => Ok(LegacyRemoval::RemovedUndurable(error!(
-            "could not remove `{legacy}`: injected directory sync failure"
-        ))),
-        Publication::Published => Ok(LegacyRemoval::Removed),
-        Publication::Conflict => Err(error!(
-            "`{legacy}` changed while its YAML replacement was being published; the YAML artifact is authoritative and the changed JSON file was left in place"
-        )),
-        Publication::PublishedUndurable(cause) => Ok(LegacyRemoval::RemovedUndurable(cause)),
     }
 }
 
@@ -967,40 +952,53 @@ impl From<&Hints> for GroupedHints {
 }
 
 fn merge_generalized(existing: &GeneralizedHints, incoming: &GeneralizedHints) -> Result<GeneralizedHints> {
-    let mut output = match existing.supported() {
-        Some(existing) => existing.clone(),
-        None if existing.version == 0 && existing.is_empty() => GeneralizedHints::empty_supported(),
-        None => return Err(error!("the existing generalized hints version cannot be merged")),
+    let existing_supported = existing.supported();
+    if existing_supported.is_none() && (existing.version != 0 || !existing.is_empty()) {
+        return Err(error!("the existing generalized hints version cannot be merged"));
+    }
+    let incoming_supported = incoming.supported();
+    if incoming_supported.is_none() && (incoming.version != 0 || !incoming.is_empty()) {
+        return Err(error!("the promoted generalized hints version cannot be merged"));
+    }
+
+    let (existing, incoming) = match (existing_supported, incoming_supported) {
+        (Some(existing), Some(incoming)) => (existing, incoming),
+        (Some(existing), None) => return Ok(existing.clone()),
+        (None, Some(incoming)) => return Ok(incoming.clone()),
+        (None, None) => return Ok(GeneralizedHints::empty_supported()),
     };
-    let incoming = match incoming.supported() {
-        Some(incoming) => incoming.clone(),
-        None if incoming.version == 0 && incoming.is_empty() => return Ok(output),
-        None => return Err(error!("the promoted generalized hints version cannot be merged")),
-    };
+    if existing == incoming {
+        return Ok(existing.clone());
+    }
+
+    let mut output = existing.clone();
+    let incoming = incoming.clone();
     let incoming_reach = reach_entries(&incoming);
 
-    for hint in incoming.items {
-        output.items.retain(|known| known.file != hint.file || known.item != hint.item);
-        output.items.push(hint);
-    }
-
-    for hint in incoming.binaries {
-        output.binaries.retain(|known| known.file != hint.file);
-        output.binaries.push(hint);
-    }
-
-    let mut reach = reach_entries(&output);
-
-    for (site, tests) in incoming_reach {
-        reach.retain(|(known, _tests)| known != &site);
-        reach.push((site, tests));
-    }
-
+    let items: crate::HashMap<_, _> = incoming
+        .items
+        .into_iter()
+        .map(|hint| ((hint.file.clone(), hint.item.clone()), hint))
+        .collect();
+    output
+        .items
+        .retain(|hint| !items.contains_key(&(hint.file.clone(), hint.item.clone())));
+    output.items.extend(items.into_values());
     output
         .items
         .sort_by(|left, right| left.file.cmp(&right.file).then_with(|| left.item.cmp(&right.item)));
+
+    let binaries: crate::HashMap<_, _> = incoming.binaries.into_iter().map(|hint| (hint.file.clone(), hint)).collect();
+    output.binaries.retain(|hint| !binaries.contains_key(&hint.file));
+    output.binaries.extend(binaries.into_values());
     output.binaries.sort_by(|left, right| left.file.cmp(&right.file));
-    rebuild_reach(&mut output, reach);
+
+    let mut reach = crate::HashMap::default();
+    for (site, tests) in reach_entries(&output) {
+        let _first = reach.entry(site).or_insert(tests);
+    }
+    reach.extend(incoming_reach);
+    rebuild_reach(&mut output, reach.into_iter().collect());
     Ok(output)
 }
 
@@ -1029,33 +1027,55 @@ fn rebuild_reach(generalized: &mut GeneralizedHints, mut reach: Vec<(super::reco
         .test_sets
         .sort_by(|left, right| left.iter().map(killer_key).cmp(right.iter().map(killer_key)));
     generalized.test_sets.dedup();
-    generalized.reach.clear();
+    let test_sets: crate::HashMap<&[Killer], u32> = generalized
+        .test_sets
+        .iter()
+        .enumerate()
+        .filter_map(|(index, tests)| u32::try_from(index).ok().map(|index| (tests.as_slice(), index)))
+        .collect();
+    let clusters = reach
+        .into_iter()
+        .filter_map(|(site, tests)| {
+            test_sets
+                .get(tests.as_slice())
+                .copied()
+                .map(|test_set| super::record::ReachCluster { site, test_set })
+        })
+        .collect();
+    generalized.reach = clusters;
+}
 
-    for (site, tests) in reach {
-        let index = generalized
-            .test_sets
-            .iter()
-            .position(|known| known == &tests)
-            .expect("every retained reach set was inserted from the same normalized entries");
-        if let Ok(test_set) = u32::try_from(index) {
-            generalized.reach.push(super::record::ReachCluster { site, test_set });
-        }
+fn compare_entries_or_preserved<T: PartialEq, K: Eq + core::hash::Hash>(
+    previous: &[T],
+    current: &[T],
+    key: impl Fn(&T) -> K,
+    changes: &mut HintChanges,
+) {
+    if previous == current {
+        changes.preserved += current.len();
+    } else {
+        compare_entries(previous, current, key, changes);
     }
 }
 
-fn compare_entries<T: PartialEq>(previous: &[T], current: &[T], same_key: impl Fn(&T, &T) -> bool, changes: &mut HintChanges) {
-    for entry in previous {
-        match current.iter().find(|candidate| same_key(entry, candidate)) {
+fn compare_entries<T: PartialEq, K: Eq + core::hash::Hash>(
+    previous: &[T],
+    current: &[T],
+    key: impl Fn(&T) -> K,
+    changes: &mut HintChanges,
+) {
+    let previous: crate::HashMap<K, &T> = previous.iter().map(|entry| (key(entry), entry)).collect();
+    let current: crate::HashMap<K, &T> = current.iter().map(|entry| (key(entry), entry)).collect();
+
+    for (entry_key, entry) in &previous {
+        match current.get(entry_key) {
             Some(candidate) if candidate == entry => changes.preserved += 1,
             Some(_updated) => changes.updated += 1,
             None => changes.removed += 1,
         }
     }
 
-    changes.added += current
-        .iter()
-        .filter(|entry| !previous.iter().any(|candidate| same_key(candidate, entry)))
-        .count();
+    changes.added += current.keys().filter(|entry_key| !previous.contains_key(*entry_key)).count();
 }
 
 fn killer_key(killer: &Killer) -> (&str, &str, &str) {
@@ -1085,11 +1105,22 @@ fn restored(
     before: Option<&str>,
     published: &str,
     cause: crate::error::Error,
+    locked: bool,
 ) -> crate::error::Error {
-    let restored = before.map_or_else(
-        || crate::elements::remove_if_unchanged(workspace, path, published),
-        |text| crate::elements::write_if_unchanged(workspace, path, Some(published), text),
-    );
+    let restored = if locked {
+        let destination = crate::paths::physical(path);
+        destination.and_then(|destination| {
+            before.map_or_else(
+                || crate::elements::remove_if_unchanged_locked(&destination, path, published),
+                |text| crate::elements::write_if_unchanged_locked(path, Some(published), text),
+            )
+        })
+    } else {
+        before.map_or_else(
+            || crate::elements::remove_if_unchanged(workspace, path, published),
+            |text| crate::elements::write_if_unchanged(workspace, path, Some(published), text),
+        )
+    };
 
     match restored {
         Ok(Publication::Published) => cause,
@@ -1291,6 +1322,16 @@ mod tests {
         assert!(!Hints::from_grouped(grouped).expect("valid references").is_empty());
     }
 
+    #[test]
+    fn a_large_artifact_is_scanned_and_deserialized_in_parallel() {
+        let mut text = artifact(&[]).rendered().expect("artifact");
+        text.push_str("# ");
+        text.push_str(&"padding".repeat(40_000));
+
+        assert!(text.len() > 256 * 1024);
+        assert!(Hints::parse(&text).is_some());
+    }
+
     /// Somebody else's YAML at this name is not this tool's file, and must not be read as one.
     #[test]
     fn a_foreign_artifact_is_no_hints_at_all() {
@@ -1345,6 +1386,30 @@ mod tests {
     }
 
     #[test]
+    fn persisted_promotion_uses_recorded_paths_and_omits_unmapped_legacy_probes() {
+        let (_dir, root) = workspace("hints-promote-record-");
+        let _record = recorded(&root);
+        let record_path = root.join("last-gamma-run.json");
+        let mut legacy: serde_json::Value = serde_json::from_str(&fs::read_to_string(&record_path).expect("record")).expect("record JSON");
+        legacy["version"] = serde_json::json!(9);
+        for entry in legacy["files"][0]["mutants"].as_array_mut().expect("entries") {
+            let _removed = entry.as_object_mut().expect("entry").remove("site");
+        }
+        fs::write(&record_path, serde_json::to_vec_pretty(&legacy).expect("legacy record")).expect("legacy bytes");
+        let record = RunRecord::load_required(&root).expect("version-9 record");
+
+        let (hints, omitted) = Hints::promoted_record(&record);
+
+        assert_eq!(hints.ordering(), vec!["unviable"]);
+        assert_eq!(hints.mutants[0].file, Utf8Path::new("src/lib.rs"));
+        assert_eq!(omitted, 1);
+        assert!(
+            !hints.probes().contains_key("killed"),
+            "a legacy probe with no persisted source identity must not be assigned a guessed path"
+        );
+    }
+
+    #[test]
     fn promotion_carries_generalized_tiers_for_a_clean_checkout() {
         let (_dir, root) = workspace("hints-generalized-promote-");
         let record = recorded(&root);
@@ -1355,6 +1420,7 @@ mod tests {
                 item: "subject::changed".to_owned(),
                 candidates: vec![super::super::record::RankedHint {
                     candidate: killer("tests::likely"),
+                    seeds: 1,
                     hits: 3,
                     misses: 1,
                     measured_ms: 12,
@@ -1374,6 +1440,79 @@ mod tests {
 
         assert_eq!(clean.items, generalized.items);
         assert_eq!(clean.items[0].candidates[0].candidate.test, "tests::likely");
+    }
+
+    #[test]
+    fn record_promotion_drops_generalized_knowledge_outside_the_campaign_population() {
+        let (_dir, root) = workspace("hints-promote-record-scope-");
+        let selected = mutant("selected", "src/lib.rs");
+        let outside = mutant("outside", "src/other.rs");
+        let selected_item = selected.item_path.to_string();
+        let mut record = RunRecord::from_run(&root, core::slice::from_ref(&selected), &context_of(), &[root.join("src")]);
+        record.replace_knowledge(
+            HashMap::default(),
+            GeneralizedHints {
+                version: record::GENERALIZED_HINTS_VERSION,
+                items: vec![
+                    record::ItemHints {
+                        file: selected.file.to_path_buf(),
+                        item: selected_item.clone(),
+                        candidates: Vec::new(),
+                    },
+                    record::ItemHints {
+                        file: outside.file.to_path_buf(),
+                        item: outside.item_path.to_string(),
+                        candidates: Vec::new(),
+                    },
+                ],
+                binaries: vec![
+                    record::FileBinaryHints {
+                        file: selected.file.to_path_buf(),
+                        candidates: Vec::new(),
+                    },
+                    record::FileBinaryHints {
+                        file: outside.file.to_path_buf(),
+                        candidates: Vec::new(),
+                    },
+                ],
+                test_sets: vec![vec![killer("tests::selected")], vec![killer("tests::outside")]],
+                reach: vec![
+                    record::ReachCluster {
+                        site: record::SiteIdentity::from_mutant(&selected),
+                        test_set: 0,
+                    },
+                    record::ReachCluster {
+                        site: record::SiteIdentity::from_mutant(&outside),
+                        test_set: 1,
+                    },
+                ],
+            },
+        );
+
+        let (promoted, omitted) = Hints::promoted_record(&record);
+
+        assert_eq!(omitted, 0);
+        assert_eq!(
+            promoted
+                .generalized
+                .items
+                .iter()
+                .map(|entry| (entry.file.clone(), entry.item.clone()))
+                .collect::<Vec<_>>(),
+            vec![(selected.file.to_path_buf(), selected_item)]
+        );
+        assert_eq!(
+            promoted
+                .generalized
+                .binaries
+                .iter()
+                .map(|entry| entry.file.clone())
+                .collect::<Vec<_>>(),
+            vec![selected.file.to_path_buf()]
+        );
+        assert_eq!(promoted.generalized.reach.len(), 1);
+        assert_eq!(promoted.generalized.reach[0].site, record::SiteIdentity::from_mutant(&selected));
+        assert_eq!(promoted.generalized.test_sets, vec![vec![killer("tests::selected")]]);
     }
 
     #[test]
@@ -1425,27 +1564,11 @@ mod tests {
         );
         fs::write(path(&root), &text).expect("artifact without generalized tiers");
 
-        let (loaded, generation, legacy_generation) =
-            Hints::load_for_promotion(&root, false).expect("omitted optional tiers are supported");
+        let (loaded, generation) = Hints::load_for_promotion(&root, false).expect("omitted optional tiers are supported");
 
         assert!(loaded.is_empty());
         assert!(loaded.generalized.supported().is_some());
         assert_eq!(generation.as_deref(), Some(text.as_str()));
-        assert!(legacy_generation.is_none());
-    }
-
-    #[test]
-    fn current_yaml_does_not_depend_on_reading_the_legacy_path() {
-        let (_dir, root) = workspace("hints-current-with-blocked-legacy-");
-        let current = artifact(&[]);
-        current.write(&path(&root)).expect("current YAML artifact");
-        fs::create_dir(legacy_path(&root)).expect("legacy path blocker");
-
-        let (loaded, generation, legacy_generation) = Hints::load_for_promotion(&root, false).expect("current YAML is authoritative");
-
-        assert_eq!(loaded, current);
-        assert!(generation.is_some());
-        assert!(legacy_generation.is_none());
     }
 
     #[test]
@@ -1594,136 +1717,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_schema_loads_semantically_and_rewrites_as_grouped() {
-        let (_dir, root) = workspace("hints-legacy-");
-        commit_fixture(&root);
-        let legacy = serde_json::json!({
-            "version": LEGACY_FLAT_VERSION,
-            "tool": "cargo-gamma legacy",
-            "context": context_of(),
-            "mutants": [
-                { "file": "src/lib.rs", "id": "killed", "killer": killer("tests::caught") },
-                { "file": "src/lib.rs", "id": "unviable", "unviable": true },
-            ],
-            "generalized": GeneralizedHints::empty_supported(),
-        });
-        fs::write(legacy_path(&root), serde_json::to_vec_pretty(&legacy).expect("legacy JSON")).expect("legacy artifact");
-        let loaded = Hints::load(&root);
-
-        assert_eq!(loaded.probes().get("killed"), Some(&killer("tests::caught")));
-        assert_eq!(loaded.ordering(), ["unviable"]);
-        let migrated = Hints::merged(&loaded, Hints::default(), false, &root).expect("legacy merge");
-        assert!(migrated.write(&path(&root)).expect("legacy rewrite").changed);
-        let yaml: yaml_serde::Value =
-            yaml_serde::from_str(&fs::read_to_string(path(&root)).expect("rewritten artifact")).expect("new YAML");
-        assert_eq!(yaml["version"].as_u64(), Some(u64::from(VERSION)));
-        assert!(yaml.get("files").is_some());
-        assert!(yaml.get("mutants").is_none());
-        assert_eq!(yaml["context"].as_mapping().expect("context").len(), 2);
-        assert!(!legacy_path(&root).exists());
-    }
-
-    #[test]
-    fn legacy_migration_compares_against_the_json_generation_used_for_the_merge() {
-        let (_dir, root) = workspace("hints-legacy-generation-");
-        let legacy = serde_json::json!({
-            "version": LEGACY_FLAT_VERSION,
-            "tool": "cargo-gamma legacy",
-            "context": context_of(),
-            "mutants": [
-                { "file": "src/lib.rs", "id": "old", "killer": killer("tests::old") },
-            ],
-        });
-        let legacy_path = legacy_path(&root);
-        fs::write(&legacy_path, serde_json::to_vec_pretty(&legacy).expect("legacy JSON")).expect("legacy artifact");
-        let (loaded, yaml_generation, legacy_generation) = Hints::load_for_promotion(&root, false).expect("legacy promotion input");
-
-        fs::write(&legacy_path, "newer legacy generation").expect("concurrent legacy update");
-        let error = loaded
-            .write_from(&path(&root), yaml_generation.as_deref(), legacy_generation.as_deref())
-            .expect_err("stale migration must not supersede a newer JSON generation");
-
-        assert!(
-            error.to_string().contains("changed while its YAML replacement was being published"),
-            "{error}"
-        );
-        assert!(!path(&root).exists(), "the stale YAML publication must be rolled back");
-        assert_eq!(
-            fs::read_to_string(legacy_path).expect("newer legacy bytes"),
-            "newer legacy generation"
-        );
-    }
-
-    #[test]
-    fn legacy_migration_keeps_verified_yaml_when_json_removal_is_visible_but_undurable() {
-        let (_dir, root) = workspace("hints-legacy-removal-sync-");
-        let legacy = serde_json::json!({
-            "version": LEGACY_FLAT_VERSION,
-            "tool": "cargo-gamma legacy",
-            "context": context_of(),
-            "mutants": [
-                { "file": "src/lib.rs", "id": "old", "killer": killer("tests::old") },
-            ],
-        });
-        let legacy_path = legacy_path(&root);
-        fs::write(&legacy_path, serde_json::to_vec_pretty(&legacy).expect("legacy JSON")).expect("legacy artifact");
-        let (loaded, yaml_generation, legacy_generation) = Hints::load_for_promotion(&root, false).expect("legacy promotion input");
-        let merged = Hints::merged(&loaded, Hints::default(), false, &root).expect("legacy merge");
-
-        fail_next_legacy_removal_durability();
-        let error = merged
-            .write_from(&path(&root), yaml_generation.as_deref(), legacy_generation.as_deref())
-            .expect_err("the failed directory sync must be reported");
-
-        assert!(error.to_string().contains("injected directory sync failure"), "{error}");
-        assert!(!legacy_path.exists(), "the JSON name was already removed");
-        assert_eq!(
-            Hints::load(&root),
-            merged,
-            "the verified YAML must remain as the only surviving copy"
-        );
-    }
-
-    #[test]
-    fn grouped_json_schema_remains_readable_during_migration() {
-        let (_dir, root) = workspace("hints-legacy-grouped-");
-        let legacy = serde_json::json!({
-            "version": LEGACY_GROUPED_VERSION,
-            "tool": "cargo-gamma legacy",
-            "context": context_of(),
-            "files": [{
-                "path": "src/lib.rs",
-                "killers": [killer("tests::caught")],
-                "mutants": [{ "id": "killed", "killer": 0 }],
-            }],
-            "generalized": GeneralizedHints::empty_supported(),
-        });
-
-        fs::write(legacy_path(&root), serde_json::to_vec_pretty(&legacy).expect("legacy JSON")).expect("legacy artifact");
-
-        assert_eq!(Hints::load(&root).probes().get("killed"), Some(&killer("tests::caught")));
-    }
-
-    #[test]
-    fn a_present_yaml_artifact_is_authoritative_over_legacy_json() {
-        let (_dir, root) = workspace("hints-yaml-precedence-");
-        let legacy = serde_json::json!({
-            "version": LEGACY_FLAT_VERSION,
-            "tool": "cargo-gamma legacy",
-            "context": context_of(),
-            "mutants": [{ "file": "src/lib.rs", "id": "legacy", "killer": killer("tests::legacy") }],
-        });
-
-        fs::write(legacy_path(&root), serde_json::to_vec(&legacy).expect("legacy JSON")).expect("legacy artifact");
-        fs::write(path(&root), "not: a cargo-gamma artifact\n").expect("current artifact");
-
-        let loaded = Hints::load(&root);
-
-        assert!(loaded.is_empty(), "a corrupt authoritative YAML file fell back to stale JSON");
-        assert!(!loaded.probes().contains_key("legacy"));
-    }
-
-    #[test]
     fn unsupported_older_and_newer_versions_are_ignored() {
         let (_dir, root) = workspace("hints-unsupported-version-");
 
@@ -1773,6 +1766,7 @@ mod tests {
                     item: "subject::changed".to_owned(),
                     candidates: vec![record::RankedHint {
                         candidate: killer("tests::item"),
+                        seeds: 1,
                         hits: 3,
                         misses: 1,
                         measured_ms: 12,
@@ -1787,6 +1781,7 @@ mod tests {
                             package: "subject".to_owned(),
                             target: "lib".to_owned(),
                         },
+                        seeds: 1,
                         hits: 2,
                         misses: 0,
                         measured_ms: 8,
@@ -1928,11 +1923,10 @@ mod tests {
             assert!(error.to_string().contains("incremental promotion would not preserve"), "{error}");
             assert_eq!(fs::read_to_string(&current).expect("existing bytes"), text);
 
-            let (replacement, generation, legacy_generation) =
+            let (replacement, generation) =
                 Hints::load_for_promotion(&root, true).expect("explicit replacement may discard unknown knowledge");
             assert!(replacement.is_empty());
             assert_eq!(generation.as_deref(), Some(text.as_str()));
-            assert!(legacy_generation.is_none());
         }
     }
 
@@ -1942,14 +1936,14 @@ mod tests {
         let current = path(&root);
         let original = artifact(&[("src/lib.rs", "original", "tests::original")]);
         original.write(&current).expect("original generation");
-        let (_loaded, generation, legacy_generation) = Hints::load_for_promotion(&root, false).expect("promotion input");
+        let (_loaded, generation) = Hints::load_for_promotion(&root, false).expect("promotion input");
 
         let newer = artifact(&[("src/lib.rs", "newer", "tests::newer")]);
         newer.write(&current).expect("newer generation");
         let stale = artifact(&[("src/lib.rs", "stale", "tests::stale")]);
 
         let error = stale
-            .write_from(&current, generation.as_deref(), legacy_generation.as_deref())
+            .write_from(&current, generation.as_deref())
             .expect_err("a stale promotion must not replace the newer generation");
 
         assert!(
@@ -1971,6 +1965,18 @@ mod tests {
             .expect_err("the existing workspace claim must block the write");
 
         assert!(error.to_string().contains("already using"), "{error}");
+    }
+
+    #[test]
+    fn a_locked_hints_write_reuses_the_callers_workspace_lock() {
+        let (_dir, root) = workspace("hints-caller-lock-");
+        let path = path(&root);
+        let hints = artifact(&[("src/lib.rs", "mutant", "tests::caught")]);
+        let _held = crate::exec::claim_workspace(&root).expect("workspace lock");
+
+        hints.write_from_locked(&path, None).expect("publication under caller lock");
+
+        assert_eq!(Hints::load(&root), hints);
     }
 
     /// A directory sync failure happens after the hints file is visible. Promotion still reports
@@ -2128,6 +2134,187 @@ mod tests {
     }
 
     #[test]
+    fn campaign_promotion_removes_a_selected_mutants_disproven_exact_hint() {
+        let (_dir, root) = workspace("hints-merge-disproven-");
+        commit_fixture(&root);
+        let existing = artifact(&[
+            ("src/lib.rs", "stale", "tests::stale"),
+            ("src/other.rs", "outside", "tests::outside"),
+        ]);
+        let mut survivor = mutant("stale", "src/lib.rs");
+        survivor.outcome = Outcome::Survived;
+        RunRecord::from_run(&root, &[survivor], &context_of(), &[root.join("src")]).store(&root, &root);
+        let record = RunRecord::load(&root);
+        let (promoted, omitted) = Hints::promoted_record(&record);
+
+        let merged = Hints::merged_record(&existing, promoted, &record, &root).expect("campaign merge");
+
+        assert_eq!(omitted, 0);
+        assert_eq!(merged.probes().get("stale"), None);
+        assert_eq!(merged.probes().get("outside"), Some(&killer("tests::outside")));
+        assert_eq!(
+            merged.changes_from(&existing),
+            HintChanges {
+                added: 0,
+                updated: 0,
+                removed: 1,
+                preserved: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn narrow_campaign_promotion_preserves_a_carried_killed_mutants_exact_hint() {
+        let (_dir, root) = workspace("hints-merge-carried-");
+        fs::write(root.join("src/other.rs"), "fn outside() {}").expect("outside source");
+        commit_fixture(&root);
+        let existing = artifact(&[
+            ("src/lib.rs", "selected", "tests::selected"),
+            ("src/other.rs", "outside", "tests::outside"),
+        ]);
+        let mut outside = mutant("outside", "src/other.rs");
+        outside.outcome = Outcome::Killed;
+        outside.killed_by = Some("tests::outside".to_owned());
+        RunRecord::from_run(&root, &[outside], &context_of(), &[root.join("src")]).store(&root, &root);
+
+        let mut selected = mutant("selected", "src/lib.rs");
+        selected.outcome = Outcome::Survived;
+        RunRecord::from_run(&root, &[selected], &context_of(), &[root.join("src")]).store(&root, &root);
+        RunRecord::store_probes(&root, &HashMap::default());
+        let record = RunRecord::load(&root);
+        let (promoted, omitted) = Hints::promoted_record(&record);
+
+        let merged = Hints::merged_record(&existing, promoted, &record, &root).expect("narrow campaign merge");
+
+        assert_eq!(omitted, 0);
+        assert_eq!(merged.probes().get("selected"), None);
+        assert_eq!(merged.probes().get("outside"), Some(&killer("tests::outside")));
+    }
+
+    #[test]
+    fn unjudged_campaign_entries_preserve_existing_exact_hints() {
+        let (_dir, root) = workspace("hints-merge-unjudged-");
+        commit_fixture(&root);
+        let existing = artifact(&[
+            ("src/lib.rs", "pending", "tests::pending"),
+            ("src/lib.rs", "not-built", "tests::not_built"),
+            ("src/lib.rs", "ignored", "tests::ignored"),
+        ]);
+        let population: Vec<_> = [
+            ("pending", Outcome::Pending),
+            ("not-built", Outcome::NotBuilt),
+            ("ignored", Outcome::Ignored),
+        ]
+        .into_iter()
+        .map(|(id, outcome)| {
+            let mut mutant = mutant(id, "src/lib.rs");
+            mutant.outcome = outcome;
+            mutant
+        })
+        .collect();
+        RunRecord::store_probes(&root, &existing.probes());
+        RunRecord::from_run(&root, &population, &context_of(), &[root.join("src")]).store(&root, &root);
+        let record = RunRecord::load(&root);
+        let (promoted, omitted) = Hints::promoted_record(&record);
+        assert!(promoted.mutants.is_empty(), "unjudged cached probes are not promotion evidence");
+
+        let merged = Hints::merged_record(&existing, promoted, &record, &root).expect("campaign merge");
+
+        assert_eq!(omitted, 0);
+        assert_eq!(merged.probes(), existing.probes());
+        assert_eq!(
+            merged.changes_from(&existing),
+            HintChanges {
+                added: 0,
+                updated: 0,
+                removed: 0,
+                preserved: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn promotion_advice_requires_an_exact_or_build_order_delta() {
+        let (_dir, root) = workspace("hints-useful-promotion-");
+        let mut caught = mutant("caught", "src/lib.rs");
+        caught.outcome = Outcome::Killed;
+        RunRecord::from_run(&root, &[caught], &context_of(), &[root.join("src")]).store(&root, &root);
+        RunRecord::store_probes(&root, &core::iter::once(("caught".into(), killer("tests::caught"))).collect());
+        let record = RunRecord::load(&root);
+        let existing = artifact(&[("src/lib.rs", "caught", "tests::caught")]);
+        existing.write(&path(&root)).expect("existing hints");
+
+        assert!(!Hints::record_promotion_is_useful(&root, &record));
+
+        let stale = artifact(&[("src/lib.rs", "caught", "tests::stale")]);
+        stale.write(&path(&root)).expect("stale hints");
+
+        assert!(Hints::record_promotion_is_useful(&root, &record));
+    }
+
+    #[test]
+    fn large_change_accounting_uses_deterministic_keyed_entries() {
+        let entries = |updated: bool| {
+            (0..20_000)
+                .map(|index| Hint {
+                    file: format!("src/{:03}.rs", index % 100).into(),
+                    id: format!("mutant-{index:05}").into(),
+                    killer: Some(killer(if updated && index % 2 == 0 {
+                        "tests::updated"
+                    } else {
+                        "tests::original"
+                    })),
+                    unviable: false,
+                })
+                .collect()
+        };
+        let previous = Hints {
+            mutants: entries(false),
+            ..Hints::default()
+        };
+        let current = Hints {
+            mutants: entries(true),
+            ..Hints::default()
+        };
+
+        assert_eq!(
+            current.changes_from(&previous),
+            HintChanges {
+                added: 0,
+                updated: 10_000,
+                removed: 0,
+                preserved: 10_000,
+            }
+        );
+    }
+
+    #[test]
+    fn a_large_persisted_record_promotes_without_population_discovery() {
+        let (_dir, root) = workspace("hints-large-record-");
+        let population: Vec<_> = (0..10_000)
+            .map(|index| {
+                let mut entry = mutant(&format!("mutant-{index:05}"), "src/lib.rs");
+                entry.outcome = Outcome::CompileError;
+                entry
+            })
+            .collect();
+        let record = RunRecord::from_run(&root, &population, &context_of(), &[root.join("src")]);
+
+        let (promoted, omitted) = Hints::promoted_record(&record);
+
+        assert_eq!(omitted, 0);
+        assert_eq!(promoted.mutants.len(), 10_000);
+        assert_eq!(promoted.mutants.first().expect("first").id.as_str(), "mutant-00000");
+        assert_eq!(promoted.mutants.last().expect("last").id.as_str(), "mutant-09999");
+        assert!(
+            promoted
+                .mutants
+                .iter()
+                .all(|entry| entry.file == Utf8Path::new("src/lib.rs") && entry.unviable)
+        );
+    }
+
+    #[test]
     fn incremental_promotion_merges_generalized_entries_and_reinterns_reach_sets() {
         let (_dir, root) = workspace("hints-merge-generalized-");
         commit_fixture(&root);
@@ -2137,6 +2324,7 @@ mod tests {
         outside_site.item_path = "subject::outside".into();
         let ranked = |test: &str| record::RankedHint {
             candidate: killer(test),
+            seeds: 1,
             hits: 1,
             misses: 0,
             measured_ms: 1,
@@ -2197,6 +2385,37 @@ mod tests {
         assert_eq!(generalized.test_sets.len(), 2);
         assert!(generalized.test_sets.iter().any(|tests| tests == &[killer("tests::new_reach")]));
         assert!(generalized.test_sets.iter().any(|tests| tests == &[killer("tests::outside_reach")]));
+    }
+
+    #[test]
+    fn heavily_overlapping_generalized_reach_merges_by_identity() {
+        let site = |occurrence| record::SiteIdentity {
+            file: "src/lib.rs".into(),
+            item: "subject::item".to_owned(),
+            mutator: "binary.eq_to_ne".to_owned(),
+            normalized_text: format!("{occurrence:032x}"),
+            occurrence,
+        };
+        let reach: Vec<_> = (0..10_000)
+            .map(|occurrence| record::ReachCluster {
+                site: site(occurrence),
+                test_set: 0,
+            })
+            .collect();
+        let generation = GeneralizedHints {
+            version: record::GENERALIZED_HINTS_VERSION,
+            test_sets: vec![vec![killer("tests::reaches")]],
+            reach,
+            ..GeneralizedHints::empty_supported()
+        };
+
+        let merged = merge_generalized(&generation, &generation).expect("overlapping generations merge");
+
+        assert_eq!(merged.reach.len(), 10_000);
+        assert_eq!(merged.test_sets, vec![vec![killer("tests::reaches")]]);
+        assert!(merged.reach.iter().all(|cluster| cluster.test_set == 0));
+        assert_eq!(merged.reach.first().expect("first").site, site(0));
+        assert_eq!(merged.reach.last().expect("last").site, site(9_999));
     }
 
     #[test]

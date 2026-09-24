@@ -16,7 +16,9 @@ mod report;
 pub(crate) use digest::surviving_mutants;
 #[doc(inline)]
 pub use digest::{Digest, FileDigest, FrameworkDigest, MutantDigest, settled_mutants};
-pub(crate) use publication::{Publication, remove_if_unchanged, write_if_unchanged, write_streamed};
+pub(crate) use publication::{
+    Publication, remove_if_unchanged, remove_if_unchanged_locked, write_if_unchanged, write_if_unchanged_locked, write_streamed,
+};
 #[cfg(test)]
 pub(crate) use publication::{before_next_publication, fail_next_directory_sync, next_scratch_path};
 #[doc(inline)]
@@ -26,4 +28,4 @@ pub use report::{
     FileResult, Framework, Location, MergeProvenance, MutantResult, Position, Report, RunInfo, ShardInfo, SourceProvenance, Thresholds,
     VerdictProvenance, build, to_json, write_json,
 };
-pub(crate) use report::{supported_schema_version, validate_schema};
+pub(crate) use report::{build_from, supported_schema_version, validate_schema};

@@ -205,6 +205,7 @@ struct ExpressionParser<'a> {
     spec: &'a str,
     tokens: Vec<Token<'a>>,
     position: usize,
+    nesting: usize,
 }
 
 impl<'a> ExpressionParser<'a> {
@@ -215,6 +216,7 @@ impl<'a> ExpressionParser<'a> {
             spec,
             tokens: tokenize(spec)?,
             position: 0,
+            nesting: 0,
         })
     }
 
@@ -225,7 +227,7 @@ impl<'a> ExpressionParser<'a> {
         if self.tokens.iter().all(|token| matches!(token, Token::Atom(_))) {
             return Predicate::parse_atom(self.spec.trim());
         }
-        let expression = self.parse_or(0)?;
+        let expression = self.parse_or()?;
         if let Some(token) = self.peek() {
             return Err(invalid(
                 self.spec,
@@ -235,11 +237,11 @@ impl<'a> ExpressionParser<'a> {
         Ok(expression)
     }
 
-    fn parse_or(&mut self, depth: usize) -> Result<Predicate, EachError> {
-        let mut operands = vec![self.parse_and(depth)?];
+    fn parse_or(&mut self) -> Result<Predicate, EachError> {
+        let mut operands = vec![self.parse_and()?];
         while self.peek() == Some(Token::Or) {
             self.advance();
-            operands.push(self.parse_and(depth)?);
+            operands.push(self.parse_and()?);
         }
         Ok(if operands.len() == 1 {
             operands.pop().expect("length checked above to contain exactly one operand")
@@ -248,11 +250,11 @@ impl<'a> ExpressionParser<'a> {
         })
     }
 
-    fn parse_and(&mut self, depth: usize) -> Result<Predicate, EachError> {
-        let mut operands = vec![self.parse_unary(depth)?];
+    fn parse_and(&mut self) -> Result<Predicate, EachError> {
+        let mut operands = vec![self.parse_unary()?];
         while self.peek() == Some(Token::And) {
             self.advance();
-            operands.push(self.parse_unary(depth)?);
+            operands.push(self.parse_unary()?);
         }
         Ok(if operands.len() == 1 {
             operands.pop().expect("length checked above to contain exactly one operand")
@@ -261,10 +263,7 @@ impl<'a> ExpressionParser<'a> {
         })
     }
 
-    fn parse_unary(&mut self, depth: usize) -> Result<Predicate, EachError> {
-        if depth > Self::MAX_NESTING {
-            return Err(invalid(self.spec, "expression nesting exceeds 64 levels"));
-        }
+    fn parse_unary(&mut self) -> Result<Predicate, EachError> {
         match self.peek() {
             Some(Token::Atom(atom)) => {
                 self.advance();
@@ -272,11 +271,17 @@ impl<'a> ExpressionParser<'a> {
             }
             Some(Token::Not) => {
                 self.advance();
-                Ok(Predicate::Not(Box::new(self.parse_unary(depth + 1)?)))
+                self.enter_nesting()?;
+                let operand = self.parse_unary();
+                self.nesting -= 1;
+                Ok(Predicate::Not(Box::new(operand?)))
             }
             Some(Token::LeftParen) => {
                 self.advance();
-                let expression = self.parse_or(depth + 1)?;
+                self.enter_nesting()?;
+                let expression = self.parse_or();
+                self.nesting -= 1;
+                let expression = expression?;
                 if self.peek() != Some(Token::RightParen) {
                     return Err(invalid(self.spec, "unclosed `(`"));
                 }
@@ -298,36 +303,41 @@ impl<'a> ExpressionParser<'a> {
         self.tokens.get(self.position).copied()
     }
 
-    #[mutants::skip] // Backward cursor mutations loop forever; parser tests cover every observable transition.
     fn advance(&mut self) {
         self.position += 1;
+    }
+
+    fn enter_nesting(&mut self) -> Result<(), EachError> {
+        if self.nesting >= Self::MAX_NESTING {
+            return Err(invalid(self.spec, "expression nesting exceeds 64 levels"));
+        }
+        self.nesting += 1;
+        Ok(())
     }
 }
 
 fn tokenize(spec: &str) -> Result<Vec<Token<'_>>, EachError> {
     let mut tokens = Vec::new();
     let mut atom_start = None;
-    let mut quoted = false;
-    let mut escaped = false;
-    for (index, character) in spec.char_indices() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                quoted = false;
-            }
-            continue;
-        }
+    let mut characters = spec.char_indices();
+    while let Some((index, character)) = characters.next() {
         if character == '"' {
-            quoted = true;
             if atom_start.is_none() {
                 atom_start = Some(index);
             }
-            continue;
-        }
-        if character.is_whitespace() || matches!(character, '(' | ')') {
+            let mut closed = false;
+            while let Some((_, quoted_character)) = characters.next() {
+                if quoted_character == '\\' {
+                    characters.next();
+                } else if quoted_character == '"' {
+                    closed = true;
+                    break;
+                }
+            }
+            if !closed {
+                return Err(invalid(spec, "unclosed double quote"));
+            }
+        } else if character.is_whitespace() || matches!(character, '(' | ')') {
             if let Some(start) = atom_start.take() {
                 tokens.push(classify_token(&spec[start..index]));
             }
@@ -342,9 +352,6 @@ fn tokenize(spec: &str) -> Result<Vec<Token<'_>>, EachError> {
     }
     if let Some(start) = atom_start {
         tokens.push(classify_token(&spec[start..]));
-    }
-    if quoted {
-        return Err(invalid(spec, "unclosed double quote"));
     }
     Ok(tokens)
 }
@@ -564,6 +571,66 @@ mod tests {
     }
 
     #[test]
+    fn malformed_filter_errors_are_exact() {
+        let cases = [
+            ("", "empty expression"),
+            (
+                "nonsense",
+                "expected one of: lib, bin, target-kind:<kind>, publishable, feature:<name>, dep:<name>, metadata:<key>[=<value>]",
+            ),
+            (
+                "target-kind:future",
+                "unknown target kind; expected one of: lib, rlib, dylib, cdylib, staticlib, proc-macro, bin, example, test, bench, custom-build",
+            ),
+            ("feature:", "empty feature name"),
+            ("dep:", "empty dependency name"),
+            ("metadata:", "empty metadata key"),
+            ("metadata:a..b", "metadata key must be a dotted path with non-empty segments"),
+            (r#"metadata:role=value"suffix"#, "unclosed double quote"),
+            (r#"metadata:role="unclosed"#, "unclosed double quote"),
+            (
+                r#"metadata:role="bad\q""#,
+                r#"unsupported escape `\q` in metadata value; expected `\"` or `\\`"#,
+            ),
+            ("lib and", "unexpected end of expression; expected a predicate, `not`, or `(`"),
+            ("(lib", "unclosed `(`"),
+        ];
+        for (expression, reason) in cases {
+            let error = Predicate::parse(expression).expect_err(expression);
+            assert_eq!(error.to_string(), format!("invalid filter expression `{expression}`: {reason}"));
+        }
+    }
+
+    #[test]
+    fn metadata_quote_boundaries_and_escapes_are_exact() {
+        assert_eq!(
+            Predicate::parse(r#"metadata:role="a \"quoted\" \\ path""#).expect("quoted value"),
+            Predicate::MetadataEquals {
+                key: "role".to_owned(),
+                value: "a \"quoted\" \\ path".to_owned(),
+            }
+        );
+
+        let trailing_quote = parse_metadata_value("metadata:role=value\"", r#"value""#).expect_err("quote only at the end is invalid");
+        assert_eq!(
+            trailing_quote.to_string(),
+            r#"invalid filter expression `metadata:role=value"`: double quotes must surround the complete metadata value"#
+        );
+
+        let trailing_escape = parse_metadata_value("metadata:role", r#""trailing\""#).expect_err("a quoted value cannot end in an escape");
+        assert_eq!(
+            trailing_escape.to_string(),
+            r"invalid filter expression `metadata:role`: trailing `\` in metadata value"
+        );
+
+        let unclosed = parse_metadata_value("metadata:role=\"value", "\"value").expect_err("a leading quote requires a closing quote");
+        assert_eq!(
+            unclosed.to_string(),
+            "invalid filter expression `metadata:role=\"value`: unclosed double-quoted metadata value"
+        );
+    }
+
+    #[test]
     fn expression_nesting_accepts_64_levels_but_rejects_65() {
         let maximum = format!("{}lib{}", "(".repeat(64), ")".repeat(64));
         assert_eq!(
@@ -583,6 +650,48 @@ mod tests {
 
         let too_many_negations = format!("{}lib", "not ".repeat(65));
         Predicate::parse(&too_many_negations).expect_err("65 negations exceed the limit");
+    }
+
+    #[test]
+    fn mixed_parenthesis_and_negation_depth_uses_one_level_per_operator() {
+        let accepted = format!("{}{}lib{}", "(".repeat(32), "not ".repeat(32), ")".repeat(32));
+        Predicate::parse(&accepted).expect("32 parentheses plus 32 negations are within the limit");
+
+        let rejected = format!("{}{}lib{}", "(".repeat(33), "not ".repeat(32), ")".repeat(33));
+        assert_eq!(
+            Predicate::parse(&rejected)
+                .expect_err("65 total nesting levels must fail")
+                .to_string(),
+            format!("invalid filter expression `{rejected}`: expression nesting exceeds 64 levels")
+        );
+
+        let sequential = format!(
+            "{}lib{} and {}bin{}",
+            "(".repeat(64),
+            ")".repeat(64),
+            "(".repeat(64),
+            ")".repeat(64)
+        );
+        Predicate::parse(&sequential).expect("nesting from one operand must not leak into the next");
+
+        let sequential_negations = format!("{}lib and {}bin", "not ".repeat(64), "not ".repeat(64));
+        Predicate::parse(&sequential_negations).expect("negation nesting from one operand must not leak into the next");
+    }
+
+    #[test]
+    fn tokenizer_keeps_boolean_syntax_inside_escaped_quotes() {
+        assert_eq!(
+            tokenize(r#"metadata:role="left \" and right" or bin"#).expect("tokenize"),
+            [Token::Atom(r#"metadata:role="left \" and right""#), Token::Or, Token::Atom("bin"),]
+        );
+        assert_eq!(
+            tokenize("not(lib)").expect("tokenize adjacent punctuation"),
+            [Token::Not, Token::LeftParen, Token::Atom("lib"), Token::RightParen]
+        );
+        assert_eq!(
+            tokenize(r#""quoted atom" and lib"#).expect("tokenize leading quote"),
+            [Token::Atom(r#""quoted atom""#), Token::And, Token::Atom("lib")]
+        );
     }
 
     #[test]
