@@ -605,24 +605,31 @@ mod tests {
     }
 
     #[test]
-    fn semver_check_compares_against_the_pr_branch_baseline() {
+    fn semver_check_compares_locked_rustdoc_against_the_pr_branch_baseline() {
         let (_, body) = CHECK_FILES
             .iter()
             .find(|(path, _)| *path == "justfiles/anvil/checks/semver-check.just")
             .expect("semver check template is registered");
 
         // The recipe must resolve the PR target branch via the shared
-        // resolver _anvil-base-ref, and pass it to cargo-semver-checks
-        // as the baseline rather than comparing against the last crates.io release.
+        // resolver _anvil-base-ref, build each revision with its own lockfile,
+        // and compare the resulting rustdoc JSON artifacts directly.
         for needle in [
             "_anvil-base-ref",
             "git rev-parse --verify \"$base^{commit}\"",
-            "git cat-file -e $baselineManifest",
+            "git worktree add --detach $baselineRoot $baseSha",
+            "git worktree remove --force $baselineRoot",
             "$stableArgs = {{_anvil_stable_toolchain_args}}",
-            "cargo @stableArgs semver-checks --package $p --baseline-rev $base",
+            "cargo '+{{ rust_nightly }}' rustdoc @currentLockArgs",
+            "cargo '+{{ rust_nightly }}' rustdoc @baselineLockArgs",
+            "cargo @stableArgs semver-checks --current-rustdoc $currentJson --baseline-rustdoc $baselineJson",
         ] {
             assert!(body.contains(needle), "semver check template missing '{needle}'");
         }
+        assert!(
+            !body.contains("--baseline-rev"),
+            "semver check must not ask cargo-semver-checks to resolve the baseline"
+        );
     }
 
     #[test]
