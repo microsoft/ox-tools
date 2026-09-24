@@ -742,6 +742,29 @@ pub fn workdir(prefix: &str) -> tempfile::TempDir {
         .expect("the temporary directory should be creatable")
 }
 
+/// Creates a private temporary directory outside the repository checkout.
+///
+/// Redirected-cache fixtures must not inherit permissions from the checkout: containerized build
+/// agents may mount it under a non-sticky shared directory, which is exactly an unsafe cache
+/// ancestry the production check must reject.
+#[must_use]
+pub fn private_system_tempdir(prefix: &str) -> tempfile::TempDir {
+    let mut builder = tempfile::Builder::new();
+
+    builder.prefix(prefix);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+
+    builder
+        .tempdir()
+        .expect("the redirected-cache fixture should be creatable in the system temporary directory")
+}
+
 /// Announces that a test is standing down, and says why.
 ///
 /// A test that returns early because the host cannot support it is indistinguishable, in the run
