@@ -109,6 +109,14 @@ toml = { version = "1.1.4", default-features = false }
 toml_edit = { version = "0.25.13", default-features = false, features = ["parse", "display"] }
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
+# Not used directly: this bounds the `unicode-ident` that `ra-ap-rustc_lexer` resolves.
+# That crate has a `const` assertion requiring `unicode_ident::UNICODE_VERSION` to equal
+# `unicode_properties::UNICODE_VERSION`, but depends on `unicode-ident = "1.0.22"`, which
+# admits 1.0.25+ (Unicode 18.0.0) while the newest `unicode-properties` (0.1.4) is still
+# Unicode 17.0.0. Any fresh resolution therefore fails to compile with E0080. Drop this
+# entry once `unicode-properties` ships Unicode 18 or `ra-ap-rustc_lexer` tightens its
+# own requirement.
+unicode-ident = { version = ">=1.0.22, <1.0.25", default-features = false }
 url = { version = "2.5.8", default-features = false }
 vu128 = { version = "1.1.0", default-features = false }
 walkdir = { version = "2.5.0", default-features = false }

@@ -30,6 +30,14 @@ allowed_external_types = []
 # public rustdoc for cargo-doc2readme to turn into a README.
 disable = true
 
+# `unicode-ident` is a deliberate version pin, never referenced from this crate's code.
+# See the dependency comment below.
+[package.metadata.cargo-udeps.ignore]
+normal = ["unicode-ident"]
+
+[package.metadata.unused-deps]
+allowed = ["unicode-ident"]
+
 # Coverage threshold slightly below the repo-wide 100% default.
 #
 # On Linux this crate is at 100%: every network-backed provider is driven against a
@@ -114,6 +122,10 @@ terminal_size = { workspace = true }
 tick = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "process", "time"] }
 toml = { workspace = true, features = ["parse", "serde", "display"] }
+# Never named in this crate's code. It is here only to bound the `unicode-ident` that
+# `ra_ap_syntax` -> `ra-ap-rustc_lexer` resolves; see the catalog entry in the workspace
+# manifest for why. Removing it breaks every consumer that resolves dependencies freshly.
+unicode-ident = { workspace = true }
 url = { workspace = true }
 vu128 = { workspace = true }
 walkdir = { workspace = true }

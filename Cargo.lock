@@ -507,6 +507,7 @@ dependencies = [
  "tick",
  "tokio",
  "toml",
+ "unicode-ident",
  "url",
  "vu128",
  "walkdir",
