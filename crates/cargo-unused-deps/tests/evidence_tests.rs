@@ -29,13 +29,19 @@ fn binary() -> PathBuf {
         .join(format!("cargo-unused-deps{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// The rustdoc beside the active rustc, found without assuming rustup manages it.
+///
+/// Honors `RUSTC` like the implementation, so the injected rustdoc matches its compiler.
 fn rustdoc() -> PathBuf {
-    let output = Command::new("rustup")
-        .args(["which", "rustdoc"])
+    let output = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+        .args(["--print", "sysroot"])
         .output()
-        .expect("failed to ask rustup for rustdoc");
-    assert!(output.status.success(), "rustup could not find rustdoc");
-    PathBuf::from(String::from_utf8(output.stdout).expect("rustdoc path must be UTF-8").trim())
+        .expect("failed to ask rustc for its sysroot");
+    assert!(output.status.success(), "rustc could not report its sysroot");
+    let sysroot = String::from_utf8(output.stdout).expect("the sysroot must be UTF-8");
+    Path::new(sysroot.trim())
+        .join("bin")
+        .join(format!("rustdoc{}", std::env::consts::EXE_SUFFIX))
 }
 
 #[test]

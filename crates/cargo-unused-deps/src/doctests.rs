@@ -237,30 +237,35 @@ pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, sh
     read_captures(&capture)
 }
 
-/// Resolve the rustdoc selected by the current rustup toolchain before replacing it.
+/// Resolve the rustdoc that ships with the active rustc before replacing it.
+///
+/// The sysroot is asked of rustc rather than of rustup because not every
+/// toolchain is managed by rustup, and it keeps rustdoc from the same toolchain
+/// as the compiler the shim runs.
 fn selected_rustdoc() -> Result<OsString> {
     if let Some(rustdoc) = std::env::var_os("RUSTDOC") {
         return Ok(rustdoc);
     }
-    let output = Command::new("rustup")
-        .args(["which", "rustdoc"])
+    let rustc = tool_or_default(std::env::var_os("RUSTC"), "rustc");
+    let output = Command::new(rustc)
+        .args(["--print", "sysroot"])
         .output()
-        .into_app_err("failed to ask rustup for the selected rustdoc")?;
-    rustdoc_from_rustup(output.status.success(), &output.stdout, &output.stderr)
+        .into_app_err("failed to ask rustc for its sysroot")?;
+    rustdoc_in_sysroot(output.status.success(), &output.stdout, &output.stderr)
 }
 
-fn rustdoc_from_rustup(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<OsString> {
+fn rustdoc_in_sysroot(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<OsString> {
     if !success {
-        ohno::bail!(
-            "rustup could not resolve the selected rustdoc:\n{}",
-            String::from_utf8_lossy(stderr).trim()
-        );
+        ohno::bail!("rustc could not report its sysroot:\n{}", String::from_utf8_lossy(stderr).trim());
     }
-    let path = String::from_utf8_lossy(stdout).trim().to_owned();
-    if path.is_empty() {
-        ohno::bail!("rustup returned an empty rustdoc path");
+    let sysroot = String::from_utf8_lossy(stdout).trim().to_owned();
+    if sysroot.is_empty() {
+        ohno::bail!("rustc reported an empty sysroot");
     }
-    Ok(OsString::from(path))
+    Ok(Path::new(&sysroot)
+        .join("bin")
+        .join(format!("rustdoc{}", std::env::consts::EXE_SUFFIX))
+        .into_os_string())
 }
 
 /// Use an environment-selected tool or its conventional executable name.
@@ -309,7 +314,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DoctestEvidence, PackageDoctests, clear_capture, read_captures, record, rustdoc_from_rustup, stable_diagnostic_args,
+        DoctestEvidence, PackageDoctests, clear_capture, read_captures, record, rustdoc_in_sysroot, stable_diagnostic_args,
         tool_or_default, unused_name,
     };
 
@@ -386,12 +391,16 @@ mod tests {
     }
 
     #[test]
-    fn rustup_must_return_a_nonempty_rustdoc_path() {
-        rustdoc_from_rustup(false, b"", b"not installed").expect_err("a failed rustup invocation is an error");
-        rustdoc_from_rustup(true, b"  \n", b"").expect_err("an empty path is an error");
+    fn rustdoc_is_found_in_a_nonempty_sysroot() {
+        let failed = rustdoc_in_sysroot(false, b"", b"no toolchain").expect_err("a failed rustc invocation is an error");
+        assert!(failed.to_string().contains("no toolchain"), "unexpected error: {failed}");
+        rustdoc_in_sysroot(true, b"  \n", b"").expect_err("an empty sysroot is an error");
         assert_eq!(
-            rustdoc_from_rustup(true, b"toolchain/rustdoc\n", b"").expect("a path is valid"),
-            "toolchain/rustdoc"
+            rustdoc_in_sysroot(true, b"toolchain\n", b"").expect("a sysroot is valid"),
+            Path::new("toolchain")
+                .join("bin")
+                .join(format!("rustdoc{}", std::env::consts::EXE_SUFFIX))
+                .into_os_string()
         );
     }
 
