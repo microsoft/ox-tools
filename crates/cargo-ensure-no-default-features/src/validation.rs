@@ -55,6 +55,9 @@ fn validate_deps_table(
     }
 }
 
+/// Invalid-dependency messages, dependency names found, and section labels checked.
+type ValidationOutcome = (Vec<String>, Vec<String>, Vec<&'static str>);
+
 /// Validates all dependencies in the given Cargo.toml content.
 ///
 /// Checks `[workspace.dependencies]` if a `[workspace]` section exists,
@@ -67,7 +70,7 @@ fn validate_deps_table(
 /// * A vector of error messages for invalid dependencies
 /// * A vector of all dependency names found
 /// * A vector of section labels that were checked (e.g. `"[workspace.dependencies]"`, `"[dependencies]"`)
-pub fn validate_dependencies(content: &str, exceptions: &[String]) -> Result<(Vec<String>, Vec<String>, Vec<&'static str>), AppError> {
+pub fn validate_dependencies(content: &str, exceptions: &[String]) -> Result<ValidationOutcome, AppError> {
     let parsed: toml::Value = toml::from_str(content).into_app_err("Failed to parse Cargo.toml")?;
 
     let has_workspace = parsed.get("workspace").is_some();
