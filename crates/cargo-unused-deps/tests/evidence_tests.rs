@@ -30,8 +30,10 @@ fn binary() -> PathBuf {
 }
 
 /// The rustdoc beside the active rustc, found without assuming rustup manages it.
+///
+/// Honors `RUSTC` like the implementation, so the injected rustdoc matches its compiler.
 fn rustdoc() -> PathBuf {
-    let output = Command::new("rustc")
+    let output = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
         .args(["--print", "sysroot"])
         .output()
         .expect("failed to ask rustc for its sysroot");
