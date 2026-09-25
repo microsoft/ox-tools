@@ -40,6 +40,7 @@ const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/e
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const APRZ: &str = include_str!("../templates/justfiles/anvil/checks/aprz.just");
 const MUTANTS_DIFF: &str = include_str!("../templates/justfiles/anvil/checks/mutants-diff.just");
+const MUTANTS_FULL: &str = include_str!("../templates/justfiles/anvil/checks/mutants-full.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
 const REGENERATE_WORKFLOW: &str = include_str!("../../../.github/workflows/regenerate-check.yml");
 const CONTAINER: &str = include_str!("../templates/justfiles/anvil/container.just");
@@ -2664,6 +2665,204 @@ fn aprz_without_a_token_warns_and_still_runs() {
     // The point of warning rather than throwing: the check still runs.
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(calls.contains("aprz deps"), "cargo aprz must still be invoked:\n{calls}");
+}
+
+const MUTANTS_SELECTOR_JUSTFILE: &str = r#"set unstable
+set shell := ["anvil-test-no-shell-available"]
+set windows-shell := ["anvil-test-no-shell-available"]
+import 'helpers.just'
+"#;
+
+#[test]
+fn mutants_config_selection_is_shell_independent_and_root_relative() {
+    if Command::new("just").arg("--version").output().is_err() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("workspace with space's");
+    let nested = root.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    write(&root.join("Justfile"), MUTANTS_SELECTOR_JUSTFILE);
+    write(&root.join("helpers.just"), HELPERS);
+    write(
+        &root.join(".cargo/mutants.toml"),
+        "the selector must not parse native configuration",
+    );
+    let host = Command::new("just")
+        .arg("--justfile")
+        .arg(root.join("Justfile"))
+        .args(["--evaluate", "_anvil_mutants_platform_config"])
+        .current_dir(&nested)
+        .output()
+        .unwrap();
+    assert!(host.status.success(), "{}", String::from_utf8_lossy(&host.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&host.stdout).trim(),
+        format!(".cargo/mutants.{}.toml", std::env::consts::OS)
+    );
+    for platform in ["windows", "linux", "macos"] {
+        let os_config = format!(".cargo/mutants.{platform}.toml");
+        write(&nested.join(&os_config), "nested config must not select a workspace config");
+        for exists in [false, true] {
+            if exists {
+                write(&root.join(&os_config), "the selector only tests existence");
+            }
+            let selected = Command::new("just")
+                .arg("--justfile")
+                .arg(root.join("Justfile"))
+                .arg("--evaluate")
+                .arg(format!("_anvil_mutants_platform_config={os_config}"))
+                .arg("_anvil_mutants_config_arg")
+                .current_dir(&nested)
+                .output()
+                .unwrap();
+            assert!(selected.status.success(), "{}", String::from_utf8_lossy(&selected.stderr));
+            assert_eq!(
+                String::from_utf8_lossy(&selected.stdout).trim(),
+                if exists { format!("--config={os_config}") } else { String::new() },
+                "selection must not require a shell or depend on the invocation directory"
+            );
+        }
+        fs::remove_file(root.join(os_config)).unwrap();
+    }
+}
+
+#[test]
+fn mutants_recipes_select_only_the_host_config_and_preserve_exit_codes() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[
+            ("helpers.just", HELPERS),
+            ("impact.just", IMPACT),
+            ("mutants-diff.just", MUTANTS_DIFF),
+            ("mutants-full.just", MUTANTS_FULL),
+        ],
+        &[
+            "anvil-tool-cargo-mutants-validate-prereqs",
+            "anvil-tool-cargo-mutants-install installer=\"install\"",
+            "anvil-impact",
+        ],
+    );
+    let root = tmp.path();
+    let log = root.join("cargo.log");
+    let os_config = format!(".cargo/mutants.{}.toml", std::env::consts::OS);
+    let other = if cfg!(windows) { "linux" } else { "windows" };
+    write(&root.join(".cargo/mutants.toml"), "");
+    write(&root.join(format!(".cargo/mutants.{other}.toml")), "");
+    for exists in [false, true] {
+        if exists {
+            write(&root.join(&os_config), "");
+        }
+        for recipe in ["anvil-mutants-diff", "anvil-mutants-full"] {
+            for native_exit in ["0", ARBITRARY_FAILURE_EXIT] {
+                write(&log, "");
+                let output = run_just(
+                    root,
+                    &[recipe],
+                    &[
+                        ("FAKE_CARGO_LOG", log.as_os_str()),
+                        ("FAKE_CARGO_DEFAULT_EXIT", OsStr::new(native_exit)),
+                        ("BASE_REF", OsStr::new("fixture-base")),
+                        ("RUNNER_TEMP", root.as_os_str()),
+                    ],
+                );
+                let calls = fs::read_to_string(&log).unwrap();
+                if cfg!(windows) && cfg!(target_arch = "aarch64") {
+                    assert!(output.status.success());
+                    assert!(calls.is_empty(), "Windows ARM must still skip cargo-mutants");
+                    continue;
+                }
+                assert_eq!(
+                    output.status.code(),
+                    Some(native_exit.parse().unwrap()),
+                    "{recipe} must preserve the native exit code: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let mutants = calls.lines().filter(|line| line.starts_with("mutants ")).collect::<Vec<_>>();
+                assert_eq!(mutants.len(), 1, "{calls}");
+                assert!(mutants[0].contains("--no-shuffle --jobs 0"), "{calls}");
+                assert!(
+                    mutants[0].contains(if recipe == "anvil-mutants-full" {
+                        "--workspace"
+                    } else {
+                        "--in-diff"
+                    }),
+                    "{calls}"
+                );
+                assert_eq!(mutants[0].contains("--config="), exists, "{calls}");
+                if exists {
+                    assert!(mutants[0].ends_with(&format!("--config={os_config}")), "{calls}");
+                }
+            }
+        }
+    }
+    seed_include(root, "affected", "--skip");
+    write(&log, "");
+    let skipped = run_just(root, &["anvil-mutants-diff"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
+    assert!(skipped.status.success(), "{}", String::from_utf8_lossy(&skipped.stderr));
+    assert!(fs::read_to_string(log).unwrap().is_empty(), "an empty impact scope must still skip");
+}
+
+#[test]
+fn mutants_native_platform_config_replaces_common_config_without_merging() {
+    if Command::new("just").arg("--version").output().is_err()
+        || !Command::new("cargo")
+            .args(["mutants", "--version"])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping native config integration: just or cargo-mutants is unavailable");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    write(&root.join("Justfile"), MUTANTS_SELECTOR_JUSTFILE);
+    write(&root.join("helpers.just"), HELPERS);
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"native-config-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n",
+    );
+    write(&root.join("src/lib.rs"), "pub mod common;\npub mod platform;\n");
+    write(&root.join("src/common.rs"), "pub fn common_marker() -> bool { true }\n");
+    write(&root.join("src/platform.rs"), "pub fn platform_marker() -> bool { true }\n");
+    write(&root.join(".cargo/mutants.toml"), "exclude_globs = [\"src/common.rs\"]\n");
+    let os_config = format!(".cargo/mutants.{}.toml", std::env::consts::OS);
+    for (config, common_included, platform_included) in [
+        (None, false, true),
+        (Some("exclude_globs = [\"src/platform.rs\"]\n"), true, false),
+        (Some("exclude_globs = [\"src/common.rs\", \"src/platform.rs\"]\n"), false, false),
+        (Some("invalid TOML {"), false, false),
+    ] {
+        if let Some(config) = config {
+            write(&root.join(&os_config), config);
+        }
+        let selected = Command::new("just")
+            .args(["--justfile", "Justfile", "--evaluate", "_anvil_mutants_config_arg"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(selected.status.success(), "{}", String::from_utf8_lossy(&selected.stderr));
+        let argument = String::from_utf8(selected.stdout).unwrap();
+        let mut command = Command::new("cargo");
+        command
+            .args(["mutants", "--list", "--workspace", "--no-shuffle"])
+            .env("CARGO_NET_OFFLINE", "true")
+            .current_dir(root);
+        if !argument.trim().is_empty() {
+            command.arg(argument.trim());
+        }
+        let output = command.output().unwrap();
+        if config == Some("invalid TOML {") {
+            assert_failed(&output, "an invalid selected config must not fall back to the common config");
+        } else {
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let listing = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(listing.contains("common_marker"), common_included, "{listing}");
+            assert_eq!(listing.contains("platform_marker"), platform_included, "{listing}");
+        }
+    }
 }
 
 /// `anvil-mutants-diff` diffs the base against the WORKING TREE, not against
