@@ -455,7 +455,9 @@ facts.
 
 The tool runs `cargo +nightly test --doc <package> --all-features` with itself as a
 chaining rustdoc executable. That wrapper appends the unstable test-builder options
-without replacing Cargo's active rustdoc flags. `<self>` then acts as the test-builder:
+without replacing Cargo's active rustdoc flags, and chains to `RUSTDOC` when set or
+otherwise to the rustdoc in the active rustc's sysroot, so no rustup is required.
+`<self>` then acts as the test-builder:
 it invokes the real rustc with `--force-warn unused_crate_dependencies`, writes one
 unique capture record, and forwards rustc's diagnostics and exit status. Per-process
 records avoid concurrent append interleaving.
