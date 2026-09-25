@@ -35,7 +35,7 @@ use std::process::Command;
 use std::{env, fs};
 
 use cargo_anvil::Catalog;
-use cargo_anvil::test_support::{Cli, run_update};
+use cargo_anvil::test_support::{Cli, isolate_powershell_cache, run_update};
 use serial_test::serial;
 use tempfile::TempDir;
 
@@ -48,6 +48,7 @@ fn write(path: &Path, contents: &str) {
 
 /// Returns true if every external tool the recipe needs is on PATH.
 fn tools_available() -> bool {
+    let cache = TempDir::new().expect("PowerShell availability check requires a temporary cache");
     for (tool, args) in [
         ("git", "--version"),
         ("cargo", "--version"),
@@ -55,7 +56,12 @@ fn tools_available() -> bool {
         ("just", "--version"),
         ("pwsh", "--version"),
     ] {
-        let ok = Command::new(tool).arg(args).output().is_ok_and(|o| o.status.success());
+        let mut command = Command::new(tool);
+        command.arg(args);
+        if tool == "pwsh" {
+            isolate_powershell_cache(&mut command, cache.path());
+        }
+        let ok = command.output().is_ok_and(|o| o.status.success());
         if !ok {
             eprintln!("skipping: required tool '{tool}' not available");
             return false;
@@ -73,8 +79,14 @@ fn tools_available() -> bool {
 /// must not. The tests that use this gate run under [`ShimBin::tripwire_cargo`],
 /// which turns any cargo invocation into a hard failure + a logged entry.
 fn core_tools_available() -> bool {
+    let cache = TempDir::new().expect("PowerShell availability check requires a temporary cache");
     for (tool, arg) in [("git", "--version"), ("just", "--version"), ("pwsh", "--version")] {
-        let ok = Command::new(tool).arg(arg).output().is_ok_and(|o| o.status.success());
+        let mut command = Command::new(tool);
+        command.arg(arg);
+        if tool == "pwsh" {
+            isolate_powershell_cache(&mut command, cache.path());
+        }
+        let ok = command.output().is_ok_and(|o| o.status.success());
         if !ok {
             eprintln!("skipping: required tool '{tool}' not available");
             return false;
@@ -260,6 +272,7 @@ fn just_cmd(root: &Path, args: &[&str]) -> Command {
         .env_remove("GITHUB_BASE_REF")
         .env_remove("SYSTEM_PULLREQUEST_TARGETBRANCH")
         .current_dir(root);
+    isolate_powershell_cache(&mut cmd, root);
     cmd
 }
 

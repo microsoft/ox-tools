@@ -19,7 +19,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use cargo_anvil::test_support::{Cli, run_update};
+use cargo_anvil::test_support::{Cli, isolate_powershell_cache, run_update};
 use serial_test::serial;
 use tempfile::TempDir;
 
@@ -63,9 +63,14 @@ fn emitted_workspace() -> TempDir {
 }
 
 fn tools_available() -> bool {
-    ["just", "pwsh"]
-        .iter()
-        .all(|tool| Command::new(tool).arg("--version").output().is_ok())
+    if Command::new("just").arg("--version").output().is_err() {
+        return false;
+    }
+    let cache = TempDir::new().expect("PowerShell availability check requires a temporary cache");
+    let mut command = Command::new("pwsh");
+    command.arg("--version");
+    isolate_powershell_cache(&mut command, cache.path());
+    command.output().is_ok()
 }
 
 fn run_title(root: &Path, title: Option<&str>) -> Output {
@@ -74,6 +79,7 @@ fn run_title(root: &Path, title: Option<&str>) -> Output {
         .args(["--justfile", "Justfile", "--color", "never", "anvil-pr-title"])
         .current_dir(root)
         .env_remove("PR_TITLE");
+    isolate_powershell_cache(&mut command, root);
     if let Some(title) = title {
         command.env("PR_TITLE", title);
     }
