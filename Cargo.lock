@@ -552,10 +552,10 @@ dependencies = [
 name = "cargo-ensure-no-cyclic-deps"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "assert_cmd",
  "cargo_metadata",
  "clap",
+ "ohno",
  "petgraph",
  "predicates",
 ]
@@ -564,8 +564,8 @@ dependencies = [
 name = "cargo-ensure-no-default-features"
 version = "1.1.1"
 dependencies = [
- "anyhow",
  "clap",
+ "ohno",
  "tempfile",
  "toml",
 ]
@@ -725,10 +725,10 @@ dependencies = [
 name = "cargo-unused-deps"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "cargo_metadata",
  "clap",
  "mutants",
+ "ohno",
  "serde_json",
  "tempfile",
  "toml_edit 0.25.13+spec-1.1.0",
