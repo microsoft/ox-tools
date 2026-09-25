@@ -13,8 +13,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::{env, fs};
 
-use anyhow::{Context, Result, bail};
+use ohno::{AppError, IntoAppError};
 use toml_edit::DocumentMut;
+
+type Result<T> = std::result::Result<T, AppError>;
 
 /// The diagnostic this tool listens for.
 const LINT: &str = "unused_crate_dependencies";
@@ -164,7 +166,7 @@ impl Evidence {
 pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, all_targets: bool) -> Result<Evidence> {
     let mut command = Command::new(cargo());
     command.arg("check").arg("--manifest-path").arg(manifest_path).args(selection);
-    let wrapper = std::env::current_exe().context("failed to locate this executable to use as the rustc wrapper")?;
+    let wrapper = std::env::current_exe().into_app_err("failed to locate this executable to use as the rustc wrapper")?;
     ensure_no_configured_workspace_wrapper()?;
     let inner = std::env::var_os("RUSTC_WORKSPACE_WRAPPER")
         .filter(|value| !value.is_empty())
@@ -184,10 +186,10 @@ pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, a
         .arg(target_dir)
         .arg("--message-format=json")
         .output()
-        .context("failed to run `cargo check` to collect compile evidence")?;
+        .into_app_err("failed to run `cargo check` to collect compile evidence")?;
 
     if !output.status.success() {
-        bail!(
+        ohno::bail!(
             "`cargo check` failed while collecting compile evidence:\n{}",
             failure_diagnostics(&output.stdout, &output.stderr)
         );
@@ -198,14 +200,14 @@ pub fn gather(manifest_path: &Path, selection: &[OsString], target_dir: &Path, a
 
 /// Refuse to replace a file-configured workspace wrapper we cannot chain safely.
 fn ensure_no_configured_workspace_wrapper() -> Result<()> {
-    let current_dir = env::current_dir().context("failed to locate the current directory for Cargo configuration discovery")?;
+    let current_dir = env::current_dir().into_app_err("failed to locate the current directory for Cargo configuration discovery")?;
     for path in cargo_config_paths(&current_dir) {
         if !path.is_file() {
             continue;
         }
-        let contents = fs::read_to_string(&path).context(format!("failed to read Cargo configuration {}", path.display()))?;
-        if has_workspace_wrapper_config(&contents).context(format!("failed to parse Cargo configuration {}", path.display()))? {
-            bail!(
+        let contents = fs::read_to_string(&path).into_app_err(format!("failed to read Cargo configuration {}", path.display()))?;
+        if has_workspace_wrapper_config(&contents).into_app_err(format!("failed to parse Cargo configuration {}", path.display()))? {
+            ohno::bail!(
                 "{} configures a workspace rustc wrapper; cargo-unused-deps cannot safely interpose without bypassing it",
                 path.display()
             );
@@ -277,7 +279,9 @@ fn has_workspace_wrapper_config(config: &str) -> Result<bool> {
 /// outer `RUSTC_WRAPPER`/`CARGO_BUILD_RUSTC_WRAPPER` remains outside this
 /// workspace wrapper, while an existing workspace wrapper is chained inside it.
 pub fn wrapper(args: &[OsString]) -> Result<ExitCode> {
-    let (rustc, rustc_args) = args.split_first().context("rustc wrapper was invoked without a compiler path")?;
+    let (rustc, rustc_args) = args
+        .split_first()
+        .into_app_err("rustc wrapper was invoked without a compiler path")?;
     let mut command = wrapper_command(std::env::var_os(INNER_WRAPPER_VAR), rustc);
     let status = command
         .args(rustc_args)
@@ -287,7 +291,7 @@ pub fn wrapper(args: &[OsString]) -> Result<ExitCode> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .context("failed to run rustc from the compile-evidence wrapper")?;
+        .into_app_err("failed to run rustc from the compile-evidence wrapper")?;
 
     Ok(if status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
@@ -341,7 +345,7 @@ fn parse(stdout: &str) -> Result<Evidence> {
     let mut evidence = Evidence::default();
 
     for line in stdout.lines().filter(|line| line.starts_with('{')) {
-        let message: serde_json::Value = serde_json::from_str(line).context("cargo emitted a line that is not valid JSON")?;
+        let message: serde_json::Value = serde_json::from_str(line).into_app_err("cargo emitted a line that is not valid JSON")?;
         let Some(target) = target_of(&message) else {
             continue;
         };

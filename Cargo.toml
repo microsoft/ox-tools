@@ -23,7 +23,6 @@ homepage = "https://github.com/microsoft/ox-tools"
 [workspace.dependencies]
 
 # external dependencies
-anyhow = { version = "1.0.104", default-features = false }
 assert_cmd = { version = "2.2.2", default-features = false }
 blake3 = { version = "1.8.7", default-features = false }
 # bolero-libfuzzer 0.13.0 calls bolero_engine::any; bolero/std enables that API for its host build.

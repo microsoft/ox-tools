@@ -63,9 +63,9 @@
 use std::collections::HashMap;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
 use clap::Parser;
+use ohno::{AppError, IntoAppError};
 use petgraph::algo::tarjan_scc;
 use petgraph::graph::DiGraph;
 
@@ -103,7 +103,7 @@ enum Command {
 ///
 /// # Errors
 /// Returns an error if cargo metadata cannot be loaded or processed
-pub fn run() -> Result<ExitCode> {
+pub fn run() -> Result<ExitCode, AppError> {
     let cli = Cli::parse();
 
     let manifest_path = match cli.cmd {
@@ -122,7 +122,7 @@ pub fn run() -> Result<ExitCode> {
     // Use --no-deps to avoid Cargo resolving dependencies (which would fail on cycles)
     cmd.no_deps();
 
-    let metadata = cmd.exec().context("Failed to load cargo metadata")?;
+    let metadata = cmd.exec().into_app_err("Failed to load cargo metadata")?;
 
     let cycles = detect_cycles(&metadata);
 

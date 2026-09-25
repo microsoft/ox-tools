@@ -6,8 +6,10 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use ohno::{AppError, IntoAppError};
 use toml_edit::{DocumentMut, Item, TableLike, Value};
+
+type Result<T> = std::result::Result<T, AppError>;
 
 /// Dependency tables a member manifest can inherit workspace dependencies from.
 const DEP_TABLES: [(&str, Section); 3] = [
@@ -196,12 +198,13 @@ fn is_optional(spec: &Item) -> bool {
 
 /// Read a manifest's text.
 pub fn read_manifest_text(path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).context(format!("failed to read {}", path.display()))
+    std::fs::read_to_string(path).into_app_err(format!("failed to read {}", path.display()))
 }
 
 /// Parse manifest text that came from `path`.
 pub fn parse_manifest(text: &str, path: &Path) -> Result<DocumentMut> {
-    text.parse::<DocumentMut>().context(format!("failed to parse {}", path.display()))
+    text.parse::<DocumentMut>()
+        .into_app_err(format!("failed to parse {}", path.display()))
 }
 
 /// Read and parse a manifest.
@@ -229,7 +232,7 @@ pub fn catalog(manifest: &DocumentMut) -> Result<Catalog> {
         None => Vec::new(),
         Some(item) => item
             .as_table_like()
-            .ok_or_else(|| anyhow!("[workspace.dependencies] must be a table, found {}", item.type_name()))?
+            .ok_or_else(|| AppError::new(format!("[workspace.dependencies] must be a table, found {}", item.type_name())))?
             .iter()
             .map(|(key, _)| key.to_owned())
             .collect(),
@@ -267,7 +270,7 @@ fn allowed_names(configured: Option<&Item>, scope: &str) -> Result<BTreeSet<Stri
     for value in array_of(configured, scope, "allowed")? {
         let name = value
             .as_str()
-            .ok_or_else(|| anyhow!("[{scope}] allowed must contain only strings, found {}", value.type_name()))?;
+            .ok_or_else(|| AppError::new(format!("[{scope}] allowed must contain only strings, found {}", value.type_name())))?;
 
         allowed.insert(name.to_owned());
     }
@@ -284,7 +287,7 @@ fn array_of<'a>(configured: Option<&'a Item>, scope: &str, key: &str) -> Result<
         None => None,
         Some(item) => Some(
             item.as_array()
-                .ok_or_else(|| anyhow!("[{scope}] {key} must be an array, found {}", item.type_name()))?,
+                .ok_or_else(|| AppError::new(format!("[{scope}] {key} must be an array, found {}", item.type_name())))?,
         ),
     };
 
