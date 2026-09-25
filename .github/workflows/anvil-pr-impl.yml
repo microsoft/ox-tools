@@ -78,7 +78,7 @@ jobs:
           fetch-depth: 0
       # anvil-impact runs `just anvil-impact` and uploads the resulting
       # target/anvil/impact cache as the anvil-impact-<runner.os> artifact.
-      - uses: ./.github/actions/anvil-impact
+      - uses: ./.anvil/github/actions/impact
         env:
           BASE_REF: ${{ inputs.base_ref }}
 
@@ -91,7 +91,7 @@ jobs:
           # See impact-linux: impact needs only path/metadata inputs, not LFS
           # payloads, so it checks out without lfs: true.
           fetch-depth: 0
-      - uses: ./.github/actions/anvil-impact
+      - uses: ./.anvil/github/actions/impact
         env:
           BASE_REF: ${{ inputs.base_ref }}
 
@@ -134,7 +134,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-fast
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
@@ -192,7 +192,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-test
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
@@ -243,7 +243,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-msrv
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
@@ -276,7 +276,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-runtime-analysis
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
@@ -310,7 +310,7 @@ jobs:
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
-      - uses: ./.github/actions/anvil-run-group
+      - uses: ./.anvil/github/actions/run-group
         with:
           group: pr-mutants
           publish_commit_statuses: ${{ inputs.publish_commit_statuses }}

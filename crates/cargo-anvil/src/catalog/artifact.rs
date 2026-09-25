@@ -3,15 +3,16 @@
 
 //! The catalog artifact model.
 //!
-//! An [`Artifact`] is one unit a catalog emits: either a fully tool-owned
-//! file ([`OwnedFileSpec`]) or a sentinel-delimited managed region spliced
+//! An [`Artifact`] is one unit a catalog emits: a fully tool-owned file
+//! ([`OwnedFileSpec`]), one delimiter-free section of a composed owned file
+//! ([`OwnedFileSectionSpec`]), or a sentinel-delimited managed region spliced
 //! into a user-composed host file ([`RegionSpec`]). The engine iterates a
-//! catalog's artifacts and dispatches each to the generic owned-file /
-//! managed-region drivers in [`crate::emit`].
+//! catalog's artifacts and dispatches each physical file / managed region to
+//! the generic drivers in [`crate::emit`].
 //!
 //! See [`extensibility.md §4`](../../docs/design/extensibility.md) for the
 //! design rationale. The on-disk vocabulary (`anvil-managed` sentinels,
-//! `justfiles/anvil/`, `.anvil.lock`) is fixed engine format — an artifact
+//! `.anvil/anvil.just`, `.anvil/manifest.toml`) is fixed engine format — an artifact
 //! never parameterizes it.
 
 use crate::backend::Backend;
@@ -85,6 +86,24 @@ pub struct OwnedFileSpec {
     pub gate: Option<Backend>,
 }
 
+/// One independently addressable catalog section of a fully owned file.
+///
+/// Sections sharing `path` are rendered in catalog order with one canonical
+/// blank line between them. The on-disk file carries no section delimiters:
+/// repository drift is still decided for the complete physical file.
+/// Identity: `(path, id)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedFileSectionSpec {
+    /// Repo-root-relative forward-slash path of the composed physical file.
+    pub path: &'static str,
+    /// Catalog-only stable identity within `path`.
+    pub id: String,
+    /// The section body.
+    pub body: String,
+    /// `None` emits the file always; `Some(backend)` emits it only when that backend is selected.
+    pub gate: Option<Backend>,
+}
+
 /// A sentinel-delimited managed region spliced into a host file.
 ///
 /// Identity: `(host-selector, region_id)`.
@@ -105,6 +124,8 @@ pub struct RegionSpec {
 pub enum Artifact {
     /// A fully tool-owned file.
     OwnedFile(OwnedFileSpec),
+    /// One delimiter-free section of a composed fully owned file.
+    OwnedFileSection(OwnedFileSectionSpec),
     /// A managed region spliced into a host file.
     Region(RegionSpec),
 }
@@ -149,6 +170,13 @@ pub struct ComposedHost {
 pub(crate) enum ArtifactKey {
     /// An owned file, keyed by its path.
     OwnedFile(String),
+    /// An owned-file section, keyed by its physical path and catalog-only id.
+    OwnedFileSection {
+        /// Physical owned-file path.
+        path: String,
+        /// Catalog-only section id.
+        id: String,
+    },
     /// A managed region, keyed by its host selector and id.
     Region {
         /// The host selector.
@@ -183,6 +211,28 @@ impl Artifact {
         })
     }
 
+    /// Construct an ungated delimiter-free owned-file section.
+    #[must_use]
+    pub fn owned_file_section(path: &'static str, id: impl Into<String>, body: impl Into<String>) -> Self {
+        Self::OwnedFileSection(OwnedFileSectionSpec {
+            path,
+            id: id.into(),
+            body: body.into(),
+            gate: None,
+        })
+    }
+
+    /// Construct a backend-gated delimiter-free owned-file section.
+    #[must_use]
+    pub fn backend_file_section(backend: Backend, path: &'static str, id: impl Into<String>, body: impl Into<String>) -> Self {
+        Self::OwnedFileSection(OwnedFileSectionSpec {
+            path,
+            id: id.into(),
+            body: body.into(),
+            gate: Some(backend),
+        })
+    }
+
     /// Construct a managed-region artifact from a full spec.
     #[must_use]
     pub fn region(spec: RegionSpec) -> Self {
@@ -211,6 +261,7 @@ impl Artifact {
     pub fn with_body(self, body: impl Into<String>) -> Self {
         match self {
             Self::OwnedFile(spec) => Self::OwnedFile(OwnedFileSpec { body: body.into(), ..spec }),
+            Self::OwnedFileSection(spec) => Self::OwnedFileSection(OwnedFileSectionSpec { body: body.into(), ..spec }),
             Self::Region(spec) => Self::Region(RegionSpec { body: body.into(), ..spec }),
         }
     }
@@ -219,6 +270,10 @@ impl Artifact {
     pub(crate) fn key(&self) -> ArtifactKey {
         match self {
             Self::OwnedFile(spec) => ArtifactKey::OwnedFile(spec.path.to_owned()),
+            Self::OwnedFileSection(spec) => ArtifactKey::OwnedFileSection {
+                path: spec.path.to_owned(),
+                id: spec.id.clone(),
+            },
             Self::Region(spec) => ArtifactKey::Region {
                 host: spec.host.clone(),
                 id: spec.id.as_str().to_owned(),
@@ -231,6 +286,7 @@ impl Artifact {
     pub fn body(&self) -> &str {
         match self {
             Self::OwnedFile(spec) => &spec.body,
+            Self::OwnedFileSection(spec) => &spec.body,
             Self::Region(spec) => &spec.body,
         }
     }
@@ -257,7 +313,7 @@ mod tests {
                 assert_eq!(spec.body, "body\n");
                 assert_eq!(spec.gate, None);
             }
-            Artifact::Region(_) => panic!("expected owned file"),
+            Artifact::OwnedFileSection(_) | Artifact::Region(_) => panic!("expected owned file"),
         }
     }
 
@@ -266,8 +322,32 @@ mod tests {
         let a = Artifact::backend_file(Backend::GitHub, ".github/workflows/anvil-pr.yml", "x");
         match &a {
             Artifact::OwnedFile(spec) => assert_eq!(spec.gate, Some(Backend::GitHub)),
-            Artifact::Region(_) => panic!("expected owned file"),
+            Artifact::OwnedFileSection(_) | Artifact::Region(_) => panic!("expected owned file"),
         }
+    }
+
+    #[test]
+    fn owned_file_section_constructor_sets_identity_without_a_gate() {
+        let artifact = Artifact::owned_file_section(".anvil/anvil.just", "recipe:check", "body");
+        let Artifact::OwnedFileSection(section) = artifact else {
+            panic!("expected owned-file section");
+        };
+        assert_eq!(section.path, ".anvil/anvil.just");
+        assert_eq!(section.id, "recipe:check");
+        assert_eq!(section.body, "body");
+        assert_eq!(section.gate, None);
+    }
+
+    #[test]
+    fn backend_file_section_sets_gate_and_with_body_preserves_identity() {
+        let artifact = Artifact::backend_file_section(Backend::GitHub, ".anvil/github/generated", "part", "old").with_body("new");
+        let Artifact::OwnedFileSection(section) = artifact else {
+            panic!("expected owned-file section");
+        };
+        assert_eq!(section.path, ".anvil/github/generated");
+        assert_eq!(section.id, "part");
+        assert_eq!(section.body, "new");
+        assert_eq!(section.gate, Some(Backend::GitHub));
     }
 
     #[test]
@@ -279,7 +359,7 @@ mod tests {
                 assert_eq!(spec.id, RegionId::new("anvil-lints"));
                 assert_eq!(spec.syntax, CommentSyntax::Hash);
             }
-            Artifact::OwnedFile(_) => panic!("expected region"),
+            Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) => panic!("expected region"),
         }
     }
 
@@ -293,7 +373,7 @@ mod tests {
                 assert_eq!(spec.gate, Some(Backend::Ado));
                 assert_eq!(spec.body, "new");
             }
-            Artifact::Region(_) => panic!("expected owned file"),
+            Artifact::OwnedFileSection(_) | Artifact::Region(_) => panic!("expected owned file"),
         }
     }
 
@@ -313,7 +393,7 @@ mod tests {
                 assert_eq!(spec.syntax, CommentSyntax::Hash);
                 assert_eq!(spec.body, "new");
             }
-            Artifact::OwnedFile(_) => panic!("expected region"),
+            Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) => panic!("expected region"),
         }
     }
 

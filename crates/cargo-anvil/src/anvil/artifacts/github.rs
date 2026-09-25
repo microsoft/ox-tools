@@ -45,7 +45,7 @@ const CODE_REVIEW_SKILL: &str = include_str!("../../../templates/github/code-rev
 #[inline]
 #[must_use]
 pub fn setup_action() -> Artifact {
-    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-setup/action.yml", SETUP_ACTION)
+    Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/setup/action.yml", SETUP_ACTION)
 }
 
 /// `.github/actions/anvil-setup/just-problem-matcher.json`.
@@ -54,7 +54,7 @@ pub fn setup_action() -> Artifact {
 pub fn just_problem_matcher() -> Artifact {
     Artifact::backend_file(
         Backend::GitHub,
-        ".github/actions/anvil-setup/just-problem-matcher.json",
+        ".anvil/github/actions/setup/just-problem-matcher.json",
         JUST_PROBLEM_MATCHER,
     )
 }
@@ -63,7 +63,7 @@ pub fn just_problem_matcher() -> Artifact {
 #[inline]
 #[must_use]
 pub fn run_group_action() -> Artifact {
-    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-run-group/action.yml", RUN_GROUP_ACTION)
+    Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/run-group/action.yml", RUN_GROUP_ACTION)
 }
 
 /// `.github/actions/anvil-report-status/action.yml`.
@@ -72,7 +72,7 @@ pub fn run_group_action() -> Artifact {
 pub fn report_status_action() -> Artifact {
     Artifact::backend_file(
         Backend::GitHub,
-        ".github/actions/anvil-report-status/action.yml",
+        ".anvil/github/actions/report-status/action.yml",
         REPORT_STATUS_ACTION,
     )
 }
@@ -80,7 +80,7 @@ pub fn report_status_action() -> Artifact {
 /// `.github/actions/anvil-impact/action.yml`.
 #[must_use]
 pub fn impact_action() -> Artifact {
-    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-impact/action.yml", IMPACT_ACTION)
+    Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/impact/action.yml", IMPACT_ACTION)
 }
 
 /// `.github/workflows/anvil-pr-impl.yml` — the PR reusable workflow.
@@ -205,7 +205,7 @@ mod tests {
             "Cargo home must be restored before Just is bootstrapped"
         );
         assert!(just_bootstrap < catalog_setup, "Just must be bootstrapped before catalog setup");
-        assert!(SETUP_ACTION.contains("$minimum = [version]'1.46.0'"));
+        assert!(SETUP_ACTION.contains("$minimum = [version]'1.47.0'"));
         assert!(SETUP_ACTION.contains("cargo-anvil requires just >= $minimum"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn run_group_action_captures_and_reports_results() {
-        assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-setup"));
+        assert!(RUN_GROUP_ACTION.contains("uses: ./.anvil/github/actions/setup"));
         assert!(RUN_GROUP_ACTION.contains("group: ${{ inputs.group }}"));
         assert!(RUN_GROUP_ACTION.contains("free-disk-space: ${{ inputs.free-disk-space }}"));
         assert!(RUN_GROUP_ACTION.contains("status=${PIPESTATUS[0]}"));
@@ -273,7 +273,7 @@ mod tests {
             reporter.contains("if: always()"),
             "reporting must run after the authoritative recipe step fails"
         );
-        assert!(reporter.contains("uses: ./.github/actions/anvil-report-status"));
+        assert!(reporter.contains("uses: ./.anvil/github/actions/report-status"));
         assert!(
             reporter.contains("exit_code: ${{ steps.run.outputs.exit_code }}"),
             "the reporter must consume the exit code recorded before failure propagation"
@@ -499,7 +499,7 @@ export -f just
             );
         }
         assert_eq!(
-            PR_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
+            PR_IMPL_WORKFLOW.matches("uses: ./.anvil/github/actions/run-group").count(),
             PR_GROUPS.len(),
             "every PR group job must use the shared group action"
         );
@@ -577,7 +577,7 @@ export -f just
         assert!(publisher_permissions.contains("\n    permissions:\n      issues: write"));
         assert!(!publisher_permissions.contains("contents: read"));
         assert_eq!(
-            SCHEDULED_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
+            SCHEDULED_IMPL_WORKFLOW.matches("uses: ./.anvil/github/actions/run-group").count(),
             SCHEDULED_GROUPS.len(),
             "every scheduled group job must use the shared group action"
         );

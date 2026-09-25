@@ -140,6 +140,33 @@ _anvil-container-dockerfile:
     Write-Error 'anvil: container image input is missing: .anvil/container/Dockerfile'
     exit 1
 
+# Read the declared root MSRV without resolving it through rustup. Image tags
+# must be stable across hosts even when a channel has different installed patch
+# releases. `none` is valid when a repository toolchain file selects Rust.
+[private]
+[script("pwsh", "-NoProfile")]
+_anvil-container-root-msrv:
+    $manifest = Join-Path '{{ replace(justfile_directory(), "'", "''") }}' 'Cargo.toml'
+    $values = @{}
+    $section = ''
+    foreach ($line in Get-Content -LiteralPath $manifest) {
+        if ($line -match '^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$') {
+            $section = $Matches[1].Trim()
+            continue
+        }
+        if ($section -in @('workspace.package', 'package') -and
+            $line -match '^\s*["'']?rust-version["'']?\s*=\s*(["''])([^"'']+)\1\s*(?:#.*)?$') {
+            $values[$section] = $Matches[2]
+        }
+    }
+    if ($values.ContainsKey('workspace.package')) {
+        Write-Output $values['workspace.package']
+    } elseif ($values.ContainsKey('package')) {
+        Write-Output $values['package']
+    } else {
+        Write-Output 'none'
+    }
+
 # Print the exec image reference for the current inputs, without building it.
 #
 # The tag is a SHA-256 over the image's declared inputs: the Dockerfile and its
@@ -172,7 +199,7 @@ anvil-container-tag:
     # it: dependency edits touch that file constantly while `rust-version` moves
     # perhaps once, and hashing it would rename the image for a stream of
     # changes that cannot alter a byte it contains.
-    $rootMsrv = & '{{ replace(just_executable(), "'", "''") }}' _anvil-resolve-stable root-msrv
+    $rootMsrv = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-root-msrv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $rootMsrv = "$rootMsrv".Trim()
 
@@ -191,7 +218,7 @@ anvil-container-tag:
     # A directory at either path is refused rather than skipped. The ignore
     # file re-includes it, so `COPY . ./` copies its whole subtree into the
     # image, while the digest walks only `.anvil/container/` and
-    # `justfiles/anvil/` -- two images differing anywhere under it would share
+    # `.anvil/anvil.just` -- two images differing anywhere under it would share
     # a tag.
     $toolchainFiles = @()
     foreach ($spelling in @('rust-toolchain.toml', 'rust-toolchain')) {
@@ -210,14 +237,13 @@ anvil-container-tag:
     # checked here, because a walk only ever reports descendants: a link that
     # *is* a root, or that is a parent of one, is traversed through and never
     # appears in its own output. `COPY . ./` copies from the context root, so a
-    # link at `justfiles` is copied as a link while everything here reads
-    # through it -- the same divergence this guard exists to refuse, reached one
-    # level up.
+    # link at `.anvil` is copied as a link while everything here reads through
+    # it -- the same divergence this guard exists to refuse.
     #
     # The root manifest is checked too, though the digest reads a value out of
     # it rather than hashing it: the context copies the link, so the resolver
     # inside the image would meet a target the ignore file never admitted.
-    foreach ($declared in @('rust-toolchain.toml', 'rust-toolchain', 'Cargo.toml', '.anvil', '.anvil/container', 'justfiles', 'justfiles/anvil')) {
+    foreach ($declared in @('rust-toolchain.toml', 'rust-toolchain', 'Cargo.toml', '.anvil', '.anvil/anvil.just', '.anvil/container')) {
         $item = Get-Item -LiteralPath (Join-Path $repoRoot $declared) -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
             $links += $item.FullName
@@ -261,43 +287,9 @@ anvil-container-tag:
             }
         }
     }
-    # Every generated recipe file. The image installs its tools by running
-    # `just anvil-setup`, and that dependency chain runs through the tier,
-    # group and check recipes before it reaches the install recipes in
-    # tools.just -- so the routing decides *whether* a tool is installed just
-    # as surely as tools.just decides *how*. Hashing only the install
-    # definitions would let a group drop a `-setup` dependency, changing the
-    # installed set, without renaming the image.
-    #
-    # This driver is included too. It is not circular -- the tag is derived
-    # from file text, and no file contains the tag -- and it belongs in the set
-    # because it passes the build arguments, the secret mounts and the hook's
-    # `Anvil-BuildSecrets` output into the build, all of which shape the result.
-    # Every file in the generated recipe tree, not only `*.just`. The build
-    # context admits the whole `justfiles/anvil/` directory (see the ignore
-    # file), so anything an adopter drops there is copied into the image. The
-    # catalog refuses to *own* a non-recipe file there, but a repository can
-    # still add one by hand, and a file that reaches the image without reaching
-    # the tag is precisely the hole this digest exists to close. Hashing what
-    # the context copies keeps the two sets identical by construction.
-    #
-    # -Force because Get-ChildItem omits hidden entries otherwise: a
-    # dot-prefixed file is copied like any other, and skipping it would let its
-    # edits ride under an unchanged tag -- and make Windows and Unix disagree.
-    #
-    # `.anvil-proposed` siblings are excluded here for the same reason as under
-    # `.anvil/container/`: this driver is itself an owned artifact, so a
-    # repository that customizes it gets the proposal written right here.
-    $recipeRoot = Join-Path $repoRoot 'justfiles/anvil'
-    if (Test-Path -LiteralPath $recipeRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -Force |
-            Where-Object { -not $_.Name.EndsWith('.anvil-proposed') }) {
-            if ($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $links += $file.FullName }
-            elseif (-not $file.PSIsContainer) {
-                $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
-            }
-        }
-    }
+    # The composed recipe file contains the complete setup graph and container
+    # driver, so its content covers every generated recipe input.
+    $inputs += '.anvil/anvil.just'
 
     # A symlink is refused rather than digested. The engine copies the link
     # itself while any reading of it here follows it, so a retarget changes the
@@ -373,12 +365,9 @@ anvil-container-tag:
     # case-sensitive filesystem the image is built on can hold -- would collapse
     # to one entry and both would be framed with whichever mode was stored last.
     #
-    # Scoped to exactly what the digest hashes. `justfiles` would reach recipes
-    # outside `justfiles/anvil`, which neither the walk hashes nor the ignore
-    # file admits, so an unstaged `chmod` on one of those would refuse a build
-    # it cannot affect.
+    # Scoped to exactly what the digest hashes.
     $indexMode = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
-    $tracked = @('.anvil/container', 'justfiles/anvil', 'rust-toolchain.toml', 'rust-toolchain')
+    $tracked = @('.anvil/container', '.anvil/anvil.just', 'rust-toolchain.toml', 'rust-toolchain')
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Write-Error 'anvil: git is required to compute the container image tag, because the image inputs are framed with the file modes git records. Without it two hosts would compute different tags for identical content. Install git, or set ANVIL_CONTAINER_ENGINE aside and build the image where git is available.'
         exit 1
@@ -524,6 +513,9 @@ _anvil-container-image:
     $enginePrefix = @($engineCmd | Select-Object -Skip 1)
 
     $repoRoot = '{{ replace(justfile_directory(), "'", "''") }}'
+    $rootMsrv = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-root-msrv
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $rootMsrv = "$rootMsrv".Trim()
     $dockerfile = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-dockerfile
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $dockerfile = "$dockerfile".Trim()
@@ -684,7 +676,12 @@ _anvil-container-image:
         # the multi-arch base to arm64 and fail late with an exec-format error.
         # It also keeps the identity scheme honest: without this, two hosts of
         # different architecture compute the same tag for different images.
-        $buildCmd = @('build', '--platform', 'linux/amd64', '--file', "$engineRoot/$dockerfile", '--tag', $image)
+        $buildCmd = @(
+            'build', '--platform', 'linux/amd64',
+            '--file', "$engineRoot/$dockerfile",
+            '--tag', $image,
+            '--build-arg', "ANVIL_RUST_VERSION=$rootMsrv"
+        )
         # BuildKit reads `<dockerfile>.dockerignore` on its own; buildah reads
         # only a context-root ignore file and needs to be pointed at ours. Named
         # rather than probed, because the flag is rejected outright by the engine

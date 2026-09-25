@@ -263,7 +263,10 @@ available.
 |-----------|-----------------------------------------------------------------------------|--------|
 | `mutants` | Resolves the base ref, writes `git diff <base>..HEAD` to a temporary unified-diff file, then runs `cargo mutants --in-diff <file> --no-shuffle --jobs 0`. Self-skips on aarch64-pc-windows-msvc where cargo-mutants doesn't build; other ARM legs run normally. | oxidizer-github |
 
-The mutants check requires a base ref: locally the recipe resolves `BASE_REF` (if set), then `origin/main`, then `origin/master`, then errors out. GitHub passes `${{ github.event.pull_request.base.sha }}` as `BASE_REF`; on ADO the shared resolver reads `$(System.PullRequest.TargetBranch)` from the environment.
+The mutants check requires a base ref. Resolution precedence is `BASE_REF`,
+the ADO target branch, the GitHub base branch, then `origin/main`. Repositories
+whose default branch is not `main` set `BASE_REF` for local runs. GitHub passes
+`${{ github.event.pull_request.base.sha }}` explicitly.
 
 ### `scheduled-test`
 
@@ -379,36 +382,25 @@ workflow/pipeline file alongside the anvil composite actions / step templates.
 
 The tool uses [`cargo-delta`](https://crates.io/crates/cargo-delta) to skip checks for
 unaffected workspace members. cargo-delta computes three concentric impact tiers
-(`required ⊇ affected ⊇ modified`) from the committed diff against the base ref. The
-shared `anvil-impact` recipe (see [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe))
-runs cargo-delta once, writes `target/anvil/impact/`, and projects each tier — via the
-`_anvil-impact-format` helper — into a pre-built `--package X@ver --package Y@ver` string
-(or the literal sentinel `--skip` when the tier is empty). Each package is a
-version-qualified cargo spec (`name@version`) so `-p` resolves uniquely to the workspace
-member even when a like-named crate is also pulled in as a different-versioned transitive
-dependency.
+(`required ⊇ affected ⊇ modified`) from committed, staged, unstaged, deleted,
+and non-ignored untracked changes against the base ref. The shared
+`anvil-impact` recipe (see [local.md §4](./local.md#4-impact-scoping)) asks
+cargo-delta to write one `name@version` package spec per line to
+`modified.packages`, `affected.packages`, and `required.packages`.
 
-Every **impact-scoped** per-crate check depends on `anvil-impact` and resolves its
-category's scope by calling `_anvil-impact-include <category>` into a local `$include`
-variable, propagates a nonzero resolver exit before reading that variable, then consumes
-it (the unscoped checks below take no such dependency). The propagation matters because
-an unguarded failure would leave `$include` empty, silently widening the check to its
-unscoped default and leaving the run green — the same failure mode `anvil-impact` already
-refuses in consume mode. The
-**same** cache is read in cloud workflows — the impact job uploads `target/anvil/impact/`
-as an artifact and each group job downloads it — so the identical code path runs locally
-and in CI, with no scoping threaded through environment variables. Scoping is on by
-default both locally and in CI; it is disabled only by `ANVIL_IMPACT=off` (the
-scheduled/full tiers), which makes every tier resolve to its full-workspace default.
+Every **impact-scoped** check depends on `anvil-impact` and gives the matching
+package file directly to cargo-each. An empty file is an explicit successful
+no-op. Cloud impact jobs upload the same directory that group jobs consume.
+`ANVIL_IMPACT=off` selects `--workspace`; `consume` trusts downloaded files.
 
 Each catalog check is tagged with one of four buckets:
 
-| Bucket    | `$include` tier               | Behavior when a tier value is present                                        | Behavior when unscoped (`ANVIL_IMPACT=off` / no cache) |
-|-----------|-------------------------------|-----------------------------------------------------------------------------|--------------------------------------|
-| modified  | `_anvil-impact-include modified`   | If `--skip`: exit 0. Otherwise run against the input domain defined by the recipe's own command; do not forward impact-selected package arguments. | Run against the command's normal input domain. |
-| affected  | `_anvil-impact-include affected`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
-| required  | `_anvil-impact-include required`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
-| unscoped  | *(none)*                       | Always run.                                                                  | Always run.                          |
+| Bucket    | Package file | Behavior when unscoped |
+|-----------|--------------|------------------------|
+| modified  | `modified.packages` | Select the workspace. |
+| affected  | `affected.packages` | Select the workspace. |
+| required  | `required.packages` | Select the workspace. |
+| unscoped  | *(none)* | Always run. |
 
 Bucket assignments per check:
 

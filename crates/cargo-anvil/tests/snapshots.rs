@@ -57,7 +57,7 @@ fn bare_workspace() -> TempDir {
 /// Walk the workspace, collect every file produced or modified by
 /// anvil, and render them into a single deterministic string.
 ///
-/// The manifest (`.anvil.lock`) is filtered out: it carries the
+/// The manifest (`.anvil/manifest.toml`) is filtered out: it carries the
 /// `rendered_by` version which would churn on every crate-version bump,
 /// drowning the actual content review in noise. The schema-validation
 /// test suite already asserts the manifest is valid TOML.
@@ -67,7 +67,7 @@ fn render_tree(root: &Path) -> String {
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
-        .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some(MANIFEST_FILE_NAME))
+        .filter(|p| *p != root.join(MANIFEST_FILE_NAME))
         .collect();
     paths.sort();
 

@@ -32,65 +32,23 @@
 [script("pwsh", "-NoProfile")]
 anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
     if (-not $IsLinux) {
         Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
         exit 0
     }
-    if ($include -eq '--skip') {
-        Write-Host 'anvil-bolero: no affected packages; skipping'
-        exit 0
-    }
-    $packageNames = [System.Collections.Generic.List[string]]::new()
-    if ($include -and $include -ne '--workspace') {
-        $pkgArgs = @(-split $include)
-        for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
-            if ($pkgArgs[$i] -ne '--package' -or ($i + 1) -ge $pkgArgs.Count) {
-                Write-Error "anvil-bolero: unsupported affected-package arguments: $include"
-                exit 1
-            }
-            # Impact emits version-qualified specs (name@version); cargo-bolero
-            # resolves workspace members by bare package name.
-            $packageNames.Add(($pkgArgs[++$i] -split '@', 2)[0])
-        }
-    } else {
-        $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error 'anvil-bolero: cargo metadata failed'
-            exit $LASTEXITCODE
-        }
-        try {
-            $metadata = $metadataJson | ConvertFrom-Json
-            foreach ($package in $metadata.packages) {
-                if ($metadata.workspace_members -contains $package.id) {
-                    $packageNames.Add($package.name)
-                }
-            }
-        } catch {
-            Write-Error "anvil-bolero: could not parse cargo metadata output: $_"
-            exit 1
-        }
-    }
-
-    # cargo-bolero accepts only one --package, so discover each package
-    # separately and combine the emitted JSON target objects.
     $targets = [System.Collections.Generic.List[object]]::new()
-    foreach ($packageName in $packageNames) {
-        $targetsJson = & cargo '+{{ rust_nightly }}' bolero list --profile release --package $packageName
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "anvil-bolero: target discovery failed for package '$packageName'"
-            exit $LASTEXITCODE
+    $targetsJson = & cargo '+{{ rust_nightly }}' each {{ anvil_affected_selection }} -- cargo '+{{ rust_nightly }}' bolero list --profile release --package '{name}'
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil-bolero: target discovery failed'
+        exit $LASTEXITCODE
+    }
+    try {
+        foreach ($targetJson in ($targetsJson | Where-Object { $_ -match '^\{' })) {
+            $targets.Add(($targetJson | ConvertFrom-Json))
         }
-        try {
-            foreach ($targetJson in ($targetsJson | Where-Object { $_ -match '^\{' })) {
-                $targets.Add(($targetJson | ConvertFrom-Json))
-            }
-        } catch {
-            Write-Error "anvil-bolero: could not parse target discovery output for package '$packageName': $_"
-            exit 1
-        }
+    } catch {
+        Write-Error "anvil-bolero: could not parse target discovery output: $_"
+        exit 1
     }
     if ($targets.Count -eq 0) {
         Write-Host 'anvil-bolero: no fuzz targets in affected packages; skipping'
@@ -115,8 +73,8 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-bolero` recipe.
 [group("anvil-setup")]
-anvil-bolero-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-bolero-install installer)
+anvil-bolero-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-bolero-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-bolero` recipe.
 [group("anvil-setup")]
-anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-bolero-validate-prereqs
+anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-bolero-validate-prereqs anvil-tool-cargo-each-validate-prereqs

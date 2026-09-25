@@ -23,14 +23,15 @@ use cargo_anvil::test_support::{Cli, Manifest, run_update};
 use cargo_anvil::{Artifact, Catalog, RegionId, artifacts};
 use tempfile::TempDir;
 
-const EXTRA_FILE: &str = "justfiles/anvil/demoforge.just";
+const EXTRA_FILE: &str = ".anvil/anvil.just";
+const EXTRA_ID: &str = "recipe:anvil-demo";
 const METADATA_REGION: &str = "demoforge-metadata";
-const CONTAINER_JUST: &str = "justfiles/anvil/container.just";
+const CONTAINER_JUST: &str = ".anvil/anvil.just";
 const DOCKERFILE: &str = ".anvil/container/Dockerfile";
 const DOCKERIGNORE: &str = ".anvil/container/Dockerfile.dockerignore";
 const CONTAINER_HOOKS: &str = ".anvil/container/hooks.ps1";
-const BEFORE_CHECKS: &str = ".pipelines/anvil/hooks/before-checks.yml";
-const AFTER_CHECKS: &str = ".pipelines/anvil/hooks/after-checks.yml";
+const BEFORE_CHECKS: &str = ".anvil/ado/hooks/before-checks.yml";
+const AFTER_CHECKS: &str = ".anvil/ado/hooks/after-checks.yml";
 
 /// The example downstream catalog: anvil's, customized four ways.
 fn demoforge() -> Catalog {
@@ -39,8 +40,12 @@ fn demoforge() -> Catalog {
         .subcommand("demoforge")
         .about("DemoForge: an example anvil fork for tests")
         .version("9.9.9")
-        // Append an owned file.
-        .with_artifact(Artifact::owned_file(EXTRA_FILE, "# demoforge\nanvil-demo:\n    @echo hi\n"))
+        // Append one independently addressable recipe section.
+        .with_artifact(Artifact::owned_file_section(
+            EXTRA_FILE,
+            EXTRA_ID,
+            "# demoforge\nanvil-demo:\n    @echo hi\n",
+        ))
         // Override a built-in region (identity + gate preserved via with_body).
         .replace_artifact(artifacts::region::rustfmt().with_body("max_width = 80\n"))
         // Drop a built-in region.
@@ -169,8 +174,13 @@ fn demoforge_emits_extra_overrides_drops_and_fans_out() {
     let outcome = run_update(&catalog, &local(false), tmp.path()).unwrap();
     assert!(outcome.applied);
 
-    // Appended owned file is emitted.
-    assert!(tmp.path().join(EXTRA_FILE).is_file(), "the extra owned file must be written");
+    // Appended recipe section is composed into the generated Justfile.
+    assert!(
+        std::fs::read_to_string(tmp.path().join(EXTRA_FILE))
+            .unwrap()
+            .contains("anvil-demo:"),
+        "the extra recipe section must be written"
+    );
 
     // Overridden built-in region carries the new body.
     let rustfmt = std::fs::read_to_string(tmp.path().join("rustfmt.toml")).unwrap();
@@ -203,7 +213,12 @@ fn base_anvil_output_is_unaffected_by_the_fork() {
     // workspace neither gains the extra file nor loses clippy.
     let tmp = workspace();
     run_update(&Catalog::anvil(), &local(false), tmp.path()).unwrap();
-    assert!(!tmp.path().join(EXTRA_FILE).exists(), "anvil must not emit the fork's file");
+    assert!(
+        !std::fs::read_to_string(tmp.path().join(EXTRA_FILE))
+            .unwrap()
+            .contains("anvil-demo:"),
+        "anvil must not emit the fork's recipe"
+    );
     assert!(tmp.path().join("clippy.toml").is_file(), "anvil still emits clippy.toml");
     let rustfmt = std::fs::read_to_string(tmp.path().join("rustfmt.toml")).unwrap();
     assert!(!rustfmt.contains("max_width = 80"), "anvil keeps its own rustfmt body");
@@ -290,8 +305,10 @@ fn guard_separates_anvil_and_demoforge() {
     let outcome = run_update(&Catalog::anvil(), &local(true), tmp.path()).unwrap();
     assert!(outcome.applied);
     assert!(
-        !tmp.path().join(EXTRA_FILE).exists(),
-        "forced switch removes the fork's orphaned file"
+        !std::fs::read_to_string(tmp.path().join(EXTRA_FILE))
+            .unwrap()
+            .contains("anvil-demo:"),
+        "forced switch removes the fork's recipe section"
     );
     assert!(
         tmp.path().join("clippy.toml").is_file(),
@@ -309,7 +326,7 @@ fn multi_level_chain_composes() {
         .into_builder()
         .subcommand("forge3")
         .version("0.0.1")
-        .replace_artifact(Artifact::owned_file(EXTRA_FILE, "# forge3 override\n"))
+        .replace_artifact(Artifact::owned_file_section(EXTRA_FILE, EXTRA_ID, "# forge3 override\n"))
         .without_artifact(Artifact::member_region(RegionId::new(METADATA_REGION), ""))
         .build()
         .unwrap();
@@ -319,8 +336,8 @@ fn multi_level_chain_composes() {
     let extra = forge3
         .artifacts()
         .iter()
-        .find(|a| matches!(a, Artifact::OwnedFile(spec) if spec.path == EXTRA_FILE))
-        .expect("forge3 still carries the extra file");
+        .find(|a| matches!(a, Artifact::OwnedFileSection(spec) if spec.path == EXTRA_FILE && spec.id == EXTRA_ID))
+        .expect("forge3 still carries the extra recipe section");
     assert_eq!(extra.body(), "# forge3 override\n", "forge3 overrides an ancestor artifact");
 
     // The metadata region demoforge added is gone in forge3.

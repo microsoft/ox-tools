@@ -16,20 +16,13 @@
 # (e.g. blank-line-separated dependency blocks) intact.
 
 # Check that Cargo.toml dependency tables are sorted.
-[script("pwsh", "-NoProfile")]
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-cargo-sort: no modified packages; skipping'; exit 0 }
-    & cargo {{_anvil_stable_toolchain_args}} sort --workspace --grouped --check --check-format
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo each {{ anvil_modified_selection }} --once -- cargo {{ anvil_stable_toolchain_arg }} sort --workspace --grouped --check --check-format
 
 # Install prerequisites for the `anvil-cargo-sort` recipe.
 [group("anvil-setup")]
-anvil-cargo-sort-setup installer="install": (anvil-tool-cargo-sort-install installer)
+anvil-cargo-sort-setup installer="install": (anvil-tool-cargo-sort-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-cargo-sort` recipe.
 [group("anvil-setup")]
-anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
+anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs anvil-tool-cargo-each-validate-prereqs

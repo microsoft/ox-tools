@@ -18,8 +18,8 @@ it means there is no namespace to isolate, so the on-disk vocabulary never needs
 Concretely, `anvil` is the name of the **engine and the on-disk format**, not of any particular
 front-end binary. Every tool built on the engine emits the *same* fixed namespace:
 
-- owned-file tree `justfiles/anvil/…`
-- sidecar manifest `.anvil.lock`
+- composed owned recipe file `.anvil/anvil.just`
+- sidecar manifest `.anvil/manifest.toml`
 - review-sibling suffix `.anvil-proposed`
 - managed-region sentinels `# >>> anvil-managed: <id>` … `# <<< anvil-managed: <id>`
 - region IDs such as `anvil-imports`, `anvil-workspace-rust-lints`,
@@ -69,21 +69,23 @@ pub fn catalog() -> Catalog {
         .subcommand("myforge")                         // CLI identity only
         .about("MyForge: unified Rust build scaffolding for the Foo org")
         .version(env!("CARGO_PKG_VERSION"))
-        .with_artifact(Artifact::owned_file(           // append an owned file
-            "justfiles/anvil/extra.just",
+        .with_artifact(Artifact::owned_file_section(   // append one recipe section
+            ".anvil/anvil.just",
+            "recipe:myforge-extra",
             include_str!("../templates/extra.just"),
         ))
         .with_artifact(myforge_codeowners_region())    // append a managed region
-        .replace_artifact(                             // swap the check recipes wholesale,
-            artifacts::justfile::checks()              // derived from the built-in
+        .replace_artifact(                             // swap one built-in recipe,
+            artifacts::justfile::recipe("anvil-clippy")
+                .expect("built-in recipe")
                 .with_body(include_str!("../templates/checks.just")),
         )
         .build()
 }
 ```
 
-That is the whole contract: **one line in `main`, plus a `Catalog` value.** Note the new owned
-file still lives under `justfiles/anvil/` and any new region still uses `anvil-managed`
+That is the whole contract: **one line in `main`, plus a `Catalog` value.** Note the new recipe
+section still composes into `.anvil/anvil.just` and any new region still uses `anvil-managed`
 sentinels — the fork extends the anvil namespace, it does not create its own.
 
 ## 4. The shape of a catalog
@@ -178,7 +180,7 @@ catalog data.
 Because the on-disk format is fixed, **none of the engine internals (`region.rs`, `manifest.rs`,
 the templates) need to change to support forks.** `region.rs` keeps its hard-coded
 `anvil-managed` sentinel; the templates keep their literal `anvil-` recipe names; the manifest
-keeps `.anvil.lock`. The only refactor is data-driving the artifact list and threading
+keeps `.anvil/manifest.toml`. The only refactor is data-driving the artifact list and threading
 `CliMeta` into clap.
 
 ### 4.1 Built-in artifacts are public
@@ -194,17 +196,17 @@ pub mod artifacts {
         pub fn cargo_anvil() -> Artifact;      // .github/instructions/cargo-anvil.instructions.md
         pub fn adoption_skill() -> Artifact;  // .github/skills/cargo-anvil-adoption/SKILL.md
     }
-    // The `justfiles/anvil/` recipe tree — every member is an owned `.just` file.
+    // Delimiter-free sections composed into `.anvil/anvil.just`.
     pub mod justfile {
-        pub fn entry() -> Artifact;     // justfiles/anvil/mod.just (imports the siblings)
-        pub fn versions() -> Artifact;  // justfiles/anvil/versions.just
-        pub fn tools() -> Artifact;     // justfiles/anvil/tools.just
-        pub fn helpers() -> Artifact;   // justfiles/anvil/helpers.just (shared helper recipes)
-        pub fn impact() -> Artifact;    // justfiles/anvil/impact.just (the anvil-impact recipe + tier formatter)
-        pub fn runner() -> Artifact;    // justfiles/anvil/runner.just (native/container tier router)
-        pub fn check_files() -> Vec<Artifact>; // justfiles/anvil/checks/<check>.just (one per check)
-        pub fn group_files() -> Vec<Artifact>; // justfiles/anvil/groups/<group>.just (one per group)
-        pub fn tiers() -> Artifact;     // justfiles/anvil/tiers.just
+        pub fn entry() -> Artifact;
+        pub fn recipe(name: &str) -> Option<Artifact>;
+        pub fn versions() -> Vec<Artifact>;
+        pub fn tools() -> Vec<Artifact>;
+        pub fn helpers() -> Vec<Artifact>;
+        pub fn impact() -> Vec<Artifact>;
+        pub fn check_files() -> Vec<Artifact>;
+        pub fn group_files() -> Vec<Artifact>;
+        pub fn tiers() -> Vec<Artifact>;
     }
     // Managed regions spliced into user-composed host files.
     pub mod region {
@@ -228,15 +230,15 @@ pub mod artifacts {
     }
     // Backend files are owned files gated on a backend (§4.3), grouped per backend.
     pub mod github {
-        pub fn setup_action() -> Artifact;      // .github/actions/anvil-setup/action.yml
-        pub fn impact_action() -> Artifact;     // .github/actions/anvil-impact/action.yml
+        pub fn setup_action() -> Artifact;      // .anvil/github/actions/setup/action.yml
+        pub fn impact_action() -> Artifact;     // .anvil/github/actions/impact/action.yml
         pub fn pr_root_workflow() -> Artifact;  // .github/workflows/anvil-pr.yml
         // …shared group runner and status reporter actions, reusable workflows, scheduled workflows.
     }
     pub mod ado {
-        pub fn setup_step() -> Artifact;        // .pipelines/anvil/steps/setup.yml
-        pub fn job_wrapper() -> Artifact;       // .pipelines/anvil/steps/job.yml
-        pub fn advisory_comments() -> Artifact; // .pipelines/anvil/steps/advisory-comments.yml
+        pub fn setup_step() -> Artifact;        // .anvil/ado/steps/setup.yml
+        pub fn job_wrapper() -> Artifact;       // .anvil/ado/steps/job.yml
+        pub fn advisory_comments() -> Artifact; // .anvil/ado/steps/advisory-comments.yml
         // …per-group step templates, root pipelines.
     }
 }
@@ -307,7 +309,7 @@ crate's `Cargo.toml` just adds one artifact:
 .with_artifact(Artifact::member_region(RegionId::new("myorg-metadata"), my_member_metadata_body()))
 ```
 
-and the engine replicates it across all members, tracks each in `.anvil.lock`, and reconciles
+and the engine replicates it across all members, tracks each in `.anvil/manifest.toml`, and reconciles
 drift per member — no per-fork engine changes.
 
 > Note anvil's own lint regions are modeled as seven separate artifacts under this scheme, with no
@@ -336,7 +338,7 @@ see [github.md](./github.md) / [ado.md](./ado.md)) are ordinary `OwnedFile` arti
 
 ```rust
 OwnedFileSpec {
-    path: ".github/actions/anvil-setup/action.yml",
+    path: ".anvil/github/actions/setup/action.yml",
     body: /* … */,
     gate: Some(Backend::GitHub),   // emitted only when github is selected
 }
@@ -467,31 +469,23 @@ repo.
 
 ## 6. Artifact-level extensibility
 
-A fork appends, replaces, or drops artifacts — owned files (including the gated backend files,
-§4.3) and managed regions. That covers the common case: "anvil's catalog plus my org's extra
-`.just` file and a CODEOWNERS region, with our own GitHub setup action." The check/group/tier
-content inside the justfile tree is an opaque blob; a fork that needs different checks replaces
-the relevant `OwnedFile` (e.g. `checks.just`) wholesale rather than editing individual recipes.
+A fork appends, replaces, or drops artifacts — owned files, delimiter-free
+owned-file sections, and managed regions. That covers the common case:
+"anvil's catalog plus my org's extra recipe and a CODEOWNERS region, with our
+own GitHub setup action." Each built-in Just recipe has a stable
+`recipe:<name>` section identity, so a fork can change one recipe without
+replacing the complete generated Justfile.
 
 This is a modest, low-risk refactor: it data-drives the artifact list (§4) without disturbing the
 engine internals or the template format.
 
-### 6.1 Placement: `justfiles/` holds recipes only
+### 6.1 Composed-file invariants
 
-One placement rule is enforced rather than left to discovery, because violating
-it fails in a confusing place. `justfiles/anvil/` may contain `.just` recipes
-and nothing else: [`CatalogBuilder::build`](#4-the-shape-of-a-catalog) rejects
-any other owned file under that prefix, so a derived catalog fails loudly at
-construction instead of shipping a file whose absence is noticed only later.
-
-The reason is legibility rather than image identity. The image identity hashes
-every file under `justfiles/anvil/` recursively, and the build context admits
-the whole directory, so a non-recipe file placed there is copied into the image
-*and* covered by its tag — editing it renames the image and a rebuild follows.
-What the rule protects is the meaning of the directory: it is the recipe tree,
-`just` parses everything in it, and a catalog that hides an installer script
-there makes the tool set harder to reason about. Non-recipe assets belong in a
-tool-owned directory of their own, such as `.anvil/`.
+[`CatalogBuilder::build`](#4-the-shape-of-a-catalog) rejects a path claimed by
+both a whole owned file and an owned-file section, a section path that is also a
+managed-region host, and inconsistent backend gates among sections composing
+one physical file. Section order is rendering order and contributes to the
+catalog checksum.
 
 Containerized execution is itself an ordinary artifact group, customized with
 the same `replace_artifact` / `with_artifact` / `without_artifact` levers as
@@ -555,15 +549,16 @@ ancestors defined seamlessly, as one tool managing one namespace.
   snapshots do not need to change at all.
 - **A second-front-end fixture.** Add a tiny in-repo example catalog (`Catalog::anvil()` with
   subcommand `demoforge` and one extra owned file) and a fixture test asserting: the subcommand
-  parses, the extra file is emitted under `justfiles/anvil/`, and the output is otherwise
+  parses, the extra recipe is emitted in `.anvil/anvil.just`, and the output is otherwise
   identical to the base catalog — i.e. nothing in the on-disk vocabulary shifted.
 
 ## 9. Non-goals
 
 - **Multiple anvil-family tools per repo.** Out of scope by deliberate constraint (§1). This is
   what lets the on-disk vocabulary stay fixed, with no per-fork rebranding of paths or sentinels.
-- **Per-fork on-disk rebranding.** A fork cannot rename `.anvil.lock`, the `anvil-managed`
-  sentinels, `justfiles/anvil/`, or the `anvil-` recipe prefix. Those belong to the engine.
+- **Per-fork on-disk rebranding.** A fork cannot rename `.anvil/manifest.toml`, the
+  `anvil-managed` sentinels, `.anvil/anvil.just`, or the `anvil-` recipe prefix.
+  Those belong to the engine.
 - **Runtime plugins / dynamic loading.** A catalog is Rust code compiled into the downstream
   binary, not a config file discovered at runtime. This keeps the "writes files, then exits"
   stance ([README.md §3](./README.md)) and avoids a plugin ABI.

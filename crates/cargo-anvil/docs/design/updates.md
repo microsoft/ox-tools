@@ -11,7 +11,7 @@ See [README.md](./README.md) for the CLI, [local.md](./local.md) for recipes,
 
 ## 1. The manifest
 
-`.anvil.lock` is committed TOML at the repository root. It records the checksum
+`.anvil/manifest.toml` is committed TOML under the generated Anvil directory. It records the checksum
 of the last rendered content for each owned file and each `(host, id)` region:
 
 ```toml
@@ -21,7 +21,7 @@ tool_version = "0.4.1"
 catalog_checksum = "sha256:..."
 
 [[file]]
-path = "justfiles/anvil/checks/fmt.just"
+path = ".anvil/anvil.just"
 checksum = "sha256:..."
 
 [[region]]
@@ -35,6 +35,9 @@ Entries are deterministic: files sorted by path, regions by `(host, id)`.
 The lock is read at startup and refreshed after applying the plan; `--dry-run`
 does not write it. Missing tracking means an item has not previously been rendered.
 The schema version controls format compatibility; a newer schema is refused.
+During migration, cargo-anvil reads the legacy root `.anvil.lock` when the new
+path is absent. If both exist they must contain equivalent state. A successful
+write retires the legacy path.
 
 Checksums normalize CRLF to LF. Other whitespace differences are content changes.
 Region checksums cover only the body, not the sentinels or user text outside them.

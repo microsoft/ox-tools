@@ -18,8 +18,8 @@ anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs (_anvil-miri
 
 # Install prerequisites for the `anvil-miri-race-coverage` recipe.
 [group("anvil-setup")]
-anvil-miri-race-coverage-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
+anvil-miri-race-coverage-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-miri-race-coverage` recipe.
 [group("anvil-setup")]
-anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
+anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs

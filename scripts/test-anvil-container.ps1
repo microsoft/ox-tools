@@ -362,7 +362,7 @@ Write-Section '1. Generated artifacts'
 
 $dockerfile = Join-Path $repo '.anvil/container/Dockerfile'
 $dockerignore = Join-Path $repo '.anvil/container/Dockerfile.dockerignore'
-$containerJust = Join-Path $repo 'justfiles/anvil/container.just'
+$containerJust = Join-Path $repo '.anvil/anvil.just'
 $hooks = Join-Path $repo '.anvil/container/hooks.ps1'
 
 Assert-That 'Dockerfile emitted' (Test-Path -LiteralPath $dockerfile)
@@ -370,7 +370,7 @@ Assert-That 'Dockerfile.dockerignore emitted' (Test-Path -LiteralPath $dockerign
 Assert-That 'container.just emitted' (Test-Path -LiteralPath $containerJust)
 Assert-That 'no hook emitted by default' (-not (Test-Path -LiteralPath $hooks))
 Assert-That 'no config file emitted' (-not (Test-Path -LiteralPath (Join-Path $repo 'anvil.toml')))
-Assert-That 'no runner seam emitted' (-not (Test-Path -LiteralPath (Join-Path $repo 'justfiles/anvil/runner.just')))
+Assert-That 'no runner seam emitted' (-not (Test-Path -LiteralPath (Join-Path $repo '.anvil/runner.just')))
 
 $containerDir = Get-ChildItem -LiteralPath (Join-Path $repo '.anvil/container') -File
 Assert-Equal 'container directory holds exactly two files' 2 $containerDir.Count

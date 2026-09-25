@@ -49,17 +49,25 @@
 [script("pwsh", "-NoProfile")]
 anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $stableArgs = {{_anvil_stable_toolchain_args}}
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
     $commentFile = 'target/anvil/comments/semver.md'
-    if ($include -eq '--skip') {
+    $pkg = if ('{{ anvil_impact_mode }}' -eq 'off') {
+        @('--workspace')
+    } else {
+        $packageFile = Join-Path '{{ replace(anvil_impact_input_dir, "'", "''") }}' 'affected.packages'
+        if (-not (Test-Path -LiteralPath $packageFile -PathType Leaf)) {
+            throw "anvil-semver-check: missing impact package file $packageFile"
+        }
+        @(
+            foreach ($spec in Get-Content -LiteralPath $packageFile) {
+                if (-not [string]::IsNullOrWhiteSpace($spec)) { '--package'; $spec.Trim() }
+            }
+        )
+    }
+    if ($pkg.Count -eq 0) {
         Write-Host 'anvil-semver-check: no affected packages; skipping'
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Build the publishable candidate package list. Keep each package's metadata so
     # its manifest path can also be checked in the baseline. Always
     # iterate per-package over library crates only -- cargo-semver-checks
@@ -71,7 +79,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # null, `publish = false` as an empty array, and named-registry restrictions
     # as a nonempty array. Only the empty array is non-publishable.
     $libPkgs = @{}
-    $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
+    $metadataJson = & cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-semver-check: cargo metadata failed'
         exit $LASTEXITCODE
@@ -108,7 +116,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         exit 0
     }
 
-    # _anvil-base-ref is the single source of truth for the baseline:
+    # anvil_base_ref is the single source of truth for the baseline:
     # the PR's target branch on CI (origin/<target>), or origin/main /
     # origin/master locally. We compare the PR's *current* API against
     # that branch rather than the last crates.io release, so the recipe
@@ -123,8 +131,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # clone, or a mis-configured job) we fail loudly with actionable
     # guidance rather than silently misreporting an unresolvable baseline
     # as a breaking change.
-    $base = (& "{{just_executable()}}" _anvil-base-ref)
-    $base = $base.Trim()
+    $base = '{{ replace(anvil_base_ref, "'", "''") }}'
     & git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-Error "anvil-semver-check: baseline '$base' is not present in this clone (shallow/truncated history? fetch it or unshallow)."
@@ -149,7 +156,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         }
 
         Write-Host "anvil-semver-check: $p (baseline $base)"
-        $outputLines = @(& cargo @stableArgs semver-checks --package $p --baseline-rev $base 2>&1)
+        $outputLines = @(& cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} semver-checks --package $p --baseline-rev $base 2>&1)
         $semverExit = $LASTEXITCODE
         $output = ($outputLines | Out-String)
         if ($semverExit -eq 100) {
@@ -240,8 +247,8 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-semver-check` recipe.
 [group("anvil-setup")]
-anvil-semver-check-setup installer="install": (anvil-tool-cargo-semver-checks-install installer)
+anvil-semver-check-setup installer="install": (anvil-tool-cargo-semver-checks-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-semver-check` recipe.
 [group("anvil-setup")]
-anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-prereqs
+anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-prereqs anvil-tool-cargo-each-validate-prereqs

@@ -11,6 +11,8 @@
 //!
 //! See [`extensibility.md §4, §5`](../../docs/design/extensibility.md).
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use ohno::{AppError, bail};
 
 use crate::catalog::artifact::Artifact;
@@ -76,7 +78,22 @@ impl Catalog {
     /// [`extensibility.md §5.1`](../../docs/design/extensibility.md).
     #[must_use]
     pub fn checksum(&self) -> String {
-        let mut entries: Vec<String> = self.artifacts.iter().map(canonical_repr).collect();
+        let mut section_ordinals = BTreeMap::<&str, usize>::new();
+        let mut entries: Vec<String> = self
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                let ordinal = if let Artifact::OwnedFileSection(spec) = artifact {
+                    let next = section_ordinals.entry(spec.path).or_default();
+                    let current = *next;
+                    *next += 1;
+                    Some(current)
+                } else {
+                    None
+                };
+                canonical_repr(artifact, ordinal)
+            })
+            .collect();
         entries.sort();
         checksum_str(&entries.join("\n"))
     }
@@ -85,13 +102,23 @@ impl Catalog {
 /// Canonical, collision-resistant string for one artifact: its full identity
 /// (including gate / syntax) followed by its rendered body. The leading
 /// fields make sorting these strings a canonical, order-independent ordering.
-fn canonical_repr(artifact: &Artifact) -> String {
+fn canonical_repr(artifact: &Artifact, section_ordinal: Option<usize>) -> String {
     // U+001F (unit separator) cannot appear in paths/ids and is vanishingly
     // unlikely in bodies, so it disambiguates the joined fields.
     const SEP: char = '\u{1f}';
     match artifact {
         Artifact::OwnedFile(spec) => {
             format!("file{SEP}{}{SEP}gate={}{SEP}{}", spec.path, gate_repr(spec.gate), spec.body)
+        }
+        Artifact::OwnedFileSection(spec) => {
+            let ordinal = section_ordinal.expect("owned-file sections are assigned a per-path catalog ordinal");
+            format!(
+                "file-section{SEP}{}{SEP}{}{SEP}order={ordinal}{SEP}gate={}{SEP}{}",
+                spec.path,
+                spec.id,
+                gate_repr(spec.gate),
+                spec.body
+            )
         }
         Artifact::Region(spec) => {
             format!(
@@ -228,6 +255,7 @@ impl CatalogBuilder {
     pub fn build(self) -> Result<Catalog, AppError> {
         let mut errors = self.errors;
         errors.extend(self.artifacts.iter().filter_map(non_recipe_under_justfiles));
+        errors.extend(structural_errors(&self.artifacts));
         if !errors.is_empty() {
             bail!("invalid catalog for '{}':\n  - {}", self.cli.subcommand, errors.join("\n  - "));
         }
@@ -238,6 +266,62 @@ impl CatalogBuilder {
     }
 }
 
+fn structural_errors(artifacts: &[Artifact]) -> Vec<String> {
+    let owned_paths: BTreeSet<&str> = artifacts
+        .iter()
+        .filter_map(|artifact| match artifact {
+            Artifact::OwnedFile(spec) => Some(spec.path),
+            Artifact::OwnedFileSection(_) | Artifact::Region(_) => None,
+        })
+        .collect();
+    let region_hosts: BTreeSet<&str> = artifacts
+        .iter()
+        .filter_map(|artifact| match artifact {
+            Artifact::Region(spec) => match &spec.host {
+                crate::catalog::HostSelector::Path(path) => Some(path.as_str()),
+                crate::catalog::HostSelector::EachMemberManifest
+                | crate::catalog::HostSelector::WorkspaceCargoToml
+                | crate::catalog::HostSelector::SingleCrateCargoToml => None,
+            },
+            Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) => None,
+        })
+        .collect();
+    let mut section_gates = BTreeMap::<&str, Option<crate::backend::Backend>>::new();
+    let mut errors = Vec::new();
+
+    for artifact in artifacts {
+        let Artifact::OwnedFileSection(spec) = artifact else {
+            continue;
+        };
+        if spec.path.is_empty() || spec.id.is_empty() {
+            errors.push("owned-file sections require nonempty paths and ids".to_owned());
+        }
+        if owned_paths.contains(spec.path) {
+            errors.push(format!(
+                "owned-file section '{}'/'{}' conflicts with a whole owned file at the same path",
+                spec.path, spec.id
+            ));
+        }
+        if region_hosts.contains(spec.path) {
+            errors.push(format!(
+                "owned-file section '{}'/'{}' conflicts with a managed-region host at the same path",
+                spec.path, spec.id
+            ));
+        }
+        match section_gates.get(spec.path) {
+            Some(gate) if *gate != spec.gate => errors.push(format!(
+                "owned-file sections composing '{}' use inconsistent backend gates",
+                spec.path
+            )),
+            Some(_) => {}
+            None => {
+                section_gates.insert(spec.path, spec.gate);
+            }
+        }
+    }
+    errors
+}
+
 /// `justfiles/` is the recipe tree: `just` parses every file the container
 /// build copies from it, so a non-recipe owned file there makes the tool set
 /// harder to reason about than one kept in a tool-owned directory. Image
@@ -246,16 +330,17 @@ impl CatalogBuilder {
 /// catalog-construction time to keep a derived catalog honest about where its
 /// assets live.
 fn non_recipe_under_justfiles(artifact: &Artifact) -> Option<String> {
-    let Artifact::OwnedFile(spec) = artifact else {
-        return None;
+    let path = match artifact {
+        Artifact::OwnedFile(spec) => spec.path,
+        Artifact::OwnedFileSection(spec) => spec.path,
+        Artifact::Region(_) => return None,
     };
-    let path = std::path::Path::new(spec.path);
-    if !spec.path.starts_with("justfiles/") || path.extension().is_some_and(|extension| extension == "just") {
+    let extension = std::path::Path::new(path).extension();
+    if !path.starts_with("justfiles/") || extension.is_some_and(|value| value == "just") {
         return None;
     }
     Some(format!(
-        "owned file '{}' is not a .just recipe; non-recipe artifacts must live outside justfiles/ (it is the recipe tree, not an asset directory)",
-        spec.path
+        "owned file '{path}' is not a .just recipe; non-recipe artifacts must live outside justfiles/ (it is the recipe tree, not an asset directory)"
     ))
 }
 
@@ -408,6 +493,73 @@ mod tests {
         assert!(one.checksum().starts_with("sha256:"));
     }
 
+    #[test]
+    fn owned_file_section_order_changes_the_catalog_checksum() {
+        let first = Artifact::owned_file_section(".anvil/composed", "first", "one");
+        let second = Artifact::owned_file_section(".anvil/composed", "second", "two");
+        let forward = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(first.clone())
+            .with_artifact(second.clone())
+            .build()
+            .unwrap();
+        let reverse = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(second)
+            .with_artifact(first)
+            .build()
+            .unwrap();
+
+        assert_ne!(forward.checksum(), reverse.checksum());
+    }
+
+    #[test]
+    fn owned_file_sections_reject_conflicting_ownership_models() {
+        let whole_file = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(Artifact::owned_file(".anvil/composed", "whole"))
+            .with_artifact(Artifact::owned_file_section(".anvil/composed", "part", "section"))
+            .build()
+            .unwrap_err();
+        assert!(whole_file.to_string().contains("conflicts with a whole owned file"));
+
+        let region_host = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(Artifact::region(crate::catalog::RegionSpec {
+                host: crate::catalog::HostSelector::Path(".anvil/composed".to_owned()),
+                id: crate::catalog::RegionId::new("managed"),
+                body: "region".to_owned(),
+                syntax: crate::region::CommentSyntax::Hash,
+            }))
+            .with_artifact(Artifact::owned_file_section(".anvil/composed", "part", "section"))
+            .build()
+            .unwrap_err();
+        assert!(region_host.to_string().contains("conflicts with a managed-region host"));
+    }
+
+    #[test]
+    fn owned_file_sections_require_consistent_gates_and_nonempty_identity() {
+        let inconsistent = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(Artifact::backend_file_section(
+                crate::backend::Backend::GitHub,
+                ".anvil/composed",
+                "github",
+                "one",
+            ))
+            .with_artifact(Artifact::backend_file_section(
+                crate::backend::Backend::Ado,
+                ".anvil/composed",
+                "ado",
+                "two",
+            ))
+            .build()
+            .unwrap_err();
+        assert!(inconsistent.to_string().contains("inconsistent backend gates"));
+
+        for artifact in [
+            Artifact::owned_file_section("", "part", "body"),
+            Artifact::owned_file_section(".anvil/composed", "", "body"),
+        ] {
+            Catalog::builder(CliMeta::new("t")).with_artifact(artifact).build().unwrap_err();
+        }
+    }
+
     #[cfg_attr(
         miri,
         ignore = "hashes the full embedded anvil catalog; pure safe Rust with no leak/UB to exercise, covered by the native run"
@@ -476,8 +628,8 @@ mod tests {
             syntax: crate::region::CommentSyntax::SlashSlash,
         });
 
-        let file_repr = canonical_repr(&file);
-        let region_repr = canonical_repr(&region);
+        let file_repr = canonical_repr(&file, None);
+        let region_repr = canonical_repr(&region, None);
 
         assert!(file_repr.contains("gate=github"));
         assert!(file_repr.contains("file"));

@@ -10,11 +10,6 @@
 [script("pwsh", "-NoProfile")]
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-careful: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Guard against cargo-careful's stale-sysroot hazard. cargo-careful
     # builds a custom std ("careful sysroot": debug-assertions + extra UB
     # checks) into a STABLE cache path -- ProjectDirs(de.ralfj.cargo-careful),
@@ -68,13 +63,13 @@ anvil-careful: anvil-careful-validate-prereqs anvil-impact
     # there is nothing to clean). Written after the clean so it survives it.
     New-Item -ItemType Directory -Force -Path (Split-Path $marker) | Out-Null
     Set-Content -LiteralPath $marker -Value $idHash
-    & cargo '+{{ rust_nightly }}' careful test @pkg --all-features --locked
+    & cargo '+{{ rust_nightly }}' each {{ anvil_affected_selection }} --once -- cargo '+{{ rust_nightly }}' careful test '{packages}' --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-careful` recipe.
 [group("anvil-setup")]
-anvil-careful-setup installer="install": anvil-component-nightly-rust-src-install (anvil-tool-cargo-careful-install installer)
+anvil-careful-setup installer="install": anvil-component-nightly-rust-src-install (anvil-tool-cargo-careful-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-careful` recipe.
 [group("anvil-setup")]
-anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-careful-validate-prereqs
+anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-careful-validate-prereqs anvil-tool-cargo-each-validate-prereqs

@@ -25,26 +25,14 @@
 # of {unused dep, unused dev-dep, dep that should be a dev-dep}.
 
 # Check required workspace packages for unused dependencies.
-[script("pwsh", "-NoProfile")]
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
-    $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
-    $impactExit = $LASTEXITCODE
-    if ($impactExit -ne 0) { exit $impactExit }
-    if ($include -eq '--skip') { Write-Host 'anvil-udeps: no affected packages; skipping'; exit 0 }
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    # Pass 1: default targets (lib + bins) -- surfaces [dependencies] that
-    # are only used by tests/benches/examples (should be dev-deps).
-    & cargo '+{{ rust_nightly }}' udeps @pkg --all-features
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # Pass 2: --all-targets -- surfaces unused [dev-dependencies].
-    & cargo '+{{ rust_nightly }}' udeps @pkg --all-features --all-targets
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features
+    cargo +{{ rust_nightly }} each {{ anvil_required_selection }} --once -- cargo +{{ rust_nightly }} udeps '{packages}' --all-features --all-targets
 
 # Install prerequisites for the `anvil-udeps` recipe.
 [group("anvil-setup")]
-anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-udeps-install installer)
+anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-udeps-install installer) (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-udeps` recipe.
 [group("anvil-setup")]
-anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs
+anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs anvil-tool-cargo-each-validate-prereqs
