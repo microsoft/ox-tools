@@ -3,6 +3,11 @@
 This guide records executable and end-to-end mechanics behind
 [`DESIGN.md`](DESIGN.md).
 
+The [validation-improvement stack plan](implementation-plans/0000/README.md)
+organizes population-scope correctness, mutation defaults, flaky-result gating,
+library target selection, external artifacts, exact replay, and const-function
+execution into linked implementation layers.
+
 ## Executable boundary
 
 The binary implements the real terminal host and calls
