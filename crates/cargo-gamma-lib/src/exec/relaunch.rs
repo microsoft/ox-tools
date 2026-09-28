@@ -60,6 +60,7 @@ pub(crate) enum Refusal {
 }
 
 /// Whether this process is the result of a relaunch.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn relaunched() -> bool {
     env::var_os(MARKER).is_some()
 }
@@ -101,6 +102,7 @@ fn scope_command(exe: OsString, args: Vec<OsString>) -> Command {
 /// `Ok(None)` means no relaunch was attempted and the caller should carry on as it would have.
 /// An `Err` means the relaunch was attempted and failed, which is worth reporting rather than
 /// swallowing: the user asked for a bound, something was supposed to provide it, and it did not.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn relaunch() -> Result<Option<i32>, Refusal> {
     relaunch_unless(relaunched())
 }
@@ -110,6 +112,7 @@ pub(crate) fn relaunch() -> Result<Option<i32>, Refusal> {
 /// The guard is a parameter rather than a call so that the recursion case can be tested without
 /// setting an environment variable, which in a threaded test binary is a change every other test
 /// sees.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn relaunch_unless(marked: bool) -> Result<Option<i32>, Refusal> {
     if marked {
         return Err(Refusal::AlreadyInScope);

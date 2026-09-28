@@ -84,6 +84,10 @@ configuration, reports, diagnostics, and exit codes. The Rust API is an
 implementation detail used by the thin executable crate. Its rustdoc is hidden,
 and its hand-written README warns downstream users not to depend on it.
 
+The testing progress display reports completed and total mutants plus observed
+verdict counts. It does not predict completion time: scheduling, contention,
+timeouts, and learned test selection make a live ETA misleading.
+
 Reports that omit `config.mutantIdVersion` use the current identity scheme,
 preserving compatibility with reports written before that field was persisted.
 An explicit different version is excluded from a merge because its identifiers
@@ -96,6 +100,16 @@ Runtime startup failures are infrastructure failures, not mutant kills. This
 includes both failure to acquire the startup environment and a guard reached
 before the runtime constructor installed its selection; either fixed marker
 disqualifies the process as mutation-score evidence.
+
+Source-declared test resources are recovered from ignored harness markers
+before baseline execution. A function marker maps a resource to one qualified
+test name; a module marker maps it to every launch of that test target.
+Campaign configuration supplies capacities, defaulting each declared resource
+to one. Every launch path uses one shared admission coordinator, including
+baseline, census, mutant probes, whole-binary fallbacks, and confirmations.
+Custom harnesses have no libtest marker registry and therefore contribute no
+source-declared resources. Resource-bearing nextest launches additionally limit
+the runner to one concurrent test process.
 
 Interactive build progress reuses Cargo's progress text while cargo-gamma owns
 the terminal redraw. Cargo's leading erase control is consumed rather than
@@ -198,18 +212,16 @@ workspace lock across a second campaign-locator resolution, campaign-record
 selection, artifact publication, and verification, so a
 concurrently completing campaign cannot be followed by hints derived from the
 record it replaced. Version-10 campaign
-records persist workspace-relative paths for exact identities. Version-9
-records retain safely usable generalized and compiler-ordering knowledge but
-omit exact probes whose path was never recorded rather than inventing one. The hints context
+records persist workspace-relative paths for exact identities. Unsupported
+campaign-record versions are discarded for automatic reuse and rejected by
+state-consuming commands. The hints context
 contains only the generating HEAD commit and UTC date because hints are
 revalidated scheduling advice, not context-gated evidence. The independently
 versioned generalized schema is version 2. It distinguishes seed observations
 from cross-mutant transfer hits and misses, interns repeated killing-test and
 binary identities, and persists stable reach sites with the engine-owned site
-digest rather than normalized source text. Version-1 generalized data is read
-conservatively: candidate identities become seeds, while conflated transfer
-statistics and measured costs are reset before the in-memory schema advances
-to version 2. Promotion output reports only records added, updated, removed,
+digest rather than normalized source text. Older generalized schemas are
+unsupported. Promotion output reports only records added, updated, removed,
 and preserved; aggregate hint and mutant counts remain available from the
 artifact rather than being repeated in the command status line.
 
@@ -220,10 +232,9 @@ the discovered file digest. Incremental execution still reuses only compiler
 unviability. `cargo gamma suppress` normally resolves the persisted ledger
 after using Cargo metadata to validate the current workspace identity. It
 performs no workspace synchronization, builds, baselines, or tests. Explicit
-package, file, mutator, diff, shard, feature, and configuration selections are
-rejected because they cannot narrow an already persisted campaign ledger. The inherited run
-`--dry-run` flag is also rejected rather than ignored; only
-`--dry-run-suppress` previews source edits. The command parses only
+package, file, mutator, diff, shard, feature, configuration, and execution settings are not offered
+because they cannot narrow an already persisted campaign ledger. Like `unsuppress`, the command
+previews source edits by default and requires `--apply` to write them. The command parses only
 affected current source files, relocates a uniquely matching unchanged site, reports missing or
 ambiguous sites as stale, and verifies the resulting source policy
 transactionally. Persisted campaign locators are accepted only after Cargo resolves the selected
@@ -258,6 +269,54 @@ notes, and `Wrote  :` artifact notices. The hints reminder depends on an
 addition, correction, or removal in exact killer or compiler-ordering
 knowledge learned by this campaign, not on whether `gamma-hints.yaml` already
 exists or on generalized counter churn.
+
+After baseline measurement, `--dashboard` replaces the ordinary single-line
+progress bar with a multiline in-place view of outcome counts, selection-tier
+hit rates, and test-process launch costs. It begins in `PLANNING` before
+reachability, census, projection, and queue preparation, then transitions to
+`TESTING` at the sweep-planned event. It is enabled only when the resolved
+progress policy permits terminal output, redraws at most once per second, and
+selects small, medium, or large rendering from the current terminal width.
+The width is sampled again before every eligible repaint, so resizing the
+window changes layout without restarting the campaign. Refreshes erase and
+replace the display in one synchronized terminal update rather than exposing
+an empty intermediate frame. While workers produce no events, the sweep
+coordinator emits a one-second heartbeat that flushes rate-limited state and
+refreshes wall-clock-derived metrics. The dashboard records the visible width
+of each row it draws. A repaint moves upward by the resulting physical row
+count and erases to the end of the screen before writing the replacement; it
+does not depend on the terminal's global saved-cursor slot, which other
+programs may overwrite or some terminals may not implement. Recomputing the
+physical row count at the current terminal width removes obsolete rows after
+terminal reflow. Survivor,
+timeout, out-of-memory, and flaky verdicts are still written as individual
+lines above the display. Clearing, exceptional output, finalization, and
+failure abandonment all restore the cursor before ordinary diagnostics or the
+final summary are written.
+
+All three layouts use Unicode separators and box drawing. The same resolved
+color policy used by ordinary console reporting is carried into the dashboard:
+section hierarchy and outcome semantics are colored under `--color=always` (or
+automatic terminal color) and emit no style escapes under `--color=never`.
+
+During testing the dashboard reuses the ordinary progress renderer as its
+header, preserving its progress bar and verdict totals. The
+large layout puts equal-height Mutants and Test Execution panels side by side
+and centers Hints beneath them. Panel widths are derived from their longest
+rendered row with one space of inner padding, so short panels do not retain a
+fixed right margin and long metrics cannot cross the border. Label and value
+columns use the same three-space gutter in every panel. Mutants uses one cell per mutant through 100
+displayed outcomes and apportions larger populations over a 10-by-10 waffle,
+so each cell then represents approximately one percent. Exact legend counts
+remain authoritative for classifications too small to receive a cell.
+
+Hints deliberately includes only explicit persisted hints and inferred
+generalized hints, each with an attempt count and hit rate. Test Execution
+reports test-binary count, current worker occupancy, five-minute mutant
+throughput, whole versus filtered process launches, mean and maximum launch
+runtime, launches per mutant completed during this sweep, the largest
+test-binary baseline memory peak when the platform measured one, and the
+baseline-runtime estimate avoided by successful explicit or inferred hints.
 
 ### Redirected cache security
 

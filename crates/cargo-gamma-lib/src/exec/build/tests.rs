@@ -431,6 +431,55 @@ fn the_final_build_does_not_compile_examples_or_benches() {
     );
 }
 
+/// Library-only selection must narrow before compilation, not discard integration binaries after
+/// Cargo has already tried to build them.
+#[test]
+fn a_library_only_oracle_never_compiles_integration_targets() {
+    let (_dir, work) = trivial_workspace("build-test-lib-");
+
+    fs::write(
+        work.root.join("src/lib.rs").as_std_path(),
+        "#[cfg(test)] mod tests { #[test] fn unit() {} }\n",
+    )
+    .expect("lib");
+    fs::create_dir_all(work.root.join("tests").as_std_path()).expect("tests");
+    fs::write(
+        work.root.join("tests/trivial.rs").as_std_path(),
+        "compile_error!(\"integration target must not compile\");\n",
+    )
+    .expect("integration test");
+
+    let mut plan = empty_plan(&work);
+    let selected = ["trivial".to_owned()];
+    let mut converger = Converger::default();
+    converger.select_test_lib(true);
+    let preflight = Converger::preflight(
+        &work,
+        &plan,
+        Some(&selected),
+        &selected,
+        true,
+        BuildLimits::default(),
+        &mut crate::testing::Recorder::default(),
+    )
+    .expect("the library harness compiles without the broken integration target");
+    converger.target_discovery(preflight.discovery);
+
+    let build = converger
+        .finish(
+            &work,
+            &mut plan,
+            Some(&selected),
+            BuildLimits::default(),
+            &mut crate::testing::Recorder::default(),
+        )
+        .expect("the final library-only build succeeds");
+
+    assert!(build.stuck.is_none());
+    assert_eq!(build.binaries.len(), 1);
+    assert_eq!(build.binaries[0].target, "trivial");
+}
+
 /// A workspace of two members, one of which does not compile and is not being mutated.
 fn split_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
     let dir = crate::testing::workdir(prefix);
@@ -529,6 +578,7 @@ fn a_check_that_only_the_whole_workspace_passes_says_so() {
         &plan,
         Some(&select),
         &select,
+        false,
         BuildLimits::default(),
         &mut crate::testing::Recorder::default(),
     )
@@ -605,6 +655,7 @@ fn a_broken_package_nobody_is_mutating_is_dropped_rather_than_failing_the_run() 
         &plan,
         Some(&select),
         &mutating,
+        false,
         BuildLimits::default(),
         &mut crate::testing::Recorder::default(),
     )
@@ -643,6 +694,7 @@ fn a_broken_package_that_is_being_mutated_still_stops_the_run() {
         &plan,
         Some(&select),
         &mutating,
+        false,
         BuildLimits::default(),
         &mut crate::testing::Recorder::default(),
     )
@@ -674,6 +726,7 @@ fn a_preflight_that_fails_both_ways_reports_the_selected_packages_errors() {
         &plan,
         Some(&select),
         &select,
+        false,
         BuildLimits::default(),
         &mut crate::testing::Recorder::default(),
     )
@@ -1707,12 +1760,19 @@ fn span(file: &str, line_start: u32, column_start: u32, line_end: u32, column_en
 }
 
 fn compiler_message(spans: &[Value]) -> String {
+    reason_message(None, "boom", spans, &[])
+}
+
+fn reason_message(code: Option<&str>, message: &str, spans: &[Value], notes: &[Value]) -> String {
     serde_json::json!({
         "reason": "compiler-message",
         "message": {
             "level": "error",
+            "message": message,
+            "code": code.map(|code| serde_json::json!({ "code": code })),
             "rendered": "error: boom\n",
             "spans": spans,
+            "children": [{ "level": "note", "spans": notes }],
         },
     })
     .to_string()
@@ -1721,17 +1781,7 @@ fn compiler_message(spans: &[Value]) -> String {
 /// A diagnostic that names a code and keeps half of what it knows in its notes, which is the
 /// shape every borrow-checker error has.
 fn coded_message(code: &str, primary: &[Value], notes: &[Value]) -> String {
-    serde_json::json!({
-        "reason": "compiler-message",
-        "message": {
-            "level": "error",
-            "code": { "code": code },
-            "rendered": "error: boom\n",
-            "spans": primary,
-            "children": [{ "level": "note", "spans": notes }],
-        },
-    })
-    .to_string()
+    reason_message(Some(code), "boom", primary, notes)
 }
 
 fn mutant() -> Mutant {
@@ -1759,6 +1809,24 @@ fn mutant() -> Mutant {
         killed_by: None,
         note: None,
     }
+}
+
+#[test]
+fn proof_build_candidates_exclude_pristine_withdrawn_and_unselected_mutants() {
+    let mut pristine = mutant();
+    pristine.ordinal = 0;
+    let mut withdrawn = mutant();
+    withdrawn.ordinal = 2;
+    let mut other_package = mutant();
+    other_package.ordinal = 3;
+    other_package.package = "other".to_owned().into();
+    let withdrawn_ordinals = HashSet::from_iter([2]);
+    let packages = vec!["pkg".to_owned()];
+
+    assert!(!isolation_candidate(&pristine, &withdrawn_ordinals, Some(&packages)));
+    assert!(!isolation_candidate(&withdrawn, &withdrawn_ordinals, Some(&packages)));
+    assert!(!isolation_candidate(&other_package, &withdrawn_ordinals, Some(&packages)));
+    assert!(isolation_candidate(&mutant(), &withdrawn_ordinals, Some(&packages)));
 }
 
 /// The failure this tier exists for, taken from a real tree: a deleted `continue` makes a path
@@ -1801,7 +1869,7 @@ fn a_move_error_is_blamed_on_the_deletion_that_changed_which_paths_exist() {
 /// that number is a mutator emitting ill-typed code or the borrow checker objecting to the
 /// schema, and those want opposite remedies.
 #[test]
-fn a_withdrawal_remembers_the_error_code_that_caused_it() {
+fn a_single_mutant_diagnostic_retains_its_normalized_reason() {
     let mut guards = Guards::default();
 
     let _ = guards.insert(
@@ -1812,11 +1880,105 @@ fn a_withdrawal_remembers_the_error_code_that_caused_it() {
         ),
     );
 
-    let stdout = coded_message("E0308", &[span("src/lib.rs", 10, 5, 10, 9, true)], &[]);
+    let stdout = reason_message(
+        Some("E0308"),
+        "mismatched types for `C:\\users\\person\\project\\secret.rs` at 123",
+        &[span("src/lib.rs", 10, 5, 10, 9, true)],
+        &[],
+    );
 
     assert_eq!(
-        blame(&stdout, Utf8Path::new(""), &guards).get(&7).map(String::as_str),
-        Some("E0308")
+        blame(&stdout, Utf8Path::new(""), &guards).get(&7),
+        Some(&CompilerReason {
+            code: "E0308".to_owned(),
+            category: "mismatched types for <value> at #".to_owned(),
+            replacement_site: true,
+        })
+    );
+}
+
+#[test]
+fn one_diagnostic_can_retain_the_same_reason_for_several_mutants() {
+    let mut guards = Guards::default();
+    for ordinal in [7, 8] {
+        let _ = guards.insert(
+            ordinal,
+            (
+                Utf8PathBuf::from("src/lib.rs"),
+                guard(at(10, 1)..at(10, 20), Some(at(10, 5)..at(10, 9))),
+            ),
+        );
+    }
+
+    let stdout = reason_message(
+        Some("E0277"),
+        "the trait bound `Thing: Copy` is not satisfied",
+        &[span("src/lib.rs", 10, 5, 10, 9, true)],
+        &[],
+    );
+    let blamed = blame(&stdout, Utf8Path::new(""), &guards);
+
+    assert_eq!(blamed.len(), 2);
+    for ordinal in [7, 8] {
+        assert_eq!(
+            blamed.get(&ordinal),
+            Some(&CompilerReason {
+                code: "E0277".to_owned(),
+                category: "the trait bound <value> is not satisfied".to_owned(),
+                replacement_site: true,
+            })
+        );
+    }
+}
+
+#[test]
+fn a_follow_on_without_a_mutant_span_does_not_replace_the_root_reason() {
+    let mut guards = Guards::default();
+    let _ = guards.insert(7, (Utf8PathBuf::from("src/lib.rs"), guard(at(10, 5)..at(10, 9), None)));
+
+    let root = reason_message(Some("E0308"), "mismatched types", &[span("src/lib.rs", 10, 5, 10, 9, true)], &[]);
+    let follow_on = reason_message(
+        Some("E0382"),
+        "use of moved value: `value`",
+        &[span("src/lib.rs", 20, 5, 20, 9, true)],
+        &[span("src/lib.rs", 5, 5, 5, 9, false)],
+    );
+    let blamed = blame(&format!("{root}\n{follow_on}"), Utf8Path::new(""), &guards);
+
+    assert_eq!(
+        blamed.get(&7),
+        Some(&CompilerReason {
+            code: "E0308".to_owned(),
+            category: "mismatched types".to_owned(),
+            replacement_site: false,
+        })
+    );
+}
+
+#[test]
+fn a_diagnostic_without_a_code_still_retains_its_category() {
+    let mut guards = Guards::default();
+    let _ = guards.insert(
+        7,
+        (
+            Utf8PathBuf::from("src/lib.rs"),
+            guard(at(10, 1)..at(10, 20), Some(at(10, 5)..at(10, 9))),
+        ),
+    );
+    let stdout = reason_message(
+        None,
+        "aborting due to 2 previous errors",
+        &[span("src/lib.rs", 10, 5, 10, 9, true)],
+        &[],
+    );
+
+    assert_eq!(
+        blame(&stdout, Utf8Path::new(""), &guards).get(&7),
+        Some(&CompilerReason {
+            code: String::new(),
+            category: "aborting due to # previous errors".to_owned(),
+            replacement_site: true,
+        })
     );
 }
 
@@ -1858,30 +2020,73 @@ fn a_secondary_span_on_innocent_original_text_blames_nothing() {
 #[test]
 fn the_census_counts_mutants_rather_than_diagnostics_and_leads_with_the_densest_pair() {
     let mut converger = Converger::default();
-    let plan = plan_of(&[(1, "lit.true_to_false"), (2, "lit.true_to_false"), (3, "expr.delete")]);
+    let mut plan = plan_of(&[
+        (1, "loop.delete_continue"),
+        (2, "loop.delete_continue"),
+        (3, "loop.delete_continue"),
+        (4, "loop.delete_continue"),
+    ]);
+    plan.mutants[3].package = "other-pkg".to_owned().into();
 
-    let _ = converger.census.insert(1, "E0308".to_owned());
-    let _ = converger.census.insert(2, "E0308".to_owned());
-    let _ = converger.census.insert(3, "E0382".to_owned());
+    let type_error = CompilerReason {
+        code: "E0308".to_owned(),
+        category: "mismatched types".to_owned(),
+        replacement_site: true,
+    };
+    let move_error = CompilerReason {
+        code: "E0382".to_owned(),
+        category: "use of moved value: <value>".to_owned(),
+        replacement_site: false,
+    };
+    let _ = converger.census.insert(1, type_error.clone());
+    let _ = converger.census.insert(2, type_error.clone());
+    let _ = converger.census.insert(3, move_error);
+    let _ = converger.census.insert(4, type_error.clone());
 
     // A second sighting of a mutant already in the census is what a follow-on diagnostic looks
     // like, and must not count twice.
-    let _ = converger.census.insert(1, "E0308".to_owned());
+    let _ = converger.census.insert(1, type_error);
 
     assert_eq!(
         converger.tally(&plan),
         vec![
             Withdrawal {
+                package: "pkg".to_owned(),
                 code: "E0308".to_owned(),
-                mutator: "lit.true_to_false".to_owned(),
+                category: "mismatched types".to_owned(),
+                replacement_site: true,
+                mutator: "loop.delete_continue".to_owned(),
                 mutants: 2,
             },
             Withdrawal {
+                package: "other-pkg".to_owned(),
+                code: "E0308".to_owned(),
+                category: "mismatched types".to_owned(),
+                replacement_site: true,
+                mutator: "loop.delete_continue".to_owned(),
+                mutants: 1,
+            },
+            Withdrawal {
+                package: "pkg".to_owned(),
                 code: "E0382".to_owned(),
-                mutator: "expr.delete".to_owned(),
+                category: "use of moved value: <value>".to_owned(),
+                replacement_site: false,
+                mutator: "loop.delete_continue".to_owned(),
                 mutants: 1,
             },
         ]
+    );
+
+    converger.withdrawn.extend([1, 2, 3, 4]);
+    let mut settled = plan;
+    converger.settle(&mut settled);
+    assert_eq!(
+        settled.mutants[0].note.as_deref(),
+        Some("rustc E0308: mismatched types; primary span identified the replacement site")
+    );
+    assert_eq!(
+        settled.mutants[2].note.as_deref(),
+        Some("rustc E0382: use of moved value: <value>; primary span did not identify the replacement site")
     );
 }
 
@@ -1930,10 +2135,10 @@ fn an_error_that_is_not_flow_sensitive_is_never_blamed_by_region() {
     assert!(ordinals_blamed(&uncoded, Utf8Path::new(""), &guards).is_empty());
 }
 
-/// With no deletion in the region there is nothing better to go on, and losing a few mutants
-/// that would have compiled is a far smaller loss than losing the run.
+/// A non-empty replacement is only a candidate when a flow-sensitive diagnostic names its region.
+/// The proof-build path must establish which candidate actually makes the compiler fail.
 #[test]
-fn a_region_with_no_deletion_falls_back_to_every_guard_in_it() {
+fn a_region_with_no_deletion_requires_isolation() {
     let mut guards = Guards::default();
 
     let _ = guards.insert(
@@ -1960,7 +2165,7 @@ fn a_region_with_no_deletion_falls_back_to_every_guard_in_it() {
         &[span("src/codegen.rs", 383, 9, 383, 13, false)],
     );
 
-    assert_eq!(ordinals_blamed(&stdout, Utf8Path::new(""), &guards), HashSet::from_iter([3]));
+    assert!(ordinals_blamed(&stdout, Utf8Path::new(""), &guards).is_empty());
 }
 
 #[test]
@@ -2229,6 +2434,39 @@ fn diagnostic_spans_inside_mutated_text_name_that_mutant_exactly() {
 }
 
 #[test]
+fn a_zero_width_deletion_uses_containment_attribution() {
+    let mut guards = Guards::default();
+    let file = Utf8PathBuf::from("src/lib.rs");
+
+    let _old = guards.insert(1, (file.clone(), guard(at(12, 5)..at(12, 5), None)));
+    let _old = guards.insert(2, (file, guard(at(10, 1)..at(20, 1), Some(at(15, 5)..at(19, 10)))));
+
+    let blamed = ordinals_blamed(
+        &compiler_message(&[span("src/lib.rs", 12, 5, 12, 5, true)]),
+        Utf8Path::new("/work"),
+        &guards,
+    );
+
+    assert_eq!(blamed, HashSet::from_iter([1]));
+}
+
+#[test]
+fn a_non_empty_replacement_with_only_containment_evidence_requires_isolation() {
+    let mut guards = Guards::default();
+    let _old = guards.insert(
+        1,
+        (
+            Utf8PathBuf::from("src/lib.rs"),
+            guard(at(10, 1)..at(20, 1), Some(at(11, 5)..at(19, 10))),
+        ),
+    );
+
+    let stdout = compiler_message(&[span("src/lib.rs", 10, 1, 20, 1, true)]);
+
+    assert!(ordinals_blamed(&stdout, Utf8Path::new("/work"), &guards).is_empty());
+}
+
+#[test]
 fn a_diagnostic_inside_a_guard_blames_the_innermost_enclosing_site() {
     let mut guards = Guards::default();
 
@@ -2246,6 +2484,26 @@ fn a_diagnostic_inside_a_guard_blames_the_innermost_enclosing_site() {
     );
 
     assert_eq!(blamed, HashSet::from_iter([2, 3]));
+}
+
+#[test]
+fn exact_replacement_blame_does_not_withdraw_a_shared_deletion_sibling() {
+    let mut guards = Guards::default();
+    let file = Utf8PathBuf::from("src/lib.rs");
+    let site = at(10, 1)..at(20, 1);
+
+    let _old = guards.insert(1, (file.clone(), guard(site.clone(), Some(at(12, 5)..at(12, 10)))));
+    let _old = guards.insert(2, (file, guard(site, None)));
+
+    let exact = compiler_message(&[span("src/lib.rs", 12, 6, 12, 8, true)]);
+    let follow_on = coded_message(
+        "E0382",
+        &[span("src/lib.rs", 30, 5, 30, 10, true)],
+        &[span("src/lib.rs", 10, 1, 20, 1, false)],
+    );
+    let blamed = ordinals_blamed(&format!("{exact}\n{follow_on}"), Utf8Path::new("/work"), &guards);
+
+    assert_eq!(blamed, HashSet::from_iter([1]));
 }
 
 #[test]
@@ -2318,6 +2576,22 @@ fn non_error_messages_and_malformed_spans_are_ignored_for_ordinals_blamed() {
         "not json".to_owned(),
         serde_json::json!({"reason": "compiler-artifact"}).to_string(),
         serde_json::json!({"reason": "compiler-message", "message": {"level": "warning"}}).to_string(),
+        serde_json::json!({
+            "reason": "compiler-message",
+            "message": {
+                "level": "warning",
+                "message": "unused",
+                "spans": [{
+                    "file_name": "src/lib.rs",
+                    "line_start": 1,
+                    "line_end": 1,
+                    "column_start": 1,
+                    "column_end": 2,
+                    "is_primary": true
+                }]
+            }
+        })
+        .to_string(),
         serde_json::json!({"reason": "compiler-message", "message": {"level": "error"}}).to_string(),
         serde_json::json!({
             "reason": "compiler-message",
@@ -3341,12 +3615,16 @@ fn diagnostic_blame_is_limited_to_the_stage_being_judged() {
     let (_dir, work) = guarded_workspace("build-blame-scope-");
     let mut plan = probe_plan(&work, 1, 1);
     plan.mutants[1].package = "elsewhere".to_owned().into();
-    let mut blamed = HashMap::from_iter([(1, "E0308".to_owned()), (2, "E0277".to_owned())]);
+    let reason = |code: &str| CompilerReason {
+        code: code.to_owned(),
+        ..CompilerReason::default()
+    };
+    let mut blamed = HashMap::from_iter([(1, reason("E0308")), (2, reason("E0277"))]);
     let packages = vec![plan.mutants[0].package.to_string()];
 
     retain_blamed(&mut blamed, &plan, Some(&packages));
 
-    assert_eq!(blamed, HashMap::from_iter([(1, "E0308".to_owned())]));
+    assert_eq!(blamed, HashMap::from_iter([(1, reason("E0308"))]));
 }
 
 /// Widening Cargo's roots must not widen the mutant population physically present in the tree.

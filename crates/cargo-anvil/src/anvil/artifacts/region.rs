@@ -104,7 +104,7 @@ const GITATTRIBUTES_BODY: &str = include_str!("../../../templates/regions/gitatt
 
 #[must_use]
 fn render_lints_body(scope: &str, namespace: &str, body: &str) -> String {
-    let mut out = String::with_capacity(scope.len() + namespace.len() + body.len() + 8);
+    let mut out = String::new();
     out.push('[');
     out.push_str(scope);
     out.push('.');
@@ -371,7 +371,16 @@ mod tests {
 
     #[test]
     fn workspace_bodies_open_namespace_subtables() {
-        assert!(render_lints_body("workspace.lints", "rust", RUST_LINTS_BODY).starts_with("[workspace.lints.rust]\n"));
+        for (scope, namespace, body, expected) in [
+            ("workspace.lints", "rust", RUST_LINTS_BODY, "[workspace.lints.rust]\n"),
+            ("workspace.lints", "rustdoc", RUSTDOC_LINTS_BODY, "[workspace.lints.rustdoc]\n"),
+            ("workspace.lints", "clippy", CLIPPY_LINTS_BODY, "[workspace.lints.clippy]\n"),
+            ("lints", "rust", RUST_LINTS_BODY, "[lints.rust]\n"),
+            ("lints", "rustdoc", RUSTDOC_LINTS_BODY, "[lints.rustdoc]\n"),
+            ("lints", "clippy", CLIPPY_LINTS_BODY, "[lints.clippy]\n"),
+        ] {
+            assert!(render_lints_body(scope, namespace, body).starts_with(expected));
+        }
         assert!(
             render_lints_body("workspace.lints", "clippy", CLIPPY_LINTS_BODY).contains("pedantic = { level = \"warn\", priority = -1 }")
         );
@@ -381,6 +390,20 @@ mod tests {
     fn single_crate_bodies_open_namespace_subtables() {
         assert!(render_lints_body("lints", "rustdoc", RUSTDOC_LINTS_BODY).starts_with("[lints.rustdoc]\n"));
         assert!(render_lints_body("lints", "clippy", CLIPPY_LINTS_BODY).contains("unwrap_used = \"warn\""));
+    }
+
+    #[test]
+    fn single_crate_lint_artifacts_use_exact_table_headers() {
+        for (artifact, expected_header) in [
+            (single_crate_rust_lints(), "[lints.rust]"),
+            (single_crate_rustdoc_lints(), "[lints.rustdoc]"),
+            (single_crate_clippy_lints(), "[lints.clippy]"),
+        ] {
+            let Artifact::Region(spec) = artifact else {
+                panic!("lint artifacts must be managed regions");
+            };
+            assert_eq!(spec.body.lines().next(), Some(expected_header));
+        }
     }
 
     #[test]

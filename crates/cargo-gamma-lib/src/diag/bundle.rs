@@ -384,13 +384,26 @@ impl RoundPackage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Withdrawal {
+    /// The package identifier after applying the bundle's redaction policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+
     /// The rustc error code, or empty when the diagnostic carried none.
     pub code: String,
+
+    /// The normalized primary diagnostic message category after applying the bundle's redaction
+    /// policy.
+    #[serde(default)]
+    pub category: String,
+
+    /// Whether the diagnostic's primary span identified the replacement text.
+    #[serde(default)]
+    pub replacement_site: bool,
 
     /// The mutator whose mutants drew it, or empty when it could not be attributed.
     pub mutator: String,
 
-    /// How many mutants this pair accounts for.
+    /// How many mutants this reason-and-mutator group accounts for.
     pub mutants: usize,
 }
 
@@ -780,7 +793,7 @@ fn build_of(session: &Session, redaction: Redaction) -> Build {
                     .packages
                     .iter()
                     .map(|package| RoundPackage {
-                        name: redaction.apply(&package.package),
+                        name: redact_package(&package.package, redaction),
                         mutants: package.mutants,
                     })
                     .collect(),
@@ -790,7 +803,10 @@ fn build_of(session: &Session, redaction: Redaction) -> Build {
             .census
             .iter()
             .map(|entry| Withdrawal {
+                package: redact_package(&entry.package, redaction),
                 code: entry.code.clone(),
+                category: redact_category(&entry.category, redaction),
+                replacement_site: entry.replacement_site,
                 mutator: entry.mutator.clone(),
                 mutants: entry.mutants,
             })
@@ -804,6 +820,18 @@ fn build_of(session: &Session, redaction: Redaction) -> Build {
             confirmed: session.ordering.confirmed,
             rounds: session.ordering.rounds,
         }),
+    }
+}
+
+fn redact_package(package: &str, redaction: Redaction) -> Option<String> {
+    if package.is_empty() { None } else { redaction.apply(package) }
+}
+
+fn redact_category(category: &str, redaction: Redaction) -> String {
+    if category.is_empty() {
+        String::new()
+    } else {
+        redaction.apply(category).unwrap_or_default()
     }
 }
 
@@ -1004,6 +1032,18 @@ fn millis(duration: Duration) -> u64 {
 mod tests {
     use super::*;
     use crate::fixtures;
+
+    #[test]
+    fn legacy_withdrawals_default_the_new_reason_dimensions() {
+        let withdrawal: Withdrawal = serde_json::from_str(r#"{"code":"E0308","mutator":"literal.int_decrement","mutants":3}"#)
+            .expect("the pre-M1 withdrawal schema remains readable");
+
+        assert_eq!(withdrawal.code, "E0308");
+        assert!(withdrawal.package.is_none());
+        assert!(withdrawal.category.is_empty());
+        assert!(!withdrawal.replacement_site);
+        assert_eq!(withdrawal.mutants, 3);
+    }
 
     fn context() -> Context<'static> {
         Context {
@@ -1226,12 +1266,79 @@ mod tests {
                 mutants: 3,
             }],
         });
+        session.census.push(crate::exec::Withdrawal {
+            package: "private-package".into(),
+            code: "E0308".into(),
+            category: "mismatched types".into(),
+            replacement_site: true,
+            mutator: "literal.int_decrement".into(),
+            mutants: 3,
+        });
 
-        let round = bundle(&plan(), Some(&session), &context()).build.expect("build").rounds.remove(0);
+        let mut build = bundle(&plan(), Some(&session), &context()).build.expect("build");
+        let round = build.rounds.remove(0);
 
         assert_eq!((round.elapsed_ms, round.withdrew), (250, 3));
         assert_eq!(round.packages[0].mutants(), 3);
         assert_ne!(round.packages[0].name(), Some("private-package"));
+        assert_ne!(build.withdrawals[0].package.as_deref(), Some("private-package"));
+    }
+
+    #[test]
+    fn build_rounds_preserve_the_unknown_package_sentinel() {
+        let mut session = session_with(crate::exec::Phases::default());
+        session.rounds_taken.push(crate::exec::Round {
+            elapsed: Duration::from_millis(1),
+            withdrew: 1,
+            packages: vec![crate::exec::PackageWithdrawal {
+                package: String::new().into(),
+                mutants: 1,
+            }],
+        });
+        session.census.push(crate::exec::Withdrawal {
+            package: String::new(),
+            code: "E0308".into(),
+            category: "mismatched types".into(),
+            replacement_site: true,
+            mutator: "literal.int_decrement".into(),
+            mutants: 1,
+        });
+
+        for redaction in [Redaction::Hashed, Redaction::Names, Redaction::Omitted] {
+            let context = Context { redaction, ..context() };
+            let build = bundle(&plan(), Some(&session), &context).build.expect("build");
+
+            assert_eq!(build.rounds[0].packages[0].name(), None, "{redaction:?}");
+            assert_eq!(build.withdrawals[0].package, None, "{redaction:?}");
+        }
+    }
+
+    #[test]
+    fn redacted_build_withdrawals_do_not_retain_source_authored_messages() {
+        const PRIVATE: &str = "ProjectCodename cannot satisfy InternalProtocol";
+        let mut session = session_with(crate::exec::Phases::default());
+        session.census.push(crate::exec::Withdrawal {
+            package: "subject".into(),
+            code: String::new(),
+            category: PRIVATE.into(),
+            replacement_site: true,
+            mutator: "literal.int_decrement".into(),
+            mutants: 1,
+        });
+
+        for redaction in [Redaction::Hashed, Redaction::Omitted] {
+            let context = Context { redaction, ..context() };
+            let build = bundle(&plan(), Some(&session), &context).build.expect("build");
+
+            assert!(!build.withdrawals[0].category.contains(PRIVATE), "{redaction:?}");
+        }
+
+        let context = Context {
+            redaction: Redaction::Names,
+            ..context()
+        };
+        let build = bundle(&plan(), Some(&session), &context).build.expect("build");
+        assert_eq!(build.withdrawals[0].category, PRIVATE);
     }
 
     /// The document is read by a stranger, so the shape has to be exactly what old consumers expect:
@@ -1370,6 +1477,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn serialized_redacted_bundles_hide_workspace_wrapper_environment_paths() {
         const CHILD: &str = "CARGO_GAMMA_DIAG_REDACTION_CHILD";
         const PRIVATE: &str = "/opt/acme/private-wrapper";

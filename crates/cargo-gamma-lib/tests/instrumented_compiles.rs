@@ -785,3 +785,68 @@ pub fn assigned(mut value: u32) -> u32 {
 
     assert!(compiles("semantics", source, "option,result,iter,string,collection,assign_value") > 0);
 }
+
+#[test]
+fn f4_default_on_semantics_compile_together() {
+    let source = r#"
+pub struct Regex;
+impl Regex {
+    pub fn new(_: &str) -> Result<Self, ()> { Ok(Self) }
+}
+
+pub fn helper() -> usize { 7 }
+pub fn early(flag: bool) -> usize { if flag { return 7; } 8 }
+pub fn mutable(mut value: usize) -> usize { value += 1; value }
+
+pub fn boolean(flag: bool, other: bool) -> bool {
+    let _: bool = flag && other;
+    let _: bool = flag || other;
+    return flag;
+}
+
+pub fn semantics(option: Option<usize>, result: Result<usize, usize>) -> Result<usize, usize> {
+    let _ = option.is_some();
+    let _ = option.is_none();
+    let _ = result.is_ok();
+    let _ = result.is_err();
+    let _ = result?;
+    let _ = option.unwrap_or(7);
+    let _ = option.unwrap_or_else(|| 7);
+    let _ = option.map_or(7, |value| value);
+    let _ = option.map_or_else(|| 7, |value| value);
+    let _: usize = helper();
+    return Ok(helper());
+}
+
+pub fn collections() {
+    let _ = vec![1, 2, 3];
+    let _ = [1, 2, 3];
+    let _ = 2.5f64;
+    let _ = 'a';
+    let _ = b'a';
+    let _: usize = loop { break 3; };
+    for _ in [1, 2, 3].into_iter().rev().filter(|value| *value > 0).take(2).skip(1) {}
+    let _ = Regex::new("^a+b*[cd]?$");
+}
+"#;
+    let mutators = [
+        "logical",
+        "bool_expr",
+        "option",
+        "result",
+        "try",
+        "fallback",
+        "collection",
+        "literal",
+        "loop.break_value_default",
+        "return_value",
+        "call",
+        "call_result",
+        "iter",
+        "parameter",
+        "regex",
+    ]
+    .join(",");
+
+    assert!(compiles("f4_default_on", source, &mutators) >= 38);
+}

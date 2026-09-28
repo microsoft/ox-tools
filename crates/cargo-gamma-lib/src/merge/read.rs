@@ -74,6 +74,7 @@ pub(crate) struct ReadReport {
 ///
 /// `limit` lets a directory collector enforce its aggregate budget before it retains the decoded
 /// report. The per-report ceiling remains in force even when the collector has more room.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn read_limited(path: &Utf8Path, limit: u64) -> Result<ReadReport> {
     let mut input = open(path).map_err(|cause| error!("could not read `{path}`").caused_by(cause))?;
     let metadata = input

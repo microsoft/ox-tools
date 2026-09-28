@@ -6,7 +6,7 @@
 //! Minimal GitHub API client for fetching repository and issue data.
 
 use chrono::{DateTime, Utc};
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 
 const LOG_TARGET: &str = "   hosting";
@@ -86,27 +86,38 @@ pub struct Client {
     base_url: String,
 }
 
+fn authorization_value(token: &str) -> crate::Result<HeaderValue> {
+    let mut value = HeaderValue::from_str(&format!("token {token}"))?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+fn build_client(builder: reqwest::ClientBuilder) -> crate::Result<reqwest::Client> {
+    Ok(builder.build()?)
+}
+
 impl Client {
+    fn from_builder(client_builder: reqwest::ClientBuilder, base_url: String) -> crate::Result<Self> {
+        Ok(Self {
+            client: build_client(client_builder)?,
+            base_url,
+        })
+    }
+
     /// Create a new hosting API client with optional authentication token and base URL
     pub fn new(token: Option<&str>, base_url: impl Into<String>) -> crate::Result<Self> {
-        use reqwest::header::{AUTHORIZATION, HeaderValue};
+        use reqwest::header::AUTHORIZATION;
 
         let mut client_builder = reqwest::Client::builder().user_agent("cargo-aprz");
 
         if let Some(t) = token {
-            let mut auth_val = HeaderValue::from_str(&format!("token {t}"))?;
-            auth_val.set_sensitive(true);
-
             let mut headers = HeaderMap::new();
-            let _ = headers.insert(AUTHORIZATION, auth_val);
+            let _ = headers.insert(AUTHORIZATION, authorization_value(t)?);
 
             client_builder = client_builder.default_headers(headers);
         }
 
-        Ok(Self {
-            client: client_builder.build()?,
-            base_url: base_url.into(),
-        })
+        Self::from_builder(client_builder, base_url.into())
     }
 
     /// Get the base URL for this client
@@ -122,12 +133,14 @@ impl Client {
             Err(e) => return HostingApiResult::Failed(e, None),
         };
 
+        // #[gamma::skip(call.replace_with_default, call_result.default, tag = "timeout", reason = "discarding rate-limit headers turns bounded mocked responses into long retry pauses")]
         let rate_limit = extract_rate_limit_from_headers(resp.headers());
         classify_response(resp, rate_limit, url)
     }
 }
 
 /// Classify an HTTP response into a [`HostingApiResult`].
+// #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "discarding supplied rate-limit state replaces the mocked reset time with a one-hour retry pause")]
 fn classify_response(resp: reqwest::Response, rate_limit: Option<RateLimitInfo>, url: &str) -> HostingApiResult<reqwest::Response> {
     let status = resp.status();
     log::debug!(target: LOG_TARGET, "HTTP {status} for {url}");
@@ -137,6 +150,7 @@ fn classify_response(resp: reqwest::Response, rate_limit: Option<RateLimitInfo>,
     }
 
     let status_code = status.as_u16();
+    // #[gamma::skip(cond.always_true, tag = "timeout", reason = "treating every HTTP failure as rate limiting makes retrying permanent server errors consume the mutation-test timeout")]
     if matches!(status_code, 403 | 429) {
         // Extract Retry-After header (used by GitHub for secondary/abuse rate limits)
         let retry_after_secs = resp
@@ -166,6 +180,7 @@ fn classify_response(resp: reqwest::Response, rate_limit: Option<RateLimitInfo>,
         }
 
         // 429 is always a rate limit signal, even with remaining > 0 and no Retry-After
+        // #[gamma::skip(cond.negate, relational.eq_to_ne, tag = "outofmem", reason = "written by cargo gamma suppress 2026-09-27")]
         if status_code == 429 {
             let rate_limit = rate_limit.expect("the primary rate limit check above returns for every None, so this is necessarily Some");
             log::warn!(target: LOG_TARGET, "Rate limited (HTTP 429, remaining: {}) for {url}", rate_limit.remaining);
@@ -192,21 +207,23 @@ fn classify_response(resp: reqwest::Response, rate_limit: Option<RateLimitInfo>,
 }
 
 /// Extract rate limit information from API response headers
+// #[gamma::skip(fn_value.none, tag = "timeout", reason = "discarding all rate-limit state turns bounded mocked responses into long retry pauses")]
 fn extract_rate_limit_from_headers(headers: &HeaderMap) -> Option<RateLimitInfo> {
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "timeout", reason = "invalidating the remaining header turns bounded mocked responses into long retry pauses")]
     let remaining = headers.get("x-ratelimit-remaining")?.to_str().ok()?.parse::<usize>().ok()?;
 
+    // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "timeout", reason = "invalidating the reset header turns bounded mocked responses into long retry pauses")]
     let reset_timestamp = headers.get("x-ratelimit-reset")?.to_str().ok()?.parse::<i64>().ok()?;
 
     let reset_at = DateTime::from_timestamp(reset_timestamp, 0)?;
 
+    // #[gamma::skip(option.some_to_none, tag = "timeout", reason = "discarding parsed rate-limit state turns bounded mocked responses into long retry pauses")]
     Some(RateLimitInfo { remaining, reset_at })
 }
 
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
-    use reqwest::header::HeaderValue;
-
     use super::*;
 
     #[test]
@@ -403,6 +420,80 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_rate_limit_missing_reset() {
+        let mut headers = HeaderMap::new();
+        let _ = headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+
+        assert!(extract_rate_limit_from_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn test_extract_rate_limit_non_ascii_reset_is_ignored() {
+        let mut headers = HeaderMap::new();
+        let _ = headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+        let _ = headers.insert(
+            "x-ratelimit-reset",
+            HeaderValue::from_bytes(b"\xff").expect("opaque non-ASCII header value is valid"),
+        );
+
+        assert!(extract_rate_limit_from_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn test_extract_rate_limit_out_of_range_timestamp_is_ignored() {
+        let mut headers = HeaderMap::new();
+        let _ = headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+        let _ = headers.insert("x-ratelimit-reset", HeaderValue::from_static("9223372036854775807"));
+
+        assert!(extract_rate_limit_from_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn test_extract_rate_limit_uses_zero_nanoseconds() {
+        use chrono::Timelike;
+
+        let mut headers = HeaderMap::new();
+        let _ = headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+        let _ = headers.insert("x-ratelimit-reset", HeaderValue::from_static("1704067200"));
+
+        assert_eq!(
+            extract_rate_limit_from_headers(&headers)
+                .expect("complete rate-limit headers yield info")
+                .reset_at
+                .nanosecond(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_extract_rate_limit_non_ascii_remaining_is_ignored() {
+        let mut headers = HeaderMap::new();
+        let _ = headers.insert(
+            "x-ratelimit-remaining",
+            HeaderValue::from_bytes(b"\xff").expect("opaque non-ASCII header value is valid"),
+        );
+        let _ = headers.insert("x-ratelimit-reset", HeaderValue::from_static("1704067200"));
+
+        assert!(extract_rate_limit_from_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn authorization_header_is_sensitive() {
+        let value = authorization_value("secret").expect("ordinary token creates a header");
+
+        assert_eq!(value, "token secret");
+        assert!(value.is_sensitive());
+    }
+
+    #[test]
+    fn client_builder_errors_are_propagated() {
+        let error = Client::from_builder(reqwest::Client::builder().user_agent("\n"), "unused".to_string())
+            .expect_err("an invalid user-agent must make client construction fail");
+
+        assert!(error.to_string().contains("builder error"), "{error}");
+    }
+
+    #[test]
     fn test_client_new_without_token() {
         let client = Client::new(None, "https://api.github.com").unwrap();
         assert_eq!(client.base_url(), "https://api.github.com");
@@ -469,6 +560,26 @@ mod tests {
     async fn classify_success_200() {
         let result = classify(ResponseTemplate::new(200)).await;
         assert!(matches!(result, HostingApiResult::Success(..)));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot call CreateIoCompletionPort")]
+    async fn client_sends_the_pinned_user_agent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let client = Client::new(None, server.uri()).expect("fixed client settings are valid");
+
+        client.client.get(server.uri()).send().await.expect("mock request succeeds");
+
+        let requests = server.received_requests().await.expect("wiremock records requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].headers.get(reqwest::header::USER_AGENT),
+            Some(&HeaderValue::from_static("cargo-aprz"))
+        );
     }
 
     #[tokio::test]

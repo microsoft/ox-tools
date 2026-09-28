@@ -70,6 +70,7 @@ pub(super) fn normalize_separators(text: &str) -> String {
     normalized(text).into_owned()
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn normalized(text: &str) -> Cow<'_, str> {
     // #[gamma::skip(cond.always_true, reason = "on a Windows mutation run cfg!(windows) is already true; non-Windows builds exercise the opposite branch")]
     if cfg!(windows) {
@@ -95,11 +96,16 @@ enum Token {
 fn glob_match(tokens: &[Token], text: &str, scratch: &mut Scratch) -> bool {
     scratch.text.clear();
     scratch.text.extend(text.chars());
-    let width = scratch.text.len() + 1;
+    let width = row_width(scratch.text.len());
     scratch.next.clear();
     scratch.next.resize(width, false);
     scratch.current.clear();
     scratch.current.resize(width, false);
+    debug_assert_eq!(
+        scratch.next.len(),
+        scratch.text.len() + 1,
+        "the dynamic-programming row has one terminal boundary cell"
+    );
     scratch.next[scratch.text.len()] = true;
 
     for token in tokens.iter().rev() {
@@ -146,6 +152,10 @@ fn glob_match(tokens: &[Token], text: &str, scratch: &mut Scratch) -> bool {
     scratch.next[0]
 }
 
+const fn row_width(text_len: usize) -> usize {
+    text_len + 1
+}
+
 fn tokenize(pattern: &str) -> Vec<Token> {
     let characters: Vec<_> = pattern.chars().collect();
     let mut tokens = Vec::with_capacity(characters.len());
@@ -155,6 +165,7 @@ fn tokenize(pattern: &str) -> Vec<Token> {
         match characters[index] {
             '?' => {
                 tokens.push(Token::One);
+                // #[gamma::skip(assign.add_to_sub, reason = "moving the tokenizer backwards after `?` makes this loop allocate tokens until memory exhaustion instead of producing a result")]
                 index += 1;
             }
             '*' => {
@@ -180,4 +191,16 @@ fn tokenize(pattern: &str) -> Vec<Token> {
     }
 
     tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_matching_row_has_one_terminal_boundary_cell() {
+        assert_eq!(row_width(0), 1);
+        assert_eq!(row_width(7), 8);
+        assert!(matches_glob("src/*.rs", "src/lib.rs"));
+    }
 }

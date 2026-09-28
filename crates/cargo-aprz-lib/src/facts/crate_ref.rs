@@ -84,7 +84,26 @@ impl Display for CrateRef {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::fmt::Write;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
     use super::*;
+
+    struct FailAfter {
+        budget: usize,
+        writes: usize,
+    }
+
+    impl Write for FailAfter {
+        fn write_str(&mut self, s: &str) -> FmtResult {
+            if self.writes >= self.budget {
+                return Err(core::fmt::Error);
+            }
+            self.writes += 1;
+            let _ = s;
+            Ok(())
+        }
+    }
 
     // --- Construction ---
 
@@ -209,6 +228,25 @@ mod tests {
     fn test_display_with_prerelease() {
         let cr = CrateRef::new("x", Some(Version::parse("0.1.0-beta.2").unwrap()));
         assert_eq!(cr.to_string(), "x@0.1.0-beta.2");
+    }
+
+    #[test]
+    fn display_propagates_every_formatter_failure_without_panicking() {
+        let cr = CrateRef::new("serde", Some(Version::parse("1.0.200").unwrap()));
+        let mut counter = FailAfter {
+            budget: usize::MAX,
+            writes: 0,
+        };
+        write!(&mut counter, "{cr}").expect("an unlimited formatter must accept every write");
+
+        for budget in 0..counter.writes {
+            let result = catch_unwind(AssertUnwindSafe(|| write!(&mut FailAfter { budget, writes: 0 }, "{cr}")));
+            assert!(result.is_ok(), "formatting panicked for writer budget {budget}");
+            assert!(
+                result.expect("checked above").is_err(),
+                "writer budget {budget} must produce an error"
+            );
+        }
     }
 
     // --- Derived traits ---

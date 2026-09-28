@@ -865,6 +865,28 @@ fn windows_report_overflow_converts_paired_no_data_before_publication() {
 #[test]
 #[cfg(windows)]
 #[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn quiet_suppresses_fallback_stdout_when_no_coverage_data_exists() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(tmp.path(), &[("alpha", "expect-no-coverable-lines = true")]);
+    let object = PathBuf::from(r"C:\coverage objects\empty.exe");
+    let tools = FakeCoverageTools::compile();
+    let coverage_dir = tmp.path().join("coverage");
+    fs::create_dir(&coverage_dir).expect("create coverage directory");
+
+    fake_collection_command(tmp.path(), &tools, &object)
+        .arg("--quiet")
+        .env("FAKE_REPORT_COMMAND_TOO_LONG", "1")
+        .env("FAKE_FALLBACK_NO_COVERAGE_DATA", "1")
+        .env("FAKE_REPORT_STDOUT", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("evaluating an empty LCOV report"));
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
 fn windows_report_overflow_failure_preserves_stable_artifact() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("100")), ("beta", Some("100"))], None);
@@ -1348,6 +1370,25 @@ fn quiet_suppresses_all_collection_stdout_and_still_writes_summary() {
         .stdout(predicate::str::is_empty());
 
     assert!(fs::read_to_string(summary).expect("read summary").contains("### coverage-gate"));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary and fake coverage tools")]
+fn quiet_suppresses_report_stdout_when_no_coverage_data_exists() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(tmp.path(), &[("alpha", "expect-no-coverable-lines = true")]);
+    let object = tmp.path().join(format!("empty-object{}", std::env::consts::EXE_SUFFIX));
+    fs::write(&object, b"object").expect("write fake object");
+    let tools = FakeCoverageTools::compile();
+
+    fake_collection_command(tmp.path(), &tools, &object)
+        .arg("--quiet")
+        .env("FAKE_REPORT_STDOUT", "1")
+        .env("FAKE_NO_COVERAGE_DATA", "1")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("evaluating an empty LCOV report"));
 }
 
 #[test]

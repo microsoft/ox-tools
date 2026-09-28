@@ -129,22 +129,38 @@ impl RequestTracker {
         self.counters[topic.index()].status.store(status as u8, Ordering::Release);
     }
 
+    #[cfg(test)]
+    pub(super) fn topic_state(&self, topic: TrackedTopic) -> (u64, u64, TopicStatus) {
+        let counter = &self.counters[topic.index()];
+        let status = match counter.status.load(Ordering::Acquire) {
+            value if value == TopicStatus::Blocked as u8 => TopicStatus::Blocked,
+            value if value == TopicStatus::Done as u8 => TopicStatus::Done,
+            _ => TopicStatus::Active,
+        };
+        (
+            counter.issued.load(Ordering::Acquire),
+            counter.completed.load(Ordering::Acquire),
+            status,
+        )
+    }
+
     /// Compute current progress state from counters.
     ///
     /// Returns (`total_length`, `current_position`, `message_string`).
     fn progress_reporter_callback(counters: &[RequestCounter; 4], use_colors: bool) -> (u64, u64, String) {
-        // Toggle every 500ms for the blink effect on blocked topics
-        let blink_on = use_colors && {
-            let ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            blink_is_on(ms)
-        };
+        let elapsed_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        Self::progress_reporter_callback_at(counters, use_colors, elapsed_ms)
+    }
+
+    fn progress_reporter_callback_at(counters: &[RequestCounter; 4], use_colors: bool, elapsed_ms: u128) -> (u64, u64, String) {
+        let blink_on = use_colors && blink_is_on(elapsed_ms);
 
         let mut total_issued = 0u64;
         let mut total_completed = 0u64;
-        let mut message = String::with_capacity(64);
+        let mut message = String::new();
 
         for topic in TrackedTopic::all() {
             let counter = &counters[topic.index()];
@@ -190,6 +206,8 @@ const fn blink_is_on(elapsed_ms: u128) -> bool {
 // Not covered: the test doubles below implement trait methods that some tests never call.
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     #[derive(Debug)]
@@ -205,6 +223,52 @@ mod tests {
 
     fn test_tracker() -> RequestTracker {
         RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>))
+    }
+
+    type DeterminateCallback = Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>;
+
+    struct ColorProgress {
+        callback: Mutex<Option<DeterminateCallback>>,
+    }
+
+    impl core::fmt::Debug for ColorProgress {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("ColorProgress").finish_non_exhaustive()
+        }
+    }
+
+    impl ColorProgress {
+        fn new() -> Self {
+            Self {
+                callback: Mutex::new(None),
+            }
+        }
+
+        fn report(&self) -> (u64, u64, String) {
+            self.callback
+                .lock()
+                .expect("no test panics while holding the callback lock")
+                .as_ref()
+                .expect("request tracker must register a determinate callback")()
+        }
+    }
+
+    impl Progress for ColorProgress {
+        fn set_phase(&self, _phase: &str) {}
+
+        fn set_determinate(&self, callback: DeterminateCallback) {
+            *self.callback.lock().expect("no test panics while holding the callback lock") = Some(callback);
+        }
+
+        fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
+
+        fn println(&self, _msg: &str) {}
+
+        fn done(&self) {}
+
+        fn use_colors(&self) -> bool {
+            true
+        }
     }
 
     /// Strip ANSI escape sequences from a string for assertion comparisons.
@@ -412,6 +476,70 @@ mod tests {
     }
 
     #[test]
+    fn blocked_topic_uses_the_exact_blink_boundary() {
+        let tracker = test_tracker();
+        tracker.add_requests(TrackedTopic::Repos, 1);
+        tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
+        let (_, _, before) = RequestTracker::progress_reporter_callback_at(&tracker.counters, true, 499);
+        let (_, _, at) = RequestTracker::progress_reporter_callback_at(&tracker.counters, true, 500);
+        assert!(before.contains("\x1b[33m"));
+        assert!(!at.contains("\x1b[33m"));
+    }
+
+    #[test]
+    fn determinate_callback_registration_preserves_the_progress_color_setting() {
+        let progress = Arc::new(ColorProgress::new());
+        let tracker = RequestTracker::new(&(Arc::clone(&progress) as Arc<dyn Progress>));
+        tracker.add_requests(TrackedTopic::Coverage, 1);
+        tracker.complete_request(TrackedTopic::Coverage);
+
+        let (issued, completed, message) = progress.report();
+
+        assert_eq!((issued, completed), (1, 1));
+        assert_eq!(strip_ansi(&message), "1/1 coverage");
+        assert!(message.contains("\x1b[32m"), "the callback must retain colored output: {message:?}");
+    }
+
+    #[test]
+    fn reporter_blink_phase_uses_the_exact_elapsed_millisecond() {
+        let tracker = test_tracker();
+        tracker.add_requests(TrackedTopic::Repos, 1);
+        tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
+
+        for elapsed_ms in [499, 1_499] {
+            let (_, _, message) = RequestTracker::progress_reporter_callback_at(&tracker.counters, true, elapsed_ms);
+            assert!(message.contains("\x1b[33m"), "{elapsed_ms}ms must be in the colored phase");
+        }
+        for elapsed_ms in [500, 1_500] {
+            let (_, _, message) = RequestTracker::progress_reporter_callback_at(&tracker.counters, true, elapsed_ms);
+            assert!(!message.contains("\x1b[33m"), "{elapsed_ms}ms must be in the plain phase");
+        }
+    }
+
+    #[test]
+    fn blocked_topic_does_not_blink_when_colors_are_disabled() {
+        let tracker = test_tracker();
+        tracker.add_requests(TrackedTopic::Repos, 1);
+        tracker.set_topic_status(TrackedTopic::Repos, TopicStatus::Blocked);
+
+        let (_, _, message) = RequestTracker::progress_reporter_callback_at(&tracker.counters, false, 0);
+
+        assert_eq!(message, "0/1 repos");
+        assert!(!message.contains('\x1b'));
+    }
+
+    #[test]
+    fn active_topic_is_not_rendered_as_blocked_during_the_on_phase() {
+        let tracker = test_tracker();
+        tracker.add_requests(TrackedTopic::Repos, 1);
+
+        let (_, _, message) = RequestTracker::progress_reporter_callback_at(&tracker.counters, true, 0);
+
+        assert_eq!(message, "0/1 repos");
+        assert!(!message.contains("\x1b[33m"));
+    }
+
+    #[test]
     fn test_multiple_topics_mixed_progress() {
         let tracker = test_tracker();
         tracker.add_requests(TrackedTopic::Coverage, 10);
@@ -505,8 +633,6 @@ mod tests {
 
     #[test]
     fn test_println_delegates_to_progress() {
-        use std::sync::Mutex;
-
         #[derive(Debug)]
         struct RecordingProgress {
             messages: Mutex<Vec<String>>,

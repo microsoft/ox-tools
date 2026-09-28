@@ -56,7 +56,7 @@ pub(crate) fn find_source_files(project_dir: &Path, exclude_path: Option<&Path>,
 
             if !exclude_list.is_empty()
                 && let Ok(canonical) = std::fs::canonicalize(path)
-                && exclude_list.iter().any(|excl| canonical == *excl || canonical.starts_with(excl))
+                && exclude_list.iter().any(|excl| canonical.starts_with(excl))
             {
                 return false;
             }

@@ -65,43 +65,97 @@ pub(super) fn in_place_reorder(expression: &Expr) -> Option<&'static str> {
 }
 
 /// The mutators and replacement operators available for a binary operator.
+#[expect(
+    clippy::useless_let_if_seq,
+    reason = "independent checks avoid an untestable wildcard arm required only because syn::BinOp is non-exhaustive"
+)]
 pub(super) const fn binary_replacements(op: &BinOp) -> &'static [(&'static str, &'static str)] {
-    match op {
-        BinOp::Lt(_) => &[("relational.lt_to_le", "<="), ("relational.lt_to_gt", ">")],
-        BinOp::Le(_) => &[("relational.le_to_lt", "<"), ("relational.le_to_ge", ">=")],
-        BinOp::Gt(_) => &[("relational.gt_to_ge", ">="), ("relational.gt_to_lt", "<")],
-        BinOp::Ge(_) => &[("relational.ge_to_gt", ">"), ("relational.ge_to_le", "<=")],
-        BinOp::Eq(_) => &[("relational.eq_to_ne", "!=")],
-        BinOp::Ne(_) => &[("relational.ne_to_eq", "==")],
-
-        BinOp::Add(_) => &[("arith.add_to_sub", "-"), ("arith.add_to_mul", "*")],
-        BinOp::Sub(_) => &[("arith.sub_to_add", "+"), ("arith.sub_to_div", "/")],
-        BinOp::Mul(_) => &[("arith.mul_to_div", "/"), ("arith.mul_to_add", "+")],
-        BinOp::Div(_) => &[("arith.div_to_mul", "*"), ("arith.div_to_rem", "%")],
-        BinOp::Rem(_) => &[("arith.rem_to_div", "/"), ("arith.rem_to_mul", "*")],
-
-        BinOp::BitAnd(_) => &[("bitwise.and_to_or", "|"), ("bitwise.and_to_xor", "^")],
-        BinOp::BitOr(_) => &[("bitwise.or_to_and", "&")],
-        BinOp::BitXor(_) => &[("bitwise.xor_to_and", "&")],
-        BinOp::Shl(_) => &[("shift.shl_to_shr", ">>")],
-        BinOp::Shr(_) => &[("shift.shr_to_shl", "<<")],
-
-        BinOp::And(_) => &[("logical.and_to_or", "||")],
-        BinOp::Or(_) => &[("logical.or_to_and", "&&")],
-
-        BinOp::AddAssign(_) => &[("assign.add_to_sub", "-=")],
-        BinOp::SubAssign(_) => &[("assign.sub_to_add", "+=")],
-        BinOp::MulAssign(_) => &[("assign.mul_to_div", "/=")],
-        BinOp::DivAssign(_) => &[("assign.div_to_mul", "*=")],
-        BinOp::RemAssign(_) => &[("assign.rem_to_div", "/=")],
-        BinOp::BitAndAssign(_) => &[("assign.and_to_or", "|=")],
-        BinOp::BitOrAssign(_) => &[("assign.or_to_and", "&=")],
-        BinOp::BitXorAssign(_) => &[("assign.xor_to_and", "&=")],
-        BinOp::ShlAssign(_) => &[("assign.shl_to_shr", ">>=")],
-        BinOp::ShrAssign(_) => &[("assign.shr_to_shl", "<<=")],
-
-        _ => &[],
+    let mut replacements: &'static [(&'static str, &'static str)] = &[];
+    if matches!(op, BinOp::Lt(_)) {
+        replacements = &[("relational.lt_to_le", "<="), ("relational.lt_to_gt", ">")];
     }
+    if matches!(op, BinOp::Le(_)) {
+        replacements = &[("relational.le_to_lt", "<"), ("relational.le_to_ge", ">=")];
+    }
+    if matches!(op, BinOp::Gt(_)) {
+        replacements = &[("relational.gt_to_ge", ">="), ("relational.gt_to_lt", "<")];
+    }
+    if matches!(op, BinOp::Ge(_)) {
+        replacements = &[("relational.ge_to_gt", ">"), ("relational.ge_to_le", "<=")];
+    }
+    if matches!(op, BinOp::Eq(_)) {
+        replacements = &[("relational.eq_to_ne", "!=")];
+    }
+    if matches!(op, BinOp::Ne(_)) {
+        replacements = &[("relational.ne_to_eq", "==")];
+    }
+    if matches!(op, BinOp::Add(_)) {
+        replacements = &[("arith.add_to_sub", "-"), ("arith.add_to_mul", "*")];
+    }
+    if matches!(op, BinOp::Sub(_)) {
+        replacements = &[("arith.sub_to_add", "+"), ("arith.sub_to_div", "/")];
+    }
+    if matches!(op, BinOp::Mul(_)) {
+        replacements = &[("arith.mul_to_div", "/"), ("arith.mul_to_add", "+")];
+    }
+    if matches!(op, BinOp::Div(_)) {
+        replacements = &[("arith.div_to_mul", "*"), ("arith.div_to_rem", "%")];
+    }
+    if matches!(op, BinOp::Rem(_)) {
+        replacements = &[("arith.rem_to_div", "/"), ("arith.rem_to_mul", "*")];
+    }
+    if matches!(op, BinOp::BitAnd(_)) {
+        replacements = &[("bitwise.and_to_or", "|"), ("bitwise.and_to_xor", "^")];
+    }
+    if matches!(op, BinOp::BitOr(_)) {
+        replacements = &[("bitwise.or_to_and", "&")];
+    }
+    if matches!(op, BinOp::BitXor(_)) {
+        replacements = &[("bitwise.xor_to_and", "&")];
+    }
+    if matches!(op, BinOp::Shl(_)) {
+        replacements = &[("shift.shl_to_shr", ">>")];
+    }
+    if matches!(op, BinOp::Shr(_)) {
+        replacements = &[("shift.shr_to_shl", "<<")];
+    }
+    if matches!(op, BinOp::And(_)) {
+        replacements = &[("logical.and_to_or", "||")];
+    }
+    if matches!(op, BinOp::Or(_)) {
+        replacements = &[("logical.or_to_and", "&&")];
+    }
+    if matches!(op, BinOp::AddAssign(_)) {
+        replacements = &[("assign.add_to_sub", "-=")];
+    }
+    if matches!(op, BinOp::SubAssign(_)) {
+        replacements = &[("assign.sub_to_add", "+=")];
+    }
+    if matches!(op, BinOp::MulAssign(_)) {
+        replacements = &[("assign.mul_to_div", "/=")];
+    }
+    if matches!(op, BinOp::DivAssign(_)) {
+        replacements = &[("assign.div_to_mul", "*=")];
+    }
+    if matches!(op, BinOp::RemAssign(_)) {
+        replacements = &[("assign.rem_to_div", "/=")];
+    }
+    if matches!(op, BinOp::BitAndAssign(_)) {
+        replacements = &[("assign.and_to_or", "|=")];
+    }
+    if matches!(op, BinOp::BitOrAssign(_)) {
+        replacements = &[("assign.or_to_and", "&=")];
+    }
+    if matches!(op, BinOp::BitXorAssign(_)) {
+        replacements = &[("assign.xor_to_and", "&=")];
+    }
+    if matches!(op, BinOp::ShlAssign(_)) {
+        replacements = &[("assign.shl_to_shr", ">>=")];
+    }
+    if matches!(op, BinOp::ShrAssign(_)) {
+        replacements = &[("assign.shr_to_shl", "<<=")];
+    }
+    replacements
 }
 
 #[cfg(test)]

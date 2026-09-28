@@ -39,6 +39,27 @@ flowchart TD
     selections --> queue --> tests --> learning --> persistence
 ```
 
+## Shared test resources
+
+Tests may declare a named shared resource with
+`#[gamma::resource("name")]`. A function annotation applies to that exact
+test and requires a test attribute such as `#[test]` or `#[tokio::test]`; an
+inline module annotation applies to every execution of its containing test target.
+The source states identity, not machine policy. Capacities come from
+the `[resources]` table in `gamma.toml`, may be overridden by repeatable
+`--resource-concurrency NAME=N` arguments, and default to one when omitted.
+Capacities for resources outside the selected packages remain inactive rather than
+invalidating a package-scoped campaign.
+
+Before launching a baseline, census, mutant, or confirmation process,
+cargo-gamma atomically reserves every resource required by that selection and
+releases it when the complete process tree has ended. Sweep assignment also
+tracks conservative per-mutant resource requirements: when a capacity is
+occupied, the scheduler skips blocked mutants and admits unrelated queued work
+instead of assigning a worker that would wait at process launch. The
+process-level reservation remains authoritative. Unrelated tests remain
+parallel.
+
 ## 1. Target-linkage discovery
 
 **Goal:** avoid building, baselining, censusing, or running test binaries that
@@ -342,11 +363,17 @@ starts, and avoid leaving expensive work as a long serial tail.
 
 Cargo-gamma estimates each pending mutant's serial test cost:
 
-- exact killer hint: baseline duration of the hinted binary;
-- `Selected`: measured duration of the selected tests;
-- `Whole`: whole-binary baseline duration;
-- `Hinted`: whole-binary baseline duration because fallback may be required;
+- exact killer hint: a short filtered probe plus a small miss-weighted
+  whole-suite fallback;
+- `Selected`: half the measured duration of the selected tests for the initial
+  killed-mutant prior;
+- `Whole`: half the whole-binary baseline for the initial killed-mutant prior;
+- `Hinted`: measured hinted-test duration plus a miss-weighted whole-binary
+  fallback;
 - `Uncovered`: zero.
+
+Persisted generalized candidates seed their scheduling probability and probe
+cost from the hint artifact's hit, miss, measured-time, and sample counters.
 
 The cost order is still partitioned into package queues and interleaved. That
 order supplies deterministic package-fair, longest-work-first secondary
@@ -386,17 +413,9 @@ may run concurrently. The waiter holds no file or item reservation and blocks
 on the scheduler condition variable; there is no duration-based sleep or
 timeout.
 
-**Output:** immutable work metadata and a synchronized assignment-time
-scheduler tracking remaining work and active file/item reservations.
-
-The same immutable work metadata seeds the live completion estimate. Worker
-assignment and completion events let it distinguish queued work from in-flight
-residuals. It calibrates exact, selected, hinted, whole-binary, and uncovered
-predictions against recent killed, full-suite, and resource-limited outcomes,
-then places the remaining costs across the configured worker lanes. The
-progress display therefore reports a range for the projected wall-time tail
-rather than scaling completed-mutant count, which would be biased whenever
-cheap or expensive work is scheduled first.
+**Output:** immutable scheduling-cost metadata and a synchronized
+assignment-time scheduler tracking remaining work and active file, item, and
+shared-resource reservations.
 
 ## 8. Testing one mutant
 
@@ -434,6 +453,15 @@ from each generalized tier. After eight attempts without a hit, that tier's
 campaign-wide circuit breaker rejects further exploration. Exact hints and
 canonical fallback remain available.
 
+A candidate failure is a transfer hit and a clean pass is a transfer miss.
+Timeouts, stalls, memory exhaustion, flakes, enumeration failures, metering
+loss, and unjudged launches are inconclusive and do not alter that candidate's
+hit or miss counters. Canonical execution also supplies soft negative evidence
+for binaries that are already item or file candidates: two clean canonical
+passes have the ranking weight of one explicit transfer miss. Soft evidence
+may demote or economically retire a candidate, but it never creates one and
+cannot exclude canonical work or determine a verdict.
+
 **Output:** one mutant outcome, elapsed time, optional killing test, and
 optional diagnostic note.
 
@@ -452,14 +480,17 @@ A completed mutant publishes:
 
 - its exact killing test for later mutants in the same item;
 - its killing or reaching binary for later mutants in the same file;
+- lower-weight negative ranking evidence when a known candidate binary passes
+  cleanly during canonical execution;
 - safe negative reach evidence for another replacement at the exact same
   stable source site.
 
-The worker publishes all exact-test, reaching-binary, file-binary, and safe
-negative-reach learning before releasing its file/item reservation. Releasing
-the reservation wakes waiters, so a related follow-on assignment observes the
-completed learning. Hinted mutants are not spaced, but their checked result is
-published before their reservation is released in the same way.
+The worker publishes all exact-test, reaching-binary, file-binary, soft
+canonical-negative, and safe negative-reach learning before releasing its
+file/item reservation. Releasing the reservation wakes waiters, so a related
+follow-on assignment observes the completed learning. Hinted mutants are not
+spaced, but their checked result is published before their reservation is
+released in the same way.
 
 **Output:** updated in-memory exact killers, bounded ranked item/file
 candidates with separate seed and transfer evidence, and safe exact-site reach
@@ -487,6 +518,11 @@ After the sweep:
 - hint funnels report candidates, attempts, hits, and economically, cap-, or
   circuit-breaker-rejected opportunities for exact mutant hints and
   generalized item, reach, file, and census tiers;
+- `gamma-selection.jsonl` receives each mutant's completed attempts as one worker-side batch, then
+  records and immediately flushes every selection attempt with its mutant ordinal, candidate tier and rank, binary
+  and optional test identity, hit/miss/inconclusive result, elapsed time, and
+  canonical fallback estimate, so interrupted campaigns can be replayed
+  without treating telemetry as verdict evidence;
 - package sweep timelines report first start, final completion, and wall span
   relative to sweep start. These spans can overlap under concurrency and are
   distinct from the package CPU totals; and
@@ -502,13 +538,12 @@ Incremental promotion refuses a malformed, foreign, or unsupported existing
 artifact rather than treating it as empty; `--replace` is the explicit
 permission to discard such a generation. This includes unsupported
 independently versioned generalized data, which today's serializer cannot
-round-trip without losing future fields. Publication and legacy cleanup compare
-against the exact YAML and JSON bytes used by the merge, so a concurrent update
+round-trip without losing future fields. Publication compares against the exact
+YAML bytes used by the merge, so a concurrent update
 is left intact and reported as a conflict.
 
 The generalized section uses schema version 2, separating seed observations
-from transfer hits and misses. Version-1 identities migrate as seeds while
-their formerly conflated transfer statistics and measured cost reset.
+from transfer hits and misses. Older generalized schemas are unsupported.
 
 Persisted knowledge changes ordering and selection only. It never carries a
 verdict into a new campaign without executing the relevant test again.

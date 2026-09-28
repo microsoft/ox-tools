@@ -237,8 +237,8 @@ pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: L
 
     // One line for the whole result. Everything a run knows about itself — what it built, what it
     // could not compile, what it was told to skip — is bookkeeping about how the number was
-    // reached, and a reader who wants that has `--estimate` and the advice artifact. What is left is the
-    // number and the counts that change what it is a number out of.
+    // reached, and a reader who wants that has the advice artifact. What is left is the number and
+    // the counts that change what it is a number out of.
     //
     // A surviving mutant is one a test ran and did not notice, and nothing else. An uncovered mutant
     // also costs score, but no test reached it, so counting it as a survivor would send the reader
@@ -306,7 +306,7 @@ pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: L
     if suppressible {
         writeln!(
             stream,
-            "{note} Run `cargo gamma suppress` to automatically suppress timed-out and out-of-memory mutants"
+            "{note} Run `cargo gamma suppress --apply` to automatically suppress timed-out and out-of-memory mutants"
         )?;
     }
 
@@ -328,9 +328,9 @@ pub fn summarize<H: Host>(host: &mut H, plan: &Plan, styler: Styler, listings: L
 /// Reports anything about the mechanics of the run that the user has to know about.
 ///
 /// Only the exceptional is reported. What a build cost and what budget a mutant was given are
-/// answers to questions nobody asked, and `--estimate` and the advice artifact exist for runs where
-/// somebody did; what is left here is the handful of things a run had to do differently from what
-/// was asked of it.
+/// answers to questions nobody asked, and the advice artifact exists for runs where somebody did;
+/// what is left here is the handful of things a run had to do differently from what was asked of
+/// it.
 ///
 /// This goes to the diagnostic stream, not to the results stream, because it is information about
 /// the run rather than a finding about the code, and a script parsing results should not have to
@@ -633,7 +633,7 @@ mod tests {
                 "Summary: 2 mutants (1 killed, 0 survived, 1 timed out, 0 out of memory, 0 uncovered => 50.0%)\n",
                 "Note   : 1 superfluous skip directive could be removed with `cargo gamma unsuppress --apply`\n",
                 "  src/a.rs:9: skip(relational) — the site no longer produces a mutant\n",
-                "Note   : Run `cargo gamma suppress` to automatically suppress timed-out and out-of-memory mutants\n",
+                "Note   : Run `cargo gamma suppress --apply` to automatically suppress timed-out and out-of-memory mutants\n",
                 "Note   : Run `cargo gamma hints` to update your hint file and accelerate subsequent cargo-gamma runs\n",
             )
         );
@@ -754,7 +754,9 @@ mod tests {
 
         let text = rendered_with(&population, Listings::default());
 
-        assert!(text.ends_with("Note   : Run `cargo gamma suppress` to automatically suppress timed-out and out-of-memory mutants\n"));
+        assert!(
+            text.ends_with("Note   : Run `cargo gamma suppress --apply` to automatically suppress timed-out and out-of-memory mutants\n")
+        );
     }
 
     #[test]

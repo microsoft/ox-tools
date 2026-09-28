@@ -26,6 +26,19 @@ pub enum DependencyType {
     Build,
 }
 
+impl DependencyType {
+    const ALL: [Self; 3] = [Self::Standard, Self::Dev, Self::Build];
+}
+
+const INCLUDE_DEPENDENCY_SUGGESTIONS: bool = false;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageSelection {
+    Named,
+    Workspace,
+    RootOrWorkspace,
+}
+
 #[derive(Parser, Debug)]
 pub struct DepsArgs {
     /// Comma-separated list of dependency types to appraise
@@ -64,74 +77,100 @@ pub struct DepsArgs {
 pub async fn process_dependencies<H: Host>(host: &mut H, args: &DepsArgs) -> Result<()> {
     let mut common = Common::new(host, &args.common).await?;
 
-    // Configure features on the metadata command based on command-line options
-    if args.all_features {
-        _ = common.metadata_cmd.features(CargoOpt::AllFeatures);
-    } else {
-        if args.no_default_features {
-            _ = common.metadata_cmd.features(CargoOpt::NoDefaultFeatures);
-        }
+    configure_metadata_features(&mut common.metadata_cmd, args);
 
-        if !args.features.is_empty() {
-            _ = common.metadata_cmd.features(CargoOpt::SomeFeatures(args.features.clone()));
-        }
-    }
-
-    let metadata = common.metadata_cmd.exec().into_app_err("retrieving workspace metadata")?;
+    let metadata = match load_metadata(&common.metadata_cmd) {
+        Ok(metadata) => metadata,
+        Err(error) => return Err(error),
+    };
     let all_packages: HashMap<_, _> = metadata.packages.iter().map(|p| (&p.id, p)).collect();
     let resolve_index: HashMap<&PackageId, &Node> = metadata
         .resolve
         .as_ref()
         .map_or_else(HashMap::default, |r| r.nodes.iter().map(|n| (&n.id, n)).collect());
 
-    // Validate package names if specified
-    if !args.package.is_empty() {
-        for pkg_name in &args.package {
-            let found = metadata
-                .workspace_members
-                .iter()
-                .filter_map(|id| all_packages.get(id).map(|p| &p.name))
-                .any(|name| name == pkg_name);
-            if !found {
-                bail!("package '{pkg_name}' not found in workspace");
-            }
+    for pkg_name in &args.package {
+        let found = metadata
+            .workspace_members
+            .iter()
+            .filter_map(|id| all_packages.get(id).map(|p| &p.name))
+            .any(|name| name == pkg_name);
+        if !found {
+            bail!("package '{pkg_name}' not found in workspace");
         }
     }
 
+    match package_selection(args) {
+        PackageSelection::Named => {
+            process_packages(
+                args,
+                &mut common,
+                &all_packages,
+                &resolve_index,
+                metadata
+                    .workspace_members
+                    .iter()
+                    .filter_map(|id| all_packages.get(id).copied())
+                    .filter(|p| args.package.contains(&p.name)),
+            )
+            .await
+        }
+        PackageSelection::Workspace => {
+            process_packages(
+                args,
+                &mut common,
+                &all_packages,
+                &resolve_index,
+                metadata.workspace_members.iter().filter_map(|id| all_packages.get(id).copied()),
+            )
+            .await
+        }
+        PackageSelection::RootOrWorkspace => {
+            if let Some(root) = metadata.root_package() {
+                process_packages(args, &mut common, &all_packages, &resolve_index, core::iter::once(root)).await
+            } else {
+                // Virtual workspace, default to all members
+                process_packages(
+                    args,
+                    &mut common,
+                    &all_packages,
+                    &resolve_index,
+                    metadata.workspace_members.iter().filter_map(|id| all_packages.get(id).copied()),
+                )
+                .await
+            }
+        }
+    }
+}
+
+fn configure_metadata_features(metadata_cmd: &mut cargo_metadata::MetadataCommand, args: &DepsArgs) {
+    if args.all_features {
+        _ = metadata_cmd.features(CargoOpt::AllFeatures);
+        return;
+    }
+    if args.no_default_features {
+        _ = metadata_cmd.features(CargoOpt::NoDefaultFeatures);
+    }
+    if !args.features.is_empty() {
+        _ = metadata_cmd.features(CargoOpt::SomeFeatures(args.features.clone()));
+    }
+}
+
+fn load_metadata(metadata_cmd: &cargo_metadata::MetadataCommand) -> Result<cargo_metadata::Metadata> {
+    metadata_cmd.exec().into_app_err("retrieving workspace metadata")
+}
+
+fn dependency_type_selected(selected: Option<&Vec<DependencyType>>, dependency_type: DependencyType) -> bool {
+    selected.is_none_or(|types| types.is_empty() || types.contains(&dependency_type))
+}
+
+fn package_selection(args: &DepsArgs) -> PackageSelection {
     if !args.package.is_empty() {
-        process_packages(
-            args,
-            &mut common,
-            &all_packages,
-            &resolve_index,
-            metadata
-                .workspace_members
-                .iter()
-                .filter_map(|id| all_packages.get(id).copied())
-                .filter(|p| args.package.contains(&p.name)),
-        )
-        .await
+        PackageSelection::Named
     } else if args.workspace {
-        process_packages(
-            args,
-            &mut common,
-            &all_packages,
-            &resolve_index,
-            metadata.workspace_members.iter().filter_map(|id| all_packages.get(id).copied()),
-        )
-        .await
-    } else if let Some(root) = metadata.root_package() {
-        process_packages(args, &mut common, &all_packages, &resolve_index, core::iter::once(root)).await
+        PackageSelection::Workspace
     } else {
-        // Virtual workspace, default to all members
-        process_packages(
-            args,
-            &mut common,
-            &all_packages,
-            &resolve_index,
-            metadata.workspace_members.iter().filter_map(|id| all_packages.get(id).copied()),
-        )
-        .await
+        PackageSelection::RootOrWorkspace
     }
 }
 
@@ -142,14 +181,12 @@ async fn process_packages<'a, H: Host>(
     resolve_index: &HashMap<&'a PackageId, &'a Node>,
     target_packages: impl Iterator<Item = &'a Package>,
 ) -> Result<()> {
-    let should_process = |dep_type: &DependencyType| args.dependency_types.as_ref().is_none_or(|d| d.is_empty() || d.contains(dep_type));
-
     // Collect all (CrateId, dependency_type) pairs, preserving duplicates
     let mut crate_dep_pairs: Vec<(CrateRef, DependencyType)> = Vec::new();
 
-    let active_dep_types: Vec<_> = [DependencyType::Standard, DependencyType::Dev, DependencyType::Build]
+    let active_dep_types: Vec<_> = DependencyType::ALL
         .into_iter()
-        .filter(|dt| should_process(dt))
+        .filter(|dependency_type| dependency_type_selected(args.dependency_types.as_ref(), *dependency_type))
         .collect();
 
     for package in target_packages {
@@ -160,10 +197,13 @@ async fn process_packages<'a, H: Host>(
 
     // Fetch facts for each crate (no suggestions for deps command)
     let crate_refs: Vec<CrateRef> = crate_dep_pairs.into_iter().map(|(crate_ref, _)| crate_ref).collect();
-    let facts = common.process_crates(&crate_refs, false).await?;
+    let facts = common.process_crates(&crate_refs, INCLUDE_DEPENDENCY_SUGGESTIONS).await?;
 
     // Report the facts
-    common.report(facts)
+    match common.report(facts) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Expand a set of features transitively using the package's feature declarations.
@@ -225,7 +265,7 @@ fn is_optional_dep_active(expanded_features: &HashSet<String>, pkg: &Package, de
                     return true;
                 }
                 // Pre-2021: listing an optional dep name directly in a feature activates it
-                if activation == dep_lib_name && !activation.contains(':') && !activation.contains('/') {
+                if activation == dep_lib_name {
                     return true;
                 }
             }
@@ -310,6 +350,7 @@ fn build_transitive_deps<'a>(
                     let features = compute_dep_features(target_pkg, dep_decl, &expanded_root);
                     queue.push((&node_dep.pkg, features));
                 } else {
+                    // #[gamma::skip(call.replace_with_default, call_result.default, tag = "trivial", reason = "HashSet::default() is already the exact default value these replacements produce")]
                     queue.push((&node_dep.pkg, HashSet::default()));
                 }
             }
@@ -343,6 +384,7 @@ fn build_transitive_deps<'a>(
                             let dep_features = compute_dep_features(pkg, dep_decl, &expanded);
                             queue.push((&node_dep.pkg, dep_features));
                         } else {
+                            // #[gamma::skip(call.replace_with_default, call_result.default, tag = "trivial", reason = "HashSet::default() is already the exact default value these replacements produce")]
                             queue.push((&node_dep.pkg, HashSet::default()));
                         }
                     }
@@ -357,7 +399,11 @@ fn build_transitive_deps<'a>(
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+    use camino::Utf8PathBuf;
+    use semver::Version;
+
     use super::*;
+    use crate::commands::host::TestHost;
 
     fn make_package(json: &str) -> Package {
         serde_json::from_str(json).expect("valid Package JSON")
@@ -762,10 +808,11 @@ mod tests {
         let other = package("other", &plain_dep("kept"), "{}");
         let lonely = package("lonely", "", "{}");
         let tghost = package("tghost", "", "{}");
+        let devonly = package("devonly", "", "{}");
         let optoff = package("optoff", "", "{}");
         let toptoff = package("toptoff", "", "{}");
 
-        let packages = [&root, &kept, &other, &lonely, &tghost, &optoff, &toptoff];
+        let packages = [&root, &kept, &other, &lonely, &tghost, &devonly, &optoff, &toptoff];
         let all_packages: HashMap<&PackageId, &Package> = packages.iter().map(|p| (&p.id, *p)).collect();
 
         let root_node = node("root", &["optoff", "kept", "other", "lonely", "ghost"]);
@@ -781,7 +828,8 @@ mod tests {
         let mut names: Vec<_> = result.iter().map(|(r, _)| r.name().to_string()).collect();
         names.sort();
 
-        // `optoff` and `toptoff` are inactive optional dependencies, `ghost` has no package.
+        // `optoff` and `toptoff` are inactive optional dependencies, `devonly` is not a normal
+        // transitive edge, and `ghost` has no package.
         assert_eq!(names, vec!["kept", "lonely", "other", "tghost"]);
         assert!(result.iter().all(|(_, kind)| *kind == DependencyType::Standard));
     }
@@ -828,6 +876,133 @@ mod tests {
         assert!(standard.iter().all(|(_, kind)| *kind == DependencyType::Standard));
         assert!(build.iter().all(|(_, kind)| *kind == DependencyType::Build));
         assert!(dev.iter().all(|(_, kind)| *kind == DependencyType::Dev));
+    }
+
+    #[test]
+    fn build_transitive_deps_accepts_an_edge_with_any_matching_kind() {
+        let root = package("root", &plain_dep("mixed"), "{}");
+        let mixed = package("mixed", "", "{}");
+        let packages = [&root, &mixed];
+        let all_packages: HashMap<&PackageId, &Package> = packages.iter().map(|p| (&p.id, *p)).collect();
+        let root_node = make_node(
+            r#"{
+                "id": "root 1.0.0 (path+file:///root)",
+                "dependencies": [],
+                "deps": [{
+                    "name": "mixed",
+                    "pkg": "mixed 1.0.0 (path+file:///mixed)",
+                    "dep_kinds": [
+                        {"kind": null, "target": null},
+                        {"kind": "dev", "target": null}
+                    ]
+                }],
+                "features": []
+            }"#,
+        );
+        let resolve_index: HashMap<&PackageId, &Node> = std::iter::once((&root_node.id, &root_node)).collect();
+        let result = build_transitive_deps(&all_packages, &resolve_index, &root.id, DependencyType::Standard);
+        assert_eq!(
+            result.iter().map(|(crate_ref, _)| crate_ref.name()).collect::<Vec<_>>(),
+            vec!["mixed"]
+        );
+    }
+
+    #[test]
+    fn build_transitive_deps_keeps_undeclared_resolve_edges_and_versions() {
+        let root = package("root", "", "{}");
+        let discovered = package("discovered", "", "{}");
+        let packages = [&root, &discovered];
+        let all_packages: HashMap<&PackageId, &Package> = packages.iter().map(|package| (&package.id, *package)).collect();
+        let root_node = node("root", &["discovered"]);
+        let resolve_index: HashMap<&PackageId, &Node> = std::iter::once((&root_node.id, &root_node)).collect();
+
+        let result = build_transitive_deps(&all_packages, &resolve_index, &root.id, DependencyType::Standard);
+        let (crate_ref, kind) = result.iter().next().expect("the resolve-only edge is traversed");
+        assert_eq!(result.len(), 1);
+        assert_eq!(crate_ref.name(), "discovered");
+        assert_eq!(crate_ref.version(), Some(&Version::new(1, 0, 0)));
+        assert_eq!(*kind, DependencyType::Standard);
+    }
+
+    #[test]
+    fn dependency_command_policies_are_explicit() {
+        assert_eq!(
+            DependencyType::ALL,
+            [DependencyType::Standard, DependencyType::Dev, DependencyType::Build]
+        );
+        const { assert!(!INCLUDE_DEPENDENCY_SUGGESTIONS) };
+
+        assert_eq!(
+            package_selection(&DepsArgs::parse_from(["deps"])),
+            PackageSelection::RootOrWorkspace
+        );
+        assert_eq!(
+            package_selection(&DepsArgs::parse_from(["deps", "--workspace"])),
+            PackageSelection::Workspace
+        );
+        assert_eq!(
+            package_selection(&DepsArgs::parse_from(["deps", "--workspace", "--package", "chosen"])),
+            PackageSelection::Named
+        );
+    }
+
+    #[test]
+    fn all_features_is_applied_to_the_metadata_command() {
+        let args = DepsArgs::parse_from(["deps", "--all-features"]);
+        let mut metadata_cmd = cargo_metadata::MetadataCommand::new();
+        configure_metadata_features(&mut metadata_cmd, &args);
+        assert!(
+            format!("{metadata_cmd:?}").contains("all_features: true"),
+            "all-features was not applied: {metadata_cmd:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_features_and_dependency_type_filters_are_applied() {
+        let args = DepsArgs::parse_from(["deps", "--features", "one,two"]);
+        let mut metadata_cmd = cargo_metadata::MetadataCommand::new();
+        configure_metadata_features(&mut metadata_cmd, &args);
+        let debug = format!("{metadata_cmd:?}");
+        assert!(debug.contains("one"), "{debug}");
+        assert!(debug.contains("two"), "{debug}");
+
+        assert!(dependency_type_selected(None, DependencyType::Standard));
+        assert!(dependency_type_selected(Some(&Vec::new()), DependencyType::Standard));
+        assert!(dependency_type_selected(
+            Some(&vec![DependencyType::Standard]),
+            DependencyType::Standard
+        ));
+        assert!(!dependency_type_selected(
+            Some(&vec![DependencyType::Dev]),
+            DependencyType::Standard
+        ));
+
+        let args = DepsArgs::parse_from(["deps"]);
+        let mut metadata_cmd = cargo_metadata::MetadataCommand::new();
+        configure_metadata_features(&mut metadata_cmd, &args);
+        let debug = format!("{metadata_cmd:?}");
+        assert!(
+            !debug.contains("features: Some"),
+            "empty --features must not configure features: {debug}"
+        );
+    }
+
+    #[test]
+    fn metadata_loading_preserves_its_error_context() {
+        let mut command = cargo_metadata::MetadataCommand::new();
+        command.manifest_path("missing-manifest-for-deps-metadata-test.toml");
+        let error = load_metadata(&command).expect_err("a missing manifest must fail");
+        assert!(error.to_string().contains("retrieving workspace metadata"));
+    }
+
+    #[tokio::test]
+    async fn common_initialization_errors_are_returned() {
+        let mut args = DepsArgs::parse_from(["deps"]);
+        args.common.manifest_path = Utf8PathBuf::from("missing-manifest-for-deps-test.toml");
+        let error = process_dependencies(&mut TestHost::new(), &args)
+            .await
+            .expect_err("a missing manifest must be reported");
+        assert!(error.to_string().contains("retrieving workspace metadata"));
     }
 
     #[test]

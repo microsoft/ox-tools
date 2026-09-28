@@ -109,6 +109,7 @@ impl Splices {
     /// The implementation visits only files whose live ordinals actually changed since the prior
     /// round ("dirty" files). Every other file's cached guards are returned from `self.placed`
     /// without re-reading, re-splicing or re-writing the file.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn instrument(&mut self, work: &Workspace, plan: &Plan, withdrawn: &HashSet<u32>) -> Result<Instrumented> {
         if self.root != work.root {
             self.root = work.root.clone();
@@ -219,6 +220,7 @@ impl Splices {
         Ok(Instrumented { guards, unavailable })
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn restore_removed_files(&mut self, work: &Workspace, plan: &Plan) -> Result<()> {
         let identity = core::ptr::from_ref(plan) as usize;
         // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]

@@ -284,6 +284,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_loader_variable_is_the_one_this_platform_actually_reads() {
         // Windows has no separate loader path; setting `LD_LIBRARY_PATH` there is silent, and every
         // test binary that links a proc macro then dies at startup without an explanation.

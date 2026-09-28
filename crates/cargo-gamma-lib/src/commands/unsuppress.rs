@@ -37,6 +37,7 @@ pub(super) fn unsuppress<H: Host>(host: &mut H, args: &UnsuppressArgs, styler: S
 }
 
 /// Implements `unsuppress` with the configuration generation dispatch already resolved.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn unsuppress_with_cargo<H: Host>(
     host: &mut H,
     args: &UnsuppressArgs,
@@ -113,6 +114,7 @@ fn remove_all<H: Host>(host: &mut H, args: &UnsuppressArgs, before: &Plan, remov
 /// already changed is in `written`, and putting that back is the caller's business. Leaving those
 /// files rewritten after the command has failed would be a directive silently deleted from
 /// somebody's source — the same hazard `--apply` is a deliberate opt-in for.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn remove_directives<H: Host>(
     host: &mut H,
     args: &UnsuppressArgs,
@@ -201,6 +203,7 @@ struct Removal {
 ///
 /// Grouped by file rather than kept flat, because the removal reads and rewrites each file once and
 /// the line numbers within it have to be applied together.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn sort_out(plan: &Plan) -> crate::Result<(Removals, Vec<&crate::suppress::Idle>)> {
     let mut removable = Removals::new();
     let mut declined = Vec::new();
@@ -260,6 +263,7 @@ fn sort_out(plan: &Plan) -> crate::Result<(Removals, Vec<&crate::suppress::Idle>
 ///
 /// Silence here would be the worst outcome: the run has just reported these as suppressing nothing,
 /// and a removal that quietly skips them leaves the user believing they are gone.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn report_declined<H: Host>(host: &mut H, declined: &[&crate::suppress::Idle], styler: Styler) -> crate::Result<()> {
     if declined.is_empty() {
         return Ok(());
@@ -301,6 +305,7 @@ fn verify_or_revert<H: Host>(
 }
 
 /// Verifies against the Cargo options that planned the edit.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn verify_or_revert_with_cargo<H: Host>(
     host: &mut H,
     args: &UnsuppressArgs,
@@ -840,6 +845,7 @@ mod tests {
     /// the loop leaves no artifact behind to reconstruct it from. Version control is the journal,
     /// so a file with nothing committed behind it is refused before the first delete.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn removing_from_a_file_with_uncommitted_changes_is_refused_before_anything_is_deleted() {
         let source = "// #[gamma::skip(arith)]\npub fn f(a: i32) -> bool { a > 1 }\n";
         let (_dir, root) = crate_dir("unsuppress-dirty-", source);

@@ -39,6 +39,9 @@ pub struct Merged {
     /// Mutants seen in a report but never actually run.
     pub never_tested: usize,
 
+    /// Current flaky verdicts, rendered with their identity and recorded evidence.
+    pub flaky: Vec<String>,
+
     /// Distinct shard indices seen.
     pub shards_seen: BTreeSet<u32>,
 

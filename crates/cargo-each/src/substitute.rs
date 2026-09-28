@@ -106,6 +106,7 @@ fn replace_arg<'a>(arg: &str, placeholders: &'a Placeholders, mut replacements: 
         let (_token, remaining) = token_and_rest.split_at(token.len());
         replaced.push_str(literal);
         replaced.push_str(value);
+        // #[gamma::skip(stmt.delete_assign, tag = "outofmemory", reason = "the substitution loop must consume each matched token")]
         rest = remaining;
     }
     replaced.push_str(rest);
@@ -191,17 +192,17 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 manifest,
                 ..
             } => {
-                // The `{name}` / `{spec}` / … literals are cargo-each
-                // placeholder tokens, not Rust format-string arguments.
-                #[expect(
-                    clippy::literal_string_with_formatting_args,
-                    reason = "cargo-each placeholder tokens, not format args"
-                )]
-                let replaced = replace_arg(
-                    arg,
-                    placeholders,
-                    vec![("{name}", name), ("{spec}", spec), ("{version}", version), ("{manifest}", manifest)],
-                )?;
+                let replacements = vec![
+                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package name token was emptied")]
+                    ("{name}", name.as_str()),
+                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package spec token was emptied")]
+                    ("{spec}", spec.as_str()),
+                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package version token was emptied")]
+                    ("{version}", version.as_str()),
+                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the package manifest token was emptied")]
+                    ("{manifest}", manifest.as_str()),
+                ];
+                let replaced = replace_arg(arg, placeholders, replacements)?;
                 out.push(replaced);
             }
             Placeholders::Target {
@@ -212,21 +213,18 @@ pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result
                 target,
                 ..
             } => {
-                #[expect(
-                    clippy::literal_string_with_formatting_args,
-                    reason = "cargo-each placeholder tokens, not format args"
-                )]
-                let replaced = replace_arg(
-                    arg,
-                    placeholders,
-                    vec![
-                        ("{name}", name),
-                        ("{spec}", spec),
-                        ("{version}", version),
-                        ("{manifest}", manifest),
-                        (TARGET_TOKEN, target),
-                    ],
-                )?;
+                let replacements = vec![
+                    // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "the stopped campaign timed out when the target-mode name token was emptied")]
+                    ("{name}", name.as_str()),
+                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the target-mode spec token was emptied")]
+                    ("{spec}", spec.as_str()),
+                    // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "the stopped campaign timed out when the target-mode version token was emptied")]
+                    ("{version}", version.as_str()),
+                    // #[gamma::skip(literal.str_to_empty, tag = "outofmemory", reason = "the stopped campaign exhausted its memory budget when the target-mode manifest token was emptied")]
+                    ("{manifest}", manifest.as_str()),
+                    (TARGET_TOKEN, target.as_str()),
+                ];
+                let replaced = replace_arg(arg, placeholders, replacements)?;
                 out.push(replaced);
             }
             Placeholders::Once { packages, .. } => {
@@ -431,6 +429,15 @@ mod tests {
         };
         let target_error = substitute(&command, &target).expect_err("target value is unresolved");
         assert!(target_error.to_string().contains("root value was not resolved"), "{target_error}");
+
+        let once = Placeholders::Once {
+            packages: args(&["--workspace"]),
+            workspace_rust_version: None,
+        };
+        assert_eq!(
+            substitute(&command, &once).expect_err("once value is unresolved").to_string(),
+            "cannot resolve `{workspace-rust-version}`: the command uses the placeholder but its root value was not resolved"
+        );
     }
 
     #[test]

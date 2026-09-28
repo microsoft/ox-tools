@@ -32,13 +32,13 @@ pub use killers::Killers;
 pub(crate) use order::stages;
 #[doc(inline)]
 pub use plan::Plan;
-pub(crate) use record::digest;
 #[doc(inline)]
 pub use record::{
     BinaryHint, Context as RecordContext, ContextDigest, Entries as RecordEntries, FileBinaryHints, GENERALIZED_HINTS_VERSION,
     GeneralizedHints, ItemHints, Killer, RankedHint, ReachCluster, RunRecord, SiteIdentity, Term, Tier, Trust, context as record_context,
     rustflags, toolchain,
 };
+pub(crate) use record::{Settled, digest};
 #[doc(inline)]
 pub use shard::shard_of;
 #[cfg(test)]

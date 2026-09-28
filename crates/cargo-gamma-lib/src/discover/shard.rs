@@ -60,6 +60,7 @@ mod tests {
     #[test]
     fn one_shard_holds_everything() {
         for id in ["a", "b", "deadbeef1234"] {
+            assert_eq!(shard_of(id, 0), 0);
             assert_eq!(shard_of(id, 1), 0);
         }
     }

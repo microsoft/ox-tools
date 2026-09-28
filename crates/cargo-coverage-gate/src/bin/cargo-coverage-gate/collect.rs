@@ -5,8 +5,6 @@
 
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-#[cfg(any(windows, test))]
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,10 +33,7 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
     }
 
     let tools = ToolPrograms::from_env();
-    let workspace = WorkspaceInfo::load(&tools)?;
-    let selection = Selection::resolve(&workspace, &args.packages)?;
-
-    let collection = resolved_collection(collection)?;
+    let (workspace, selection, collection) = prepare_collection(args, collection, &tools, WorkspaceInfo::load, resolved_collection)?;
     let configurations = normalized_configurations(&collection.configurations);
     let effective_target = EffectiveTarget::resolve(&workspace, args.target.as_deref(), &tools)?;
 
@@ -47,27 +42,33 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
             "target `{}` is configured for no coverage; tests passed without coverage collection or gating",
             effective_target.triple
         );
-        run_plain_configurations(
-            &workspace,
-            &selection,
-            &collection,
-            &configurations,
-            &effective_target.triple,
-            &tools,
-            args.quiet,
+        finish_no_coverage_run(
+            args,
+            &result,
+            || {
+                run_plain_configurations(
+                    &workspace,
+                    &selection,
+                    &collection,
+                    &configurations,
+                    &effective_target.triple,
+                    &tools,
+                    args.quiet,
+                )
+            },
+            crate::run::write_no_gate_summary,
         )?;
-        crate::run::write_no_gate_summary(args, &result)?;
         eprintln!("coverage-gate: {result}");
         return Ok(ExitCode::SUCCESS);
     }
 
     validate_instrumentation_tools(&workspace, &tools, effective_target.rustc_version.as_deref())?;
-    fs::create_dir_all(&collection.coverage_dir).into_app_err(format!(
-        "failed to create coverage directory `{}`",
-        collection.coverage_dir.display()
-    ))?;
-
-    let coverage_scratch = TemporaryDirectory::create(&coverage_scratch_parent(&workspace))?;
+    let coverage_scratch = prepare_coverage_directories(
+        &collection.coverage_dir,
+        &workspace,
+        |path| fs::create_dir_all(path),
+        TemporaryDirectory::create,
+    )?;
     let coverage_target_root = coverage_target_root(coverage_scratch.path());
     let execution = CollectionExecution {
         workspace: &workspace,
@@ -87,6 +88,39 @@ pub(crate) fn run(args: &CoverageGateArgs, collection: &CollectionArgs) -> Resul
 
     let evaluation = crate::run::evaluate_paths(args, &lcov_paths, &selection.gated_names(), Some(&effective_target.triple));
     combine_evaluation_and_cleanup(evaluation, coverage_scratch.cleanup()).complete()
+}
+
+fn prepare_collection(
+    args: &CoverageGateArgs,
+    collection: &CollectionArgs,
+    tools: &ToolPrograms,
+    load_workspace: impl FnOnce(&ToolPrograms) -> Result<WorkspaceInfo, AppError>,
+    resolve_collection: impl FnOnce(&CollectionArgs) -> Result<CollectionArgs, AppError>,
+) -> Result<(WorkspaceInfo, Selection, CollectionArgs), AppError> {
+    let workspace = load_workspace(tools)?;
+    let selection = Selection::resolve(&workspace, &args.packages)?;
+    let collection = resolve_collection(collection)?;
+    Ok((workspace, selection, collection))
+}
+
+fn finish_no_coverage_run(
+    args: &CoverageGateArgs,
+    result: &str,
+    run_plain: impl FnOnce() -> Result<(), AppError>,
+    write_summary: impl FnOnce(&CoverageGateArgs, &str) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    run_plain()?;
+    write_summary(args, result)
+}
+
+fn prepare_coverage_directories(
+    coverage_dir: &Path,
+    workspace: &WorkspaceInfo,
+    create_coverage_dir: impl FnOnce(&Path) -> io::Result<()>,
+    create_scratch: impl FnOnce(&Path) -> Result<TemporaryDirectory, AppError>,
+) -> Result<TemporaryDirectory, AppError> {
+    create_coverage_dir(coverage_dir).into_app_err(format!("failed to create coverage directory `{}`", coverage_dir.display()))?;
+    create_scratch(&coverage_scratch_parent(workspace))
 }
 
 fn resolved_collection(collection: &CollectionArgs) -> Result<CollectionArgs, AppError> {
@@ -477,13 +511,18 @@ fn cargo_llvm_cov_version(output: &str) -> Result<Version, AppError> {
 }
 
 fn read_stdout(command: &mut Command, description: &str) -> Result<String, AppError> {
+    read_stdout_with(command, description, std::process::Child::wait_with_output)
+}
+
+fn read_stdout_with(
+    command: &mut Command,
+    description: &str,
+    wait_with_output: impl FnOnce(std::process::Child) -> io::Result<Output>,
+) -> Result<String, AppError> {
     let display = command_display(command);
     command.stdout(Stdio::piped()).stderr(Stdio::inherit());
-    let output = command
-        .spawn()
-        .into_app_err(format!("failed to execute `{display}`"))?
-        .wait_with_output()
-        .into_app_err(format!("failed to wait for `{display}`"))?;
+    let child = command.spawn().into_app_err(format!("failed to execute `{display}`"))?;
+    let output = wait_with_output(child).into_app_err(format!("failed to wait for `{display}`"))?;
     if !output.status.success() {
         return Err(AppError::new(format!(
             "{description} failed: `{display}` exited with {}",
@@ -602,6 +641,7 @@ fn prefixed_path_argument(prefix: &str, path: &Path) -> OsString {
     argument
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfiguration, lcov_path: &Path) -> Result<(), AppError> {
     let mut command = report_command(execution, configuration, lcov_path);
     let display = command_display(&command);
@@ -610,28 +650,78 @@ fn run_report(execution: &CollectionExecution<'_>, configuration: FeatureConfigu
         .stderr(Stdio::piped())
         .output()
         .into_app_err(format!("failed to execute `{display}`"))?;
+    match handle_report_output_with(
+        &output,
+        execution.quiet,
+        &display,
+        lcov_path,
+        cfg!(windows),
+        forward_output,
+        |output, quiet| forward_stdout_to(output, quiet, &mut io::stdout()),
+        |path| fs::write(path, []).into_app_err(format!("failed to write empty LCOV file `{}`", path.display())),
+    )? {
+        ReportAction::Complete => Ok(()),
+        #[cfg(any(windows, test))]
+        ReportAction::WindowsFallback(arguments) => {
+            #[cfg(windows)]
+            {
+                eprintln!(
+                    "coverage-gate: cargo-llvm-cov could not launch llvm-cov directly; retrying its export through an LLVM response file"
+                );
+                run_windows_report_fallback(execution, configuration, lcov_path, &arguments)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = (execution, configuration, lcov_path, arguments);
+                Err(AppError::new("Windows response-file fallback was requested on a non-Windows host"))
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ReportAction {
+    Complete,
+    #[cfg(any(windows, test))]
+    WindowsFallback(Vec<String>),
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the injected output boundaries keep report classification deterministic and independently testable"
+)]
+fn handle_report_output_with(
+    output: &Output,
+    quiet: bool,
+    display: &str,
+    lcov_path: &Path,
+    allow_windows_fallback: bool,
+    mut forward: impl FnMut(&Output, bool) -> Result<(), AppError>,
+    mut forward_stdout: impl FnMut(&Output, bool) -> Result<(), AppError>,
+    write_empty: impl FnOnce(&Path) -> Result<(), AppError>,
+) -> Result<ReportAction, AppError> {
     if output.status.success() {
-        forward_output(&output, execution.quiet)?;
-        return Ok(());
+        forward(output, quiet)?;
+        return Ok(ReportAction::Complete);
     }
 
-    #[cfg(windows)]
-    if is_windows_command_too_long(&output.stderr) {
-        forward_output(&output, execution.quiet)?;
+    #[cfg(any(windows, test))]
+    if allow_windows_fallback && is_windows_command_too_long(&output.stderr) {
+        forward(output, quiet)?;
         let stderr = std::str::from_utf8(&output.stderr).into_app_err(WINDOWS_DIAGNOSTIC_UTF8_CONTEXT)?;
         let arguments = command_too_long_response_arguments(stderr)?;
-        eprintln!("coverage-gate: cargo-llvm-cov could not launch llvm-cov directly; retrying its export through an LLVM response file");
-        return run_windows_report_fallback(execution, configuration, lcov_path, &arguments);
+        return Ok(ReportAction::WindowsFallback(arguments));
     }
 
+    let _ = allow_windows_fallback;
     if is_no_coverage_data(&String::from_utf8_lossy(&output.stderr)) {
-        forward_stdout_to(&output, execution.quiet, &mut io::stdout())?;
-        fs::write(lcov_path, []).into_app_err(format!("failed to write empty LCOV file `{}`", lcov_path.display()))?;
+        forward_stdout(output, quiet)?;
+        write_empty(lcov_path)?;
         eprintln!("coverage-gate: cargo-llvm-cov found no coverable objects; evaluating an empty LCOV report");
-        return Ok(());
+        return Ok(ReportAction::Complete);
     }
 
-    forward_output(&output, execution.quiet)?;
+    forward(output, quiet)?;
     Err(AppError::new(format!(
         "cargo llvm-cov report failed: `{display}` exited with {}",
         output.status
@@ -656,6 +746,11 @@ fn forward_stdout_to(output: &Output, quiet: bool, stdout: &mut dyn io::Write) -
             .into_app_err("failed to forward cargo-llvm-cov stdout")?;
     }
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn stdout_forwarder(stdout: &mut dyn io::Write) -> impl FnMut(&Output, bool) -> Result<(), AppError> + '_ {
+    move |output, quiet| forward_stdout_to(output, quiet, stdout)
 }
 
 fn forward_output(output: &Output, quiet: bool) -> Result<(), AppError> {
@@ -741,7 +836,7 @@ fn parse_windows_command_line(command: &str) -> Result<Vec<String>, AppError> {
             }
 
             if
-            // #[gamma::skip(cond.always_true, cond.negate, tag = "timeout", reason = "misclassifying every character as a quote prevents the parser from advancing")]
+            // #[gamma::skip(cond.always_true, cond.negate, tag = "timeout", reason = "misclassifying every backslash run as a quote prevents the parser from making progress")]
             matches!(chars.peek(), Some('"')) {
                 // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "the parser must consume the opening or escaped quote")]
                 chars.next();
@@ -757,6 +852,7 @@ fn parse_windows_command_line(command: &str) -> Result<Vec<String>, AppError> {
 
             argument.push_str(&backslashes);
             let Some(&character) = chars.peek() else {
+                // #[gamma::skip(loop.break_to_continue, tag = "timeout", reason = "continuing after reaching end of input leaves the quoted parser loop running")]
                 break;
             };
             if quoted {
@@ -828,11 +924,9 @@ fn quote_windows_argument(argument: &str, output: &mut String) {
 }
 
 #[cfg(windows)]
-// Linux mutation jobs cannot execute this Windows response-file boundary. The
-// Windows integration test covers the fallback command and stable LCOV output.
-#[mutants::skip]
 // The spawned-binary integration test covers this fallback, but the outer
 // coverage report cannot include that child binary's coverage object.
+#[mutants::skip] // Thin Windows adapter over the exhaustively tested injected fallback seam.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn run_windows_report_fallback(
     execution: &CollectionExecution<'_>,
@@ -840,40 +934,92 @@ fn run_windows_report_fallback(
     lcov_path: &Path,
     arguments: &[String],
 ) -> Result<(), AppError> {
-    let response_contents = windows_response_contents(arguments)?;
-    let response = TemporaryPath::write(
+    let mut stdout = io::stdout();
+    run_windows_report_fallback_with(
+        execution,
         execution.scratch_dir,
+        configuration,
+        lcov_path,
+        arguments,
+        windows_response_contents,
+        TemporaryPath::write,
+        TemporaryPath::create,
+        discover_llvm_cov,
+        execute_windows_export,
+        forward_output,
+        stdout_forwarder(&mut stdout),
+        |path| fs::write(path, []).into_app_err(format!("failed to write empty staged LCOV file `{}`", path.display())),
+        TemporaryPath::publish,
+    )
+}
+
+#[cfg(any(windows, test))]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the injected Windows fallback boundaries allow each filesystem and process failure to be tested independently"
+)]
+fn run_windows_report_fallback_with(
+    execution: &CollectionExecution<'_>,
+    scratch_dir: &Path,
+    configuration: FeatureConfiguration,
+    lcov_path: &Path,
+    arguments: &[String],
+    encode_response: impl FnOnce(&[String]) -> Result<Vec<u8>, AppError>,
+    write_response: impl FnOnce(&Path, &str, &[u8]) -> Result<TemporaryPath, AppError>,
+    create_staged: impl FnOnce(&Path, &str) -> Result<(TemporaryPath, fs::File), AppError>,
+    discover_cov: impl FnOnce(&ToolPrograms) -> Result<PathBuf, AppError>,
+    execute_export: impl FnOnce(PathBuf, &Path, &Path, fs::File) -> Result<(String, Output), AppError>,
+    mut forward: impl FnMut(&Output, bool) -> Result<(), AppError>,
+    mut forward_stdout: impl FnMut(&Output, bool) -> Result<(), AppError>,
+    write_empty: impl FnOnce(&Path) -> Result<(), AppError>,
+    publish: impl FnOnce(TemporaryPath, &Path) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let response_contents = encode_response(arguments)?;
+    let response = write_response(
+        scratch_dir,
         &format!("{}-objects.rsp", configuration.artifact_name()),
         &response_contents,
     )?;
     let output_dir = lcov_path
         .parent()
         .ok_or_else(|| AppError::new(format!("LCOV path `{}` has no parent directory", lcov_path.display())))?;
-    let (staged, output_file) = TemporaryPath::create(output_dir, &format!("{}-fallback.info", configuration.artifact_name()))?;
-    let llvm_cov = discover_llvm_cov(execution.tools)?;
-    let mut command = Command::new(llvm_cov);
-    configure_windows_export_command(&mut command, &execution.workspace.root, response.path());
-    command.stdout(Stdio::from(output_file));
-    let display = command_display(&command);
-    let output = command.output().into_app_err(format!("failed to execute `{display}`"))?;
+    let (staged, output_file) = create_staged(output_dir, &format!("{}-fallback.info", configuration.artifact_name()))?;
+    let llvm_cov = discover_cov(execution.tools)?;
+    let (display, output) = execute_export(llvm_cov, &execution.workspace.root, response.path(), output_file)?;
     if output.status.success() {
-        forward_output(&output, execution.quiet)?;
-        return staged.publish(lcov_path);
+        forward(&output, execution.quiet)?;
+        return publish(staged, lcov_path);
     }
 
     if is_no_coverage_data(&String::from_utf8_lossy(&output.stderr)) {
-        forward_stdout_to(&output, execution.quiet, &mut io::stdout())?;
-        fs::write(staged.path(), []).into_app_err(format!("failed to write empty staged LCOV file `{}`", staged.path().display()))?;
-        staged.publish(lcov_path)?;
+        forward_stdout(&output, execution.quiet)?;
+        write_empty(staged.path())?;
+        publish(staged, lcov_path)?;
         eprintln!("coverage-gate: llvm-cov found no coverable objects during response-file retry; evaluating an empty LCOV report");
         return Ok(());
     }
 
-    forward_output(&output, execution.quiet)?;
+    forward(&output, execution.quiet)?;
     Err(AppError::new(format!(
         "llvm-cov export response-file fallback failed: `{display}` exited with {}",
         output.status
     )))
+}
+
+#[cfg(any(windows, test))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn execute_windows_export(
+    llvm_cov: PathBuf,
+    workspace_root: &Path,
+    response: &Path,
+    output_file: fs::File,
+) -> Result<(String, Output), AppError> {
+    let mut command = Command::new(llvm_cov);
+    configure_windows_export_command(&mut command, workspace_root, response);
+    command.stdout(Stdio::from(output_file));
+    let display = command_display(&command);
+    let output = command.output().into_app_err(format!("failed to execute `{display}`"))?;
+    Ok((display, output))
 }
 
 #[cfg(any(windows, test))]
@@ -958,10 +1104,11 @@ impl TemporaryPath {
 
     fn write(directory: &Path, label: &str, contents: &[u8]) -> Result<Self, AppError> {
         let (temporary, mut file) = Self::create(directory, label)?;
-        file.write_all(contents)
-            .into_app_err(format!("failed to write temporary file `{}`", temporary.path().display()))?;
-        file.sync_all()
-            .into_app_err(format!("failed to flush temporary file `{}`", temporary.path().display()))?;
+        Self::finish_write(temporary, &mut file, contents)
+    }
+
+    fn finish_write(temporary: Self, writer: &mut impl SynchronizedWrite, contents: &[u8]) -> Result<Self, AppError> {
+        write_temporary_contents(&temporary, writer, contents)?;
         Ok(temporary)
     }
 
@@ -987,6 +1134,29 @@ impl TemporaryPath {
         ))?;
         Ok(())
     }
+}
+
+#[cfg(any(windows, test))]
+trait SynchronizedWrite: io::Write {
+    fn sync_all(&self) -> io::Result<()>;
+}
+
+#[cfg(any(windows, test))]
+impl SynchronizedWrite for fs::File {
+    #[mutants::skip] // Trivial File delegation; the injected writer test double covers synchronization failures.
+    fn sync_all(&self) -> io::Result<()> {
+        Self::sync_all(self)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn write_temporary_contents(temporary: &TemporaryPath, writer: &mut impl SynchronizedWrite, contents: &[u8]) -> Result<(), AppError> {
+    writer
+        .write_all(contents)
+        .into_app_err(format!("failed to write temporary file `{}`", temporary.path().display()))?;
+    writer
+        .sync_all()
+        .into_app_err(format!("failed to flush temporary file `{}`", temporary.path().display()))
 }
 
 #[cfg(any(windows, test))]
@@ -1103,6 +1273,17 @@ mod tests {
         }
     }
 
+    fn coverage_args() -> CoverageGateArgs {
+        CoverageGateArgs {
+            lcov: Vec::new(),
+            packages: Vec::new(),
+            target: None,
+            summary_file: None,
+            quiet: false,
+            command: None,
+        }
+    }
+
     #[test]
     fn evaluation_error_remains_primary_when_cleanup_also_fails() {
         let finalized = combine_evaluation_and_cleanup(Err(app_error("evaluation failed")), Err(app_error("cleanup failed")));
@@ -1208,6 +1389,86 @@ mod tests {
         })
         .expect("resolution succeeds");
         assert_eq!(resolved.coverage_dir, PathBuf::from("absolute-coverage"));
+    }
+
+    #[test]
+    fn collection_resolution_propagates_path_errors() {
+        let error = resolved_collection_with(&collection_args(), |_| Err(app_error("resolution failed")))
+            .expect_err("resolution errors must propagate");
+        assert_eq!(error.to_string(), "resolution failed");
+    }
+
+    #[test]
+    fn collection_preparation_returns_each_dependency_error() {
+        let tools = ToolPrograms {
+            cargo: OsString::from("cargo"),
+            rustc: OsString::from("rustc"),
+        };
+        let load_error = prepare_collection(
+            &coverage_args(),
+            &collection_args(),
+            &tools,
+            |_| Err(app_error("workspace failed")),
+            |_| panic!("collection resolution must not run"),
+        )
+        .expect_err("workspace failure must propagate");
+        assert_eq!(load_error.to_string(), "workspace failed");
+
+        let mut selector_args = coverage_args();
+        selector_args.packages.push("missing".to_owned());
+        let selector_error = prepare_collection(
+            &selector_args,
+            &collection_args(),
+            &tools,
+            |_| Ok(workspace(Path::new("repo"))),
+            |_| panic!("collection resolution must not run"),
+        )
+        .expect_err("selector failure must propagate");
+        assert!(selector_error.to_string().contains("missing"));
+
+        let resolution_error = prepare_collection(
+            &coverage_args(),
+            &collection_args(),
+            &tools,
+            |_| Ok(workspace(Path::new("repo"))),
+            |_| Err(app_error("collection failed")),
+        )
+        .expect_err("collection resolution failure must propagate");
+        assert_eq!(resolution_error.to_string(), "collection failed");
+    }
+
+    #[test]
+    fn no_coverage_completion_returns_test_and_summary_errors() {
+        let test_error = finish_no_coverage_run(
+            &coverage_args(),
+            "skipped",
+            || Err(app_error("plain tests failed")),
+            |_, _| panic!("summary must not run"),
+        )
+        .expect_err("plain-test failure must propagate");
+        assert_eq!(test_error.to_string(), "plain tests failed");
+
+        let summary_error = finish_no_coverage_run(&coverage_args(), "skipped", || Ok(()), |_, _| Err(app_error("summary failed")))
+            .expect_err("summary failure must propagate");
+        assert_eq!(summary_error.to_string(), "summary failed");
+    }
+
+    #[test]
+    fn coverage_directory_preparation_returns_each_error() {
+        let workspace = workspace(Path::new("repo"));
+        let coverage_error = prepare_coverage_directories(
+            Path::new("coverage"),
+            &workspace,
+            |_| Err(io::Error::other("coverage directory failed")),
+            |_| panic!("scratch creation must not run"),
+        )
+        .expect_err("coverage-directory failure must propagate");
+        assert!(coverage_error.to_string().contains("coverage directory failed"));
+
+        let scratch_error =
+            prepare_coverage_directories(Path::new("coverage"), &workspace, |_| Ok(()), |_| Err(app_error("scratch failed")))
+                .expect_err("scratch failure must propagate");
+        assert_eq!(scratch_error.to_string(), "scratch failed");
     }
 
     #[test]
@@ -1388,6 +1649,44 @@ mod tests {
             .expect_err("invalid tool output must fail");
             assert_eq!(error.to_string(), expected);
         }
+    }
+
+    #[test]
+    fn instrumentation_reader_errors_propagate_from_each_tool_query() {
+        let workspace = workspace(Path::new("repo"));
+        let tools = ToolPrograms {
+            cargo: OsString::from("cargo"),
+            rustc: OsString::from("rustc"),
+        };
+
+        for failed_call in 0..3 {
+            let mut call = 0;
+            let error = validate_instrumentation_tools_with(&workspace, &tools, None, |_, description| {
+                let current = call;
+                call += 1;
+                if current == failed_call {
+                    Err(AppError::new(format!("injected {description} failure")))
+                } else if current <= 1 {
+                    Ok("release: 1.99.0-nightly\n".to_owned())
+                } else {
+                    Ok("cargo-llvm-cov 0.9.0\n".to_owned())
+                }
+            })
+            .expect_err("injected reader failure must propagate");
+            assert!(error.to_string().contains("injected"), "failed_call={failed_call}: {error}");
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "spawns a missing cargo process")]
+    #[test]
+    fn workspace_metadata_spawn_errors_are_returned() {
+        let missing = format!("missing-cargo-coverage-gate-{}", std::process::id());
+        let tools = ToolPrograms {
+            cargo: OsString::from(&missing),
+            rustc: OsString::from("rustc"),
+        };
+        let error = WorkspaceInfo::load(&tools).expect_err("missing cargo must fail").to_string();
+        assert!(error.contains(METADATA_LOAD_CONTEXT), "{error}");
     }
 
     #[test]
@@ -1680,6 +1979,44 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg_attr(miri, ignore = "attempts to spawn a missing process")]
+    fn process_spawn_errors_include_the_command() {
+        let missing = format!("missing-coverage-gate-command-{}", std::process::id());
+        let mut command = Command::new(&missing);
+        let read_error = read_stdout(&mut command, "missing command")
+            .expect_err("missing command must fail")
+            .to_string();
+        assert!(read_error.contains(&missing), "{read_error}");
+
+        let mut command = Command::new(&missing);
+        let status_error = run_status(&mut command, "missing command")
+            .expect_err("missing command must fail")
+            .to_string();
+        assert!(status_error.contains(&missing), "{status_error}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns a process")]
+    fn read_stdout_returns_wait_errors() {
+        #[cfg(windows)]
+        let mut command = Command::new("cmd");
+        #[cfg(windows)]
+        command.args(["/C", "exit", "0"]);
+        #[cfg(not(windows))]
+        let mut command = Command::new("sh");
+        #[cfg(not(windows))]
+        command.args(["-c", "exit 0"]);
+
+        let error = read_stdout_with(&mut command, "wait failure test", |_| {
+            Err(io::Error::other("injected wait failure"))
+        })
+        .expect_err("wait failure must propagate")
+        .to_string();
+        assert!(error.contains("failed to wait for"), "{error}");
+        assert!(error.contains("injected wait failure"), "{error}");
+    }
+
     struct FailingWriter;
 
     impl io::Write for FailingWriter {
@@ -1712,6 +2049,301 @@ mod tests {
             .expect_err("stderr forwarding must fail")
             .to_string();
         assert!(stderr_error.contains("failed to forward cargo-llvm-cov stderr"), "{stderr_error}");
+
+        let stdout_error = forward_output_to(&output, false, &mut FailingWriter, &mut io::sink())
+            .expect_err("stdout forwarding failure must propagate through combined forwarding")
+            .to_string();
+        assert!(stdout_error.contains("failed to forward cargo-llvm-cov stdout"), "{stdout_error}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns a process; miri isolation forbids that")]
+    fn forwarding_obeys_quiet_and_preserves_both_streams() {
+        #[cfg(windows)]
+        let status = Command::new("cmd").args(["/C", "exit", "0"]).status().expect("status");
+        #[cfg(not(windows))]
+        let status = Command::new("sh").args(["-c", "exit 0"]).status().expect("status");
+        let output = Output {
+            status,
+            stdout: b"stdout".to_vec(),
+            stderr: b"stderr".to_vec(),
+        };
+
+        for (quiet, expected_stdout) in [(false, b"stdout".as_slice()), (true, b"".as_slice())] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            forward_output_to(&output, quiet, &mut stdout, &mut stderr).expect("forward output");
+            assert_eq!(stdout, expected_stdout, "quiet={quiet}");
+            assert_eq!(stderr, b"stderr", "quiet={quiet}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns a process; miri isolation forbids that")]
+    fn stdout_forwarder_passes_quiet_through_unchanged() {
+        #[cfg(windows)]
+        let status = Command::new("cmd").args(["/C", "exit", "0"]).status().expect("status");
+        #[cfg(not(windows))]
+        let status = Command::new("sh").args(["-c", "exit 0"]).status().expect("status");
+        let output = Output {
+            status,
+            stdout: b"stdout".to_vec(),
+            stderr: Vec::new(),
+        };
+        let mut stdout = Vec::new();
+        {
+            let mut forward = stdout_forwarder(&mut stdout);
+            forward(&output, true).expect("quiet forwarding succeeds");
+        }
+        assert!(stdout.is_empty(), "quiet fallback forwarding must suppress stdout");
+        {
+            let mut forward = stdout_forwarder(&mut stdout);
+            forward(&output, false).expect("non-quiet forwarding succeeds");
+        }
+        assert_eq!(stdout, b"stdout", "non-quiet fallback forwarding must preserve stdout");
+    }
+
+    fn process_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Output {
+        #[cfg(windows)]
+        let status = Command::new("cmd")
+            .args(["/C", "exit", if success { "0" } else { "1" }])
+            .status()
+            .expect("status");
+        #[cfg(not(windows))]
+        let status = Command::new("sh")
+            .args(["-c", if success { "exit 0" } else { "exit 1" }])
+            .status()
+            .expect("status");
+        Output {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns processes to construct exit statuses")]
+    fn report_output_handling_propagates_each_boundary_error_and_quiet_value() {
+        for quiet in [false, true] {
+            let output = process_output(true, b"out", b"err");
+            let mut seen_quiet = None;
+            let action = handle_report_output_with(
+                &output,
+                quiet,
+                "cargo report",
+                Path::new("lcov.info"),
+                false,
+                |_, actual_quiet| {
+                    seen_quiet = Some(actual_quiet);
+                    Ok(())
+                },
+                |_, _| panic!("success must not use the no-data stdout path"),
+                |_| panic!("success must not write an empty report"),
+            )
+            .expect("successful report output");
+            assert!(matches!(action, ReportAction::Complete));
+            assert_eq!(seen_quiet, Some(quiet));
+        }
+
+        let output = process_output(true, b"", b"");
+        let forward_error = handle_report_output_with(
+            &output,
+            false,
+            "cargo report",
+            Path::new("lcov.info"),
+            false,
+            |_, _| Err(app_error("forward failed")),
+            |_, _| panic!("success must not use the no-data stdout path"),
+            |_| panic!("success must not write an empty report"),
+        )
+        .expect_err("forwarding failure must propagate");
+        assert_eq!(forward_error.to_string(), "forward failed");
+
+        let no_data = process_output(
+            false,
+            b"partial",
+            b"error: no coverage data found\nerror: could not load coverage information\n",
+        );
+        let stdout_error = handle_report_output_with(
+            &no_data,
+            true,
+            "cargo report",
+            Path::new("lcov.info"),
+            false,
+            |_, _| panic!("no-data output must not use ordinary forwarding"),
+            |_, quiet| {
+                assert!(quiet);
+                Err(app_error("stdout failed"))
+            },
+            |_| panic!("write must not follow stdout failure"),
+        )
+        .expect_err("stdout failure must propagate");
+        assert_eq!(stdout_error.to_string(), "stdout failed");
+
+        let write_error = handle_report_output_with(
+            &no_data,
+            false,
+            "cargo report",
+            Path::new("lcov.info"),
+            false,
+            |_, _| panic!("no-data output must not use ordinary forwarding"),
+            |_, quiet| {
+                assert!(!quiet);
+                Ok(())
+            },
+            |path| {
+                assert_eq!(path, Path::new("lcov.info"));
+                Err(app_error("empty write failed"))
+            },
+        )
+        .expect_err("empty-report write failure must propagate");
+        assert_eq!(write_error.to_string(), "empty write failed");
+
+        let failed = process_output(false, b"", b"ordinary failure");
+        let ordinary_forward_error = handle_report_output_with(
+            &failed,
+            true,
+            "cargo report",
+            Path::new("lcov.info"),
+            false,
+            |_, quiet| {
+                assert!(quiet);
+                Err(app_error("failure forwarding failed"))
+            },
+            |_, _| panic!("ordinary failure must not use no-data forwarding"),
+            |_| panic!("ordinary failure must not write a report"),
+        )
+        .expect_err("failure forwarding error must propagate");
+        assert_eq!(ordinary_forward_error.to_string(), "failure forwarding failed");
+    }
+
+    #[cfg_attr(miri, ignore = "spawns processes to construct exit statuses")]
+    #[test]
+    fn windows_overflow_output_handling_returns_parse_and_forward_errors() {
+        let diagnostic = concat!(
+            "error: could not execute process `",
+            "llvm-cov export -object object.exe",
+            "` (never executed): too long (os error 206)"
+        );
+        let output = process_output(false, b"", diagnostic.as_bytes());
+        let action = handle_report_output_with(
+            &output,
+            false,
+            "cargo report",
+            Path::new("lcov.info"),
+            true,
+            |_, quiet| {
+                assert!(!quiet);
+                Ok(())
+            },
+            |_, _| panic!("overflow must not use no-data forwarding"),
+            |_| panic!("overflow must not write an empty report"),
+        )
+        .expect("valid overflow diagnostic");
+        let ReportAction::WindowsFallback(arguments) = action else {
+            panic!("overflow must request fallback");
+        };
+        assert_eq!(arguments, ["-object", "object.exe"]);
+
+        let forward_error = handle_report_output_with(
+            &output,
+            true,
+            "cargo report",
+            Path::new("lcov.info"),
+            true,
+            |_, quiet| {
+                assert!(quiet);
+                Err(app_error("overflow forwarding failed"))
+            },
+            |_, _| panic!("overflow must not use no-data forwarding"),
+            |_| panic!("overflow must not write an empty report"),
+        )
+        .expect_err("overflow forwarding failure must propagate");
+        assert_eq!(forward_error.to_string(), "overflow forwarding failed");
+
+        let mut forwarded = false;
+        let disabled_error = handle_report_output_with(
+            &output,
+            false,
+            "cargo report",
+            Path::new("lcov.info"),
+            false,
+            |_, _| {
+                forwarded = true;
+                Ok(())
+            },
+            |_, _| panic!("ordinary failure must not use no-data forwarding"),
+            |_| panic!("ordinary failure must not write an empty report"),
+        )
+        .expect_err("disabled Windows fallback must preserve the ordinary failure");
+        assert!(forwarded);
+        assert!(disabled_error.to_string().contains("cargo llvm-cov report failed"));
+
+        let invalid_utf8 = process_output(
+            false,
+            b"",
+            b"could not execute process `llvm-cov export x` (never executed) (os error 206)\xFF",
+        );
+        let utf8_error = handle_report_output_with(
+            &invalid_utf8,
+            false,
+            "cargo report",
+            Path::new("lcov.info"),
+            true,
+            |_, _| Ok(()),
+            |_, _| panic!("overflow must not use no-data forwarding"),
+            |_| panic!("overflow must not write an empty report"),
+        )
+        .expect_err("invalid UTF-8 must propagate");
+        assert!(utf8_error.to_string().contains(WINDOWS_DIAGNOSTIC_UTF8_CONTEXT));
+
+        let malformed = process_output(false, b"", b"(os error 206)");
+        let parse_error = handle_report_output_with(
+            &malformed,
+            false,
+            "cargo report",
+            Path::new("lcov.info"),
+            true,
+            |_, _| Ok(()),
+            |_, _| panic!("overflow must not use no-data forwarding"),
+            |_| panic!("overflow must not write an empty report"),
+        )
+        .expect_err("malformed overflow diagnostic must propagate");
+        assert!(parse_error.to_string().contains("process-error prefix"));
+    }
+
+    #[cfg_attr(miri, ignore = "attempts to spawn a missing process")]
+    #[test]
+    fn report_spawn_errors_include_the_complete_command() {
+        let workspace = workspace(Path::new("."));
+        let args = collection_args();
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let missing = format!("missing-report-command-{}", std::process::id());
+        let tools = ToolPrograms {
+            cargo: OsString::from(&missing),
+            rustc: OsString::from("rustc"),
+        };
+        let coverage_target_root = PathBuf::from("coverage-target");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            #[cfg(windows)]
+            scratch_dir: Path::new("scratch"),
+            coverage_target_root: &coverage_target_root,
+            target: "test-target",
+            tools: &tools,
+            quiet: false,
+        };
+
+        let error = run_report(&execution, FeatureConfiguration::AllFeatures, Path::new("lcov.info"))
+            .expect_err("missing report command must fail")
+            .to_string();
+        assert!(error.contains(&missing), "{error}");
+        assert!(error.contains("llvm-cov report"), "{error}");
     }
 
     #[test]
@@ -1776,6 +2408,17 @@ mod tests {
     }
 
     #[test]
+    fn llvm_cov_discovery_propagates_rustc_reader_errors() {
+        let tools = ToolPrograms {
+            cargo: OsString::from("cargo"),
+            rustc: OsString::from("rustc"),
+        };
+        let error = discover_llvm_cov_with(&tools, |_| None, |_, _| Err(app_error("rustc read failed")))
+            .expect_err("rustc reader failure must propagate");
+        assert_eq!(error.to_string(), "rustc read failed");
+    }
+
+    #[test]
     fn windows_export_fallback_uses_response_file_argument() {
         let mut command = Command::new("llvm-cov-custom");
         configure_windows_export_command(&mut command, Path::new(r"C:\workspace"), Path::new(r"C:\scratch\objects.rsp"));
@@ -1784,6 +2427,427 @@ mod tests {
             command.get_args().collect::<Vec<_>>(),
             ["export", r"@C:\scratch\objects.rsp"].map(OsStr::new)
         );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files and process exit statuses")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table-driven boundary test keeps the fallback pipeline and its short-circuit expectations together"
+    )]
+    fn windows_fallback_returns_every_injected_boundary_error() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = workspace(tmp.path());
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("cargo"),
+            rustc: OsString::from("rustc"),
+        };
+        let coverage_target_root = tmp.path().join("coverage-target");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            #[cfg(windows)]
+            scratch_dir: tmp.path(),
+            coverage_target_root: &coverage_target_root,
+            target: "test-target",
+            tools: &tools,
+            quiet: true,
+        };
+        let arguments = vec!["-object".to_owned(), "object.exe".to_owned()];
+        let lcov_path = tmp.path().join("lcov.info");
+
+        let encode_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Err(app_error("encode failed")),
+            |_, _, _| panic!("response write must not run"),
+            |_, _| panic!("staging must not run"),
+            |_| panic!("discovery must not run"),
+            |_, _, _, _| panic!("execution must not run"),
+            |_, _| panic!("forwarding must not run"),
+            |_, _| panic!("stdout forwarding must not run"),
+            |_| panic!("empty write must not run"),
+            |_, _| panic!("publish must not run"),
+        )
+        .expect_err("encoding failure must propagate");
+        assert_eq!(encode_error.to_string(), "encode failed");
+
+        let write_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            |_, _, _| Err(app_error("response write failed")),
+            |_, _| panic!("staging must not run"),
+            |_| panic!("discovery must not run"),
+            |_, _, _, _| panic!("execution must not run"),
+            |_, _| panic!("forwarding must not run"),
+            |_, _| panic!("stdout forwarding must not run"),
+            |_| panic!("empty write must not run"),
+            |_, _| panic!("publish must not run"),
+        )
+        .expect_err("response write failure must propagate");
+        assert_eq!(write_error.to_string(), "response write failed");
+
+        let no_parent = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            Path::new(""),
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            |_, _| panic!("staging must not run"),
+            |_| panic!("discovery must not run"),
+            |_, _, _, _| panic!("execution must not run"),
+            |_, _| panic!("forwarding must not run"),
+            |_, _| panic!("stdout forwarding must not run"),
+            |_| panic!("empty write must not run"),
+            |_, _| panic!("publish must not run"),
+        )
+        .expect_err("parentless LCOV path must fail");
+        assert!(no_parent.to_string().contains("has no parent directory"));
+
+        let staged_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            |_, _| Err(app_error("staging failed")),
+            |_| panic!("discovery must not run"),
+            |_, _, _, _| panic!("execution must not run"),
+            |_, _| panic!("forwarding must not run"),
+            |_, _| panic!("stdout forwarding must not run"),
+            |_| panic!("empty write must not run"),
+            |_, _| panic!("publish must not run"),
+        )
+        .expect_err("staging failure must propagate");
+        assert_eq!(staged_error.to_string(), "staging failed");
+
+        let discover_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            TemporaryPath::create,
+            |_| Err(app_error("discovery failed")),
+            |_, _, _, _| panic!("execution must not run"),
+            |_, _| panic!("forwarding must not run"),
+            |_, _| panic!("stdout forwarding must not run"),
+            |_| panic!("empty write must not run"),
+            |_, _| panic!("publish must not run"),
+        )
+        .expect_err("discovery failure must propagate");
+        assert_eq!(discover_error.to_string(), "discovery failed");
+
+        let execute_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            TemporaryPath::create,
+            |_| Ok(PathBuf::from("llvm-cov")),
+            |_, _, _, _| Err(app_error("execution failed")),
+            |_, _| panic!("forwarding must not run"),
+            |_, _| panic!("stdout forwarding must not run"),
+            |_| panic!("empty write must not run"),
+            |_, _| panic!("publish must not run"),
+        )
+        .expect_err("execution failure must propagate");
+        assert_eq!(execute_error.to_string(), "execution failed");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files and process exit statuses")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table-driven output test keeps success, no-data, and failure forwarding contracts together"
+    )]
+    fn windows_fallback_output_paths_preserve_quiet_and_errors() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = workspace(tmp.path());
+        let selection = Selection {
+            explicit: false,
+            members: workspace.members.clone(),
+        };
+        let args = collection_args();
+        let tools = ToolPrograms {
+            cargo: OsString::from("cargo"),
+            rustc: OsString::from("rustc"),
+        };
+        let coverage_target_root = tmp.path().join("coverage-target");
+        let execution = CollectionExecution {
+            workspace: &workspace,
+            selection: &selection,
+            args: &args,
+            #[cfg(windows)]
+            scratch_dir: tmp.path(),
+            coverage_target_root: &coverage_target_root,
+            target: "test-target",
+            tools: &tools,
+            quiet: true,
+        };
+        let arguments = vec!["-object".to_owned(), "object.exe".to_owned()];
+        let lcov_path = tmp.path().join("lcov.info");
+
+        let success = process_output(true, b"lcov", b"warning");
+        let mut published = false;
+        run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            TemporaryPath::create,
+            |_| Ok(PathBuf::from("llvm-cov")),
+            |_, _, _, _| Ok(("llvm-cov export".to_owned(), success)),
+            |_, quiet| {
+                assert!(quiet);
+                Ok(())
+            },
+            |_, _| panic!("successful export must not use no-data forwarding"),
+            |_| panic!("successful export must not write an empty report"),
+            |_, target| {
+                assert_eq!(target, lcov_path);
+                published = true;
+                Ok(())
+            },
+        )
+        .expect("successful fallback");
+        assert!(published);
+
+        let success = process_output(true, b"lcov", b"warning");
+        let success_forward_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            TemporaryPath::create,
+            |_| Ok(PathBuf::from("llvm-cov")),
+            |_, _, _, _| Ok(("llvm-cov export".to_owned(), success)),
+            |_, quiet| {
+                assert!(quiet);
+                Err(app_error("success forwarding failed"))
+            },
+            |_, _| panic!("successful export must not use no-data forwarding"),
+            |_| panic!("successful export must not write an empty report"),
+            |_, _| panic!("publish must not follow forwarding failure"),
+        )
+        .expect_err("successful-output forwarding failure must propagate");
+        assert_eq!(success_forward_error.to_string(), "success forwarding failed");
+
+        let no_data = process_output(
+            false,
+            b"partial",
+            b"error: no coverage data found\nerror: could not load coverage information\n",
+        );
+        let stdout_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            TemporaryPath::create,
+            |_| Ok(PathBuf::from("llvm-cov")),
+            |_, _, _, _| Ok(("llvm-cov export".to_owned(), no_data)),
+            |_, _| panic!("no-data export must not use ordinary forwarding"),
+            |_, quiet| {
+                assert!(quiet);
+                Err(app_error("stdout failed"))
+            },
+            |_| panic!("write must not follow stdout failure"),
+            |_, _| panic!("publish must not follow stdout failure"),
+        )
+        .expect_err("stdout failure must propagate");
+        assert_eq!(stdout_error.to_string(), "stdout failed");
+
+        let no_data = process_output(
+            false,
+            b"partial",
+            b"error: no coverage data found\nerror: could not load coverage information\n",
+        );
+        let write_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            TemporaryPath::create,
+            |_| Ok(PathBuf::from("llvm-cov")),
+            |_, _, _, _| Ok(("llvm-cov export".to_owned(), no_data)),
+            |_, _| panic!("no-data export must not use ordinary forwarding"),
+            |_, quiet| {
+                assert!(quiet);
+                Ok(())
+            },
+            |_| Err(app_error("empty write failed")),
+            |_, _| panic!("publish must not follow write failure"),
+        )
+        .expect_err("empty write failure must propagate");
+        assert_eq!(write_error.to_string(), "empty write failed");
+
+        let no_data = process_output(
+            false,
+            b"partial",
+            b"error: no coverage data found\nerror: could not load coverage information\n",
+        );
+        let publish_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            TemporaryPath::create,
+            |_| Ok(PathBuf::from("llvm-cov")),
+            |_, _, _, _| Ok(("llvm-cov export".to_owned(), no_data)),
+            |_, _| panic!("no-data export must not use ordinary forwarding"),
+            |_, quiet| {
+                assert!(quiet);
+                Ok(())
+            },
+            |_| Ok(()),
+            |_, _| Err(app_error("publish failed")),
+        )
+        .expect_err("publish failure must propagate");
+        assert_eq!(publish_error.to_string(), "publish failed");
+
+        let no_data = process_output(
+            false,
+            b"partial",
+            b"error: no coverage data found\nerror: could not load coverage information\n",
+        );
+        let mut stdout_forwarded = false;
+        let mut empty_written = false;
+        let mut published = false;
+        run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            TemporaryPath::create,
+            |_| Ok(PathBuf::from("llvm-cov")),
+            |_, _, _, _| Ok(("llvm-cov export".to_owned(), no_data)),
+            |_, _| panic!("no-data export must not use ordinary forwarding"),
+            |_, quiet| {
+                assert!(quiet);
+                stdout_forwarded = true;
+                Ok(())
+            },
+            |_| {
+                empty_written = true;
+                Ok(())
+            },
+            |_, target| {
+                assert_eq!(target, lcov_path);
+                published = true;
+                Ok(())
+            },
+        )
+        .expect("no-data fallback succeeds");
+        assert!(stdout_forwarded);
+        assert!(empty_written);
+        assert!(published);
+
+        let failed = process_output(false, b"partial", b"ordinary failure");
+        let forward_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            TemporaryPath::create,
+            |_| Ok(PathBuf::from("llvm-cov")),
+            |_, _, _, _| Ok(("llvm-cov export".to_owned(), failed)),
+            |_, quiet| {
+                assert!(quiet);
+                Err(app_error("forward failed"))
+            },
+            |_, _| panic!("ordinary failure must not use no-data forwarding"),
+            |_| panic!("ordinary failure must not write an empty report"),
+            |_, _| panic!("ordinary failure must not publish"),
+        )
+        .expect_err("forwarding failure must propagate");
+        assert_eq!(forward_error.to_string(), "forward failed");
+
+        let failed = process_output(false, b"partial", b"ordinary failure");
+        let mut forwarded = false;
+        let export_error = run_windows_report_fallback_with(
+            &execution,
+            tmp.path(),
+            FeatureConfiguration::AllFeatures,
+            &lcov_path,
+            &arguments,
+            |_| Ok(Vec::new()),
+            TemporaryPath::write,
+            TemporaryPath::create,
+            |_| Ok(PathBuf::from("llvm-cov")),
+            |_, _, _, _| Ok(("llvm-cov export".to_owned(), failed)),
+            |_, quiet| {
+                assert!(quiet);
+                forwarded = true;
+                Ok(())
+            },
+            |_, _| panic!("ordinary failure must not use no-data forwarding"),
+            |_| panic!("ordinary failure must not write an empty report"),
+            |_, _| panic!("ordinary failure must not publish"),
+        )
+        .expect_err("failed export must be reported");
+        assert!(forwarded);
+        assert!(
+            export_error
+                .to_string()
+                .contains("llvm-cov export response-file fallback failed: `llvm-cov export` exited with"),
+            "{export_error}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files and attempts to spawn a missing process")]
+    fn windows_export_execution_errors_include_the_command() {
+        let tmp = tempdir().expect("tempdir");
+        let output = fs::File::create(tmp.path().join("output.info")).expect("output file");
+        let missing = tmp.path().join("missing-llvm-cov");
+        let error = execute_windows_export(missing.clone(), tmp.path(), Path::new("objects.rsp"), output)
+            .expect_err("missing llvm-cov must fail")
+            .to_string();
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+        assert!(error.contains("@objects.rsp"), "{error}");
     }
 
     #[test]
@@ -1796,6 +2860,101 @@ mod tests {
         assert_eq!(fs::read(&path).expect("read temporary response"), b"complete bytes");
         drop(temporary);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn temporary_paths_reserve_distinct_sequence_numbers() {
+        let mut first = TemporaryPath::new(Path::new("scratch"), "response");
+        let mut second = TemporaryPath::new(Path::new("scratch"), "response");
+        assert_ne!(first.path(), second.path());
+        first.armed = false;
+        second.armed = false;
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files, which Miri isolation does not support")]
+    fn temporary_file_creation_errors_are_returned() {
+        let tmp = tempdir().expect("tempdir");
+        let missing = tmp.path().join("missing");
+        let create_error = TemporaryPath::create(&missing, "response")
+            .expect_err("missing parent must reject temporary creation")
+            .to_string();
+        assert!(create_error.contains("failed to create temporary file"), "{create_error}");
+
+        let write_error = TemporaryPath::write(&missing, "response", b"bytes")
+            .expect_err("write must propagate temporary creation failure")
+            .to_string();
+        assert!(write_error.contains("failed to create temporary file"), "{write_error}");
+    }
+
+    struct ControlledTemporaryWriter {
+        fail_write: bool,
+        fail_sync: bool,
+        bytes: Vec<u8>,
+    }
+
+    impl io::Write for ControlledTemporaryWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.fail_write {
+                return Err(io::Error::other("injected write failure"));
+            }
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SynchronizedWrite for ControlledTemporaryWriter {
+        fn sync_all(&self) -> io::Result<()> {
+            if self.fail_sync {
+                Err(io::Error::other("injected sync failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn temporary_file_write_and_sync_errors_are_returned() {
+        let temporary = TemporaryPath {
+            path: PathBuf::from("temporary-response"),
+            armed: false,
+        };
+        for (fail_write, fail_sync, expected) in [
+            (true, false, "failed to write temporary file"),
+            (false, true, "failed to flush temporary file"),
+        ] {
+            let mut writer = ControlledTemporaryWriter {
+                fail_write,
+                fail_sync,
+                bytes: Vec::new(),
+            };
+            let error = write_temporary_contents(&temporary, &mut writer, b"complete bytes")
+                .expect_err("injected temporary write failure")
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn temporary_write_returns_content_errors() {
+        let temporary = TemporaryPath {
+            path: PathBuf::from("temporary-response"),
+            armed: false,
+        };
+        let mut writer = ControlledTemporaryWriter {
+            fail_write: true,
+            fail_sync: false,
+            bytes: Vec::new(),
+        };
+
+        let error = TemporaryPath::finish_write(temporary, &mut writer, b"complete bytes")
+            .expect_err("content write failure must propagate from TemporaryPath::write")
+            .to_string();
+        assert!(error.contains("failed to write temporary file"), "{error}");
     }
 
     #[test]
@@ -1836,6 +2995,19 @@ mod tests {
 
         assert!(!first_path.exists());
         assert!(!second_path.exists());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary files and directories")]
+    fn isolated_target_parent_creation_errors_are_returned() {
+        let tmp = tempdir().expect("tempdir");
+        let parent = tmp.path().join("not-a-directory");
+        fs::write(&parent, b"file").expect("write blocking file");
+
+        let error = TemporaryDirectory::create(&parent)
+            .expect_err("a file cannot be a coverage target parent")
+            .to_string();
+        assert!(error.contains("failed to create coverage target parent"), "{error}");
     }
 
     #[test]

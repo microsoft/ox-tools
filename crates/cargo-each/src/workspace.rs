@@ -365,9 +365,22 @@ mod tests {
             Err("expected `major.minor` or `major.minor.patch`".to_owned())
         );
         assert_eq!(
+            parse_rust_version("1..2"),
+            Err("expected `major.minor` or `major.minor.patch`".to_owned())
+        );
+        assert_eq!(
+            parse_rust_version("1.a"),
+            Err("expected `major.minor` or `major.minor.patch`".to_owned())
+        );
+        assert_eq!(
+            parse_rust_version("1.a2"),
+            Err("expected `major.minor` or `major.minor.patch`".to_owned())
+        );
+        assert_eq!(
             parse_rust_version("1.080"),
             Err("numeric components must not contain leading zeroes".to_owned())
         );
+        parse_rust_version("1.18446744073709551616").expect_err("an overflowing component is invalid");
         assert_eq!(parse_rust_version("2.0"), Err("expected a Rust 1.x toolchain version".to_owned()));
     }
 

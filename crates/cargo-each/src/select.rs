@@ -245,9 +245,9 @@ fn version_matches(supplied: &str, actual: &Version) -> bool {
     }
 
     let components: Vec<&str> = release.split('.').collect();
-    // `str::split('.')` always yields ≥1 element, so `is_empty` is defensive;
-    // the `> 3` bound is the real guard and also keeps `i` (below) in bounds.
-    if components.is_empty() || components.len() > 3 {
+    // `str::split('.')` always yields at least one element. The upper bound
+    // keeps `i` below the three-element `actual_release` array.
+    if components.len() > 3 {
         return false;
     }
     // A prerelease or build metadata is only meaningful on a full version.
@@ -388,18 +388,21 @@ mod tests {
 
     #[test]
     fn package_file_lines_reject_comments_tokens_and_whitespace() {
-        for spec in [
-            "# alpha",
-            "--workspace",
-            " alpha",
-            "alpha ",
-            "alpha beta",
-            "@1",
-            "alpha!",
-            "alpha@",
-            "alpha@1@2",
+        for (spec, reason) in [
+            ("#alpha", "comments are not supported"),
+            ("--workspace", "command-line tokens are not package specs"),
+            (" alpha", "leading, trailing, and embedded whitespace are not allowed"),
+            ("alpha ", "leading, trailing, and embedded whitespace are not allowed"),
+            ("alpha beta", "leading, trailing, and embedded whitespace are not allowed"),
+            ("@1", "expected a package name or Unix glob, optionally followed by `@version`"),
+            ("alpha!", "expected a package name or Unix glob, optionally followed by `@version`"),
+            ("alpha@", "the version qualifier after `@` must not be empty"),
+            ("alpha@1@2", "a package spec may contain at most one `@`"),
         ] {
-            validate_package_file_spec("packages.txt", 1, spec).expect_err(spec);
+            assert_eq!(
+                validate_package_file_spec("packages.txt", 7, spec).expect_err(spec).to_string(),
+                format!("invalid package spec in `packages.txt` at line 7: `{spec}` ({reason})")
+            );
         }
         for spec in ["alpha", "alpha@1.2.3", "cargo-*", "?eta"] {
             assert_eq!(validate_package_file_spec("packages.txt", 1, spec).expect(spec), spec);
@@ -503,6 +506,7 @@ mod tests {
 
     #[test]
     fn is_whole_workspace_detects_pass_through() {
+        assert!(!Selection::default().is_whole_workspace());
         let all = Selection {
             all: true,
             ..Selection::default()
@@ -529,6 +533,19 @@ mod tests {
             ..Selection::default()
         };
         assert!(!none.is_whole_workspace());
+    }
+
+    #[test]
+    fn invalid_exclude_selector_propagates_as_an_error() {
+        let ws = workspace(&["alpha"]);
+        let error = Selection {
+            all: true,
+            exclude: vec!["missing".to_owned()],
+            ..Selection::default()
+        }
+        .resolve(&ws)
+        .expect_err("an invalid exclusion must not panic or silently pass");
+        assert_eq!(error.to_string(), "package selector `missing` did not match any workspace member");
     }
 
     #[test]

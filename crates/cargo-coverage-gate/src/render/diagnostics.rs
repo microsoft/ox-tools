@@ -38,7 +38,6 @@ pub(crate) fn displayed_diagnostics(outcome: &PackageOutcome) -> Vec<(&std::path
         if remaining == 0 {
             break;
         }
-
         let displayed = diagnostic.lines.len().min(remaining);
         if displayed == 0 {
             continue;
@@ -128,6 +127,31 @@ mod tests {
         assert_eq!(displayed.len(), 1);
         assert_eq!(displayed[0].0, std::path::Path::new("first.rs"));
         assert_eq!(displayed[0].1, (1..=100).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn displayed_diagnostics_use_the_remaining_partial_budget_once() {
+        let mut outcome = outcome(Status::Fail);
+        outcome.diagnostics = vec![
+            LineDiagnostic {
+                path: "first.rs".into(),
+                lines: (1..=60).collect(),
+            },
+            LineDiagnostic {
+                path: "second.rs".into(),
+                lines: (61..=120).collect(),
+            },
+            LineDiagnostic {
+                path: "third.rs".into(),
+                lines: vec![121],
+            },
+        ];
+
+        let displayed = displayed_diagnostics(&outcome);
+
+        assert_eq!(displayed.len(), 2);
+        assert_eq!(displayed[0].1, (1..=60).collect::<Vec<_>>());
+        assert_eq!(displayed[1].1, (61..=100).collect::<Vec<_>>());
     }
 
     #[test]

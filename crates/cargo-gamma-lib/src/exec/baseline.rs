@@ -164,6 +164,7 @@ where
     )
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn measure_within_reporting_retaining<O>(
     measurement: Measurement<'_>,
     binaries: &mut [TestBinary],
@@ -255,6 +256,7 @@ where
 }
 
 /// Gives each test-failing binary one clean retry before rejecting the baseline.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn retry_failed_binaries<O>(
     work: &Workspace,
     binaries: &[TestBinary],
@@ -321,6 +323,7 @@ fn retry_failed_binaries<O>(
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn sweep_binaries_with<O>(
     work: &Workspace,
     binaries: &[TestBinary],
@@ -356,6 +359,7 @@ where
                         break;
                     };
 
+                    let _resources = work.acquire_resources(binary, Only::All);
                     let began = Instant::now();
                     let observation = observer(
                         work,
@@ -393,6 +397,7 @@ where
     measured
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn baseline_failure_error(
     work: &Workspace,
     binary: &TestBinary,
@@ -516,6 +521,7 @@ fn baseline_artifact_directory(binary: &TestBinary, kind: &str, test: Option<&st
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn failure_category(kind: &str) -> &'static str {
     match kind {
         "timeout" => "timeout",
@@ -527,6 +533,7 @@ fn failure_category(kind: &str) -> &'static str {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn filesystem_component(value: &str, cap: usize) -> String {
     let mut component = String::new();
     let mut separated = false;
@@ -581,6 +588,7 @@ fn directory_with_suffix(directory: &str, suffix: &str) -> String {
     format!("{parent}/{leaf}{suffix}")
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn disambiguate_artifact_directories(failure: &mut Error) {
     let mut used = crate::HashSet::default();
 
@@ -707,7 +715,9 @@ mod tests {
 
         // Continuing would time out every mutant against a suite that never finishes and report a
         // perfect score built entirely out of false detections.
-        assert_eq!(failure.artifact().expect("timeout record").value["kind"], "timeout");
+        let artifact = failure.artifact().expect("timeout record");
+        assert_eq!(artifact.value["kind"], "timeout");
+        assert!(artifact.value["lastObservedTest"].is_null());
     }
 
     /// A suite that is already failing stops the run, naming the test.
@@ -916,6 +926,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn every_binary_settles_and_failures_get_distinct_artifacts() {
         let (_directory, work) = crate::testing::helper_workspace("baseline-aggregate", &["exit:0"]);
         let mut binaries: Vec<TestBinary> = ["pass-before", "red/package", "timed:package", "pass-after"]
@@ -1110,6 +1121,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn timeout_artifacts_distinguish_no_observed_test_from_an_empty_test_name() {
+        let (_directory, work, binaries) = diagnostic_harness();
+        let failure = baseline_failure_error(
+            &work,
+            &binaries[0],
+            Duration::from_secs(31),
+            Duration::from_secs(30),
+            &Verdict::TimedOut,
+            None,
+        );
+        let artifact = failure.artifact().expect("timeout artifact");
+
+        assert!(artifact.value["lastObservedTest"].is_null());
+        assert_eq!(artifact.value["reason"], "the test binary exceeded its baseline time budget");
+    }
+
     /// A red binary is reported whichever worker happened to reach it first.
     ///
     /// With more than one binary in flight the order results arrive in is the scheduler's business,
@@ -1189,6 +1217,7 @@ mod tests {
     /// ordinary passing suite while quietly starving the machine of memory.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_baseline_binary_that_outgrows_its_ceiling_is_reported_as_such() {
         if crate::testing::without_memory_support("a baseline measuring the suite's memory") {
             return;
@@ -1220,6 +1249,7 @@ mod tests {
     /// the ceiling was meant to catch.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_undelegated_host_stops_a_metered_baseline_rather_than_measure_it_unprotected() {
         if crate::exec::memory::support().is_ok() {
             return;
@@ -1241,6 +1271,7 @@ mod tests {
     /// A metered baseline writes each binary's peak back, which is what a ceiling is derived from.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_metered_baseline_records_what_each_binary_used() {
         if crate::testing::without_memory_support("a baseline measuring the suite's memory") {
             return;

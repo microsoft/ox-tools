@@ -77,24 +77,32 @@ cargo gamma explain relational.lt_to_le   # what one does, and how to switch it 
 | [`bitwise`](#bitwise) | 4 | Is this mask or flag combination correct? |
 | [`shift`](#shift) | 2 | Is this shift's direction load-bearing? |
 | [`assign`](#assign) | 10 | Does this compound assignment's operator matter? |
-| [`logical`](#logical) | 2 | Is this `&&` really an `&&`? |
+| [`logical`](#logical) | 6 | Is this `&&` really an `&&`? |
+| [`bool_expr`](#bool_expr) | 1 | Does anything observe this boolean value's polarity? |
 | [`cond`](#cond) | 3 | Does anything depend on this branch being taken? |
 | [`match_guard`](#match_guard) | 3 | Does anything depend on this guard being right? |
 | [`match_arm`](#match_arm) | 1 | Is this arm reachable, and does anything notice when it stops matching? |
 | [`struct_field`](#struct_field) | 1 | Does this field's value matter, or is the default good enough? |
 | [`range`](#range) | 2 | Is this bound inclusive on purpose? |
-| [`loop`](#loop) | 4 | Does this `break` or `continue` carry the loop's meaning? |
+| [`loop`](#loop) | 5 | Does this `break` or `continue` carry the loop's meaning? |
+| [`return_value`](#return_value) | 1 | Does this early return carry the value its caller needs? |
 | [`unary`](#unary) | 2 | Does this negation or complement matter? |
-| [`literal`](#literal) | 7 | Does this constant's exact value matter? |
+| [`literal`](#literal) | 14 | Does this constant's exact value matter? |
 | [`stmt`](#stmt) | 2 | Does this statement's side effect matter? |
 | [`expr`](#expr) | 2 | Would an off-by-one here be caught? |
-| [`option`](#option) | 2 | Is the present case distinguished from the absent one? |
-| [`result`](#result) | 2 | Is success distinguished from failure? |
-| [`iter`](#iter) | 8 | Does anything observe that this was ordered, deduplicated, or taken from one end? |
+| [`option`](#option) | 4 | Is the present case distinguished from the absent one? |
+| [`result`](#result) | 4 | Is success distinguished from failure? |
+| [`try`](#try) | 1 | Is graceful propagation distinguished from a panic? |
+| [`fallback`](#fallback) | 4 | Does the absent or error path produce the right fallback value? |
+| [`iter`](#iter) | 12 | Does anything observe that this was ordered, deduplicated, or taken from one end? |
 | [`string`](#string) | 6 | Does the prefix, the case, or the trimmed end actually matter? |
-| [`collection`](#collection) | 1 | Does every element of this literal earn its place? |
+| [`collection`](#collection) | 3 | Does every element of this literal earn its place? |
 | [`assign_value`](#assign_value) | 1 | Is the value assigned here ever read in a way that would notice? |
-| **Total** | **106** | |
+| [`call`](#call) | 1 | Does this call's execution matter? |
+| [`call_result`](#call_result) | 1 | Does this call's result matter independently of its side effects? |
+| [`parameter`](#parameter) | 1 | Does this function parameter contribute to behavior? |
+| [`regex`](#regex) | 6 | Does this pattern's matching semantics matter? |
+| **Total** | **144** | |
 
 <!-- end generated -->
 
@@ -133,7 +141,9 @@ in a `const` context — both are explained under
 [What the catalog deliberately omits](#what-the-catalog-deliberately-omits). A site that gets no
 mutant, or the wrong one, can [state the value itself](#stating-the-value-yourself). A function
 returning `impl Iterator` is the exception: the schema wraps original and replacement iterators in
-its shared `Either` type, as described below.
+its shared `Either` type, as described below. When a workspace-defined type shadows a standard
+collection name and positively implements `Default`, its empty replacement uses that proved default
+rather than assuming the shadow also provides the standard type's `new` constructor.
 
 ### `relational`
 
@@ -339,8 +349,9 @@ On an unsigned endpoint that is already zero, `inclusive_to_exclusive` underflow
 Replaces a literal constant with a nearby one of the same kind: an integer zeroed, set to one, incremented, or decremented; a boolean flipped; a string emptied or replaced. A surviving mutant means the suite never asserts the literal's *exact* value, only that it is present, non-zero, or non-empty.
 
 An explicitly unsigned zero is not decremented. Explicit evidence includes a suffix, cast, return
-type, or directly enclosing binding annotation; names and unresolved API signatures are not treated
-as type evidence.
+type, directly enclosing binding annotation, or the visible fixed signature of selected standard
+constructors such as `Duration::from_secs`, `NonZeroU32::new`, and `AtomicUsize::new`. Unknown API
+signatures retain the candidate rather than guessing that an integer-looking argument is unsigned.
 
 ```rust
 // original
@@ -366,6 +377,9 @@ fn take_first(n: usize, items: &[Item]) -> &[Item] { &items[..(n + 1)] }
 ```
 
 Deliberately narrower than the `literal` family: the two mutators only fire on evidence, not guesswork, avoiding unviable mutants on genuinely non-numeric expressions.
+When the written type is floating point, the replacement uses `1.0` rather than an integer `1`.
+Arithmetic over a value explicitly typed as text or a standard temporal type is not taken as
+evidence that its result accepts an integer offset.
 
 ### `unary`
 
@@ -449,7 +463,11 @@ remain eligible for compiler withdrawal.
 
 ### `iter`
 
-Swaps a standard-library iterator method for a nearby one that returns the same type: `any`/`all`, `min`/`max`, `first`/`last`, and removes a `sort` or `dedup` from a chain outright. A surviving mutant means the suite never depends on the actual quantifier, extremum, end, ordering, or deduplication — for example a `min`/`max` swap survives when the tested collection has a single element.
+Swaps a standard-library iterator method for a nearby one: `any`/`all`, `min`/`max`,
+`first`/`last`, and `take`/`skip`; removes `rev` or `filter` from an iterator pipeline; and removes a
+`sort` or `dedup` from a chain outright. A surviving mutant means the suite never depends on the
+actual quantifier, extremum, end, ordering, filtering, or truncation — for example a `min`/`max`
+swap survives when the tested collection has a single element.
 
 ```rust
 // original
@@ -462,7 +480,11 @@ let cheapest = prices.iter().max();
 let ordered = { names.sort(); names };
 ```
 
-Limited to a curated set of standard-library names with matching return types (`take`/`skip` and dropping a `filter` are absent because they would change the type), since without type resolution there is no way to know a user-defined `min` or `max` means what the standard library's does.
+Limited to a curated set of standard-library names, since without type resolution there is no way
+to know a user-defined `min` or `max` means what the standard library's does. Pipeline mutations
+whose concrete adapter types differ use `gamma_rt::Either` to give the original and mutated
+branches one iterator type. `Option::filter` remains excluded: the pipeline adapter applies only
+when the receiver has iterator shape.
 
 ### `string`
 
@@ -596,6 +618,16 @@ the mutator runs when `--mutators` is not given.
 | --- | --- | --- | --- |
 | `logical.and_to_or` | replace && with \|\| | `LCR` | yes |
 | `logical.or_to_and` | replace \|\| with && | `LCR` | yes |
+| `logical.and_remove_left` | replace a && b with b | `LOR` | yes |
+| `logical.and_remove_right` | replace a && b with a | `LOR` | yes |
+| `logical.or_remove_left` | replace a \|\| b with b | `LOR` | yes |
+| `logical.or_remove_right` | replace a \|\| b with a | `LOR` | yes |
+
+#### `bool_expr`
+
+| Mutator | What it does | Alias | Default |
+| --- | --- | --- | --- |
+| `bool_expr.negate` | negate a boolean value outside a branch condition | `UOI` | yes |
 
 #### `cond`
 
@@ -640,6 +672,13 @@ the mutator runs when `--mutators` is not given.
 | `loop.continue_to_break` | replace continue with break |  | yes |
 | `loop.delete_break` | delete a break statement | `SDL` | yes |
 | `loop.delete_continue` | delete a continue statement | `SDL` | yes |
+| `loop.break_value_default` | replace a value carried by break with its default | `EVR` | yes |
+
+#### `return_value`
+
+| Mutator | What it does | Alias | Default |
+| --- | --- | --- | --- |
+| `return_value.default` | replace an early return value with its default | `EVR` | yes |
 
 #### `unary`
 
@@ -659,6 +698,13 @@ the mutator runs when `--mutators` is not given.
 | `literal.bool_flip` | invert a boolean literal | `CRP` | yes |
 | `literal.str_to_empty` | replace a string literal with an empty string | `CRP` | yes |
 | `literal.str_to_xyzzy` | replace a string literal with a different string | `CRP` | yes |
+| `literal.float_to_zero` | replace a floating-point literal with zero | `CRP` | yes |
+| `literal.float_to_one` | replace a floating-point literal with one | `CRP` | yes |
+| `literal.float_negate` | negate a floating-point literal | `CRP` | yes |
+| `literal.char_to_nul` | replace a character literal with NUL | `CRP` | yes |
+| `literal.char_to_distinct` | replace a character literal with a distinct character | `CRP` | yes |
+| `literal.byte_to_nul` | replace a byte literal with NUL | `CRP` | yes |
+| `literal.byte_to_distinct` | replace a byte literal with a distinct byte | `CRP` | yes |
 
 #### `stmt`
 
@@ -680,6 +726,8 @@ the mutator runs when `--mutators` is not given.
 | --- | --- | --- | --- |
 | `option.some_to_none` | replace Some(value) with None | `EVR` | yes |
 | `option.none_to_some` | replace None with Some(Default::default()) | `EVR` | yes |
+| `option.is_some_to_is_none` | replace is_some with is_none | `EVR` | yes |
+| `option.is_none_to_is_some` | replace is_none with is_some | `EVR` | yes |
 
 #### `result`
 
@@ -687,6 +735,23 @@ the mutator runs when `--mutators` is not given.
 | --- | --- | --- | --- |
 | `result.ok_to_err` | replace Ok(value) with Err(Default::default()) | `EVR` | yes |
 | `result.err_to_ok` | replace Err(value) with Ok(Default::default()) | `EVR` | yes |
+| `result.is_ok_to_is_err` | replace is_ok with is_err | `EVR` | yes |
+| `result.is_err_to_is_ok` | replace is_err with is_ok | `EVR` | yes |
+
+#### `try`
+
+| Mutator | What it does | Alias | Default |
+| --- | --- | --- | --- |
+| `try.propagate_to_unwrap` | replace ? propagation with unwrap | `EVR` | yes |
+
+#### `fallback`
+
+| Mutator | What it does | Alias | Default |
+| --- | --- | --- | --- |
+| `fallback.unwrap_or_to_default` | replace unwrap_or with unwrap_or_default | `EVR` | yes |
+| `fallback.unwrap_or_else_to_default` | replace an unwrap_or_else fallback with a default | `EVR` | yes |
+| `fallback.map_or_to_default` | replace a map_or fallback with a default | `EVR` | yes |
+| `fallback.map_or_else_to_default` | replace a map_or_else fallback with a default | `EVR` | yes |
 
 #### `iter`
 
@@ -700,6 +765,10 @@ the mutator runs when `--mutators` is not given.
 | `iter.last_to_first` | replace last with first | `EVR` | yes |
 | `iter.remove_sort` | remove a sort from a chain | `SDL` | yes |
 | `iter.remove_dedup` | remove a deduplication from a chain | `SDL` | yes |
+| `iter.remove_rev` | remove rev from an iterator pipeline | `EVR` | yes |
+| `iter.remove_filter` | remove filter from an iterator pipeline | `EVR` | yes |
+| `iter.take_to_skip` | replace take with skip | `EVR` | yes |
+| `iter.skip_to_take` | replace skip with take | `EVR` | yes |
 
 #### `string`
 
@@ -717,12 +786,43 @@ the mutator runs when `--mutators` is not given.
 | Mutator | What it does | Alias | Default |
 | --- | --- | --- | --- |
 | `collection.omit_element` | omit an element from a vec! literal | `SDL` | yes |
+| `collection.reverse_vec` | reverse the elements of a vec! literal | `EVR` | yes |
+| `collection.reverse_array` | reverse the elements of an array literal | `EVR` | yes |
 
 #### `assign_value`
 
 | Mutator | What it does | Alias | Default |
 | --- | --- | --- | --- |
 | `assign_value.default` | replace an assigned value with its type's default | `EVR` | yes |
+
+#### `call`
+
+| Mutator | What it does | Alias | Default |
+| --- | --- | --- | --- |
+| `call.replace_with_default` | replace a call and its side effects with a default value | `SDL` | yes |
+
+#### `call_result`
+
+| Mutator | What it does | Alias | Default |
+| --- | --- | --- | --- |
+| `call_result.default` | preserve a call's side effects but replace its result with a default | `EVR` | yes |
+
+#### `parameter`
+
+| Mutator | What it does | Alias | Default |
+| --- | --- | --- | --- |
+| `parameter.default_shadow` | shadow a function parameter with its type's default | `EVR` | yes |
+
+#### `regex`
+
+| Mutator | What it does | Alias | Default |
+| --- | --- | --- | --- |
+| `regex.remove_start_anchor` | remove a regular expression's leading anchor | `EVR` | yes |
+| `regex.remove_end_anchor` | remove a regular expression's trailing anchor | `EVR` | yes |
+| `regex.star_to_plus` | replace a regular-expression * quantifier with + | `EVR` | yes |
+| `regex.plus_to_star` | replace a regular-expression + quantifier with * | `EVR` | yes |
+| `regex.optional_to_required` | remove a regular-expression ? quantifier | `EVR` | yes |
+| `regex.negate_character_class` | toggle negation of a regular-expression character class | `EVR` | yes |
 
 <!-- end generated -->
 
@@ -744,12 +844,13 @@ renamed, and the value it is asked of is ordinary code.
 `a..b + 1` covers exactly what `a..=b` covers — but `Range` and `RangeInclusive` are different
 types, so the literal rewrite could never compile.
 
-**`iter` swaps only methods whose two spellings agree on a type.** `any`/`all` and
-`starts_with`/`ends_with` return `bool`; `min`/`max` and `first`/`last` return `Option<T>`. Swapping
-`take` for `skip` asks a real question about a chain, but `Take<I>` and `Skip<I>` are different
-types, so it is absent — as is dropping a `filter`, which would turn `Filter<I>` back into `I`.
-`sort` and `dedup` return `()` and work in place, so they are reached by deleting the statement
-instead.
+**`iter` adapts type-changing iterator pipelines explicitly.** `any`/`all` return `bool`, while
+`min`/`max` and `first`/`last` return `Option<T>`, so those swaps already agree on a type.
+`take`/`skip`, removing `filter`, and removing `rev` change the concrete iterator adapter; the
+schema wraps the original and mutated branches in `gamma_rt::Either`, preserving their shared
+iterator contract. This applies only to iterator-shaped receivers, so `Option::filter` remains
+absent. `sort` and `dedup` return `()` and work in place, so they are reached by deleting the
+statement instead.
 
 **A non-iterator `impl Trait` return gets no return-value mutants.** An `impl Trait` return is a
 single concrete type chosen by the body, so an arbitrary replacement and whatever the author
@@ -783,12 +884,14 @@ A `Result<Option<bool>, E>` yields `Err(Default::default())`, `Ok(None)`, `Ok(So
 `Cow` and `NonZero`. Depth and width are bounded so a deeply generic signature cannot generate an
 unbounded population.
 
-Where the tool cannot name a value of a type it falls back to `Default::default()`, optimistically:
-a concrete type it has never heard of usually does have a `Default`. It withholds that guess only
-where nothing could support it — a bare type parameter, an associated type projected out of one such
-as `D::Error`, an `impl Trait` that is not an iterator, or a `Box<dyn Trait>`. A parameter declared
-`T: Default` keeps its mutant, because there the promise is explicit. Where you know a value the
-signature accepts, [state it](#stating-the-value-yourself) and the mutant comes back.
+Where the tool cannot name a value of a type it falls back to `Default::default()` only when the
+source provides positive evidence that the type implements `Default`, or when an unresolved
+concrete name is not proved otherwise. It withholds that guess for a bare type parameter, an
+unresolved associated type such as `D::Error` or `Self::Value`, an `impl Trait` that is not an
+iterator, a trait object, or a workspace type whose declarations establish no `Default`
+implementation. A parameter declared `T: Default` keeps its mutant, because there the promise is
+explicit. Where you know a value the signature accepts, [state it](#stating-the-value-yourself) and
+the mutant comes back.
 
 To reach an error type that has no `Default`, name the values yourself:
 
@@ -811,15 +914,12 @@ falls back to `Default::default()` instead of being handed `Vec::new()`. A type 
 standard name *and* matches its shape is genuinely indistinguishable and will produce a mutant that
 does not compile, reported as unviable.
 
-A function returning a reference is served by leaking a box, so `fn name(&self) -> &String` offers
-`&*Box::leak(Box::new(String::new()))` and the other values `String` would offer. The plain spelling
-would borrow a temporary that dies at the end of the expression and so would never compile; leaking
-yields a reference that outlives the call. `Box::leak` hands back `&mut T`, which is reborrowed when
-the signature asked for `&T` — coercion would cover a return position, but not one where the value
-is what a type is inferred from. The leak lasts as long as the test process, which exits shortly
-afterwards, though a mutant leaking on a hot path can reach the memory limit and be reported as
-`OUTOFMEM`. A reference to a trait object is still passed over, because there is no value of it to
-make.
+A function returning a shared reference is not given a fabricated leaked allocation. Such a
+replacement can change ownership and lifetime behavior independently of the returned value, and
+reference payloads frequently lack enough source evidence to construct a compiling value. Mutable
+string slices are the exception: `&mut str` replacements use leaked `String` allocations because
+there is no borrowed empty mutable string with a suitable lifetime. Use `#[gamma::value(...)]`
+where a stable reference value is available and meaningful.
 
 A function returning `impl Iterator` is offered `core::iter::empty()`, and `core::iter::once(v)` for
 each value its `Item` type yields. This is the one return type whose mutant cannot simply be dropped
@@ -853,16 +953,17 @@ to the item unchanged, so it costs a normal build nothing.
 
 It is worth reaching for in two situations:
 
-- **A site the tool withholds a mutant from.** A bare type parameter, an associated type, a
-  `Box<dyn Trait>` or a non-iterator `impl Trait` are all types with no value the tool can name.
+- **A site the tool withholds a mutant from.** A bare type parameter, an unresolved associated
+  type, a reference, a `Box<dyn Trait>` or a non-iterator `impl Trait` are all types with no value
+  the tool can conservatively name.
   Stating one creates the mutant, and the function stops being invisible to the family whose whole
   question is whether anything checks what it returns.
 - **A site whose guess is not the interesting wrong answer.** A stated value replaces the guessed
   ones at that site rather than joining them, so `#[gamma::value(u32::MAX)]` on a function the tool
   would have handed `0` asks the question you meant to ask instead of one more you did not.
 
-Behind an alias or an unknown concrete type the guess is `Default::default()`, which is a hope that
-the type implements `Default`; stating a value is how that hope becomes a fact.
+Behind an unresolved alias or concrete type, `Default::default()` may still be a guess. Stating a
+value is how that hope becomes a fact.
 
 The rules are deliberately few:
 
@@ -938,12 +1039,12 @@ cargo gamma run --mutators @numeric,!literal.int_increment  # a preset, less one
 | `@pedantic` | additional low-yield mutations excluded from the default selection | `fn_value.some` |
 | `@boundary` | relational and boundary conditions | `relational`, `range` |
 | `@arithmetic` | arithmetic, bitwise, shift and compound assignment | `arith`, `bitwise`, `shift`, `assign` |
-| `@logical` | logical operators and branch conditions | `logical`, `cond`, `match_guard` |
-| `@control` | the choices control flow makes: conditions, guards, arms and loop exits | `cond`, `match_guard`, `match_arm`, `loop` |
-| `@removal` | statement and side-effect deletion | `stmt`, `unary`, `match_arm`, `struct_field`, `collection` |
-| `@semantics` | standard-library meaning: Option, Result, iterators, strings and collections | `option`, `result`, `iter`, `string`, `collection`, `assign_value` |
+| `@logical` | logical operators and branch conditions | `logical`, `bool_expr`, `cond`, `match_guard` |
+| `@control` | the choices control flow makes: conditions, guards, arms and loop exits | `cond`, `match_guard`, `match_arm`, `loop`, `return_value` |
+| `@removal` | statement and side-effect deletion | `stmt`, `unary`, `match_arm`, `struct_field`, `collection.omit_element`, `call` |
+| `@semantics` | Rust and library meaning: propagation, fallbacks, calls, iterators, regexes and collections | `option`, `result`, `try`, `fallback`, `iter`, `string`, `collection`, `assign_value`, `call_result`, `regex` |
 | `@literals` | literal and constant replacement | `literal` |
-| `@numeric` | literal replacement and focused numeric expression perturbation | `literal`, `expr` |
+| `@numeric` | literal replacement and focused numeric expression perturbation | `literal.int_to_zero`, `literal.int_to_one`, `literal.int_increment`, `literal.int_decrement`, `literal.float_to_zero`, `literal.float_to_one`, `literal.float_negate`, `expr` |
 | `@extreme` | a synonym for `all`, kept because scripts name it | `*` |
 
 <!-- end generated -->
@@ -957,8 +1058,6 @@ the shipped policy rather than a list that has to be re-derived every release.
 **`@pedantic` currently contains only `fn_value.some`.** Select it alone to study that mutation, or
 use `--mutators @default,@pedantic` to add it to an ordinary run. Membership is deliberately narrow
 until cross-repository evidence supports more candidates.
-
-**`@extreme` is a second spelling of `@all`.** It selects the entire catalog as an alias for `@all`.
 
 **`@boundary` is the highest-yield preset per mutant.** Off-by-one errors are the defect class
 mutation testing is best at exposing, and a surviving `relational` or `range` mutant almost always

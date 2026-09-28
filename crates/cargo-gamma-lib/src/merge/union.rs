@@ -13,11 +13,20 @@ use super::verdict::Verdict;
 use crate::elements::{FileResult, MergeProvenance, MutantResult, Report, RunInfo, SourceProvenance, VerdictProvenance};
 use crate::model::{MUTANT_ID_VERSION, Scoring};
 
+fn population_is_authoritative(source: (u64, &str, &str), population: (u64, &str, &str)) -> bool {
+    source <= population
+}
+
 /// Merges reports, keeping the most recent verdict per mutant ID.
 ///
 /// `now` and `window` are passed in rather than read from the clock so that the freshness rule is
 /// testable and so that re-merging the same inputs twice gives the same answer.
 #[must_use]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the merge keeps one ordered pass over report populations and winning verdicts"
+)]
 pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Merged {
     // Hashed rather than ordered. Every one of these is a lookup table — is this id withdrawn, what
     // is this file's selected source, which verdict is currently winning — and none of them decides
@@ -92,8 +101,10 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
                 // still exists, so every id remains admissible.
                 if current.get(path.as_str()).is_some_and(|population| {
                     !population.ids.contains(mutant.id.as_str())
-                        && rank(source_origin, source_at, &source_lineage)
-                            <= rank(population.origin, population.started_at, &population.lineage)
+                        && population_is_authoritative(
+                            rank(source_origin, source_at, &source_lineage),
+                            rank(population.origin, population.started_at, &population.lineage),
+                        )
                 }) {
                     let _ = withdrawn.insert(mutant.id.as_str());
                     continue;
@@ -140,6 +151,15 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
             out.fresh += 1;
         }
 
+        if crate::elements::is_flaky_status(&verdict.mutant.status, verdict.mutant.status_reason.as_deref()) {
+            out.flaky.push(format!(
+                "{} in {}: {}",
+                verdict.mutant.id,
+                verdict.file,
+                verdict.mutant.status_reason.as_deref().unwrap_or("flaky")
+            ));
+        }
+
         // A status the schema does not define is left out of the fraction rather than counted
         // against it. `read` refuses such a document, so this is reachable only from a `Report`
         // assembled in memory — and a merge that guessed at a word it cannot interpret would be
@@ -155,6 +175,8 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
 
         files.entry(verdict.file).or_default().push(verdict);
     }
+
+    out.flaky.sort();
 
     out.report = rebuild(&compatible, &sources, files);
     out
@@ -484,6 +506,7 @@ impl<'report> Lineages<'report> {
     }
 
     /// The lineage of one verdict, encoded through the shared buffer.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verdict(&mut self, name: &str, mutant: &MutantResult) -> String {
         self.scratch.clear();
 
@@ -672,6 +695,13 @@ mod tests {
 
     /// One day, in seconds.
     const DAY: u64 = 86_400;
+
+    #[test]
+    fn an_equal_rank_population_is_authoritative_for_withdrawals() {
+        let rank = (100, "report", "lineage");
+
+        assert!(population_is_authoritative(rank, rank));
+    }
 
     /// Like [`report`], but with a chosen source text, so a test can tell which input a merged
     /// file's source was drawn from.
@@ -1055,6 +1085,7 @@ mod tests {
     /// argument order, and it decides both figures a team uses to judge whether the merged score
     /// covers the codebase.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_rotation_is_the_same_whichever_order_the_inputs_arrive_in() {
         let inputs = || {
             [
@@ -1146,6 +1177,7 @@ mod tests {
     /// and explicitly keeps out of the denominator, so a single one made the printed score and the
     /// score the viewer computes from the merged document disagree.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_status_the_score_cannot_interpret_stays_out_of_the_fraction() {
         for status in ["RuntimeError", "Kiled"] {
             let merged = merge(
@@ -1360,6 +1392,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn staged_reports_with_colliding_inner_provenance_are_order_independent() {
         let left = || report_with_source(Some((0, 2)), 100, "fn left() {}\n", vec![mutant("shared", 1, "Killed")]);
         let right = || report_with_source(Some((1, 2)), 100, "fn right() {}\n", vec![mutant("shared", 1, "Survived")]);

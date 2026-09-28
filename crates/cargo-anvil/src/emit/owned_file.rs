@@ -134,4 +134,13 @@ mod tests {
         let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "template\n").unwrap();
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn unreadable_owned_file_returns_an_error_instead_of_panicking() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), [0xff]).unwrap();
+
+        plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "template").unwrap_err();
+    }
 }

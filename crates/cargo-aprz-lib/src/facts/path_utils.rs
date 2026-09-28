@@ -22,7 +22,12 @@ pub fn sanitize_path_component(s: &str) -> String {
     // This preserves crate names like "my.crate" while preventing "../" attacks
     let s = s.replace("..", "__");
     // Then remove other dangerous filesystem characters
-    s.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
+    s.chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            safe => safe,
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -20,7 +20,27 @@ pub struct CratesArgs {
 
 pub async fn process_crates<H: Host>(host: &mut H, args: &CratesArgs) -> Result<()> {
     let mut common = Common::new(host, &args.common).await?;
-    let crate_facts = common.process_crates(&args.crates, true).await?;
+    common
+        .process_crates(&args.crates, true)
+        .await
+        .and_then(|crate_facts| common.report(crate_facts))
+}
 
-    common.report(crate_facts)
+#[cfg(test)]
+#[cfg(not(miri))]
+mod tests {
+    use camino::Utf8PathBuf;
+
+    use super::*;
+    use crate::commands::host::TestHost;
+
+    #[tokio::test]
+    async fn common_initialization_errors_are_returned() {
+        let mut args = CratesArgs::parse_from(["crates"]);
+        args.common.manifest_path = Utf8PathBuf::from("missing-manifest-for-crates-test.toml");
+        let error = process_crates(&mut TestHost::new(), &args)
+            .await
+            .expect_err("a missing manifest must be reported");
+        assert!(error.to_string().contains("retrieving workspace metadata"));
+    }
 }

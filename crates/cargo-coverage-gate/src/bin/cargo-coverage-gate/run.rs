@@ -37,11 +37,19 @@ pub(crate) fn evaluate_paths(
     let lcov_refs: Vec<&str> = lcov_texts.iter().map(String::as_str).collect();
 
     let report = evaluate_many_for_target(&lcov_refs, None, gated_packages, target).into_app_err("failed to evaluate coverage")?;
+    finish_evaluation(args, &report, write_text_output, write_summary_file)
+}
 
-    write_text_output(&report, args.quiet)?;
+fn finish_evaluation(
+    args: &CoverageGateArgs,
+    report: &EvaluatedReport,
+    write_text: impl FnOnce(&EvaluatedReport, bool) -> Result<(), AppError>,
+    write_summary_file: impl FnOnce(&EvaluatedReport, &Path) -> io::Result<()>,
+) -> Result<ExitCode, AppError> {
+    write_text(report, args.quiet)?;
 
     if let Some(path) = summary_target(args) {
-        write_summary_file(&report, &path).into_app_err(format!("failed to write summary file `{}`", path.display()))?;
+        write_summary_file(report, &path).into_app_err(format!("failed to write summary file `{}`", path.display()))?;
     }
 
     let code = u8::try_from(report.verdict().as_exit_code()).expect("Verdict::as_exit_code only ever produces values in 0..=2");
@@ -75,9 +83,17 @@ fn verdict_write_result(result: io::Result<()>) -> Result<(), AppError> {
 
 fn write_summary_file(report: &EvaluatedReport, path: &Path) -> io::Result<()> {
     let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
-    report.render_markdown(&mut writer)?;
-    Ok(())
+    write_summary(report, file)
+}
+
+fn write_summary(report: &EvaluatedReport, out: impl io::Write) -> io::Result<()> {
+    write_summary_with(out, |writer| report.render_markdown(writer))
+}
+
+fn write_summary_with(out: impl io::Write, render: impl FnOnce(&mut dyn io::Write) -> io::Result<()>) -> io::Result<()> {
+    let mut writer = BufWriter::new(out);
+    render(&mut writer)?;
+    io::Write::flush(&mut writer)
 }
 
 /// Resolve where the Markdown summary should be written, if anywhere.
@@ -123,6 +139,26 @@ mod tests {
         }
     }
 
+    fn zero_threshold_report() -> (tempfile::TempDir, cargo_coverage_gate::EvaluatedReport) {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join("alpha/src")).expect("create member");
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n",
+        )
+        .expect("write workspace manifest");
+        fs::write(
+            tmp.path().join("alpha/Cargo.toml"),
+            "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [package.metadata.coverage-gate]\nmin-lines-percent = 0\n",
+        )
+        .expect("write member manifest");
+        fs::write(tmp.path().join("alpha/src/lib.rs"), "").expect("write member source");
+        let report = cargo_coverage_gate::evaluate_many(&[], Some(&tmp.path().join("Cargo.toml")), &[]).expect("zero-threshold report");
+
+        (tmp, report)
+    }
+
     #[test]
     fn summary_target_queries_documented_environment_variables_in_order() {
         let mut queried = Vec::new();
@@ -148,5 +184,79 @@ mod tests {
         fs::write(&lcov, "not lcov").expect("write malformed lcov");
         let error = evaluate_paths(&args(), &[lcov], &[], None).expect_err("malformed lcov must fail");
         assert!(error.to_string().contains("failed to evaluate coverage"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata")]
+    fn summary_creation_errors_are_returned() {
+        let (tmp, report) = zero_threshold_report();
+        let missing_parent = tmp.path().join("missing").join("summary.md");
+        let error = write_summary_file(&report, &missing_parent).expect_err("missing parent must reject summary creation");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg_attr(miri, ignore = "uses a temporary directory; miri isolation forbids filesystem access")]
+    #[test]
+    fn no_gate_summary_write_errors_are_returned() {
+        let tmp = tempdir().expect("tempdir");
+        let mut args = args();
+        args.summary_file = Some(tmp.path().join("missing").join("summary.md"));
+
+        let error = write_no_gate_summary(&args, "skipped").expect_err("missing parent must reject summary creation");
+        assert!(error.to_string().contains("failed to write summary file"));
+    }
+
+    struct FailingWriter;
+
+    impl io::Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected summary failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata")]
+    fn summary_rendering_errors_are_returned() {
+        let (_tmp, report) = zero_threshold_report();
+
+        let error = write_summary(&report, FailingWriter).expect_err("summary write must fail");
+        assert_eq!(error.to_string(), "injected summary failure");
+    }
+
+    #[test]
+    fn summary_returns_render_errors_before_flushing() {
+        let error = write_summary_with(io::sink(), |_| Err(io::Error::other("injected render failure")))
+            .expect_err("render failure must propagate");
+        assert_eq!(error.to_string(), "injected render failure");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata")]
+    fn evaluation_output_errors_are_returned_from_the_call_site() {
+        let (_tmp, report) = zero_threshold_report();
+
+        let text_error = finish_evaluation(
+            &args(),
+            &report,
+            |_, _| Err(AppError::new("injected text failure")),
+            |_, _| panic!("summary must not be attempted after text failure"),
+        )
+        .expect_err("text failure must be returned");
+        assert_eq!(text_error.to_string(), "injected text failure");
+
+        let mut summary_args = args();
+        summary_args.summary_file = Some(PathBuf::from("summary.md"));
+        let summary_error = finish_evaluation(
+            &summary_args,
+            &report,
+            |_, _| Ok(()),
+            |_, _| Err(io::Error::other("injected summary failure")),
+        )
+        .expect_err("summary failure must be returned");
+        assert!(summary_error.to_string().contains("injected summary failure"));
     }
 }

@@ -2,10 +2,11 @@
 // Licensed under the MIT License.
 
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{Expr, Item, Member, Stmt};
 
-use super::super::{Defaults, collect_in};
+use super::super::{Defaults, collect_in, collect_with};
 use super::{Collector, compact_path};
 use crate::cfg::CfgSet;
 use crate::ops::registry::Selection;
@@ -34,8 +35,9 @@ fn mutators_past_the_end(source: &str, keep: usize, ops: &str) -> Vec<&'static s
 fn mutators(source: &str, ops: &str, cfg: &CfgSet) -> Vec<&'static str> {
     let file = SourceFile::parse("test.rs", source.to_owned()).unwrap();
     let selection = Selection::parse(ops).unwrap();
+    let defaults = Defaults::of_in(&file.ast, cfg);
 
-    collect_in(&file, &selection, cfg)
+    collect_with(&file, &selection, cfg, &defaults)
         .into_iter()
         .map(|candidate| candidate.mutator)
         .collect()
@@ -50,6 +52,14 @@ fn a_wildcard_arm_that_is_configured_out_is_not_a_wildcard() {
     let found = mutators(source, "match_arm.never_matches", &CfgSet::parse("unix"));
 
     assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_configured_out_arm_does_not_hide_later_mutatable_arms() {
+    let source = "fn f(x: u8) -> u8 { match x { #[cfg(not(unix))] 0 => 0, 1 => 1, _ => 2 } }";
+    let found = mutators(source, "match_arm.never_matches", &CfgSet::parse("unix"));
+
+    assert_eq!(found, vec!["match_arm.never_matches"]);
 }
 
 /// A statement the build does not contain is not mutated, and neither is anything inside it.
@@ -180,11 +190,11 @@ fn a_leaked_default_is_not_offered_to_a_body_that_already_leaks_one() {
 }
 
 #[test]
-fn a_leaked_value_is_still_offered_to_a_body_that_leaks_something_else() {
+fn a_reference_value_is_not_fabricated_with_a_generic_leak() {
     let source = "fn f<T: Default>() -> &'static T { Box::leak(Box::new(make())) }";
     let found = mutators(source, "fn_value", &CfgSet::unconditional());
 
-    assert!(!found.is_empty(), "{found:?}");
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -273,7 +283,7 @@ fn only_standard_default_implementations_suppress_recursive_replacements() {
     for source in [custom, aliased_custom] {
         let found = mutators(source, "fn_value.default", &CfgSet::unconditional());
 
-        assert_eq!(found, vec!["fn_value.default"], "{source}: {found:?}");
+        assert!(found.is_empty(), "{source}: {found:?}");
     }
 
     assert_eq!(
@@ -323,7 +333,7 @@ fn a_parenthesized_reference_return_type_is_still_a_reference() {
     let source = "fn f<T: Default>() -> (&'static mut T) { g() }";
     let found = mutators(source, "fn_value", &CfgSet::unconditional());
 
-    assert_eq!(found, vec!["fn_value.default"]);
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
@@ -332,7 +342,7 @@ fn only_standard_default_bounds_make_generic_fallbacks_available() {
     let custom = "mod custom { pub trait Default {} } fn f<T: custom::Default>() -> &'static mut T { g() }";
     let aliased_custom = "mod custom { pub trait Default {} } use custom::Default as Alias; fn f<T: Alias>() -> &'static mut T { g() }";
 
-    assert_eq!(mutators(standard, "fn_value", &CfgSet::unconditional()), vec!["fn_value.default"]);
+    assert!(mutators(standard, "fn_value", &CfgSet::unconditional()).is_empty());
     assert!(mutators(custom, "fn_value", &CfgSet::unconditional()).is_empty());
     assert!(mutators(aliased_custom, "fn_value", &CfgSet::unconditional()).is_empty());
 }
@@ -424,7 +434,7 @@ fn every_method_rename_replaces_the_call_its_name_promises() {
         ("fn f(v: V) -> O { v.max() }", "iter.max_to_min", "v.min()"),
         ("fn f(a: A, b: A) -> A { a.max(b) }", "iter.max_to_min", "a.min(b)"),
         ("fn f(v: V) -> O { v.first() }", "iter.first_to_last", "v.last()"),
-        ("fn f(v: V) -> O { v.last() }", "iter.last_to_first", "v.first()"),
+        ("fn f(v: Vec<u8>) -> Option<&u8> { v.last() }", "iter.last_to_first", "v.first()"),
         (
             "fn f(s: S) -> bool { s.starts_with(\"a\") }",
             "string.starts_with_to_ends_with",
@@ -547,16 +557,9 @@ fn every_return_type_is_served_the_values_that_belong_to_it() {
                 "fn_value.two=NonZeroU32::new(2).unwrap()",
             ],
         ),
-        // A slice reference has a `Default` of its own, so it is not leaked into being.
-        ("&'static [u8]", &["fn_value.default=Default::default()"]),
-        (
-            "&'static u8",
-            &["fn_value.one=&*Box::leak(Box::new(1))", "fn_value.zero=&*Box::leak(Box::new(0))"],
-        ),
-        (
-            "&'static mut u8",
-            &["fn_value.one=Box::leak(Box::new(1))", "fn_value.zero=Box::leak(Box::new(0))"],
-        ),
+        ("&'static [u8]", &["fn_value.empty_collection=&[]"]),
+        ("&'static u8", &[]),
+        ("&'static mut u8", &[]),
         (
             "Vec<u8>",
             &[
@@ -568,19 +571,12 @@ fn every_return_type_is_served_the_values_that_belong_to_it() {
         ("Box<u8>", &["fn_value.one=Box::new(1)", "fn_value.zero=Box::new(0)"]),
         ("Rc<u8>", &["fn_value.one=Rc::new(1)", "fn_value.zero=Rc::new(0)"]),
         ("Arc<u8>", &["fn_value.one=Arc::new(1)", "fn_value.zero=Arc::new(0)"]),
-        ("Cow<'static, str>", &["fn_value.default=Cow::Owned(Default::default())"]),
+        ("Cow<'static, str>", &[]),
         (
             "Option<u8>",
             &["fn_value.none=None", "fn_value.some=Some(0)", "fn_value.some=Some(1)"],
         ),
-        (
-            "Result<u8, E>",
-            &[
-                "fn_value.err_default=Err(Default::default())",
-                "fn_value.ok=Ok(0)",
-                "fn_value.ok=Ok(1)",
-            ],
-        ),
+        ("Result<u8, E>", &["fn_value.ok=Ok(0)", "fn_value.ok=Ok(1)"]),
         (
             "HashMap<u8, u8>",
             &[
@@ -725,6 +721,173 @@ fn a_site_whose_span_runs_past_the_text_offers_nothing() {
     assert!(truncated.is_empty(), "{truncated:?}");
 }
 
+#[test]
+fn a_zero_width_site_offers_nothing() {
+    let file = SourceFile::parse("test.rs", "fn f() {}".to_owned()).unwrap();
+    let selection = Selection::parse("relational.eq_to_ne").unwrap();
+    let cfg = CfgSet::unconditional();
+    let defaults = Defaults::default();
+    let mut collector = Collector::new(&file, &selection, selection.errors(), &cfg, &defaults);
+
+    collector.emit_at("relational.eq_to_ne", 0..0, "!=", 0, crate::ops::collect::Shape::Expr);
+
+    assert!(collector.finish().is_empty());
+}
+
+#[test]
+fn parameter_shadowing_skips_const_functions_and_reference_patterns() {
+    for source in [
+        "const fn f(value: usize) -> usize { value }",
+        "fn f(ref value: usize) -> usize { *value }",
+        "fn f<'a>(value: Option<&'a u8>) -> impl Iterator<Item = &'a u8> { value.into_iter() }",
+    ] {
+        let found = mutators(source, "parameter.default_shadow", &CfgSet::unconditional());
+
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn f4_semantics_require_positive_type_and_source_shape_evidence() {
+    let cfg = CfgSet::unconditional();
+    let cases = [
+        (
+            "struct Flags { applied: bool } fn f(applied: bool) -> Flags { Flags { applied } }",
+            "bool_expr.negate",
+        ),
+        (
+            "enum Placement { Start } fn f(value: Option<Placement>, placement: Placement) -> Placement { value.unwrap_or(placement) }",
+            "fallback.unwrap_or_to_default",
+        ),
+        (
+            "fn f(value: Option<u8>) -> Option<u8> { value.and_then(Some).filter(|value| *value > 0) }",
+            "iter.remove_filter",
+        ),
+        (
+            "fn remove_file() -> usize { 1 } fn f(path: &std::path::Path) { let _ = std::fs::remove_file(path); }",
+            "call.replace_with_default,call_result.default",
+        ),
+        (
+            r#"fn f() { for _ in [("first", ["a", "b"].as_slice()), ("second", ["c", "d"].as_slice())] {} }"#,
+            "collection.reverse_array",
+        ),
+    ];
+
+    for (source, selection) in cases {
+        let found = mutators(source, selection, &cfg);
+
+        assert!(found.is_empty(), "{selection}: {source}: {found:?}");
+    }
+}
+
+#[test]
+fn f4_semantics_remain_available_with_positive_evidence() {
+    let source = "
+        #[derive(Default)] struct Flags { applied: bool }
+        fn local() -> usize { 1 }
+        fn fields(applied: bool) -> Flags { Flags { applied: applied } }
+        fn fallback(value: Option<usize>, other: usize) -> usize { value.unwrap_or(other) }
+        fn filtered(value: impl Iterator<Item = usize>) -> impl Iterator<Item = usize> {
+            value.filter(|value| *value > 0)
+        }
+        fn calls() -> usize { local() }
+        fn arrays() { let _ = [1, 2]; }
+    ";
+    let found = mutators(
+        source,
+        "bool_expr.negate,fallback.unwrap_or_to_default,iter.remove_filter,call.replace_with_default,call_result.default,collection.reverse_array",
+        &CfgSet::unconditional(),
+    );
+
+    for expected in [
+        "bool_expr.negate",
+        "fallback.unwrap_or_to_default",
+        "iter.remove_filter",
+        "call.replace_with_default",
+        "call_result.default",
+        "collection.reverse_array",
+    ] {
+        assert!(found.contains(&expected), "{expected}: {found:?}");
+    }
+}
+
+#[test]
+fn default_replacements_are_not_offered_for_values_already_at_their_default() {
+    for source in [
+        "fn f(value: Option<bool>) -> bool { value.unwrap_or(false) }",
+        "fn f(value: Option<bool>) -> bool { value.unwrap_or_else(|| false) }",
+        "fn f(value: Option<bool>) -> bool { value.map_or(false, |value| value) }",
+        "fn f(value: Option<bool>) -> bool { value.map_or_else(|| false, |value| value) }",
+        "fn f() -> bool { return false; }",
+        "fn f() -> bool { return bool::default(); }",
+        "fn f() -> Option<bool> { return None; }",
+        "fn f() -> Option<bool> { return Option::default(); }",
+        "fn f() -> String { return String::new(); }",
+        "fn f() -> String { return String::default(); }",
+    ] {
+        let found = mutators(
+            source,
+            "fallback.unwrap_or_to_default,fallback.unwrap_or_else_to_default,fallback.map_or_to_default,fallback.map_or_else_to_default,return_value.default",
+            &CfgSet::unconditional(),
+        );
+
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+
+    let found = mutators(
+        "fn f(value: Option<bool>, fallback: bool) -> bool { if fallback { return true; } value.unwrap_or(fallback) }",
+        "fallback.unwrap_or_to_default,return_value.default",
+        &CfgSet::unconditional(),
+    );
+    assert!(found.contains(&"fallback.unwrap_or_to_default"), "{found:?}");
+    assert!(found.contains(&"return_value.default"), "{found:?}");
+}
+
+#[test]
+fn negating_floating_point_zero_is_not_offered_as_a_mutant() {
+    let found = mutators(
+        "fn f() { let _ = 0.0; let _ = 0.00_f64; let _ = 1.5; }",
+        "literal.float_negate",
+        &CfgSet::unconditional(),
+    );
+
+    assert_eq!(found, vec!["literal.float_negate"]);
+}
+
+#[test]
+fn call_and_regex_semantics_require_their_exact_source_shapes() {
+    for source in [
+        "fn f() { (|| 1)(); }",
+        "fn f(pattern: &str) { Regex::new(pattern); }",
+        r#"fn f() { Regex::new("["); }"#,
+    ] {
+        let found = mutators(
+            source,
+            "call.replace_with_default,call_result.default,regex",
+            &CfgSet::unconditional(),
+        );
+
+        assert!(found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn result_variant_mutations_reuse_copy_safe_parameter_payloads() {
+    let ok = mutators(
+        "fn f(error: &'static str) -> Result<u8, &'static str> { Ok(1) }",
+        "result.ok_to_err",
+        &CfgSet::unconditional(),
+    );
+    let err = mutators(
+        "fn f(value: &'static str) -> Result<&'static str, u8> { Err(1) }",
+        "result.err_to_ok",
+        &CfgSet::unconditional(),
+    );
+
+    assert_eq!(ok, vec!["result.ok_to_err"]);
+    assert_eq!(err, vec!["result.err_to_ok"]);
+}
+
 /// The struct-field omission refuses a literal whose span it cannot index.
 #[test]
 fn a_struct_literal_past_the_text_omits_no_field() {
@@ -848,6 +1011,18 @@ fn one_modules_import_does_not_decide_anothers() {
     );
 }
 
+#[test]
+fn standalone_collection_stays_optimistic_about_cross_file_default_impls() {
+    let file = SourceFile::parse("test.rs", "struct Error; fn f() -> Result<u8, Error> { Ok(1) }".to_owned()).expect("source parses");
+    let selection = Selection::parse("result.ok_to_err").expect("selection parses");
+    let found: Vec<_> = collect_in(&file, &selection, &CfgSet::unconditional())
+        .into_iter()
+        .map(|candidate| candidate.mutator)
+        .collect();
+
+    assert_eq!(found, ["result.ok_to_err"]);
+}
+
 /// Demoting a contested name must not cost the answer for a name nothing contests.
 #[test]
 fn an_uncontested_import_still_resolves_to_where_it_came_from() {
@@ -860,14 +1035,17 @@ fn an_uncontested_import_still_resolves_to_where_it_came_from() {
 
     assert!(foreign.is_empty(), "a foreign error type has no `Default`: {foreign:?}");
 
-    // Local, so `Default::default()` is a guess worth making.
+    // Local but undeclared here, so there is no positive `Default` evidence.
     let local = mutators(
         "mod b { use crate::Error; pub fn g() -> Result<u8, Error> { Ok(0) } }",
         "fn_value.err_default",
         &CfgSet::unconditional(),
     );
 
-    assert_eq!(local, vec!["fn_value.err_default"], "a workspace error type may have a `Default`");
+    assert!(
+        local.is_empty(),
+        "an unknown workspace error type has no positive `Default` evidence"
+    );
 }
 
 /// Two modules importing the *same* path do not disagree, so neither loses its answer.
@@ -911,6 +1089,22 @@ fn an_addition_is_numeric_when_either_side_is() {
     let found = mutators(source, "expr.increment,expr.decrement", &CfgSet::unconditional());
 
     assert_eq!(found, vec!["expr.decrement", "expr.increment"], "{found:?}");
+}
+
+#[test]
+fn subtraction_is_known_to_be_numeric() {
+    let source = "fn f(a: i32, b: i32) { g(a - b); }\n";
+    let found = mutators(source, "expr.increment,expr.decrement", &CfgSet::unconditional());
+
+    assert_eq!(found, vec!["expr.decrement", "expr.increment"], "{found:?}");
+}
+
+#[test]
+fn an_operator_on_a_written_temporal_type_is_not_assumed_numeric() {
+    let source = "use std::time::Duration; fn f(a: Duration, b: Duration) { g(a - b); }\n";
+    let found = mutators(source, "expr.increment,expr.decrement", &CfgSet::unconditional());
+
+    assert!(found.is_empty(), "{found:?}");
 }
 
 /// A tuple field's type is not recorded anywhere this file reads, so it never answers "number".
@@ -1003,6 +1197,28 @@ fn omit_elements_refuses_element_spans_outside_the_macro() {
 }
 
 #[test]
+fn omit_elements_skips_only_an_element_with_an_unreadable_span() {
+    let file = SourceFile::parse("test.rs", "fn f() { vec![1, 2, 3]; }".to_owned()).unwrap();
+    let Item::Fn(function) = &file.ast.items[0] else {
+        panic!("test source should contain a function");
+    };
+    let Stmt::Macro(statement) = &function.block.stmts[0] else {
+        panic!("test source should contain a macro statement");
+    };
+    let node = statement.mac.clone();
+    let mut elements = node.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated).unwrap();
+    elements[1] = syn::parse_quote!(outside);
+    let selection = Selection::parse("collection.omit_element").unwrap();
+    let cfg = CfgSet::unconditional();
+    let defaults = Defaults::default();
+    let mut collector = Collector::new(&file, &selection, selection.errors(), &cfg, &defaults);
+
+    collector.omit_elements(&node, &elements);
+
+    assert_eq!(collector.finish().len(), 2);
+}
+
+#[test]
 fn omit_update_refuses_field_spans_outside_the_struct() {
     let mut file = SourceFile::parse("test.rs", "fn f() { S { field: 1, ..base }; }".to_owned()).unwrap();
     let Item::Fn(function) = &mut file.ast.items[0] else {
@@ -1042,6 +1258,70 @@ fn rename_method_refuses_a_name_span_outside_the_call() {
     collector.rename_method(&node, "first");
 
     assert!(collector.finish().is_empty());
+}
+
+#[test]
+fn rename_method_refuses_call_text_past_the_file() {
+    let mut file = SourceFile::parse("test.rs", "fn f(values: &[u8]) { values.first(); }".to_owned()).unwrap();
+    let Item::Fn(function) = &file.ast.items[0] else {
+        panic!("test source should contain a function");
+    };
+    let Stmt::Expr(Expr::MethodCall(node), _) = &function.block.stmts[0] else {
+        panic!("test source should contain a method call");
+    };
+    let node = node.clone();
+    file.text.truncate(node.span().byte_range().end - 1);
+    let selection = Selection::parse("iter.first_to_last").unwrap();
+    let cfg = CfgSet::unconditional();
+    let defaults = Defaults::default();
+    let mut collector = Collector::new(&file, &selection, selection.errors(), &cfg, &defaults);
+
+    collector.rename_method(&node, "first");
+
+    assert!(collector.finish().is_empty());
+}
+
+#[test]
+fn typed_and_inferred_let_else_divergence_is_visited() {
+    for source in [
+        "fn f(value: Option<usize>) { loop { let Some(index): Option<usize> = value else { continue; }; consume(index); } }",
+        "fn f(value: usize, values: &[u8]) { loop { let index = value else { continue; }; consume(values[index]); } }",
+    ] {
+        let found = mutators(source, "loop.continue_to_break,expr.increment", &CfgSet::unconditional());
+        assert!(!found.is_empty(), "{source}: {found:?}");
+    }
+}
+
+#[test]
+fn comparison_traversal_respects_unsigned_evidence_on_each_side() {
+    let source = "fn f(left: usize, right: i32) { let _ = left < right; let _ = right < left; }";
+    let found = mutators(source, "expr.increment,expr.decrement", &CfgSet::unconditional());
+
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn value_required_if_branches_keep_their_trailing_continue() {
+    let source = "fn f(flag: bool) { loop { let _ = if flag { 1 } else { continue; }; } }";
+    let found = mutators(source, "loop.delete_continue", &CfgSet::unconditional());
+
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn tuple_struct_fields_and_as_slice_arguments_are_visited() {
+    let source = "struct Pair(usize); fn f(value: usize) { let _ = Pair { 0: value }; let _ = [value].as_slice(value + 1); }";
+    let found = mutators(source, "expr.increment,arith.add_to_sub", &CfgSet::unconditional());
+
+    assert!(!found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn calls_with_unknown_or_undefaultable_returns_are_not_replaced() {
+    let source = "fn borrowed() -> &'static str { \"value\" } fn f() { <usize>::default(); borrowed(); }";
+    let found = mutators(source, "call.replace_with_default,call_result.default", &CfgSet::unconditional());
+
+    assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]

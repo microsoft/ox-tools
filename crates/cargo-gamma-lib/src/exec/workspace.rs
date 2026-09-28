@@ -12,7 +12,7 @@ use std::io::{Read as _, Write as _};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::{env, io, thread};
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
@@ -28,6 +28,7 @@ use super::faults::{self, Fault};
 use super::loader::{Launch, toolchain_libraries};
 use super::manifest::{CAP_LINTS, Manifest, RUNTIME_CRATE, RUNTIME_PACKAGE, WorkspaceRuntimeFeatures, anchor_cargo_config, cap_lints};
 use super::nextest::Harness;
+use super::resources::{ResourcePermit, Resources};
 use super::rustc_wrapper::{CAPTURE_DIR_VAR, ORIGINAL_WRAPPER_VAR, reset_capture_directory, wrapper_path};
 use super::sync::sync_or_copy;
 use super::test_binary::{TEST_THREADS_VAR, TestBinary, harness_threads};
@@ -130,6 +131,9 @@ pub struct Workspace {
     /// afterwards that would fix it. Every launch shares this one answer, so the baseline and the
     /// sweep still cannot disagree about the width of the workload they measure and judge.
     harness_threads: OnceLock<Option<String>>,
+
+    /// Shared resources declared by selected tests and their campaign-wide admission state.
+    resources: Resources,
 
     /// The private cache home inherited by nested Cargo Gamma processes in self-tests.
     #[cfg(any(test, feature = "internals"))]
@@ -234,6 +238,7 @@ impl Workspace {
     }
 
     /// Copies and instruments the tree while retaining locks taken before cache adoption.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn prepare_with_locks(
         source: &Utf8Path,
         target_directory: &Utf8Path,
@@ -318,6 +323,7 @@ impl Workspace {
             cargo_metadata: None,
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
+            resources: Resources::default(),
             #[cfg(any(test, feature = "internals"))]
             test_cache_home: crate::testing::cache_home(source),
             _workspace_lock: workspace_lock,
@@ -383,6 +389,7 @@ impl Workspace {
     /// for the last component alone, so it cannot see a link among the *intermediate* ones; the copy
     /// recreates links verbatim, including absolute targets, so such a prefix is reachable. The
     /// physical path is therefore checked as well.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn overwrite(root: &Utf8Path, path: &Utf8Path, contents: &str) -> Result<bool> {
         let metadata = fs::symlink_metadata(path.as_std_path())
             .map_err(|cause| error!("could not write `{path}`, which the copy did not create").caused_by(cause))?;
@@ -444,6 +451,7 @@ impl Workspace {
             leak: true,
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
+            resources: Resources::default(),
             #[cfg(any(test, feature = "internals"))]
             test_cache_home,
             _workspace_lock: tempfile::tempfile().expect("a temporary file should be creatable"),
@@ -461,6 +469,23 @@ impl Workspace {
         self.cargo.test_args = args;
     }
 
+    pub(super) fn set_resources(&mut self, resources: Resources) {
+        self.resources = resources;
+    }
+
+    pub(super) fn acquire_resources<'work>(&'work self, binary: &TestBinary, only: super::verdict::Only<'_>) -> ResourcePermit<'work> {
+        self.resources.acquire(binary, only)
+    }
+
+    pub(super) fn required_resources(&self, binary: &TestBinary, only: super::verdict::Only<'_>) -> Vec<Arc<str>> {
+        self.resources.required(binary, only)
+    }
+
+    pub(super) fn resource_capacities(&self) -> crate::HashMap<Arc<str>, usize> {
+        self.resources.capacities()
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn cargo(&self) -> Command {
         let mut command = Command::new(cargo_binary());
 
@@ -538,6 +563,7 @@ impl Workspace {
         self.base.join(".cargo-gamma-report-source")
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn snapshot_report_sources(&self, plan: &crate::discover::Plan) -> Result<()> {
         let root = self.report_source_root();
         match fs::symlink_metadata(root.as_std_path()) {
@@ -609,6 +635,7 @@ impl Workspace {
 
     /// Reconstructs the environment Cargo would give the test executables from the metadata and
     /// successful build stream that produced them.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn arm_test_environment(&mut self, binaries: &[TestBinary], artifacts: &str) -> Result<()> {
         self.prepend_test_search_paths(binaries);
         let metadata = self.capture_cargo_metadata()?;
@@ -625,6 +652,7 @@ impl Workspace {
     }
 
     /// Adds the profile and dependency directories Cargo prepends when it runs a test binary.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn prepend_test_search_paths(&mut self, binaries: &[TestBinary]) {
         debug_assert!(
             self.launch.get().is_none(),
@@ -710,6 +738,7 @@ impl Workspace {
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn write_scratch(&self, name: &str, contents: &str) -> Result<Utf8PathBuf> {
         let path = self.target.join(name);
 
@@ -801,6 +830,7 @@ impl Workspace {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn rustc_capture_directory(root: &Utf8Path, target: &Utf8Path) -> Option<Utf8PathBuf> {
     wrapper_path()?;
     let cfg::RustcWrapperChain::Interpose(_) = cfg::rustc_wrapper_chain(root) else {
@@ -810,6 +840,7 @@ fn rustc_capture_directory(root: &Utf8Path, target: &Utf8Path) -> Option<Utf8Pat
     Some(target.join(".cargo-gamma-rustc"))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn wrapper_is_self(candidate: &OsStr, wrapper: &Utf8Path, root: &Utf8Path) -> bool {
     let candidate = std::path::Path::new(candidate);
 
@@ -834,6 +865,7 @@ fn wrapper_is_self(candidate: &OsStr, wrapper: &Utf8Path, root: &Utf8Path) -> bo
         .is_some_and(|(candidate, wrapper)| candidate == wrapper)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn executable_names_equal(left: &str, right: &str) -> bool {
     if cfg!(windows) {
         left.eq_ignore_ascii_case(right)
@@ -976,6 +1008,7 @@ pub(crate) fn campaign_base_from_state(root: &Utf8Path, cache: Option<&Utf8Path>
 }
 
 /// Resolves the workspace root and persisted campaign base for a state-consuming command.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn campaign_state_from(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
     let selected = physical(selected);
 
@@ -1035,6 +1068,7 @@ fn validate_campaign_state_owner(root: &Utf8Path, base: &Utf8Path) -> Result<()>
 /// locator under that lock. The second resolution therefore observes either the completed
 /// campaign's locator or the same state as the first resolution, never the stale locator that led
 /// this command to the lock.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn claim_campaign_state(selected: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(Utf8PathBuf, Utf8PathBuf, File)> {
     let (root, _base) = campaign_state_from(selected, cache)?;
     let lock = claim_workspace(&root)?;
@@ -1049,6 +1083,7 @@ pub(crate) fn claim_campaign_state(selected: &Utf8Path, cache: Option<&Utf8Path>
     Ok((root, base, lock))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn cache_owner_root(base: &Utf8Path) -> Option<Utf8PathBuf> {
     let base_metadata = fs::symlink_metadata(base.as_std_path()).ok()?;
     if !base_metadata.is_dir() || base_metadata.file_type().is_symlink() {
@@ -1110,6 +1145,7 @@ fn metadata_workspace(selected: &Utf8Path) -> Option<(Utf8PathBuf, Utf8PathBuf)>
 ///
 /// Returns whether the locator was published. Postprocessing advice depends on this: a campaign
 /// record that exists but cannot be found by the advised command is not actionable.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn remember_campaign_base(root: &Utf8Path, base: &Utf8Path) -> bool {
     let root = physical(root);
     if !cache_owner_root(base).is_some_and(|owner| same_existing_path(&owner, &root)) {
@@ -1126,6 +1162,7 @@ pub(crate) fn remember_campaign_base(root: &Utf8Path, base: &Utf8Path) -> bool {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_campaign_base(root: &Utf8Path, target: &Utf8Path) -> Utf8PathBuf {
     #[cfg(any(test, feature = "internals"))]
     if crate::testing::cache_home(root).is_some() {
@@ -1140,6 +1177,7 @@ fn default_campaign_base(root: &Utf8Path, target: &Utf8Path) -> Utf8PathBuf {
 }
 
 /// The directory every default per-workspace cache is a child of.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_cache_home(root: &Utf8Path) -> Utf8PathBuf {
     #[cfg(any(test, feature = "internals"))]
     if let Some(home) = crate::testing::cache_home(root) {
@@ -1228,6 +1266,7 @@ fn digest_workspace_path(root: &Utf8Path) -> String {
 ///
 /// Only the workspace's own cache is cleaned. A cache redirected elsewhere with `--cache-dir` is
 /// not reachable from the workspace root alone and is the caller's to remove.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn clean_cache(root: &Utf8Path, target: &Utf8Path) -> Result<bool> {
     let scratch = gamma_base(root, None);
     let campaign = campaign_base(root, target, None);
@@ -1297,6 +1336,7 @@ fn remove_cached(entry: &fs::DirEntry) -> Result<()> {
 ///
 /// Purely textual, so it never touches the filesystem and never fails: the paths it is given are
 /// scratch directories that do not exist yet, which is exactly when canonicalising cannot answer.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn absolute(path: &Utf8Path) -> Utf8PathBuf {
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     let rooted = if path.is_absolute() {
@@ -1339,6 +1379,7 @@ pub(crate) fn absolute(path: &Utf8Path) -> Utf8PathBuf {
 /// enough to answer the only question asked of it: where the path physically lands. A path that
 /// cannot be resolved at all is returned as written, because being unable to answer must not fail
 /// a run that would otherwise have been fine.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn physical(path: &Utf8Path) -> Utf8PathBuf {
     let mut existing = path.to_owned();
     let mut tail: Vec<String> = Vec::new();
@@ -1381,6 +1422,7 @@ fn physical(path: &Utf8Path) -> Utf8PathBuf {
 /// Both are decided on the physical paths, because that is what the copy walks, and refused up
 /// front rather than allowed to proceed: the alternative is a tree that contains a copy of itself,
 /// growing until the disk does, and every mutant measured in it measured in the wrong file.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn ensure_copy_terminates(source: &Utf8Path, base: &Utf8Path) -> Result<()> {
     let (real_source, real_base) = (physical(source), physical(base));
 
@@ -1397,7 +1439,8 @@ fn ensure_copy_terminates(source: &Utf8Path, base: &Utf8Path) -> Result<()> {
         return Err(error!(
             "the scratch directory `{base}` is `{real_base}`, inside the workspace at `{source}`, but is \
              not named as a path inside it — so the copy cannot skip it and would copy the copy.\n\
-             Point --cache-dir at a directory that is really outside the workspace."
+             Point --cache-dir at a directory that is really outside the workspace. To move only \
+             compiler artifacts, set CARGO_TARGET_DIR or Cargo's build.target-dir instead."
         )
         .usage());
     }
@@ -1405,7 +1448,8 @@ fn ensure_copy_terminates(source: &Utf8Path, base: &Utf8Path) -> Result<()> {
     Err(error!(
         "the scratch directory `{base}` is the workspace at `{source}` itself, so copying the \
          workspace would copy the copy.\n\
-         Point --cache-dir at a directory outside the workspace."
+         Point --cache-dir at a directory outside the workspace. To move only compiler artifacts, \
+         set CARGO_TARGET_DIR or Cargo's build.target-dir instead."
     )
     .usage())
 }
@@ -1455,13 +1499,16 @@ fn ensure_vcs_visibility(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
 
     Err(error!(
         "`--cache-dir` would relocate the cached workspace to `{scratch}`, where build scripts cannot see VCS metadata available from `{source}`: {}. \
-         Use a cache directory beneath the same repository, or remove the build-time VCS dependency.",
+         Use a cache directory beneath the same repository, or leave `--cache-dir` unset and set \
+         `CARGO_TARGET_DIR` (or Cargo's `build.target-dir`) to move only compiler artifacts while \
+         preserving the synchronized workspace's Git context.",
         hidden.iter().map(|marker| marker.as_str()).collect::<Vec<_>>().join(", ")
     )
     .usage())
 }
 
 /// Makes source-control metadata visible from an isolated default scratch tree.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn expose_vcs_metadata(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
     let markers = visible_vcs_metadata(source);
 
@@ -1553,6 +1600,7 @@ pub fn scratch_tree(root: &Utf8Path, scratch: Option<&Utf8Path>) -> Utf8PathBuf 
 /// The caller has already taken the stable workspace lock. This second lock protects the inverse
 /// collision: different workspaces naming the same redirected cache. Ownership is established only
 /// for an empty directory; existing unmarked contents are never adopted as cargo-gamma state.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn claim_redirected_cache(source: &Utf8Path, base: &Utf8Path) -> Result<File> {
     if base.exists() {
         reject_linked_cache(base)?;
@@ -1652,6 +1700,7 @@ fn reject_linked_cache(base: &Utf8Path) -> Result<()> {
 /// can write to their own cache can still change it under a run they started themselves, and no
 /// check here would be about a trust boundary.
 #[cfg(unix)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn reject_foreign_writers(base: &Utf8Path) -> Result<()> {
     /// The bits that let a group member or anyone else write to a directory.
     const SHARED_WRITE: u32 = 0o022;
@@ -1713,6 +1762,7 @@ fn reject_foreign_writers(base: &Utf8Path) -> Result<()> {
 /// does not depend on identity.
 #[cfg(not(unix))]
 #[expect(clippy::unnecessary_wraps, reason = "matches the Unix signature this stands in for")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn reject_foreign_writers(_base: &Utf8Path) -> Result<()> {
     Ok(())
 }
@@ -1745,6 +1795,7 @@ impl CacheKind {
 /// The marker is opened once and both inspected and read through that one handle, so the file whose
 /// type is checked is the file whose contents decide the answer. Reopening it by name between the
 /// two would leave an interval in which the checked file could be replaced by another.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_cache_owner(source: &Utf8Path, base: &Utf8Path, kind: CacheKind) -> Result<()> {
     let owner = base.join(CACHE_OWNER);
     let source = physical(source);
@@ -1826,6 +1877,7 @@ fn validate_cache_owner(source: &Utf8Path, base: &Utf8Path, kind: CacheKind) -> 
 }
 
 #[cfg(unix)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn open_cache_owner(owner: &Utf8Path) -> io::Result<File> {
     // O_NOFOLLOW rejects a final-component symlink at open time. O_NONBLOCK prevents a planted
     // special file such as a FIFO from blocking before handle metadata can reject it.
@@ -1836,6 +1888,7 @@ fn open_cache_owner(owner: &Utf8Path) -> io::Result<File> {
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn open_cache_owner(owner: &Utf8Path) -> io::Result<File> {
     let metadata = fs::symlink_metadata(owner.as_std_path())?;
 
@@ -1958,6 +2011,7 @@ fn claim_workspace_at(root: &Utf8Path, base: &Utf8Path) -> Result<File> {
 /// expression at a time, so removing the namespace or identity join from the derivation leaves
 /// this structural check intact and turns the mutant into a refusal rather than a write to the
 /// platform cache home.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_default_cache_base(root: &Utf8Path, base: &Utf8Path) -> Result<()> {
     let root = absolute(root);
     let expected_identity = workspace_identity(&root);
@@ -1984,6 +2038,7 @@ fn validate_default_cache_base(root: &Utf8Path, base: &Utf8Path) -> Result<()> {
 }
 
 /// Refuses a malformed target-resident campaign base before it can be claimed or cleaned.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn validate_default_campaign_base(root: &Utf8Path, target: &Utf8Path, base: &Utf8Path) -> Result<()> {
     let root = absolute(root);
 
@@ -2094,6 +2149,7 @@ fn try_lock(file: &File) -> core::result::Result<(), TryLockError> {
 ///
 /// Every manifest is visited, not just the ones belonging to mutated packages: a package nobody
 /// mutates is still built, and a path dependency it cannot resolve fails the build just as surely.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn anchor_manifests(source: &Utf8Path, root: &Utf8Path, runtime: &Utf8Path) -> Result<()> {
     // Read before any manifest in the tree is edited: `root` is the copy of the whole workspace
     // `source` names, so its own `Cargo.toml` carries whatever `[workspace.dependencies]`
@@ -2153,6 +2209,7 @@ fn anchor_manifests(source: &Utf8Path, root: &Utf8Path, runtime: &Utf8Path) -> R
 /// Missing any of this is not a warning: with `-D warnings` ambient the instrumented tree compiles
 /// under deny-by-default, guard-induced warnings become errors, and the mutants that produced them
 /// are withdrawn as unviable — a score computed over a silently smaller denominator.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn cap_ambient_rustflags(command: &mut Command) {
     // The encoded spelling separates flags with a unit separator rather than a space, which is the
     // whole reason it exists: a flag may contain spaces.
@@ -2665,6 +2722,109 @@ mod tests {
         );
     }
 
+    fn initialize_git_build_fixture(source: &Utf8Path) -> String {
+        fs::create_dir_all(source.join("src")).expect("source");
+        fs::write(
+            source.join("Cargo.toml"),
+            "[package]\nname = \"git-context\"\nversion = \"0.0.0\"\nedition = \"2024\"\nbuild = \"build.rs\"\n\n[workspace]\n",
+        )
+        .expect("manifest");
+        fs::write(source.join("src/lib.rs"), "pub fn present() {}\n").expect("library");
+        fs::write(
+            source.join("build.rs"),
+            r#"fn main() {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git runs");
+    assert!(output.status.success(), "git rev-parse failed");
+    std::fs::write("observed-head", output.stdout).expect("head is recorded");
+}
+"#,
+        )
+        .expect("build script");
+
+        let run_git = |arguments: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(source)
+                .args(arguments)
+                .output()
+                .expect("git runs");
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            output
+        };
+        let _ = run_git(&["init", "--quiet"]);
+        let _ = run_git(&["add", "."]);
+        let _ = run_git(&[
+            "-c",
+            "user.name=cargo-gamma test",
+            "-c",
+            "user.email=cargo-gamma@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ]);
+
+        String::from_utf8(run_git(&["rev-parse", "HEAD"]).stdout)
+            .expect("Git hashes are UTF-8")
+            .trim()
+            .to_owned()
+    }
+
+    fn assert_external_target_preserves_git_context(source: &Utf8Path, root: &Utf8Path, expected_head: &str) {
+        let scratch = root.join("scratch");
+        let target = root.join("external-target");
+        fs::create_dir_all(scratch.join("src")).expect("scratch");
+        fs::copy(source.join("Cargo.toml"), scratch.join("Cargo.toml")).expect("manifest copy");
+        fs::copy(source.join("build.rs"), scratch.join("build.rs")).expect("build script copy");
+        fs::copy(source.join("src/lib.rs"), scratch.join("src/lib.rs")).expect("library copy");
+        expose_vcs_metadata(source, &scratch).expect("Git context");
+
+        let output = Workspace::adopt(scratch.clone(), target.clone())
+            .cargo()
+            .arg("build")
+            .arg("--quiet")
+            .output()
+            .expect("cargo runs");
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(
+            fs::read_to_string(scratch.join("observed-head"))
+                .expect("the build script recorded the selected commit")
+                .trim(),
+            expected_head
+        );
+        assert!(target.join("debug").is_dir(), "Cargo artifacts must use the external target");
+        assert!(
+            !scratch.join("target").exists(),
+            "the synchronized workspace must not gain a local target"
+        );
+    }
+
+    #[test]
+    fn an_external_target_preserves_git_context_for_a_checkout_and_linked_worktree() {
+        let directory = crate::testing::workdir("workspace-external-target-git-");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 root");
+        let repository = root.join("repository");
+        let expected_head = initialize_git_build_fixture(&repository);
+
+        assert_external_target_preserves_git_context(&repository, &root.join("ordinary"), &expected_head);
+
+        let worktree = root.join("linked-worktree");
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["worktree", "add", "--quiet", "--detach"])
+            .arg(&worktree)
+            .arg("HEAD")
+            .output()
+            .expect("git worktree runs");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_external_target_preserves_git_context(&worktree, &root.join("linked"), &expected_head);
+    }
+
     #[test]
     fn empty_and_non_utf8_owner_markers_are_rejected() {
         let directory = crate::testing::workdir("workspace-owner-invalid-");
@@ -2838,6 +2998,7 @@ mod tests {
     /// approved, so the name that was checked is not the directory that gets built into and run
     /// from.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_linked_redirected_cache_is_refused() {
         let directory = private_system_tempdir("linked-cache-");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
@@ -3395,6 +3556,7 @@ mod tests {
             leak: false,
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
+            resources: Resources::default(),
             test_cache_home: crate::testing::cache_home(root),
             _workspace_lock: File::create(base.join("lock").as_std_path()).unwrap(),
             _cache_lock: None,
@@ -3412,6 +3574,7 @@ mod tests {
     /// unset rather than by clearing it on this shared, multithreaded process, so the read races
     /// nothing and there is nothing to restore afterwards.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_harness_width_is_settled_on_the_workspace_rather_than_on_this_process() {
         if env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
             return;
@@ -3429,6 +3592,7 @@ mod tests {
 
     /// A width the caller chose is left alone, and so nothing is set on the launched command.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_caller_who_chose_a_harness_width_gets_no_setting_from_the_run() {
         if env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
             return;
@@ -3498,6 +3662,7 @@ mod tests {
     ///
     /// In an ordinary suite run the scenario variable is unset and this returns at once.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn env_child_helper() {
         let Ok(scenario) = env::var(CHILD_SCENARIO_VAR) else {
             return;
@@ -3550,6 +3715,7 @@ mod tests {
     /// The point is isolation: the variables are set on the child's `Command`, so the code under
     /// test reads exactly the values this process chose without any thread ever writing the running
     /// environment — the data race that made a safe `set_var` wrapper unsound in the first place.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_child(scenario: &str, vars: &[(&str, Option<&str>)]) -> BTreeMap<String, String> {
         let executable = env::current_exe().expect("the test binary knows its own path");
         let mut command = Command::new(executable);
@@ -3590,6 +3756,7 @@ mod tests {
 
     /// Lifts the `key=value` block [`env_child_helper`] prints out of the harness's surrounding
     /// output, or `None` if the child never emitted a complete block.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn parse_payload(stdout: &str) -> Option<BTreeMap<String, String>> {
         let mut lines = stdout.lines().skip_while(|line| *line != PAYLOAD_OPEN);
 
@@ -3632,6 +3799,7 @@ mod tests {
     /// halves: a distinctive value is injected into the child, the child reads it back through the
     /// code under test, and the parent's own environment is shown to be exactly what it was before.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_child_helper_isolates_the_environment_from_the_parent() {
         // A value the parent does not carry: a process-wide write of it would be visible here both
         // before and after, and racing to spawn a real cargo elsewhere with it would break.
@@ -3657,6 +3825,7 @@ mod tests {
     /// this process, so it cannot reach the other tests spawning real cargo processes beside this
     /// one.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn cargo_binary_prefers_the_invoking_cargo_but_falls_back_when_it_is_unset() {
         if env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
             return;
@@ -3695,6 +3864,7 @@ mod tests {
             leak: true,
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
+            resources: Resources::default(),
             test_cache_home,
             _workspace_lock: tempfile::tempfile().unwrap(),
             _cache_lock: None,
@@ -3722,6 +3892,7 @@ mod tests {
             leak: true,
             launch: OnceLock::new(),
             harness_threads: OnceLock::new(),
+            resources: Resources::default(),
             test_cache_home: None,
             _workspace_lock: tempfile::tempfile().unwrap(),
             _cache_lock: None,
@@ -3734,6 +3905,7 @@ mod tests {
     /// user's own environment configured instead of silently dropping them from the instrumented
     /// build.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_ambient_encoded_rustflags_is_extended_rather_than_replaced() {
         if env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
             return;
@@ -3753,6 +3925,7 @@ mod tests {
     /// extended the same way: replacing it would silently drop whatever the caller's environment
     /// configured, changing what the instrumented tree compiles to.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_ambient_rustflags_is_extended_rather_than_replaced() {
         if env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
             return;
@@ -3776,6 +3949,7 @@ mod tests {
     /// that produced them are withdrawn as unviable, and the score is computed over a silently
     /// smaller denominator.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_ambient_build_rustflags_carries_the_cap() {
         if env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
             return;
@@ -3797,6 +3971,7 @@ mod tests {
 
     /// The same for the target-table spelling, which outranks the build one.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_ambient_target_rustflags_carries_the_cap() {
         if env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
             return;
@@ -3822,6 +3997,7 @@ mod tests {
     /// once a global one is set — but it would put the tool's flag into variables the child process
     /// passes on to anything it in turn runs.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_global_rustflags_leaves_the_lower_spellings_alone() {
         if env::var_os(crate::exec::UNDER_GAMMA_VAR).is_some() {
             return;
@@ -3885,6 +4061,7 @@ mod tests {
     /// against a literal, and any change to the algorithm has to be a deliberate one made with
     /// that consequence in view.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_default_cache_directory_name_is_pinned_to_this_crate() {
         assert_eq!(digest_workspace_path(Utf8Path::new("/workspace")), "155d8208f4c61a79");
         assert_eq!(digest_workspace_path(Utf8Path::new("/workspace/one")), "85dacdefd093e7c1");
@@ -4387,6 +4564,8 @@ mod tests {
 
         assert!(failure.is_usage(), "{failure}");
         assert!(failure.to_string().contains("--cache-dir"), "{failure}");
+        assert!(failure.to_string().contains("CARGO_TARGET_DIR"), "{failure}");
+        assert!(failure.to_string().contains("build.target-dir"), "{failure}");
     }
 
     /// The mirror image: a base named *inside* the workspace, so it looks pruned, but reached
@@ -4483,6 +4662,8 @@ mod tests {
 
         assert!(failure.is_usage(), "{failure}");
         assert!(failure.to_string().contains("--cache-dir"), "{failure}");
+        assert!(failure.to_string().contains("CARGO_TARGET_DIR"), "{failure}");
+        assert!(failure.to_string().contains("build.target-dir"), "{failure}");
         assert_eq!(
             fs::read_to_string(marker.as_std_path()).expect("VCS metadata"),
             "ref: refs/heads/main\n"

@@ -174,8 +174,34 @@ const fn win32_succeeded(result: i32) -> bool {
     result != 0
 }
 
+/// Converts a public byte limit to the native job-object field width.
+///
+/// The error exists only for a 32-bit Windows target receiving a limit above its address space;
+/// supported CI targets are 64-bit, so that platform-width adapter cannot be driven there.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn native_limit(limit: u64) -> Option<usize> {
+    usize::try_from(limit).ok()
+}
+
+/// Installs a public byte limit into the target-width Win32 structure.
+///
+/// The refusal branch is reachable only on 32-bit Windows with a limit larger than its address
+/// space. The 64-bit CI targets exercise the installed policy through the kernel-facing tests.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn install_memory_limit(limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION, limit: u64) -> Option<()> {
+    let bytes = native_limit(limit)?;
+    limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+    limits.JobMemoryLimit = bytes;
+    Some(())
+}
+
 #[cfg(test)]
 struct FaultInjectingCalls;
+
+#[cfg(test)]
+thread_local! {
+    static LAST_OPEN_THREAD: core::cell::Cell<Option<u32>> = const { core::cell::Cell::new(None) };
+}
 
 #[cfg(test)]
 impl NativeCalls for FaultInjectingCalls {
@@ -196,6 +222,7 @@ impl NativeCalls for FaultInjectingCalls {
     }
 
     fn open_thread(&self, thread: u32) -> HANDLE {
+        LAST_OPEN_THREAD.set(Some(thread));
         if native_faults::fired(NativeCall::OpenThread) {
             core::ptr::null_mut()
         } else {
@@ -495,12 +522,7 @@ impl Job {
             // The job-wide limit is the one worth having: a per-process limit would let a test
             // that spawns helpers reach any total it liked, which is the shape of runaway
             // allocation this is here to stop.
-            let Ok(bytes) = usize::try_from(limit) else {
-                return None;
-            };
-
-            limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
-            limits.JobMemoryLimit = bytes;
+            install_memory_limit(&mut limits, limit)?;
         }
 
         if !configure_job(job.handle, &mut limits) {
@@ -722,9 +744,11 @@ mod tests {
     fn the_safe_open_thread_wrapper_preserves_the_requested_identifier() {
         // SAFETY: this takes no arguments and returns the calling thread's numeric identifier.
         let current = unsafe { GetCurrentThreadId() };
+        LAST_OPEN_THREAD.set(None);
         let opened = open_thread(current);
 
         assert!(valid_handle(opened), "the wrapper must open the requested current thread");
+        assert_eq!(LAST_OPEN_THREAD.get(), Some(current));
 
         // SAFETY: the successful call above returned this newly owned handle.
         drop(unsafe { OwnedHandle::from_raw_handle(opened) });
@@ -1178,6 +1202,7 @@ mod tests {
 
     /// A process that actually tries to pass the hard ceiling produces the event `usage` trusts.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[ignore = "requires a Windows job-memory limit violation; run explicitly"]
     fn a_job_memory_limit_violation_is_reported() {
         const LIMIT: u64 = 256 * 1024 * 1024;
@@ -1207,6 +1232,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_child_attempts_to_pass_its_job_memory_limit() {
         if env::var_os("CARGO_GAMMA_JOB_LIMIT_REGRESSION_CHILD").is_none() {
             return;

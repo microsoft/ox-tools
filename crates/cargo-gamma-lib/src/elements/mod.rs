@@ -28,4 +28,4 @@ pub use report::{
     FileResult, Framework, Location, MergeProvenance, MutantResult, Position, Report, RunInfo, ShardInfo, SourceProvenance, Thresholds,
     VerdictProvenance, build, to_json, write_json,
 };
-pub(crate) use report::{build_from, supported_schema_version, validate_schema};
+pub(crate) use report::{build_from, is_flaky_status, supported_schema_version, validate_schema};

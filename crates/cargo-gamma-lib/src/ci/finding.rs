@@ -91,6 +91,19 @@ mod tests {
     }
 
     #[test]
+    fn every_finding_kind_has_specific_explanatory_text() {
+        for (outcome, phrase) in [
+            (Outcome::NoCoverage, "No test reaches"),
+            (Outcome::Timeout, "timed out"),
+            (Outcome::OutOfMemory, "memory limit"),
+            (Outcome::Survived, "no test failed"),
+        ] {
+            let finding = mutant("/w/src/a.rs", 1, "relational.gt_to_ge", outcome);
+            assert!(describe(&finding).contains(phrase), "{}", describe(&finding));
+        }
+    }
+
+    #[test]
     fn a_path_outside_the_root_is_left_alone() {
         // Better an absolute path a consumer cannot resolve than a relative one pointing at the
         // wrong file inside the checkout.

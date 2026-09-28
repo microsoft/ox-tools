@@ -118,4 +118,15 @@ mod tests {
     fn empty_input_has_no_header() {
         assert_eq!(header_comment("", CommentStyle::DoubleSlash), None);
     }
+
+    #[test]
+    fn optional_shebang_extraction_returns_none_for_empty_input() {
+        assert_eq!(header_after_optional_shebang("", CommentStyle::Hash), None);
+    }
+
+    #[test]
+    fn script_header_returns_none_when_required_frontmatter_lines_are_missing() {
+        assert_eq!(script_header("", CommentStyle::Hash), None);
+        assert_eq!(script_header("#!/usr/bin/env cargo\n", CommentStyle::Hash), None);
+    }
 }

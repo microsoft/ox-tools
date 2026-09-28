@@ -6,7 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use futures::stream::TryStreamExt;
+use futures::Stream;
+use futures::stream::StreamExt;
 use futures_util::future::join_all;
 use ohno::{EnrichableExt, IntoAppError, app_err};
 use tokio::io::AsyncWriteExt;
@@ -26,6 +27,9 @@ pub(super) const LOG_TARGET: &str = "      docs";
 pub const DOCS_BASE_URL: &str = "https://docs.rs";
 
 const MAX_CONCURRENT_REQUESTS: usize = 5;
+const DOWNLOAD_ID_STEP: u64 = 1;
+const DOWNLOAD_OPERATION: &str = "docs_download";
+const UNREADABLE_BODY_PLACEHOLDER: &str = "<unable to read body>";
 
 #[derive(Debug, Clone)]
 pub struct Provider {
@@ -79,9 +83,9 @@ impl Provider {
     }
 
     async fn fetch_docs_for_crate(self, crate_spec: CrateSpec, tracker: RequestTracker) -> (CrateSpec, ProviderResult<DocsData>) {
+        let _completion = RequestCompletion::new(tracker, TrackedTopic::Docs);
         let _permit = self.throttler.acquire().await;
         let result = self.fetch_docs_for_crate_core(&crate_spec).await;
-        tracker.complete_request(TrackedTopic::Docs);
 
         (crate_spec, result)
     }
@@ -101,7 +105,7 @@ impl Provider {
         let spec = crate_spec.clone();
 
         // resilient_download retries on Err, passes through Ok(None) for 404.
-        let result = crate::facts::resilient_http::resilient_download("docs_download", spec, None, move |spec| {
+        let result = crate::facts::resilient_http::resilient_download(DOWNLOAD_OPERATION, spec, None, move |spec| {
             let provider = provider.clone();
             async move { provider.download_zst_core(&spec).await }
         })
@@ -121,7 +125,7 @@ impl Provider {
             }
         };
 
-        let docs_data = match Self::calculate_docs_metrics(&temp_file, crate_spec) {
+        let docs_data = match Self::calculate_docs_metrics_and_remove(&temp_file, crate_spec).await {
             Ok(data) => {
                 let m = &data.metrics;
                 log::debug!(target: LOG_TARGET, "Successfully calculated docs metrics for {crate_spec}");
@@ -139,17 +143,9 @@ impl Provider {
                     log::debug!(target: LOG_TARGET, "Could not save cache for {crate_spec}: {e:#}");
                 }
 
-                tokio::fs::remove_file(&temp_file)
-                    .await
-                    .unwrap_or_else(|e| log::debug!(target: LOG_TARGET, "Could not remove temp file '{}': {e:#}", temp_file.display()));
-
                 return ProviderResult::Unavailable(reason.into());
             }
         };
-
-        tokio::fs::remove_file(&temp_file)
-            .await
-            .unwrap_or_else(|e| log::debug!(target: LOG_TARGET, "Could not remove temp file '{}': {e:#}", temp_file.display()));
 
         match self.cache.save(&filename, &docs_data) {
             Ok(()) => ProviderResult::Found(docs_data),
@@ -167,6 +163,11 @@ impl Provider {
     /// Download logic for a single attempt.
     /// Returns `Ok(None)` for 404 (not retryable), `Ok(Some(path))` on success.
     async fn download_zst_core(&self, crate_spec: &CrateSpec) -> Result<Option<PathBuf>> {
+        self.download_zst_to(crate_spec, temp_zst_path(crate_spec.name(), &crate_spec.version().to_string()))
+            .await
+    }
+
+    async fn download_zst_to(&self, crate_spec: &CrateSpec, temp_file: PathBuf) -> Result<Option<PathBuf>> {
         let crate_name = crate_spec.name();
         let version = crate_spec.version().to_string();
 
@@ -179,31 +180,20 @@ impl Provider {
             if status == reqwest::StatusCode::NOT_FOUND {
                 return Ok(None);
             }
-            let body = response.text().await.unwrap_or_else(|_| String::from("<unable to read body>"));
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(_) => UNREADABLE_BODY_PLACEHOLDER.to_owned(),
+            };
             log::debug!(target: LOG_TARGET, "Response body (first 500 chars): {}", body.chars().take(500).collect::<String>());
             return Err(app_err!("could not download docs for {crate_spec}: HTTP {status}"));
         }
-
-        // Create a temporary file with a name unique to this download
-        let temp_file = temp_zst_path(crate_name, &version);
 
         let mut file = tokio::fs::File::create(&temp_file)
             .await
             .into_app_err_with(|| format!("creating temp file '{}'", temp_file.display()))?;
 
-        let mut stream = response.bytes_stream();
-        let mut total_bytes = 0;
-
-        while let Some(chunk) = stream.try_next().await.into_app_err("reading response chunk")? {
-            total_bytes += chunk.len();
-            file.write_all(&chunk)
-                .await
-                .into_app_err_with(|| format!("writing to temp file '{}'", temp_file.display()))?;
-        }
-
-        file.flush()
-            .await
-            .into_app_err_with(|| format!("flushing temp file '{}'", temp_file.display()))?;
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "streaming an HTTP response into a file is an external I/O adapter boundary")]
+        let total_bytes = write_response_body(response.bytes_stream(), &mut file, &temp_file).await?;
 
         log::debug!(target: LOG_TARGET, "Downloaded {total_bytes} bytes for {crate_spec} to temp file '{}'", temp_file.display());
         Ok(Some(temp_file))
@@ -212,6 +202,7 @@ impl Provider {
     fn calculate_docs_metrics(zst_path: impl AsRef<Path>, crate_spec: &CrateSpec) -> Result<DocsData> {
         let path = zst_path.as_ref();
         log::debug!(target: LOG_TARGET, "Opening .zst file for {crate_spec}: {}", path.display());
+        // #[gamma::skip(try.propagate_to_unwrap, reason = "opening downloaded documentation is a filesystem adapter boundary whose errors must remain recoverable")]
         let file = fs::File::open(path).into_app_err_with(|| format!("opening file '{}' for {crate_spec}", path.display()))?;
         let reader = std::io::BufReader::new(file);
 
@@ -219,6 +210,59 @@ impl Provider {
 
         super::calc_metrics::calculate_docs_metrics(&json_bytes, crate_spec)
     }
+
+    async fn calculate_docs_metrics_and_remove(zst_path: impl AsRef<Path>, crate_spec: &CrateSpec) -> Result<DocsData> {
+        let path = zst_path.as_ref().to_path_buf();
+        let worker_path = path.clone();
+        let worker_spec = crate_spec.clone();
+        let result = tokio::task::spawn_blocking(move || Self::calculate_docs_metrics(worker_path, &worker_spec))
+            .await
+            .map_err(|cause| app_err!("documentation metric worker failed for {crate_spec}: {cause}"))?;
+        tokio::fs::remove_file(&path)
+            .await
+            .unwrap_or_else(|e| log::debug!(target: LOG_TARGET, "Could not remove temp file '{}': {e:#}", path.display()));
+        result
+    }
+}
+
+struct RequestCompletion {
+    tracker: RequestTracker,
+    topic: TrackedTopic,
+}
+
+impl RequestCompletion {
+    fn new(tracker: RequestTracker, topic: TrackedTopic) -> Self {
+        Self { tracker, topic }
+    }
+}
+
+impl Drop for RequestCompletion {
+    fn drop(&mut self) {
+        self.tracker.complete_request(self.topic);
+    }
+}
+
+async fn write_response_body<S, E, W>(stream: S, writer: &mut W, temp_file: &Path) -> Result<usize>
+where
+    S: Stream<Item = core::result::Result<bytes::Bytes, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    tokio::pin!(stream);
+    let mut total_bytes = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.into_app_err_with(|| "reading response chunk".to_owned())?;
+        total_bytes += chunk.len();
+        writer
+            .write_all(&chunk)
+            .await
+            .into_app_err_with(|| format!("writing to temp file '{}'", temp_file.display()))?;
+    }
+    writer
+        .flush()
+        .await
+        .into_app_err_with(|| format!("flushing temp file '{}'", temp_file.display()))?;
+    Ok(total_bytes)
 }
 
 /// Builds a unique path for a crate's downloaded `.zst` file.
@@ -235,24 +279,99 @@ fn temp_zst_path(crate_name: &str, version: &str) -> PathBuf {
     let safe_name = sanitize_path_component(crate_name);
     let safe_version = sanitize_path_component(version);
     let pid = std::process::id();
-    let id = NEXT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed);
+    let id = next_download_id(&NEXT_DOWNLOAD_ID);
 
     std::env::temp_dir().join(format!("{safe_name}@{safe_version}-{pid}-{id}.zst"))
+}
+
+fn next_download_id(counter: &AtomicU64) -> u64 {
+    counter.fetch_add(DOWNLOAD_ID_STEP, Ordering::Relaxed)
 }
 
 #[cfg(test)]
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use core::pin::Pin;
+    use core::task::{Context, Poll};
+    use std::io;
     use std::process::Command;
     use std::sync::Mutex;
 
     use semver::Version;
 
     use super::*;
+    use crate::facts::Progress;
+    use crate::facts::docs::DocsMetrics;
+    use crate::facts::request_tracker::TopicStatus;
+
+    #[derive(Debug)]
+    struct NoOpProgress;
+
+    impl Progress for NoOpProgress {
+        fn set_phase(&self, _phase: &str) {}
+        fn set_determinate(&self, _callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {}
+        fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
+        fn println(&self, _msg: &str) {}
+        fn done(&self) {}
+    }
 
     fn test_crate_spec(name: &str, version: &str) -> CrateSpec {
         CrateSpec::from_arcs(Arc::from(name), Arc::new(Version::parse(version).unwrap()))
+    }
+
+    #[tokio::test]
+    async fn get_docs_data_tracks_each_crate_exactly_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path(), core::time::Duration::MAX, false);
+        let spec = test_crate_spec("cached", "1.0.0");
+        cache
+            .save(
+                &Provider::get_cache_filename(&spec),
+                &DocsData {
+                    metrics: DocsMetrics {
+                        doc_coverage_percentage: 100.0,
+                        public_api_elements: 1,
+                        undocumented_elements: 0,
+                        examples_in_docs: 0,
+                        has_crate_level_docs: true,
+                        broken_doc_links: 0,
+                    },
+                },
+            )
+            .unwrap();
+        let provider = Provider::new(cache, None);
+        let tracker = RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>));
+
+        assert_eq!(provider.get_docs_data(Arc::from([spec]), &tracker).await.count(), 1);
+        assert_eq!(tracker.topic_state(TrackedTopic::Docs), (1, 1, TopicStatus::Done));
+    }
+
+    struct FailingWriter {
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl tokio::io::AsyncWrite for FailingWriter {
+        fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+            if self.fail_write {
+                Poll::Ready(Err(io::Error::other("synthetic write failure")))
+            } else {
+                Poll::Ready(Ok(buf.len()))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if self.fail_flush {
+                Poll::Ready(Err(io::Error::other("synthetic flush failure")))
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
     }
 
     #[derive(Debug)]
@@ -387,16 +506,141 @@ mod tests {
 
     #[test]
     fn test_provider_new_default_url() {
-        let cache = Cache::new("/tmp/test", core::time::Duration::from_hours(1), false);
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, None);
         assert_eq!(provider.base_url, DOCS_BASE_URL);
+        let debug = format!("{:?}", provider.throttler);
+        assert!(debug.contains("permits: 5"), "unexpected throttler state: {debug}");
     }
 
     #[test]
     fn test_provider_new_custom_url() {
-        let cache = Cache::new("/tmp/test", core::time::Duration::from_hours(1), false);
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, Some("https://custom.docs.rs"));
         assert_eq!(provider.base_url, "https://custom.docs.rs");
+    }
+
+    #[tokio::test]
+    async fn provider_sends_the_declared_user_agent() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let provider = Provider::new(Cache::new(temp.path(), core::time::Duration::MAX, false), Some(&server.uri()));
+
+        assert!(
+            provider
+                .download_zst_core(&test_crate_spec("anyhow", "1.0.100"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].headers.get("user-agent").unwrap().to_str().unwrap(), "cargo-aprz");
+    }
+
+    #[tokio::test]
+    async fn transport_errors_are_returned_instead_of_panicking() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = Provider::new(Cache::new(temp.path(), core::time::Duration::MAX, false), Some("http://[::1"));
+
+        let error = provider.download_zst_core(&test_crate_spec("anyhow", "1.0.100")).await.unwrap_err();
+
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_destination_that_cannot_be_created_is_an_error() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("payload"))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let provider = Provider::new(Cache::new(temp.path(), core::time::Duration::MAX, false), Some(&server.uri()));
+        let destination = temp.path().join("missing").join("download.zst");
+
+        let error = provider
+            .download_zst_to(&test_crate_spec("anyhow", "1.0.100"), destination.clone())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("creating temp file"), "{error}");
+        assert!(error.to_string().contains(&destination.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn download_diagnostics_constants_are_exact() {
+        assert_eq!(DOWNLOAD_OPERATION, "docs_download");
+        assert_eq!(UNREADABLE_BODY_PLACEHOLDER, "<unable to read body>");
+    }
+
+    #[tokio::test]
+    async fn response_stream_errors_are_propagated_with_context() {
+        let stream = futures::stream::iter([Err::<bytes::Bytes, _>(io::Error::other("truncated body"))]);
+        let mut writer = tokio::io::sink();
+
+        let error = write_response_body(stream, &mut writer, Path::new("download.zst"))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("reading response chunk"), "{error}");
+        assert_eq!(error.source().map(ToString::to_string).as_deref(), Some("truncated body"));
+    }
+
+    #[tokio::test]
+    async fn response_write_errors_are_propagated_with_the_destination() {
+        let stream = futures::stream::iter([Ok::<_, io::Error>(bytes::Bytes::from_static(b"chunk"))]);
+        let mut writer = FailingWriter {
+            fail_write: true,
+            fail_flush: false,
+        };
+
+        let error = write_response_body(stream, &mut writer, Path::new("download.zst"))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("writing to temp file 'download.zst'"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn response_flush_errors_are_propagated_with_the_destination() {
+        let stream = futures::stream::empty::<core::result::Result<bytes::Bytes, io::Error>>();
+        let mut writer = FailingWriter {
+            fail_write: false,
+            fail_flush: true,
+        };
+
+        let error = write_response_body(stream, &mut writer, Path::new("download.zst"))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("flushing temp file 'download.zst'"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn downloaded_file_is_removed_after_successful_or_failed_parsing() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/anyhow-1.0.100.json.zst");
+        let valid = temp.path().join("valid.zst");
+        fs::copy(fixture, &valid).unwrap();
+        Provider::calculate_docs_metrics_and_remove(&valid, &test_crate_spec("anyhow", "1.0.100"))
+            .await
+            .unwrap();
+        assert!(!valid.exists());
+
+        let invalid = temp.path().join("invalid.zst");
+        fs::write(&invalid, b"not zstd").unwrap();
+        let _ = Provider::calculate_docs_metrics_and_remove(&invalid, &test_crate_spec("anyhow", "1.0.100"))
+            .await
+            .unwrap_err();
+        assert!(!invalid.exists());
     }
 
     #[test]
@@ -407,6 +651,16 @@ mod tests {
         let second = temp_zst_path("anyhow", "1.0.100");
 
         assert_ne!(first, second);
+        assert_eq!(DOWNLOAD_ID_STEP, 1);
+    }
+
+    #[test]
+    fn download_ids_advance_by_exactly_one() {
+        let counter = AtomicU64::new(0);
+
+        assert_eq!(next_download_id(&counter), 0);
+        assert_eq!(next_download_id(&counter), 1);
+        assert_eq!(next_download_id(&counter), 2);
     }
 
     #[test]

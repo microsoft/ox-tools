@@ -4,7 +4,7 @@
 use camino::Utf8PathBuf;
 use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Effects};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
 
 use super::When;
@@ -65,14 +65,14 @@ pub struct Cli {
     /// When to use color in output.
     #[arg(long, global = true, value_name = "WHEN", default_value = "auto", help_heading = "Global options")]
     pub color: When,
-
-    /// When to show the progress display.
-    #[arg(long, global = true, value_name = "WHEN", default_value = "auto", help_heading = "Global options")]
-    pub progress: When,
 }
 
 /// The subcommands.
 #[derive(Debug, Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "clap owns each command's typed arguments here; boxing the run arguments would complicate dispatch without reducing command-line work"
+)]
 pub enum Command {
     /// Run mutation testing.
     Run(RunArgs),
@@ -139,25 +139,32 @@ pub struct MergeArgs {
     /// undetected because no test assertion rejected them.
     #[arg(long, value_name = "PERCENT", value_parser = percentage, help_heading = "Run control")]
     pub min_score: Option<f64>,
+
+    /// Fail if more than this many merged mutants have an unresolved flaky outcome.
+    ///
+    /// Flakes remain outside the mutation score because they establish neither a kill nor a
+    /// survival. Set this to zero for a strict campaign gate.
+    #[arg(long, value_name = "COUNT", help_heading = "Run control")]
+    pub max_flaky: Option<usize>,
 }
 
 /// Arguments for `suppress`.
 #[derive(Debug, Args)]
 pub struct SuppressArgs {
-    /// Identifies the workspace and campaign cache whose persisted outcomes to promote.
-    ///
-    /// The command does not rerun the campaign. Explicit mutant-selection settings are rejected
-    /// because they cannot narrow a persisted ledger; execution settings retained for command-line
-    /// compatibility do not trigger Cargo metadata, building, or tests. The inherited `--dry-run`
-    /// flag is rejected because only `--dry-run-suppress` previews source edits.
-    #[command(flatten)]
-    pub run: RunArgs,
+    /// Path to the workspace or package whose completed campaign should be used.
+    #[arg(short = 'd', long, value_name = "PATH", default_value = ".", help_heading = "Suppressing")]
+    pub dir: Utf8PathBuf,
 
-    /// Print the diff without changing anything.
-    ///
-    /// Spelled apart from the campaign command's `--dry-run`: this option reads the persisted
-    /// outcomes and validates the affected source, but holds back the source edit.
+    /// Read the completed campaign from this cache directory instead of cargo-gamma's default.
+    #[arg(long, value_name = "PATH", help_heading = "Cache")]
+    pub cache_dir: Option<Utf8PathBuf>,
+
+    /// Write the generated directives instead of printing what would be written.
     #[arg(long, help_heading = "Suppressing")]
+    pub apply: bool,
+
+    /// Deprecated compatibility flag; suppress previews by default.
+    #[arg(long, hide = true, conflicts_with = "apply", help_heading = "Suppressing")]
     pub dry_run_suppress: bool,
 
     /// Which verdicts may be suppressed.
@@ -191,10 +198,9 @@ pub struct UnsuppressArgs {
 
     /// Remove the directives instead of printing what would be removed.
     ///
-    /// The preview is the default, which is the reverse of `suppress`. Writing a directive can be
-    /// read back and reverted at leisure; deleting one that was in fact load-bearing turns a
-    /// considered decision into a survivor nobody chose to accept, and by then the reason it
-    /// carried is gone too.
+    /// Preview is the default for both suppression commands. Deleting a directive that was in fact
+    /// load-bearing turns a considered decision into a survivor nobody chose to accept, and by
+    /// then the reason it carried is gone too.
     #[arg(long, help_heading = "Suppressing")]
     pub apply: bool,
 
@@ -348,9 +354,8 @@ pub struct ConfigArgs {
 
 /// How long a build may take before it is abandoned.
 ///
-/// Not offered to `estimate`. These change nothing an estimate reports — they can only turn a
-/// working estimate into an error — and capping the build is at odds with a subcommand whose job is
-/// to tell you what the build costs.
+/// A run builds once, so these limits bound campaign startup rather than individual mutant
+/// executions.
 #[derive(Debug, Args, Default)]
 #[command(next_help_heading = "Building")]
 pub struct BuildLimitArgs {
@@ -377,11 +382,7 @@ pub struct BuildLimitArgs {
     pub rollback_rounds: u32,
 }
 
-/// The options common to every command that builds, measures a baseline and runs tests.
-///
-/// Shared by `run`, `estimate` and `advise`, because all three build the tree and measure the
-/// baseline the same way — an estimate that measured differently from the run it predicts would be
-/// predicting a different run.
+/// The options for building, measuring a baseline and running tests.
 #[derive(Debug, Args, Default)]
 #[command(next_help_heading = "Running tests")]
 #[expect(
@@ -400,6 +401,13 @@ pub struct MeasureArgs {
     /// How many mutants to test at once. Defaults to one more than the available parallelism.
     #[arg(short = 'j', long, value_name = "N")]
     pub jobs: Option<usize>,
+
+    /// Override the maximum concurrency of a test resource declared with `#[gamma::resource]`.
+    ///
+    /// Repeat as `--resource-concurrency NAME=N`. A declared resource with no override is
+    /// serialized.
+    #[arg(long = "resource-concurrency", value_name = "NAME=N")]
+    pub resource_concurrency: Vec<crate::exec::ResourceLimit>,
 
     /// Multiple of each test binary's baseline duration that a mutant is allowed.
     #[arg(long, value_name = "FACTOR", value_parser = factor)]
@@ -500,6 +508,13 @@ pub struct MeasureArgs {
     #[arg(long = "test-package", value_name = "NAME")]
     pub test_packages: Vec<String>,
 
+    /// Use only library unit-test harnesses as the verdict oracle.
+    ///
+    /// This narrows test-target compilation and execution without changing which source files are
+    /// mutated. Integration, binary, example, and benchmark test harnesses are not built.
+    #[arg(long, help_heading = "Running tests")]
+    pub test_lib: bool,
+
     /// Only let these test targets decide a verdict.
     ///
     /// Matches cargo target names — a package's unit tests take the name of the lib or bin they
@@ -567,6 +582,8 @@ pub struct MeasureArgs {
     /// checkout. The path is the cache itself, must be empty on first use, and becomes owned by this
     /// workspace; another workspace cannot share it. Build artifacts live here too, so reusing the
     /// directory across this workspace's runs keeps them incremental while a fresh one starts cold.
+    /// To move only compiler artifacts, leave this unset and configure Cargo's `CARGO_TARGET_DIR`
+    /// or `build.target-dir`; the synchronized source then retains its Git context.
     #[arg(long, value_name = "PATH", help_heading = "Cache")]
     pub cache_dir: Option<Utf8PathBuf>,
 
@@ -598,13 +615,37 @@ pub struct RunArgs {
     #[command(flatten)]
     pub select: SelectArgs,
 
-    /// Run only mutants that genuinely survived in this cargo-gamma report.
+    /// When to show the progress display.
+    #[arg(long, value_name = "WHEN", default_value = "auto", help_heading = "Run control")]
+    pub progress: When,
+
+    /// Show a live testing dashboard instead of the progress bar.
     ///
-    /// Stable mutant identities are rediscovered from the current source, so adding tests does not
-    /// make the report stale. Mutants that timed out or exceeded their memory limit are not genuine
-    /// survivors and are not selected.
-    #[arg(long, value_name = "PATH", help_heading = "Selecting what to mutate")]
-    pub only_survivors_from: Option<Utf8PathBuf>,
+    /// The dashboard is shown only when the progress display is enabled and updates at most once
+    /// per second. Exceptional mutant outcomes continue to be printed above it.
+    #[arg(long, help_heading = "Run control")]
+    pub dashboard: bool,
+
+    /// Run only mutants that genuinely survived in the previous cargo-gamma report.
+    ///
+    /// Reads `gamma-report.json` from the effective artifact directory. Stable mutant identities
+    /// are rediscovered from the current source, so adding tests does not make the report stale.
+    /// Mutants that timed out or exceeded their memory limit are not genuine survivors and are not
+    /// selected.
+    #[arg(long, help_heading = "Selecting what to mutate")]
+    pub only_survivors: bool,
+
+    /// Run exactly this current mutant ID; repeat to select more than one.
+    ///
+    /// Repeat the option to rerun a set of findings. Every requested ID must resolve under the
+    /// current source selection, and explicit selections always receive fresh verdicts.
+    #[arg(
+        long = "mutant",
+        value_name = "ID",
+        conflicts_with = "only_survivors",
+        help_heading = "Selecting what to mutate"
+    )]
+    pub mutants: Vec<String>,
 
     /// How the build and the baseline are measured.
     #[command(flatten)]
@@ -627,6 +668,13 @@ pub struct RunArgs {
     /// rejected them.
     #[arg(long, value_name = "PERCENT", value_parser = percentage, help_heading = "Run control")]
     pub min_score: Option<f64>,
+
+    /// Fail if more than this many mutants have an unresolved flaky outcome.
+    ///
+    /// Flakes remain outside the mutation score. Set this to zero to require every failing mutant
+    /// execution to receive a reliable confirmation verdict.
+    #[arg(long, value_name = "COUNT", conflicts_with = "no_confirm", help_heading = "Run control")]
+    pub max_flaky: Option<usize>,
 
     /// How an incremental run reuses the last run: `no` starts cold; `build` reuses compiler
     /// unviability and checked execution hints.
@@ -688,15 +736,6 @@ pub struct RunArgs {
     #[arg(long, value_name = "POLICY", default_value = "hashed", help_heading = "Reporting")]
     pub diag_names: crate::diag::Redaction,
 
-    /// Project what the rest of the run will cost, once the build and baseline have been measured.
-    ///
-    /// Printed at the only moment it is both possible and useful: everything before it was
-    /// measured, and everything after it is the wait you are deciding whether to sit through. The
-    /// range assumes a killed mutant gets through 60% of the tests that can reach it before one
-    /// of them fails.
-    #[arg(long, help_heading = "Run control")]
-    pub estimate: bool,
-
     /// Dump what the run measured about itself, for people working on this tool.
     ///
     /// Hidden, unstable and undocumented on purpose: it exists so that a change to the scheduler,
@@ -724,7 +763,7 @@ pub struct CompletionsArgs {
 }
 
 /// What `list` can enumerate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListKind {
     /// The mutants that would be generated.
     Mutants,
@@ -743,9 +782,29 @@ pub enum ListKind {
 #[derive(Debug, Args)]
 pub struct ListArgs {
     /// What to list.
-    #[arg(value_enum, default_value = "mutants")]
-    pub what: ListKind,
+    #[command(subcommand)]
+    pub command: ListCommand,
+}
 
+/// The independently documented `list` modes.
+#[derive(Debug, Subcommand)]
+pub enum ListCommand {
+    /// List the mutants that would be generated.
+    Mutants(ListMutantsArgs),
+
+    /// List the source files that would be analyzed.
+    Files(ListFilesArgs),
+
+    /// List the mutator registry.
+    Mutators(ListRegistryArgs),
+
+    /// List the named mutator presets.
+    Presets(ListRegistryArgs),
+}
+
+/// Arguments for `list mutants`.
+#[derive(Debug, Args)]
+pub struct ListMutantsArgs {
     /// Which mutants to consider.
     #[command(flatten)]
     pub select: SelectArgs,
@@ -759,12 +818,80 @@ pub struct ListArgs {
     pub json_report: Option<Utf8PathBuf>,
 }
 
+/// Arguments for `list files`.
+#[derive(Debug, Args)]
+pub struct ListFilesArgs {
+    /// Which source files to consider.
+    #[command(flatten)]
+    pub select: SelectArgs,
+
+    /// Emit machine-readable JSON instead of text.
+    #[arg(long, help_heading = "Reporting")]
+    pub json: bool,
+}
+
+/// Arguments for registry-only list modes.
+#[derive(Debug, Args)]
+pub struct ListRegistryArgs {
+    /// Path used to find `gamma.toml`.
+    #[arg(short = 'd', long, value_name = "PATH", default_value = ".", help_heading = "Selecting mutators")]
+    pub dir: Utf8PathBuf,
+
+    /// Mutators to mark as enabled, as a comma-separated selector list.
+    #[arg(long, value_name = "SELECTORS", allow_hyphen_values = true, help_heading = "Selecting mutators")]
+    pub mutators: Option<String>,
+
+    /// Where the configuration comes from.
+    #[command(flatten)]
+    pub config: ConfigArgs,
+
+    /// Emit machine-readable JSON instead of text.
+    #[arg(long, help_heading = "Reporting")]
+    pub json: bool,
+}
+
 /// Arguments for `explain`.
 #[derive(Debug, Args)]
 pub struct ExplainArgs {
     /// A mutator name, family, preset, or mutant id.
     #[arg(value_name = "SUBJECT")]
     pub subject: String,
+
+    /// Path to the workspace used to resolve a current mutant ID.
+    #[arg(
+        short = 'd',
+        long,
+        value_name = "PATH",
+        default_value = ".",
+        help_heading = "Selecting current mutants"
+    )]
+    pub dir: Utf8PathBuf,
+
+    /// Read historical verdict context from this cargo-gamma JSON report.
+    #[arg(long, value_name = "PATH", help_heading = "Reporting")]
+    pub report: Option<Utf8PathBuf>,
+
+    /// Activate Cargo features while resolving the current mutant population.
+    #[command(flatten)]
+    pub features: FeatureArgs,
+
+    /// Restrict current discovery to these packages.
+    #[arg(
+        short = 'p',
+        long = "package",
+        value_name = "NAME",
+        conflicts_with = "workspace",
+        help_heading = "Selecting current mutants"
+    )]
+    pub packages: Vec<String>,
+
+    /// Resolve current mutants across every workspace package.
+    #[arg(long, conflicts_with = "packages", help_heading = "Selecting current mutants")]
+    pub workspace: bool,
+
+    /// Configuration-file selection.
+    #[command(flatten)]
+    pub config: ConfigArgs,
 }
 
 impl Default for SelectArgs {
@@ -1043,25 +1170,61 @@ mod tests {
     }
 
     #[test]
-    fn a_survivor_report_path_is_a_run_option() {
-        let cli =
-            Cli::try_parse_from(["cargo-gamma", "run", "--only-survivors-from", "previous.json"]).expect("survivor report path parses");
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn survivor_selection_is_a_run_option() {
+        let cli = Cli::try_parse_from(["cargo-gamma", "run", "--only-survivors"]).expect("survivor selection parses");
         let Command::Run(args) = cli.command else {
             panic!("the run subcommand was parsed as something else");
         };
 
-        assert_eq!(args.only_survivors_from, Some(Utf8PathBuf::from("previous.json")));
+        assert!(args.only_survivors);
+    }
+
+    #[test]
+    fn estimate_is_not_a_run_option() {
+        Cli::try_parse_from(["cargo-gamma", "run", "--estimate"]).expect_err("the removed estimate flag must not parse");
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn resource_concurrency_is_repeatable_and_validated() {
+        let cli = Cli::try_parse_from([
+            "cargo-gamma",
+            "run",
+            "--resource-concurrency",
+            "cargo-subprocess=2",
+            "--resource-concurrency",
+            "powershell=1",
+        ])
+        .expect("resource capacities parse");
+        let Command::Run(args) = cli.command else {
+            panic!("expected run");
+        };
+
+        assert_eq!(
+            args.measure.resource_concurrency,
+            [
+                crate::exec::ResourceLimit::new("cargo-subprocess", 2).expect("valid resource"),
+                crate::exec::ResourceLimit::new("powershell", 1).expect("valid resource")
+            ]
+        );
+        Cli::try_parse_from(["cargo-gamma", "run", "--resource-concurrency", "cargo=0"])
+            .expect_err("zero is not a valid resource capacity");
     }
 
     /// The command line no longer requires the two together, because the file supplies one of them
     /// and is read after parsing. What must not follow is that a half pair typed on the command
     /// line becomes acceptable — it is refused later instead, on the effective values.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn half_a_pair_parses_and_is_refused_afterwards() {
-        let cli = Cli::try_parse_from(["cargo-gamma", "list", "--shard-count", "4"]).expect("parsing must not reject the split");
+        let cli = Cli::try_parse_from(["cargo-gamma", "list", "mutants", "--shard-count", "4"]).expect("parsing must not reject the split");
 
         let Command::List(args) = cli.command else {
             panic!("the list subcommand was parsed as something else");
+        };
+        let ListCommand::Mutants(args) = args.command else {
+            panic!("the mutants list mode was parsed as something else");
         };
 
         assert_eq!(args.select.shard_count, Some(4));
@@ -1077,13 +1240,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn mutator_presets_are_listed_by_name() {
         let cli = Cli::try_parse_from(["cargo-gamma", "list", "presets"]).expect("list kind parses");
         let Command::List(args) = cli.command else {
             panic!("expected list");
         };
 
-        assert_eq!(args.what, ListKind::Presets);
+        assert!(matches!(args.command, ListCommand::Presets(_)));
     }
 
     #[test]
@@ -1177,6 +1341,7 @@ mod tests {
     /// because nothing in clap requires the default to be a value `Eligible::parse` accepts — the
     /// failure would surface only when a user ran `suppress` with no `--eligible`.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn suppress_defaults_to_suppressing_both_timeouts_and_out_of_memory() {
         let cli = Cli::try_parse_from(["cargo-gamma", "suppress"]).expect("suppress parses with no arguments");
 
@@ -1187,9 +1352,31 @@ mod tests {
         let eligible = crate::fix::Eligible::parse(&args.eligible).expect("the default must be a value the parser accepts");
 
         assert_eq!(eligible, vec![crate::fix::Eligible::Timeout, crate::fix::Eligible::OutOfMemory]);
+        assert!(!args.apply, "suppress must preview unless source edits are explicitly requested");
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn suppress_apply_and_legacy_preview_are_distinct_modes() {
+        let cli = Cli::try_parse_from(["cargo-gamma", "suppress", "--apply"]).expect("suppress apply parses");
+        let Command::Suppress(args) = cli.command else {
+            panic!("expected the suppress subcommand");
+        };
+        assert!(args.apply);
+        assert!(!args.dry_run_suppress);
+
+        let cli = Cli::try_parse_from(["cargo-gamma", "suppress", "--dry-run-suppress"]).expect("legacy preview parses");
+        let Command::Suppress(args) = cli.command else {
+            panic!("expected the suppress subcommand");
+        };
+        assert!(!args.apply);
+        assert!(args.dry_run_suppress);
+
+        Cli::try_parse_from(["cargo-gamma", "suppress", "--apply", "--dry-run-suppress"]).unwrap_err();
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_zero_merge_window_is_the_documented_disabled_value() {
         use clap::CommandFactory as _;
 
@@ -1271,6 +1458,7 @@ mod tests {
 
     /// Artifact routing is directory-wide.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn artifact_and_cache_directories_parse() {
         let cli = Cli::try_parse_from(["cargo gamma", "run", "--artifact-dir", "out"]).expect("the directory parses");
 
@@ -1292,6 +1480,7 @@ mod tests {
     /// `--config` once said `<FILE>` and `--cache-dir` said `<DIR>`, which reads as though they
     /// accept different things from the eleven other path-valued flags. They do not.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn path_valued_flags_all_use_the_same_placeholder() {
         use clap::CommandFactory as _;
 

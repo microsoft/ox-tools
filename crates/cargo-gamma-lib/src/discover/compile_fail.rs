@@ -41,6 +41,7 @@ pub struct CompileFailTarget {
 /// is that it names a target precisely enough to act on, and a warning about the wrong one is worse
 /// than none: `--exclude-test` takes a target out of the oracle, so acting on a bad name silently
 /// narrows what can convict a mutant.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn compile_fail_targets(metadata: &Metadata) -> Vec<CompileFailTarget> {
     let mut found = Vec::new();
 

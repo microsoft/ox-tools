@@ -121,6 +121,7 @@ const NAME_ATTEMPTS: u64 = 64;
 /// the sequence restarts when a replacement process receives the same pid. `EEXIST` is therefore
 /// retried with another sequence value; exhausting the finite retry budget is safer than sharing
 /// an old cgroup's accounting.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn create_child_with(root: &Path, kind: &str, pid: u32, generation: u64, mut next: impl FnMut() -> u64) -> io::Result<PathBuf> {
     for _attempt in 0..NAME_ATTEMPTS {
         let path = root.join(format!("{kind}.{pid}.{generation}.{}", next()));
@@ -146,6 +147,7 @@ fn reaper() -> std::sync::MutexGuard<'static, Reaper> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn leaf_owner(name: &std::ffi::OsStr) -> Option<LeafOwner> {
     let name = name.to_str()?;
     let mut pieces = name.split('.');
@@ -191,6 +193,7 @@ fn process_generation(pid: u32) -> io::Result<u64> {
 ///
 /// An error other than `NotFound` is deliberately treated as live: permission and namespace
 /// boundaries must not turn a leaf belonging to another running invocation into one we remove.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn owner_is_live(owner: LeafOwner) -> bool {
     match process_generation(owner.pid) {
         Ok(generation) => owner.generation.is_none_or(|owned| generation == owned),
@@ -204,6 +207,7 @@ fn owner_is_live(owner: LeafOwner) -> bool {
 /// registered before it can be observed here, so only one dropped after foreground removal gave up
 /// can be removed. A failed `rmdir` normally means an orphan still occupies the cgroup; returning
 /// `true` asks the background reaper to try again after it exits.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn reap_owned_leaves(root: &Path) -> bool {
     let Ok(entries) = fs::read_dir(root) else {
         return true;
@@ -271,6 +275,7 @@ fn next_name_ticket(sequence: &AtomicU64) -> u64 {
 /// caller may be told to start a thread, and a compare-and-swap is what makes that true where a
 /// load followed by a store would let two callers both see `false`. One reaper thread per
 /// abandoned leaf is the failure this prevents.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn claim_reaper(running: &AtomicBool) -> bool {
     running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok()
 }
@@ -279,11 +284,13 @@ fn claim_reaper(running: &AtomicBool) -> bool {
 ///
 /// Without this, a single failed thread spawn would leave the claim held forever and no later
 /// abandoned leaf would ever be reaped, on a run that is still perfectly able to spawn threads.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn release_reaper_claim(running: &AtomicBool) {
     running.store(false, Ordering::Release);
 }
 
 /// Starts the bounded, shared background reaper after foreground cleanup gives up.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn ensure_reaper() {
     if !claim_reaper(&REAPER_RUNNING) {
         return;
@@ -296,6 +303,7 @@ fn ensure_reaper() {
 }
 
 /// Reaps leaves that become empty after their owning run has moved on.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn reaper_loop() -> ! {
     loop {
         let task = {
@@ -343,6 +351,7 @@ fn settled(
 }
 
 /// Works out whether this process can create memory-controlled cgroups, and where.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn discover() -> Result<PathBuf, String> {
     let root = discover_with(own, delegate, probe)?;
     let pending = reap_owned_leaves(&root);
@@ -422,6 +431,7 @@ fn unified_entry(listed: &str) -> Option<&str> {
 }
 
 /// Ensures children of `own` will have the memory controller, moving this process if it must.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn delegate(own: &Path) -> Result<PathBuf, String> {
     if lists(own, "cgroup.subtree_control", "memory") {
         return Ok(own.to_owned());
@@ -515,6 +525,7 @@ fn probe(root: &Path) -> Result<(), String> {
     probe_with(root, process::id(), || next_name_ticket(&SEQUENCE))
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn probe_with(root: &Path, pid: u32, next: impl FnMut() -> u64) -> Result<(), String> {
     let generation = process_generation(pid).map_err(|cause| format!("process generation could not be read: {cause}"))?;
     let path = create_child_with(root, "gamma.probe", pid, generation, next).map_err(|cause| {
@@ -557,6 +568,7 @@ fn unoffered(path: &Path) -> Option<&'static str> {
 /// Separated from [`Situation::Unsupported`] because the two demand opposite responses: a host that
 /// can never hold a leaf lets an unmetered run degrade once, while a host that can and did not is
 /// one launch that must be refused rather than run outside its boundary.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn refused(reason: String) -> PlatformError {
     PlatformError::new(Situation::Refused, reason)
 }
@@ -627,6 +639,7 @@ impl Cgroup {
     /// creator's own generation could not be read, every candidate name under the root was taken,
     /// a ceiling could not be written, or the leaf's `cgroup.kill` switch could not be opened. That
     /// concerns one launch rather than the host, and the caller must not launch that command.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn create(limit: Option<u64>) -> Result<Self, PlatformError> {
         let root = root().map_err(|reason| PlatformError::new(Situation::Unsupported, reason))?;
         Self::create_at(root, limit)
@@ -637,6 +650,7 @@ impl Cgroup {
     /// Returns `Ok(None)` for the cached host-wide unsupported condition without constructing a
     /// backtrace-bearing [`PlatformError`]. Per-launch failures remain [`Situation::Refused`]
     /// errors because a supported host failed to create this particular boundary.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn create_unmetered_if_supported() -> Result<Option<Self>, PlatformError> {
         let Ok(root) = root() else {
             return Ok(None);
@@ -645,6 +659,7 @@ impl Cgroup {
         Self::create_at(root, None).map(Some)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_at(root: &Path, limit: Option<u64>) -> Result<Self, PlatformError> {
         let (group, start_reaper) = {
             // Creation and registration are one critical section. A reaper never sees a
@@ -725,6 +740,7 @@ impl Cgroup {
     /// writing before the fork. The descriptor has to exist before the child does, because the
     /// child moves itself in between `fork` and `exec`; the caller must not spawn after this
     /// refusal.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn arm(&self, command: &mut Command) -> Result<(), PlatformError> {
         let procs = self.path.join("cgroup.procs");
         let file = OpenOptions::new()
@@ -775,6 +791,7 @@ impl Cgroup {
     /// # Errors
     ///
     /// Returns the operating system's reason when the cgroup kill switch could not be written.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn kill(&self) -> io::Result<()> {
         if let Some(kill) = self.kill.as_ref() {
             let fd = kill.as_raw_fd();
@@ -821,6 +838,7 @@ impl Cgroup {
     /// Called by [`interrupt::Spawning::watch_cgroup`] as the descriptor is published. The unique
     /// cgroup borrow keeps the owning file live until this reminder is stored, and this cgroup
     /// retains ownership of the descriptor until `Drop` removes the registry entry.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) const fn watched_at(&mut self, slot: usize, descriptor: RawFd) {
         self.watch = Some(CgroupWatch {
             slot,
@@ -874,6 +892,7 @@ impl Cgroup {
 }
 
 impl Drop for Cgroup {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn drop(&mut self) {
         // Discharged first, and unconditionally once a registration was ever made. The registry
         // holds a raw descriptor this leaf owns, and the `kill` field below closes it as this
@@ -973,6 +992,7 @@ mod tests {
             }
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn watch_cgroup(&self, group: i32, cgroup: &mut Cgroup) -> Option<usize> {
             self.registry
                 .watch_cgroup(group, cgroup, &|group| self.killed_groups.borrow_mut().push(group), &|descriptor| {
@@ -984,6 +1004,7 @@ mod tests {
             self.registry.forget(slot, group);
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn finish(self) {
             assert_eq!(
                 self.registry
@@ -1003,6 +1024,7 @@ mod tests {
     /// Reached only when somebody asked for these by name, so the answer is a failure rather than a
     /// skip: they asked for coverage of the memory feature and did not get it, and the reason is
     /// the same one the tool itself would give a user who asked for a ceiling here.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn demand_delegation() {
         assert!(root().is_ok(), "{NEEDS_DELEGATION}: {:?}", root().err());
     }
@@ -1264,6 +1286,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_live_process_cgroup_is_visible_under_the_unified_mount() {
         match own() {
             Ok(path) => {
@@ -1603,6 +1626,7 @@ mod tests {
     /// ordinary case is that it is empty. Retrying regardless would add the whole retry budget to
     /// the end of every invocation, which for a sweep of thousands is the run's pace.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_removable_cgroup_is_removed_without_waiting() {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let path = directory.path().join("leaf");
@@ -1633,6 +1657,7 @@ mod tests {
     /// A cgroup still holding an orphan the test spawned will not become removable, and an
     /// untidy directory is a far smaller cost than a run that stops until that orphan exits.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_cgroup_that_cannot_be_removed_is_left_behind() {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let path = directory.path().join("leaf");
@@ -1951,6 +1976,7 @@ mod tests {
 
     /// An unsupported host explains itself in terms of the machine, not of this tool.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_undelegated_host_says_what_is_missing() {
         if let Err(reason) = root() {
             assert!(
@@ -1963,6 +1989,7 @@ mod tests {
     /// A cgroup leaf measures the memory of the child that ran in it.
     #[test]
     #[ignore = "needs a delegated cgroup: run with --ignored under `systemd-run --user --scope -p Delegate=yes`"]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_leaf_measures_what_the_child_allocated() {
         demand_delegation();
 
@@ -1988,6 +2015,7 @@ mod tests {
     /// A child that passes the ceiling is killed by the kernel and reported as such.
     #[test]
     #[ignore = "needs a delegated cgroup: run with --ignored under `systemd-run --user --scope -p Delegate=yes`"]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_child_that_passes_the_ceiling_is_reported_as_exhausted() {
         demand_delegation();
 
@@ -2016,6 +2044,7 @@ mod tests {
     /// A cgroup that was never used is removed when it is dropped.
     #[test]
     #[ignore = "needs a delegated cgroup: run with --ignored under `systemd-run --user --scope -p Delegate=yes`"]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_spent_leaf_is_removed() {
         demand_delegation();
 
@@ -2032,6 +2061,7 @@ mod tests {
     /// Orphans can outlast bounded foreground cleanup, but not the shared reaper.
     #[test]
     #[ignore = "needs a delegated cgroup: run with --ignored under `systemd-run --user --scope -p Delegate=yes`"]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn repeated_orphan_exits_do_not_accumulate_leaves() {
         demand_delegation();
 

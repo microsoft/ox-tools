@@ -165,11 +165,13 @@ After adding those tests, use the completed run’s JSON report to check only th
 genuinely survived:
 
 ```bash
-cargo gamma run --only-survivors-from target/cargo-gamma/gamma-report.json
+cargo gamma run --only-survivors
+cargo gamma run --mutant c6d3802ceceb      # rerun one exact current mutant
 ```
 
-Mutant identities remain stable when only tests change. Timeout and memory-limit outcomes are
-not selected, even though the report format represents them as survived.
+The option reads `gamma-report.json` from the artifact directory. Mutant identities remain
+stable when only tests change. Timeout and memory-limit outcomes are not selected, even though
+the report format represents them as survived.
 
 ### Mutators
 
@@ -291,6 +293,7 @@ cargo gamma run -p ledger -p ledger-core   # mutate only these packages
 cargo gamma run --test-package ledger      # let this package's tests judge a mutant too
 cargo gamma run --exclude-test conformance # keep a test target out of the oracle
 cargo gamma run --test-workspace           # let every package's tests judge a mutant
+cargo gamma run --test-lib                 # use only library unit-test harnesses
 ```
 
 By default, each mutant is judged by tests from its own package. That applies both to a run inside
@@ -313,6 +316,8 @@ names the packages that could and suggests the flag.
 `--test-workspace` lets every package’s tests decide, which is the most thorough oracle available
 and costs a workspace-wide build and test run per mutant. It lifts the cap, not reachability: a
 mutant no test binary links is still `uncovered` rather than a survivor.
+`--test-lib` instead constrains the target kind: Cargo compiles and runs only library unit-test
+harnesses, never integration, binary, example, or benchmark targets.
 
 Within the cap, reachability is still an optimization: a test binary that cannot link the mutated
 code is never built or run.
@@ -371,6 +376,7 @@ cargo gamma run --test-timeout-multiplier 2.0 # multiple of each test binary's b
 cargo gamma run --minimum-test-timeout 5      # floor under the computed budget
 cargo gamma run --build-timeout 600           # bound the single build
 cargo gamma run --min-score 80                # fail the run below a score
+cargo gamma run --max-flaky 0                 # fail if any inconclusive flakes remain
 cargo gamma run --dry-run                     # report the plan without building anything
 cargo gamma run --show-killed                 # list what the suite killed, not just what survived
 cargo gamma run --show-unviable               # list the mutants that could not compile
@@ -397,17 +403,22 @@ itself and must be empty on first use; cargo-gamma marks it as belonging to that
 refuses to let another workspace adopt or share it. A workspace-specific lock in cargo-gamma’s
 default external scratch area serializes commands targeting the same original workspace, while
 a second lock protects redirected cache state.
+To move only compiler artifacts while preserving checkout-visible Git metadata for build scripts,
+leave `--cache-dir` unset and use Cargo’s `CARGO_TARGET_DIR` or `build.target-dir`.
 
 `cargo gamma clean` deletes the workspace-specific external scratch and target-resident campaign
 cache after taking the same lock as a run. It leaves published reports under
 `target/cargo-gamma`, checked-in hints and source suppressions untouched.
 
-As soon as a measured run acquires its campaign cache, it truncates `gamma-progress.log`. Every
-mutant verdict is appended and flushed there as it
-arrives, using the console’s outcome-line format but without color or redraw escapes. Unlike the
-console, the journal includes ordinary killed mutants as well as survivors, timeouts, memory exhaustion,
-flakes and uncovered mutants. An interrupted run therefore leaves every complete verdict it had
-already reached available for recovery, even though its final reports were never written.
+As soon as a measured run acquires its campaign cache, it truncates `gamma-progress.log` and
+`gamma-selection.jsonl`. Every mutant verdict is appended and flushed to the progress journal as
+it arrives, using the console’s outcome-line format but without color or redraw escapes. Unlike
+the console, the journal includes ordinary killed mutants as well as survivors, timeouts, memory
+exhaustion, flakes and uncovered mutants. The JSON Lines selection journal similarly flushes one
+structured record for every mutant test-process launch, including its selection tier, candidate identity
+and rank, conclusive hit, clean miss, or inconclusive result, elapsed time, and fallback estimate.
+An interrupted run therefore leaves every complete verdict and selection attempt already reached
+available for recovery and heuristic analysis, even though its final reports were never written.
 
 What gets copied follows version control: files git tracks are always copied, whatever an ignore
 rule says about them. `--copy-ignored` adds the untracked ones, and is for the build that reads
@@ -601,6 +612,8 @@ Only a failing assertion increases the numerator. Timeout, out-of-memory, surviv
 uncovered verdicts increase only the denominator. An excluded verdict changes neither. If
 there are no scored mutants at all, the displayed ratio is 100%, but `--min-score` treats the
 run as ungraded rather than allowing an empty population to pass a quality gate.
+`--max-flaky` is a separate gate for inconclusive flaky outcomes; `--max-flaky 0` requires every
+selected result to be conclusive and therefore cannot be combined with `--no-confirm`.
 
 Uncovered mutants are in the denominator and never in the numerator, so they cost you exactly what
 a survivor costs you. That is deliberate. *Which* mutants went undetected is a diagnosis, and “no
@@ -677,14 +690,14 @@ without workspace synchronization, rebuilding, baselining, or rerunning tests. A
 persisted workspace locator avoids Cargo metadata; without one, or whenever `--cache-dir` is
 explicit, the command uses metadata to resolve and validate the selected workspace.
 It validates only affected source files against the persisted site identity and leaves both
-`last-gamma-run.json` and `gamma-progress.log` unchanged. Use `--dry-run-suppress` to preview
-source edits; the inherited run flag `--dry-run` is rejected rather than silently editing:
+`last-gamma-run.json` and `gamma-progress.log` unchanged. Like `unsuppress`, it previews by
+default and requires `--apply` to edit source; the inherited run flag `--dry-run` is rejected:
 
 ```bash
-cargo gamma suppress --dry-run-suppress             # print the diff, change nothing
-cargo gamma suppress                                # timeouts and out-of-memory mutants
-cargo gamma suppress --eligible timeout             # timeouts only
-cargo gamma suppress --eligible timeout,outofmem,unviable   # also those that would not compile
+cargo gamma suppress                                      # print the diff, change nothing
+cargo gamma suppress --apply                              # timeouts and out-of-memory mutants
+cargo gamma suppress --apply --eligible timeout           # timeouts only
+cargo gamma suppress --apply --eligible timeout,outofmem,unviable
 ```
 
 The default covers both `timeout` and `outofmem`, because both are a mutant the machine stopped
@@ -720,7 +733,7 @@ cargo gamma unsuppress --apply    # remove them
 ```
 
 It removes exactly the directives a run reports as suppressing nothing, and the preview is the
-default — the reverse of `suppress`, because a directive written in error can be read back and
+default for both suppression commands. A directive written in error can be read back and
 reverted at leisure, while one deleted in error takes its reason with it.
 
 Nothing is built and no test is run: whether a directive governs a mutant is a fact about the
@@ -776,7 +789,9 @@ set too tight can stop a healthy mutant, which is why the note carries both numb
 
 `--memory measure` meters and reports without ever stopping a mutant, which is what to use if you
 want the numbers before you trust the ceiling. `--memory off` disables both. A mutant whose site is
-genuinely allowed to allocate this much can be taken out of the run for good with `cargo gamma suppress`, which treats `outofmem` as eligible by default alongside `timeout`.
+genuinely allowed to allocate this much can be taken out of the run for good with
+`cargo gamma suppress --apply`, which treats `outofmem` as eligible by default alongside
+`timeout`.
 
 ##### Telling a detection from a flaky test
 
@@ -1044,6 +1059,8 @@ To see what a mutator does and how to switch it off:
 ```bash
 cargo gamma explain relational.lt_to_le   # a mutator
 cargo gamma explain @arithmetic           # everything a preset selects
+cargo gamma explain c6d3802ceceb           # a current mutant
+cargo gamma explain --report old.json c6d3802ceceb # a retained historical finding
 ```
 
 To write directives in bulk for the mutants a run could not decide on, see
@@ -1413,44 +1430,22 @@ replacement.
 A run adopts only compiler unviability under a matching build context. Test outcomes are
 observations that can vary even when every captured input is unchanged, so they are never reused.
 
-**A skip directive is not a cache and must never be treated as one.** `cargo gamma suppress` writes
-a finding into the source, where it is reviewed, committed, and survives a clean checkout. That is a
-claim you stand behind. Everything in the record — and everything in the hints file, committed or
+**A skip directive is not a cache and must never be treated as one.**
+`cargo gamma suppress --apply` writes a finding into the source, where it is reviewed, committed,
+and survives a clean checkout. That is a claim you stand behind. Everything in the record — and
+everything in the hints file, committed or
 not — is a convenience that must be safe to delete: removing the cargo-gamma cache and
 `rm gamma-hints.yaml` cost you time and nothing else.
 
 #### Diagnosing a slow run
 
 Mutation testing is the kind of tool that gets adopted enthusiastically, runs for four hours, and is
-then quietly deleted from the CI configuration. Two options exist to prevent that.
+then quietly deleted from the CI configuration. Cargo-gamma writes an advice document on every
+run so that measured bottlenecks can be addressed instead of guessed at:
 
 ```bash
-cargo gamma run --estimate            # project the run once the fixed cost is measured, then carry on
 cargo gamma run --artifact-dir reports # write every user-facing artifact here
 ```
-
-`--estimate` reports at the exact point a run stops measuring and starts waiting. Everything behind
-it was measured rather than guessed — the build really built, the baseline really ran, and mutants
-that cannot compile were really withdrawn. It prints one line and then continues, because stopping
-there would throw away the build it just paid for:
-
-```rust
-    Estimate 14m if none hang, 3.1h if 15% do, for 18 751 mutants at 16 jobs;
-             9.7h worst case for test time, before per-mutant overhead
-```
-
-The range is wide on purpose, and each end is labeled with what produces it. The worst case bounds
-time spent *running tests*; per-mutant process launch, scheduling and reporting are not in it, so a
-run with a very short suite will overshoot the figure. What a run costs is
-decided less by how many mutants there are than by how many of them hang: a mutant that turns a
-loop counter into an infinite loop is stopped only by its timeout, which has a floor under it, and
-is then re-run to confirm. On a suite that finishes in a second, one hang can cost as much as
-several thousand mutants that do not. Nothing measurable before the mutants execute can say how
-many there will be, so it is reported as the thing that decides the answer rather than averaged
-into a single confident number that would be wrong by two orders of magnitude.
-
-If the top of that range is intolerable, `--minimum-test-timeout` is the lever: it sets the floor
-under a mutant’s budget, and lowering it makes every hang cheaper.
 
 The advice document is written on every run, to `target/cargo-gamma/gamma-perf-advice.md`;
 `--artifact-dir` moves it with the other artifacts. It turns a finished run into a Markdown document: a list of findings, each a measured
@@ -1532,7 +1527,7 @@ What to reach for, in rough order of what it costs you:
 |cold CI runs starting from scratch|check in `gamma-hints.yaml` with `cargo gamma hints`|nothing|
 |the build, on a narrow run|incremental execution (`--incremental`)|nothing|
 |non-deterministic test reachability|`--whole-test-binaries`|every selected case in a reachable binary is repeated for every mutant|
-|unviable convergence across checkouts|`cargo gamma hints` or `cargo gamma suppress`|nothing|
+|unviable convergence across checkouts|`cargo gamma hints` or `cargo gamma suppress --apply`|nothing|
 |hangs|lower `--minimum-test-timeout`|a genuine hang is caught sooner but a slow test may be misread as one|
 |a whole-population run in CI|`--shard-count` with `cargo gamma merge`|a verdict is up to one rotation old|
 |one generated or tabular file|`--exclude-file`|those mutants stop being tested|

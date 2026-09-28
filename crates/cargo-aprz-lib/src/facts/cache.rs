@@ -106,12 +106,12 @@ impl Cache {
 
         // Handle future timestamps (clock skew) — treat as fresh data
         let age = Utc::now().signed_duration_since(envelope.timestamp);
-        if age.num_seconds() < 0 {
+        if is_future_age(age) {
             log::debug!(target: LOG_TARGET, "Cache timestamp is in the future for {filename} (clock skew detected), treating as fresh");
         } else {
             let age_duration = age.to_std().unwrap_or(Duration::MAX);
 
-            if age_duration >= self.ttl {
+            if is_expired(age_duration, self.ttl) {
                 log::debug!(
                     target: LOG_TARGET,
                     "Cache expired for {filename} (age: {:.1} days, TTL: {:.1} days)",
@@ -163,12 +163,23 @@ impl Cache {
         let file = File::create(&path).into_app_err_with(|| format!("creating cache file '{}'", path.display()))?;
         let mut writer = BufWriter::new(file);
 
-        rmp_serde::encode::write(&mut writer, envelope).into_app_err_with(|| format!("writing cache file '{}'", path.display()))?;
+        Self::write_envelope_to(&mut writer, envelope, &path)
+    }
+
+    fn write_envelope_to<T: Serialize>(writer: &mut impl Write, envelope: &Envelope<T>, path: &Path) -> Result<()> {
+        rmp_serde::encode::write(&mut *writer, envelope).into_app_err_with(|| format!("writing cache file '{}'", path.display()))?;
         writer
             .flush()
-            .into_app_err_with(|| format!("flushing cache file '{}'", path.display()))?;
-        Ok(())
+            .into_app_err_with(|| format!("flushing cache file '{}'", path.display()))
     }
+}
+
+fn is_future_age(age: chrono::TimeDelta) -> bool {
+    age < chrono::TimeDelta::zero()
+}
+
+fn is_expired(age: Duration, ttl: Duration) -> bool {
+    age >= ttl
 }
 
 #[cfg(test)]
@@ -181,6 +192,28 @@ mod tests {
     struct TestData {
         name: String,
         value: u64,
+    }
+
+    struct FailingWriter {
+        fail_flush: bool,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.fail_flush {
+                Ok(buf.len())
+            } else {
+                Err(std::io::Error::other("write failed"))
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.fail_flush {
+                Err(std::io::Error::other("flush failed"))
+            } else {
+                Ok(())
+            }
+        }
     }
 
     fn make_cache(dir: &Path, ttl_secs: u64) -> Cache {
@@ -313,6 +346,36 @@ mod tests {
     }
 
     #[test]
+    fn write_envelope_reports_serialization_write_failures() {
+        let envelope = Envelope {
+            timestamp: Utc::now(),
+            payload: EnvelopePayload::Data(TestData {
+                name: "test".to_string(),
+                value: 1,
+            }),
+        };
+        let error = Cache::write_envelope_to(&mut FailingWriter { fail_flush: false }, &envelope, Path::new("broken.bin"))
+            .expect_err("writer failure must be propagated");
+
+        assert!(error.to_string().contains("writing cache file 'broken.bin'"), "{error}");
+    }
+
+    #[test]
+    fn write_envelope_reports_flush_failures() {
+        let envelope = Envelope {
+            timestamp: Utc::now(),
+            payload: EnvelopePayload::Data(TestData {
+                name: "test".to_string(),
+                value: 1,
+            }),
+        };
+        let error = Cache::write_envelope_to(&mut FailingWriter { fail_flush: true }, &envelope, Path::new("broken.bin"))
+            .expect_err("flush failure must be propagated");
+
+        assert!(error.to_string().contains("flushing cache file 'broken.bin'"), "{error}");
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
     fn zero_ttl_entry_created_this_second_is_expired() {
         let tmp = tempfile::tempdir().unwrap();
@@ -442,6 +505,20 @@ mod tests {
 
         let cache = make_cache(tmp.path(), ttl_seconds.cast_unsigned());
         assert!(matches!(cache.load::<TestData>("boundary.bin"), CacheResult::Miss));
+    }
+
+    #[test]
+    fn cache_age_comparisons_include_the_exact_boundaries() {
+        assert!(!is_future_age(chrono::TimeDelta::zero()));
+        assert!(is_future_age(chrono::TimeDelta::nanoseconds(-1)));
+
+        let ttl = Duration::from_mins(1);
+        assert!(!is_expired(
+            ttl.checked_sub(Duration::from_nanos(1))
+                .expect("one minute is longer than one nanosecond"),
+            ttl
+        ));
+        assert!(is_expired(ttl, ttl));
     }
 
     #[test]

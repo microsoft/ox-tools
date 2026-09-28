@@ -492,7 +492,8 @@ pub fn run_app(catalog: Catalog) -> ExitCode {
     };
 
     match run::run(&catalog, &cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(0) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::FAILURE,
         Err(err) => {
             eprintln!("error: {err:#}");
             ExitCode::FAILURE

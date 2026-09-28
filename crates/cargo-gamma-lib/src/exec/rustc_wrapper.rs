@@ -30,6 +30,7 @@ pub(crate) struct RustcInvocation {
 /// Runs cargo-gamma as Cargo's rustc wrapper when the private capture marker is present.
 ///
 /// Returns `None` for an ordinary cargo-gamma invocation.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn run_if_requested(args: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
     let directory = std::env::var_os(CAPTURE_DIR_VAR).filter(|directory| !directory.is_empty())?;
     let mut args = args.into_iter();
@@ -94,6 +95,7 @@ fn publish_capture(directory: &camino::Utf8Path, bytes: &[u8]) -> std::io::Resul
     publish_capture_with(directory, bytes, next_capture_stem)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn publish_capture_with(directory: &camino::Utf8Path, bytes: &[u8], mut next_stem: impl FnMut() -> String) -> std::io::Result<()> {
     fs::create_dir_all(directory.as_std_path())?;
 
@@ -300,6 +302,10 @@ mod tests {
     #[test]
     fn incomplete_invocations_and_pathless_externs_fail_open() {
         assert!(parse_invocation(&args(&["--crate-name", "x", "src/lib.rs"])).is_none());
+        assert!(
+            parse_invocation(&args(&["--crate-name", "x", "--out-dir", "target"])).is_none(),
+            "an invocation without a source path has no compilation identity"
+        );
         assert!(parse_invocation(&args(&["--crate-name"])).is_none());
         assert!(parse_invocation(&args(&["--out-dir"])).is_none());
         assert!(parse_invocation(&args(&["--extern"])).is_none());
@@ -400,6 +406,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn ordinary_invocations_do_not_enter_wrapper_mode() {
         if env::var_os(CAPTURE_DIR_VAR).is_none() {
             assert_eq!(run_if_requested(args(&["cargo-gamma"])), None);
@@ -414,6 +421,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn wrapper_child_helper() {
         let Ok(scenario) = env::var(CHILD_SCENARIO) else {
             return;

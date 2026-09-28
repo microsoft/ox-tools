@@ -105,6 +105,18 @@ impl<'args> HarnessFilters<'args> {
         &self.flags
     }
 
+    /// The user's flags without a harness thread-count override.
+    pub(super) fn flags_without_test_threads(&self) -> Vec<&'args str> {
+        without_test_threads(&self.flags)
+    }
+
+    /// The user's complete argument selection without a harness thread-count override.
+    pub(super) fn without_test_threads(&self) -> Vec<&'args str> {
+        let mut args = without_test_threads(&self.flags);
+        args.extend_from_slice(&self.filters);
+        args
+    }
+
     /// The user's arguments as a listing pass should carry them.
     ///
     /// A listing has to see exactly the population the user's filters allow, or the census records
@@ -134,6 +146,29 @@ impl<'args> HarnessFilters<'args> {
     }
 }
 
+fn without_test_threads<'args>(flags: &[&'args str]) -> Vec<&'args str> {
+    let mut kept = Vec::with_capacity(flags.len());
+    let mut index = 0;
+
+    while let Some(flag) = flags.get(index) {
+        let value = VALUED.contains(flag).then(|| flags.get(index + 1)).flatten();
+        let valid_split = *flag == "--test-threads" && value.is_some_and(|value| valid_test_threads(value));
+        let valid_joined = flag.strip_prefix("--test-threads=").is_some_and(valid_test_threads);
+
+        if !valid_split && !valid_joined {
+            kept.push(*flag);
+            kept.extend(value);
+        }
+        index += 1 + usize::from(value.is_some());
+    }
+
+    kept
+}
+
+fn valid_test_threads(value: &str) -> bool {
+    value.parse::<core::num::NonZeroUsize>().is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::HarnessFilters;
@@ -161,6 +196,34 @@ mod tests {
 
         assert_eq!(parsed.flags(), ["--test-threads=4"]);
         assert!(parsed.admits("tests::parser_works"));
+    }
+
+    #[test]
+    fn resource_constrained_arguments_drop_both_thread_count_spellings() {
+        for raw in [
+            args(&["--test-threads", "4", "--nocapture", "parser"]),
+            args(&["--test-threads=4", "--nocapture", "parser"]),
+        ] {
+            let parsed = HarnessFilters::parse(&raw);
+
+            assert_eq!(parsed.flags_without_test_threads(), ["--nocapture"]);
+            assert_eq!(parsed.without_test_threads(), ["--nocapture", "parser"]);
+        }
+    }
+
+    #[test]
+    fn resource_constrained_arguments_preserve_malformed_thread_counts_for_libtest() {
+        for raw in [
+            args(&["--test-threads=abc", "--nocapture"]),
+            args(&["--test-threads=0", "--nocapture"]),
+            args(&["--test-threads", "abc", "--nocapture"]),
+            args(&["--test-threads", "--nocapture"]),
+        ] {
+            let parsed = HarnessFilters::parse(&raw);
+            let expected: Vec<&str> = raw.iter().map(String::as_str).collect();
+
+            assert_eq!(parsed.flags_without_test_threads(), expected);
+        }
     }
 
     #[test]

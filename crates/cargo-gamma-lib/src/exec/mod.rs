@@ -37,6 +37,7 @@ mod nextest;
 mod progress;
 #[cfg(target_os = "linux")]
 pub(crate) mod relaunch;
+pub(crate) mod resources;
 mod rustc_wrapper;
 mod session;
 mod stall;
@@ -56,6 +57,9 @@ pub use config::Config;
 pub(crate) use config::{available_parallelism, resolve_jobs};
 #[doc(inline)]
 pub use events::Events;
+#[doc(hidden)]
+pub use events::SelectionAttempt;
+pub(crate) use events::{SelectionResult, SelectionTier};
 #[doc(inline)]
 pub use incremental_mode::IncrementalMode;
 pub(crate) use killers::Killers;
@@ -70,13 +74,14 @@ pub use memory::{DEFAULT_HEADROOM, DEFAULT_MULTIPLIER, Demand, MemoryControl, Me
 // Named for its subject at this level, where `support` alone would say nothing about what is
 // supported. The module itself is private unless the `internals` feature exposes it.
 pub(crate) use memory::{implied_memory_control, support as memory_support};
+#[doc(inline)]
+pub use resources::ResourceLimit;
 #[doc(hidden)]
 pub use rustc_wrapper::run_if_requested as run_rustc_wrapper_if_requested;
 #[doc(inline)]
 pub use session::{CensusCost, CensusStatus, PackageSweepCost, Phases, Session, SweepCost};
 #[doc(inline)]
 pub use test_binary::TestBinary;
-pub(crate) use verdict::CONFIRM_FACTOR;
 #[doc(inline)]
 pub use verdict::READERS;
 #[cfg(loom)]

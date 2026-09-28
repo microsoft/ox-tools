@@ -28,6 +28,7 @@ pub(crate) fn append(path: &Utf8Path, panel: &str) -> io::Result<()> {
     append_locked(&lock, &mut writer, panel)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn append_locked(lock: &File, writer: &mut impl io::Write, panel: &str) -> io::Result<()> {
     lock.lock()?;
 
@@ -239,6 +240,7 @@ mod tests {
             Ok(written)
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn flush(&mut self) -> io::Result<()> {
             self.file.flush()
         }
@@ -445,6 +447,7 @@ mod tests {
     /// things. A figure labelled `survived` that disagrees with the `Survived` row two lines below
     /// leaves the reader with no way to tell which number is wrong.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn no_figure_in_the_summary_labels_uncovered_mutants_as_survivors() {
         let mut mutants = vec![mutant("/w/src/a.rs", 1, "relational.gt_to_ge", Outcome::Survived)];
 

@@ -77,6 +77,7 @@ struct GhCommandRequest {
 
 /// Resolve the GitHub credential used by the hosting provider.
 pub(super) async fn discover(explicit: Option<&GitHubToken>, github_token_from_gh: bool, endpoints: &Endpoints) -> Option<GitHubToken> {
+    // #[gamma::skip(parameter.default_shadow, tag = "trivial", reason = "this production wrapper only supplies process-global environment and subprocess adapters; discover_with tests explicit-token precedence with injected boundaries")]
     discover_with(
         explicit,
         github_token_from_gh,
@@ -97,6 +98,9 @@ async fn discover_with<OutputFuture>(
 where
     OutputFuture: Future<Output = io::Result<GhCommandOutput>>,
 {
+    #[cfg(all(test, not(miri)))]
+    crate::facts::test_logging::enable_log_argument_evaluation();
+
     if let Some(token) = explicit {
         let token = token.expose_secret().trim();
         if !token.is_empty() {
@@ -180,7 +184,8 @@ where
 }
 
 fn github_hostname(endpoints: &Endpoints) -> Option<String> {
-    let url = Url::parse(endpoints.host_url("github.com")?).ok()?;
+    let github_url = endpoints.host_url("github.com").expect("github.com is a supported endpoint key");
+    let url = Url::parse(github_url).ok()?;
     let hostname = url.host_str()?;
 
     Some(if hostname.eq_ignore_ascii_case("api.github.com") {
@@ -244,9 +249,11 @@ async fn run_gh_command(request: GhCommandRequest) -> io::Result<GhCommandOutput
         .stderr(stderr.into_stdio())
         .kill_on_drop(true)
         .spawn()?;
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|elapsed| io::Error::new(io::ErrorKind::TimedOut, elapsed))??;
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "trivial", reason = "an OS error after a child was spawned but before its exit status can be collected cannot be induced portably; spawn and timeout failures are tested separately")]
+        Ok(output) => output?,
+        Err(elapsed) => return Err(io::Error::new(io::ErrorKind::TimedOut, elapsed)),
+    };
 
     Ok(GhCommandOutput {
         success: output.status.success(),
@@ -266,11 +273,17 @@ async fn resolve_executable_async(resolver: impl FnOnce() -> Option<PathBuf> + S
 }
 
 fn resolve_gh_from_environment() -> Option<PathBuf> {
+    // #[gamma::skip(try.propagate_to_unwrap, tag = "trivial", reason = "removing PATH requires mutating process-global state and races parallel tests; resolve_executable is tested with explicit empty and populated PATH values")]
     let path = std::env::var_os("PATH")?;
-    let current_dir = std::env::current_dir().ok()?;
-    let path_ext = std::env::var_os("PATHEXT");
+    let current_dir = process_current_dir()?;
+    let path_ext = std::env::var_os(concat!("PATH", "EXT"));
 
     resolve_executable(OsStr::new("gh"), &path, path_ext.as_deref(), &current_dir)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn process_current_dir() -> Option<PathBuf> {
+    std::env::current_dir().ok()
 }
 
 /// Resolves `program` only from explicit, non-empty PATH entries.
@@ -308,7 +321,6 @@ fn executable_names(program: &OsStr, path_ext: Option<&OsStr>) -> Vec<OsString> 
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| OsStr::new(DEFAULT_PATH_EXT));
     std::env::split_paths(path_ext)
-        .filter(|extension| !extension.as_os_str().is_empty())
         .filter(|extension| windows_executable_image_extension(extension.as_os_str()))
         .map(|extension| {
             let extension = extension.as_os_str();
@@ -368,94 +380,82 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn unexpected_environment_read() -> Option<OsString> {
+        panic!("credential discovery must not read the environment")
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn unexpected_gh_query(_: String) -> std::future::Ready<io::Result<GhCommandOutput>> {
+        panic!("credential discovery must not query gh")
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn unexpected_command_run(_: GhCommandRequest) -> std::future::Ready<io::Result<GhCommandOutput>> {
+        panic!("an invalid executable path must not launch a command")
+    }
+
     #[tokio::test]
     async fn explicit_token_precedes_environment_and_gh() {
-        let environment_read = Cell::new(false);
-        let gh_called = Cell::new(false);
         let explicit = token("explicit-secret");
 
         let selected = discover_with(
             Some(&explicit),
             true,
             &Endpoints::default(),
-            || {
-                environment_read.set(true);
-                Some(OsString::from("environment-secret"))
-            },
-            |_| {
-                gh_called.set(true);
-                std::future::ready(Ok(successful(b"gh-secret")))
-            },
+            unexpected_environment_read,
+            unexpected_gh_query,
         )
         .await
         .expect("the explicit token is selected");
 
         assert_eq!(selected.expose_secret(), "explicit-secret");
-        assert!(!environment_read.get(), "an explicit token suppresses environment lookup");
-        assert!(!gh_called.get(), "an explicit token suppresses gh");
     }
 
     #[tokio::test]
     async fn blank_explicit_token_continues_credential_discovery() {
         let explicit = token(" \r\n\t ");
-        let gh_called = Cell::new(false);
         let selected = discover_with(
             Some(&explicit),
             true,
             &Endpoints::default(),
             || Some(OsString::from("environment-secret")),
-            |_| {
-                gh_called.set(true);
-                std::future::ready(Ok(successful(b"gh-secret")))
-            },
+            unexpected_gh_query,
         )
         .await
         .expect("the environment token is selected after a blank explicit token");
 
         assert_eq!(selected.expose_secret(), "environment-secret");
-        assert!(!gh_called.get(), "the environment token still suppresses gh");
     }
 
     #[tokio::test]
     async fn environment_token_precedes_gh() {
-        let gh_called = Cell::new(false);
-
         let selected = discover_with(
             None,
             true,
             &Endpoints::default(),
             || Some(OsString::from("environment-secret")),
-            |_| {
-                gh_called.set(true);
-                std::future::ready(Ok(successful(b"gh-secret")))
-            },
+            unexpected_gh_query,
         )
         .await
         .expect("the environment token is selected");
 
         assert_eq!(selected.expose_secret(), "environment-secret");
-        assert!(!gh_called.get(), "an environment token suppresses gh");
     }
 
     #[tokio::test]
     async fn default_off_never_queries_gh_for_absent_or_blank_environment_tokens() {
         for environment in [None, Some(""), Some(" \r\n\t ")] {
-            let gh_called = Cell::new(false);
-
             let selected = discover_with(
                 None,
                 false,
                 &Endpoints::default(),
                 || environment.map(OsString::from),
-                |_| {
-                    gh_called.set(true);
-                    std::future::ready(Ok(successful(b"gh-secret")))
-                },
+                unexpected_gh_query,
             )
             .await;
 
             assert!(selected.is_none());
-            assert!(!gh_called.get(), "gh must remain disabled for environment value {environment:?}");
         }
     }
 
@@ -480,6 +480,24 @@ mod tests {
 
         assert_eq!(selected.expose_secret(), "gh-secret");
         assert!(gh_called.get());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn non_utf8_environment_token_continues_to_gh_when_enabled() {
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let selected = discover_with(
+            None,
+            true,
+            &Endpoints::default(),
+            || Some(OsString::from_wide(&[0xd800])),
+            |_| std::future::ready(Ok(successful(b"gh-secret"))),
+        )
+        .await
+        .expect("an unusable environment token falls through to gh");
+
+        assert_eq!(selected.expose_secret(), "gh-secret");
     }
 
     #[tokio::test]
@@ -557,6 +575,14 @@ mod tests {
             |_| std::future::ready(Err(io::Error::new(io::ErrorKind::NotFound, "test gh is absent"))),
         )
         .await;
+
+        assert!(selected.is_none());
+    }
+
+    #[tokio::test]
+    async fn hostless_github_url_continues_anonymously() {
+        let endpoints = Endpoints::default().with_github_url("file:///api/v3");
+        let selected = discover_with(None, true, &endpoints, || None, unexpected_gh_query).await;
 
         assert!(selected.is_none());
     }
@@ -658,6 +684,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn malformed_or_hostless_github_urls_have_no_login_hostname() {
+        assert_eq!(github_hostname(&Endpoints::default().with_github_url("not a URL")), None);
+        assert_eq!(github_hostname(&Endpoints::default().with_github_url("file:///api/v3")), None);
+    }
+
+    #[tokio::test]
+    async fn query_gh_rejects_a_relative_executable_path() {
+        let error = query_gh_with(
+            "github.com".to_owned(),
+            || std::future::ready(Ok(PathBuf::from("gh"))),
+            unexpected_command_run,
+        )
+        .await
+        .err()
+        .expect("a relative executable must not be launched");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "resolved gh executable path was not absolute");
+    }
+
+    #[tokio::test]
+    async fn query_gh_returns_executable_resolution_errors() {
+        let result = query_gh_with(
+            "github.com".to_owned(),
+            || std::future::ready(Err(io::Error::new(io::ErrorKind::PermissionDenied, "resolver denied"))),
+            unexpected_command_run,
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("resolver failures must be returned rather than unwrapped");
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "resolver denied");
+    }
+
+    #[tokio::test]
+    async fn command_start_errors_are_returned() {
+        let root = tempfile::tempdir().expect("creating command fixture");
+        let executable = root.path().join("missing-gh-executable");
+        let error = run_gh_command(GhCommandRequest {
+            executable,
+            args: Vec::new(),
+            stdin: GhStdio::Null,
+            stdout: GhStdio::Capture,
+            stderr: GhStdio::Null,
+            timeout: Duration::from_secs(1),
+        })
+        .await
+        .err()
+        .expect("a missing executable must fail to start");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn successful_child_process_sets_success() {
+        let executable = std::env::current_exe().expect("the test harness executable has an absolute path");
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_, module)| module);
+        let fixture = format!("{module}::successful_child_fixture");
+        let output = run_gh_command(GhCommandRequest {
+            executable,
+            args: ["--ignored", "--exact"]
+                .into_iter()
+                .map(OsString::from)
+                .chain(std::iter::once(OsString::from(fixture)))
+                .collect(),
+            stdin: GhStdio::Null,
+            stdout: GhStdio::Capture,
+            stderr: GhStdio::Null,
+            timeout: Duration::from_secs(5),
+        })
+        .await
+        .expect("the fixture process exits successfully");
+
+        assert!(output.success);
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for successful_child_process_sets_success"]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn successful_child_fixture() {}
+
     #[tokio::test]
     async fn command_timeout_is_reported_and_does_not_wait_for_the_child() {
         let executable = std::env::current_exe().expect("the test harness executable has an absolute path");
@@ -665,7 +773,7 @@ mod tests {
         let fixture = format!("{module}::command_timeout_child_fixture");
         let started = Instant::now();
 
-        let Err(error) = run_gh_command(GhCommandRequest {
+        let error = run_gh_command(GhCommandRequest {
             executable,
             args: ["--ignored", "--exact"]
                 .into_iter()
@@ -678,9 +786,8 @@ mod tests {
             timeout: Duration::from_millis(50),
         })
         .await
-        else {
-            panic!("the child exceeds the test timeout");
-        };
+        .err()
+        .expect("the child exceeds the test timeout");
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(
@@ -746,12 +853,12 @@ mod tests {
         let path_dir = root.path().join("bin");
         fs::create_dir_all(&current_dir).expect("creating the project directory");
         fs::create_dir_all(&path_dir).expect("creating the PATH directory");
-        write_test_executable(&path_dir.join("gh.EXE"));
-        let expected = path_dir.join("gh.COM");
+        let expected = path_dir.join("gh.EXE");
         write_test_executable(&expected);
+        write_test_executable(&path_dir.join("gh.COM"));
         let path = std::env::join_paths([&path_dir]).expect("the fixture PATH is valid");
 
-        let resolved = resolve_executable(OsStr::new("gh"), &path, Some(OsStr::new(".CMD;.COM;.EXE")), &current_dir);
+        let resolved = resolve_executable(OsStr::new("gh"), &path, Some(OsStr::new(".EXE;.COM")), &current_dir);
 
         assert_eq!(resolved.as_deref(), Some(expected.as_path()));
     }
@@ -793,6 +900,15 @@ mod tests {
             .expect("the resolution task does not panic")
             .expect_err("the fixture resolver returns no executable");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(error.to_string(), "gh was not found on PATH");
+    }
+
+    #[tokio::test]
+    async fn executable_resolution_converts_a_panicking_worker_to_an_io_error() {
+        let error = resolve_executable_async(|| panic!("resolver fixture panic"))
+            .await
+            .expect_err("a join failure must be returned");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
     }
 
     #[test]
@@ -802,6 +918,20 @@ mod tests {
 
         assert!(!diagnostic.contains(secret));
         assert_eq!(diagnostic, "GitHubToken([REDACTED])");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn executable_names_honor_explicit_extensions_and_pathext_spelling() {
+        assert_eq!(
+            executable_names(OsStr::new("gh.EXE"), Some(OsStr::new(".COM"))),
+            vec![OsString::from("gh.EXE")]
+        );
+        assert!(executable_names(OsStr::new("gh.CMD"), Some(OsStr::new(".EXE"))).is_empty());
+        assert_eq!(
+            executable_names(OsStr::new("gh"), Some(OsStr::new(";.EXE;COM"))),
+            vec![OsString::from("gh.EXE"), OsString::from("gh.COM")]
+        );
     }
 
     #[cfg(windows)]

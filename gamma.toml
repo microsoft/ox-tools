@@ -12,3 +12,6 @@ exclude-files = [
 
 # Human-readable debug and redacted output is diagnostic text, not a supported behavioral contract.
 exclude-trait-impls = ["Debug"]
+
+[resources]
+cargo-aprz-cargo-subprocess = 2

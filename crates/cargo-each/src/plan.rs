@@ -436,6 +436,67 @@ mod tests {
     }
 
     #[test]
+    fn per_target_requires_both_kind_and_required_features() {
+        let mut a = member("alpha");
+        a.targets.push(MemberTarget {
+            name: "example".to_owned(),
+            kinds: std::iter::once(TargetKind::Example).collect(),
+            required_features: std::iter::once("loom".to_owned()).collect(),
+        });
+        let kinds = std::iter::once(TargetKind::Test).collect();
+        let required = std::iter::once("loom".to_owned()).collect();
+        assert!(
+            Plan::is_empty(
+                &[&a],
+                &cmd(&["echo", "{target}"]),
+                BuildOptions {
+                    mode: Mode::PerTarget,
+                    chdir: false,
+                    packages: PackagesExpansion::Explicit,
+                    target_kinds: &kinds,
+                    target_required_features: &required,
+                    workspace_rust_version: None,
+                },
+            )
+            .expect("valid target selection")
+        );
+    }
+
+    #[test]
+    fn unresolved_workspace_value_propagates_in_every_nonempty_mode() {
+        let mut a = member("alpha");
+        a.targets.push(MemberTarget {
+            name: "example".to_owned(),
+            kinds: std::iter::once(TargetKind::Example).collect(),
+            required_features: BTreeSet::new(),
+        });
+        let command = cmd(&["echo", "{workspace-rust-version}"]);
+        for (mode, kinds) in [
+            (Mode::PerPackage, BTreeSet::new()),
+            (Mode::PerTarget, std::iter::once(TargetKind::Example).collect()),
+            (Mode::Once, BTreeSet::new()),
+        ] {
+            let error = Plan::build(
+                &[&a],
+                &command,
+                BuildOptions {
+                    mode,
+                    chdir: false,
+                    packages: PackagesExpansion::Explicit,
+                    target_kinds: &kinds,
+                    target_required_features: &BTreeSet::new(),
+                    workspace_rust_version: None,
+                },
+            )
+            .expect_err("an unresolved requested workspace value must propagate");
+            assert_eq!(
+                error.to_string(),
+                "cannot resolve `{workspace-rust-version}`: the command uses the placeholder but its root value was not resolved"
+            );
+        }
+    }
+
+    #[test]
     fn explicit_package_flags_preserve_member_order() {
         let a = member("alpha");
         let b = member("beta");

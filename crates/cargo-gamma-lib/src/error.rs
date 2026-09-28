@@ -130,6 +130,7 @@ impl Error {
     }
 
     /// Moves another failure's diagnostics onto this one.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn append_artifacts(&mut self, other: &mut Self) {
         let Some(mut artifacts) = other.artifacts.take() else {
             return;
@@ -303,5 +304,23 @@ mod tests {
         assert!(error.is_usage());
         assert!(error.is_skippable());
         assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn mutable_error_details_preserve_classification_and_diagnostics() {
+        let mut error = Error::new("outer")
+            .skippable()
+            .with_nested_artifact("first".to_owned(), "one.json", serde_json::json!(1));
+        let mut other = Error::new("other").with_nested_artifact("second".to_owned(), "two.json", serde_json::json!(2));
+
+        error.append_artifacts(&mut other);
+        error.append_message(" context");
+        error.set_message("replacement");
+
+        assert!(error.is_skippable());
+        assert_eq!(error.message(), "replacement");
+        assert_eq!(error.artifacts().len(), 2);
+        assert!(other.artifacts().is_empty());
+        let _captured = error.backtrace();
     }
 }

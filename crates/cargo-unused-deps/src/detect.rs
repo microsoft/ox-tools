@@ -370,7 +370,7 @@ fn inherits_from_workspace(spec: &Item) -> bool {
         .and_then(|table| table.get("workspace"))
         .and_then(Item::as_value)
         .and_then(Value::as_bool)
-        .unwrap_or(false)
+        .unwrap_or_default()
 }
 
 /// Split the catalog into unused entries and stale allow-list entries.
@@ -495,5 +495,51 @@ shadowed = []
         assert_eq!(inheritance.inputs[0].contents, first_text);
         assert_eq!(inheritance.inputs[1].path, second);
         assert_eq!(inheritance.inputs[1].contents, second_text);
+    }
+
+    #[test]
+    fn catalog_returns_shape_errors_instead_of_panicking() {
+        for (text, expected) in [
+            (
+                "[workspace]\ndependencies = \"invalid\"\n",
+                "[workspace.dependencies] must be a table",
+            ),
+            (
+                "[workspace.metadata.unused-deps]\nallowed = \"invalid\"\n",
+                "allowed must be an array",
+            ),
+            (
+                "[workspace.metadata.unused-deps]\nallowed = [1]\n",
+                "allowed must contain only strings",
+            ),
+        ] {
+            let manifest = parse_manifest(text, Path::new("Cargo.toml")).expect("fixture parses");
+            let error = catalog(&manifest).err().expect("invalid configuration must be rejected");
+            assert!(error.to_string().contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses temporary filesystem manifests")]
+    fn inheritance_returns_read_and_parse_errors_instead_of_panicking() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let missing = directory.path().join("missing.toml");
+        let read_error = inherited(std::slice::from_ref(&missing)).err().expect("missing manifest must fail");
+        assert!(
+            read_error.to_string().contains(&format!("failed to read {}", missing.display())),
+            "unexpected error: {read_error}"
+        );
+
+        let malformed = directory.path().join("malformed.toml");
+        fs::write(&malformed, "[package").expect("malformed manifest");
+        let parse_error = inherited(std::slice::from_ref(&malformed))
+            .err()
+            .expect("malformed manifest must fail");
+        assert!(
+            parse_error
+                .to_string()
+                .contains(&format!("failed to parse {}", malformed.display())),
+            "unexpected error: {parse_error}"
+        );
     }
 }

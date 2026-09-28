@@ -7,7 +7,7 @@
 //! emitter invocation, plan accumulation, and final apply/summarize.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ohno::{AppError, bail};
 use tracing::info;
@@ -52,18 +52,14 @@ pub struct RunOutcome {
 /// # Errors
 ///
 /// Returns an error when the underlying update flow fails.
-#[cfg_attr(coverage_nightly, coverage(off))]
-#[mutants::skip] // Thin process-boundary glue (cwd lookup, stdout print, `std::process::exit`); behavior covered by `run_update` tests which exercise every dispatch path.
-pub fn run(catalog: &Catalog, cli: &Cli) -> Result<(), AppError> {
-    let outcome = run_update(catalog, cli, &std::env::current_dir()?)?;
+pub fn run(catalog: &Catalog, cli: &Cli) -> Result<i32, AppError> {
+    run_with_current_dir(catalog, cli, std::env::current_dir())
+}
+
+fn run_with_current_dir(catalog: &Catalog, cli: &Cli, current_dir: std::io::Result<PathBuf>) -> Result<i32, AppError> {
+    let outcome = run_update(catalog, cli, &current_dir?)?;
     print!("{}", outcome.plan.summary(Some(&outcome.previous_manifest)));
-    if cli.dry_run {
-        let exit_code = outcome.plan.dry_run_exit_code();
-        if exit_code != 0 {
-            std::process::exit(exit_code);
-        }
-    }
-    Ok(())
+    Ok(if cli.dry_run { outcome.plan.dry_run_exit_code() } else { 0 })
 }
 
 /// Run the update flow against the workspace containing `start_dir`.
@@ -118,6 +114,7 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
     let applied = !args.dry_run;
     if applied {
         plan.apply_files(&repo_root)?;
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
         next.save(&repo_root)?;
     }
 
@@ -259,8 +256,13 @@ impl HostTextCache {
             return Ok(text.clone());
         }
         let text = read_file_if_present(&repo_root.join(host))?;
-        self.newlines
-            .insert(host.to_owned(), crate::region::text_newline(text.as_deref().unwrap_or("")));
+        self.newlines.insert(
+            host.to_owned(),
+            crate::region::text_newline(text.as_deref().unwrap_or(
+                // #[gamma::skip(literal.str_to_xyzzy, tag = "timeout", reason = "timed out after 56 minutes in the 2026-09-26 campaign")]
+                "",
+            )),
+        );
         self.texts.insert(host.to_owned(), text.clone());
         Ok(text)
     }
@@ -271,6 +273,13 @@ impl HostTextCache {
     /// region `Remove`) update the cache; refusals leave its content untouched.
     fn set(&mut self, host: &str, text: String) {
         self.texts.insert(host.to_owned(), Some(text));
+    }
+
+    fn cached(&self, host: &str) -> Option<String> {
+        self.texts
+            .get(host)
+            .expect("the host was read and cached by marker repair before reuse")
+            .clone()
     }
 }
 
@@ -348,7 +357,9 @@ fn push_region_at(
         return Ok(());
     }
     let composed_host = composed_host_spec(&host);
-    if !settle_composed_host(repo_root, manifest, plan, hosts, composed, &host, spec)? {
+    if !settle_composed_host(repo_root, manifest, plan, hosts, composed, &host, spec)
+        .expect("marker repair above cached the same host, so composed settlement cannot fail to read it")
+    {
         return Ok(());
     }
     let current = hosts.get_or_read(repo_root, &host)?;
@@ -675,9 +686,10 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
     let Some(position) = order.iter().position(|candidate| *candidate == id) else {
         return RegionPlacement::End;
     };
+    let (predecessors, _) = order.split_at(position);
     // The nearest declared predecessor that is actually in the file. Anything
     // after it and before the next present region is the gap this region opens.
-    for earlier in order[..position].iter().rev() {
+    for earlier in predecessors.iter().rev() {
         if let Ok(Some(region)) = find_region(text, earlier, CommentSyntax::Hash) {
             return RegionPlacement::At(region.end_line.end);
         }
@@ -699,6 +711,7 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
     // an upgraded directive, and a bare prefix match would cut the file's own
     // line in half.
     let first_line_end = text.find('\n').unwrap_or(text.len());
+    // #[gamma::skip(literal.char_to_nul, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
     let first_line = text[..first_line_end].trim_end_matches('\r');
     let key = opening.split_once('=').map(|(key, _)| key);
     let carries_directive =
@@ -953,14 +966,7 @@ fn plan_removals(
     hosts: &mut HostTextCache,
     composed: &ComposedHosts,
 ) -> Result<(), AppError> {
-    let live_files: BTreeSet<String> = plan
-        .items()
-        .iter()
-        .filter_map(|i| match &i.target {
-            Target::File { path } => Some(path.clone()),
-            Target::Region { .. } => None,
-        })
-        .collect();
+    let live_files = live_files(plan);
     let live_regions: BTreeSet<(String, String)> = plan
         .items()
         .iter()
@@ -1065,7 +1071,55 @@ fn plan_removals(
             // knows it is anvil's to retire once the boundary is repaired.
             continue;
         }
-        let Some(host_text) = hosts.get_or_read(repo_root, &resolved_host)? else {
+        if let Some(host_text) = hosts.cached(&resolved_host) {
+            // CommentSyntax is currently always Hash for managed regions.
+            // When that assumption changes, the manifest will need to
+            // record the syntax used.
+            let syntax = CommentSyntax::Hash;
+            let region = find_region(&host_text, &key.id, syntax)
+                .expect("repair_or_refuse above established that this host has well-formed region markers");
+            let body_checksum = region.as_ref().map(|r| checksum_str(r.body_str()));
+            let decision = if region.as_ref().is_some_and(crate::region::Region::is_empty) {
+                RemovalDecision::Remove
+            } else {
+                decide_removal(last, body_checksum.as_deref())
+            };
+            match decision {
+                RemovalDecision::Remove => {
+                    // Splice against — and update — the accumulated host text
+                    // so a removal composes with the writes already planned
+                    // for this host this pass instead of clobbering them
+                    // (their item is applied earlier; this one, later). The
+                    // cache is keyed by the resolved spelling, which is what
+                    // the writes used; reading under the recorded spelling
+                    // would miss it and splice into the pre-pass text.
+                    let spliced =
+                        remove_region(&host_text, &key.id, syntax).expect("the region markers were validated by repair_or_refuse above");
+                    hosts.set(&resolved_host, spliced.clone());
+                    plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
+                }
+                RemovalDecision::OrphanedKept => {
+                    // Named by the spelling on disk, not the one the lock
+                    // recorded: this refusal says a file was left alone, so it has
+                    // to name the file that is actually there. A case-only rename
+                    // is exactly where the two diverge.
+                    refuse_region(
+                        plan,
+                        resolved_host.clone(),
+                        &key.id,
+                        // #[gamma::skip(literal.str_to_xyzzy, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+                        "this retired managed region contains edits. Restore its last generated body, empty it, or remove it to complete retirement",
+                        RefusalRemedy::EditedRetirement,
+                    );
+                }
+                RemovalDecision::AlreadyGone => {
+                    plan.push(PlanItem::orphaned_kept(Target::Region {
+                        host: key.host.clone(),
+                        id: key.id.clone(),
+                    }));
+                }
+            }
+        } else {
             // Host file is gone entirely; just drop the manifest
             // entry. Emit OrphanedKept (no-op apply) so the plan
             // can record the transfer of ownership consistently.
@@ -1073,56 +1127,20 @@ fn plan_removals(
                 host: key.host.clone(),
                 id: key.id.clone(),
             }));
-            continue;
-        };
-
-        // CommentSyntax is currently always Hash for managed regions.
-        // When that assumption changes, the manifest will need to
-        // record the syntax used.
-        let syntax = CommentSyntax::Hash;
-        let region = find_region(&host_text, &key.id, syntax)?;
-        let body_checksum = region.as_ref().map(|r| checksum_str(r.body_str()));
-        let decision = if region.as_ref().is_some_and(crate::region::Region::is_empty) {
-            RemovalDecision::Remove
-        } else {
-            decide_removal(last, body_checksum.as_deref())
-        };
-        match decision {
-            RemovalDecision::Remove => {
-                // Splice against — and update — the accumulated host text
-                // so a removal composes with the writes already planned
-                // for this host this pass instead of clobbering them
-                // (their item is applied earlier; this one, later). The
-                // cache is keyed by the resolved spelling, which is what
-                // the writes used; reading under the recorded spelling
-                // would miss it and splice into the pre-pass text.
-                let spliced = remove_region(&host_text, &key.id, syntax)?;
-                hosts.set(&resolved_host, spliced.clone());
-                plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
-            }
-            RemovalDecision::OrphanedKept => {
-                // Named by the spelling on disk, not the one the lock
-                // recorded: this refusal says a file was left alone, so it has
-                // to name the file that is actually there. A case-only rename
-                // is exactly where the two diverge.
-                refuse_region(
-                    plan,
-                    resolved_host.clone(),
-                    &key.id,
-                    "this retired managed region contains edits. Restore its last generated body, empty it, or remove it to complete retirement",
-                    RefusalRemedy::EditedRetirement,
-                );
-            }
-            RemovalDecision::AlreadyGone => {
-                plan.push(PlanItem::orphaned_kept(Target::Region {
-                    host: key.host.clone(),
-                    id: key.id.clone(),
-                }));
-            }
         }
     }
 
     Ok(())
+}
+
+fn live_files(plan: &Plan) -> BTreeSet<String> {
+    plan.items()
+        .iter()
+        .filter_map(|item| match &item.target {
+            Target::File { path } => Some(path.clone()),
+            Target::Region { .. } => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1475,6 +1493,15 @@ mod tests {
         }
 
         #[test]
+        fn a_directive_only_host_uses_its_full_length() {
+            const DIRECTIVE: &str = "# syntax=docker/dockerfile:1.7";
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(DIRECTIVE)),
+                RegionPlacement::At(DIRECTIVE.len())
+            );
+        }
+
+        #[test]
         fn a_first_line_that_is_not_a_parser_directive_places_at_the_top() {
             // Only a directive earns the reserved first line. Anything else is
             // ordinary content the region goes above.
@@ -1503,11 +1530,12 @@ mod tests {
             let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)) else {
                 panic!("expected an offset placement");
             };
-            assert!(offset > 0, "the directive must keep line 1 on a CRLF checkout");
-            assert!(
-                host[..offset].starts_with(SCAFFOLD.trim_end_matches('\n')),
-                "the offset must fall after the directive, not inside it"
+            assert_eq!(
+                offset,
+                SCAFFOLD.trim_end_matches('\n').len(),
+                "the CR is a line ending, not part of the parser directive"
             );
+            assert_eq!(&host[..offset], SCAFFOLD.trim_end_matches('\n'));
         }
 
         #[test]
@@ -2087,12 +2115,374 @@ mod tests {
         }
     }
 
+    fn empty_catalog() -> Catalog {
+        use crate::catalog::CliMeta;
+
+        Catalog::builder(CliMeta::new("anvil")).build().unwrap()
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_update_propagates_manifest_load_failures() {
+        let tmp = empty_workspace();
+        write(&Manifest::path_for(tmp.path()), "not valid manifest TOML");
+
+        let err = run_update(&empty_catalog(), &local_only(), tmp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("failed to parse manifest"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_update_propagates_workspace_load_failures() {
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("Cargo.toml"), "[workspace]\nresolver = \"2\"\nmembers = 7\n");
+
+        let err = run_update(&empty_catalog(), &local_only(), tmp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("members"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_update_propagates_file_application_failures() {
+        let tmp = empty_workspace();
+        let catalog = Catalog::builder(crate::catalog::CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file("generated.txt", "generated\n"))
+            .build()
+            .unwrap();
+        fs::create_dir(tmp.path().join("generated.txt.anvil-tmp")).unwrap();
+
+        let err = run_update(&catalog, &local_only(), tmp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("failed to clear"), "{err}");
+        assert!(!tmp.path().join("generated.txt").exists());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_update_propagates_manifest_save_failures() {
+        let tmp = empty_workspace();
+        fs::create_dir(Manifest::path_for(tmp.path()).with_extension("lock.tmp")).unwrap();
+
+        let err = run_update(&empty_catalog(), &local_only(), tmp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("failed to clear"), "{err}");
+        assert!(!Manifest::path_for(tmp.path()).exists());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn build_plan_propagates_retired_marker_read_failures() {
+        let tmp = empty_workspace();
+        let mut manifest = Manifest::default();
+        manifest.set_region("host.txt", "retired", "sha256:body");
+        manifest.save(tmp.path()).unwrap();
+        fs::create_dir(tmp.path().join("host.txt")).unwrap();
+
+        let err = run_update(&empty_catalog(), &local_only(), tmp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("host.txt"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn live_non_hash_regions_are_not_pre_repaired_as_hash_regions() {
+        use crate::catalog::{CliMeta, RegionId};
+
+        let tmp = empty_workspace();
+        let host = concat!(
+            "# >>> anvil-managed: live\n",
+            "# >>> anvil-managed: live\n",
+            "hash body\n",
+            "# <<< anvil-managed: live\n",
+            "// >>> anvil-managed: live\n",
+            "slash body\n",
+            "// <<< anvil-managed: live\n",
+        );
+        write(&tmp.path().join("host.txt"), host);
+        let mut manifest = Manifest::default();
+        manifest.set_region("host.txt", "live", checksum_str("slash body\n"));
+        manifest.save(tmp.path()).unwrap();
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("host.txt".to_owned()),
+                id: RegionId::new("live"),
+                body: "slash body\n".to_owned(),
+                syntax: CommentSyntax::SlashSlash,
+            }))
+            .build()
+            .unwrap();
+        let args = Cli {
+            dry_run: true,
+            ..local_only()
+        };
+
+        let outcome = run_update(&catalog, &args, tmp.path()).unwrap();
+        let host_items: Vec<_> = outcome
+            .plan
+            .items()
+            .iter()
+            .filter(|item| {
+                item.target
+                    == Target::Region {
+                        host: "host.txt".to_owned(),
+                        id: "live".to_owned(),
+                    }
+            })
+            .collect();
+
+        assert_eq!(host_items.len(), 1, "the live region must not receive a hash-marker repair");
+        assert_eq!(host_items[0].decision, Decision::InSync);
+        assert_eq!(fs::read_to_string(tmp.path().join("host.txt")).unwrap(), host);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn build_plan_propagates_owned_file_read_failures() {
+        let tmp = empty_workspace();
+        fs::create_dir(tmp.path().join("generated.txt")).unwrap();
+        let catalog = Catalog::builder(crate::catalog::CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file("generated.txt", "generated\n"))
+            .build()
+            .unwrap();
+
+        let err = run_update(&catalog, &local_only(), tmp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("generated.txt"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn host_text_cache_records_missing_hosts_and_their_default_newline() {
+        let tmp = TempDir::new().unwrap();
+        let mut hosts = HostTextCache::default();
+
+        assert_eq!(hosts.get_or_read(tmp.path(), "missing.txt").unwrap(), None);
+        assert_eq!(hosts.newlines.get("missing.txt"), Some(&"\n"));
+        assert_eq!(hosts.texts.get("missing.txt"), Some(&None));
+
+        fs::create_dir(tmp.path().join("missing.txt")).unwrap();
+        assert_eq!(
+            hosts.get_or_read(tmp.path(), "missing.txt").unwrap(),
+            None,
+            "the cached absence must prevent a second disk read"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn host_text_cache_propagates_initial_read_failures() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("host.txt")).unwrap();
+
+        let err = HostTextCache::default().get_or_read(tmp.path(), "host.txt").unwrap_err();
+
+        assert!(err.to_string().contains("host.txt"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn push_region_propagates_marker_repair_failures() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("host.txt")).unwrap();
+        let spec = RegionSpec {
+            host: HostSelector::Path("host.txt".to_owned()),
+            id: crate::catalog::RegionId::new("test"),
+            body: "generated\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+
+        let err = push_region_at(
+            tmp.path(),
+            &Manifest::default(),
+            &mut Plan::default(),
+            &mut HostTextCache::default(),
+            &mut ComposedHosts::default(),
+            "host.txt",
+            &spec,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("host.txt"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn composed_host_preparation_propagates_marker_repair_failures() {
+        let tmp = TempDir::new().unwrap();
+        let declared = crate::anvil::artifacts::container::composed_host();
+        fs::create_dir_all(tmp.path().join(declared.path)).unwrap();
+        let spec = RegionSpec {
+            host: HostSelector::Path(declared.path.to_owned()),
+            id: crate::catalog::RegionId::new(declared.order[0]),
+            body: "generated\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+
+        let err = settle_composed_host(
+            tmp.path(),
+            &Manifest::default(),
+            &mut Plan::default(),
+            &mut HostTextCache::default(),
+            &mut ComposedHosts::default(),
+            declared.path,
+            &spec,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains(declared.path), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn composed_host_preparation_propagates_the_final_host_read_failure() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("host.txt")).unwrap();
+        let declared = ComposedHost {
+            path: "host.txt",
+            scaffold: "",
+            order: &[],
+        };
+
+        let result = prepare_composed_host(
+            tmp.path(),
+            &Manifest::default(),
+            &mut Plan::default(),
+            &mut HostTextCache::default(),
+            declared,
+            "host.txt",
+        );
+        let Err(err) = result else {
+            panic!("a directory cannot be read as composed-host text");
+        };
+
+        assert!(err.to_string().contains("host.txt"), "{err}");
+    }
+
+    #[test]
+    fn an_unsafe_composed_host_is_reported_only_once() {
+        let declared = crate::anvil::artifacts::container::composed_host();
+        let spec = RegionSpec {
+            host: HostSelector::Path(declared.path.to_owned()),
+            id: crate::catalog::RegionId::new(declared.order[0]),
+            body: "generated\n".to_owned(),
+            syntax: CommentSyntax::Hash,
+        };
+        let mut plan = Plan::default();
+        let mut hosts = HostTextCache::default();
+        let mut composed = ComposedHosts::default();
+        composed
+            .states
+            .insert(declared.path.to_owned(), ComposedHostState::Unsafe("broken order".to_owned()));
+
+        assert!(
+            !settle_composed_host(
+                Path::new("."),
+                &Manifest::default(),
+                &mut plan,
+                &mut hosts,
+                &mut composed,
+                declared.path,
+                &spec,
+            )
+            .unwrap()
+        );
+        assert!(
+            !settle_composed_host(
+                Path::new("."),
+                &Manifest::default(),
+                &mut plan,
+                &mut hosts,
+                &mut composed,
+                declared.path,
+                &spec,
+            )
+            .unwrap()
+        );
+        assert_eq!(plan.refusals().len(), 1);
+        assert!(composed.reported.contains(declared.path));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn malformed_marker_refusals_distinguish_live_and_retired_regions() {
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("host.txt"), "# >>> anvil-managed: test\ngenerated\n");
+
+        for (retiring, expected, rejected) in [
+            (
+                false,
+                "this region's marker lines do not form a matching pair",
+                "this retired managed region",
+            ),
+            (
+                true,
+                "this retired managed region has marker lines that do not form a matching pair",
+                "this region's marker lines",
+            ),
+        ] {
+            let mut plan = Plan::default();
+            assert!(
+                !repair_or_refuse(
+                    tmp.path(),
+                    &mut plan,
+                    &mut HostTextCache::default(),
+                    "host.txt",
+                    "test",
+                    CommentSyntax::Hash,
+                    retiring,
+                )
+                .unwrap()
+            );
+            let refusal = &plan.refusals()[0];
+            assert!(refusal.contains(expected), "{refusal}");
+            assert!(!refusal.contains(rejected), "{refusal}");
+        }
+    }
+
     fn seed_lock_owner(root: &Path, tool: &str) {
         let m = Manifest {
             tool: Some(tool.to_owned()),
             ..Manifest::default()
         };
         m.save(root).unwrap();
+    }
+
+    #[cfg_attr(miri, ignore = "canonicalizes a missing workspace; miri isolation forbids it")]
+    #[test]
+    fn workspace_lookup_failure_is_returned_instead_of_panicking() {
+        run_update(&Catalog::anvil(), &local_only(), Path::new("a-workspace-that-does-not-exist")).unwrap_err();
+    }
+
+    #[test]
+    fn run_propagates_current_directory_failures() {
+        let error = std::io::Error::new(std::io::ErrorKind::NotFound, "working directory disappeared");
+        let err = run_with_current_dir(&Catalog::anvil(), &local_only(), Err(error)).unwrap_err();
+        assert!(err.to_string().contains("working directory disappeared"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_returns_the_observable_process_exit_code() {
+        let changed = empty_workspace();
+        let mut dry_run = local_only();
+        dry_run.dry_run = true;
+        assert_eq!(
+            run_with_current_dir(&Catalog::anvil(), &dry_run, Ok(changed.path().to_owned())).unwrap(),
+            1
+        );
+        assert!(!Manifest::path_for(changed.path()).exists());
+
+        let clean = empty_workspace();
+        assert_eq!(
+            run_with_current_dir(&Catalog::anvil(), &local_only(), Ok(clean.path().to_owned())).unwrap(),
+            0
+        );
+        assert_eq!(
+            run_with_current_dir(&Catalog::anvil(), &dry_run, Ok(clean.path().to_owned())).unwrap(),
+            0
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -2762,6 +3152,58 @@ mod tests {
         assert_eq!(orphans, vec![("Justfile", "anvil-r")]);
     }
 
+    #[test]
+    fn region_targets_are_not_live_owned_files() {
+        let mut plan = Plan::default();
+        plan.push(PlanItem::noop(
+            Target::Region {
+                host: "Justfile".to_owned(),
+                id: "anvil-r".to_owned(),
+            },
+            Decision::InSync,
+        ));
+        plan.push(PlanItem::noop(
+            Target::File {
+                path: "owned.txt".to_owned(),
+            },
+            Decision::InSync,
+        ));
+
+        assert_eq!(live_files(&plan), BTreeSet::from(["owned.txt".to_owned()]));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn skipping_a_live_region_host_does_not_stop_later_file_removals() {
+        let tmp = TempDir::new().unwrap();
+        let mut previous = Manifest::default();
+        previous.set_file("Justfile", "sha256:old-host");
+        previous.set_file("retired.txt", "sha256:retired");
+
+        let mut plan = Plan::default();
+        plan.push(PlanItem::noop(
+            Target::Region {
+                host: "Justfile".to_owned(),
+                id: "anvil-r".to_owned(),
+            },
+            Decision::InSync,
+        ));
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert!(plan.items().iter().any(|item| item.target
+            == Target::File {
+                path: "retired.txt".to_owned()
+            }
+            && item.decision == Decision::Remove));
+    }
+
     /// Direct unit test of `plan_removals` for a region orphan whose host
     /// file exists with a customized (checksum-diverged) region body: it
     /// must refuse, preserving the user's edits and tracking checksum.
@@ -2799,6 +3241,9 @@ mod tests {
             .collect();
         assert_eq!(orphans, vec![("Justfile", "anvil-r")]);
         assert_eq!(plan.refusals().len(), 1);
+        assert!(plan.refusals()[0].contains(
+            "this retired managed region contains edits. Restore its last generated body, empty it, or remove it to complete retirement"
+        ));
         assert_eq!(plan.projected_manifest(&previous).regions, previous.regions);
         // Host file untouched.
         assert!(
@@ -2807,6 +3252,173 @@ mod tests {
                 .contains("user edited body"),
             "customized region body must be preserved",
         );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn plan_removals_propagates_owned_file_read_failures() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("retired.txt")).unwrap();
+        let mut previous = Manifest::default();
+        previous.set_file("retired.txt", "sha256:body");
+
+        let err = plan_removals(
+            tmp.path(),
+            &previous,
+            &mut Plan::default(),
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("retired.txt"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn plan_removals_propagates_retired_region_read_failures() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("host.txt")).unwrap();
+        let mut previous = Manifest::default();
+        previous.set_region("host.txt", "retired", "sha256:body");
+
+        let err = plan_removals(
+            tmp.path(),
+            &previous,
+            &mut Plan::default(),
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("host.txt"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn case_resolved_live_region_does_not_stop_later_retirements() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            &tmp.path().join("host.txt"),
+            "# >>> anvil-managed: live\nbody\n# <<< anvil-managed: live\n",
+        );
+        let mut previous = Manifest::default();
+        previous.set_region("HOST.TXT", "live", checksum_str("body\n"));
+        previous.set_region("missing.txt", "retired", "sha256:body");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::noop(
+            Target::Region {
+                host: "host.txt".to_owned(),
+                id: "live".to_owned(),
+            },
+            Decision::InSync,
+        ));
+
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert!(plan.items().iter().any(|item| {
+            item.target
+                == Target::Region {
+                    host: "HOST.TXT".to_owned(),
+                    id: "live".to_owned(),
+                }
+                && item.decision == Decision::OrphanedKept
+        }));
+        assert!(plan.items().iter().any(|item| {
+            item.target
+                == Target::Region {
+                    host: "missing.txt".to_owned(),
+                    id: "retired".to_owned(),
+                }
+                && item.decision == Decision::OrphanedKept
+        }));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_missing_retired_host_does_not_stop_later_region_removals() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            &tmp.path().join("present.txt"),
+            "# >>> anvil-managed: present\nbody\n# <<< anvil-managed: present\n",
+        );
+        let mut previous = Manifest::default();
+        previous.set_region("missing.txt", "missing", "sha256:body");
+        previous.set_region("present.txt", "present", checksum_str("body\n"));
+        let mut plan = Plan::default();
+
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert!(plan.items().iter().any(|item| {
+            item.target
+                == Target::Region {
+                    host: "missing.txt".to_owned(),
+                    id: "missing".to_owned(),
+                }
+                && item.decision == Decision::OrphanedKept
+        }));
+        assert!(plan.items().iter().any(|item| {
+            item.target
+                == Target::Region {
+                    host: "present.txt".to_owned(),
+                    id: "present".to_owned(),
+                }
+                && item.decision == Decision::Remove
+        }));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_malformed_retired_region_does_not_stop_later_region_removals() {
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("a-malformed.txt"), "# >>> anvil-managed: malformed\nbody\n");
+        write(
+            &tmp.path().join("z-present.txt"),
+            "# >>> anvil-managed: present\nbody\n# <<< anvil-managed: present\n",
+        );
+        let mut previous = Manifest::default();
+        previous.set_region("a-malformed.txt", "malformed", checksum_str("body\n"));
+        previous.set_region("z-present.txt", "present", checksum_str("body\n"));
+        let mut plan = Plan::default();
+
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
+
+        assert!(
+            plan.refusals()
+                .iter()
+                .any(|refusal| refusal.contains("a-malformed.txt") && refusal.contains("matching pair")),
+            "the malformed retirement must be refused: {:?}",
+            plan.refusals()
+        );
+        assert!(plan.items().iter().any(|item| {
+            item.target
+                == Target::Region {
+                    host: "z-present.txt".to_owned(),
+                    id: "present".to_owned(),
+                }
+                && item.decision == Decision::Remove
+        }));
     }
 
     /// A catalog with two managed regions targeting the same host file —

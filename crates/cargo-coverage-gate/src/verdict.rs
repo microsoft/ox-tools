@@ -223,20 +223,24 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let n: Vec<char> = name.chars().collect();
     let (mut pattern_index, mut name_index) = (0, 0);
-    let (mut star, mut star_match) = (None, 0);
+    let mut star = None;
 
     while name_index < n.len() {
         if pattern_index < p.len() && (p[pattern_index] == '?' || p[pattern_index] == n[name_index]) {
             pattern_index += 1;
             name_index += 1;
-        } else if pattern_index < p.len() && p[pattern_index] == '*' {
-            star = Some(pattern_index);
+        } else if
+        // #[gamma::skip(cond.always_true, tag = "timeout", reason = "treating every remaining character as a star prevents the matcher from consuming ordinary literals")]
+        pattern_index < p.len() && p[pattern_index] == '*' {
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, tag = "timeout", reason = "the matcher must advance past the star before attempting to match its suffix")]
             pattern_index = pattern_index.saturating_add(1);
-            star_match = name_index;
-        } else if let Some(star_index) = star {
-            pattern_index = star_index.saturating_add(1);
-            star_match = star_match.saturating_add(1);
-            name_index = star_match;
+            star = Some((pattern_index, name_index));
+        } else if let Some((suffix_index, star_match)) = star.as_mut() {
+            pattern_index = *suffix_index;
+            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, tag = "timeout", reason = "star backtracking must advance through the candidate name")]
+            *star_match = star_match.saturating_add(1);
+            // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "the next comparison must use the advanced star match position")]
+            name_index = *star_match;
         } else {
             return false;
         }
@@ -535,6 +539,24 @@ mod tests {
         assert!(!glob_matches("?a", "a"));
         assert!(glob_matches("ab*cd", "abxxcd"));
         assert!(!glob_matches(&format!("{}z", "*".repeat(10_000)), &"a".repeat(10_000)));
+    }
+
+    #[test]
+    fn glob_backtracking_matches_the_complete_pattern() {
+        for (pattern, name, expected) in [
+            ("*ab", "aaab", true),
+            ("*ab", "aaaa", false),
+            ("a*ab", "aaab", true),
+            ("a*ab", "aaba", false),
+            ("*a*b", "xxaayb", true),
+            ("*a*b", "xxaaya", false),
+            ("ab**cd", "abxxcd", true),
+            ("ab**cd", "abxxce", false),
+            ("?*?", "ab", true),
+            ("?*?", "a", false),
+        ] {
+            assert_eq!(glob_matches(pattern, name), expected, "{pattern:?} against {name:?}");
+        }
     }
 
     #[test]
