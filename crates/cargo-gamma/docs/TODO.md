@@ -11,6 +11,7 @@ deleted; this file is not a changelog or a record of rejected work.
 ### Features
 - [F2](#f2) — Checkpoint and resume long-running campaigns
 - [F3](#f3) — Native fork-server test harness as a `cargo test`/nextest replacement
+- [F4](#f4) - Evaluate repair workflows beyond survivor-only reruns
 
 ## Performance
 
@@ -121,3 +122,26 @@ documentation explicitly discloses the instrumented-tree caveats a team must acc
 their primary test runner.
 
 **See also:** P3 (this mode's execution engine)
+
+---
+
+<a id="f4"></a>
+### F4 - Evaluate repair workflows beyond survivor-only reruns
+
+**Area:** report-driven selection and local test improvement
+**Priority:** Deferred; requires evidence that the existing workflow is insufficient
+
+Use `cargo gamma run --only-survivors-from <report>` for focused test-improvement
+runs, followed by an ordinary full campaign. It selects genuine survivors for
+fresh execution rather than carrying historical detections into a new score.
+
+Broader result-driven iteration is not committed implementation work. Reconsider
+it only when a concrete workflow needs unresolved outcomes beyond survivors,
+automatic inclusion of newly discovered candidates, or durable repair-chain
+provenance. Any such proposal must distinguish fresh results from intentionally
+omitted historical findings and handle changed or missing identities explicitly.
+Existing selector and report-correctness fixes do not depend on this feature.
+
+**Decision complete when:** a concrete use case either demonstrates a need beyond
+survivor-only reruns and justifies a separate design, or establishes that the
+existing workflow is sufficient and this evaluation can be removed.
