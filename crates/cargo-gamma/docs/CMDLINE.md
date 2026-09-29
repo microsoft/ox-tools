@@ -210,6 +210,12 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
 | `--only-survivors-from` | `<PATH>` | Run only mutants that genuinely survived in this cargo-gamma report. |
 
+**Selecting tests**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--lib` |  | Compile and run only library unit-test harnesses with `test = true`. |
+
 **Cargo features**
 
 | Option | Value | What it does |
@@ -330,6 +336,12 @@ cargo gamma list [OPTIONS] [WHAT]
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
 
+**Selecting tests**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--lib` |  | Compile and run only library unit-test harnesses with `test = true`. |
+
 **Cargo features**
 
 | Option | Value | What it does |
@@ -389,6 +401,12 @@ cargo gamma suppress [OPTIONS] [-- <TEST_ARGS>...]
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
 | `--only-survivors-from` | `<PATH>` | Run only mutants that genuinely survived in this cargo-gamma report. |
+
+**Selecting tests**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--lib` |  | Compile and run only library unit-test harnesses with `test = true`. |
 
 **Cargo features**
 
@@ -511,6 +529,12 @@ cargo gamma unsuppress [OPTIONS]
 | `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
+
+**Selecting tests**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--lib` |  | Compile and run only library unit-test harnesses with `test = true`. |
 
 **Cargo features**
 

@@ -624,6 +624,11 @@ pub(super) fn run_cargo(
     first_round: Option<Duration>,
     events: &mut dyn Events,
 ) -> Result<Compiled> {
+    let library_packages = work.cargo.lib.then(|| work.library_packages(select, verb.first() == Some(&"test")));
+    let select = library_packages.as_deref().or(select);
+    if select.is_some_and(<[String]>::is_empty) {
+        return Err(error!("--lib selected no eligible library targets for `cargo {}`", verb.join(" ")).usage());
+    }
     let mut args: Vec<String> = verb.iter().map(|arg| (*arg).to_owned()).collect();
 
     args.push("--message-format=json".to_owned());

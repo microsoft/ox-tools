@@ -12,7 +12,8 @@ use super::census::{Census, CensusWork};
 use super::config::Config;
 use super::memory::MemoryPolicy;
 use super::rustc_wrapper::RustcInvocation;
-use crate::discover::{Glob, Plan};
+use crate::discover::{Glob, Plan, TargetIdentity, TestTarget};
+use crate::error::error;
 use crate::estimate::Workload;
 use crate::model::{Mutant, Outcome};
 
@@ -34,6 +35,15 @@ pub struct TestBinary {
     /// `tests/` becomes a target of its own, so this is the finest granularity cargo offers for
     /// naming part of a suite — and the granularity `package` is too coarse for.
     pub target: String,
+
+    /// Logical Cargo identity, preserved when the executable is rebuilt or relocated.
+    pub identity: Option<TargetIdentity>,
+
+    /// Whether Cargo supplies libtest rather than a custom harness.
+    pub libtest: bool,
+
+    /// Whether a legacy package/name hint identifies only this declared test target.
+    pub(crate) legacy_hint_unambiguous: bool,
 
     /// The directory holding the package's `Cargo.toml`, which is where cargo would run it.
     ///
@@ -90,6 +100,51 @@ pub struct TestBinary {
 }
 
 impl TestBinary {
+    /// Matches a hint only when its target identity is exact or its legacy name is unique.
+    pub(crate) fn matches_hint(&self, package: &str, target: &str, identity: Option<&TargetIdentity>) -> bool {
+        self.package == package
+            && self.target == target
+            && match identity {
+                Some(identity) => self.identity.as_ref() == Some(identity),
+                None => self.legacy_hint_unambiguous,
+            }
+    }
+
+    /// Associates a scratch artifact with the source workspace's declared target.
+    pub(crate) fn identify(&mut self, targets: &[TestTarget], plan: &Plan, root: &Utf8Path) -> crate::Result<()> {
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let found = targets
+            .iter()
+            .find(|target| {
+                let same_name = target.name == self.target;
+                same_name
+                    && target.package == self.package
+                    && self
+                        .identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.kind == target.identity.kind && identity.source == target.identity.source)
+                    && plan
+                        .directory_of(&target.package)
+                        .is_some_and(|directory| root.join(directory) == self.manifest_dir)
+            })
+            .ok_or_else(|| {
+                error!(
+                    "Cargo artifact `{}` in package `{}` does not match its declared target identity",
+                    self.target, self.package_id
+                )
+            })?;
+        self.identity = Some(found.identity.clone());
+        self.libtest = found.harness;
+        self.legacy_hint_unambiguous = targets
+            .iter()
+            .filter(|target| target.test && target.package == self.package && target.name == self.target)
+            .count()
+            == 1;
+        Ok(())
+    }
+
     /// Computes the timeout budget for this binary given an optional per-mutant multiplier override and a floor.
     ///
     /// An override rescales a calibrated budget; it cannot manufacture one, because on a run with
@@ -230,11 +285,27 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
                 .and_then(|manifest| manifest.parent().map(Utf8Path::to_path_buf))
                 .unwrap_or_default();
 
+            let identity = target_source.as_ref().map(|source| TargetIdentity {
+                package_id: package_id.clone(),
+                kind: message
+                    .get("target")
+                    .and_then(|target| target.get("kind"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                source: Utf8PathBuf::from(source.strip_prefix(root).unwrap_or(source).as_str().replace('\\', "/")),
+            });
             binaries.push(TestBinary {
                 path: Utf8PathBuf::from(path),
                 package,
                 package_id,
                 target,
+                identity,
+                libtest: true,
+                legacy_hint_unambiguous: false,
                 manifest_dir,
                 linked_sources: captures
                     .as_ref()
@@ -1897,13 +1968,54 @@ mod tests {
         assert_eq!(unmatched_test(&tests, &["untis".to_owned()], &[]), Some("untis"));
     }
 
+    #[test]
+    fn library_identity_distinguishes_same_named_targets_and_legacy_hints() {
+        let root = Utf8Path::new("/scratch");
+        let mut plan = plan_reaching(&[]);
+        let _ = plan.specs.insert("subject".to_owned(), ("subject".into(), "0.1.0".to_owned()));
+        let declared = |kind: &str, source: &str| TestTarget {
+            identity: TargetIdentity {
+                package_id: "path+file:///checkout/subject#subject@0.1.0".to_owned(),
+                kind: vec![kind.to_owned()],
+                source: source.into(),
+            },
+            package: "subject".to_owned(),
+            name: "same".to_owned(),
+            library: kind == "lib",
+            test: true,
+            harness: false,
+        };
+        let targets = vec![declared("lib", "subject/src/lib.rs"), declared("test", "subject/tests/same.rs")];
+        let message = serde_json::json!({
+            "reason": "compiler-artifact", "profile": {"test": true},
+            "package_id": "path+file:///scratch/subject#subject@0.1.0",
+            "manifest_path": "/scratch/subject/Cargo.toml",
+            "executable": "/artifacts/new-executable",
+            "target": {"name": "same", "kind": ["lib"], "src_path": "/scratch/subject/src/lib.rs"},
+        })
+        .to_string();
+        let mut binaries = test_binaries_with_linkage(&message, root, None);
+        let binary = &mut binaries[0];
+        binary.identify(&targets, &plan, root).unwrap();
+        assert_eq!(binary.identity.as_ref(), Some(&targets[0].identity));
+        assert!(!binary.libtest);
+        assert!(!binary.matches_hint("subject", "same", None));
+        assert!(binary.matches_hint("subject", "same", Some(&targets[0].identity)));
+        assert!(!binary.matches_hint("subject", "same", Some(&targets[1].identity)));
+        assert!(!binary.matches_hint("different", "same", Some(&targets[0].identity)));
+        binary.path = "/artifacts/rebuilt-executable".into();
+        assert!(binary.matches_hint("subject", "same", Some(&targets[0].identity)));
+        binary.identify(&targets[..1], &plan, root).unwrap();
+        assert!(binary.matches_hint("subject", "same", None));
+        binary.target = "not-declared".to_owned();
+        assert!(binary.identify(&targets, &plan, root).is_err());
+    }
+
     fn plan_reaching(edges: &[(&str, &[&str])]) -> Plan {
         let mut reach = crate::HashMap::default();
-
         for (from, to) in edges {
             let _previous = reach.insert((*from).to_owned(), to.iter().map(|name| (*name).to_owned()).collect());
         }
-
         Plan {
             population: None,
             skipped: Vec::new(),

@@ -300,6 +300,13 @@ pub struct SelectArgs {
     #[arg(long, conflicts_with = "packages")]
     pub workspace: bool,
 
+    /// Compile and run only library unit-test harnesses with `test = true`.
+    ///
+    /// Mutation-source selection is unchanged. Integration, binary, example and benchmark
+    /// harnesses are excluded, including during pristine validation and nextest inventory.
+    #[arg(long, help_heading = "Selecting tests")]
+    pub lib: bool,
+
     /// Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`.
     ///
     /// `fn_value.err_default` only reaches error types that implement `Default`. Naming a value
@@ -795,6 +802,7 @@ impl Default for SelectArgs {
             in_diff: None,
             packages: Vec::new(),
             workspace: false,
+            lib: false,
             errors: Vec::new(),
             features: FeatureArgs::default(),
             config: ConfigArgs::default(),

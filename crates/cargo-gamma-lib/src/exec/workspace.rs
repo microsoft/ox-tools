@@ -30,9 +30,9 @@ use super::manifest::{CAP_LINTS, Manifest, RUNTIME_CRATE, RUNTIME_PACKAGE, Works
 use super::nextest::Harness;
 use super::rustc_wrapper::{CAPTURE_DIR_VAR, ORIGINAL_WRAPPER_VAR, reset_capture_directory, wrapper_path};
 use super::sync::sync_or_copy;
-use super::test_binary::{TEST_THREADS_VAR, TestBinary, harness_threads};
+use super::test_binary::{TEST_THREADS_VAR, TestBinary, admits_target, harness_threads, test_binaries_with_linkage};
 use super::test_environment::TestEnvironment;
-use crate::discover::TargetFile;
+use crate::discover::{TargetFile, TestTarget};
 use crate::error::error;
 use crate::{Result, cfg};
 
@@ -84,6 +84,13 @@ pub struct Workspace {
 
     /// How cargo is invoked in this tree.
     pub(super) cargo: CargoOptions,
+
+    /// Source-workspace identities used to admit artifacts and preserve custom harnesses.
+    pub(super) targets: Vec<TestTarget>,
+    /// Library harness roots after target-name filtering, before package-scope narrowing.
+    pub(super) library_harnesses: Vec<String>,
+    /// The final harness build's roots, retained for nextest's build-capable inventory.
+    library_inventory: Vec<String>,
 
     /// Where the vendored guard runtime lives, so that a package can be linked to it at the moment
     /// its own mutants are known rather than all of them up front.
@@ -308,6 +315,9 @@ impl Workspace {
             target,
             libraries,
             cargo: config.cargo.clone(),
+            targets: Vec::new(),
+            library_harnesses: Vec::new(),
+            library_inventory: Vec::new(),
             runtime,
             rustc_captures,
             rustc_captures_ready: AtomicBool::new(false),
@@ -437,6 +447,9 @@ impl Workspace {
             rustc_captures_ready: AtomicBool::new(false),
             libraries: Vec::new(),
             cargo: CargoOptions::default(),
+            targets: Vec::new(),
+            library_harnesses: Vec::new(),
+            library_inventory: Vec::new(),
             nextest: None,
             test_environment: None,
             cargo_metadata: None,
@@ -459,6 +472,47 @@ impl Workspace {
     #[cfg(any(test, feature = "internals"))]
     pub(crate) fn set_test_args(&mut self, args: Vec<String>) {
         self.cargo.test_args = args;
+    }
+
+    /// Installs metadata before any Cargo build can select a target.
+    pub(super) fn select_targets(&mut self, targets: &[TestTarget], config: &Config) {
+        self.targets = targets.to_vec();
+        self.library_harnesses = targets
+            .iter()
+            .filter(|target| target.library && target.test && admits_target(&target.name, &config.include_tests, &config.exclude_tests))
+            .map(|target| target.package.clone())
+            .collect();
+        self.library_harnesses.sort();
+        self.library_harnesses.dedup();
+    }
+
+    /// Intersects package widening with the explicit library-kind boundary.
+    pub(super) fn library_packages(&self, select: Option<&[String]>, harness: bool) -> Vec<String> {
+        let mut packages: Vec<String> = self
+            .targets
+            .iter()
+            .filter(|target| {
+                target.library
+                    && (!harness || self.library_harnesses.contains(&target.package))
+                    && select.is_none_or(|packages| packages.contains(&target.package))
+            })
+            .map(|target| target.package.clone())
+            .collect();
+        packages.sort();
+        packages.dedup();
+        packages
+    }
+
+    /// Keeps nextest's inventory on the same feature-unified roots as the final build.
+    pub(super) fn retain_inventory_roots(&mut self, artifacts: &str) {
+        if self.cargo.lib {
+            self.library_inventory = test_binaries_with_linkage(artifacts, &self.root, None)
+                .into_iter()
+                .map(|binary| binary.package_id)
+                .collect();
+            self.library_inventory.sort();
+            self.library_inventory.dedup();
+        }
     }
 
     pub(super) fn cargo(&self) -> Command {
@@ -757,6 +811,11 @@ impl Workspace {
             .collect();
         packages.sort_unstable();
         packages.dedup();
+
+        if self.cargo.lib {
+            args.push("--lib".to_owned());
+            packages = self.library_inventory.iter().map(String::as_str).collect();
+        }
 
         for package in packages {
             args.push("--package".to_owned());
@@ -3389,6 +3448,9 @@ mod tests {
             rustc_captures_ready: AtomicBool::new(false),
             libraries: Vec::new(),
             cargo: CargoOptions::default(),
+            targets: Vec::new(),
+            library_harnesses: Vec::new(),
+            library_inventory: Vec::new(),
             nextest: None,
             test_environment: None,
             cargo_metadata: None,
@@ -3689,6 +3751,9 @@ mod tests {
             rustc_captures_ready: AtomicBool::new(false),
             libraries: Vec::new(),
             cargo: CargoOptions::default(),
+            targets: Vec::new(),
+            library_harnesses: Vec::new(),
+            library_inventory: Vec::new(),
             nextest: None,
             test_environment: None,
             cargo_metadata: None,
@@ -3716,6 +3781,9 @@ mod tests {
             rustc_captures_ready: AtomicBool::new(false),
             libraries: Vec::new(),
             cargo: CargoOptions::default(),
+            targets: Vec::new(),
+            library_harnesses: Vec::new(),
+            library_inventory: Vec::new(),
             nextest: None,
             test_environment: None,
             cargo_metadata: None,
@@ -3874,6 +3942,28 @@ mod tests {
                 "mutants",
             ]
         );
+    }
+
+    #[test]
+    fn library_nextest_inventory_keeps_all_final_build_roots_and_no_tests_selector() {
+        let mut work = unsettled_default();
+        work.cargo.lib = true;
+        work.library_inventory = vec!["leaf-id".to_owned(), "enabler-id".to_owned()];
+        let binaries = [TestBinary {
+            package: "leaf".to_owned(),
+            package_id: "leaf-id".to_owned(),
+            ..crate::testing::test_binary("/built/leaf")
+        }];
+        let command = work.nextest_list_command(&binaries);
+        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        assert!(args.iter().any(|arg| arg == "--lib"));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--tests" || arg == "--all-targets" || arg == "--workspace")
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--package", "leaf-id"]));
+        assert!(args.windows(2).any(|pair| pair == ["--package", "enabler-id"]));
     }
 
     /// The default cache directory's name is a cross-release contract, not a private detail.

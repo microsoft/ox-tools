@@ -71,6 +71,35 @@ collision-checked, with a short identity digest added only when needed.
 Artifact publication is separate from the cache, and `--artifact-dir` moves
 the complete user-facing set.
 
+## Library target policy
+
+`CargoOptions::lib` carries the effective shared CLI/config policy into discovery and every build.
+`Survey` retains Cargo target identities, library classification across crate kinds, `test`
+eligibility and custom `harness` declarations. The mutation file inventory remains independent.
+Before copying, measurement validates name patterns and the requested oracle against that inventory.
+
+Mode-specific Cargo verbs distinguish ordinary checks, production stages and full harness builds.
+The shared invocation path intersects every package selection, including unrestricted widening,
+with eligible library roots. Production stages may compile libraries with disabled test harnesses;
+harness invocations cannot request them. Library convergence does not use optional ordering probes
+or diagnostic-free isolation builds: each counted round is one aggregate invocation, and only
+returned compiler diagnostics authorize withdrawal. The final library build retains preflight's
+package feature scope rather than performing optional target-name narrowing.
+
+Artifacts carry target kinds and workspace-relative source roots and are associated with metadata
+before any execution. That association preserves the source-workspace Cargo package identity
+across scratch rebuilds. Nextest inventories the final build's package roots with `--lib`, even
+when linkage or oracle-package filtering omits some built binaries from execution.
+
+Killer and generalized binary hints optionally carry the complete logical identity. Legacy
+package/name hints are admitted only when the declared inventory contains one matching test
+target, including targets excluded from the current oracle. All hints remain fresh checked
+probes, never verdict reuse. Custom harnesses bypass libtest enumeration.
+
+The effective target policy is part of the population shaping record and its canonical key.
+It also participates in build/execution cache policy and test-selection terms. Diagnostic binary
+records include redacted package identity and source root alongside Cargo target kinds.
+
 ## Runtime protocol
 
 The injected runtime uses fixed static buffers and native startup-environment

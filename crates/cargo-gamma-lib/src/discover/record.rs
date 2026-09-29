@@ -444,6 +444,10 @@ pub struct Killer {
     /// The cargo target within that package.
     pub target: String,
 
+    /// Exact Cargo identity; absent in legacy name-only hints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Box<crate::discover::TargetIdentity>>,
+
     /// The test the harness named when it failed.
     pub test: String,
 }
@@ -451,8 +455,8 @@ pub struct Killer {
 impl Killer {
     /// Whether this names the given binary.
     #[must_use]
-    pub fn names(&self, package: &str, target: &str) -> bool {
-        self.package == package && self.target == target
+    pub fn names(&self, binary: &crate::exec::TestBinary) -> bool {
+        binary.matches_hint(&self.package, &self.target, self.identity.as_deref())
     }
 }
 
@@ -564,7 +568,9 @@ impl From<&GeneralizedHints> for CompactGeneralizedHints {
             .flat_map(|item| item.candidates.iter().map(|ranked| ranked.candidate.clone()))
             .chain(hints.test_sets.iter().flatten().cloned())
             .collect();
-        killers.sort_by(|left, right| (&left.package, &left.target, &left.test).cmp(&(&right.package, &right.target, &right.test)));
+        killers.sort_by(|left, right| {
+            (&left.package, &left.target, &left.identity, &left.test).cmp(&(&right.package, &right.target, &right.identity, &right.test))
+        });
         killers.dedup();
 
         let mut binary_identities: Vec<BinaryHint> = hints
@@ -572,7 +578,8 @@ impl From<&GeneralizedHints> for CompactGeneralizedHints {
             .iter()
             .flat_map(|file| file.candidates.iter().map(|ranked| ranked.candidate.clone()))
             .collect();
-        binary_identities.sort_by(|left, right| (&left.package, &left.target).cmp(&(&right.package, &right.target)));
+        binary_identities
+            .sort_by(|left, right| (&left.package, &left.target, &left.identity).cmp(&(&right.package, &right.target, &right.identity)));
         binary_identities.dedup();
 
         let items = hints
@@ -804,6 +811,8 @@ pub struct ItemHints {
 pub struct BinaryHint {
     pub package: String,
     pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Box<crate::discover::TargetIdentity>>,
 }
 
 /// Ranked test-binary candidates for one source file.
@@ -1987,6 +1996,9 @@ pub struct Context<'a> {
     /// Whether to test the whole workspace.
     pub test_workspace: bool,
 
+    /// Whether compilation and judging are restricted to library targets.
+    pub lib: bool,
+
     /// Whether to collect case-level reachability before testing mutants.
     pub optimize_test_execution: bool,
 
@@ -2116,6 +2128,7 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
     // opposite default are invalidated rather than believed.
     test_parts.push(b":case-reachability-default:");
     let test_flags = [
+        u8::from(of.lib),
         u8::from(of.test_workspace),
         u8::from(of.optimize_test_execution),
         u8::from(of.whole_test_binaries),
@@ -2132,7 +2145,7 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
         "baseline={};confirm={};stall={};timeout_multiplier={:?};timeout_floor={:?};memory={:?};\
          memory_multiplier={:?};memory_headroom={:?};memory_limit={:?};baseline_memory_limit={:?};\
          no_relaunch={};copy_ignored={};jobs={:?};build_timeout={:?};build_timeout_multiplier={:?};\
-         rollback_rounds={}",
+         rollback_rounds={};lib={}",
         of.baseline,
         of.confirm,
         of.stall,
@@ -2148,7 +2161,8 @@ fn context_in(of: &Context<'_>, build_target: Option<&str>, environment: &[(Vec<
         of.jobs,
         of.build_timeout,
         of.build_timeout_multiplier,
-        of.rollback_rounds
+        of.rollback_rounds,
+        of.lib
     );
     policy_parts.push(policy.as_bytes());
 
@@ -2377,11 +2391,13 @@ mod tests {
         let killer = Killer {
             package: "subject".to_owned(),
             target: "lib".to_owned(),
+            identity: None,
             test: "tests::shared".to_owned(),
         };
         let binary = BinaryHint {
             package: "subject".to_owned(),
             target: "lib".to_owned(),
+            identity: None,
         };
         let hints = GeneralizedHints {
             version: GENERALIZED_HINTS_VERSION,
@@ -3024,6 +3040,7 @@ mod tests {
                     Killer {
                         package: "subject".to_owned(),
                         target: "lib".to_owned(),
+                        identity: None,
                         test: format!("caught_{generation}"),
                     },
                 ))
@@ -3057,6 +3074,7 @@ mod tests {
                 Killer {
                     package: "subject".to_owned(),
                     target: "lib".to_owned(),
+                    identity: None,
                     test: "caught".to_owned(),
                 },
             ))
@@ -3345,6 +3363,7 @@ mod tests {
             build_timeout: _bt,
             build_timeout_multiplier: _btm,
             rollback_rounds: _rr,
+            lib: _lib,
         } = plain();
 
         let varied: &[(&str, Context<'_>)] = &[
@@ -3437,6 +3456,7 @@ mod tests {
                 },
             ),
             ("nextest", Context { nextest: true, ..plain() }),
+            ("library harness policy", Context { lib: true, ..plain() }),
             (
                 "cargo test arguments",
                 Context {
@@ -3642,6 +3662,7 @@ mod tests {
                 Killer {
                     package: "subject".to_owned(),
                     target: "lib".to_owned(),
+                    identity: None,
                     test: "caught".to_owned(),
                 },
             ))

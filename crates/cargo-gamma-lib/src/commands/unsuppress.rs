@@ -31,7 +31,7 @@ use crate::report::{Styler, quantity};
 #[cfg(test)]
 pub(super) fn unsuppress<H: Host>(host: &mut H, args: &UnsuppressArgs, styler: Styler) -> crate::Result<i32> {
     let config = crate::config::Config::resolve(&args.select)?;
-    let cargo = config.cargo_options();
+    let cargo = config.cargo_options(&args.select);
 
     unsuppress_with_cargo(host, args, styler, &cargo)
 }
@@ -295,7 +295,7 @@ fn verify_or_revert<H: Host>(
     styler: Styler,
 ) -> crate::Result<i32> {
     let config = crate::config::Config::resolve(&args.select)?;
-    let cargo = config.cargo_options();
+    let cargo = config.cargo_options(&args.select);
 
     verify_or_revert_with_cargo(host, args, before, removed, written, styler, &cargo)
 }

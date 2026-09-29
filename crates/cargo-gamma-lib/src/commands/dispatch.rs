@@ -263,7 +263,7 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
 
         Command::List(mut args) => {
             let config = Config::resolve(&args.select)?;
-            let cargo = config.cargo_options();
+            let cargo = config.cargo_options(&args.select);
             config.apply_selection(&mut args.select)?;
             check_shard(&args.select)?;
             list_with_cargo(host, &args, styler, &cargo)
@@ -274,7 +274,7 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
 
         Command::Unsuppress(mut args) => {
             let config = Config::resolve(&args.select)?;
-            let cargo = config.cargo_options();
+            let cargo = config.cargo_options(&args.select);
             config.apply_selection(&mut args.select)?;
             check_shard(&args.select)?;
             unsuppress_with_cargo(host, &args, styler, &cargo)

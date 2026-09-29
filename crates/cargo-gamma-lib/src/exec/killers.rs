@@ -175,6 +175,7 @@ mod tests {
         Killer {
             package: "alpha".to_owned(),
             target: "lib".to_owned(),
+            identity: None,
             test: test.to_owned(),
         }
     }
@@ -261,9 +262,14 @@ mod tests {
     fn a_hint_names_only_the_binary_it_was_recorded_against() {
         let hint = killer("tests::round_trip");
 
-        assert!(hint.names("alpha", "lib"));
-        assert!(!hint.names("alpha", "integration"));
-        assert!(!hint.names("beta", "lib"));
+        let binary = |package: &str, target: &str| crate::exec::TestBinary {
+            package: package.to_owned(),
+            target: target.to_owned(),
+            ..crate::testing::test_binary("test")
+        };
+        assert!(hint.names(&binary("alpha", "lib")));
+        assert!(!hint.names(&binary("alpha", "integration")));
+        assert!(!hint.names(&binary("beta", "lib")));
     }
 
     #[test]
@@ -338,6 +344,7 @@ mod tests {
                 candidates: vec![ranked(BinaryHint {
                     package: "old".to_owned(),
                     target: "old".to_owned(),
+                    identity: None,
                 })],
             }],
             test_sets: vec![vec![killer("tests::old")]],
@@ -358,6 +365,7 @@ mod tests {
                 candidates: vec![ranked(BinaryHint {
                     package: "new".to_owned(),
                     target: "new".to_owned(),
+                    identity: None,
                 })],
             }],
             test_sets: vec![vec![killer("tests::reach")]],

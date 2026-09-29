@@ -221,6 +221,9 @@ test-packages = ["my-integration-tests"]
 # Default: false.
 test-workspace = false
 
+# Compile and run only eligible library unit-test harnesses. Default: false.
+lib = false
+
 # Experimentally measure case-level reachability before testing mutants.
 # Default: false.
 optimize-test-execution = false
@@ -236,6 +239,18 @@ exclude-tests = ["*_slow", "e2e_*"]
 # Run tests with nextest for per-test process isolation. Default: false.
 nextest = false
 ```
+
+`lib = true` is the configuration equivalent of `--lib`. It restricts harness compilation,
+baseline, census, confirmation and mutant execution, including nextest inventory. Eligible
+libraries must have `test = true`; binary-only members and disabled library harnesses supply no
+oracle. Production dependencies still compile and may be mutated. An entirely empty eligible
+oracle is a usage error before mutation work. Include/exclude target-name globs apply inside the
+eligible library set, without changing the package scope of `test-packages` or `test-workspace`.
+
+Library-only pristine validation is a full `cargo test --no-run --lib` build, so `cfg(test)`
+errors are checked. Pass-through Cargo target selectors that contradict the library policy and
+package selectors that bypass harness eligibility are rejected. Use Gamma's package/oracle
+options instead. `--no-config` provides the existing way to ignore a configured library policy.
 
 A derived budget adapts to the machine it runs on and to each specific test binary.
 `minimum-test-timeout` exists because a test binary finishing in milliseconds would otherwise get a budget of

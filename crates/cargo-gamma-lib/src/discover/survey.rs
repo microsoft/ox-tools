@@ -23,7 +23,7 @@ use super::compile_fail::{CompileFailTarget, compile_fail_targets};
 use super::glob::{Glob, normalize_separators};
 use super::killers::Killers;
 use super::shard::shard_of;
-use super::{Diff, Plan, TargetFile, modules};
+use super::{Diff, Plan, TargetFile, TestTarget, is_library, modules, test_inventory};
 use crate::cfg::{CfgSet, Cfgs, features};
 use crate::commands::{FeatureArgs, SelectArgs};
 use crate::elements::{Scope, SelectionKind};
@@ -140,6 +140,9 @@ pub struct Survey {
     /// Collected across every workspace member, since `--package` chooses what to mutate while
     /// these patterns choose what judges it.
     pub tests: Vec<String>,
+
+    /// Cargo target identities and explicit harness settings, independent of mutation sources.
+    pub(crate) targets: Vec<TestTarget>,
 
     /// Every test target that appears to run the compiler rather than the code under test.
     ///
@@ -266,7 +269,7 @@ impl Survey {
     #[cfg(test)]
     pub fn new(args: &SelectArgs, shard: Option<(u32, u32)>) -> Result<Self> {
         let config = crate::config::Config::resolve(args)?;
-        let cargo = config.cargo_options();
+        let cargo = config.cargo_options(args);
 
         Self::for_build(args, shard, &cargo)
     }
@@ -484,6 +487,7 @@ impl Survey {
             reach: reachable(&metadata),
             selected: sorted(selected),
             tests: test_targets(&metadata),
+            targets: test_inventory(&metadata)?,
             compile_fail: compile_fail_targets(&metadata),
             roots,
             specs,
@@ -1163,6 +1167,7 @@ fn population_scope(
         "idScheme": crate::model::MUTANT_ID_VERSION,
         "packages": packages,
         "features": features,
+        "testTargetPolicy": if cargo.lib { "lib" } else { "all" },
         "files": args.files.iter().collect::<BTreeSet<_>>(),
         "excludeFiles": args.exclude_files.iter().collect::<BTreeSet<_>>(),
         "excludeTraitImpls": args.exclude_trait_impls.iter().collect::<BTreeSet<_>>(),
@@ -2098,10 +2103,7 @@ fn is_mutable_target(target: &Target, enabled: Option<&Vec<String>>) -> bool {
     }
 
     // #[gamma::skip(iter.any_to_all, reason = "Cargo metadata gives a target one primary kind; any and all are therefore identical for the accepted-kind predicate")]
-    let kind = target
-        .kind
-        .iter()
-        .any(|kind| matches!(kind.to_string().as_str(), "lib" | "rlib" | "cdylib" | "bin"));
+    let kind = is_library(target) || target.is_bin();
 
     // Library targets carry no `required-features` — cargo rejects a manifest that gives them
     // any — so this is the binary gate and nothing else.

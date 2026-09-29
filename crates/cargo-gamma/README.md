@@ -326,6 +326,25 @@ unit tests take the name of the lib or bin they live in, and each file under `te
 named after the file. Exclusion is applied last, so `--include-test "*" --exclude-test "conformance_*"`
 means what it looks like.
 
+`--lib` (or `lib = true` in `gamma.toml`) restricts both compilation and execution to
+library unit-test harnesses. Library crate kinds such as `rlib`, `cdylib` and `proc-macro`
+are included; a library with `test = false` supplies no harness. Binary-only and disabled
+members do not prevent a workspace campaign when another eligible library supplies the oracle.
+If the requested oracle has no eligible library harness, the command fails before mutation work.
+Target-name globs apply inside that eligible set, so a name present only as an integration
+target does not satisfy `--include-test`.
+
+Mutation sources remain independent of this choice: a production dependency may be compiled
+and mutated without supplying a harness. `--test-package` and `--test-workspace` retain their
+package-scope meanings. Never-compiled candidates are `notbuilt`; compiled candidates with
+no judging tests are `uncovered`.
+
+Library-only pristine validation performs `cargo test --no-run --lib`, not `cargo check --lib`,
+so errors in `cfg(test)` code are found before instrumentation. Package widening preserves
+this library boundary, including nextest’s build-capable inventory. Contradictory target
+selectors in `--cargo-arg` are rejected; use gamma’s own selection options instead.
+Without `--lib`, the broader test-target selection remains available.
+
 The usual reason to reach for this is a corpus that is not an oracle at all — conformance suites,
 fuzz seeds, golden-file comparisons — sitting in the same package as the tests that are. Those
 target failures say nothing about whether a mutant was noticed, and letting them convict inflates

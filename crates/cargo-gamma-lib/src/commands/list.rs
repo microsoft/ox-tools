@@ -20,7 +20,7 @@ use crate::report::{Styler, encode_controls};
 #[cfg(test)]
 pub(super) fn list<H: Host>(host: &mut H, args: &ListArgs, styler: Styler) -> crate::Result<i32> {
     let config = crate::config::Config::resolve(&args.select)?;
-    let cargo = config.cargo_options();
+    let cargo = config.cargo_options(&args.select);
 
     list_with_cargo(host, args, styler, &cargo)
 }

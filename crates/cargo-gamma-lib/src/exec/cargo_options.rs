@@ -30,6 +30,9 @@ fn adjust_lock_flags(args: &[String]) -> Vec<String> {
 /// that decide what gets compiled and what the compiled thing is asked to do.
 #[derive(Debug, Clone, Default)]
 pub struct CargoOptions {
+    /// Compile only eligible library test harnesses and library production targets.
+    pub lib: bool,
+
     /// Feature arguments, already rendered in the form cargo accepts.
     pub features: Vec<String>,
 
@@ -59,18 +62,104 @@ impl CargoOptions {
     /// not let the two builds silently diverge; supporting this needs to model Cargo's full
     /// configuration precedence, so it is rejected before either discovery or Cargo starts.
     pub fn validate(&self) -> crate::Result<()> {
-        if let Some(argument) = self
-            .extra
-            .iter()
-            .find(|argument| argument.as_str() == "--config" || argument.starts_with("--config="))
-        {
-            return Err(error!(
-                "pass-through Cargo configuration `{argument}` is not supported; put the setting in a Cargo configuration file gamma can inspect"
-            )
-            .usage());
+        let mut arguments = self.extra.iter();
+        while let Some(argument) = arguments.next() {
+            let (flag, value) = argument
+                .split_once('=')
+                .map_or((argument.as_str(), None), |(flag, value)| (flag, Some(value)));
+            if flag == "--" {
+                return Err(error!("Cargo pass-through `--` is not supported; use gamma's `--` for test arguments").usage());
+            }
+            if flag == "--config" {
+                return Err(error!(
+                    "pass-through Cargo configuration `{argument}` is not supported; put the setting in a Cargo configuration file gamma can inspect"
+                ).usage());
+            }
+            if flag == "--lib" {
+                return Err(error!("use gamma's first-class --lib option, not a pass-through Cargo --lib selector").usage());
+            }
+            if self.lib && (flag == "--keep-going" || (flag.starts_with("-p") && !flag.starts_with("--"))) {
+                return Err(error!("pass-through Cargo argument `{argument}` is not supported with --lib; gamma owns eligible package roots and bounded harness retries").usage());
+            }
+            if self.lib
+                && matches!(
+                    flag,
+                    "--tests"
+                        | "--test"
+                        | "--bins"
+                        | "--bin"
+                        | "--examples"
+                        | "--example"
+                        | "--benches"
+                        | "--bench"
+                        | "--all-targets"
+                        | "--doc"
+                )
+            {
+                return Err(error!(
+                    "pass-through Cargo selector `{argument}` contradicts --lib; select library target names with --include-test"
+                )
+                .usage());
+            }
+            if self.lib && matches!(flag, "--workspace" | "--all" | "--package" | "-p" | "--exclude" | "--manifest-path") {
+                return Err(error!("pass-through Cargo package selector `{argument}` bypasses --lib harness eligibility; use --package, --test-package or --test-workspace").usage());
+            }
+            if value.is_none()
+                && matches!(
+                    flag,
+                    "--features"
+                        | "-F"
+                        | "--target"
+                        | "--target-dir"
+                        | "--profile"
+                        | "--jobs"
+                        | "-j"
+                        | "--message-format"
+                        | "--color"
+                        | "--manifest-path"
+                        | "--package"
+                        | "-p"
+                        | "--exclude"
+                        | "--test"
+                        | "--bin"
+                        | "--example"
+                        | "--bench"
+                        | "-Z"
+                )
+            {
+                let _value = arguments.next();
+            }
         }
 
         Ok(())
+    }
+
+    /// The pristine build must check the same test code the final harness compiles.
+    pub(crate) const fn preflight(&self) -> &'static [&'static str] {
+        if self.lib {
+            &["test", "--no-run", "--lib"]
+        } else {
+            &["check", "--tests", "--keep-going"]
+        }
+    }
+
+    /// Production-only compilation used for early viability checks.
+    pub(crate) const fn stage(&self, workspace: bool) -> &'static [&'static str] {
+        match (self.lib, workspace) {
+            (true, true) => &["check", "--lib", "--keep-going"],
+            (true, false) => &["build", "--lib", "--keep-going"],
+            (false, true) => &["check", "--keep-going"],
+            (false, false) => &["build", "--keep-going"],
+        }
+    }
+
+    /// Full harness compilation; `cargo test` does not accept `--keep-going`.
+    pub(crate) const fn harness(&self) -> &'static [&'static str] {
+        if self.lib {
+            &["test", "--no-run", "--lib"]
+        } else {
+            &["build", "--tests", "--keep-going"]
+        }
     }
 
     /// Describes the compilation these options ask for, for a workspace at `root`.
@@ -178,6 +267,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn library_policy_uses_harness_compilation_without_keep_going() {
+        let options = CargoOptions {
+            lib: true,
+            ..CargoOptions::default()
+        };
+        assert_eq!(options.preflight(), ["test", "--no-run", "--lib"]);
+        assert_eq!(options.harness(), ["test", "--no-run", "--lib"]);
+        assert_eq!(options.stage(false), ["build", "--lib", "--keep-going"]);
+        assert_eq!(options.stage(true), ["check", "--lib", "--keep-going"]);
+    }
+
+    #[test]
+    fn library_policy_rejects_contradictory_selectors_not_argument_values() {
+        for selector in [
+            "--tests",
+            "--test",
+            "--test=same",
+            "--bin=app",
+            "--bins",
+            "--example=x",
+            "--examples",
+            "--bench=x",
+            "--benches",
+            "--all-targets",
+            "--doc",
+            "--workspace",
+            "--all",
+            "--package=x",
+            "-px",
+            "--exclude=x",
+            "--manifest-path=x",
+            "--keep-going",
+            "--lib",
+            "--",
+        ] {
+            let options = CargoOptions {
+                lib: true,
+                extra: vec![selector.to_owned()],
+                ..CargoOptions::default()
+            };
+            assert!(options.validate().unwrap_err().is_usage(), "{selector}");
+        }
+        for extra in [
+            vec!["--target", "some-target", "--features=tests"],
+            vec!["--target-dir=contains--tests"],
+            vec!["--features", "--tests"],
+            vec!["--target-dir", "--tests"],
+            vec!["-Ftests", "--offline"],
+        ] {
+            let options = CargoOptions {
+                lib: true,
+                extra: extra.into_iter().map(str::to_owned).collect(),
+                ..CargoOptions::default()
+            };
+            options.validate().unwrap();
+        }
+    }
+
+    #[test]
     fn zero_rollback_rounds_means_the_default() {
         // A caller that does not care about rollback should not have to know what the default is,
         // and a build that allowed zero rounds could never even try once.
@@ -245,6 +393,7 @@ mod tests {
     #[test]
     fn build_args_are_rendered_in_cargo_order() {
         let options = CargoOptions {
+            lib: false,
             features: vec!["--all-features".to_owned()],
             profile: Some("release".to_owned()),
             extra: vec!["--offline".to_owned()],

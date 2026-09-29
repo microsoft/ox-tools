@@ -497,7 +497,9 @@ impl Converger {
         // Before the first ordinary round, and only ever before it. Whatever the probe withdraws is
         // withdrawn by the compiler's own accusation in a real build, so the loop below starts from
         // a tree the compiler has already ruled on rather than from a guess.
-        self.probe(work, plan, scope, verb, limits, events)?;
+        if !work.cargo.lib {
+            self.probe(work, plan, scope, verb, limits, events)?;
+        }
 
         loop {
             self.rounds = self.rounds.saturating_add(1);
@@ -533,7 +535,9 @@ impl Converger {
             retain_blamed(&mut blamed, plan, scope.mutants);
 
             if blamed.is_empty() {
-                if let Some(isolated) = self.isolate_scoped(work, plan, scope, verb, limits, events)? {
+                if !work.cargo.lib
+                    && let Some(isolated) = self.isolate_scoped(work, plan, scope, verb, limits, events)?
+                {
                     let ordinals = match &isolated {
                         Isolation::Blamed(ordinals) | Isolation::Item(ordinals) => ordinals,
                     };
@@ -576,10 +580,15 @@ impl Converger {
 
             self.history.push(build_round(elapsed, plan, blamed.keys().copied()));
 
+            let before = self.withdrawn.len();
             for (ordinal, code) in blamed {
                 let _ = self.withdrawn.insert(ordinal);
                 let _ = self.census.entry(ordinal).or_insert(code);
             }
+            debug_assert!(
+                self.withdrawn.len() > before,
+                "each rollback must withdraw a newly attributed mutant"
+            );
         }
     }
 
@@ -1005,15 +1014,10 @@ impl Converger {
     /// though it were the first — which sends the reader hunting through their own source for a
     /// fault that was there before the tool arrived.
     ///
-    /// It runs `cargo check` rather than a build because it is a question about the code and not
-    /// about artifacts: no codegen, no linking, and nothing it produces is kept. What it cannot see
-    /// is exactly what `check` never reaches — link failures and post-monomorphization errors — so
-    /// passing here is a strong precondition rather than a total one, and the later builds still
-    /// report a failure they cannot pin on any mutant instead of absorbing it.
-    ///
-    /// `--tests` is not optional. The baseline build compiles test targets, so leaving them out
-    /// here would clear the libraries and let a broken test target fail later, unattributably, in
-    /// the middle of a run that had already paid for instrumentation.
+    /// Ordinary mode checks test targets without codegen. Library-only mode performs a full
+    /// `cargo test --no-run --lib`: `check --lib` would omit `cfg(test)` code, while
+    /// `check --tests` would compile excluded integration targets. Both modes validate the
+    /// selected oracle before instrumentation.
     pub(super) fn preflight(
         work: &Workspace,
         plan: &Plan,
@@ -1120,7 +1124,8 @@ impl Converger {
         events: &mut dyn Events,
     ) -> Result<String> {
         // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
-        let outcome = run_cargo(work, plan, &["check", "--tests", "--keep-going"], select, limits, None, events)?;
+        let verb = work.cargo.preflight();
+        let outcome = run_cargo(work, plan, verb, select, limits, None, events)?;
 
         let Some(stdout) = outcome.stdout else {
             return Err(Self::build_timeout_error(limits.budget(None).unwrap_or_default()));
@@ -1151,9 +1156,10 @@ impl Converger {
             "this tree does not compile before any mutation is applied, so there is nothing to \
              measure against.\n\
              These are the compiler's own errors, on the unmodified sources. Note that `cargo build` \
-             alone would not show them, because it does not build test targets; `cargo check --tests` \
+             alone would not show them, because it does not build test targets; `cargo {}` \
              reproduces them. A feature selection that leaves a test target's dependencies switched \
              off is the usual cause.\n\n{}",
+            verb.join(" "),
             leading(&diagnostics, DIAGNOSTIC_LIMIT)
         ))
     }
@@ -1181,12 +1187,12 @@ impl Converger {
         let workspace = self.whole_workspace || self.workspace_stages;
         // #[gamma::skip(all, reason = "the optional state is observed only through higher-level process orchestration that cannot be isolated safely here")]
         let roots = if workspace { None } else { Some(packages) };
-        // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
-        let verb: &[&str] = if workspace {
-            &["check", "--keep-going"]
-        } else {
-            &["build", "--keep-going"]
-        };
+        if work.cargo.lib && work.library_packages(roots, false).is_empty() {
+            // Binary-only candidates stay in the plan. The final artifact inventory decides
+            // whether their sources compiled; a missing library is not compiler unviability.
+            return Ok(None);
+        }
+        let verb = work.cargo.stage(workspace);
 
         match self.converge_scoped(
             work,
@@ -1277,6 +1283,21 @@ impl Converger {
         limits: BuildLimits,
         events: &mut dyn Events,
     ) -> Result<Convergence> {
+        if work.cargo.lib {
+            // One aggregate invocation per round preserves Cargo feature unification. Only
+            // diagnostics returned by that invocation can withdraw candidates.
+            return self.converge_scoped(
+                work,
+                plan,
+                BuildScope {
+                    roots: select,
+                    mutants: None,
+                },
+                work.cargo.harness(),
+                limits,
+                events,
+            );
+        }
         let target_args = self
             .target_discovery
             .as_deref()
@@ -1356,7 +1377,7 @@ impl Converger {
             // because a package left out of the selection switches a feature on will fail here and
             // will fail in a way no mutant can be blamed for. That is a wrong answer to the
             // question the run is asking, so the selection is abandoned rather than reported.
-            Convergence::Stuck(narrow) if select.is_some() => {
+            Convergence::Stuck(narrow) if select.is_some() && !work.cargo.lib => {
                 widened = true;
 
                 match self.compile(work, plan, None, limits, events)? {
@@ -1399,11 +1420,27 @@ impl Converger {
         // when it agrees with the survey at all.
         if let Some(compiled) = &self.compiled {
             // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
-            withdraw_uncompiled(plan, compiled);
+            if work.cargo.lib {
+                mark_uncompiled(plan, compiled);
+            } else {
+                withdraw_uncompiled(plan, compiled);
+            }
         }
 
         let captures = work.rustc_captures();
         let mut binaries = test_binaries_with_linkage(&stdout, &work.root, captures.as_deref());
+        for binary in &mut binaries {
+            binary.identify(&work.targets, plan, &work.root)?;
+        }
+        if work.cargo.lib {
+            binaries.retain(|binary| {
+                binary.identity.as_ref().is_some_and(|identity| {
+                    work.targets
+                        .iter()
+                        .any(|target| &target.identity == identity && target.library && target.test)
+                })
+            });
+        }
         // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
         retain_linked_to_population(&mut binaries, plan);
 
@@ -1497,6 +1534,10 @@ fn withdraw_uncompiled(plan: &mut Plan, compiled: &HashSet<Utf8PathBuf>) {
         return;
     }
 
+    mark_uncompiled(plan, compiled);
+}
+
+fn mark_uncompiled(plan: &mut Plan, compiled: &HashSet<Utf8PathBuf>) {
     for mutant in &mut plan.mutants {
         if mutant.outcome == Outcome::Pending && !compiled.contains(&*mutant.file) {
             mutant.outcome = Outcome::NotBuilt;

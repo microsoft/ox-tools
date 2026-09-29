@@ -599,6 +599,512 @@ fn promote_hints(dir: &TempDir) -> (i32, String) {
     (code, format!("{}{}", host.out(), host.err()))
 }
 
+fn read_diagnostics(dir: &TempDir) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-diagnostics.json")).unwrap()).unwrap()
+}
+
+fn library_only_campaign(nextest: bool) {
+    let dir = workspace("pub fn greater(left: i32, right: i32) -> bool { left > right }\n");
+    let library_marker = dir.path().join("library-launches");
+    let integration_marker = dir.path().join("integration-launched");
+    let source = format!(
+        r#"
+pub fn greater(left: i32, right: i32) -> bool {{ left > right }}
+#[cfg(test)]
+mod tests {{
+    #[test]
+    fn ordering() {{
+        use std::io::Write;
+        let mut marker = std::fs::OpenOptions::new().create(true).append(true).open({library_marker:?}).unwrap();
+        writeln!(marker, "{{}}", std::env::var("GAMMA_ACTIVE").unwrap_or_default()).unwrap();
+        assert!(!super::greater(1, 2));
+        assert!(!super::greater(2, 2));
+        assert!(super::greater(3, 2));
+    }}
+}}
+"#
+    );
+    fs::write(dir.path().join("src/lib.rs"), source).unwrap();
+    fs::create_dir(dir.path().join("tests")).unwrap();
+    fs::write(
+        dir.path().join("tests/subject.rs"),
+        format!(
+            r#"
+#[test] fn excluded() {{ std::fs::write({integration_marker:?}, "ran").unwrap(); }}
+"#
+        ),
+    )
+    .unwrap();
+    fs::create_dir(dir.path().join("src/bin")).unwrap();
+    fs::write(
+        dir.path().join("src/bin/excluded.rs"),
+        "compile_error!(\"excluded binary must not compile\"); fn main() {}",
+    )
+    .unwrap();
+    let mut options = vec![
+        "--lib",
+        "--mutators",
+        "relational.gt_to_eq",
+        "--incremental",
+        "no",
+        "--diag-names",
+        "names",
+    ];
+    if nextest {
+        options.push("--nextest");
+    }
+    let (code, output) = censused_session(&dir, &options);
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(output.contains("1 killed"), "{output}");
+    assert!(!integration_marker.exists());
+    let launches = fs::read_to_string(&library_marker).unwrap();
+    assert!(launches.lines().any(str::is_empty), "baseline/confirmation: {launches}");
+    assert!(launches.lines().any(|line| !line.is_empty()), "mutant execution: {launches}");
+    let diagnostics = read_diagnostics(&dir);
+    let binaries = diagnostics["binaries"].as_array().unwrap();
+    assert!(!binaries.is_empty(), "{diagnostics}");
+    for binary in binaries {
+        assert_eq!(binary["targetKind"], serde_json::json!(["lib"]), "{binary}");
+        assert_eq!(binary["targetSource"], "src/lib.rs", "{binary}");
+        assert!(binary["packageId"].as_str().is_some_and(|id| id.contains("subject")), "{binary}");
+    }
+    fs::write(
+        dir.path().join("tests/subject.rs"),
+        "compile_error!(\"excluded integration must not compile\");",
+    )
+    .unwrap();
+    let (code, output) = session(&dir, &options);
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(!integration_marker.exists());
+    let (code, output) = session(&dir, &["--mutators", "relational.gt_to_eq", "--incremental", "no"]);
+    assert_eq!(code, 3, "{output}");
+    assert!(
+        output.contains("excluded integration") || output.contains("excluded binary"),
+        "{output}"
+    );
+}
+
+#[test]
+fn library_only_libtest_compilation_inventory_and_execution() {
+    step_aside_if_nested!();
+    library_only_campaign(false);
+}
+
+#[test]
+fn library_only_nextest_compilation_inventory_and_execution() {
+    step_aside_if_nested!();
+    step_aside_without_nextest!();
+    library_only_campaign(true);
+}
+
+#[test]
+fn library_only_requires_an_eligible_oracle_before_building() {
+    step_aside_if_nested!();
+    for disabled in [false, true] {
+        let dir = workspace("pub fn greater(x: u32) -> bool { x > 1 }\n");
+        if disabled {
+            let manifest = fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+            fs::write(dir.path().join("Cargo.toml"), format!("{manifest}\n[lib]\ntest = false\n")).unwrap();
+        } else {
+            fs::rename(dir.path().join("src/lib.rs"), dir.path().join("src/main.rs")).unwrap();
+        }
+        let (code, output) = session(&dir, &["--lib"]);
+        assert_eq!(code, EXIT_USAGE, "{output}");
+        assert!(output.contains("no eligible library unit-test harness"), "{output}");
+        assert!(!output.contains("Copying"), "{output}");
+    }
+}
+
+#[test]
+fn library_only_checks_cfg_test_and_rejects_integration_only_name_globs() {
+    step_aside_if_nested!();
+    let dir = workspace("pub fn greater(x: u32) -> bool { x > 1 }\n#[cfg(test)] compile_error!(\"broken library test\");");
+    fs::create_dir(dir.path().join("tests")).unwrap();
+    fs::write(dir.path().join("tests/integration_only.rs"), "#[test] fn integration() {}").unwrap();
+    let (code, output) = session(&dir, &["--lib", "--include-test", "integration_only"]);
+    assert_eq!(code, EXIT_USAGE, "{output}");
+    assert!(output.contains("no eligible library test target"), "{output}");
+    let (code, output) = session(&dir, &["--lib"]);
+    assert_eq!(code, 3, "{output}");
+    assert!(output.contains("broken library test"), "{output}");
+    assert!(output.contains("cargo test --no-run --lib"), "{output}");
+}
+
+#[test]
+fn library_only_keeps_disabled_libraries_as_mutable_production_dependencies() {
+    step_aside_if_nested!();
+    let dir = workspace("");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"subject\", \"oracle\", \"binary\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    for package in ["subject", "oracle", "binary"] {
+        fs::create_dir_all(dir.path().join(package).join("src")).unwrap();
+        fs::write(
+            dir.path().join(package).join("Cargo.toml"),
+            format!(
+                "[package]\nname = {package:?}\nversion = \"0.1.0\"\nedition = \"2021\"\n{}",
+                match package {
+                    "subject" => "[lib]\ntest = false\n",
+                    "oracle" => "[dependencies]\nsubject = { path = \"../subject\" }\n",
+                    _ => "",
+                }
+            ),
+        )
+        .unwrap();
+    }
+    fs::write(
+        dir.path().join("subject/src/lib.rs"),
+        "pub fn greater(x: i32, y: i32) -> bool { x > y }\n#[cfg(test)] compile_error!(\"disabled harness must not compile\");",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("oracle/src/lib.rs"),
+        "#[test] fn ordering() { assert!(!subject::greater(1, 2)); assert!(!subject::greater(2, 2)); assert!(subject::greater(3, 2)); }",
+    )
+    .unwrap();
+    fs::write(dir.path().join("binary/src/main.rs"), "fn main() {}").unwrap();
+    let (code, output) = session(
+        &dir,
+        &["--workspace", "--lib", "--mutators", "relational.gt_to_eq", "--incremental", "no"],
+    );
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(output.contains("1 uncovered"), "{output}");
+    let (code, output) = session(
+        &dir,
+        &[
+            "--package",
+            "subject",
+            "--lib",
+            "--test-package",
+            "oracle",
+            "--mutators",
+            "relational.gt_to_eq",
+            "--incremental",
+            "no",
+            "--diag-names",
+            "names",
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(output.contains("1 killed"), "{output}");
+    let diagnostics = read_diagnostics(&dir);
+    assert!(
+        diagnostics["binaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|binary| binary["package"] == "oracle"),
+        "{diagnostics}"
+    );
+    let (code, output) = session(
+        &dir,
+        &[
+            "--workspace",
+            "--lib",
+            "--test-workspace",
+            "--mutators",
+            "relational.gt_to_eq",
+            "--incremental",
+            "no",
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(output.contains("1 killed"), "{output}");
+}
+
+#[test]
+fn default_oracle_still_executes_same_named_integration_tests() {
+    step_aside_if_nested!();
+    let dir = workspace("pub fn greater(x: i32, y: i32) -> bool { x > y }");
+    let marker = dir.path().join("integration-marker");
+    fs::create_dir(dir.path().join("tests")).unwrap();
+    fs::write(
+        dir.path().join("tests/subject.rs"),
+        format!(
+            r#"
+#[test] fn ordering() {{
+    std::fs::write({marker:?}, "executed").unwrap();
+    assert!(!subject::greater(1, 2));
+    assert!(!subject::greater(2, 2));
+    assert!(subject::greater(3, 2));
+}}
+"#
+        ),
+    )
+    .unwrap();
+    let (code, output) = session(&dir, &["--mutators", "relational.gt_to_eq", "--incremental", "no"]);
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(output.contains("1 killed"), "{output}");
+    assert_eq!(fs::read_to_string(marker).unwrap(), "executed");
+    assert!(
+        read_diagnostics(&dir)["binaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|binary| binary["targetKind"] == serde_json::json!(["test"]))
+    );
+}
+
+#[test]
+fn configured_library_policy_and_cli_listing_share_population_context() {
+    step_aside_if_nested!();
+    let dir = workspace("pub fn greater(x: i32, y: i32) -> bool { x > y }");
+    fs::write(dir.path().join("gamma.toml"), "lib = true\n").unwrap();
+    let (code, output) = session(&dir, &["--mutators", "relational.gt_to_eq", "--incremental", "no"]);
+    assert_eq!(code, EXIT_OK, "{output}");
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-report.json")).unwrap()).unwrap();
+    let contexts = report["config"]["population"]["contexts"].as_object().unwrap();
+    assert!(contexts.values().all(|shaping| shaping["testTargetPolicy"] == "lib"), "{report}");
+    let mut host = Sink::default();
+    let listing = dir.path().join("listed.json");
+    assert_eq!(
+        run(
+            &mut host,
+            vec![
+                "gamma",
+                "list",
+                "mutants",
+                "--lib",
+                "--no-config",
+                "--json-report",
+                listing.to_str().unwrap(),
+                "--dir",
+                dir.path().to_str().unwrap()
+            ]
+        ),
+        EXIT_OK
+    );
+    let listed: serde_json::Value = serde_json::from_str(&fs::read_to_string(listing).unwrap()).unwrap();
+    assert!(
+        listed["config"]["population"]["contexts"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|shaping| shaping["testTargetPolicy"] == "lib"),
+        "{listed}"
+    );
+}
+
+#[test]
+fn library_only_supports_cargos_library_crate_kinds() {
+    step_aside_if_nested!();
+    for kind in ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"] {
+        let dir = workspace("fn greater(x: i32, y: i32) -> bool { x > y }\n#[test] fn check() { assert!(greater(2, 1)); }");
+        let manifest = fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        let setting = if kind == "proc-macro" {
+            "proc-macro = true".to_owned()
+        } else {
+            format!("crate-type = [{kind:?}]")
+        };
+        fs::write(dir.path().join("Cargo.toml"), format!("{manifest}\n[lib]\n{setting}\n")).unwrap();
+        let (code, output) = session(&dir, &["--lib", "--mutators", "relational.gt_to_eq", "--incremental", "no"]);
+        assert_eq!(code, EXIT_OK, "{kind}: {output}");
+        assert!(output.contains("1 killed"), "{kind}: {output}");
+        assert!(
+            read_diagnostics(&dir)["binaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|binary| binary["targetKind"] == serde_json::json!([kind]))
+        );
+    }
+}
+
+#[test]
+fn library_only_convergence_attributes_only_reported_sibling_errors_and_honors_bound() {
+    step_aside_if_nested!();
+    for rounds in ["2", "4"] {
+        let dir = workspace("");
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"first\", \"second\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        for name in ["first", "second"] {
+            fs::create_dir_all(dir.path().join(name).join("src")).unwrap();
+            fs::write(
+                dir.path().join(name).join("Cargo.toml"),
+                format!("[package]\nname = {name:?}\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+            )
+            .unwrap();
+            fs::write(
+                dir.path().join(name).join("src/lib.rs"),
+                r#"
+pub trait Value {}
+impl Value for () {}
+#[cfg(not(test))]
+impl Default for &'static dyn Value { fn default() -> Self { &() } }
+pub fn value() -> Option<&'static dyn Value> { None }
+#[test] fn original() { assert!(value().is_none()); }
+"#,
+            )
+            .unwrap();
+        }
+        let (code, output) = session(
+            &dir,
+            &[
+                "--workspace",
+                "--lib",
+                "--mutators",
+                "fn_value.some_default",
+                "--incremental",
+                "no",
+                "--cargo-arg=--jobs=1",
+                "--rollback-rounds",
+                rounds,
+                "--show-unviable",
+            ],
+        );
+        let report: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-report.json"))
+                .unwrap_or_else(|error| panic!("{error}: {output}")),
+        )
+        .unwrap();
+        let mutants: Vec<_> = report["files"]
+            .as_object()
+            .unwrap()
+            .values()
+            .flat_map(|file| file["mutants"].as_array().unwrap())
+            .collect();
+        assert_eq!(mutants.len(), 2, "{report}");
+        let unviable = mutants.iter().filter(|mutant| mutant["status"] == "CompileError").count();
+        let not_built = mutants
+            .iter()
+            .filter(|mutant| {
+                mutant["status"] == "Ignored"
+                    && mutant["statusReason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.starts_with("not built:"))
+            })
+            .count();
+        if rounds == "2" {
+            assert_eq!(code, 3, "{output}");
+            assert!(output.contains("rollback rounds"), "{output}");
+            assert_eq!(unviable, 1, "{report}");
+            assert_eq!(not_built, 1, "{report}");
+        } else {
+            assert_eq!(code, EXIT_OK, "{output}");
+            assert_eq!(unviable, 2, "{report}");
+            assert_eq!(not_built, 0, "{report}");
+        }
+    }
+}
+
+#[test]
+fn library_only_widening_keeps_the_library_boundary() {
+    step_aside_if_nested!();
+    step_aside_without_nextest!();
+    let dir = workspace("");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"leaf\", \"enabler\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    for name in ["leaf", "enabler"] {
+        fs::create_dir_all(dir.path().join(name).join("src")).unwrap();
+        fs::create_dir_all(dir.path().join(name).join("tests")).unwrap();
+        let extra = if name == "leaf" {
+            "[features]\nwide = []\n"
+        } else {
+            "[dependencies]\nleaf = { path = \"../leaf\", features = [\"wide\"] }\n"
+        };
+        fs::write(
+            dir.path().join(name).join("Cargo.toml"),
+            format!("[package]\nname = {name:?}\nversion = \"0.1.0\"\nedition = \"2021\"\n{extra}"),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join(name).join("tests/forbidden.rs"),
+            "compile_error!(\"widened into integration tests\");",
+        )
+        .unwrap();
+    }
+    fs::write(dir.path().join("leaf/src/lib.rs"),
+        "#[cfg(feature = \"wide\")] const BOUNDARY: i32 = 1;\npub fn greater(x: i32) -> bool { x > BOUNDARY }\n#[test] fn check() { assert!(greater(2)); }").unwrap();
+    fs::write(
+        dir.path().join("enabler/src/lib.rs"),
+        "#[test] fn linked() { assert!(leaf::greater(2)); }",
+    )
+    .unwrap();
+    let (code, output) = session(
+        &dir,
+        &[
+            "--package",
+            "leaf",
+            "--lib",
+            "--nextest",
+            "--mutators",
+            "relational.gt_to_eq",
+            "--incremental",
+            "no",
+            "--diag-names",
+            "names",
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(output.contains("1 killed"), "{output}");
+    assert!(
+        read_diagnostics(&dir)["binaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|binary| binary["targetKind"] == serde_json::json!(["lib"]) && binary["package"] == "leaf")
+    );
+}
+
+#[test]
+fn library_only_custom_harness_is_not_enumerated_as_libtest() {
+    step_aside_if_nested!();
+    let dir = workspace(
+        r#"
+pub fn greater(x: i32, y: i32) -> bool { x > y }
+#[cfg(test)]
+fn main() {
+    assert!(!std::env::args().any(|arg| arg == "--list"), "not a libtest harness");
+    assert!(greater(2, 1));
+}
+"#,
+    );
+    let manifest = fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+    fs::write(dir.path().join("Cargo.toml"), format!("{manifest}\n[lib]\nharness = false\n")).unwrap();
+    let (code, output) = censused_session(&dir, &["--lib", "--mutators", "relational.gt_to_eq", "--incremental", "no"]);
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(output.contains("1 killed"), "{output}");
+}
+
+#[test]
+fn library_only_never_compiled_binary_candidates_remain_not_built() {
+    step_aside_if_nested!();
+    let dir = workspace("#[test] fn library_test() {}\n");
+    fs::write(
+        dir.path().join("src/main.rs"),
+        "fn greater(x: i32) -> bool { x > 1 }\nfn main() { let _ = greater(2); }\n",
+    )
+    .unwrap();
+    let (code, output) = session(
+        &dir,
+        &[
+            "--lib",
+            "--file",
+            "src/main.rs",
+            "--mutators",
+            "relational.gt_to_eq",
+            "--incremental",
+            "no",
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{output}");
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-report.json")).unwrap()).unwrap();
+    let mutants = report["files"]["src/main.rs"]["mutants"].as_array().unwrap();
+    assert_eq!(mutants.len(), 1, "{report}");
+    assert_eq!(mutants[0]["status"], "Ignored", "{report}");
+    assert!(mutants[0]["statusReason"].as_str().unwrap().starts_with("not built:"), "{report}");
+}
+
 #[test]
 fn greater_than_to_equality_is_caught_by_ordering_cases() {
     step_aside_if_nested!();

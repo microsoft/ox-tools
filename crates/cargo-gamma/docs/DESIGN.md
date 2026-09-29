@@ -202,6 +202,30 @@ The selected Cargo build settings also determine the active `cfg` predicates. Tr
 the build never compiles as ordinary live code would create mutants no test could execute and
 misreport them as test-suite failures.
 
+### Library-only oracle
+
+`--lib` and `lib = true` constrain both harness compilation and judging to library unit-test
+targets with Cargo's `test = true` setting. All library crate kinds participate, including
+procedural macros. Target identity includes the Cargo package, target name, kind and source root;
+a same-named integration target is a different target, not another executable for the library.
+Custom harnesses retain their declared behavior rather than being assumed to support libtest.
+
+Name globs narrow the eligible library targets. An include that matches only an integration
+target is a usage error. Package scope remains independently controlled by the mutation package
+selection, `--test-package` and `--test-workspace`. Binary-only and disabled-harness members
+supply no harness but do not invalidate a workspace selection with other eligible libraries.
+An entirely empty requested oracle fails before mutation work.
+
+Library selection does not remove mutation candidates. A production dependency may be compiled
+and mutated without supplying a harness. Never-compiled sources retain `notbuilt`; compiled
+candidates without a judging test retain ordinary `uncovered` handling. Without `--lib`,
+ordinary broader target selection remains available.
+
+The library boundary applies to pristine validation, convergence, package widening and retreat,
+final harness compilation, nextest inventory, baseline, census, sweep and confirmation. Cargo
+pass-through target selectors cannot contradict it, and package selectors cannot bypass the
+eligibility check.
+
 The source engine parses Rust for structure and spans but rewrites the original bytes rather than
 pretty-printing an AST. Textual rewriting preserves comments, formatting, macros, and literal
 spelling. Byte-accurate spans are therefore part of the correctness model, not merely an
@@ -347,7 +371,7 @@ one such mutation can prevent every test binary from being built.
 cargo-gamma resolves this with a rollback fixpoint:
 
 1. Instrument the currently admitted population.
-2. Ask Cargo to build while continuing past independent failures.
+2. Ask Cargo to build the selected targets.
 3. Attribute structured compiler diagnostics to mutation guards.
 4. Withdraw every blamed mutant.
 5. Rewrite only files whose admitted population changed.
@@ -360,6 +384,18 @@ Workspace packages are handled in dependency order so that failures are localize
 can progress without waiting for one global rollback loop. A final workspace build applies Cargo's
 real feature unification and produces the test binaries. Example and benchmark targets are not
 built: cargo-gamma does not execute them, so they are not part of its compilation oracle.
+
+Ordinary pristine validation uses `cargo check --tests --keep-going`. Library-only validation
+uses a full `cargo test --no-run --lib` over eligible roots: `check --lib` would not validate
+`cfg(test)`, and `--tests` would compile excluded targets. Production-stage library build/check
+optimizations do not replace this harness validation.
+
+Cargo test does not accept `--keep-going`. Each library harness convergence round is one aggregate
+eligible-root invocation, with attribution limited to returned diagnostics. Retrying exposes
+errors in sibling packages without splitting the feature-unified graph. The configured round
+bound applies to those invocations; exhaustion records remaining candidates as not built and
+fails the campaign rather than claiming they are unviable. Package fallback cannot widen target
+kinds or silently change an already calibrated oracle.
 
 Diagnostic attribution uses guard locations in the instrumented text, not original line numbers.
 Instrumentation changes line positions, and nested mutations can share original spans. The mutated

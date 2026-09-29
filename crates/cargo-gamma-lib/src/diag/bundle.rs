@@ -581,6 +581,16 @@ pub struct Binary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 
+    /// Cargo package identity, subject to the redaction policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_id: Option<String>,
+    /// Cargo target kinds distinguish same-named library and integration targets.
+    #[serde(default)]
+    pub target_kind: Vec<String>,
+    /// Workspace-relative target root, subject to the redaction policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_source: Option<String>,
+
     pub baseline_ms: u64,
     /// `None` when no cutoff was calibrated, which is what a run with no baseline leaves.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -897,6 +907,12 @@ fn binaries_of(session: &Session, redaction: Redaction) -> Vec<Binary> {
         .map(|binary| Binary {
             package: redaction.apply(&binary.package),
             target: redaction.apply(&binary.target),
+            package_id: binary.identity.as_ref().and_then(|identity| redaction.apply(&identity.package_id)),
+            target_kind: binary.identity.as_ref().map_or_else(Vec::new, |identity| identity.kind.clone()),
+            target_source: binary
+                .identity
+                .as_ref()
+                .and_then(|identity| redaction.apply(identity.source.as_str())),
             baseline_ms: millis(binary.baseline),
             budget_ms: binary.budget.map(millis),
             peak_bytes: binary.peak,

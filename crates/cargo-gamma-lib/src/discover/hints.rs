@@ -1078,8 +1078,13 @@ fn compare_entries<T: PartialEq, K: Eq + core::hash::Hash>(
     changes.added += current.keys().filter(|entry_key| !previous.contains_key(*entry_key)).count();
 }
 
-fn killer_key(killer: &Killer) -> (&str, &str, &str) {
-    (killer.package.as_str(), killer.target.as_str(), killer.test.as_str())
+fn killer_key(killer: &Killer) -> (&str, &str, &Option<Box<crate::discover::TargetIdentity>>, &str) {
+    (
+        killer.package.as_str(),
+        killer.target.as_str(),
+        &killer.identity,
+        killer.test.as_str(),
+    )
 }
 
 fn site_key(site: &super::record::SiteIdentity) -> (&Utf8Path, &str, &str, &str, u32) {
@@ -1195,6 +1200,7 @@ mod tests {
         Killer {
             package: "subject".to_owned(),
             target: "lib".to_owned(),
+            identity: None,
             test: test.to_owned(),
         }
     }
@@ -1780,6 +1786,7 @@ mod tests {
                         candidate: record::BinaryHint {
                             package: "subject".to_owned(),
                             target: "lib".to_owned(),
+                            identity: None,
                         },
                         seeds: 1,
                         hits: 2,

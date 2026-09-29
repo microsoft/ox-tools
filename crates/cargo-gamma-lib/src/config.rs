@@ -87,6 +87,9 @@ pub struct Config {
     /// Let tests from every workspace package judge mutants they can reach.
     pub test_workspace: Option<bool>,
 
+    /// Compile and judge with eligible library unit-test harnesses only.
+    pub lib: Option<bool>,
+
     /// Run the experimental case-level reachability census.
     pub optimize_test_execution: Option<bool>,
 
@@ -179,8 +182,9 @@ pub struct Shard {
 impl Config {
     /// The Cargo-only settings discovery must share with the eventual run.
     #[must_use]
-    pub(crate) fn cargo_options(&self) -> crate::exec::CargoOptions {
+    pub(crate) fn cargo_options(&self, select: &SelectArgs) -> crate::exec::CargoOptions {
         crate::exec::CargoOptions {
+            lib: select.lib || self.lib.unwrap_or(false),
             profile: self.profile.clone(),
             extra: self.cargo_args.clone(),
             ..crate::exec::CargoOptions::default()
@@ -384,6 +388,7 @@ impl Config {
         select.exclude_files.extend(self.exclude_files.iter().cloned());
         select.exclude_trait_impls.extend(self.exclude_trait_impls.iter().cloned());
         select.packages.extend(self.packages.iter().cloned());
+        select.lib = select.lib || self.lib.unwrap_or(false);
         select.errors.extend(self.errors.iter().cloned());
         select.features.features.extend(self.features.iter().cloned());
         select.features.all_features = select.features.all_features || self.all_features.unwrap_or(false);
@@ -464,7 +469,7 @@ mod tests {
             ..Config::default()
         };
 
-        let options = config.cargo_options();
+        let options = config.cargo_options(&SelectArgs::default());
 
         assert_eq!(options.profile.as_deref(), Some("release"));
         assert_eq!(options.extra, ["--locked", "--offline"]);
@@ -1174,6 +1179,7 @@ mod tests {
             no_baseline: Some(true),
             no_confirm: Some(true),
             no_fail_on_flaky: Some(true),
+            lib: Some(true),
             packages: vec!["package-from-the-file".to_owned()],
             test_packages: vec!["test-package-from-the-file".to_owned()],
             test_workspace: Some(false),

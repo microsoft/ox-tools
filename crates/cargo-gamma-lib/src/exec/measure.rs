@@ -247,7 +247,7 @@ fn census_targets(plan: &Plan, reach: &Reachability<'_>, killers: &Killers) -> (
         killers.hint(&mutant.id).is_some_and(|hint| {
             reach
                 .reachable(mutant)
-                .is_some_and(|reachable| reachable.iter().any(|binary| hint.names(&binary.package, &binary.target)))
+                .is_some_and(|reachable| reachable.iter().any(|binary| hint.names(binary)))
         })
     };
 
@@ -588,6 +588,20 @@ fn preflight(
     let intending: crate::HashSet<&str> = intended.iter().map(String::as_str).collect();
     let wide_stages = workspace_stages(&survey.selected, &survey.reach);
     let checking = reaching_packages(&survey.reach, &intending, &scope);
+    let checking = if config.cargo.lib {
+        Some(
+            work.library_packages(Some(&requested), true)
+                .into_iter()
+                .chain(if config.test_workspace {
+                    work.library_packages(None, true)
+                } else {
+                    Vec::new()
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        checking
+    };
     let cleared = Converger::preflight(work, plan, checking.as_deref(), &intended, config.build, events)?;
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
     record_preflight_discovery(converger, cleared.discovery.clone());
@@ -765,12 +779,7 @@ fn measure_with_locks(
 
     let (memory, unbounded) = settle_memory_control(config, memory::support().map_err(|reason| reason.to_string()))?;
 
-    // Checked against what the workspace declares, before anything is copied or compiled. A typo
-    // here changes which tests get to convict a mutant, so it should cost a second rather than a
-    // full instrumented build.
-    if let Some(pattern) = unmatched_test(&survey.tests, &config.include_tests, &config.exclude_tests) {
-        return Err(error!("no test target matches `{pattern}`; patterns match cargo target names, not test function names").usage());
-    }
+    validate_target_selection(survey, config)?;
 
     // Said before the tree is copied, let alone built. A compile-fail target is expensive per
     // mutant rather than once, so by the time its cost is visible in the progress display the run
@@ -788,6 +797,7 @@ fn measure_with_locks(
     // which.
     let copy_started = Instant::now();
     let mut work = Workspace::prepare_with_locks(&plan.root, &survey.target, config, events, locks)?;
+    work.select_targets(&survey.targets, config);
     let copy = copy_started.elapsed();
 
     // #[gamma::skip(all, reason = "this orchestration side effect crosses a process, event, cache, or synchronization boundary that cannot be isolated safely in a deterministic unit test")]
@@ -842,7 +852,11 @@ fn measure_with_locks(
     // baselined and never consulted. The preflight check cleared this same set, narrowed from the
     // packages that turned out to hold live mutants rather than from those the run set out to
     // mutate, so it is a subset of what was checked.
-    let select = build_packages(&plan, &scope);
+    let select = if config.cargo.lib {
+        Some(work.library_packages(if scope.whole_workspace { None } else { Some(scope.packages) }, true))
+    } else {
+        build_packages(&plan, &scope)
+    };
     let mut build = converger.finish(&work, &mut plan, select.as_deref(), config.build, events)?;
 
     // The build that decides the run could not be made to compile, so there is no test binary to
@@ -872,6 +886,10 @@ fn measure_with_locks(
     // run. A run with nothing left to run it cannot decide anything: every mutant would survive
     // unopposed and the report would read as a total failure of the test suite rather than as the
     // filter having eaten it.
+    work.retain_inventory_roots(&build.artifacts);
+    if config.cargo.lib {
+        build.binaries.retain(|binary| scope.admits(&binary.package));
+    }
     let filtered = restrict_binaries(&mut build.binaries, config)?;
 
     let build_time = started.elapsed();
@@ -966,6 +984,41 @@ fn begin_baseline(events: &mut impl Events) {
     const COMPLETE: &str = "Baseline";
     const DETAIL: &str = "building the test binaries and running the suite";
     events.begin(ACTIVE, COMPLETE, DETAIL);
+}
+
+/// Rejects an impossible oracle before copying or compiling the workspace.
+fn validate_target_selection(survey: &Survey, config: &Config) -> Result<()> {
+    let eligible = survey
+        .targets
+        .iter()
+        .filter(|target| target.library && target.test)
+        .map(|target| target.name.clone())
+        .collect::<Vec<_>>();
+    let tests = if config.cargo.lib { &eligible } else { &survey.tests };
+    if let Some(pattern) = unmatched_test(tests, &config.include_tests, &config.exclude_tests) {
+        let category = if config.cargo.lib {
+            "eligible library test target under --lib"
+        } else {
+            "test target"
+        };
+        return Err(error!("no {category} matches `{pattern}`; patterns match Cargo target names, not test function names").usage());
+    }
+    if config.cargo.lib {
+        let requested = oracle_packages(&survey.selected, config);
+        if !survey.targets.iter().any(|target| {
+            target.library
+                && target.test
+                && (config.test_workspace || requested.contains(&target.package))
+                && admits_target(&target.name, &config.include_tests, &config.exclude_tests)
+        }) {
+            return Err(error!(
+                "--lib selected no eligible library unit-test harness; select a package with a library and test = true, \
+                 or choose its downstream tests with --test-package/--test-workspace"
+            )
+            .usage());
+        }
+    }
+    Ok(())
 }
 
 fn restrict_binaries(binaries: &mut Vec<TestBinary>, config: &Config) -> Result<usize> {
@@ -1591,6 +1644,7 @@ mod tests {
         let killer = Killer {
             package: "subject".to_owned(),
             target: "lib".to_owned(),
+            identity: None,
             test: "tests::caught".to_owned(),
         };
         crate::discover::RunRecord::store_probes(base, &core::iter::once((mutant.id.clone(), killer.clone())).collect());
@@ -1608,6 +1662,7 @@ mod tests {
         let killer = Killer {
             package: "subject".to_owned(),
             target: "lib".to_owned(),
+            identity: None,
             test: "tests::caught".to_owned(),
         };
         let mut killers = Killers::default();
@@ -2538,6 +2593,7 @@ mod tests {
         let killer = Killer {
             package: "tests".to_owned(),
             target: "tests".to_owned(),
+            identity: None,
             test: "tests::kills_it".to_owned(),
         };
         let mut generalized = crate::discover::GeneralizedHints::empty_supported();
@@ -2577,6 +2633,7 @@ mod tests {
             Killer {
                 package: "core".to_owned(),
                 target: String::new(),
+                identity: None,
                 test: "tests::hint".to_owned(),
             },
         );
@@ -2623,6 +2680,7 @@ mod tests {
             Killer {
                 package: "core".to_owned(),
                 target: String::new(),
+                identity: None,
                 test: "tests::hint".to_owned(),
             },
         );
@@ -2674,6 +2732,7 @@ mod tests {
             Killer {
                 package: "extra".to_owned(),
                 target: String::new(),
+                identity: None,
                 test: "tests::hint".to_owned(),
             },
         );
@@ -2728,6 +2787,7 @@ mod tests {
             Killer {
                 package: "core".to_owned(),
                 target: "a-target-no-binary-carries".to_owned(),
+                identity: None,
                 test: "tests::hint".to_owned(),
             },
         );

@@ -16,6 +16,7 @@ mod record;
 mod shard;
 mod survey;
 mod target_file;
+mod test_target;
 mod workspace_snapshot;
 
 #[doc(inline)]
@@ -49,4 +50,7 @@ pub(crate) use survey::plan_for_build;
 pub use survey::{Scanned, Survey, load_metadata};
 #[doc(inline)]
 pub use target_file::TargetFile;
+#[doc(inline)]
+pub use test_target::TargetIdentity;
+pub(crate) use test_target::{TestTarget, is_library, test_inventory};
 pub(crate) use workspace_snapshot::WorkspaceSnapshot;

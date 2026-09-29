@@ -164,6 +164,13 @@
 #
 # test-workspace = true
 
+# Compile and run only library unit-test harnesses with test = true. Default: false.
+# Production dependencies remain compilable and mutable. The requested oracle must contain
+# an eligible library; target-name globs narrow this set. Pristine validation is a full
+# cargo test --no-run --lib build, including cfg(test) code.
+#
+# lib = false
+
 # Experimentally measure case-level reachability before testing mutants.
 # Default: false.
 #

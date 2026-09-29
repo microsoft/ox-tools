@@ -396,6 +396,7 @@ impl Census {
                         .map(|name| Killer {
                             package: binary.package.clone(),
                             target: binary.target.clone(),
+                            identity: binary.identity.clone().map(Box::new),
                             test: name.to_string(),
                         }),
                 );
@@ -409,6 +410,7 @@ impl Census {
                     left.package
                         .cmp(&right.package)
                         .then_with(|| left.target.cmp(&right.target))
+                        .then_with(|| left.identity.cmp(&right.identity))
                         .then_with(|| left.test.cmp(&right.test))
                 });
                 tests.dedup();
@@ -428,8 +430,12 @@ impl Census {
         let mut test_sets: Vec<Vec<Killer>> = entries.iter().map(|(_, tests)| tests.clone()).collect();
         test_sets.sort_by(|left, right| {
             left.iter()
-                .map(|killer| (&killer.package, &killer.target, &killer.test))
-                .cmp(right.iter().map(|killer| (&killer.package, &killer.target, &killer.test)))
+                .map(|killer| (&killer.package, &killer.target, &killer.identity, &killer.test))
+                .cmp(
+                    right
+                        .iter()
+                        .map(|killer| (&killer.package, &killer.target, &killer.identity, &killer.test)),
+                )
         });
         test_sets.dedup();
 
@@ -652,6 +658,9 @@ const LIST_POLL: Duration = Duration::from_millis(5);
 /// `fn main()` ignores the flags and runs its suite instead. Either way the binary is left without
 /// a census and therefore run in full, which is the answer this had before the census existed.
 fn list(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
+    if !binary.libtest {
+        return None;
+    }
     let command = listing_command(work, binary);
 
     // A successful process with no libtest records may be a custom harness that ignored both
@@ -1636,6 +1645,9 @@ mod tests {
             package: "p".to_owned(),
             package_id: String::new(),
             target: "t".to_owned(),
+            identity: None,
+            libtest: true,
+            legacy_hint_unambiguous: true,
             manifest_dir: Utf8PathBuf::new(),
             linked_sources: None,
             baseline: Duration::from_secs(1),
@@ -2922,17 +2934,20 @@ mod tests {
             Killer {
                 package: "z-package".to_owned(),
                 target: "z-tests".to_owned(),
+                identity: None,
                 test: "tests::z".to_owned(),
             },
             Killer {
                 package: "a-package".to_owned(),
                 target: "a-tests".to_owned(),
+                identity: None,
                 test: "tests::a".to_owned(),
             },
         ];
         let previous_expensive = vec![Killer {
             package: "old-package".to_owned(),
             target: "old-tests".to_owned(),
+            identity: None,
             test: "tests::old".to_owned(),
         }];
         let mut hints = GeneralizedHints {

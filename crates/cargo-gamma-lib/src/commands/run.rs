@@ -619,6 +619,7 @@ fn cache_context(args: &RunArgs) -> Option<crate::discover::ContextDigest> {
         include_tests: &args.measure.include_tests,
         exclude_tests: &args.measure.exclude_tests,
         test_workspace: args.measure.test_workspace,
+        lib: args.select.lib,
         optimize_test_execution: args.measure.optimize_test_execution,
         whole_test_binaries: args.measure.whole_test_binaries,
         nextest: args.measure.nextest,
@@ -734,6 +735,7 @@ pub(super) fn run_config(args: &RunArgs, styler: Styler) -> exec::Config {
         confirm: !args.no_confirm,
         stall: !args.no_stall_detection,
         cargo: exec::CargoOptions {
+            lib: args.select.lib,
             features: args.select.features.to_cargo_args(),
             profile: args.measure.profile.clone(),
             extra: args.measure.cargo_args.clone(),
@@ -1528,6 +1530,7 @@ mod tests {
         let killer = crate::discover::Killer {
             package: "subject".to_owned(),
             target: "lib".to_owned(),
+            identity: None,
             test: "tests::caught".to_owned(),
         };
         let mut learning = crate::exec::Killers::default();
@@ -1551,6 +1554,7 @@ mod tests {
             crate::discover::Killer {
                 package: "subject".to_owned(),
                 target: "lib".to_owned(),
+                identity: None,
                 test: "tests::stale".to_owned(),
             },
         ))
@@ -1634,6 +1638,7 @@ mod tests {
             crate::discover::Killer {
                 package: "subject".to_owned(),
                 target: "lib".to_owned(),
+                identity: None,
                 test: "tests::caught".to_owned(),
             },
         ))

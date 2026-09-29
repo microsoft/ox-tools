@@ -175,7 +175,7 @@ fn mutant_cost(position: usize, plan: &Plan, reach: &Reachability<'_>, census: &
     // A mutant with a persisted killer hint is expected to be killed by one probe.
     if let Some(hint) = killers.hint(&mutant.id)
         && let Some(binaries) = reach.reachable(mutant)
-        && let Some(binary) = binaries.iter().find(|b| hint.names(&b.package, &b.target))
+        && let Some(binary) = binaries.iter().find(|binary| hint.names(binary))
     {
         return binary.baseline;
     }
@@ -212,7 +212,7 @@ fn mutant_work(
 
     if let Some(hint) = killers.hint(&mutant.id)
         && let Some(binaries) = reach.reachable(mutant)
-        && let Some(binary) = binaries.iter().find(|binary| hint.names(&binary.package, &binary.target))
+        && let Some(binary) = binaries.iter().find(|binary| hint.names(binary))
     {
         return crate::estimate::MutationWork::new(
             mutant.ordinal,
@@ -1372,6 +1372,7 @@ fn probe_reserved(
             Some(Killer {
                 package: hint.package.clone(),
                 target: hint.target.clone(),
+                identity: binary.identity.clone().map(Box::new),
                 test: named.unwrap_or_else(|| hint.test.clone()),
             })
         }
@@ -1410,7 +1411,7 @@ fn bounded_reach_hints(hints: Vec<Killer>, reachable: &[&TestBinary], ordinal: u
 
     all.iter()
         .filter(|hint| {
-            let Some(binary) = reachable.iter().copied().find(|binary| hint.names(&binary.package, &binary.target)) else {
+            let Some(binary) = reachable.iter().copied().find(|binary| hint.names(binary)) else {
                 return false;
             };
             let Some(total) = binary.tests else {
@@ -1423,10 +1424,7 @@ fn bounded_reach_hints(hints: Vec<Killer>, reachable: &[&TestBinary], ordinal: u
             if binary.baseline.is_zero() || measured.cmp(&binary.baseline).is_ge() {
                 return false;
             }
-            let selected = all
-                .iter()
-                .filter(|candidate| candidate.names(&binary.package, &binary.target))
-                .count();
+            let selected = all.iter().filter(|candidate| candidate.names(binary)).count();
 
             selected <= total / 2
         })
@@ -1469,6 +1467,7 @@ fn probe_cases(
             Some(Killer {
                 package: binary.package.clone(),
                 target: binary.target.clone(),
+                identity: binary.identity.clone().map(Box::new),
                 test: name.unwrap_or_else(|| {
                     names
                         .first()
@@ -1569,7 +1568,7 @@ fn judge_ranked(
 
     if let Some(exact) = hint
         && let Some(binary) = reachable.first().copied()
-        && exact.names(&binary.package, &binary.target)
+        && exact.names(binary)
         && !census_excludes(sweep.census, binary, active)
         && !negative_excludes(negative, binary, timeout_multiplier, sweep)
     {
@@ -1590,11 +1589,7 @@ fn judge_ranked(
 
             match candidate {
                 Candidate::Exact(candidate_hint) => {
-                    let Some(binary) = reachable
-                        .iter()
-                        .copied()
-                        .find(|binary| candidate_hint.names(&binary.package, &binary.target))
-                    else {
+                    let Some(binary) = reachable.iter().copied().find(|binary| candidate_hint.names(binary)) else {
                         continue 'candidate;
                     };
 
@@ -1724,7 +1719,7 @@ fn judge_ranked(
         }
 
         if !exact_attempted
-            && let Some(exact) = hint.filter(|hint| hint.names(&binary.package, &binary.target))
+            && let Some(exact) = hint.filter(|hint| hint.names(binary))
             && let Some(killer) = probe(work, active, binary, exact, timeout_multiplier, sweep, tally, ProbeKind::Exact)
         {
             return killed_by(killer);
@@ -1840,6 +1835,7 @@ fn terminal_judgement(binary: &TestBinary, verdict: Verdict) -> Option<Judgement
             name.map(|test| Killer {
                 package: binary.package.clone(),
                 target: binary.target.clone(),
+                identity: binary.identity.clone().map(Box::new),
                 test,
             }),
             None,
@@ -2015,10 +2011,12 @@ fn record_rejections(tally: &Tally, rejected: [usize; 3]) {
     }
 }
 
+/// A logical target key shared by run-local scheduling and persisted binary hints.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct BinaryIdentity {
     package: String,
     target: String,
+    identity: Option<Box<crate::discover::TargetIdentity>>,
 }
 
 impl BinaryIdentity {
@@ -2026,6 +2024,7 @@ impl BinaryIdentity {
         Self {
             package: binary.package.clone(),
             target: binary.target.clone(),
+            identity: binary.identity.clone().map(Box::new),
         }
     }
 
@@ -2033,17 +2032,19 @@ impl BinaryIdentity {
         Self {
             package: killer.package.clone(),
             target: killer.target.clone(),
+            identity: killer.identity.clone(),
         }
     }
 
     fn names(&self, binary: &TestBinary) -> bool {
-        self.package == binary.package && self.target == binary.target
+        binary.matches_hint(&self.package, &self.target, self.identity.as_deref())
     }
 
     fn from_hint(hint: &BinaryHint) -> Self {
         Self {
             package: hint.package.clone(),
             target: hint.target.clone(),
+            identity: hint.identity.clone(),
         }
     }
 
@@ -2051,6 +2052,7 @@ impl BinaryIdentity {
         BinaryHint {
             package: self.package.clone(),
             target: self.target.clone(),
+            identity: self.identity.clone(),
         }
     }
 }
@@ -2696,6 +2698,7 @@ mod tests {
             Killer {
                 package: "stale".to_owned(),
                 target: "stale".to_owned(),
+                identity: None,
                 test: "tests::stale".to_owned(),
             },
         );
@@ -3595,6 +3598,7 @@ mod tests {
         let hint = Killer {
             package: "subject".to_owned(),
             target: String::new(),
+            identity: None,
             test: "tests::killer".to_owned(),
         };
 
@@ -3641,6 +3645,7 @@ mod tests {
         let hint = Killer {
             package: "subject".to_owned(),
             target: String::new(),
+            identity: None,
             test: "tests::killer".to_owned(),
         };
         let tally = Tally::default();
@@ -3689,6 +3694,7 @@ mod tests {
         let hint = Killer {
             package: "subject".to_owned(),
             target: String::new(),
+            identity: None,
             test: "tests::killer".to_owned(),
         };
         let tally = Tally::default();
@@ -3872,6 +3878,7 @@ mod tests {
         let hint = Killer {
             package: "subject".to_owned(),
             target: String::new(),
+            identity: None,
             test: "tests::killer".to_owned(),
         };
         let tally = Tally::default();
@@ -3911,6 +3918,7 @@ mod tests {
         let hint = Killer {
             package: "subject".to_owned(),
             target: "hinted".to_owned(),
+            identity: None,
             test: "tests::killer".to_owned(),
         };
         let tally = Tally::default();
@@ -3989,6 +3997,7 @@ mod tests {
         let hint = Killer {
             package: "subject".to_owned(),
             target: String::new(),
+            identity: None,
             test: "tests::killer".to_owned(),
         };
 
@@ -4060,6 +4069,7 @@ mod tests {
         let hint = Killer {
             package: "elsewhere".to_owned(),
             target: String::new(),
+            identity: None,
             test: "tests::killer".to_owned(),
         };
 
@@ -4114,6 +4124,7 @@ mod tests {
         let hint = Killer {
             package: "subject".to_owned(),
             target: String::new(),
+            identity: None,
             test: "tests::gone".to_owned(),
         };
 
@@ -4176,6 +4187,7 @@ mod tests {
         let hint = Killer {
             package: "subject".to_owned(),
             target: String::new(),
+            identity: None,
             test: "tests::gone".to_owned(),
         };
 
@@ -4245,6 +4257,7 @@ mod tests {
             Killer {
                 package: "subject".to_owned(),
                 target: String::new(),
+                identity: None,
                 test: "tests::stale".to_owned(),
             },
         );
@@ -4419,6 +4432,7 @@ mod tests {
         let killer = Killer {
             package: "subject".to_owned(),
             target: "lib".to_owned(),
+            identity: None,
             test: "tests::caught".to_owned(),
         };
         let mut killers = Killers::default();
@@ -4480,6 +4494,7 @@ mod tests {
             Killer {
                 package: "subject".to_owned(),
                 target: String::new(),
+                identity: None,
                 test: "tests::hint".to_owned(),
             },
         );
@@ -4518,6 +4533,7 @@ mod tests {
             Killer {
                 package: "subject".to_owned(),
                 target: String::new(),
+                identity: None,
                 test: "tests::hint".to_owned(),
             },
         );
@@ -4555,6 +4571,7 @@ mod tests {
         Killer {
             package: "subject".to_owned(),
             target: "lib".to_owned(),
+            identity: None,
             test: test.to_owned(),
         }
     }
@@ -4591,6 +4608,7 @@ mod tests {
         let missing = Candidate::FileBinary(BinaryIdentity {
             package: "elsewhere".to_owned(),
             target: "lib".to_owned(),
+            identity: None,
         });
 
         assert_eq!(exact.estimated_cost(&reachable), Duration::from_millis(17));
@@ -4667,6 +4685,7 @@ mod tests {
                 Candidate::FileBinary(BinaryIdentity {
                     package: "subject".to_owned(),
                     target: format!("file-{index}"),
+                    identity: None,
                 })
             }))
             .collect::<Vec<_>>();
@@ -4720,6 +4739,7 @@ mod tests {
                         candidate: BinaryHint {
                             package: "subject".to_owned(),
                             target: "first".to_owned(),
+                            identity: None,
                         },
                         seeds: 1,
                         hits: 1,
@@ -4732,6 +4752,7 @@ mod tests {
                         candidate: BinaryHint {
                             package: "subject".to_owned(),
                             target: "second".to_owned(),
+                            identity: None,
                         },
                         seeds: 1,
                         hits: 1,
@@ -4748,6 +4769,7 @@ mod tests {
         let first = Candidate::FileBinary(BinaryIdentity {
             package: "subject".to_owned(),
             target: "first".to_owned(),
+            identity: None,
         });
 
         learning.observe("subject::item", &first, false, Duration::from_millis(1));
@@ -4855,6 +4877,7 @@ mod tests {
                 vec![Killer {
                     package: "elsewhere".to_owned(),
                     target: "other".to_owned(),
+                    identity: None,
                     test: "tests::a".to_owned(),
                 }],
                 &reachable,
@@ -4916,6 +4939,7 @@ mod tests {
                     candidate: BinaryHint {
                         package: "subject".to_owned(),
                         target: "integration".to_owned(),
+                        identity: None,
                     },
                     seeds: 1,
                     hits: 3,
@@ -4951,6 +4975,7 @@ mod tests {
         let candidates = [Candidate::Exact(Killer {
             package: binaries[0].package.clone(),
             target: binaries[0].target.clone(),
+            identity: None,
             test: "tests::stale".to_owned(),
         })];
         let tally = Tally::default();
@@ -4991,6 +5016,7 @@ mod tests {
         let exact = Killer {
             package: binaries[0].package.clone(),
             target: binaries[0].target.clone(),
+            identity: None,
             test: "tests::stale".to_owned(),
         };
         let candidates = [Candidate::Exact(Killer {
@@ -5045,6 +5071,7 @@ mod tests {
         let exact = Killer {
             package: binaries[0].package.clone(),
             target: binaries[0].target.clone(),
+            identity: None,
             test: "tests::excluded".to_owned(),
         };
         let candidates = [Candidate::Exact(Killer {
@@ -5085,6 +5112,7 @@ mod tests {
         let exact = Killer {
             package: binaries[0].package.clone(),
             target: binaries[0].target.clone(),
+            identity: None,
             test: "tests::killer".to_owned(),
         };
         let exact_tally = Tally::default();
@@ -5138,6 +5166,7 @@ mod tests {
         let hint = Killer {
             package: binaries[0].package.clone(),
             target: binaries[0].target.clone(),
+            identity: None,
             test: "tests::hinted".to_owned(),
         };
         let candidate = Candidate::Exact(hint.clone());
@@ -5185,7 +5214,8 @@ mod tests {
                 Some(Killer {
                     package,
                     target,
-                    test
+                    test,
+                    ..
                 }),
                 None
             )) if package == "subject" && target == "lib" && test == "tests::caught"
@@ -5507,6 +5537,7 @@ mod tests {
         let candidate = Candidate::ItemBinary(BinaryIdentity {
             package: "subject".to_owned(),
             target: "reached".to_owned(),
+            identity: None,
         });
 
         let judged = judge_ranked(
@@ -5544,11 +5575,13 @@ mod tests {
             Candidate::Exact(Killer {
                 package: "subject".to_owned(),
                 target: "later".to_owned(),
+                identity: None,
                 test: "tests::killer".to_owned(),
             }),
             Candidate::FileBinary(BinaryIdentity {
                 package: "subject".to_owned(),
                 target: "earlier".to_owned(),
+                identity: None,
             }),
         ];
         let tally = Tally::default();
@@ -5593,6 +5626,7 @@ mod tests {
         let candidate = Candidate::Exact(Killer {
             package: "subject".to_owned(),
             target: "later".to_owned(),
+            identity: None,
             test: "tests::killer".to_owned(),
         });
         let tally = Tally::default();
@@ -5628,6 +5662,7 @@ mod tests {
         let candidates = [Candidate::FileBinary(BinaryIdentity {
             package: "subject".to_owned(),
             target: String::new(),
+            identity: None,
         })];
         let tally = Tally::default();
 
