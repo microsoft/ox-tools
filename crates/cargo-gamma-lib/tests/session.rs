@@ -1330,8 +1330,17 @@ mod tests {
 
     assert_eq!(second, EXIT_OK, "{second_output}");
     assert!(second_output.contains("0 survived,"), "{second_output}");
-    assert!(second_output.contains("generalized 2/2"), "{second_output}");
-    assert!(second_output.contains("2 probes"), "{second_output}");
+    // Economic admission can change the probe count. The contract is fresh execution
+    // accelerated by checked generalized hints, not a particular catalog or timing.
+    let diagnostics = read_diagnostics(&dir);
+    let sweep = &diagnostics["phases"]["sweep"];
+    assert!(sweep["generalizedProbes"].as_u64().unwrap() > 0, "{diagnostics}");
+    assert!(sweep["generalizedHits"].as_u64().unwrap() > 0, "{diagnostics}");
+    assert_eq!(sweep["exactProbes"], 0, "{diagnostics}");
+    assert!(
+        sweep["launches"].as_u64().unwrap() >= diagnostics["outcomes"]["killed"].as_u64().unwrap(),
+        "{diagnostics}"
+    );
 }
 
 #[test]
