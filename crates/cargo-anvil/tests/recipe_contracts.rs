@@ -648,16 +648,12 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
     if !tools_available() {
         return;
     }
-    if !Command::new("cargo")
-        .args(["unique-target-names", "--version"])
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        eprintln!("skipping: published checker is unavailable; run just anvil-unique-target-names-setup");
-        return;
-    }
     let _powershell = powershell_process_lock();
     let tmp = TempDir::new().unwrap();
+    let installation = TempDir::new().unwrap();
+    let mut paths = vec![installation.path().join("bin")];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    let path = std::env::join_paths(paths).unwrap();
     let root = tmp.path();
     write(
         &root.join("Cargo.toml"),
@@ -695,6 +691,8 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
             .args(arguments)
             .current_dir(root)
             .env("ANVIL_IMPACT", "consume")
+            .env("CARGO_INSTALL_ROOT", installation.path())
+            .env("PATH", &path)
             .output()
             .expect("just was checked by tools_available")
     };
@@ -721,6 +719,41 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
             );
         }
     }
+
+    // An executable on PATH is not proof that Cargo registered an installation.
+    let missing = run(&["anvil-unique-target-names-validate-prereqs"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("required tool 'cargo-unique-target-names' not found"),
+        "the fixture must not use an ambient tool installation:\n{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+
+    let version = run(&["--evaluate", "cargo_unique_target_names_version"]);
+    assert!(
+        version.status.success(),
+        "reading the generated checker pin failed:\n{}",
+        String::from_utf8_lossy(&version.stderr)
+    );
+    let install = Command::new("cargo")
+        .args(["install", "--locked", "--debug", "--version"])
+        .arg(format!("={}", String::from_utf8_lossy(&version.stdout).trim()))
+        .arg("cargo-unique-target-names")
+        .arg("--root")
+        .arg(installation.path())
+        .arg("--target-dir")
+        .arg(installation.path().join("target"))
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTDOCFLAGS")
+        .output()
+        .expect("Cargo is required to provision the fixture's checker");
+    assert!(
+        install.status.success(),
+        "installing the fixture's checker failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&install.stdout),
+        String::from_utf8_lossy(&install.stderr)
+    );
 
     let clean = run(&["anvil-unique-target-names"]);
     assert!(
