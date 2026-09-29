@@ -243,6 +243,27 @@ fn a_negated_selector_carves_out_of_a_family() {
 }
 
 #[test]
+fn greater_than_to_equality_can_be_suppressed_without_its_siblings() {
+    for directive in ["#[gamma::skip(relational.gt_to_eq)]", "// #[gamma::skip(relational.gt_to_eq)]"] {
+        let source = format!("{directive}\npub fn greater(a: i32, b: i32) -> bool {{ a > b }}");
+        let dir = workspace(&source);
+        let (code, host) = invoke(&dir, &["list", "mutants", "--mutators", "relational"]);
+        let output = host.out();
+
+        assert_eq!(code, EXIT_OK, "{}", host.err());
+        let equality = output.lines().find(|line| line.contains("[relational.gt_to_eq]")).unwrap();
+
+        assert!(equality.contains("[suppressed:"), "{output}");
+        for sibling in ["relational.gt_to_ge", "relational.gt_to_lt"] {
+            let line = output.lines().find(|line| line.contains(sibling)).unwrap();
+
+            assert!(!line.contains("[suppressed:"), "{output}");
+        }
+        assert!(output.lines().any(|line| line == "1 suppressed"), "{output}");
+    }
+}
+
+#[test]
 fn an_unknown_selector_is_a_usage_error() {
     let dir = workspace(SUBJECT);
     let (code, host) = invoke(&dir, &["list", "mutants", "--mutators", "relationl"]);

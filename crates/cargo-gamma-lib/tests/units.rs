@@ -880,8 +880,9 @@ mod lookup {
     fn family_prefixes_resolve_to_the_family() {
         let resolved = resolve("relational").unwrap();
 
-        assert_eq!(resolved.len(), 10);
+        assert_eq!(resolved.len(), 11);
         assert!(resolved.contains(&"relational.lt_to_le"));
+        assert!(resolved.contains(&"relational.gt_to_eq"));
         assert!(!resolved.contains(&"arith.add_to_sub"));
     }
 

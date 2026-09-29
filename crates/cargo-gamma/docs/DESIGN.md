@@ -217,6 +217,12 @@ Selection narrows the population before expensive work:
 - suppressions withdraw explicitly accepted sites;
 - sharding assigns stable portions of the population to separate campaigns.
 
+The default mutator selection contains the main useful catalog; evidence-based low-yield
+exceptions belong to `@pedantic`. The default includes `relational.gt_to_eq`, which replaces `left > right`
+with `left == right`. Its family (`relational`), alias (`ROR`), and `@boundary` preset select it
+through the same rules as `@default` and `all`. Exact selection and source suppression use its
+stable name. Each operand is evaluated once in the executed expression branch.
+
 Trait-name policy is deliberately lexical. `impl Debug`, `impl fmt::Debug`, and
 `impl core::fmt::Debug` share the final written identifier `Debug`, while an imported alias retains
 the identifier written in the implementation. Without rustc name resolution, discovery cannot

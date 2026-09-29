@@ -23,6 +23,20 @@ effective value. The top-level boundary maps help and success to `0`, usage to
 `1`, failed score or source-expectation gates to `2`, inability to proceed to
 `3`, and an uncaught internal panic to `70`.
 
+## Mutation discovery
+
+The engine registry declares `relational.gt_to_eq` as default-on with the `ROR` alias.
+The `BinOp::Gt` replacement table appends equality after `gt_to_ge` and `gt_to_lt`: their
+replacement indices remain identity-significant and unchanged. Generic selector resolution
+supplies family, alias, and preset membership without a separate path.
+
+The binary collector rewrites the whole expression with parenthesized operands and uses
+ordinary no-op and identical-edit filtering. Selection precedes deduplication, so an exact
+mutator selection still emits its edit when a broader selection coalesces identical edits.
+Runtime guards evaluate only the chosen expression branch, without hoisting operands into
+temporary bindings. The compiler decides viability; the collector does not infer operand
+types for this transformation.
+
 ## Scratch layout
 
 The coordinator synchronizes sources and vendors the dependency-free guard

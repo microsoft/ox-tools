@@ -45,6 +45,7 @@ mutators! {
     "relational.le_to_ge",       true,  &["ROR"], "replace <= with >=";
     "relational.gt_to_ge",       true,  &["ROR"], "replace > with >=";
     "relational.gt_to_lt",       true,  &["ROR"], "replace > with <";
+    "relational.gt_to_eq",       true,  &["ROR"], "replace > with ==";
     "relational.ge_to_gt",       true,  &["ROR"], "replace >= with >";
     "relational.ge_to_le",       true,  &["ROR"], "replace >= with <=";
     "relational.eq_to_ne",       true,  &["ROR"], "replace == with !=";

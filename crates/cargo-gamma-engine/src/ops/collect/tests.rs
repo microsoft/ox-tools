@@ -248,7 +248,11 @@ const OPERATOR_ORACLE: &[OperatorCase] = &[
     (
         "fn f(a: i32, b: i32) -> bool { a > b }",
         "relational",
-        &[("relational.gt_to_ge", "(a) >= (b)"), ("relational.gt_to_lt", "(a) < (b)")],
+        &[
+            ("relational.gt_to_ge", "(a) >= (b)"),
+            ("relational.gt_to_lt", "(a) < (b)"),
+            ("relational.gt_to_eq", "(a) == (b)"),
+        ],
     ),
     (
         "fn f(a: i32, b: i32) -> bool { a >= b }",
@@ -412,7 +416,44 @@ fn the_operator_oracle_covers_every_replacement_the_tables_offer() {
     let pairs: usize = OPERATOR_ORACLE.iter().map(|(_, _, expected)| expected.len()).sum();
 
     assert_eq!(OPERATOR_ORACLE.len(), 28, "one row per binary and compound-assignment operator");
-    assert_eq!(pairs, 38, "one assertion per `binary_replacements` entry");
+    assert_eq!(pairs, 39, "one assertion per `binary_replacements` entry");
+}
+
+#[test]
+fn greater_than_replacements_keep_their_identities_when_selected_independently() {
+    let file = SourceFile::parse("test.rs", "fn f(a: i32, b: i32) -> bool { a > b }".to_owned()).unwrap();
+    let family = into_definitions(&file, collect(&file, &Selection::parse("relational").unwrap()));
+
+    for (name, replacement, index) in [
+        ("relational.gt_to_ge", "(a) >= (b)", 0),
+        ("relational.gt_to_lt", "(a) < (b)", 1),
+        ("relational.gt_to_eq", "(a) == (b)", 2),
+    ] {
+        let selected = into_definitions(&file, collect(&file, &Selection::parse(name).unwrap()));
+
+        assert_eq!(selected.len(), 1, "{name}");
+        let mutant = &selected[0];
+
+        assert_eq!(mutant.mutator.as_ref(), name);
+        assert_eq!(mutant.site.original, "a > b");
+        assert_eq!(mutant.replacement, replacement);
+        assert_eq!(mutant.replacement_index, index);
+        assert_eq!(
+            mutant.id,
+            mutant_id_with_discriminator(&file.path, "f", name, "a > b", SiteIndex::new(0, index), None)
+        );
+        assert_eq!(family.iter().find(|entry| entry.mutator.as_ref() == name).unwrap().id, mutant.id);
+    }
+}
+
+#[test]
+fn default_discovery_includes_greater_than_to_equality() {
+    let file = SourceFile::parse("test.rs", "fn f(a: i32, b: i32) -> bool { a > b }".to_owned()).unwrap();
+    let found = collect(&file, &Selection::default_preset());
+    let equality = found.iter().find(|candidate| candidate.mutator == "relational.gt_to_eq").unwrap();
+
+    assert_eq!(file.slice(&equality.span), "a > b");
+    assert_eq!(equality.replacement, "(a) == (b)");
 }
 
 #[test]

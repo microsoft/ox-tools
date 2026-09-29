@@ -600,6 +600,79 @@ fn promote_hints(dir: &TempDir) -> (i32, String) {
 }
 
 #[test]
+fn greater_than_to_equality_is_caught_by_ordering_cases() {
+    step_aside_if_nested!();
+    let dir = workspace(
+        "
+pub fn greater(left: i32, right: i32) -> bool { left > right }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ordering_cases() {
+        assert_eq!(
+            [super::greater(1, 2), super::greater(2, 2), super::greater(3, 2)],
+            [false, false, true],
+        );
+    }
+}
+",
+    );
+    let (code, output) = session(&dir, &["--mutators", "relational.gt_to_eq", "--incremental", "no"]);
+
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert!(
+        output.contains("1 mutant (1 killed, 0 survived, 0 timed out, 0 out of memory, 0 uncovered => 100.0%)"),
+        "{output}"
+    );
+}
+
+#[test]
+fn greater_than_to_equality_evaluates_each_operand_once() {
+    step_aside_if_nested!();
+    let dir = workspace(
+        "
+use std::cell::Cell;
+
+fn operand(value: i32, calls: &Cell<usize>) -> i32 {
+    calls.set(calls.get() + 1);
+    value
+}
+
+pub fn greater(left: i32, right: i32, left_calls: &Cell<usize>, right_calls: &Cell<usize>) -> bool {
+    operand(left, left_calls) > operand(right, right_calls)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_operand_is_evaluated_once() {
+        for left in [1, 2, 3] {
+            let left_calls = Cell::new(0);
+            let right_calls = Cell::new(0);
+            let _result = greater(left, 2, &left_calls, &right_calls);
+
+            assert_eq!(left_calls.get(), 1);
+            assert_eq!(right_calls.get(), 1);
+        }
+    }
+}
+",
+    );
+    let (code, output) = session(&dir, &["--mutators", "relational.gt_to_eq", "--incremental", "no"]);
+
+    assert_eq!(code, EXIT_OK, "{output}");
+    // The baseline and selected mutation must both pass the counter assertions. A killed or
+    // uncovered mutant cannot establish that the selected branch preserves evaluation counts.
+    assert!(
+        output.contains("1 mutant (0 killed, 1 survived, 0 timed out, 0 out of memory, 0 uncovered => 0.0%)"),
+        "{output}"
+    );
+}
+
+#[test]
 fn an_asserted_boundary_catches_its_mutant() {
     step_aside_if_nested!();
     let dir = workspace(SUBJECT);

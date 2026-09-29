@@ -69,7 +69,11 @@ pub(super) const fn binary_replacements(op: &BinOp) -> &'static [(&'static str, 
     match op {
         BinOp::Lt(_) => &[("relational.lt_to_le", "<="), ("relational.lt_to_gt", ">")],
         BinOp::Le(_) => &[("relational.le_to_lt", "<"), ("relational.le_to_ge", ">=")],
-        BinOp::Gt(_) => &[("relational.gt_to_ge", ">="), ("relational.gt_to_lt", "<")],
+        BinOp::Gt(_) => &[
+            ("relational.gt_to_ge", ">="),
+            ("relational.gt_to_lt", "<"),
+            ("relational.gt_to_eq", "=="),
+        ],
         BinOp::Ge(_) => &[("relational.ge_to_gt", ">"), ("relational.ge_to_le", "<=")],
         BinOp::Eq(_) => &[("relational.eq_to_ne", "!=")],
         BinOp::Ne(_) => &[("relational.ne_to_eq", "==")],

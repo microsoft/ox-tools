@@ -456,6 +456,20 @@ fn main() {
 }
 
 #[test]
+fn greater_than_to_equality_compiles_with_generic_and_non_copy_operands() {
+    let source = "
+pub fn greater<T: PartialOrd>(left: T, right: T) -> bool { left > right }
+
+pub fn strings(left: String, right: String) -> (bool, String, String) {
+    let result = left > right;
+    (result, left, right)
+}
+";
+
+    assert_eq!(compiles("greater_than_to_equality", source, "relational.gt_to_eq"), 2);
+}
+
+#[test]
 fn a_disabled_match_arm_still_compiles() {
     // The guard is spliced into the pattern position, where the arm's bindings are in scope but
     // not yet moved. Getting this wrong is not a parse error, it is a borrow error.

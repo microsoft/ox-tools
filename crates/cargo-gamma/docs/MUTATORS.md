@@ -40,7 +40,9 @@ covers how to turn one off for a particular site.
 ## Choosing what to run
 
 The default preset contains the main catalog. Valid mutations with evidence of low yield are kept
-in the opt-in `@pedantic` preset so ordinary runs do not pay for them without asking.
+in the opt-in `@pedantic` preset so ordinary runs do not pay for them without asking. Useful
+additions such as `relational.gt_to_eq` belong to the default catalog. A replacement identical
+to the original is omitted at that site rather than disabling its mutator across the catalog.
 
 A selector is a mutator name, a family prefix, a [preset](#mutator-presets), or an academic alias. `!`
 removes from the set, and selectors apply left to right:
@@ -72,7 +74,7 @@ cargo gamma explain relational.lt_to_le   # what one does, and how to switch it 
 | Family | Mutators | What it asks |
 | --- | ---: | --- |
 | [`fn_value`](#fn_value) | 21 | Does anything check what this function returns? |
-| [`relational`](#relational) | 10 | Is this comparison's boundary the right one? |
+| [`relational`](#relational) | 11 | Is this comparison's boundary the right one? |
 | [`arith`](#arith) | 10 | Does this calculation's operator matter? |
 | [`bitwise`](#bitwise) | 4 | Is this mask or flag combination correct? |
 | [`shift`](#shift) | 2 | Is this shift's direction load-bearing? |
@@ -94,7 +96,7 @@ cargo gamma explain relational.lt_to_le   # what one does, and how to switch it 
 | [`string`](#string) | 6 | Does the prefix, the case, or the trimmed end actually matter? |
 | [`collection`](#collection) | 1 | Does every element of this literal earn its place? |
 | [`assign_value`](#assign_value) | 1 | Is the value assigned here ever read in a way that would notice? |
-| **Total** | **106** | |
+| **Total** | **107** | |
 
 <!-- end generated -->
 
@@ -137,7 +139,9 @@ its shared `Either` type, as described below.
 
 ### `relational`
 
-Targets the boundary of a comparison: `<`, `<=`, `>`, `>=`, `==`, `!=`. A surviving mutant means the suite has no test sitting exactly on that boundary — off-by-one errors in loop bounds, capacity checks, and range tests live here.
+Targets the boundary and direction of a comparison: `<`, `<=`, `>`, `>=`, `==`, `!=`. A surviving
+mutant can expose missing boundary assertions or an unchecked ordering result in loop bounds,
+capacity checks, and range tests.
 
 ```rust
 // original
@@ -146,11 +150,16 @@ if index < limit { … }
 // relational.lt_to_le
 if index <= limit { … }
 
+// relational.gt_to_eq replaces `remaining > limit`
+if remaining == limit { … }
+
 // relational.eq_to_ne
-if remaining == 0 { … }
+if remaining != 0 { … }
 ```
 
-The `ROR` alias covers this whole family; a test suite that only exercises values well inside or well outside a boundary, never on it, will let all ten mutators here survive together.
+The `ROR` alias covers this whole family. Exercise less-than, equal, and greater-than inputs to
+distinguish equality, boundary shifts, and reversed comparisons. `relational.gt_to_eq` participates
+in ordinary default runs and can also be selected independently.
 
 ### `arith`
 
@@ -539,6 +548,7 @@ the mutator runs when `--mutators` is not given.
 | `relational.le_to_ge` | replace <= with >= | `ROR` | yes |
 | `relational.gt_to_ge` | replace > with >= | `ROR` | yes |
 | `relational.gt_to_lt` | replace > with < | `ROR` | yes |
+| `relational.gt_to_eq` | replace > with == | `ROR` | yes |
 | `relational.ge_to_gt` | replace >= with > | `ROR` | yes |
 | `relational.ge_to_le` | replace >= with <= | `ROR` | yes |
 | `relational.eq_to_ne` | replace == with != | `ROR` | yes |

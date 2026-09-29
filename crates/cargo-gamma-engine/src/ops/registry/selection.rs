@@ -174,6 +174,24 @@ mod tests {
     }
 
     #[test]
+    fn greater_than_to_equality_uses_ordinary_selector_resolution() {
+        for selector in ["relational.gt_to_eq", "relational", "ROR", "ror", "@boundary", "all", "@default"] {
+            let selection = Selection::parse(selector).unwrap();
+
+            assert!(selection.contains("relational.gt_to_eq"), "{selector}");
+            assert!(
+                !Selection::parse(&format!("{selector},!relational.gt_to_eq"))
+                    .unwrap()
+                    .contains("relational.gt_to_eq"),
+                "{selector}"
+            );
+        }
+
+        assert!(Selection::default_preset().contains("relational.gt_to_eq"));
+        assert!(!Selection::parse("@pedantic").unwrap().contains("relational.gt_to_eq"));
+    }
+
+    #[test]
     fn default_and_pedantic_presets_partition_everything() {
         let default = Selection::default_preset();
         let pedantic = Selection::parse("@pedantic").unwrap();
@@ -204,7 +222,7 @@ mod tests {
     fn empty_selectors_are_ignored() {
         let selection = Selection::parse("relational, , ").unwrap();
 
-        assert_eq!(selection.names.len(), 10);
+        assert_eq!(selection, Selection::parse("relational").unwrap());
     }
 
     /// `any_in_family` is the gate that builds the per-file imports index only when a `fn_value`
