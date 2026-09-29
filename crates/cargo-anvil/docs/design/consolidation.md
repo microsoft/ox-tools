@@ -165,9 +165,10 @@ setup layer:
   downloading community-produced executable artifacts is outside their supply
   chain policy.
 - `binstall` is an explicit opt-in for environments that permit prebuilt
-  binaries. It passes `--disable-strategies compile` and does not fall back to
-  source. If no permitted binary strategy succeeds, setup fails and tells the
-  caller to retry with `installer=install`.
+  binaries. It prefers cargo-binstall's binary strategies and lets
+  cargo-binstall compile the pinned crate when no binary source has it. This
+  matters for a newly published tool whose crate can be available before a
+  binary index catches up.
 
 Installer choice is not a per-tool constant and is never inferred from the
 machine. Group and tier setup recipes forward the selected mode unchanged.
@@ -191,7 +192,7 @@ _install-tool name minimum installer="install" \
     installed=(if found == "true" { replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1') } else { "" }) \
     satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }) \
     source_command=("cargo install --locked --version =" + minimum + " " + name) \
-    binary_command=("cargo binstall --no-confirm --locked --disable-strategies compile --version =" + minimum + " " + name):
+    binary_command=("cargo binstall --no-confirm --locked --version =" + minimum + " " + name):
     @{{ if satisfied == "true" { "" } else if installer == "install" { source_command } else { binary_command } }}
 ```
 

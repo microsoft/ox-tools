@@ -134,12 +134,12 @@ fn setup_uses_lazy_inventory_and_exact_install_policy() {
         "installed_cargo_tools := `cargo install --list`",
         "semver_matches(installed, \">=\" + minimum)",
         "cargo install --locked --version =",
-        "cargo binstall --no-confirm --locked --disable-strategies compile",
+        "cargo binstall --no-confirm --locked --version =",
         "anvil-toolchain-stable-install installer=\"install\": (anvil-tool-cargo-each-install installer)",
     ] {
         assert!(recipes.contains(contract), "missing setup contract: {contract}");
     }
-    assert!(!recipes.contains("falling back to cargo install"));
+    assert!(!recipes.contains("--disable-strategies compile"));
 }
 
 #[test]

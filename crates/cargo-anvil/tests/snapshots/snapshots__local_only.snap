@@ -2476,8 +2476,9 @@ bolero_command_prefix := if os() == "linux" { "" } else { "# " }
 mutants_command_prefix := if os() == "windows" { if arch() == "aarch64" { "# " } else { "" } } else { "" }
 
 # Install exactly the catalog version when the installed version is too old.
-# A newer local version is accepted. `binstall` is binary-only and never falls
-# back to compilation; installer mode is caller policy.
+# A newer local version is accepted. `binstall` prefers a prebuilt binary and
+# lets cargo-binstall compile when no binary strategy succeeds; installer mode
+# is caller policy.
 [arg("installer", pattern="^(install|binstall)$")]
 _install-tool name minimum installer="install" \
     extracted=(replace_regex(installed_cargo_tools, ('(?ms)\A.*^' + name + ' v([^:\r\n]+):\r?$.*\z'), '$1')) \
@@ -2485,7 +2486,7 @@ _install-tool name minimum installer="install" \
     installed=(if found == "true" { extracted } else { "" }) \
     satisfied=(if found == "true" { semver_matches(installed, ">=" + minimum) } else { "false" }) \
     source_command=(if name == "cargo-each" { "cargo install --locked --version =" + minimum + " " + name } else if anvil_stable_toolchain_arg == "" { "cargo install --locked --version =" + minimum + " " + name } else { "cargo each --workspace --once -- cargo " + anvil_stable_toolchain_arg + " install --locked --version =" + minimum + " " + name }) \
-    binary_command=(if name == "cargo-each" { "cargo binstall --no-confirm --locked --disable-strategies compile --version =" + minimum + " " + name } else if anvil_stable_toolchain_arg == "" { "cargo binstall --no-confirm --locked --disable-strategies compile --version =" + minimum + " " + name } else { "cargo each --workspace --once -- cargo " + anvil_stable_toolchain_arg + " binstall --no-confirm --locked --disable-strategies compile --version =" + minimum + " " + name }):
+    binary_command=(if name == "cargo-each" { "cargo binstall --no-confirm --locked --version =" + minimum + " " + name } else if anvil_stable_toolchain_arg == "" { "cargo binstall --no-confirm --locked --version =" + minimum + " " + name } else { "cargo each --workspace --once -- cargo " + anvil_stable_toolchain_arg + " binstall --no-confirm --locked --version =" + minimum + " " + name }):
     {{ if satisfied == "true" { "# cargo-binstall not needed" } else if installer == "binstall" { if cargo_binstall_found == "true" { "# cargo-binstall already available" } else { "cargo install --locked cargo-binstall" } } else { "# cargo-binstall not needed" } }}
     {{ if satisfied == "true" { "# " + name + " " + installed + " satisfies >= " + minimum } else if installer == "install" { source_command } else { binary_command } }}
 

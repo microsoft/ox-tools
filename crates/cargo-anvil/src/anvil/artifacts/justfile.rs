@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn installers_are_portable_and_binary_mode_never_compiles() {
+    fn installers_are_portable_and_binstall_can_compile_as_a_fallback() {
         assert!(
             TOOLS_JUST.contains("installed_cargo_tools := `cargo install --list`"),
             "tool inventory must be a lazy direct Cargo invocation"
@@ -624,8 +624,12 @@ mod tests {
             "validation must accept equal or newer tool versions"
         );
         assert!(
-            TOOLS_JUST.contains("binstall --no-confirm --locked --disable-strategies compile"),
-            "binary policy must not fall back to source compilation"
+            TOOLS_JUST.contains("binstall --no-confirm --locked --version ="),
+            "binstall mode must remain one portable domain-tool invocation"
+        );
+        assert!(
+            !TOOLS_JUST.contains("--disable-strategies compile"),
+            "binstall mode must remain usable before binary indexes contain a newly published tool"
         );
     }
 

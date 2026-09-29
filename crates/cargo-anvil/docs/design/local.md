@@ -109,10 +109,11 @@ inventory.
 | Equal or newer | Accept without reinstalling or downgrading. |
 
 `installer=install` builds from source with `cargo install --locked`.
-`installer=binstall` is explicit binary-only policy and uses
-`--disable-strategies compile`; it never falls back to source. The selected
-installer is forwarded unchanged through group, tier, stable-toolchain, and
-cargo-each bootstrap setup.
+`installer=binstall` prefers a prebuilt artifact through `cargo binstall` and
+allows cargo-binstall's compile strategy when no binary source has the pinned
+release. This keeps newly published tools installable before binary indexes
+catch up. The selected installer is forwarded unchanged through group, tier,
+stable-toolchain, and cargo-each bootstrap setup.
 
 `cargo-each` is the bootstrap Cargo tool. It installs with Cargo already
 available to the caller, then resolves `{workspace-rust-version}` for the
