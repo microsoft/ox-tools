@@ -14,7 +14,7 @@ deleted; this file is not a changelog or a record of rejected work.
 - [F4](#f4) - Evaluate repair workflows beyond survivor-only reruns
 
 ### Test reliability
-- [T1](#t1) - Make the census-failure fixture deterministic
+- [T1](#t1) - Make census fixtures deterministic
 
 ## Performance
 
@@ -152,16 +152,21 @@ existing workflow is sufficient and this evaluation can be removed.
 ## Test reliability
 
 <a id="t1"></a>
-### T1 - Make the census-failure fixture deterministic
+### T1 - Make census fixtures deterministic
 
-**Area:** `cargo-gamma-lib/src/exec/sweep.rs`,
-`a_complete_census_failure_settles_without_a_whole_binary_rerun`
+**Area:** `cargo-gamma-lib/src/exec/sweep.rs` and `exec/census.rs`;
+`a_complete_census_failure_settles_without_a_whole_binary_rerun` and
+`taking_a_census_reports_and_persists_one_complete_sample`
 
-Replace the fixture's real `sleep:200` and 20ms binary budget with controlled
-synchronization or budget injection. An expanded library-suite run failed its
-expected killed-verdict assertion while an isolated rerun passed; this is evidence
-of a timing-sensitive test, not a demonstrated product defect.
+Replace the failure fixture's real `sleep:200` and 20ms binary budget with
+controlled synchronization or budget injection. The complete-sample fixture
+also needs deterministic economic-admission inputs: its measured process
+startup cost competes with a fixed savings budget under concurrent suite load.
+A failed sample assertion poisons the shared census-walk lock and cascades
+into unrelated census tests. Keep these test-reliability changes separate
+from library-target selection.
 
-**Done when:** the test proves a complete census failure settles after one
+**Done when:** the failure test proves a complete census failure settles after one
 selected-test launch without depending on elapsed wall-clock time or a timeout
-to detect an incorrect whole-binary rerun.
+to detect an incorrect whole-binary rerun, and the complete-sample test proves
+admission, persistence and reporting without depending on process startup time.
