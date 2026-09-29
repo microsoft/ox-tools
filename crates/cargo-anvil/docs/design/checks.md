@@ -54,6 +54,7 @@ flowchart LR
     sched --> s_runtime[anvil-scheduled-runtime-analysis]:::group
     sched --> s_exh[anvil-scheduled-exhaustive]:::group
 
+    pr_fast --> unique_target_names[unique-target-names]:::check
     pr_fast --> fmt[fmt]:::check
     pr_fast --> clippy[clippy]:::check
     pr_fast --> cargo_sort[cargo-sort]:::check
@@ -176,6 +177,7 @@ while paired prerequisite validation remains read-only.
 
 | Check                          | Invocation                                                | Source |
 |--------------------------------|-----------------------------------------------------------|--------|
+| `unique-target-names`          | `cargo unique-target-names`. Rejects workspace targets that write the same build artifact, including Windows debug-info collisions on every host. Runs before the other fast checks and always inspects the entire workspace, even when only one owning package changed. | [`cargo-unique-target-names`](../../../cargo-unique-target-names) |
 | `fmt`                          | `cargo each --workspace --keep-going -- cargo +<pinned-nightly> fmt --manifest-path {manifest} --check`. `cargo-each` resolves workspace membership and invokes rustfmt once per manifest, keeping child commands bounded on every platform while reporting every failing member. Unlike `cargo fmt --all`, local path dependencies outside the workspace are not included. Local `--fix` removes `--check`; cloud workflows never pass it. | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
 | `cargo-sort`                   | `cargo sort --workspace --grouped --check --check-format`. Since cargo-sort 2.1.2, formatting-only differences are warnings unless `--check-format` is set; Anvil keeps it load-bearing so dependency ordering and Cargo manifest formatting are both enforced. `--grouped` preserves intentional blank-line-separated dependency groups. | oxidizer-github |
@@ -191,6 +193,13 @@ while paired prerequisite validation remains read-only.
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
 | `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
 | `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
+
+`unique-target-names` delegates artifact identity and diagnostics to the published Rust
+tool. It does not reject duplicate test or benchmark names whose outputs remain
+metadata-hashed. Collisions, unreadable workspace metadata, and rejected invocations
+all fail the check; they are not advisory findings. Setup installs the catalog pin
+through the shared tool installer, and prerequisite validation follows the same
+installed-version policy as other Cargo tools.
 
 ### `pr-slow` umbrella
 
@@ -425,7 +434,7 @@ Bucket assignments per check:
 | modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features` |
 | affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `msrv-test`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
 | required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
-| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck` |
+| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck`, `unique-target-names` |
 
 \* cargo-delta's README recommends `clippy` with the modified tier. anvil deliberately
 runs it on the affected set instead: a change in a crate's API can introduce clippy lints
@@ -439,13 +448,14 @@ whose correctness resolves through the dep graph: `cargo doc` (intra-doc links w
 deps), `cargo udeps` (unused-deps detection needs the resolved graph), `cargo hack
 --feature-powerset` (feature combinations cascade through dep features).
 
-`unscoped` is for checks that have nothing to do with workspace-member identity:
+`unscoped` is for checks that cannot be restricted to changed workspace members:
 `deny`/`audit` read `Cargo.lock`, `pr-title` reads PR metadata, `aprz` consults an
 external risk DB. `readme-check` and `spellcheck` also belong here: their inputs include
 repo-level files cargo-delta does not map to any package — the workspace-level README
 template (`crates/README.j2` / `README.j2`) and the root `.spelling` dictionary — so a
-change to one of those would be silently scoped out. These ignore impact scoping and
-always run.
+change to one of those would be silently scoped out. `unique-target-names` must compare
+every workspace target because a changed target can collide with an unchanged member.
+These checks ignore impact scoping and always run.
 
 The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
 is no collision with real package names. Recipes test for it with

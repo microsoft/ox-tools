@@ -9,6 +9,7 @@
 # Run the fast pull request checks.
 [group("anvil")]
 anvil-pr-fast: anvil-pr-fast-validate-prereqs \
+    anvil-unique-target-names \
     anvil-fmt \
     anvil-clippy \
     anvil-cargo-sort \
@@ -35,6 +36,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
 [group("anvil-setup")]
 anvil-pr-fast-setup installer="install": \
     (anvil-tool-cargo-delta-install installer) \
+    (anvil-unique-target-names-setup installer) \
     (anvil-fmt-setup installer) \
     (anvil-clippy-setup installer) \
     (anvil-cargo-sort-setup installer) \
@@ -55,6 +57,7 @@ anvil-pr-fast-setup installer="install": \
 [group("anvil-setup")]
 anvil-pr-fast-validate-prereqs: \
     anvil-tool-cargo-delta-validate-prereqs \
+    anvil-unique-target-names-validate-prereqs \
     anvil-fmt-validate-prereqs \
     anvil-clippy-validate-prereqs \
     anvil-cargo-sort-validate-prereqs \

@@ -1084,3 +1084,11 @@ anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps"
 # Validate that the pinned `cargo-udeps` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)
+
+# Install the pinned `cargo-unique-target-names` tool.
+[group("anvil-setup")]
+anvil-tool-cargo-unique-target-names-install installer="install": (_install-tool "cargo-unique-target-names" cargo_unique_target_names_version installer)
+
+# Validate that the pinned `cargo-unique-target-names` tool is available.
+[group("anvil-setup")]
+anvil-tool-cargo-unique-target-names-validate-prereqs: (_check-tool "cargo-unique-target-names" cargo_unique_target_names_version)
