@@ -128,44 +128,48 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
             continue;
         }
 
-        if verdict.mutant.status == NEVER_RUN {
-            out.never_tested += 1;
-        } else if window.is_some_and(|window| now.saturating_sub(verdict.tested_at) > window) {
-            out.stale += 1;
-        } else {
-            out.fresh += 1;
-        }
-
-        // A status the schema does not define is left out of the fraction rather than counted
-        // against it. `read` refuses such a document, so this is reachable only from a `Report`
-        // assembled in memory — and a merge that guessed at a word it cannot interpret would be
-        // guessing with the score.
-        match scoring(&verdict.mutant.status) {
-            Some(Scoring::Detected) => {
-                out.valid += 1;
-                out.detected += 1;
-                match (verdict.producer.as_deref(), verdict.confirm) {
-                    (Some(FRAMEWORK_NAME), Some(false)) => out.unconfirmed += 1,
-                    (Some(FRAMEWORK_NAME), Some(true)) => {}
-                    _ => out.confirmation_unknown += 1,
-                }
-            }
-            Some(Scoring::Undetected) => out.valid += 1,
-            Some(Scoring::Excluded) | None => {}
-        }
-
-        if verdict.producer.as_deref() == Some(FRAMEWORK_NAME)
-            && crate::elements::gamma_outcome(&verdict.mutant.status, verdict.mutant.status_reason.as_deref()) == Some(Outcome::Flaky)
-        {
-            out.flaky += 1;
-        }
-
+        tally_presented(&mut out, verdict, now, window);
         files.entry(verdict.file).or_default().push(verdict);
     }
 
     out.report = rebuild(&compatible, &sources, files, current.into_values().collect());
     remember_observations(out.report.as_mut(), observations);
     out
+}
+
+/// Counts only winning verdicts already checked for retirement and presentation compatibility.
+fn tally_presented(out: &mut Merged, verdict: &Verdict<'_>, now: u64, window: Option<u64>) {
+    if verdict.mutant.status == NEVER_RUN {
+        out.never_tested += 1;
+    } else if window.is_some_and(|window| now.saturating_sub(verdict.tested_at) > window) {
+        out.stale += 1;
+    } else {
+        out.fresh += 1;
+    }
+
+    // A status the schema does not define is left out of the fraction rather than counted
+    // against it. `read` refuses such a document, so this is reachable only from a `Report`
+    // assembled in memory — and a merge that guessed at a word it cannot interpret would be
+    // guessing with the score.
+    match scoring(&verdict.mutant.status) {
+        Some(Scoring::Detected) => {
+            out.valid += 1;
+            out.detected += 1;
+            match (verdict.producer.as_deref(), verdict.confirm) {
+                (Some(FRAMEWORK_NAME), Some(false)) => out.unconfirmed += 1,
+                (Some(FRAMEWORK_NAME), Some(true)) => {}
+                _ => out.confirmation_unknown += 1,
+            }
+        }
+        Some(Scoring::Undetected) => out.valid += 1,
+        Some(Scoring::Excluded) | None => {}
+    }
+
+    if verdict.producer.as_deref() == Some(FRAMEWORK_NAME)
+        && crate::elements::gamma_outcome(&verdict.mutant.status, verdict.mutant.status_reason.as_deref()) == Some(Outcome::Flaky)
+    {
+        out.flaky += 1;
+    }
 }
 
 /// Stores original evidence without refreshing any of its timestamps.

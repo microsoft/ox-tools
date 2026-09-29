@@ -322,55 +322,6 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
         }
     }
 
-    fn report_confirmation(stream: &mut impl Write, merged: &crate::merge::Merged, styler: Styler) -> crate::Result<()> {
-        let mut shown = 0;
-        if merged.confirmation_unknown > 0 {
-            writeln!(
-                stream,
-                "{} {} detections have unknown confirmation provenance; legacy or foreign evidence does not establish Gamma confirmation",
-                styler.verb("Note"),
-                merged.confirmation_unknown,
-            )?;
-        }
-        if let Some(report) = &merged.report {
-            for (file, result) in &report.files {
-                for mutant in &result.mutants {
-                    let (producer, confirm) = report.verdict_policy(&mutant.id);
-                    let finding = if report.gamma_outcome(mutant) == Some(Outcome::Flaky) {
-                        "flaky, inconclusive"
-                    } else if producer == Some(FRAMEWORK_NAME) && confirm == Some(false) && mutant.status == "Killed" {
-                        "unconfirmed detection"
-                    } else {
-                        continue;
-                    };
-                    if shown == MAX_CONFIRMATION_NOTES {
-                        continue;
-                    }
-                    shown += 1;
-                    writeln!(
-                        stream,
-                        "{} {} mutant `{}` at {}:{}: {}",
-                        styler.verb("Note"),
-                        finding,
-                        encode_controls(mutant.id.as_str()),
-                        encode_controls(file),
-                        mutant.location.start.line,
-                        encode_controls(mutant.status_reason.as_deref().unwrap_or("confirmation was disabled")),
-                    )?;
-                }
-            }
-        }
-        let remaining = merged.flaky.saturating_add(merged.unconfirmed).saturating_sub(shown);
-        if remaining > 0 {
-            writeln!(
-                stream,
-                "{} {remaining} more flaky or unconfirmed findings; see the input reports or write --json-report for the complete merged findings",
-                styler.verb("Note"),
-            )?;
-        }
-        Ok(())
-    }
-
     // Two runs at different shard counts partitioned the population differently, so the coverage
     // number above is not the claim it appears to be.
     for input in &merged.inconsistent {
@@ -393,6 +344,55 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
         )?;
     }
 
+    Ok(())
+}
+
+fn report_confirmation(stream: &mut impl Write, merged: &crate::merge::Merged, styler: Styler) -> crate::Result<()> {
+    let mut shown = 0;
+    if merged.confirmation_unknown > 0 {
+        writeln!(
+            stream,
+            "{} {} detections have unknown confirmation provenance; legacy or foreign evidence does not establish Gamma confirmation",
+            styler.verb("Note"),
+            merged.confirmation_unknown,
+        )?;
+    }
+    if let Some(report) = &merged.report {
+        for (file, result) in &report.files {
+            for mutant in &result.mutants {
+                let (producer, confirm) = report.verdict_policy(&mutant.id);
+                let finding = if report.gamma_outcome(mutant) == Some(Outcome::Flaky) {
+                    "flaky, inconclusive"
+                } else if producer == Some(FRAMEWORK_NAME) && confirm == Some(false) && mutant.status == "Killed" {
+                    "unconfirmed detection"
+                } else {
+                    continue;
+                };
+                if shown == MAX_CONFIRMATION_NOTES {
+                    continue;
+                }
+                shown += 1;
+                writeln!(
+                    stream,
+                    "{} {} mutant `{}` at {}:{}: {}",
+                    styler.verb("Note"),
+                    finding,
+                    encode_controls(mutant.id.as_str()),
+                    encode_controls(file),
+                    mutant.location.start.line,
+                    encode_controls(mutant.status_reason.as_deref().unwrap_or("confirmation was disabled")),
+                )?;
+            }
+        }
+    }
+    let remaining = merged.flaky.saturating_add(merged.unconfirmed).saturating_sub(shown);
+    if remaining > 0 {
+        writeln!(
+            stream,
+            "{} {remaining} more flaky or unconfirmed findings; see the input reports or write --json-report for the complete merged findings",
+            styler.verb("Note"),
+        )?;
+    }
     Ok(())
 }
 
