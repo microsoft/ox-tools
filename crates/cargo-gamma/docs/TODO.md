@@ -15,6 +15,7 @@ deleted; this file is not a changelog or a record of rejected work.
 
 ### Test reliability
 - [T1](#t1) - Make census fixtures deterministic
+- [T2](#t2) - Make memory/stall precedence fixtures deterministic
 
 ## Performance
 
@@ -170,3 +171,20 @@ from library-target selection.
 selected-test launch without depending on elapsed wall-clock time or a timeout
 to detect an incorrect whole-binary rerun, and the complete-sample test proves
 admission, persistence and reporting without depending on process startup time.
+
+<a id="t2"></a>
+### T2 - Make memory/stall precedence fixtures deterministic
+
+**Area:** `cargo-gamma-lib/src/exec/verdict.rs`;
+`a_binary_that_stalls_while_exhausting_its_ceiling_is_convicted_of_the_memory`
+
+The fixture expects memory exhaustion to precede its real-time stall budget.
+Concurrent suite execution can instead produce `Stalled(None)`, even when the
+same unchanged runtime-analysis recipe passes on retry. Replace this timing
+assumption with controlled synchronization or injected resource observations.
+Keep system-level memory-enforcement coverage separate from deterministic
+verdict-precedence coverage; increasing a delay is not a deterministic oracle.
+
+**Done when:** the test proves that observed memory exhaustion takes precedence
+over a stall without depending on process scheduling or waiting for a real-time
+budget to expire.
