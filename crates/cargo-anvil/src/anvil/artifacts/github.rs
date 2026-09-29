@@ -490,7 +490,7 @@ export -f just
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("BASE_REF: ${{ inputs.base_ref }}").count(),
             4,
-            "both impact jobs plus SemVer and mutation checks must use the event-specific base"
+            "both impact jobs plus the fast and mutation group jobs must use the event-specific base"
         );
         for group in PR_GROUPS {
             assert!(

@@ -248,7 +248,6 @@ pub mod artifacts {
     pub mod ado {
         pub fn setup_step() -> Artifact;        // .anvil/ado/steps/setup.yml
         pub fn job_wrapper() -> Artifact;       // .anvil/ado/steps/job.yml
-        pub fn advisory_comments() -> Artifact; // .anvil/ado/steps/advisory-comments.yml
         // …per-group step templates, root pipelines.
     }
 }
@@ -261,7 +260,7 @@ body.) With the artifact in hand, the two operations are uniform and identity-sa
 // Override: derive from the built-in, so path + gate are preserved by construction.
 .replace_artifact(artifacts::github::setup_action().with_body(include_str!("../templates/our-setup.yml")))
 // Remove: pass the artifact; the engine reads its identity.
-.without_artifact(artifacts::ado::advisory_comments())
+.without_artifact(artifacts::ado::job_wrapper())
 ```
 
 Because an override is *derived* from the real artifact via `with_body`, a fork cannot change a
