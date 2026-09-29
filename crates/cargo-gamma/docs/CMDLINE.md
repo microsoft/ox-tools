@@ -43,6 +43,17 @@ is a run over the whole workspace; `cargo gamma list` is the `list` subcommand a
 
 ## The subcommands
 
+For exact current candidates, repeat `run --mutant-id ID` or `list mutants --mutant-id ID`.
+Copy complete IDs from the JSON listing or a report; prefixes and run-local ordinals are
+not accepted. `run --from-report PATH` replays the entire named report population, while
+explicit IDs narrow it to a corroborated subset. All requested IDs must resolve before
+building: source drift never silently turns the request into its matching remainder.
+Exact requests conflict with survivor iteration, diff selection and sharding.
+
+Use `explain ID --dir PATH` for current discovery, or `explain ID --report PATH` for
+historical embedded evidence without its checkout. Registry selectors such as
+`explain relational`, `explain @default` and `explain ROR` do not discover a workspace.
+
 <!-- begin generated: commands -->
 
 | Command | What it does |
@@ -208,6 +219,8 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
+| `--mutant-id` | `<ID>` | Complete current mutant IDs to execute, repeated for a set. |
+| `--from-report` | `<PATH>` | Replay this report's exact candidate set, or corroborate the explicitly named IDs. |
 | `--only-survivors-from` | `<PATH>` | Run only mutants that genuinely survived in this cargo-gamma report. |
 
 **Selecting tests**
@@ -335,6 +348,7 @@ cargo gamma list [OPTIONS] [WHAT]
 | `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
+| `--mutant-id` | `<ID>` | Complete current mutant IDs to list, repeated for a set. Only valid for `list mutants`. |
 
 **Selecting tests**
 
@@ -369,7 +383,7 @@ cargo gamma list [OPTIONS] [WHAT]
 Explain a mutator, a mutant, or a suppression
 
 ```text
-cargo gamma explain <SUBJECT>
+cargo gamma explain [OPTIONS] <SUBJECT>
 ```
 
 **Arguments**
@@ -377,6 +391,48 @@ cargo gamma explain <SUBJECT>
 | Option | Value | What it does |
 | --- | --- | --- |
 | `<SUBJECT>` | `<SUBJECT>` | A mutator name, family, preset, or mutant id. |
+
+**Selecting what to mutate**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `-d`, `--dir` | `<PATH>` | Path to the workspace or package to analyze. Defaults to `.`. |
+| `--mutators` | `<SELECTORS>` | Mutators to apply, as a comma-separated selector list. |
+| `--file` | `<GLOB>` | Only mutate files matching these glob patterns. |
+| `--exclude-file` | `<GLOB>` | Skip files matching these glob patterns. |
+| `--shard-count` | `<COUNT>` | Number of shards to divide the mutants into. |
+| `--shard-index` | `<INDEX>` | Which shard to run, from 0. |
+| `-D`, `--in-diff` | `<PATH>` | Only mutate lines added or changed by this unified diff, or `-` for standard input. |
+| `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
+| `--workspace` |  | Mutate every package in the workspace. |
+| `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
+
+**Selecting tests**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--lib` |  | Compile and run only library unit-test harnesses with `test = true`. |
+
+**Cargo features**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--features` | `<FEATURES>` | Cargo features to activate, comma-separated or repeated. |
+| `--all-features` |  | Activate every feature of every selected package. |
+| `--no-default-features` |  | Do not activate the `default` feature. |
+
+**Configuration**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--config` | `<PATH>` | Read configuration from this file instead of `gamma.toml`. |
+| `--no-config` |  | Ignore the configuration file entirely. |
+
+**Historical evidence**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--report` | `<PATH>` | Explain embedded historical evidence without reading its original checkout. |
 
 ### `gamma suppress`
 
@@ -400,6 +456,8 @@ cargo gamma suppress [OPTIONS] [-- <TEST_ARGS>...]
 | `-p`, `--package` | `<NAME>` | Only mutate these packages. Defaults to Cargo's package selection for the current directory. |
 | `--workspace` |  | Mutate every package in the workspace. |
 | `--error` | `<EXPR>` | Additional values for `fn_value.err_with`, which replaces a function body with `Err(...)`. |
+| `--mutant-id` | `<ID>` | Complete current mutant IDs to execute, repeated for a set. |
+| `--from-report` | `<PATH>` | Replay this report's exact candidate set, or corroborate the explicitly named IDs. |
 | `--only-survivors-from` | `<PATH>` | Run only mutants that genuinely survived in this cargo-gamma report. |
 
 **Selecting tests**

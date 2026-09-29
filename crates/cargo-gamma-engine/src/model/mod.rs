@@ -10,7 +10,7 @@ mod mutation_site;
 
 pub(crate) use identity::mutant_id_with_discriminator;
 #[doc(inline)]
-pub use identity::{MUTANT_ID_HEX_LEN, MUTANT_ID_VERSION, MutantId, SiteIndex, mutant_id, normalize_site_text, site_key};
+pub use identity::{MUTANT_ID_HEX_LEN, MUTANT_ID_VERSION, MutantId, SiteIndex, mutant_id, normalize_site_text, site_key, token_position};
 #[doc(inline)]
 pub use interner::Interner;
 #[doc(inline)]

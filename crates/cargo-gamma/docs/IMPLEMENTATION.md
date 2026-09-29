@@ -37,6 +37,34 @@ Runtime guards evaluate only the chosen expression branch, without hoisting oper
 temporary bindings. The compiler decides viability; the collector does not infer operand
 types for this transformation.
 
+## Exact identity resolution
+
+The command layer snapshots report inputs through the bounded regular-file/schema reader.
+The input-byte BLAKE3 digest identifies the parent even when publication overwrites that path.
+Report paths and character coordinates are validated only as data; embedded source is parsed
+without consulting `projectRoot`. Replay requires the explicit current identity scheme and
+original Gamma producer, including per-verdict producer metadata for merged documents.
+
+`commands::exact::Request` deduplicates input IDs in sorted order, indexes a complete current
+scan, reports duplicate current identities and accounts for every requested ID before filtering.
+Historical comparison checks file, mutator and replacement, normalized site tokens, and the
+containing item's tokens with module/implementation headers, and its token-indexed source
+position. Sibling items do not participate. The containing body and site position prevent
+occurrence renumbering or different edit coalescing from redirecting historical selections.
+Exact lookup preserves ordinary coalescing and identity construction.
+
+`Survey` retains the resolved scan and its source digests for exact requests. Measurement
+validates those digests against the synchronized tree before preflight and consumes the
+retained candidates by package, assigning execution ordinals through the existing staged
+pipeline. Ordinary runs continue to discover package by package. Exact requests do not adopt
+cached outcomes; current build and execution controls decide the results.
+
+The existing population scope carries `selection = exactIds`, a reduction, the audited
+`exact.ids` set and optional `exact.parentReport` digest. Complete-file assertions are cleared,
+so both direct and staged merges preserve omitted findings under the existing authority rules.
+Historical explanation uses retained report source and verdict provenance, labels it as
+historical, and does not infer current correspondence or execute Cargo.
+
 ## Scratch layout
 
 The coordinator synchronizes sources and vendors the dependency-free guard

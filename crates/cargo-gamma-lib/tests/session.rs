@@ -605,6 +605,138 @@ fn read_diagnostics(dir: &TempDir) -> serde_json::Value {
     serde_json::from_str(&text).expect("the published diagnostics are JSON")
 }
 
+fn exact_ids(dir: &TempDir) -> Vec<String> {
+    let mut host = Sink::default();
+    let code = run(
+        &mut host,
+        [
+            "cargo-gamma",
+            "list",
+            "mutants",
+            "--dir",
+            dir.path().to_str().expect("UTF-8 workspace path"),
+            "--mutators",
+            "arith.add_to_sub",
+            "--json",
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let mutants: serde_json::Value = serde_json::from_str(&host.out()).expect("mutant JSON");
+    mutants
+        .as_array()
+        .expect("mutant array")
+        .iter()
+        .map(|mutant| mutant["id"].as_str().expect("mutant ID").to_owned())
+        .collect()
+}
+
+#[test]
+fn exact_sessions_execute_only_named_ids_and_replay_same_path_with_fresh_verdicts() {
+    step_aside_if_nested!();
+    let source = "pub fn first(a: i32) -> i32 { a + 1 }\npub fn second(a: i32) -> i32 { a + 2 }\n\
+        #[cfg(test)] mod tests { #[test] fn values() { assert_eq!(super::first(2), 3); assert_eq!(super::second(2), 4); } }\n";
+    let dir = workspace(source);
+    let ids = exact_ids(&dir);
+    assert_eq!(ids.len(), 2);
+    let report_path = dir.path().join("target/cargo-gamma/gamma-report.json");
+    let (code, output) = session(&dir, &["--mutant-id", &ids[1], "--mutant-id", &ids[1]]);
+    assert_eq!(code, EXIT_OK, "{output}");
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    let mutants = report["files"]["src/lib.rs"]["mutants"].as_array().unwrap();
+    assert_eq!(mutants.len(), 1);
+    assert_eq!(mutants[0]["id"], ids[1]);
+    assert_eq!(mutants[0]["status"], "Killed");
+
+    let (code, output) = session(&dir, &["--mutant-id", &ids[1], "--mutant-id", &ids[0], "--mutant-id", &ids[1]]);
+    assert_eq!(code, EXIT_OK, "{output}");
+    let before = fs::read(&report_path).unwrap();
+    let prior: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(prior["files"]["src/lib.rs"]["mutants"].as_array().unwrap().len(), 2);
+    assert!(
+        prior["files"]["src/lib.rs"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mutant| mutant["status"] == "Killed")
+    );
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        source.replace(
+            "assert_eq!(super::first(2), 3); assert_eq!(super::second(2), 4);",
+            "let _ = super::first(2); let _ = super::second(2);",
+        ),
+    )
+    .unwrap();
+    let (code, output) = session(&dir, &["--from-report", report_path.to_str().unwrap()]);
+    assert_eq!(code, EXIT_OK, "{output}");
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    assert!(
+        report["files"]["src/lib.rs"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mutant| mutant["status"] == "Survived")
+    );
+    assert_eq!(
+        report["config"]["population"]["exact"]["parentReport"],
+        blake3::hash(&before).to_hex().as_str()
+    );
+    assert_eq!(report["config"]["confirm"], true);
+    assert_eq!(report["config"]["failOnFlaky"], true);
+}
+
+#[test]
+fn exact_postresolution_source_edit_stops_before_preflight_building() {
+    step_aside_if_nested!();
+    let dir = Arc::new(workspace("pub fn first(a: i32) -> i32 { a + 1 }\n"));
+    let ids = exact_ids(&dir);
+    fs::write(dir.path().join("build.rs"), "compile_error!(\"preflight must not execute\");").unwrap();
+    let root = Utf8PathBuf::from_path_buf(dir.path().to_owned()).unwrap();
+    let mut boundary = cargo_gamma_lib::testing::hold_after_cache_adoption(root);
+    let running = thread::spawn({
+        let dir = Arc::clone(&dir);
+        move || session(&dir, &["--mutant-id", &ids[0]])
+    });
+    let _lock = boundary.wait();
+    fs::write(dir.path().join("src/lib.rs"), "pub fn first(a: i32) -> i32 { a + 2 }\n").unwrap();
+    boundary.release();
+    let (code, output) = running.join().unwrap();
+    assert_eq!(code, 3, "{output}");
+    assert!(
+        output.contains("changed between discovery and workspace synchronization"),
+        "{output}"
+    );
+    assert!(!output.contains("preflight must not execute"), "{output}");
+}
+
+#[test]
+fn exact_package_stages_report_a_skipped_source_only_once() {
+    step_aside_if_nested!();
+    let dir = workspace("pub fn f(a: i32) -> i32 { a + 1 }\n#[test] fn test() { assert_eq!(f(1), 2); }\n");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nmembers=[\"dep\"]\n[package]\nname=\"subject\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.path().join("dep/src")).unwrap();
+    fs::write(
+        dir.path().join("dep/Cargo.toml"),
+        "[package]\nname=\"dep\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("dep/src/lib.rs"), "pub fn g(a: i32) -> i32 { a + 2 }\n").unwrap();
+    let ids = exact_ids(&dir);
+    // An unreferenced source file remains part of discovery, but never enters Cargo's module tree.
+    fs::write(
+        dir.path().join("src/unparsed.rs"),
+        format!("fn deep() {{ {}0{}; }}", "(".repeat(500), ")".repeat(500)),
+    )
+    .unwrap();
+    let (code, output) = session(&dir, &["--workspace", "--mutant-id", &ids[0]]);
+    assert_eq!(code, EXIT_OK, "{output}");
+    assert_eq!(output.matches("unparsed.rs:").count(), 1, "{output}");
+}
+
 #[expect(
     clippy::unnecessary_debug_formatting,
     reason = "Debug quotes and escapes paths as Rust source string literals"

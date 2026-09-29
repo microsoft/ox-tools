@@ -19,7 +19,7 @@ pub use digest::{Digest, FileDigest, FrameworkDigest, MutantDigest, settled_muta
 pub(crate) use digest::{gamma_outcome, surviving_mutants};
 pub(crate) use population::context_key;
 #[doc(inline)]
-pub use population::{Observation, Population, PopulationAssertion, PopulationOrigin, Scope, SelectionKind};
+pub use population::{ExactSelection, Observation, Population, PopulationAssertion, PopulationOrigin, Scope, SelectionKind};
 pub(crate) use publication::{
     Publication, remove_if_unchanged, remove_if_unchanged_locked, write_if_unchanged, write_if_unchanged_locked, write_streamed,
 };

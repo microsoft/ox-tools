@@ -858,7 +858,9 @@ fn adopt(
 // #[gamma::skip(all, reason = "the command orchestrator coordinates subprocesses, cache locks, terminal state, and cleanup; its externally observable branches are covered by integration tests, while isolated mutations are platform/resource dependent")]
 fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<Executed> {
     let started = Instant::now();
-    let selection = args.select.selection()?;
+    let exact = super::exact::Request::load(&args.mutant_ids, args.from_report.as_deref())?;
+    super::exact::validate_options(&args.select, exact.is_some(), args.only_survivors_from.is_some())?;
+    let selection = super::exact::selection(&args.select, exact.is_some())?;
     let shard = args.select.shard()?;
     let visible = progress_when.resolve(host.is_terminal());
     let mut progress = Progress::new(visible, styler, host.terminal_width());
@@ -874,6 +876,11 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let observed_context = incremental_enabled(args).then(|| cache_context(args)).flatten();
     let contexts = postprocessing_contexts(args, observed_context);
     let mut survey = crate::discover::Survey::for_build_with_cache_inputs(&args.select, shard, &config.cargo, incremental_enabled(args))?;
+
+    if let Some(request) = &exact {
+        request.resolve(&mut survey, &selection, false)?;
+        writeln!(host.error(), "Resolved {} distinct exact mutant IDs", request.len())?;
+    }
 
     if let Some(path) = args.only_survivors_from.as_ref() {
         let report = crate::merge::read_limited(path, u64::MAX)?.report;
@@ -897,7 +904,13 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     let cache_lock_identity = cache_locks.as_ref().map(exec::cache_lock_identity);
     let (cached, _declined, _moved) = reusable_context.as_ref().zip(record.as_ref()).map_or_else(
         || (crate::HashMap::default(), 0, Vec::new()),
-        |(context, prepared)| adopt(args, &mut survey, &prepared.base, Some(context), &prepared.inputs),
+        |(context, prepared)| {
+            if exact.is_some() {
+                (crate::HashMap::default(), 0, Vec::new())
+            } else {
+                adopt(args, &mut survey, &prepared.base, Some(context), &prepared.inputs)
+            }
+        },
     );
 
     // A dry run reports on the whole population and builds nothing, so there is no package-by-

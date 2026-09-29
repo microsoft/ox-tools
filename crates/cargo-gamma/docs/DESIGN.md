@@ -883,6 +883,47 @@ Comments and insignificant inter-token whitespace do not move an identity; liter
 The digest is rendered as twelve hex characters. The identity joins reports, shards, suppressions,
 SARIF findings, and incremental records.
 
+### Exact replay and explanation
+
+Repeated `run --mutant-id ID` selects a deduplicated set of complete current identities.
+`--from-report PATH` names the report's entire candidate set; adding explicit IDs selects
+only that subset and requires membership in the report. These are exact requests, not
+best-effort intersections: missing, duplicate, stale or suppressed candidates fail before
+any build or test. An empty report is not a replay request. Prefixes, ordinals and mutator
+selectors are not mutant IDs.
+
+Current configuration determines package, file, feature, build, test and suppression policy.
+Without an explicit CLI or configured mutator selection, exact lookup searches the full
+registry, including opt-in mutators. Explicit
+restrictions remain constraints. Exact selection cannot combine with survivor iteration,
+diff selection or configured/CLI sharding. A previously sharded report supplies IDs without
+reapplying its shard.
+
+Report-backed correspondence requires a Gamma producer, supported report schema, explicit
+current ID scheme, matching file/mutator/replacement, enclosing-item tokens and the site's
+position within those tokens.
+Comments, formatting and unambiguous item motion are normalized; unrelated test items do
+not affect correspondence. Changes within the enclosing body conservatively invalidate
+history, including deletion of a repeated site whose occurrence index could be reused.
+The existing identity scheme is unchanged. Legacy reports remain explainable but cannot
+authorize replay without sufficient corroboration.
+
+Resolution pins source generations through scratch synchronization. An intervening source
+edit cannot silently cause execution of a newly discovered generation. Report input is
+snapshotted before output publication, including when input and output paths coincide.
+Historical verdicts never supply fresh detection credit: resolved candidates use ordinary
+build viability, baseline, confirmation, resource and scoring controls.
+
+`list mutants --mutant-id ID` resolves the same exact set without execution. `explain ID`
+shows current location, package, item, source change and suppression. `explain ID --report PATH`
+shows explicitly historical embedded source, recorded outcome, evidence and provenance
+without requiring the original checkout or asserting freshness. The report's `projectRoot`
+never authorizes local reads. Registry names, families, presets and aliases retain their
+workspace-independent explanation path.
+
+Exact reports are partial and record their audited IDs and optional parent-report identity.
+They cannot retire findings omitted from the request when merged with earlier evidence.
+
 ### Incremental knowledge
 
 The target-resident campaign cache stores facts and hints learned by an earlier campaign:

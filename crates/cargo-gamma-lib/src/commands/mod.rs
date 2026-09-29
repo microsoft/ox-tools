@@ -8,6 +8,7 @@ mod cli;
 mod completions;
 mod console_events;
 mod dispatch;
+mod exact;
 mod explain;
 mod hints;
 mod host;

@@ -27,6 +27,14 @@ with its default. For the command-line flags these mirror, see [CMDLINE.md](CMDL
 
 ## Where the file lives
 
+Exact replay flags (`--mutant-id` and `--from-report`) are invocation inputs, not configuration
+keys. A report supplies identities and corroborating source evidence, never executable settings.
+Current configuration still controls source selection, suppression, build and test behavior.
+If neither CLI nor configuration explicitly names mutators, exact lookup searches the full
+registry; an explicit `mutators` value remains a constraint. Configured sharding conflicts with
+exact replay. Current-ID explanation resolves the same configuration; registry and historical
+explanation do not read it.
+
 `gamma.toml` in the directory being analyzed — so the workspace root for a workspace run, and
 `--dir` decides it otherwise.
 

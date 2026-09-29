@@ -614,6 +614,19 @@ pub struct RunArgs {
     #[command(flatten)]
     pub select: SelectArgs,
 
+    /// Complete current mutant IDs to execute, repeated for a set.
+    ///
+    /// Every ID must resolve before building. Prefixes and run-local ordinals are not accepted.
+    #[arg(long = "mutant-id", value_name = "ID", help_heading = "Selecting what to mutate")]
+    pub mutant_ids: Vec<String>,
+
+    /// Replay this report's exact candidate set, or corroborate the explicitly named IDs.
+    ///
+    /// Uses current configuration and obtains fresh verdicts. Every requested historical site
+    /// must still match; use explicit IDs to choose a valid subset after source changes.
+    #[arg(long, value_name = "PATH", help_heading = "Selecting what to mutate")]
+    pub from_report: Option<Utf8PathBuf>,
+
     /// Run only mutants that genuinely survived in this cargo-gamma report.
     ///
     /// Stable mutant identities are rediscovered from the current source, so adding tests does not
@@ -775,6 +788,10 @@ pub struct ListArgs {
     #[command(flatten)]
     pub select: SelectArgs,
 
+    /// Complete current mutant IDs to list, repeated for a set. Only valid for `list mutants`.
+    #[arg(long = "mutant-id", value_name = "ID", help_heading = "Selecting what to mutate")]
+    pub mutant_ids: Vec<String>,
+
     /// Emit machine-readable JSON instead of text.
     #[arg(long, help_heading = "Reporting")]
     pub json: bool,
@@ -785,11 +802,19 @@ pub struct ListArgs {
 }
 
 /// Arguments for `explain`.
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Default)]
 pub struct ExplainArgs {
     /// A mutator name, family, preset, or mutant id.
     #[arg(value_name = "SUBJECT")]
     pub subject: String,
+
+    /// Workspace context for a current mutant; registry and historical explanations do not use it.
+    #[command(flatten)]
+    pub select: SelectArgs,
+
+    /// Explain embedded historical evidence without reading its original checkout.
+    #[arg(long, value_name = "PATH", help_heading = "Historical evidence")]
+    pub report: Option<Utf8PathBuf>,
 }
 
 impl Default for SelectArgs {

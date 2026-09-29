@@ -31,6 +31,12 @@ pub(super) fn suppress<H: Host>(host: &mut H, args: &SuppressArgs, _progress_whe
     if args.run.dry_run {
         return Err(error!("`cargo gamma suppress --dry-run` does not preview source edits; use `--dry-run-suppress` instead").usage());
     }
+    if !args.run.mutant_ids.is_empty() || args.run.from_report.is_some() {
+        return Err(error!(
+            "`cargo gamma suppress` consumes the completed campaign; --mutant-id and --from-report cannot narrow persisted outcomes"
+        )
+        .usage());
+    }
     reject_selection(&args.run.select)?;
 
     let selected = crate::paths::physical(&args.run.select.dir)?;

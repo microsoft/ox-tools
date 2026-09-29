@@ -101,6 +101,7 @@ fn read(path: &Utf8Path) -> Result<Report> {
 pub(crate) struct ReadReport {
     pub(crate) report: Report,
     pub(crate) bytes: u64,
+    pub(crate) identity: String,
 }
 
 /// Reads one regular report while retaining no more than `limit` input bytes.
@@ -129,6 +130,7 @@ pub(crate) fn read_limited(path: &Utf8Path, limit: u64) -> Result<ReadReport> {
     }
 
     let (text, bytes_read) = read_contents(&mut input, path, limit)?;
+    let identity = blake3::hash(text.as_bytes()).to_hex().to_string();
 
     let document: Value =
         serde_json::from_str(&text).map_err(|cause| error!("{path} is not a mutation report").caused_by(cause).usage())?;
@@ -222,7 +224,11 @@ pub(crate) fn read_limited(path: &Utf8Path, limit: u64) -> Result<ReadReport> {
         .usage());
     }
 
-    Ok(ReadReport { report, bytes: bytes_read })
+    Ok(ReadReport {
+        report,
+        bytes: bytes_read,
+        identity,
+    })
 }
 
 /// Checks cross-record references after decoding supported population metadata.

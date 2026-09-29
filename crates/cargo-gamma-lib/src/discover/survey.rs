@@ -204,10 +204,12 @@ pub struct Survey {
     only_mutants: Option<HashSet<MutantId>>,
     settled: HashMap<MutantId, Outcome>,
     exclude_trait_impls: Vec<String>,
+    /// Exact requests retain the validated generation instead of rediscovering after copying.
+    exact: Option<Scanned>,
 }
 
 /// What scanning some part of the workspace yielded.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Scanned {
     /// The scope actually used by this scan, including its successful complete files.
     pub population: Option<Scope>,
@@ -500,6 +502,7 @@ impl Survey {
             source_dirs: sorted(source_dirs),
             external_inputs: external_inputs.roots,
             untracked_build_script_inputs: external_inputs.has_build_scripts,
+            exact: None,
         })
     }
 
@@ -561,6 +564,43 @@ impl Survey {
         let _ = self.population.reductions.insert("exactIds".to_owned());
     }
 
+    /// Retains an all-or-nothing resolution for subsequent package-stage consumption.
+    pub(crate) fn pin_exact(&mut self, scanned: Scanned) {
+        if let Some(scope) = &scanned.population {
+            self.population = scope.clone();
+        }
+        self.exact = Some(scanned);
+    }
+
+    pub(crate) fn pinned_digests(&self) -> Option<&HashMap<Utf8PathBuf, String>> {
+        self.exact.as_ref().map(|scanned| &scanned.digests)
+    }
+
+    fn exact_scan(&self, exact: &Scanned, package: Option<&str>, ordinals: &mut u32) -> Scanned {
+        let mut scanned = exact.clone();
+        if let Some(package) = package {
+            // The whole-workspace diagnostics are already present in the execution skeleton.
+            scanned.skipped.clear();
+            let paths: HashSet<&Utf8Path> = self
+                .files
+                .iter()
+                .filter(|file| file.package == package)
+                .map(|file| file.path.as_path())
+                .collect();
+            scanned.mutants.retain(|mutant| mutant.package.as_ref() == package);
+            scanned.digests.retain(|path, _| paths.contains(path.as_path()));
+            scanned.sources.retain(|path, _| paths.contains(path.as_path()));
+        }
+        scanned.suppressed = scanned.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Ignored).count();
+        for mutant in &mut scanned.mutants {
+            if mutant.outcome == Outcome::Pending {
+                *ordinals = ordinals.saturating_add(1);
+                mutant.ordinal = *ordinals;
+            }
+        }
+        scanned
+    }
+
     /// Restricts discovery to previously surviving identities, without adopting their verdicts.
     pub(crate) fn retain_survivors(&mut self, mutants: HashSet<MutantId>) {
         self.retain_only(mutants);
@@ -597,7 +637,7 @@ impl Survey {
             idle: Vec::new(),
             sharded_out: 0,
             settled_out: 0,
-            skipped: Vec::new(),
+            skipped: self.exact.as_ref().map_or_else(Vec::new, |scanned| scanned.skipped.clone()),
             digests: HashMap::default(),
             reach: self.reach.clone(),
             specs: self.specs.clone(),
@@ -614,6 +654,9 @@ impl Survey {
     ///
     /// Returns an error if a file cannot be read or parsed.
     pub fn scan(&self, package: Option<&str>, selection: &Selection, ordinals: &mut u32) -> Result<Scanned> {
+        if let Some(exact) = &self.exact {
+            return Ok(self.exact_scan(exact, package, ordinals));
+        }
         let files: Vec<&TargetFile> = package.map_or_else(
             || self.files.iter().collect(),
             |wanted| {

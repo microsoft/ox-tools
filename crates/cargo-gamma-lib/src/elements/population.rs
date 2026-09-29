@@ -59,6 +59,17 @@ pub struct Scope {
     pub reductions: BTreeSet<String>,
     /// Original complete assertions consumed by a merge, not assertions made by that merge.
     pub assertions: Vec<PopulationAssertion>,
+    /// Audited exact request, independent of the population's shaping context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact: Option<ExactSelection>,
+}
+
+/// Identities explicitly requested by a replay, with its optional input report digest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExactSelection {
+    pub ids: BTreeSet<String>,
+    pub parent_report: Option<String>,
 }
 
 /// Why the report contains its selected candidates.
@@ -115,6 +126,7 @@ impl Scope {
             complete_files: BTreeSet::new(),
             reductions: BTreeSet::new(),
             assertions: Vec::new(),
+            exact: None,
         }
     }
 
@@ -127,10 +139,16 @@ impl Scope {
             complete_files: BTreeSet::new(),
             reductions: BTreeSet::new(),
             assertions: Vec::new(),
+            exact: None,
         }
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if let Some(exact) = &self.exact
+            && (self.selection != SelectionKind::ExactIds || exact.ids.is_empty())
+        {
+            return Err("exact selection must name a nonempty partial population".to_owned());
+        }
         for (key, shaping) in &self.contexts {
             if !shaping.is_object() || *key != context_key(shaping) {
                 return Err("population context key does not match its complete shaping record".to_owned());

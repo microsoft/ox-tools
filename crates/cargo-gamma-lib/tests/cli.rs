@@ -9,7 +9,7 @@ use std::fs;
 use std::process::{Command, Stdio};
 
 use camino::Utf8PathBuf;
-use cargo_gamma_lib::testing::{Sink, gamma_base, run};
+use cargo_gamma_lib::testing::{BrokenHost, Sink, gamma_base, run};
 use tempfile::TempDir;
 
 /// Exit code for a run in which every gate passed.
@@ -81,11 +81,8 @@ fn invoke_at(path: &Utf8PathBuf, args: &[&str]) -> (i32, Sink) {
 
     command.extend(args.iter().map(|arg| (*arg).to_owned()));
 
-    // `explain` reads only the registry, so it takes no directory.
-    if args.first() != Some(&"explain") {
-        command.push("--dir".to_owned());
-        command.push(path.to_string());
-    }
+    command.push("--dir".to_owned());
+    command.push(path.to_string());
 
     let mut host = Sink::default();
     let code = run(&mut host, command);
@@ -124,6 +121,330 @@ fn listing_mutants_reports_the_expected_operators() {
     assert_eq!(code, EXIT_OK, "{}", host.err());
     assert!(output.contains("relational.lt_to_le"), "{output}");
     assert!(output.contains("arith.add_to_sub"), "{output}");
+}
+
+/// Produces historical evidence with deterministic provenance for replay fixtures.
+fn exact_report(dir: &TempDir, mutators: &str) -> (Vec<String>, serde_json::Value, Utf8PathBuf) {
+    let path = Utf8PathBuf::from_path_buf(dir.path().join("prior.json")).expect("UTF-8 report path");
+    let (code, host) = invoke(dir, &["list", "mutants", "--mutators", mutators, "--json-report", path.as_str()]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let mut report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).expect("read generated report")).expect("report JSON");
+    report["config"]["startedAt"] = 100.into();
+    fs::write(&path, serde_json::to_vec(&report).expect("serialize report")).expect("write report");
+    let ids = report["files"]
+        .as_object()
+        .expect("file table")
+        .values()
+        .flat_map(|file| file["mutants"].as_array().expect("mutant array"))
+        .map(|mutant| mutant["id"].as_str().expect("ID").to_owned())
+        .collect();
+    (ids, report, path)
+}
+
+const EXACT_SOURCE: &str = "pub fn first(a: i32) -> i32 { a + 1 }\npub fn second(a: i32) -> i32 { a + 2 }\n";
+
+#[test]
+fn exact_selection_deduplicates_and_audits_only_requested_candidates() {
+    let dir = workspace(EXACT_SOURCE);
+    let (ids, _, prior) = exact_report(&dir, "arith.add_to_sub");
+    assert_eq!(ids.len(), 2);
+    let output = dir.path().join("exact.json");
+    let output = output.to_str().unwrap();
+    let (code, host) = invoke(
+        &dir,
+        &[
+            "list",
+            "mutants",
+            "--mutant-id",
+            &ids[1],
+            "--mutant-id",
+            &ids[1],
+            "--json",
+            "--json-report",
+            output,
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let mutants: serde_json::Value = serde_json::from_str(&host.out()).unwrap();
+    assert_eq!(mutants.as_array().unwrap().len(), 1);
+    assert_eq!(mutants[0]["id"], ids[1]);
+    assert_eq!(mutants[0]["ordinal"], 1);
+    assert!(host.err().contains("1 distinct exact"), "{}", host.err());
+    let report: serde_json::Value = serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
+    assert_eq!(report["config"]["population"]["selection"], "exactIds");
+    assert_eq!(report["config"]["population"]["completeFiles"], serde_json::json!([]));
+    assert_eq!(report["config"]["population"]["exact"]["ids"], serde_json::json!([ids[1]]));
+    let (code, host) = invoke(
+        &dir,
+        &[
+            "run",
+            "--dry-run",
+            "--from-report",
+            prior.as_str(),
+            "--mutant-id",
+            &ids[1],
+            "--mutant-id",
+            &ids[0],
+            "--mutant-id",
+            &ids[1],
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let current: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-report.json")).unwrap()).unwrap();
+    assert_eq!(current["files"]["src/lib.rs"]["mutants"].as_array().unwrap().len(), 2);
+    assert_eq!(current["config"]["population"]["exact"]["parentReport"].as_str().unwrap().len(), 64);
+    assert!(
+        current["files"]["src/lib.rs"]["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mutant| mutant["status"] == "Pending")
+    );
+}
+
+#[test]
+fn exact_mixed_missing_and_invalid_ids_stop_before_build_or_artifact_creation() {
+    let dir = workspace(EXACT_SOURCE);
+    let (ids, _, _) = exact_report(&dir, "arith.add_to_sub");
+    fs::write(dir.path().join("build.rs"), "compile_error!(\"build must not execute\");").unwrap();
+    for bad in ["0123456789ab", "1", "abcdef", "arith.add_to_sub"] {
+        let (code, host) = invoke(&dir, &["run", "--mutant-id", &ids[0], "--mutant-id", bad]);
+        assert_eq!(code, EXIT_USAGE, "{}", host.err());
+        assert!(host.err().contains(bad), "{}", host.err());
+        assert!(!host.err().contains("build must not execute"), "{}", host.err());
+        assert!(!dir.path().join("target/cargo-gamma/gamma-report.json").exists());
+        assert!(!scratch_base(&dir).exists());
+    }
+}
+
+#[test]
+fn exact_report_drift_is_all_or_nothing_but_an_explicit_valid_subset_can_run() {
+    let dir = workspace(EXACT_SOURCE);
+    let (ids, _, prior) = exact_report(&dir, "arith.add_to_sub");
+    fs::write(dir.path().join("src/lib.rs"), EXACT_SOURCE.replace("a + 2", "a - 2")).unwrap();
+    let (code, host) = invoke(&dir, &["run", "--from-report", prior.as_str()]);
+    assert_eq!(code, EXIT_USAGE, "{}", host.err());
+    assert!(host.err().contains(&ids[1]), "{}", host.err());
+    assert!(!scratch_base(&dir).exists());
+    let (code, host) = invoke(&dir, &["run", "--dry-run", "--from-report", prior.as_str(), "--mutant-id", &ids[0]]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let (code, host) = invoke(
+        &dir,
+        &["run", "--dry-run", "--from-report", prior.as_str(), "--mutant-id", "0123456789ab"],
+    );
+    assert_eq!(code, EXIT_USAGE, "{}", host.err());
+    assert!(host.err().contains("not present in the input report"), "{}", host.err());
+}
+
+#[test]
+fn exact_replay_refuses_corrupt_foreign_legacy_duplicate_empty_and_invalid_location_reports() {
+    let dir = workspace(EXACT_SOURCE);
+    let (_, original, path) = exact_report(&dir, "arith.add_to_sub");
+    let mut cases = Vec::new();
+    for change in 0..8 {
+        let mut report = original.clone();
+        match change {
+            0 => report["framework"]["name"] = "foreign".into(),
+            1 => {
+                let _ = report["config"].as_object_mut().unwrap().remove("mutantIdVersion");
+            }
+            2 => report["schemaVersion"] = "99".into(),
+            3 => report["files"]["src/lib.rs"]["mutants"][1]["id"] = report["files"]["src/lib.rs"]["mutants"][0]["id"].clone(),
+            4 => report["files"]["src/lib.rs"]["mutants"] = serde_json::json!([]),
+            5 => report["files"]["src/lib.rs"]["mutants"][0]["location"]["start"]["line"] = 999_999.into(),
+            6 => {
+                let file = report["files"].as_object_mut().unwrap().remove("src/lib.rs").unwrap();
+                report["files"]["../outside.rs"] = file;
+            }
+            _ => report["config"]["mutantIdVersion"] = 0.into(),
+        }
+        cases.push(serde_json::to_vec(&report).unwrap());
+    }
+    cases.push(b"{broken".to_vec());
+    for report in cases {
+        fs::write(&path, report).unwrap();
+        let (code, host) = invoke(&dir, &["run", "--from-report", path.as_str()]);
+        assert_eq!(code, EXIT_USAGE, "{}", host.err());
+        assert!(!scratch_base(&dir).exists());
+    }
+    let (code, host) = invoke(&dir, &["run", "--from-report", dir.path().to_str().unwrap()]);
+    assert_eq!(code, EXIT_USAGE, "{}", host.err());
+}
+
+#[test]
+fn exact_lookup_includes_opt_in_mutators_but_respects_explicit_selection_and_suppression() {
+    let dir = workspace("pub fn f() -> Option<u8> { None }\n");
+    let (ids, _, _) = exact_report(&dir, "fn_value.some");
+    assert!(!ids.is_empty());
+    let (code, host) = invoke(&dir, &["list", "mutants", "--mutant-id", &ids[0]]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let (code, _) = invoke(&dir, &["list", "mutants", "--mutant-id", &ids[0], "--mutators", "@default"]);
+    assert_eq!(code, EXIT_USAGE);
+    fs::write(dir.path().join("gamma.toml"), "mutators = [\"@default\"]").unwrap();
+    let (code, _) = invoke(&dir, &["list", "mutants", "--mutant-id", &ids[0]]);
+    assert_eq!(code, EXIT_USAGE);
+    fs::write(dir.path().join("gamma.toml"), "").unwrap();
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        "// #[gamma::skip(fn_value.some, reason = \"policy\")]\npub fn f() -> Option<u8> { None }\n",
+    )
+    .unwrap();
+    let (code, host) = invoke(&dir, &["run", "--mutant-id", &ids[0]]);
+    assert_eq!(code, EXIT_USAGE, "{}", host.err());
+    assert!(host.err().contains("suppressed"), "{}", host.err());
+    let (code, host) = invoke(&dir, &["explain", &ids[0]]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    for expected in [
+        "package: subject",
+        "item: f",
+        "original:",
+        "replacement:",
+        "eligibility: suppressed",
+        "policy",
+    ] {
+        assert!(host.out().contains(expected), "{}: {}", expected, host.out());
+    }
+}
+
+#[test]
+fn exact_options_reject_survivor_diff_and_configured_resharding() {
+    let dir = workspace(EXACT_SOURCE);
+    for rest in [
+        vec!["--only-survivors-from", "unused.json"],
+        vec!["--in-diff", "unused.diff"],
+        vec!["--shard-count", "2", "--shard-index", "0"],
+    ] {
+        let mut args = vec!["run", "--mutant-id", "0123456789ab"];
+        args.extend(rest);
+        let (code, host) = invoke(&dir, &args);
+        assert_eq!(code, EXIT_USAGE, "{}", host.err());
+        assert!(host.err().contains("cannot be combined"), "{}", host.err());
+    }
+    fs::write(dir.path().join("gamma.toml"), "[shard]\ncount=2\nindex=0").unwrap();
+    let (code, host) = invoke(&dir, &["list", "mutants", "--mutant-id", "0123456789ab"]);
+    assert_eq!(code, EXIT_USAGE, "{}", host.err());
+    assert!(host.err().contains("configured sharding"), "{}", host.err());
+}
+
+#[test]
+fn exact_report_replay_and_explanation_follow_the_producers_bom_columns() {
+    let dir = workspace(&format!("\u{feff}{EXACT_SOURCE}"));
+    let (ids, _, path) = exact_report(&dir, "arith.add_to_sub");
+    let (code, host) = invoke(&dir, &["explain", &ids[0], "--report", path.as_str()]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert!(host.out().contains("original (embedded source): a + 1"), "{}", host.out());
+    for current in [format!("\u{feff}{EXACT_SOURCE}"), EXACT_SOURCE.to_owned()] {
+        fs::write(dir.path().join("src/lib.rs"), current).unwrap();
+        let (code, host) = invoke(&dir, &["run", "--dry-run", "--from-report", path.as_str()]);
+        assert_eq!(code, EXIT_OK, "{}", host.err());
+        assert!(host.err().contains("2 distinct exact"), "{}", host.err());
+    }
+}
+
+#[test]
+fn exact_historical_explanation_needs_no_checkout_and_does_not_claim_freshness() {
+    let dir = workspace(EXACT_SOURCE);
+    let (ids, mut report, path) = exact_report(&dir, "arith.add_to_sub");
+    report["projectRoot"] = "C:/must-not-read-this/source".into();
+    report["files"]["src/lib.rs"]["mutants"][0]["status"] = "Killed".into();
+    report["files"]["src/lib.rs"]["mutants"][0]["killedBy"] = serde_json::json!(["test\u{1b}[2J"]);
+    let _ = report.as_object_mut().unwrap().remove("config");
+    fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+    fs::remove_file(dir.path().join("Cargo.toml")).unwrap();
+    fs::remove_file(dir.path().join("src/lib.rs")).unwrap();
+    fs::write(dir.path().join("gamma.toml"), "invalid TOML").unwrap();
+    let (code, host) = invoke(&dir, &["explain", &ids[0], "--report", path.as_str()]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    for expected in [
+        "historical evidence",
+        "correspondence not checked",
+        "embedded source",
+        "Killed",
+        "unavailable",
+    ] {
+        assert!(host.out().contains(expected), "{}", host.out());
+    }
+    assert!(!host.out().contains('\u{1b}'), "{}", host.out());
+    let (code, host) = invoke(&dir, &["explain", "0123456789ab", "--report", path.as_str()]);
+    assert_eq!(code, EXIT_USAGE);
+    assert!(host.err().contains("unknown historical mutant ID"), "{}", host.err());
+    for selector in ["relational.lt_to_le", "relational", "@default", "ROR"] {
+        let (code, host) = invoke(&dir, &["explain", selector]);
+        assert_eq!(code, EXIT_OK, "{}", host.err());
+    }
+}
+
+#[test]
+fn exact_partial_report_merge_preserves_omitted_findings_and_sharded_input_is_not_resharded() {
+    let dir = workspace(EXACT_SOURCE);
+    let (ids, mut original, prior) = exact_report(&dir, "arith.add_to_sub");
+    original["files"]["src/lib.rs"]["mutants"][1]["status"] = "Survived".into();
+    fs::write(&prior, serde_json::to_vec(&original).unwrap()).unwrap();
+    let partial = dir.path().join("partial.json");
+    let (code, host) = invoke(
+        &dir,
+        &[
+            "list",
+            "mutants",
+            "--mutators",
+            "arith.add_to_sub",
+            "--mutant-id",
+            &ids[0],
+            "--json-report",
+            partial.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let mut part: serde_json::Value = serde_json::from_slice(&fs::read(&partial).unwrap()).unwrap();
+    part["config"]["startedAt"] = 200.into();
+    fs::write(&partial, serde_json::to_vec(&part).unwrap()).unwrap();
+    let merged = dir.path().join("merged.json");
+    let mut host = Sink::default();
+    let code = run(
+        &mut host,
+        [
+            "cargo-gamma",
+            "merge",
+            prior.as_str(),
+            partial.to_str().unwrap(),
+            "--json-report",
+            merged.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(&merged).unwrap()).unwrap();
+    let mutants = report["files"]["src/lib.rs"]["mutants"].as_array().unwrap();
+    assert_eq!(mutants.len(), 2);
+    assert!(
+        mutants
+            .iter()
+            .any(|mutant| mutant["id"] == ids[1] && mutant["status"] == "Survived")
+    );
+
+    let (code, host) = invoke(&dir, &["explain", &ids[1], "--report", merged.to_str().unwrap()]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert!(host.out().contains("verdict origin:"), "{}", host.out());
+    assert!(host.out().contains("source origin:"), "{}", host.out());
+    for report in [None, Some(merged.to_str().unwrap())] {
+        let mut arguments = vec!["cargo-gamma", "explain", &ids[1], "--dir", dir.path().to_str().unwrap()];
+        if let Some(report) = report {
+            arguments.extend(["--report", report]);
+        }
+        assert_eq!(run(&mut BrokenHost, arguments), EXIT_OK);
+    }
+    let (code, host) = invoke(&dir, &["explain", "0123456789ab"]);
+    assert_eq!(code, EXIT_USAGE);
+    assert!(host.err().contains("unknown current mutant"), "{}", host.err());
+
+    original["config"]["shard"] = serde_json::json!({"count": 16, "index": 15});
+    original["config"]["population"]["completeFiles"] = serde_json::json!([]);
+    original["config"]["population"]["reductions"] = serde_json::json!(["shard"]);
+    fs::write(&prior, serde_json::to_vec(&original).unwrap()).unwrap();
+    let (code, host) = invoke(&dir, &["run", "--dry-run", "--from-report", prior.as_str()]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert!(host.err().contains("2 distinct exact"), "{}", host.err());
 }
 
 #[test]

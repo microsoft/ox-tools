@@ -173,6 +173,28 @@ not selected, even though the report format represents them as survived.
 The resulting report describes a partial selection. Merging it with the original report keeps
 omitted identities and their original verdict provenance; it does not treat them as retired.
 
+To replay an exact set instead, copy complete mutant IDs from `list mutants --json` or a report:
+
+```bash
+cargo gamma run --mutant-id 97ac41aad8e4 --mutant-id b06d54ae21d3
+cargo gamma run --from-report target/cargo-gamma/gamma-report.json
+cargo gamma run --from-report previous.json --mutant-id 97ac41aad8e4
+cargo gamma list mutants --mutant-id 97ac41aad8e4
+```
+
+Replace the example IDs with IDs from your workspace. Every distinct requested ID must resolve
+before building; missing, stale, ambiguous or suppressed entries fail the whole request.
+Report-backed replay corroborates the enclosing source item, not just the ID: deleting a
+repeated site must not redirect an old occurrence ID. Separate test edits and unambiguous
+formatting or item motion can preserve correspondence. Choose an explicit valid subset after
+production changes rather than relying on silent intersection.
+
+Current configuration applies, and reports supply no fresh verdicts or executable settings.
+Without explicit CLI/configured mutators, exact lookup includes opt-in registry entries.
+Explicit package, file, mutator and suppression restrictions still constrain the request.
+Exact replay cannot combine with `--only-survivors-from`, `--in-diff` or sharding.
+The result is a partial report with audited IDs and parent-report provenance.
+
 ### Mutators
 
 `cargo-gamma` supports a large set of mutators. These are selected to represent real-world errors that can
@@ -1095,7 +1117,14 @@ To see what a mutator does and how to switch it off:
 ```bash
 cargo gamma explain relational.lt_to_le   # a mutator
 cargo gamma explain @arithmetic           # everything a preset selects
+cargo gamma explain 97ac41aad8e4          # current candidate, including suppression
+cargo gamma explain 97ac41aad8e4 --report previous.json  # historical evidence
 ```
+
+Historical explanation uses embedded source without needing the original checkout. It labels
+recorded outcomes and provenance as historical, not as fresh evidence about current source.
+Registry explanations never require Cargo discovery. IDs must be complete, not prefixes or
+execution ordinals; they belong to `--mutant-id`, not the `--mutators` namespace.
 
 To write directives in bulk for the mutants a run could not decide on, see
 [Fixing timeouts, out-of-memory and unviable mutants](#fixing-timeouts-out-of-memory-and-unviable-mutants).

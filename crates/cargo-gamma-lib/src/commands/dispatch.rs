@@ -251,6 +251,11 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
     match cli.command {
         Command::Run(mut args) => {
             configure(host, &mut args, styler)?;
+            super::exact::validate_options(
+                &args.select,
+                !args.mutant_ids.is_empty() || args.from_report.is_some(),
+                args.only_survivors_from.is_some(),
+            )?;
             check_shard(&args.select)?;
 
             #[cfg(target_os = "linux")]
@@ -265,6 +270,7 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
             let config = Config::resolve(&args.select)?;
             let cargo = config.cargo_options(&args.select);
             config.apply_selection(&mut args.select)?;
+            super::exact::validate_options(&args.select, !args.mutant_ids.is_empty(), false)?;
             check_shard(&args.select)?;
             list_with_cargo(host, &args, styler, &cargo)
         }

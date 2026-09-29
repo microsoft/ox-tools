@@ -27,6 +27,9 @@ pub(super) fn list<H: Host>(host: &mut H, args: &ListArgs, styler: Styler) -> cr
 
 /// Implements `list` with the configuration generation dispatch already resolved.
 pub(super) fn list_with_cargo<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &CargoOptions) -> crate::Result<i32> {
+    if !args.mutant_ids.is_empty() && args.what != ListKind::Mutants {
+        return Err(error!("--mutant-id is only valid for `list mutants`").usage());
+    }
     match args.what {
         ListKind::Mutators => list_mutators(host, args),
         ListKind::Files => list_files(host, args, styler, cargo),
@@ -158,9 +161,19 @@ fn list_files<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &Ca
 
 /// Lists the mutants that would be generated.
 fn list_mutants<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &CargoOptions) -> crate::Result<i32> {
-    let selection = args.select.selection()?;
+    let exact = super::exact::Request::load(&args.mutant_ids, None)?;
+    super::exact::validate_options(&args.select, exact.is_some(), false)?;
+    let selection = super::exact::selection(&args.select, exact.is_some())?;
     let shard = args.select.shard()?;
-    let plan = crate::discover::plan_for_build(&args.select, &selection, shard, cargo, &mut |_| {})?;
+    let plan = if let Some(request) = exact {
+        let mut survey = crate::discover::Survey::for_build(&args.select, None, cargo)?;
+        request.resolve(&mut survey, &selection, false)?;
+        let scanned = survey.scan(None, &selection, &mut 0)?;
+        writeln!(host.error(), "Resolved {} distinct exact mutant IDs", request.len())?;
+        survey.into_plan(scanned)
+    } else {
+        crate::discover::plan_for_build(&args.select, &selection, shard, cargo, &mut |_| {})?
+    };
 
     crate::report::skipped(host, &plan, styler)?;
 
@@ -260,6 +273,7 @@ mod tests {
     fn args(dir: Utf8PathBuf, what: ListKind, json: bool) -> ListArgs {
         ListArgs {
             what,
+            mutant_ids: Vec::new(),
             select: crate::commands::SelectArgs {
                 dir,
                 ..crate::commands::SelectArgs::default()

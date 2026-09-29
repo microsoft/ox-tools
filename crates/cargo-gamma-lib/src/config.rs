@@ -370,8 +370,8 @@ impl Config {
     /// Folds the file's selection keys into `select` — the step `list`, `unsuppress`, and `hints`
     /// each take before discovery, and that `run` and `suppress` reach through [`apply`](Self::apply).
     ///
-    /// `explain` is deliberately not in that set: it resolves a named subject rather than a
-    /// selection, so it never calls this and the file's selection keys do not reach it.
+    /// Current-mutant `explain` uses these same restrictions. Registry and historical
+    /// explanations require neither configuration nor workspace discovery.
     ///
     /// # Errors
     ///

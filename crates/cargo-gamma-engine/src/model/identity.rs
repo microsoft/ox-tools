@@ -10,6 +10,7 @@ use core::ops::Deref;
 use blake3::Hasher;
 use camino::Utf8Path;
 use compact_str::CompactString;
+use rustc_lexer::{TokenKind, tokenize};
 use serde::{Deserialize, Serialize};
 
 /// A mutant's compact, content-addressed identity.
@@ -196,6 +197,39 @@ impl SiteIndex {
     pub const fn replacement_index(self) -> u32 {
         self.replacement_index
     }
+}
+
+/// A byte offset expressed as a token index and an offset within that token.
+///
+/// Comments and whitespace do not occupy token indices. This corroborates a site's position
+/// inside an unchanged enclosing item without depending on line numbers or mutation selection.
+///
+/// # Panics
+///
+/// `offset` must be a UTF-8 boundary within `text`.
+#[must_use]
+pub fn token_position(text: &str, offset: usize) -> (usize, usize) {
+    assert!(
+        text.is_char_boundary(offset),
+        "the caller must provide a UTF-8 boundary within the source"
+    );
+    let mut at = 0;
+    let mut index = 0;
+    for token in tokenize(text) {
+        let end = at + token.len;
+        let trivia = matches!(
+            token.kind,
+            TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment { .. }
+        );
+        if offset < end {
+            return (index, if trivia { 0 } else { offset - at });
+        }
+        if !trivia {
+            index += 1;
+        }
+        at = end;
+    }
+    (index, 0)
 }
 
 /// The identity normalization contract.

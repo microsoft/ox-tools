@@ -797,6 +797,9 @@ fn measure_with_locks(
     // which.
     let copy_started = Instant::now();
     let mut work = Workspace::prepare_with_locks(&plan.root, &survey.target, config, events, locks)?;
+    if let Some(digests) = survey.pinned_digests() {
+        validate_synchronized_sources(&work, digests)?;
+    }
     work.select_targets(&survey.targets, config);
     let copy = copy_started.elapsed();
 
