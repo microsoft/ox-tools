@@ -138,16 +138,18 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail, ensure};
 use cargo_metadata::MetadataCommand;
 use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Effects};
 use clap::{Parser, Subcommand};
+use ohno::{AppError, IntoAppError};
 use tempfile::NamedTempFile;
 
 use crate::detect::{Catalog, ManifestInput, Section, WorkspaceCatalog};
 use crate::fix::Carry;
 use crate::verdict::Verdict;
+
+type Result<T> = std::result::Result<T, AppError>;
 
 // Deliberately identical to the palette of the repository's other styled Cargo
 // subcommands, so help output looks the same whichever one the user reaches for.
@@ -238,7 +240,7 @@ impl Check {
 // the doctest integration cases, but that child does not contribute a profile
 // to the parent coverage run.
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub fn dispatch(args: &[OsString]) -> Result<ExitCode> {
+pub fn dispatch(args: &[OsString]) -> std::result::Result<ExitCode, AppError> {
     if std::env::var_os(evidence::WRAPPER_VAR).is_some() {
         return evidence::wrapper(&args[1..]);
     }
@@ -330,7 +332,7 @@ fn workspace_manifest_of(manifest_path: &Path) -> Result<PathBuf> {
 
     let supplied = manifest_path
         .canonicalize()
-        .context(format!("failed to resolve {}", manifest_path.display()))?;
+        .into_app_err(format!("failed to resolve {}", manifest_path.display()))?;
     let package_dir = supplied
         .parent()
         .expect("a canonical manifest file path always has a parent directory");
@@ -406,11 +408,11 @@ fn resolve_selectors(packages: &[verdict::Package], selectors: &[String], allow_
             .collect();
         match matches.as_slice() {
             [] if allow_missing => {}
-            [] => bail!("package selector `{selector}` did not match any workspace member"),
+            [] => ohno::bail!("package selector `{selector}` did not match any workspace member"),
             [package] => {
                 resolved.insert(package.manifest_path.clone());
             }
-            _ => bail!("package selector `{selector}` matched more than one workspace member; qualify it with @version"),
+            _ => ohno::bail!("package selector `{selector}` matched more than one workspace member; qualify it with @version"),
         }
     }
     Ok(resolved)
@@ -490,7 +492,7 @@ fn doctest_evidence(manifest_path: &Path, workspace: &Workspace, candidates: &[v
         return Ok(evidence);
     }
 
-    let shim = std::env::current_exe().context("failed to locate this executable to use as the doctest shim")?;
+    let shim = std::env::current_exe().into_app_err("failed to locate this executable to use as the doctest shim")?;
     let accused: BTreeSet<&Path> = candidates.iter().map(|finding| finding.manifest_path.as_path()).collect();
 
     for package in &workspace.packages {
@@ -647,34 +649,33 @@ fn write_back(manifest_path: &Path, original: &str, member_inputs: &[ManifestInp
 
     // Follow a symlinked manifest through to its target, the way an in-place
     // write would have.
-    let target = fs::canonicalize(manifest_path).context(resolve_failure)?;
+    let target = fs::canonicalize(manifest_path).into_app_err(resolve_failure)?;
 
-    let current = fs::read_to_string(&target).context(read_failure)?;
-    ensure!(
-        current == original,
-        "{} changed on disk while the check was running; not writing",
-        manifest_path.display()
-    );
-
-    for input in member_inputs {
-        let current = fs::read_to_string(&input.path).context(format!("failed to re-read {} before writing", input.path.display()))?;
-        ensure!(
-            current == input.contents,
+    let current = fs::read_to_string(&target).into_app_err(read_failure)?;
+    if current != original {
+        ohno::bail!(
             "{} changed on disk while the check was running; not writing",
-            input.path.display()
+            manifest_path.display()
         );
     }
 
-    let permissions = fs::metadata(&target).context(metadata_failure)?.permissions();
+    for input in member_inputs {
+        let current = fs::read_to_string(&input.path).into_app_err(format!("failed to re-read {} before writing", input.path.display()))?;
+        if current != input.contents {
+            ohno::bail!("{} changed on disk while the check was running; not writing", input.path.display());
+        }
+    }
+
+    let permissions = fs::metadata(&target).into_app_err(metadata_failure)?.permissions();
     let directory = target
         .parent()
         .expect("a canonicalized file path always names a file, so it always has a parent directory");
 
     // Same directory as the manifest, so the rename stays on one filesystem.
-    let mut staged = NamedTempFile::new_in(directory).context(write_failure.clone())?;
-    staged.write_all(contents.as_bytes()).context(write_failure)?;
-    staged.as_file().set_permissions(permissions).context(permissions_failure)?;
-    staged.persist(&target).context(persist_failure)?;
+    let mut staged = NamedTempFile::new_in(directory).into_app_err(write_failure.clone())?;
+    staged.write_all(contents.as_bytes()).into_app_err(write_failure)?;
+    staged.as_file().set_permissions(permissions).into_app_err(permissions_failure)?;
+    staged.persist(&target).into_app_err(persist_failure)?;
 
     Ok(())
 }
@@ -689,7 +690,7 @@ fn members_of(manifest_path: &Path) -> Result<Vec<PathBuf>> {
         .manifest_path(manifest_path)
         .no_deps()
         .exec()
-        .context(format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
+        .into_app_err(format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
 
     Ok(metadata
         .workspace_packages()
@@ -704,10 +705,9 @@ fn verify_members_unchanged(manifest_path: &Path, expected: &[PathBuf]) -> Resul
     let expected: BTreeSet<&Path> = expected.iter().map(PathBuf::as_path).collect();
     let current: BTreeSet<&Path> = current.iter().map(PathBuf::as_path).collect();
 
-    ensure!(
-        current == expected,
-        "workspace membership changed while the check was running; not writing"
-    );
+    if current != expected {
+        ohno::bail!("workspace membership changed while the check was running; not writing");
+    }
 
     Ok(())
 }
@@ -738,7 +738,7 @@ fn workspace_of(manifest_path: &Path) -> Result<Workspace> {
         .manifest_path(manifest_path)
         .no_deps()
         .exec()
-        .context(format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
+        .into_app_err(format!("failed to enumerate the workspace members of {}", manifest_path.display()))?;
 
     let mut packages = Vec::new();
     for package in metadata.workspace_packages() {
@@ -769,11 +769,11 @@ fn workspace_of(manifest_path: &Path) -> Result<Workspace> {
     };
 
     let evidence_root = metadata.target_directory.into_std_path_buf().join("unused-deps");
-    fs::create_dir_all(&evidence_root).context(format!("failed to create {}", evidence_root.display()))?;
+    fs::create_dir_all(&evidence_root).into_app_err(format!("failed to create {}", evidence_root.display()))?;
     let evidence_target_dir = tempfile::Builder::new()
         .prefix("run-")
         .tempdir_in(&evidence_root)
-        .context(format!("failed to create an evidence directory under {}", evidence_root.display()))?;
+        .into_app_err(format!("failed to create an evidence directory under {}", evidence_root.display()))?;
 
     Ok(Workspace {
         packages,

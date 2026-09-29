@@ -66,10 +66,10 @@ mod validation;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
 use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Effects};
 use clap::{Parser, Subcommand};
+use ohno::{AppError, IntoAppError};
 use validation::validate_dependencies;
 
 const CLAP_STYLES: Styles = Styles::styled()
@@ -115,11 +115,11 @@ enum Commands {
 ///
 /// Returns an error if the manifest cannot be read or parsed, or if it contains
 /// no dependency section to check.
-pub fn run() -> Result<ExitCode> {
+pub fn run() -> Result<ExitCode, AppError> {
     let cli = Cli::parse();
     let Commands::EnsureNoDefaultFeatures { manifest_path, exceptions } = cli.command;
 
-    let content = std::fs::read_to_string(&manifest_path).with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let content = std::fs::read_to_string(&manifest_path).into_app_err_with(|| format!("Failed to read {}", manifest_path.display()))?;
     let exceptions = exceptions.unwrap_or_default();
 
     let (errors, found_deps, checked_sections) = validate_dependencies(&content, &exceptions)?;

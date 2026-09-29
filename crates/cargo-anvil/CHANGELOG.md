@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-24
+
+- ✨ Features
+
+  - select platform-specific mutants configs
+
 ## [0.12.0] - 2026-09-18
 
 - ✨ Features

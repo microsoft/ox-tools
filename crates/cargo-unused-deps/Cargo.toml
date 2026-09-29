@@ -20,19 +20,18 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-unuse
 all-features = true
 
 [package.metadata.cargo_check_external_types]
-# `anyhow::Error` leaks through the public `dispatch` entry point that `main` calls.
-# Mirrors the allowlist entry in `cargo-ensure-no-default-features`, which has the same shape.
-allowed_external_types = ["anyhow::Result"]
+# `ohno::AppError` is the error type of the public `dispatch` entry point.
+allowed_external_types = ["ohno::app::error::AppError"]
 
 [[bin]]
 name = "cargo-unused-deps"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = { workspace = true, features = ["std"] }
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["std", "derive", "color", "help", "error-context", "usage"] }
 mutants = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
 serde_json = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }
 toml_edit = { workspace = true }

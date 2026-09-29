@@ -20,17 +20,16 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensur
 all-features = true
 
 [package.metadata.cargo_check_external_types]
-# `anyhow::Error` leaks through the `run` entry point that `main` calls. Mirrors the
-# allowlist entry in `cargo-ensure-no-cyclic-deps`, which has the same shape.
-allowed_external_types = ["anyhow::Result"]
+# `ohno::AppError` is the error type of the public `run` entry point.
+allowed_external_types = ["ohno::app::error::AppError"]
 
 [[bin]]
 name = "cargo-ensure-no-default-features"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = { workspace = true, features = ["std"] }
 clap = { workspace = true, features = ["std", "derive", "color", "help", "error-context", "usage"] }
+ohno = { workspace = true, features = ["app-err"] }
 toml = { workspace = true, features = ["parse", "serde"] }
 
 [dev-dependencies]
