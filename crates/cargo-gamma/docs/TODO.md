@@ -13,6 +13,9 @@ deleted; this file is not a changelog or a record of rejected work.
 - [F3](#f3) — Native fork-server test harness as a `cargo test`/nextest replacement
 - [F4](#f4) - Evaluate repair workflows beyond survivor-only reruns
 
+### Test reliability
+- [T1](#t1) - Make the census-failure fixture deterministic
+
 ## Performance
 
 <a id="p3"></a>
@@ -145,3 +148,20 @@ Existing selector and report-correctness fixes do not depend on this feature.
 **Decision complete when:** a concrete use case either demonstrates a need beyond
 survivor-only reruns and justifies a separate design, or establishes that the
 existing workflow is sufficient and this evaluation can be removed.
+
+## Test reliability
+
+<a id="t1"></a>
+### T1 - Make the census-failure fixture deterministic
+
+**Area:** `cargo-gamma-lib/src/exec/sweep.rs`,
+`a_complete_census_failure_settles_without_a_whole_binary_rerun`
+
+Replace the fixture's real `sleep:200` and 20ms binary budget with controlled
+synchronization or budget injection. An expanded library-suite run failed its
+expected killed-verdict assertion while an isolated rerun passed; this is evidence
+of a timing-sensitive test, not a demonstrated product defect.
+
+**Done when:** the test proves a complete census failure settles after one
+selected-test launch without depending on elapsed wall-clock time or a timeout
+to detect an incorrect whole-binary rerun.
