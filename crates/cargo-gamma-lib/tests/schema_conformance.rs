@@ -115,6 +115,7 @@ fn sample() -> Report {
         },
         files: files.into_iter().collect(),
         config: Some(RunInfo {
+            population: None,
             started_at: 1_700_000_000,
             mutant_id_version: Some(cargo_gamma_lib::internals::model::MUTANT_ID_VERSION),
             merged: false,
@@ -130,6 +131,28 @@ fn sample() -> Report {
 /// Serializes the sample report as a JSON value.
 fn emitted() -> Value {
     serde_json::from_str(&to_json(&sample()).expect("serializes")).expect("emits valid JSON")
+}
+
+#[test]
+fn population_provenance_stays_inside_config_and_preserves_schema_and_html_results() {
+    let original = sample();
+    let merged = cargo_gamma_lib::internals::merge::merge(&[("sample".to_owned(), original.clone())], 1_700_000_000, None)
+        .report
+        .unwrap();
+    let document = serde_json::to_value(&merged).unwrap();
+    assert_eq!(document["config"]["population"]["version"], 1);
+    assert_eq!(document["config"]["population"]["selection"], "merged");
+    assert_eq!(document["files"], serde_json::to_value(&original).unwrap()["files"]);
+    let allowed = strings(&schema(), "required");
+    assert!(allowed.iter().all(|name| document.get(name).is_some()));
+    let page = cargo_gamma_lib::internals::html::render(&merged).unwrap();
+    assert!(page.contains("\"population\""));
+    assert!(page.contains("\"selection\":\"merged\""));
+    for file in merged.files.values() {
+        for mutant in &file.mutants {
+            assert!(strings(&mutant_schema(&schema())["properties"]["status"], "enum").contains(&mutant.status.to_string()));
+        }
+    }
 }
 
 #[test]

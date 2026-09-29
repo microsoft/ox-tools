@@ -576,6 +576,7 @@ mod tests {
 
     fn plan(mutants: Vec<Mutant>) -> Plan {
         Plan {
+            population: None,
             skipped: Vec::new(),
             digests: HashMap::default(),
             root: Utf8PathBuf::from("/w"),

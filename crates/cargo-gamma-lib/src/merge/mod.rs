@@ -16,9 +16,9 @@
 //! A union alone is not enough for the second half of that promise. The edited construct's *new* ID
 //! does appear as never tested, but nothing removes the *old* one, so a survivor that has since been
 //! fixed goes on depressing the score and a caught verdict goes on crediting code that has changed.
-//! Whichever unsharded input is newest states the complete population of every file it contains, so
-//! an ID absent from it has been withdrawn, and [`Merged::withdrawn`] counts what that dropped. A
-//! sharded input describes only its own slice of the population and can never withdraw anything.
+//! Explicit complete snapshots authorize retirement only within their discovery context, and
+//! [`Merged::withdrawn`] counts those identities. Partial or legacy reports do not authorize
+//! retirement. A merged report retains the original snapshots rather than creating a fresh one.
 //!
 //! Three numbers matter as much as the score, and all three are invisible without merging:
 //!
@@ -40,6 +40,6 @@ mod verdict;
 pub(crate) use merged::MAX_SHARDS;
 #[doc(inline)]
 pub use merged::Merged;
-pub(crate) use read::read_limited;
+pub(crate) use read::{read_limited, validate_output_size};
 #[doc(inline)]
 pub use union::merge;

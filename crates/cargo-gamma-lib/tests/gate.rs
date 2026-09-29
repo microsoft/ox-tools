@@ -66,6 +66,24 @@ fn tempdir() -> (tempfile::TempDir, Utf8PathBuf) {
     (dir, root)
 }
 
+#[test]
+fn a_legacy_subset_cannot_erase_a_survivor_and_make_the_gate_pass() {
+    let (_dir, root) = tempdir();
+    let full = report(&root, "full.json", &["Killed", "Survived"]);
+    let subset = report(&root, "subset.json", &["Killed"]);
+    let mut document: serde_json::Value = serde_json::from_slice(&std::fs::read(&subset).unwrap()).unwrap();
+    document["config"]["startedAt"] = serde_json::json!(200);
+    std::fs::write(&subset, serde_json::to_vec(&document).unwrap()).unwrap();
+    let mut host = Sink::default();
+    let code = run(
+        &mut host,
+        ["cargo-gamma", "merge", full.as_str(), subset.as_str(), "--min-score", "100"],
+    );
+    assert_eq!(code, EXIT_GATE_FAILED, "{}", host.err());
+    assert!(host.err().contains("withdrawals unchecked"), "{}", host.err());
+    assert!(host.err().contains("legacy or unsupported"), "{}", host.err());
+}
+
 /// A merge that clears the bar exits zero.
 #[test]
 fn a_merged_score_at_or_above_the_bar_exits_ok() {

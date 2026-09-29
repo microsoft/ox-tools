@@ -83,6 +83,39 @@ scanned for forbidden references before strict deserialization begins.
 Incremental generalized merging and change accounting use keyed Fx tables,
 then restore canonical ordering before publication.
 
+## Population evidence in reports
+
+`Survey` resolves shaping inputs once, and each scan adds the actual sorted mutator membership.
+`Plan` accumulates successful per-file assertions separately from candidate outcomes. Declaration
+or selected-file analysis skips conservatively withhold completeness across the plan. Normal
+suppressed candidates stay visible. Report construction includes complete empty files and verifies
+their retained source generation exactly as it does files containing mutants.
+
+`config.population` uses a versioned envelope in the standard schema's free-form configuration.
+Its context table stores complete JSON shaping records keyed by BLAKE3 over recursively
+key-sorted JSON. Arrays describing sets are sorted before writing. Unknown additive shaping
+fields survive decoding and digest validation; unsupported envelope versions supply no authority.
+Error replacement expressions retain their identity-significant ordering. Arbitrary Cargo flags,
+build configuration, resolved compiler cfg evidence and discovery-affecting environment inputs are digests,
+not ambient values. Unrelated process environment and the Gamma package version do not shape this
+key. Source-file bytes remain outside it as well.
+
+Merge indexes complete ID sets by file and context, ranked by original time, origin and lineage.
+Only the newest assertion for each pair survives. Original observations are flattened,
+deduplicated and retained in merge provenance, including observations currently excluded by
+retirement or source presentation. Keeping only an intermediate winning verdict would lose the
+alternate context's evidence when a subsequent assertion retires that winner. These records carry
+source digests rather than duplicate source text, retain original verdict timestamps, and are
+subject to the same bounded report-input budgets as the standard document. They are not scored
+unless selected into the standard file/mutant projection.
+Before publication the merged JSON is size-checked against the reader's per-report budget.
+An oversized history fails explicitly rather than publishing an artifact that cannot be remerged
+or silently discarding provenance. Independent contexts can be kept in separate histories.
+
+The reader validates recognized metadata and cross-record references rather than discarding
+failed parses. The writer preserves source authority even for empty projected files; staged
+merges therefore retain empty snapshots independently of mutant provenance.
+
 ## Test fixtures
 
 Cross-process tests use owned temporary directories and explicit environment

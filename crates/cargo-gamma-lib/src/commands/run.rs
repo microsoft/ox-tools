@@ -108,6 +108,7 @@ pub(super) fn memory_policy(args: &RunArgs) -> exec::MemoryPolicy {
 /// know the convention.
 fn run_info(args: &RunArgs, tests: Option<usize>, dropped: &[String]) -> crate::elements::RunInfo {
     crate::elements::RunInfo {
+        population: None,
         tests,
         started_at: seconds_since_epoch(SystemTime::now()),
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
@@ -848,7 +849,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         let survivors = crate::elements::surviving_mutants(&report)
             .map_err(|cause| error!("cannot select survivors from `{path}`: {cause}").usage())?;
 
-        survey.retain_only(survivors);
+        survey.retain_survivors(survivors);
     }
 
     let artifact_dir = Documents::directory(args, &survey.root);
@@ -878,6 +879,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         progress.finish(host);
         if plan.mutants.is_empty() {
             let _ = writeln!(host.error(), "no mutants were generated");
+            crate::report::skipped(host, &plan, styler)?;
+            emit_reports(host, args, &plan, None, None, &[], styler)?;
 
             return Ok(Executed {
                 plan: None,
@@ -995,6 +998,8 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
     report_cache(host, adopted, styler)?;
     if plan.mutants.is_empty() {
         let _ = writeln!(host.error(), "no mutants were generated");
+        crate::report::skipped(host, &plan, styler)?;
+        emit_reports(host, args, &plan, None, None, &dropped, styler)?;
         warn_auxiliary(host, log_failure.as_ref(), styler);
 
         return Ok(Executed { plan: None, stuck });
@@ -1755,6 +1760,7 @@ mod tests {
         let _previous = digests.insert(Utf8PathBuf::from("src/lib.rs"), crate::discover::digest(source.as_bytes()));
 
         Plan {
+            population: None,
             skipped: Vec::new(),
             digests,
             root,

@@ -186,6 +186,10 @@ fn current_sources(root: &Utf8Path, record: &RunRecord, affected: &crate::HashMa
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "record reconstruction keeps source verification and its diagnostics together"
+)]
 fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix::Eligible]) -> crate::Result<(Plan, Vec<String>)> {
     let outcomes = record.outcomes();
     let mut files = Vec::new();
@@ -280,6 +284,7 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
     files.sort_by(|left, right| left.path.cmp(&right.path));
 
     let mut plan = Plan {
+        population: None,
         root: root.to_owned(),
         files,
         mutants,
@@ -890,6 +895,7 @@ mod tests {
     /// A plan over the named files, which is all the edit loop reads out of one.
     fn plan_over(root: &Utf8PathBuf, files: &[&str]) -> Plan {
         Plan {
+            population: None,
             skipped: Vec::new(),
             digests: crate::HashMap::default(),
             root: root.clone(),
@@ -954,6 +960,7 @@ mod tests {
             eligible: "timeout".to_owned(),
         };
         let before = Plan {
+            population: None,
             skipped: Vec::new(),
             digests: crate::HashMap::default(),
             root: root.clone(),
@@ -1090,6 +1097,7 @@ mod tests {
         fs::write(&path, "pub fn answer() -> i32 { 0 }\n").expect("edited");
 
         let before = Plan {
+            population: None,
             skipped: Vec::new(),
             digests: crate::HashMap::default(),
             root: root.clone(),
@@ -1138,6 +1146,7 @@ mod tests {
         let dir = crate_dir("suppress-broken-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
         let before = Plan {
+            population: None,
             skipped: Vec::new(),
             digests: crate::HashMap::default(),
             root: root.clone(),

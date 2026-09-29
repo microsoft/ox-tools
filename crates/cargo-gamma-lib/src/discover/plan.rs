@@ -13,6 +13,8 @@ use crate::{HashMap, HashSet};
 /// Everything a run needs, worked out before any building happens.
 #[derive(Debug)]
 pub struct Plan {
+    /// Resolved discovery scope and the files whose population was completely analyzed.
+    pub population: Option<crate::elements::Scope>,
     /// Absolute path of the workspace root.
     pub root: Utf8PathBuf,
 
@@ -134,6 +136,7 @@ impl Plan {
             skipped,
             digests,
             sources,
+            population,
         } = scanned;
 
         self.mutants.extend(mutants);
@@ -142,6 +145,26 @@ impl Plan {
         self.sharded_out = self.sharded_out.saturating_add(sharded_out);
         self.settled_out = self.settled_out.saturating_add(settled_out);
         self.skipped.extend(skipped);
+        if let Some(mut incoming) = population {
+            if let Some(scope) = &self.population
+                && !scope.complete_files.is_empty()
+            {
+                assert_eq!(
+                    scope.context, incoming.context,
+                    "a plan must absorb scans from the same discovery context"
+                );
+                incoming.complete_files.extend(scope.complete_files.iter().cloned());
+            }
+            self.population = Some(incoming);
+        }
+        if let Some(scope) = &mut self.population
+            && !self.skipped.is_empty()
+        {
+            // Declaration and default-value dependencies can cross files in a scan.
+            // Withhold authority rather than infer which candidates missing analysis affected.
+            scope.complete_files.clear();
+            let _ = scope.reductions.insert("unavailableAnalysis".to_owned());
+        }
         self.digests.extend(digests);
         for (path, source) in sources {
             if let Some(index) = files.get(&path)
@@ -170,6 +193,7 @@ mod tests {
 
     fn plan(specs: &[(&str, &str, &str)]) -> Plan {
         Plan {
+            population: None,
             skipped: Vec::new(),
             digests: HashMap::default(),
             root: Utf8PathBuf::from("/w"),
@@ -250,6 +274,7 @@ mod tests {
             suppressed: 2,
             idle: Vec::new(),
             sharded_out: 3,
+            population: None,
             settled_out: 4,
             skipped: vec!["src/broken.rs: could not parse".to_owned()],
             digests: std::iter::once((Utf8PathBuf::from("z.rs"), "digest".to_owned())).collect(),

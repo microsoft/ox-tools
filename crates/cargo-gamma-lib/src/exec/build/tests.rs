@@ -1448,6 +1448,7 @@ fn target_file(root: &Utf8Path, path: &str) -> TargetFile {
 
 fn empty_plan(work: &Workspace) -> Plan {
     Plan {
+        population: None,
         skipped: Vec::new(),
         digests: HashMap::default(),
         root: work.root.clone(),
@@ -1510,6 +1511,7 @@ fn a_build_stopped_by_its_budget_reports_no_stdout() {
 fn converging_on_a_build_that_never_finishes_stops_with_the_budget() {
     let (_dir, work) = trivial_workspace("build-converge-budget-");
     let plan = Plan {
+        population: None,
         skipped: Vec::new(),
         digests: HashMap::default(),
         root: work.root.clone(),
@@ -1888,6 +1890,7 @@ fn the_census_counts_mutants_rather_than_diagnostics_and_leads_with_the_densest_
 /// A plan with one mutant per ordinal and mutator, for the census.
 fn plan_of(entries: &[(u32, &str)]) -> Plan {
     Plan {
+        population: None,
         skipped: Vec::new(),
         digests: HashMap::default(),
         root: Utf8PathBuf::new(),

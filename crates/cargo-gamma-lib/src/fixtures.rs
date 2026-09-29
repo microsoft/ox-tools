@@ -135,6 +135,7 @@ pub(crate) fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: V
     Report {
         files,
         config: Some(RunInfo {
+            population: Some(population(shard.is_none())),
             started_at,
             mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
             merged: false,
@@ -146,6 +147,20 @@ pub(crate) fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: V
         }),
         ..report()
     }
+}
+
+pub(crate) fn population(complete: bool) -> crate::elements::Population {
+    let mut scope = crate::elements::Scope::discovery(serde_json::json!({
+        "mutators": ["relational.lt_to_le"], "idScheme": crate::model::MUTANT_ID_VERSION,
+        "packages": {"subject": ["", "0.1.0"]}, "features": {"subject": []},
+        "files": [], "excludeFiles": [], "opaque": {},
+    }));
+    if complete {
+        let _ = scope.complete_files.insert("src/lib.rs".to_owned());
+    } else {
+        let _ = scope.reductions.insert("shard".to_owned());
+    }
+    crate::elements::Population::Known(scope)
 }
 
 pub(crate) fn crate_dir(name: &str, source: &str) -> (tempfile::TempDir, Utf8PathBuf) {

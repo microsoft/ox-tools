@@ -895,8 +895,29 @@ identities from different namespaces together. A rotation that spans an identity
 therefore be restarted or completed with reports from the new scheme. When `--min-score` is
 requested, any excluded input fails the gate because the requested population is incomplete.
 
-A shard describes only its slice and cannot prove that a missing mutant was withdrawn. Only an
-unsharded, complete population can withdraw identities from an accumulated report.
+Population metadata separates discovery completeness from execution completion. An unfiltered
+listing or dry run can assert a complete discovered population while its verdicts remain pending.
+Survivor-only, diff-filtered, exact-ID and sharded selections are partial: omission cannot withdraw
+another observation. Successfully analyzed files with no candidates are explicit complete empty
+populations. Skipped analysis, including declaration dependencies, cannot establish completeness.
+
+Retirement requires an explicit, at-least-as-recent complete assertion for the same file and
+discovery context. Context compares resolved mutator membership, package identities, file policy,
+features and opaque build/cfg inputs, not preset names or source-tree bytes. Different contexts
+cannot retire each other's observations. Legacy reports without population metadata and reports
+with unsupported population versions remain readable but non-authoritative; malformed supported
+metadata is an input error.
+
+Merged reports preserve the newest complete assertion for each file/context, including the empty
+ID set and its original authority. They also preserve original observations and verdict provenance
+so staged merging cannot refresh historical evidence or resurrect an identity retired by a newer
+compatible assertion. The merge itself is not a fresh discovery snapshot. No deleted-file claim
+is inferred merely because a file is absent.
+
+Source compatibility is separate from retirement: a retained observation whose location cannot be
+rendered over the selected source is diagnosed as incompatible, not withdrawn. Only actual
+rendered verdicts enter the score. Merge notes identify unknown or incompatible scope; omitted
+candidates are never manufactured as pending or killed results.
 
 ## Verdicts and scoring
 

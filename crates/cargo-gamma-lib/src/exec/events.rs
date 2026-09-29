@@ -111,6 +111,7 @@ mod tests {
     fn default_event_methods_are_expressed_in_terms_of_phase_and_outcome() {
         let mut events = Recorder::default();
         let plan = Plan {
+            population: None,
             skipped: Vec::new(),
             digests: crate::HashMap::default(),
             root: Utf8PathBuf::from("/workspace"),

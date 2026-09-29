@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::discover::Plan;
+use crate::elements::{Observation, Population, PopulationOrigin};
 use crate::error::error;
 use crate::model::{Mutant, Outcome};
 use crate::parse::SourceFile;
@@ -79,6 +80,9 @@ pub struct Report {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunInfo {
+    /// Discovery context and explicit completeness; absence is non-authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub population: Option<Population>,
     /// When the run started, in seconds since the Unix epoch.
     ///
     /// Seconds rather than a formatted timestamp because every use is arithmetic — freshness,
@@ -154,6 +158,12 @@ pub struct RunInfo {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeProvenance {
+    /// Original observations, including those excluded by current population or source evidence.
+    ///
+    /// A later merge must apply its complete assertions to original observations, not to an
+    /// intermediate winner that may have hidden another context's verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observations: Option<Vec<Observation>>,
     /// The report that supplied each rendered file's source and language.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sources: BTreeMap<String, SourceProvenance>,
@@ -185,6 +195,9 @@ pub struct SourceProvenance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerdictProvenance {
+    /// The original population observation, distinct from the verdict's test time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub population: Option<PopulationOrigin>,
     /// When the verdict's run started.
     pub started_at: u64,
 
@@ -477,9 +490,14 @@ pub(crate) fn build_from(plan: &Plan, source_root: Option<&Utf8Path>, thresholds
     }
 
     for file in &plan.files {
-        let Some(mutants) = grouped.get(file.path.as_path()) else {
+        let mutants = grouped.get(file.path.as_path()).map_or(&[][..], Vec::as_slice);
+        let complete = plan
+            .population
+            .as_ref()
+            .is_some_and(|scope| scope.complete_files.contains(file.path.as_str()));
+        if mutants.is_empty() && !complete {
             continue;
-        };
+        }
 
         let snapshot = source_root.map(|root| root.join(&file.path));
         let original = match snapshot.as_ref() {
@@ -533,6 +551,7 @@ pub(crate) fn build_from(plan: &Plan, source_root: Option<&Utf8Path>, thresholds
         },
         files,
         config: run.map(|run| RunInfo {
+            population: plan.population.clone().map(Population::Known),
             not_built: (not_built > 0).then_some(not_built),
             mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
             ..run
@@ -1010,6 +1029,14 @@ pub fn write_json(report: &Report, path: &Utf8Path) -> Result<()> {
 /// this crate did not write, where the types have not yet been established and the answer must not
 /// depend on `serde` having accepted them.
 fn validate_report(report: &Report) -> SchemaResult<()> {
+    if let Some(scope) = report
+        .config
+        .as_ref()
+        .and_then(|config| config.population.as_ref())
+        .and_then(Population::known)
+    {
+        scope.validate()?;
+    }
     if !supported_schema_version(&report.schema_version) {
         return Err(format!(
             "schema version `{}` at report.schemaVersion must match the supported pattern",
@@ -1031,7 +1058,7 @@ fn validate_report(report: &Report) -> SchemaResult<()> {
 }
 
 /// Validates one file's mutants, and that no two of them are the same mutant.
-fn validate_file_result(file: &FileResult, path: &str) -> SchemaResult<()> {
+pub(crate) fn validate_file_result(file: &FileResult, path: &str) -> SchemaResult<()> {
     let mut unique = HashSet::default();
 
     for (index, mutant) in file.mutants.iter().enumerate() {
@@ -1430,6 +1457,7 @@ mod tests {
         let first = normalized.find("fn").expect("first-line span");
         let second = normalized.find("true").expect("second-line span");
         let mut plan = Plan {
+            population: None,
             skipped: Vec::new(),
             digests: HashMap::default(),
             root,
@@ -1920,6 +1948,7 @@ mod tests {
         fs::write(root.join("lib.rs").as_std_path(), source).expect("source");
 
         let plan = Plan {
+            population: None,
             skipped: Vec::new(),
             digests: HashMap::default(),
             root: root.clone(),
@@ -1948,6 +1977,7 @@ mod tests {
             specs: HashMap::default(),
         };
         let info = RunInfo {
+            population: None,
             started_at: 0,
             mutant_id_version: None,
             merged: false,
@@ -1975,6 +2005,7 @@ mod tests {
             &clean,
             Thresholds::default(),
             Some(RunInfo {
+                population: None,
                 started_at: 0,
                 mutant_id_version: None,
                 merged: false,
@@ -2089,8 +2120,9 @@ mod tests {
     }
 
     #[test]
-    fn a_file_without_mutants_is_left_out_of_the_report() {
-        let plan = Plan {
+    fn only_explicitly_complete_files_without_mutants_are_embedded() {
+        let mut plan = Plan {
+            population: None,
             skipped: Vec::new(),
             digests: HashMap::default(),
             root: Utf8PathBuf::from("/w"),
@@ -2114,6 +2146,25 @@ mod tests {
         // Embedding every selected file would bloat empty reports and try to read files that have
         // no result to show.
         assert!(report.files.is_empty());
+        plan.files[0].source = Some("pub fn empty() {}\n".to_owned());
+        let Population::Known(scope) = fixtures::population(true) else {
+            panic!("fixture scope")
+        };
+        plan.population = Some(scope);
+        let report = build(&plan, Thresholds::default(), fixtures::report_with(None, 100, vec![]).config).unwrap();
+        assert!(report.files["src/lib.rs"].mutants.is_empty());
+        assert_eq!(report.files["src/lib.rs"].source, "pub fn empty() {}\n");
+        assert!(
+            report
+                .config
+                .unwrap()
+                .population
+                .unwrap()
+                .known()
+                .unwrap()
+                .complete_files
+                .contains("src/lib.rs")
+        );
     }
 
     #[test]
@@ -2144,6 +2195,13 @@ mod tests {
 
     #[test]
     fn serialization_refuses_reports_outside_the_adopted_schema() {
+        let mut partial = fixtures::report_with(None, 100, Vec::new());
+        let Some(Population::Known(scope)) = partial.config.as_mut().unwrap().population.as_mut() else {
+            panic!("fixture scope")
+        };
+        scope.selection = crate::elements::SelectionKind::Survivors;
+        assert!(to_json(&partial).unwrap_err().to_string().contains("partial population"));
+
         let mut version = fixtures::report();
         version.schema_version = "3".to_owned();
         assert_eq!(
@@ -2302,6 +2360,7 @@ mod tests {
         let placements = [("a.rs", "m1"), ("a.rs", "m2"), ("b.rs", "m3"), ("c.rs", "m4")];
 
         let plan = Plan {
+            population: None,
             skipped: Vec::new(),
             digests: HashMap::default(),
             root,
@@ -2352,6 +2411,7 @@ mod tests {
         let mut digests = HashMap::default();
         let _previous = digests.insert(path.clone(), crate::discover::digest(discovered.as_bytes()));
         let plan = Plan {
+            population: None,
             skipped: Vec::new(),
             digests,
             root,
@@ -2396,6 +2456,7 @@ mod tests {
         let mut digests = HashMap::default();
         let _previous = digests.insert(path.clone(), crate::discover::digest(discovered.as_bytes()));
         let plan = Plan {
+            population: None,
             skipped: Vec::new(),
             digests,
             root: root.clone(),
@@ -2444,6 +2505,7 @@ mod tests {
         let mut digests = HashMap::default();
         let _previous = digests.insert(path.clone(), crate::discover::digest(discovered.as_bytes()));
         let plan = Plan {
+            population: None,
             skipped: Vec::new(),
             digests,
             root,
@@ -2486,6 +2548,7 @@ mod tests {
         fs::write(root.join("a.rs").as_std_path(), "fn a() { x(a < b); }").expect("source");
 
         let plan = Plan {
+            population: None,
             skipped: Vec::new(),
             digests: HashMap::default(),
             root: root.clone(),

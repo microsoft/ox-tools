@@ -1020,6 +1020,7 @@ mod tests {
 
     fn plan() -> Plan {
         Plan {
+            population: None,
             skipped: Vec::new(),
             digests: crate::HashMap::default(),
             root: "/work/subject".into(),

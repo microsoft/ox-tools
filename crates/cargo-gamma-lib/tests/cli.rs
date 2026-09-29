@@ -778,6 +778,205 @@ fn a_survivor_report_selects_only_its_genuine_survivor_identities() {
         .collect::<Vec<_>>();
 
     assert_eq!(selected_ids, [survivor]);
+    assert_eq!(selected["config"]["population"]["selection"], "survivors");
+    assert_eq!(selected["config"]["population"]["completeFiles"], serde_json::json!([]));
+    assert_eq!(
+        selected["config"]["population"]["context"],
+        report["config"]["population"]["context"]
+    );
+    assert_eq!(report["config"]["population"]["completeFiles"], serde_json::json!(["src/lib.rs"]));
+
+    let mut host = Sink::default();
+    let merged = dir.path().join("merged.json");
+    let selected_path = dir.path().join("target/cargo-gamma/gamma-report.json");
+    let code = run(
+        &mut host,
+        [
+            "cargo-gamma",
+            "merge",
+            prior_arg,
+            selected_path.to_str().unwrap(),
+            "--json-report",
+            merged.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let merged: serde_json::Value = serde_json::from_slice(&fs::read(merged).unwrap()).unwrap();
+    assert_eq!(
+        merged["files"]["src/lib.rs"]["mutants"].as_array().unwrap().len(),
+        report["files"]["src/lib.rs"]["mutants"].as_array().unwrap().len()
+    );
+}
+
+#[test]
+fn complete_empty_discovery_is_reported_without_claiming_execution() {
+    let dir = workspace("pub fn empty() {}\n");
+    for command in ["list", "run"] {
+        let output = dir.path().join(format!("{command}.json"));
+        let args = if command == "list" {
+            vec![
+                "list",
+                "mutants",
+                "--mutators",
+                "relational",
+                "--json-report",
+                output.to_str().unwrap(),
+            ]
+        } else {
+            vec!["run", "--dry-run", "--mutators", "relational"]
+        };
+        let (code, host) = invoke(&dir, &args);
+        assert_eq!(code, EXIT_OK, "{}", host.err());
+        let output = if command == "run" {
+            dir.path().join("target/cargo-gamma/gamma-report.json")
+        } else {
+            output
+        };
+        let report: serde_json::Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+        assert_eq!(report["config"]["population"]["completeFiles"], serde_json::json!(["src/lib.rs"]));
+        assert_eq!(report["files"]["src/lib.rs"]["mutants"], serde_json::json!([]));
+        assert!(report["config"]["tests"].is_null());
+    }
+}
+
+#[test]
+fn population_context_uses_resolved_mutators_and_build_inputs_not_source_bytes() {
+    let dir = workspace(SUBJECT);
+    let manifest = dir.path().join("Cargo.toml");
+    let mut text = fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[features]\nextra = []\n");
+    fs::write(manifest, text).unwrap();
+    let output = dir.path().join("population.json");
+    let list = |selector: &str, extra: &[&str]| {
+        let mut args = vec!["list", "mutants", "--mutators", selector, "--json-report", output.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        let (code, host) = invoke(&dir, &args);
+        assert_eq!(code, EXIT_OK, "{}", host.err());
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&output).unwrap()).unwrap()
+    };
+    let preset = list("@default", &[]);
+    let context = preset["config"]["population"]["context"].as_str().unwrap();
+    let names = preset["config"]["population"]["contexts"][context]["mutators"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|name| name.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join(",");
+    let explicit = list(&names, &[]);
+    assert_eq!(explicit["config"]["population"]["context"], context);
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        format!("{SUBJECT}\npub fn added(x: u32) -> u32 {{ x + 1 }}\n"),
+    )
+    .unwrap();
+    let edited = list("@default", &[]);
+    assert_eq!(edited["config"]["population"]["context"], context);
+    assert_ne!(edited["files"], preset["files"]);
+    let features = list("@default", &["--features", "extra"]);
+    assert_ne!(features["config"]["population"]["context"], context);
+}
+
+#[test]
+fn population_context_ignores_unrelated_environment_but_tracks_cfg_flags() {
+    const CHILD_ROOT: &str = "GAMMA_POPULATION_CONTEXT_CHILD_ROOT";
+    const CHILD_OUTPUT: &str = "GAMMA_POPULATION_CONTEXT_CHILD_OUTPUT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = Utf8PathBuf::from_path_buf(root.into()).unwrap();
+        let output = std::env::var(CHILD_OUTPUT).unwrap();
+        let (code, host) = invoke_at(
+            &root,
+            &["list", "mutants", "--mutators", "relational.lt_to_le", "--json-report", &output],
+        );
+        assert_eq!(code, EXIT_OK, "{}", host.err());
+        return;
+    }
+
+    let dir = workspace(SUBJECT);
+    let baseline = dir.path().join("baseline.json");
+    let (code, host) = invoke(
+        &dir,
+        &[
+            "list",
+            "mutants",
+            "--mutators",
+            "relational.lt_to_le",
+            "--json-report",
+            baseline.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    fs::write(dir.path().join("src/lib.rs"), "pub fn empty() {}\n").unwrap();
+    let read = |path: &std::path::Path| serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap();
+    let first = read(&baseline);
+    let child = |path: &std::path::Path, flags: bool| {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "population_context_ignores_unrelated_environment_but_tracks_cfg_flags"])
+            .env(CHILD_ROOT, dir.path())
+            .env(CHILD_OUTPUT, path)
+            .env("GAMMA_UNRELATED_JOB_NAME", "different-job");
+        if flags {
+            command
+                .env_remove("CARGO_ENCODED_RUSTFLAGS")
+                .env("RUSTFLAGS", "--cfg gamma_population_probe");
+        }
+        assert!(command.status().unwrap().success());
+    };
+    let unrelated = dir.path().join("unrelated.json");
+    child(&unrelated, false);
+    let second = read(&unrelated);
+    assert_eq!(first["config"]["population"]["context"], second["config"]["population"]["context"]);
+    let changed_cfg = dir.path().join("cfg.json");
+    child(&changed_cfg, true);
+    assert_ne!(
+        first["config"]["population"]["context"],
+        read(&changed_cfg)["config"]["population"]["context"]
+    );
+
+    let mut first = first;
+    let mut second = second;
+    first["config"]["startedAt"] = serde_json::json!(100);
+    second["config"]["startedAt"] = serde_json::json!(200);
+    fs::write(&baseline, serde_json::to_vec(&first).unwrap()).unwrap();
+    fs::write(&unrelated, serde_json::to_vec(&second).unwrap()).unwrap();
+    let mut host = Sink::default();
+    let code = run(
+        &mut host,
+        ["cargo-gamma", "merge", baseline.to_str().unwrap(), unrelated.to_str().unwrap()],
+    );
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert!(host.err().contains("Withdrawn"), "{}", host.err());
+    assert!(!host.err().contains("Incompatible"), "{}", host.err());
+}
+
+#[test]
+fn population_context_tracks_error_replacement_order_and_trait_policy() {
+    let dir = workspace(
+        "pub fn fallible() -> Result<u32, u32> { Ok(1) }\n\
+         #[derive(Debug)] struct Item;\nimpl Item { fn value(&self) -> u32 { 1 } }\n\
+         impl core::fmt::Display for Item { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { write!(f, \"item\") } }\n",
+    );
+    let output = dir.path().join("population.json");
+    let list = |extra: &[&str]| {
+        let mut args = vec![
+            "list",
+            "mutants",
+            "--mutators",
+            "fn_value.err_with",
+            "--json-report",
+            output.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        let (code, host) = invoke(&dir, &args);
+        assert_eq!(code, EXIT_OK, "{}", host.err());
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&output).unwrap()).unwrap()["config"]["population"]["context"].clone()
+    };
+    let first = list(&["--error", "1", "--error", "2"]);
+    assert_ne!(first, list(&["--error", "2", "--error", "1"]));
+    assert_ne!(first, list(&["--error", "1", "--error", "3"]));
+    fs::write(dir.path().join("gamma.toml"), "exclude-trait-impls = [\"Display\"]\n").unwrap();
+    assert_ne!(first, list(&["--error", "1", "--error", "2"]));
 }
 
 /// Writes a run record naming the first mutant unviable and the second one killed by a named test.

@@ -189,6 +189,15 @@ fn flakes(count: u32) -> String {
 ///
 /// Returns an error if the diagnostic stream cannot be written.
 pub fn skipped<H: Host>(host: &mut H, plan: &Plan, styler: Styler) -> Result<()> {
+    if let Some(scope) = &plan.population
+        && !scope.reductions.is_empty()
+    {
+        writeln!(
+            host.error(),
+            "{} partial population; omissions do not authorize retirement",
+            styler.verb("Note")
+        )?;
+    }
     if plan.skipped.is_empty() {
         return Ok(());
     }
@@ -398,6 +407,7 @@ mod tests {
 
     fn plan() -> Plan {
         Plan {
+            population: None,
             skipped: Vec::new(),
             digests: HashMap::default(),
             root: Utf8PathBuf::from("/w"),

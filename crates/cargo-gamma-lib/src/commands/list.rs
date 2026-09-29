@@ -213,9 +213,8 @@ fn describe_for_listing(mutant: &crate::model::Mutant) -> String {
 
 /// Writes the listing as a report document.
 ///
-/// `merge` withdraws a mutant only when a newer unsharded input states the whole population of its
-/// file, and producing that from a run means paying for a run. Listing is the cheap way to say what
-/// exists now, so it is the one a nightly rotation can afford beside its shard.
+/// A complete compatible listing can authorize retirement without executing candidates.
+/// Filtered listings carry their reductions instead of claiming a full population.
 fn write_population<H: Host>(
     host: &mut H,
     plan: &crate::discover::Plan,
@@ -223,6 +222,7 @@ fn write_population<H: Host>(
     path: &Utf8PathBuf,
 ) -> crate::Result<()> {
     let info = crate::elements::RunInfo {
+        population: None,
         started_at: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()),
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
         merged: false,

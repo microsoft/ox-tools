@@ -10,12 +10,16 @@
 //! someone's browser rather than as a failing build.
 
 mod digest;
+mod population;
 mod publication;
 mod report;
 
 pub(crate) use digest::surviving_mutants;
 #[doc(inline)]
 pub use digest::{Digest, FileDigest, FrameworkDigest, MutantDigest, settled_mutants};
+pub(crate) use population::context_key;
+#[doc(inline)]
+pub use population::{Observation, Population, PopulationAssertion, PopulationOrigin, Scope, SelectionKind};
 pub(crate) use publication::{
     Publication, remove_if_unchanged, remove_if_unchanged_locked, write_if_unchanged, write_if_unchanged_locked, write_streamed,
 };
@@ -28,4 +32,4 @@ pub use report::{
     FileResult, Framework, Location, MergeProvenance, MutantResult, Position, Report, RunInfo, ShardInfo, SourceProvenance, Thresholds,
     VerdictProvenance, build, to_json, write_json,
 };
-pub(crate) use report::{build_from, supported_schema_version, validate_schema};
+pub(crate) use report::{build_from, supported_schema_version, validate_file_result, validate_schema};

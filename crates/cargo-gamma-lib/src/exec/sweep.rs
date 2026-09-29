@@ -2590,6 +2590,7 @@ mod tests {
         };
 
         Plan {
+            population: None,
             skipped: Vec::new(),
             digests: crate::HashMap::default(),
             root,

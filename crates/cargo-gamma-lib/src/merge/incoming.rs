@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::elements::{FileResult, Framework, Report, RunInfo, Thresholds};
+use crate::error::error;
 
 /// What a producer that did not name itself, or did not name its version, is recorded as.
 ///
@@ -66,8 +67,10 @@ struct IncomingFramework {
     version: Option<String>,
 }
 
-impl From<Incoming> for Report {
-    fn from(incoming: Incoming) -> Self {
+impl TryFrom<Incoming> for Report {
+    type Error = crate::error::Error;
+
+    fn try_from(incoming: Incoming) -> crate::Result<Self> {
         // Absence is recorded rather than papered over: a merged document that named this tool as
         // the producer of an input it only read would be a lie that outlives the merge, since the
         // document is what a viewer shows.
@@ -81,16 +84,30 @@ impl From<Incoming> for Report {
                 version: framework.version.unwrap_or_else(|| UNKNOWN.to_owned()),
             },
         );
-        let config = incoming.config.and_then(|config| serde_json::from_value::<RunInfo>(config).ok());
+        let config = incoming
+            .config
+            .map(|config| {
+                let recognized = framework.name == "cargo-gamma" || config.get("startedAt").is_some();
+                if recognized && config.get("population").is_some_and(|population| !population.is_object()) {
+                    return Err(error!("malformed cargo-gamma report metadata: population must be an object").usage());
+                }
+                match serde_json::from_value::<RunInfo>(config) {
+                    Ok(config) => Ok(Some(config)),
+                    Err(cause) if recognized => Err(error!("malformed cargo-gamma report metadata: {cause}").usage()),
+                    Err(_) => Ok(None),
+                }
+            })
+            .transpose()?
+            .flatten();
 
-        Self {
+        Ok(Self {
             schema_version: incoming.schema_version,
             thresholds: incoming.thresholds,
             project_root: incoming.project_root,
             framework,
             files: incoming.files,
             config,
-        }
+        })
     }
 }
 

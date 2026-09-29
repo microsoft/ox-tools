@@ -3,26 +3,33 @@
 
 //! Resolving engine cfg evidence from the compiler selected by Cargo policy.
 
+use std::collections::BTreeSet;
 use std::process::Command;
 
 use super::{Build, CfgSet};
 use crate::Result;
 use crate::error::error;
 
+#[cfg(test)]
 pub(crate) fn for_build(build: &Build) -> Result<CfgSet> {
+    for_build_with_evidence(build).map(|(cfg, _evidence)| cfg)
+}
+
+/// Resolves cfg predicates and an opaque identity of the exact discovery answer.
+pub(crate) fn for_build_with_evidence(build: &Build) -> Result<(CfgSet, Option<String>)> {
     if build.several_targets {
-        return Ok(CfgSet::unconditional());
+        return Ok((CfgSet::unconditional(), None));
     }
 
     let program = rustc_program(|name| std::env::var(name));
-    for_build_with(build, &program)
+    for_build_with(build, &program).map(|(cfg, evidence)| (cfg, Some(evidence)))
 }
 
 fn rustc_program(mut get: impl FnMut(&str) -> std::result::Result<String, std::env::VarError>) -> String {
     get("RUSTC").unwrap_or_else(|_| "rustc".to_owned())
 }
 
-fn for_build_with(build: &Build, program: impl AsRef<std::ffi::OsStr>) -> Result<CfgSet> {
+fn for_build_with(build: &Build, program: impl AsRef<std::ffi::OsStr>) -> Result<(CfgSet, String)> {
     let mut command = Command::new(program);
     let _builder = command.args(build.probe_args());
     let output = command
@@ -36,13 +43,23 @@ fn for_build_with(build: &Build, program: impl AsRef<std::ffi::OsStr>) -> Result
         ));
     }
 
-    let mut set = CfgSet::parse(&String::from_utf8_lossy(&output.stdout));
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let mut set = CfgSet::parse(&printed);
 
     if build.debug_assertions.is_none() {
         set = set.with_undecided(["debug_assertions".to_owned()]);
     }
 
-    Ok(set.with_undecided(build.undecided.iter().cloned()))
+    let evidence = cfg_evidence(build, &printed);
+    Ok((set.with_undecided(build.undecided.iter().cloned()), evidence))
+}
+
+fn cfg_evidence(build: &Build, printed: &str) -> String {
+    crate::elements::context_key(&serde_json::json!({
+        "predicates": printed.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<BTreeSet<_>>(),
+        "debugAssertions": build.debug_assertions,
+        "undecided": build.undecided.iter().collect::<BTreeSet<_>>(),
+    }))
 }
 
 #[cfg(test)]
@@ -51,6 +68,36 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    #[test]
+    fn cfg_evidence_tracks_resolved_predicates_not_probe_output_order() {
+        let build = Build::default();
+        assert_eq!(
+            cfg_evidence(&build, "unix\ntarget_os=\"linux\"\n"),
+            cfg_evidence(&build, "\n target_os=\"linux\"\nunix\nunix\n")
+        );
+        assert_ne!(cfg_evidence(&build, "unix\n"), cfg_evidence(&build, "windows\n"));
+        assert_ne!(
+            cfg_evidence(&build, "unix\n"),
+            cfg_evidence(
+                &Build {
+                    undecided: vec!["loom".to_owned()],
+                    ..build
+                },
+                "unix\n"
+            )
+        );
+    }
+
+    #[test]
+    fn an_unresolved_multi_target_build_cannot_supply_completeness_evidence() {
+        let (_, evidence) = for_build_with_evidence(&Build {
+            several_targets: true,
+            ..Build::default()
+        })
+        .unwrap();
+        assert!(evidence.is_none());
+    }
 
     #[test]
     fn a_rustc_probe_failure_is_reported() {

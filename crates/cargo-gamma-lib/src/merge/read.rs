@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Result as IoResult};
+use std::io::{self, Read, Result as IoResult, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use camino::Utf8Path;
@@ -17,7 +17,7 @@ use super::incoming::Incoming;
 use super::merged::MAX_SHARDS;
 use super::status::scoring;
 use crate::Result;
-use crate::elements::Report;
+use crate::elements::{FileResult, Report, SourceProvenance, VerdictProvenance, validate_file_result};
 use crate::error::error;
 
 /// The largest report a merge will read.
@@ -45,6 +45,39 @@ const MAX_BYTES: u64 = 256 * 1024 * 1024;
 /// rotation spans, so it separates a clock that is drifting from one that is wrong, without
 /// refusing a report over the second or two of skew that is normal between machines.
 const MAX_SKEW: u64 = 3_600;
+
+/// Counts the encoded report without allocating it, refusing an unreadable merged artifact.
+struct ReportSize {
+    bytes: u64,
+    limit: u64,
+}
+
+impl Write for ReportSize {
+    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(buf.len()).expect("supported usize fits in u64"));
+        if self.bytes > self.limit {
+            return Err(io::Error::other("merged report exceeds the report-input byte budget"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> IoResult<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_output_size(report: &Report) -> Result<()> {
+    validate_size_with(report, MAX_BYTES)
+}
+
+fn validate_size_with(report: &Report, limit: u64) -> Result<()> {
+    serde_json::to_writer_pretty(&mut ReportSize { bytes: 0, limit }, report).map_err(|cause| {
+        error!("could not encode merged report within the {limit}-byte report budget; use a narrower report history or split independent contexts")
+            .caused_by(cause).usage()
+    })
+}
 
 /// Reads a report from a file.
 ///
@@ -116,7 +149,8 @@ pub(crate) fn read_limited(path: &Utf8Path, limit: u64) -> Result<ReadReport> {
         .usage());
     }
 
-    let report = Report::from(incoming);
+    let report = Report::try_from(incoming).map_err(|cause| error!("{path}: {cause}").usage())?;
+    validate_population(&report).map_err(|cause| error!("{path}: {cause}").usage())?;
     let mut ids: BTreeMap<&str, &str> = BTreeMap::new();
 
     for (file, result) in &report.files {
@@ -191,6 +225,73 @@ pub(crate) fn read_limited(path: &Utf8Path, limit: u64) -> Result<ReadReport> {
     Ok(ReadReport { report, bytes: bytes_read })
 }
 
+/// Checks cross-record references after decoding supported population metadata.
+fn validate_population(report: &Report) -> Result<()> {
+    let Some(config) = &report.config else { return Ok(()) };
+    let scope = config.population.as_ref().and_then(crate::elements::Population::known);
+    if let Some(provenance) = &config.merge_provenance {
+        for source in provenance.sources.values() {
+            validate_authority(source, config.started_at)?;
+        }
+        for verdict in provenance.verdicts.values() {
+            validate_verdict_origin(verdict, scope, config.started_at)?;
+        }
+        if let Some(observations) = &provenance.observations {
+            if !config.merged {
+                return Err(error!("original observations are only valid on a merged report").usage());
+            }
+            for observation in observations {
+                validate_authority(&observation.source, config.started_at)?;
+                validate_verdict_origin(&observation.verdict, scope, config.started_at)?;
+                validate_file_result(
+                    &FileResult {
+                        source: String::new(),
+                        language: "rust".to_owned(),
+                        mutants: vec![observation.mutant.clone()],
+                    },
+                    "merge observation",
+                )
+                .map_err(|cause| error!("invalid merge observation: {cause}").usage())?;
+            }
+        }
+    }
+    let Some(scope) = scope else { return Ok(()) };
+    if !scope.complete_files.is_empty() && (config.merged || config.shard.is_some()) {
+        return Err(error!("merged or sharded report cannot claim fresh complete files").usage());
+    }
+    for file in &scope.complete_files {
+        if !report.files.contains_key(file) {
+            return Err(error!("complete population file `{file}` is absent from the report").usage());
+        }
+    }
+    for assertion in &scope.assertions {
+        if assertion.discovered.started_at > config.started_at {
+            return Err(error!("population assertion is newer than the report's original provenance").usage());
+        }
+    }
+    Ok(())
+}
+
+fn validate_authority(source: &SourceProvenance, newest: u64) -> Result<()> {
+    if source.started_at > newest {
+        return Err(error!("original provenance is newer than the report timestamp").usage());
+    }
+    Ok(())
+}
+
+fn validate_verdict_origin(verdict: &VerdictProvenance, scope: Option<&crate::elements::Scope>, newest: u64) -> Result<()> {
+    if verdict.started_at > newest {
+        return Err(error!("original verdict is newer than the report timestamp").usage());
+    }
+    if let Some(population) = &verdict.population {
+        if scope.is_some_and(|scope| !scope.contexts.contains_key(&population.context)) {
+            return Err(error!("verdict population has an unknown context").usage());
+        }
+        validate_authority(&population.discovered, newest)?;
+    }
+    Ok(())
+}
+
 /// Opens without waiting for a FIFO writer, so its file type can be rejected from this handle.
 fn open(path: &Utf8Path) -> IoResult<File> {
     let mut options = OpenOptions::new();
@@ -217,7 +318,7 @@ fn too_large(path: &Utf8Path, size: u64, limit: u64) -> crate::error::Error {
 /// Reads one already checked handle without ever allocating more than the caller's cap.
 fn read_contents(input: &mut File, path: &Utf8Path, limit: u64) -> Result<(String, u64)> {
     let mut bytes = Vec::new();
-    let mut capped = input.by_ref().take(limit.saturating_add(1));
+    let mut capped = Read::by_ref(input).take(limit.saturating_add(1));
 
     let _read = capped
         .read_to_end(&mut bytes)
@@ -273,6 +374,64 @@ mod tests {
         let (_directory, path) = written(text);
 
         read(&path)
+    }
+
+    #[test]
+    fn recognized_malformed_population_metadata_is_an_actionable_error() {
+        let base = serde_json::to_value(crate::fixtures::report_with(None, 100, vec![])).unwrap();
+        for bad in [Value::Null, serde_json::json!({"version": "1"}), serde_json::json!({"version": 1})] {
+            let mut document = base.clone();
+            document["config"]["population"] = bad;
+            let error = read_text(&document.to_string()).unwrap_err();
+            assert!(error.is_usage());
+            assert!(error.to_string().contains("population"), "{error}");
+        }
+        let mut mismatched = base.clone();
+        let contexts = mismatched["config"]["population"]["contexts"].as_object_mut().unwrap();
+        contexts.values_mut().next().unwrap()["lib"] = Value::Bool(true);
+        assert!(read_text(&mismatched.to_string()).unwrap_err().to_string().contains("context key"));
+
+        let mut missing = base.clone();
+        missing["files"] = serde_json::json!({});
+        assert!(
+            read_text(&missing.to_string())
+                .unwrap_err()
+                .to_string()
+                .contains("complete population file")
+        );
+
+        let mut future = base;
+        future["config"]["population"] = serde_json::json!({"version": 99, "futureShape": true});
+        assert!(matches!(
+            read_text(&future.to_string()).unwrap().config.unwrap().population,
+            Some(crate::elements::Population::Unknown(_))
+        ));
+    }
+
+    #[test]
+    fn merged_observations_are_validated_and_roundtrip_through_bounded_ingress() {
+        let inputs = [
+            (
+                "old".to_owned(),
+                crate::fixtures::report_with(None, 100, vec![crate::fixtures::mutant_result()]),
+            ),
+            ("empty".to_owned(), crate::fixtures::report_with(None, 200, vec![])),
+        ];
+        let merged = crate::merge::merge(&inputs, 300, None).report.unwrap();
+        let mut document = serde_json::to_value(&merged).unwrap();
+        let read = read_text(&document.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(read).unwrap(), document);
+        document["config"]["mergeProvenance"]["observations"][0]["mutant"]["status"] = serde_json::json!("Kiled");
+        assert!(read_text(&document.to_string()).unwrap_err().to_string().contains("observation"));
+    }
+
+    #[test]
+    fn merged_output_is_bounded_before_any_artifact_is_published() {
+        let report = crate::fixtures::report_with(None, 100, vec![crate::fixtures::mutant_result()]);
+        let size = u64::try_from(serde_json::to_vec_pretty(&report).unwrap().len()).unwrap();
+        validate_size_with(&report, size).unwrap();
+        let error = validate_size_with(&report, size - 1).unwrap_err();
+        assert!(error.to_string().contains("narrower report history"), "{error}");
     }
 
     /// The schema requires `schemaVersion`, `thresholds` and `files`, and nothing else at the top

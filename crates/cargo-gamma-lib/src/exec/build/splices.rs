@@ -390,6 +390,7 @@ mod tests {
 
     fn empty_plan(root: &camino::Utf8Path) -> Plan {
         Plan {
+            population: None,
             root: root.to_owned(),
             files: Vec::new(),
             mutants: Vec::new(),

@@ -2485,6 +2485,7 @@ mod tests {
         let _previous = specs.insert("b".to_owned(), (Utf8PathBuf::from("crates/b"), "0.1.0".to_owned()));
 
         Plan {
+            population: None,
             root: root.to_owned(),
             files: Vec::new(),
             mutants,

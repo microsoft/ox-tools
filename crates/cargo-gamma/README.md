@@ -170,6 +170,8 @@ cargo gamma run --only-survivors-from target/cargo-gamma/gamma-report.json
 
 Mutant identities remain stable when only tests change. Timeout and memory-limit outcomes are
 not selected, even though the report format represents them as survived.
+The resulting report describes a partial selection. Merging it with the original report keeps
+omitted identities and their original verdict provenance; it does not treat them as retired.
 
 ### Mutators
 
@@ -1670,10 +1672,12 @@ predecessor earned — it reappears as never tested, which is also how it stays 
 denominator.
 
 Removing the *old* identity needs one more thing, because a union by itself never drops anything: at
-least one input has to be an unsharded run or listing, which states the complete population of every
-file it covers. An identity absent from the newest such input has been withdrawn, and the summary
-counts it under `Withdrawn`. A sharded report describes only its own slice, so it never withdraws
-anything — merge a full `list mutants --json` alongside the rotation to keep the denominator honest:
+least one input must explicitly describe a complete population under a compatible discovery
+context. Resolved mutators, packages, features and build settings determine compatibility, not
+source edits. An identity absent from a newer compatible complete snapshot is counted under
+`Withdrawn`, including when its file now has no candidates. Sharded, survivor-only and diff-filtered
+reports cannot withdraw omitted identities. Legacy reports remain readable but cannot prove
+completeness. Merge a full listing alongside the rotation to establish what exists now:
 
 ```bash
 cargo gamma list mutants --json-report reports/current.json
@@ -1681,6 +1685,9 @@ cargo gamma merge reports --window 45
 ```
 
 The summary also reports how fresh the verdicts are and which shards the rotation has yet to visit.
+Complete discovery does not imply completed execution: a listing carries pending outcomes.
+Staged merges retain original verdict times and inherited complete snapshots rather than claiming
+a fresh population. Incompatible source locations are reported separately from retired identities.
 
 
 <hr/>

@@ -53,6 +53,7 @@ fn merge_at<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler, now: Option
     report_merge(host, args, &merged, styler)?;
 
     if let Some(report) = merged.report.as_ref() {
+        crate::merge::validate_output_size(report)?;
         if let Some(path) = args.json_report.as_ref() {
             crate::elements::write_json(report, path)?;
             writeln!(host.error(), "{} {}", styler.verb("Wrote"), encode_controls(path.as_str()))?;
@@ -277,11 +278,13 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
     if merged.unchecked > 0 {
         writeln!(
             stream,
-            "{} withdrawals unchecked for {}: no input supplied a complete population",
+            "{} withdrawals unchecked for {}: no input supplied a complete population for their discovery context",
             styler.verb("Note"),
             quantity(merged.unchecked, "file")
         )?;
     }
+
+    report_population(&mut stream, merged, styler)?;
 
     if let Some(count) = merged.shard_count {
         writeln!(
@@ -326,6 +329,32 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
     Ok(())
 }
 
+fn report_population(stream: &mut impl Write, merged: &crate::merge::Merged, styler: Styler) -> crate::Result<()> {
+    if let Some(scope) = merged
+        .report
+        .as_ref()
+        .and_then(|report| report.config.as_ref())
+        .and_then(|config| config.population.as_ref())
+        .and_then(crate::elements::Population::known)
+    {
+        if scope.reductions.contains("unknownScope") {
+            writeln!(
+                stream,
+                "{} legacy or unsupported population metadata cannot authorize retirement",
+                styler.verb("Note")
+            )?;
+        }
+        if scope.contexts.len() > 1 {
+            writeln!(
+                stream,
+                "{} incompatible discovery contexts cannot retire each other's observations",
+                styler.verb("Note")
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
@@ -355,6 +384,7 @@ mod tests {
         Report {
             files,
             config: Some(RunInfo {
+                population: Some(fixtures::population(false)),
                 started_at: 100 + u64::from(index),
                 mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
                 merged: false,
@@ -385,6 +415,7 @@ mod tests {
         Report {
             files,
             config: Some(RunInfo {
+                population: Some(fixtures::population(true)),
                 started_at,
                 mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
                 merged: false,
@@ -736,6 +767,7 @@ mod tests {
         let mut prior = unsharded_report(100, "aaa", 1, "Killed");
 
         prior.config.as_mut().expect("config").merged = true;
+        prior.config.as_mut().expect("config").population = None;
         write_report(&input, &prior);
         let args = MergeArgs {
             inputs: vec![input],
@@ -800,6 +832,7 @@ mod tests {
         Report {
             files,
             config: Some(RunInfo {
+                population: None,
                 started_at: 100,
                 mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
                 merged: false,

@@ -470,6 +470,7 @@ mod tests {
             &mut host,
             &args,
             &Plan {
+                population: None,
                 skipped: Vec::new(),
                 digests: crate::HashMap::default(),
                 root,
@@ -617,6 +618,7 @@ mod tests {
     /// A plan holding only the root, which is all the removal loop reads out of one.
     fn plan_at(root: &Utf8PathBuf) -> Plan {
         Plan {
+            population: None,
             skipped: Vec::new(),
             digests: crate::HashMap::default(),
             root: root.clone(),

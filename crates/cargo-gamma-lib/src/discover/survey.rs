@@ -8,6 +8,7 @@ use core::mem;
 use core::num::NonZero;
 use core::panic::AssertUnwindSafe;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::panic::{catch_unwind, resume_unwind};
 use std::sync::{Barrier, Mutex, OnceLock, PoisonError};
@@ -25,6 +26,7 @@ use super::shard::shard_of;
 use super::{Diff, Plan, TargetFile, modules};
 use crate::cfg::{CfgSet, Cfgs, features};
 use crate::commands::{FeatureArgs, SelectArgs};
+use crate::elements::{Scope, SelectionKind};
 use crate::error::{Error, error};
 use crate::exec::CargoOptions;
 use crate::model::{Channel, Interner, Mutant, MutantId, Outcome, Suppression};
@@ -97,6 +99,8 @@ fn plan_survey(survey: Survey, selection: &Selection, notify: &mut impl FnMut(&s
 /// everything before anything else can start.
 #[derive(Debug)]
 pub struct Survey {
+    /// Resolved shaping inputs, shared by run and list report construction.
+    population: Scope,
     /// Absolute path of the workspace root.
     pub root: Utf8PathBuf,
 
@@ -202,6 +206,8 @@ pub struct Survey {
 /// What scanning some part of the workspace yielded.
 #[derive(Debug, Default)]
 pub struct Scanned {
+    /// The scope actually used by this scan, including its successful complete files.
+    pub population: Option<Scope>,
     /// The mutants found, with ordinals already assigned to the live ones.
     pub mutants: Vec<Mutant>,
 
@@ -431,7 +437,7 @@ impl Survey {
         files.sort_by(|left, right| left.path.cmp(&right.path));
         normalize_file_lists(&mut declaration_files, &mut exclusion_files);
 
-        let cfgs = configuration(&root, cargo, &enabled);
+        let (cfgs, cfg_evidence) = configuration(&root, cargo, &enabled);
         validate_trait_exclusions(&args.exclude_trait_impls, &exclusion_files, &cfgs)?;
 
         // The diff names files; only the workspace can say which files those are. Resolving it
@@ -459,7 +465,17 @@ impl Survey {
             by_package.entry(file.package.clone()).or_default().push(position);
         }
 
+        let population = population_scope(args, cargo, &root, &selected, &specs, &enabled, cfg_evidence.as_deref());
+        let mut population = selection_scope(&population, &args.selection()?);
+        if diff.is_some() {
+            population.selection = SelectionKind::Diff;
+            let _ = population.reductions.insert("diff".to_owned());
+        }
+        if shard.is_some() {
+            let _ = population.reductions.insert("shard".to_owned());
+        }
         Ok(Self {
+            population,
             root,
             target,
             files,
@@ -537,6 +553,16 @@ impl Survey {
     /// Restricts discovery to the exact mutant identities named by an earlier report.
     pub fn retain_only(&mut self, mutants: HashSet<MutantId>) {
         self.only_mutants = Some(mutants);
+        self.population.selection = SelectionKind::ExactIds;
+        let _ = self.population.reductions.insert("exactIds".to_owned());
+    }
+
+    /// Restricts discovery to previously surviving identities, without adopting their verdicts.
+    pub(crate) fn retain_survivors(&mut self, mutants: HashSet<MutantId>) {
+        self.retain_only(mutants);
+        self.population.selection = SelectionKind::Survivors;
+        let _ = self.population.reductions.remove("exactIds");
+        let _ = self.population.reductions.insert("survivors".to_owned());
     }
 
     /// The workspace packages that have files worth mutating, in a stable order.
@@ -559,6 +585,7 @@ impl Survey {
     // #[gamma::skip(all, reason = "a skeleton intentionally uses identity zero counts until discovery fills them; plan construction tests cover the completed values")]
     pub fn skeleton(&self) -> Plan {
         Plan {
+            population: Some(self.population.clone()),
             root: self.root.clone(),
             files: self.files.clone(),
             mutants: Vec::new(),
@@ -685,7 +712,15 @@ impl Survey {
             }
         }
 
+        let mut population = selection_scope(&self.population, selection);
+        if !skipped.is_empty() {
+            let _ = population.reductions.insert("unavailableAnalysis".to_owned());
+        }
+        if population.reductions.is_empty() {
+            population.complete_files = sources.keys().map(ToString::to_string).collect();
+        }
         Ok(Scanned {
+            population: Some(population),
             mutants,
             suppressed,
             idle,
@@ -701,6 +736,7 @@ impl Survey {
     #[must_use]
     pub fn into_plan(self, scanned: Scanned) -> Plan {
         let mut plan = Plan {
+            population: None,
             root: self.root,
             files: self.files,
             mutants: Vec::new(),
@@ -1057,14 +1093,14 @@ fn scan(
     let mut idle = Vec::new();
 
     for (index, parsed) in collected {
-        if files.get(index).is_some_and(|file| excluded.contains(&file.absolute)) {
-            continue;
+        if let Some(file) = files.get(index) {
+            let _replaced = sources.insert(file.path.clone(), parsed.source);
+            if excluded.contains(&file.absolute) {
+                continue;
+            }
+            let _replaced = digests.insert(file.path.clone(), parsed.digest);
         }
 
-        if let Some(file) = files.get(index) {
-            let _replaced = digests.insert(file.path.clone(), parsed.digest);
-            let _replaced = sources.insert(file.path.clone(), parsed.source);
-        }
         mutants.extend(parsed.mutants);
         suppressed += parsed.suppressed;
         idle.extend(parsed.idle);
@@ -1097,6 +1133,61 @@ fn scan(
         digests,
         sources,
     })
+}
+
+/// Describes discovery inputs without tying compatibility to a particular source generation.
+fn population_scope(
+    args: &SelectArgs,
+    cargo: &CargoOptions,
+    root: &Utf8Path,
+    selected: &HashSet<String>,
+    specs: &HashMap<String, (Utf8PathBuf, String)>,
+    enabled: &HashMap<String, Vec<String>>,
+    cfg_evidence: Option<&str>,
+) -> Scope {
+    let packages: BTreeMap<_, _> = specs.iter().filter(|(name, _)| selected.contains(*name)).collect();
+    let features: BTreeMap<_, BTreeSet<_>> = enabled.iter().map(|(name, features)| (name, features.iter().collect())).collect();
+    let opaque: BTreeMap<_, _> = [
+        ("profile", serde_json::json!(cargo.profile)),
+        ("cargoArgs", serde_json::json!(cargo.extra)),
+        ("rustflags", serde_json::json!(crate::discover::rustflags())),
+        ("buildSettings", serde_json::json!(crate::cfg::Build::settings(root))),
+        ("cfg", serde_json::json!(cfg_evidence)),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name, crate::elements::context_key(&value)))
+    .collect();
+    let mut scope = Scope::discovery(serde_json::json!({
+        "mutators": [],
+        "errors": [],
+        "idScheme": crate::model::MUTANT_ID_VERSION,
+        "packages": packages,
+        "features": features,
+        "files": args.files.iter().collect::<BTreeSet<_>>(),
+        "excludeFiles": args.exclude_files.iter().collect::<BTreeSet<_>>(),
+        "excludeTraitImpls": args.exclude_trait_impls.iter().collect::<BTreeSet<_>>(),
+        "opaque": opaque,
+    }));
+    if cfg_evidence.is_none() {
+        let _ = scope.reductions.insert("unresolvedCfg".to_owned());
+    }
+    scope
+}
+
+fn selection_scope(scope: &Scope, selection: &Selection) -> Scope {
+    let mut shaping = scope
+        .contexts
+        .values()
+        .next()
+        .expect("a survey has one resolved shaping record")
+        .clone();
+    shaping["mutators"] = serde_json::json!(selection.sorted());
+    // Error replacement order participates in mutant identity through the replacement index.
+    shaping["errors"] = serde_json::json!(selection.errors());
+    let mut resolved = Scope::discovery(shaping);
+    resolved.selection = scope.selection;
+    resolved.reductions.clone_from(&scope.reductions);
+    resolved
 }
 
 type DeclarationParse = (usize, Result<DeclarationOutcome>);
@@ -1713,14 +1804,14 @@ fn reachable_ids(edges: &[Vec<usize>], opaque: &[bool]) -> Vec<HashSet<usize>> {
 /// unconditional, which is exactly how the tool behaved before it evaluated predicates at all:
 /// nothing is stripped, and a user on an unusual toolchain gets a noisier report rather than a
 /// failed run.
-fn configuration(root: &Utf8Path, cargo: &CargoOptions, enabled: &HashMap<String, Vec<String>>) -> Cfgs {
+fn configuration(root: &Utf8Path, cargo: &CargoOptions, enabled: &HashMap<String, Vec<String>>) -> (Cfgs, Option<String>) {
     let build = cargo.cfg_build(root);
 
-    let Ok(target) = crate::cfg::for_build(&build) else {
-        return Cfgs::unconditional();
+    let Ok((target, evidence)) = crate::cfg::for_build_with_evidence(&build) else {
+        return (Cfgs::unconditional(), None);
     };
 
-    Cfgs::new(&target, enabled)
+    (Cfgs::new(&target, enabled), evidence)
 }
 
 /// Places a package's source file relative to the workspace root, refusing one that lies outside it.
@@ -3623,6 +3714,8 @@ mod tests {
             .expect("a file this tool cannot walk does not make the workspace unmeasurable");
 
         assert_eq!(scanned.skipped.len(), 1, "{:?}", scanned.skipped);
+        assert!(scanned.population.as_ref().unwrap().complete_files.is_empty());
+        assert!(scanned.population.as_ref().unwrap().reductions.contains("unavailableAnalysis"));
 
         let note = scanned.skipped.first().expect("one file was skipped");
 
@@ -3687,6 +3780,8 @@ mod tests {
         });
 
         assert_eq!(narrow.skipped, wide.skipped, "the same file must be reported either way");
+        assert!(narrow.population.as_ref().unwrap().complete_files.is_empty());
+        assert!(wide.population.as_ref().unwrap().complete_files.is_empty());
         assert_eq!(narrow.skipped.len(), 1, "{:?}", narrow.skipped);
 
         let note = narrow.skipped.first().expect("one file was skipped");
@@ -4365,6 +4460,8 @@ mod tests {
         assert_eq!(filtered.mutants.len(), 1, "{:?}", filtered.mutants);
         assert_eq!(filtered.mutants[0].id, wanted);
         assert_eq!(ordinals, 1);
+        assert!(filtered.population.as_ref().unwrap().complete_files.is_empty());
+        assert_eq!(filtered.population.as_ref().unwrap().selection, SelectionKind::ExactIds);
     }
 
     #[test]

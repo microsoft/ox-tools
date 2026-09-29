@@ -1809,6 +1809,7 @@ mod tests {
     /// A plan holding the given mutants and nothing else.
     fn stuck_plan(mutants: Vec<Mutant>) -> Plan {
         Plan {
+            population: None,
             skipped: Vec::new(),
             digests: crate::HashMap::default(),
             root: Utf8PathBuf::from("/workspace"),
@@ -2362,6 +2363,7 @@ mod tests {
         pending.package = mutating.to_owned().into();
 
         Plan {
+            population: None,
             skipped: Vec::new(),
             digests: crate::HashMap::default(),
             root: Utf8PathBuf::from("/w"),

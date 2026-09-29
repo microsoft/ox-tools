@@ -1514,6 +1514,7 @@ mod mutation_outcome_tests {
 
     fn plan(mutants: Vec<Mutant>) -> Plan {
         Plan {
+            population: None,
             root: Utf8PathBuf::from("root"),
             files: Vec::new(),
             mutants,

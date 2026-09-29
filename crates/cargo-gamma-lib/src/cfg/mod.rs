@@ -76,4 +76,6 @@ pub use cargo_gamma_engine::cfg::CfgSet;
 pub(crate) use cargo_gamma_engine::cfg::test_gated_for;
 #[doc(inline)]
 pub use cfgs::Cfgs;
+#[cfg(test)]
 pub(crate) use probe::for_build;
+pub(crate) use probe::for_build_with_evidence;

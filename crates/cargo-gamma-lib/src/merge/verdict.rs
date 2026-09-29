@@ -3,7 +3,7 @@
 
 //! One mutant's most recent verdict, and when it was earned.
 
-use crate::elements::MutantResult;
+use crate::elements::{MutantResult, PopulationOrigin};
 
 /// One mutant's most recent verdict, and when it was earned.
 ///
@@ -13,6 +13,8 @@ use crate::elements::MutantResult;
 /// merged document is built. The reports outlive the merge, which is what makes the borrow possible.
 #[derive(Debug, Clone)]
 pub(super) struct Verdict<'reports> {
+    /// Discovery authority, never inferred from the merged document's publication time.
+    pub(super) population: Option<PopulationOrigin>,
     /// The mutant as reported.
     pub(super) mutant: &'reports MutantResult,
 

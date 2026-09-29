@@ -2555,6 +2555,7 @@ mod tests {
         fs::create_dir_all(&target).expect("target");
         let work = unsettled(&base, &root, &target);
         let plan = crate::discover::Plan {
+            population: None,
             root: root.clone(),
             files: vec![TargetFile {
                 path: Utf8PathBuf::from("src/lib.rs"),

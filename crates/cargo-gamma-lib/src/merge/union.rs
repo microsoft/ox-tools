@@ -4,13 +4,16 @@
 //! The union that turns per-shard reports into one score.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ptr::from_ref;
 
 use super::merged::Merged;
 use super::status::{NEVER_RUN, scoring};
 use super::verdict::Verdict;
-use crate::elements::{FileResult, MergeProvenance, MutantResult, Report, RunInfo, SourceProvenance, VerdictProvenance};
+use crate::elements::{
+    FileResult, MergeProvenance, MutantResult, Observation, Population, PopulationAssertion, PopulationOrigin, Report, RunInfo, Scope,
+    SourceProvenance, VerdictProvenance,
+};
 use crate::model::{MUTANT_ID_VERSION, Scoring};
 
 /// Merges reports, keeping the most recent verdict per mutant ID.
@@ -52,6 +55,7 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
 
     let current = populations(&compatible, &mut lineages);
     let sources = sources(&compatible, &mut lineages);
+    let observations = observations(&compatible, &mut lineages);
 
     // Withdrawal is a fact about a mutant, not about the inputs that mentioned it. Counting a
     // sighting per input made ten nightly reports of the same three withdrawn ids read as thirty,
@@ -60,18 +64,9 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
     // otherwise become visible.
     let mut withdrawn: HashSet<&str> = HashSet::new();
 
-    out.unchecked = compatible
-        .iter()
-        .flat_map(|(_name, report)| report.files.keys())
-        .filter(|path| !current.contains_key(path.as_str()))
-        .collect::<HashSet<_>>()
-        .len();
-
     out.shard_count = rotation(&compatible);
 
     for (name, report) in compatible.iter().copied() {
-        let input_name = name.as_str();
-
         if let Some(shard) = report.config.as_ref().and_then(|config| config.shard) {
             let _ = out.shards_seen.insert(shard.index);
 
@@ -79,47 +74,46 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
                 out.inconsistent.push(name.clone());
             }
         }
-
-        for (path, file) in &report.files {
-            let Some(source) = sources.get(path.as_str()) else {
-                continue;
-            };
-            let (source_at, source_origin, source_lineage) = source_provenance(input_name, report, path, file, &mut lineages);
-
-            for mutant in &file.mutants {
-                // A file whose current population is known admits exactly the ids in it. When no
-                // input supplies a complete population, absence says nothing about whether the code
-                // still exists, so every id remains admissible.
-                if current.get(path.as_str()).is_some_and(|population| {
-                    !population.ids.contains(mutant.id.as_str())
-                        && rank(source_origin, source_at, &source_lineage)
-                            <= rank(population.origin, population.started_at, &population.lineage)
-                }) {
-                    let _ = withdrawn.insert(mutant.id.as_str());
-                    continue;
-                }
-
-                let (tested_at, origin, lineage) = verdict_provenance(input_name, report, mutant, &mut lineages);
-                let compatible = file.source == source.file.source && file.language == source.file.language;
-                retain(
-                    &mut latest,
-                    Candidate {
-                        mutant,
-                        path,
-                        tested_at,
-                        origin,
-                        lineage,
-                        compatible,
-                        source_rank: (source.started_at, source.origin, source.lineage.clone()),
-                    },
-                );
-            }
-        }
     }
+    let source_keys: HashMap<_, _> = sources.iter().map(|(&path, source)| (path, source_key(source.file))).collect();
+    let mut unchecked = HashSet::new();
+    for observation in &observations {
+        let path = observation.file.as_str();
+        let mutant = &observation.mutant;
+        let population = observation.verdict.population.as_ref();
+        let assertion = population.and_then(|origin| current.get(&(observation.file.clone(), origin.context.clone())));
+        if assertion.is_none() {
+            let _ = unchecked.insert(path);
+        }
+        if population.zip(assertion).is_some_and(|(origin, assertion)| {
+            !assertion.ids.contains(mutant.id.as_str()) && authority(&origin.discovered) <= authority(&assertion.discovered)
+        }) {
+            let _ = withdrawn.insert(mutant.id.as_str());
+            continue;
+        }
+        retain(
+            &mut latest,
+            Candidate {
+                population: population.cloned(),
+                mutant,
+                path,
+                tested_at: observation.verdict.started_at,
+                origin: &observation.verdict.origin,
+                lineage: observation.verdict.lineage.clone(),
+                compatible: source_keys.get(path).is_some_and(|key| *key == observation.source_key),
+                source_rank: (
+                    observation.source.started_at,
+                    &observation.source.origin,
+                    observation.source.lineage.clone(),
+                ),
+            },
+        );
+    }
+    out.unchecked = unchecked.len();
 
     let mut files: HashMap<&str, Vec<&Verdict<'_>>> = HashMap::new();
 
-    out.withdrawn = withdrawn.len();
+    out.withdrawn = withdrawn.iter().filter(|id| !latest.contains_key(**id)).count();
 
     // The dissenters are named in whatever order the inputs arrived in, and a shell glob chooses
     // that; sorting is what stops the same rotation reading differently on two machines.
@@ -156,8 +150,24 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
         files.entry(verdict.file).or_default().push(verdict);
     }
 
-    out.report = rebuild(&compatible, &sources, files);
+    out.report = rebuild(&compatible, &sources, files, current.into_values().collect());
+    remember_observations(out.report.as_mut(), observations);
     out
+}
+
+/// Stores original evidence without refreshing any of its timestamps.
+fn remember_observations(report: Option<&mut Report>, observations: Vec<Observation>) {
+    if let Some(config) = report.and_then(|report| report.config.as_mut()) {
+        for observation in &observations {
+            config.started_at = config
+                .started_at
+                .max(observation.verdict.started_at)
+                .max(observation.source.started_at);
+        }
+        if let Some(provenance) = &mut config.merge_provenance {
+            provenance.observations = Some(observations);
+        }
+    }
 }
 
 /// The mutant-identity scheme a report belongs to.
@@ -169,7 +179,9 @@ fn identity_version(report: &Report) -> u32 {
         .unwrap_or(MUTANT_ID_VERSION)
 }
 
+/// One original verdict considered alongside a source-compatible presentation.
 struct Candidate<'report> {
+    population: Option<PopulationOrigin>,
     mutant: &'report MutantResult,
     path: &'report str,
     tested_at: u64,
@@ -182,6 +194,7 @@ struct Candidate<'report> {
 /// Retains the newest verdict and the newest presentation that fits the selected source.
 fn retain<'report>(latest: &mut HashMap<&'report str, Verdict<'report>>, candidate: Candidate<'report>) {
     let Candidate {
+        population,
         mutant,
         path,
         tested_at,
@@ -195,6 +208,7 @@ fn retain<'report>(latest: &mut HashMap<&'report str, Verdict<'report>>, candida
     match entry {
         Entry::Vacant(slot) => {
             let _ = slot.insert(Verdict {
+                population,
                 mutant,
                 file: path,
                 tested_at,
@@ -227,6 +241,7 @@ fn retain<'report>(latest: &mut HashMap<&'report str, Verdict<'report>>, candida
                 };
 
                 let _ = slot.insert(Verdict {
+                    population,
                     mutant,
                     file,
                     tested_at,
@@ -275,22 +290,6 @@ fn verdict_rank<'name, 'lineage>(
     (status != NEVER_RUN, rank(name, tested_at, lineage))
 }
 
-/// The complete set of mutant ids each file currently admits, where an input says so.
-///
-/// Only an unsharded report can answer this: it lists every mutant of every file it covers, so an
-/// id it does not mention is an id the code no longer produces. A sharded report lists one slice of
-/// the population, and reading its silence as a withdrawal would erase most of the rotation.
-///
-/// Two unsharded reports with the same timestamp describe the same commit, so one is as good as the
-/// other; the tie is settled by [`rank`] rather than by which was named first, which is what keeps
-/// the population — and so the whole score — independent of the order the inputs were listed.
-struct Population<'report> {
-    started_at: u64,
-    origin: &'report str,
-    lineage: String,
-    ids: HashSet<&'report str>,
-}
-
 /// A file's source and language as one presentation unit.
 #[derive(Clone)]
 struct Source<'report> {
@@ -303,48 +302,124 @@ struct Source<'report> {
 fn populations<'report>(
     reports: &[&'report (String, Report)],
     lineages: &mut Lineages<'report>,
-) -> HashMap<&'report str, Population<'report>> {
-    let mut newest: HashMap<&str, Population<'_>> = HashMap::new();
+) -> HashMap<(String, String), PopulationAssertion> {
+    let mut newest = HashMap::new();
 
     for (name, report) in reports.iter().copied() {
-        if report.config.as_ref().is_some_and(|config| config.shard.is_some() || config.merged) {
+        let Some(scope) = scope(report) else { continue };
+        for assertion in &scope.assertions {
+            retain_assertion(&mut newest, assertion.clone());
+        }
+        let Some(context) = &scope.context else { continue };
+        if report.config.as_ref().is_some_and(|config| config.merged || config.shard.is_some()) {
             continue;
         }
-
-        let at = started_at(report);
-
-        for (path, file) in &report.files {
-            let ids: HashSet<&str> = file.mutants.iter().map(|mutant| mutant.id.as_str()).collect();
-
-            match newest.entry(path.as_str()) {
-                Entry::Vacant(slot) => {
-                    let _ = slot.insert(Population {
-                        started_at: at,
-                        origin: name,
-                        lineage: lineages.source(name, file),
-                        ids,
-                    });
-                }
-
-                Entry::Occupied(mut slot) => {
-                    let held = slot.get();
-
-                    let lineage = lineages.source(name, file);
-
-                    if rank(name, at, &lineage) > rank(held.origin, held.started_at, &held.lineage) {
-                        let _ = slot.insert(Population {
-                            started_at: at,
-                            origin: name,
-                            lineage,
-                            ids,
-                        });
-                    }
-                }
+        for path in &scope.complete_files {
+            if let Some(file) = report.files.get(path) {
+                retain_assertion(
+                    &mut newest,
+                    PopulationAssertion {
+                        file: path.clone(),
+                        context: context.clone(),
+                        ids: file.mutants.iter().map(|mutant| mutant.id.to_string()).collect(),
+                        discovered: SourceProvenance {
+                            started_at: started_at(report),
+                            origin: name.clone(),
+                            lineage: lineages.source(name, file),
+                        },
+                    },
+                );
             }
         }
     }
 
     newest
+}
+
+fn scope(report: &Report) -> Option<&Scope> {
+    report.config.as_ref()?.population.as_ref()?.known()
+}
+
+fn authority(provenance: &SourceProvenance) -> (u64, &str, &str) {
+    rank(&provenance.origin, provenance.started_at, &provenance.lineage)
+}
+
+fn retain_assertion(newest: &mut HashMap<(String, String), PopulationAssertion>, assertion: PopulationAssertion) {
+    let key = (assertion.file.clone(), assertion.context.clone());
+    if newest
+        .get(&key)
+        .is_none_or(|held| (authority(&assertion.discovered), &assertion.ids) > (authority(&held.discovered), &held.ids))
+    {
+        let _ = newest.insert(key, assertion);
+    }
+}
+
+fn population_origin(report: &Report, mutant: &MutantResult, started_at: u64, origin: &str, lineage: &str) -> Option<PopulationOrigin> {
+    let config = report.config.as_ref()?;
+    if let Some(provenance) = &config.merge_provenance {
+        return provenance.verdicts.get(mutant.id.as_str())?.population.clone();
+    }
+    Some(PopulationOrigin {
+        context: scope(report)?.context.clone()?,
+        discovered: SourceProvenance {
+            started_at,
+            origin: origin.to_owned(),
+            lineage: lineage.to_owned(),
+        },
+    })
+}
+
+fn source_key(file: &FileResult) -> String {
+    lineage(&[file.language.as_bytes(), file.source.as_bytes()])
+}
+
+/// Flattens and deduplicates original evidence; intermediate winners are not fresh observations.
+fn observations<'report>(reports: &[&'report (String, Report)], lineages: &mut Lineages<'report>) -> Vec<Observation> {
+    let mut all = BTreeMap::new();
+    for (name, report) in reports {
+        if let Some(retained) = report
+            .config
+            .as_ref()
+            .and_then(|config| config.merge_provenance.as_ref())
+            .and_then(|provenance| provenance.observations.as_ref())
+        {
+            for observation in retained {
+                let mut observation = observation.clone();
+                if scope(report).is_none() {
+                    observation.verdict.population = None;
+                }
+                let key = crate::elements::context_key(&serde_json::to_value(&observation).expect("typed observation is serializable"));
+                let _ = all.insert(key, observation);
+            }
+            continue;
+        }
+        for (path, file) in &report.files {
+            let (source_at, source_origin, source_lineage) = source_provenance(name, report, path, file, lineages);
+            let source_key = source_key(file);
+            for mutant in &file.mutants {
+                let (started_at, origin, lineage) = verdict_provenance(name, report, mutant, lineages);
+                let observation = Observation {
+                    file: path.clone(),
+                    source_key: source_key.clone(),
+                    source: SourceProvenance {
+                        started_at: source_at,
+                        origin: source_origin.to_owned(),
+                        lineage: source_lineage.clone(),
+                    },
+                    mutant: mutant.clone(),
+                    verdict: VerdictProvenance {
+                        population: population_origin(report, mutant, source_at, source_origin, &source_lineage),
+                        started_at,
+                        origin: origin.to_owned(),
+                        lineage,
+                    },
+                };
+                let key = crate::elements::context_key(&serde_json::to_value(&observation).expect("typed observation is serializable"));
+                let _ = all.insert(key, observation);
+            }
+        }
+    }
+    all.into_values().collect()
 }
 
 /// The shard count the merged rotation is measured against.
@@ -559,7 +634,12 @@ fn merged_not_built(reports: &[&(String, Report)]) -> Option<usize> {
 /// recent the winner is settled by [`rank`], the same tie-break the population used, so the source
 /// and the mutants rendered over it come from one coherent choice rather than from opposite ends of
 /// the argument list.
-fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, files: HashMap<&str, Vec<&Verdict<'_>>>) -> Option<Report> {
+fn rebuild(
+    reports: &[&(String, Report)],
+    sources: &HashMap<&str, Source<'_>>,
+    mut files: HashMap<&str, Vec<&Verdict<'_>>>,
+    assertions: Vec<PopulationAssertion>,
+) -> Option<Report> {
     let base = reports
         .iter()
         .max_by(|left, right| rank(&left.0, started_at(&left.1), "").cmp(&rank(&right.0, started_at(&right.1), "")))
@@ -568,10 +648,10 @@ fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, f
     let mut provenance = MergeProvenance::default();
     let mut newest = u64::MIN;
 
-    let merged_files = files
-        .into_iter()
-        .filter_map(|(path, mutants)| {
-            let source = sources.get(path)?;
+    let merged_files = sources
+        .iter()
+        .map(|(&path, source)| {
+            let mutants = files.remove(path).unwrap_or_default();
             let _ = provenance.sources.insert(
                 path.to_owned(),
                 SourceProvenance {
@@ -608,6 +688,7 @@ fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, f
                     let _ = provenance.verdicts.insert(
                         mutant.id.to_string(),
                         VerdictProvenance {
+                            population: verdict.population.clone(),
                             started_at: verdict.tested_at,
                             origin: verdict.origin.to_owned(),
                             lineage: verdict.lineage.clone(),
@@ -626,14 +707,14 @@ fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, f
                     .then(left.id.cmp(&right.id))
             });
 
-            Some((
+            (
                 path.to_owned(),
                 FileResult {
                     source: source.file.source.clone(),
                     language: source.file.language.clone(),
                     mutants,
                 },
-            ))
+            )
         })
         .collect();
 
@@ -645,6 +726,10 @@ fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, f
         .into_iter()
         .collect();
 
+    for assertion in &assertions {
+        newest = newest.max(assertion.discovered.started_at);
+    }
+    let population = merged_scope(reports, assertions);
     Some(Report {
         schema_version: base.schema_version.clone(),
         thresholds: base.thresholds,
@@ -652,6 +737,7 @@ fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, f
         framework: base.framework.clone(),
         files: merged_files,
         config: Some(RunInfo {
+            population: Some(Population::Known(population)),
             started_at: newest,
             mutant_id_version: Some(identity_version(base)),
             merged: true,
@@ -663,6 +749,22 @@ fn rebuild(reports: &[&(String, Report)], sources: &HashMap<&str, Source<'_>>, f
         }),
     })
 }
+
+fn merged_scope(reports: &[&(String, Report)], mut assertions: Vec<PopulationAssertion>) -> Scope {
+    assertions.sort_by(|left, right| (&left.file, &left.context).cmp(&(&right.file, &right.context)));
+    let mut population = Scope::merged();
+    for (_, report) in reports {
+        if let Some(scope) = scope(report) {
+            population.contexts.extend(scope.contexts.clone());
+            population.reductions.extend(scope.reductions.iter().cloned());
+        } else {
+            let _ = population.reductions.insert("unknownScope".to_owned());
+        }
+    }
+    population.assertions = assertions;
+    population
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,6 +774,146 @@ mod tests {
 
     /// One day, in seconds.
     const DAY: u64 = 86_400;
+
+    fn partial(mut report: Report, kind: crate::elements::SelectionKind) -> Report {
+        let Some(Population::Known(scope)) = report.config.as_mut().unwrap().population.as_mut() else {
+            panic!("fixture scope")
+        };
+        scope.selection = kind;
+        scope.complete_files.clear();
+        let _ = scope.reductions.insert("selectedSubset".to_owned());
+        report
+    }
+
+    fn with_shaping(mut report: Report, field: &str, value: serde_json::Value) -> Report {
+        let Some(Population::Known(scope)) = report.config.as_mut().unwrap().population.as_mut() else {
+            panic!("fixture scope")
+        };
+        let mut shaping = scope.contexts.values().next().unwrap().clone();
+        shaping[field] = value;
+        let key = crate::elements::context_key(&shaping);
+        scope.context = Some(key.clone());
+        scope.contexts = [(key, shaping)].into();
+        report
+    }
+
+    #[test]
+    fn subsets_cannot_retire_omitted_same_source_verdicts() {
+        for kind in [
+            crate::elements::SelectionKind::Survivors,
+            crate::elements::SelectionKind::Diff,
+            crate::elements::SelectionKind::ExactIds,
+        ] {
+            let full = report(None, 100, vec![mutant("killed", 1, "Killed"), mutant("survivor", 2, "Survived")]);
+            let subset = partial(report(None, 200, vec![mutant("survivor", 2, "Killed")]), kind);
+            let merged = merge(&[("full".to_owned(), full), ("subset".to_owned(), subset)], 300, None);
+            assert_eq!(merged.withdrawn, 0);
+            assert_eq!(merged.detected, 2);
+            let provenance = merged.report.unwrap().config.unwrap().merge_provenance.unwrap();
+            assert_eq!(provenance.verdicts["killed"].started_at, 100);
+            assert_eq!(provenance.verdicts["killed"].origin, "full");
+        }
+    }
+
+    #[test]
+    fn different_shaping_records_never_authorize_cross_context_retirement() {
+        for (field, value) in [
+            ("mutators", serde_json::json!(["another"])),
+            ("features", serde_json::json!({"subject": ["extra"]})),
+            ("cfg", serde_json::json!("changed")),
+            ("lib", serde_json::json!(true)),
+            ("noConstFns", serde_json::json!(true)),
+        ] {
+            let old = report(None, 100, vec![mutant("old", 1, "Survived")]);
+            let current = with_shaping(report(None, 200, vec![]), field, value);
+            let merged = merge(&[("old".to_owned(), old), ("current".to_owned(), current)], 300, None);
+            assert_eq!(merged.withdrawn, 0, "{field}");
+            assert_eq!(merged.valid, 1, "{field}");
+        }
+    }
+
+    #[test]
+    fn legacy_and_future_metadata_are_non_authoritative() {
+        for population in [None, Some(Population::Unknown(serde_json::json!({"version": 2})))] {
+            let old = report(None, 100, vec![mutant("old", 1, "Survived")]);
+            let mut current = report(None, 200, vec![]);
+            current.config.as_mut().unwrap().population = population;
+            let merged = merge(&[("old".to_owned(), old), ("current".to_owned(), current)], 300, None);
+            assert_eq!(merged.withdrawn, 0);
+            assert_eq!(merged.valid, 1);
+            assert!(scope(merged.report.as_ref().unwrap()).unwrap().reductions.contains("unknownScope"));
+        }
+    }
+
+    fn roundtrip(report: &Report) -> Report {
+        serde_json::from_str(&crate::elements::to_json(report).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn complete_empty_assertions_survive_staging_and_prevent_resurrection() {
+        let old = report(None, 100, vec![mutant("gone", 1, "Survived")]);
+        let empty = report(None, 200, vec![]);
+        let first = merge(&[("old".to_owned(), old.clone()), ("empty".to_owned(), empty)], 300, None);
+        assert_eq!(first.withdrawn, 1);
+        let staged = roundtrip(&first.report.unwrap());
+        assert!(staged.files["src/lib.rs"].mutants.is_empty());
+        let assertion = &scope(&staged).unwrap().assertions[0];
+        assert_eq!(assertion.discovered.started_at, 200);
+        assert_eq!(assertion.discovered.origin, "empty");
+        assert!(assertion.ids.is_empty());
+        let remerged = merge(&[("stage".to_owned(), staged), ("old".to_owned(), old)], 900, None);
+        assert_eq!(remerged.withdrawn, 1);
+        assert_eq!(remerged.valid, 0);
+        assert!(remerged.report.unwrap().files["src/lib.rs"].mutants.is_empty());
+    }
+
+    #[test]
+    fn bounded_permutations_and_roundtrip_staging_preserve_population_and_verdict_provenance() {
+        let cases = [
+            [
+                report(None, 100, vec![mutant("gone", 1, "Survived"), mutant("kept", 2, "Killed")]),
+                report(None, 200, vec![mutant("kept", 2, "Pending")]),
+                partial(
+                    report(None, 300, vec![mutant("kept", 2, "Survived")]),
+                    crate::elements::SelectionKind::Survivors,
+                ),
+            ],
+            // A verdict hidden by another context must be available if the winner's context retires it.
+            [
+                with_shaping(
+                    report(None, 100, vec![mutant("shared", 1, "Killed")]),
+                    "lib",
+                    serde_json::json!(true),
+                ),
+                report(None, 200, vec![mutant("shared", 1, "Survived")]),
+                report(None, 300, vec![]),
+            ],
+            // A newer partial presence is not the older verdict's discovery generation.
+            [
+                report(None, 100, vec![mutant("shared", 1, "Killed")]),
+                report(None, 200, vec![]),
+                partial(
+                    report(None, 300, vec![mutant("shared", 1, "Pending")]),
+                    crate::elements::SelectionKind::ExactIds,
+                ),
+            ],
+        ];
+        for reports in cases {
+            let inputs: Vec<_> = reports
+                .into_iter()
+                .enumerate()
+                .map(|(index, report)| (index.to_string(), report))
+                .collect();
+            let expected = rendered(&merge(&inputs, 500, None));
+            for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+                let ordered: Vec<_> = order.iter().map(|&index| inputs[index].clone()).collect();
+                assert_eq!(rendered(&merge(&ordered, 500, None)), expected);
+                let first = roundtrip(&merge(&ordered[..2], 500, None).report.unwrap());
+                let staged = merge(&[("stage".to_owned(), first), ordered[2].clone()], 900, None);
+                assert_eq!(rendered(&staged), expected, "{order:?}");
+            }
+        }
+    }
 
     /// Like [`report`], but with a chosen source text, so a test can tell which input a merged
     /// file's source was drawn from.
@@ -1340,6 +1582,7 @@ mod tests {
             let _ = provenance.verdicts.insert(
                 "aaa".to_owned(),
                 VerdictProvenance {
+                    population: None,
                     started_at: verdict_at,
                     origin: "verdict".to_owned(),
                     lineage: String::new(),
