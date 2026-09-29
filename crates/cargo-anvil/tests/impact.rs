@@ -55,7 +55,12 @@ fn generated_workspace() -> TempDir {
 
 fn just(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut command = Command::new("just");
-    command.current_dir(root).args(args);
+    command
+        .current_dir(root)
+        .args(args)
+        .env_remove("BASE_REF")
+        .env_remove("SYSTEM_PULLREQUEST_TARGETBRANCH")
+        .env_remove("GITHUB_BASE_REF");
     for (name, value) in env {
         command.env(name, value);
     }
