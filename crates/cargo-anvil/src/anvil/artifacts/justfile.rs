@@ -157,7 +157,7 @@ pub(crate) fn generated_header(path: &'static str, id: &'static str) -> Artifact
 }
 
 fn recipe_name(line: &str) -> Option<&str> {
-    if line.is_empty() || line.len() != line.trim_start().len() || line.starts_with('#') || line.starts_with('[') || line.contains(":=") {
+    if line.len() != line.trim_start().len() || line.contains(":=") {
         return None;
     }
     let (head, _) = line.split_once(':')?;
@@ -188,15 +188,13 @@ pub(crate) fn template_sections(output_path: &'static str, source: &str, body: &
 
     let mut starts = Vec::with_capacity(recipe_headers.len());
     for (header, name) in recipe_headers {
-        let mut start = header;
-        while start > 0 {
-            let preceding = lines[start - 1].trim_end_matches(['\r', '\n']);
-            if preceding.is_empty() || preceding.starts_with('#') || preceding.starts_with('[') {
-                start -= 1;
-            } else {
-                break;
-            }
-        }
+        let start = lines[..header]
+            .iter()
+            .rposition(|line| {
+                let preceding = line.trim_end_matches(['\r', '\n']);
+                !(preceding.is_empty() || preceding.starts_with('#') || preceding.starts_with('['))
+            })
+            .map_or(0, |index| index + 1);
         starts.push((start, name));
     }
 
@@ -565,6 +563,54 @@ mod tests {
             line.strip_prefix(recipe)
                 .is_some_and(|suffix| suffix.starts_with(':') || suffix.starts_with(' '))
         })
+    }
+
+    #[test]
+    fn recipe_names_accept_only_generated_top_level_declarations() {
+        for line in [
+            "anvil-check:",
+            "_anvil-helper argument:",
+            "_install-tool name:",
+            "_check-tool name:",
+            "anvil-check_with-mixed_bytes:",
+        ] {
+            assert!(recipe_name(line).is_some(), "{line:?} must be recognized");
+        }
+        for line in [
+            "",
+            " anvil-indented:",
+            "# anvil-comment:",
+            "[private]:",
+            "anvil-variable := \"value\"",
+            "ordinary-recipe:",
+            "anvil-invalid!:",
+        ] {
+            assert_eq!(recipe_name(line), None, "{line:?} must not be recognized");
+        }
+    }
+
+    #[test]
+    fn setup_routing_classifies_every_supported_recipe_family() {
+        for name in [
+            "anvil-check-setup",
+            "anvil-check-validate-prereqs",
+            "anvil-tool-example",
+            "anvil-component-example",
+            "anvil-toolchain-example",
+            "_install-example",
+            "_check-example",
+            "_anvil-root-msrv",
+        ] {
+            assert!(is_setup_recipe(&format!("recipe:{name}")), "{name} must route to setup.just");
+        }
+        for id in [
+            "source:tools",
+            "recipe:anvil-check",
+            "recipe:_anvil-helper",
+            "recipe:anvil-setup-helper",
+        ] {
+            assert!(!is_setup_recipe(id), "{id} must remain outside setup.just");
+        }
     }
 
     #[test]

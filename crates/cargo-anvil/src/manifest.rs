@@ -634,6 +634,17 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
+    fn save_stops_when_the_legacy_manifest_cannot_be_retired() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(LEGACY_MANIFEST_FILE_NAME)).unwrap();
+
+        let err = sample_manifest().save(tmp.path()).unwrap_err();
+
+        assert!(err.to_string().contains("failed to retire legacy manifest"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
     fn save_then_load_round_trip() {
         let tmp = TempDir::new().unwrap();
         let m1 = sample_manifest();

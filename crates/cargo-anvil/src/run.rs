@@ -1269,6 +1269,40 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn member_region_conflict_honors_the_section_backend_gate() {
+        use crate::catalog::{CliMeta, RegionId};
+
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::member_region(RegionId::new("member"), "workspace = true\n"))
+            .with_artifact(Artifact::backend_file_section(
+                Backend::GitHub,
+                "crates/alpha/Cargo.toml",
+                "part",
+                "section",
+            ))
+            .build()
+            .unwrap();
+
+        let local = empty_workspace();
+        run_update(&catalog, &local_only(), local.path()).unwrap();
+
+        let github = empty_workspace();
+        let args = Cli {
+            backends: vec!["github".to_owned()],
+            no_backends: false,
+            ..local_only()
+        };
+        let error = run_update(&catalog, &args, github.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("conflict with managed-region host 'crates/alpha/Cargo.toml'"),
+            "{error}"
+        );
+    }
+
     /// `plan_removals` resolves the host's casing before deciding what to
     /// remove, so this must too. A lock that records `Deny.toml` for a file now
     /// spelled `deny.toml` still owns that region, and the same pass is about
