@@ -10,12 +10,13 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::error::error;
 
-/// A Cargo target's logical identity, independent of its executable path.
+/// Portable target identity within a named workspace package.
+///
+/// Package and target names accompany this identity in binary and test hints.
+/// Physical Cargo package IDs remain on executable artifacts, not persisted hints.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TargetIdentity {
-    /// Cargo's package ID in the source workspace.
-    pub package_id: String,
     /// Cargo target kinds, including library crate kinds.
     pub kind: Vec<String>,
     /// Target source root relative to the workspace.
@@ -56,7 +57,6 @@ pub(crate) fn test_inventory(metadata: &Metadata) -> Result<Vec<TestTarget>> {
             let source = target.src_path.strip_prefix(&metadata.workspace_root).unwrap_or(&target.src_path);
             targets.push(TestTarget {
                 identity: TargetIdentity {
-                    package_id: package.id.to_string(),
                     kind: target.kind.iter().map(ToString::to_string).collect(),
                     source: Utf8PathBuf::from(source.as_str().replace('\\', "/")),
                 },

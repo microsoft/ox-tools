@@ -5,6 +5,8 @@
 
 use cargo_metadata::{DependencyKind, Metadata};
 
+use crate::discover::test_target::is_library;
+
 /// The dev-dependencies that give a compile-fail harness away.
 ///
 /// Both drive rustc once per case and assert on what it says. Neither is detectable from the target
@@ -41,7 +43,7 @@ pub struct CompileFailTarget {
 /// is that it names a target precisely enough to act on, and a warning about the wrong one is worse
 /// than none: `--exclude-test` takes a target out of the oracle, so acting on a bad name silently
 /// narrows what can convict a mutant.
-pub(super) fn compile_fail_targets(metadata: &Metadata) -> Vec<CompileFailTarget> {
+pub(super) fn compile_fail_targets(metadata: &Metadata, library_only: bool) -> Vec<CompileFailTarget> {
     let mut found = Vec::new();
 
     for package in metadata.workspace_packages() {
@@ -55,7 +57,11 @@ pub(super) fn compile_fail_targets(metadata: &Metadata) -> Vec<CompileFailTarget
             continue;
         };
 
-        for target in package.targets.iter().filter(|target| target.test) {
+        for target in package
+            .targets
+            .iter()
+            .filter(|target| target.test && (!library_only || is_library(target)))
+        {
             let Ok(source) = std::fs::read_to_string(&target.src_path) else {
                 continue;
             };

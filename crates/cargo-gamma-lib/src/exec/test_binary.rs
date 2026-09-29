@@ -110,7 +110,7 @@ impl TestBinary {
             }
     }
 
-    /// Associates a scratch artifact with the source workspace's declared target.
+    /// Associates a scratch artifact with its declared, workspace-relative target.
     pub(crate) fn identify(&mut self, targets: &[TestTarget], plan: &Plan, root: &Utf8Path) -> crate::Result<()> {
         if targets.is_empty() {
             return Ok(());
@@ -286,7 +286,6 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
                 .unwrap_or_default();
 
             let identity = target_source.as_ref().map(|source| TargetIdentity {
-                package_id: package_id.clone(),
                 kind: message
                     .get("target")
                     .and_then(|target| target.get("kind"))
@@ -1975,7 +1974,6 @@ mod tests {
         let _ = plan.specs.insert("subject".to_owned(), ("subject".into(), "0.1.0".to_owned()));
         let declared = |kind: &str, source: &str| TestTarget {
             identity: TargetIdentity {
-                package_id: "path+file:///checkout/subject#subject@0.1.0".to_owned(),
                 kind: vec![kind.to_owned()],
                 source: source.into(),
             },
@@ -2004,7 +2002,10 @@ mod tests {
         assert!(!binary.matches_hint("subject", "same", Some(&targets[1].identity)));
         assert!(!binary.matches_hint("different", "same", Some(&targets[0].identity)));
         binary.path = "/artifacts/rebuilt-executable".into();
+        binary.package_id = "path+file:///different-checkout/subject#subject@0.2.0".to_owned();
         assert!(binary.matches_hint("subject", "same", Some(&targets[0].identity)));
+        let encoded = serde_json::to_string(&binary.identity).unwrap();
+        assert!(!encoded.contains("checkout"), "{encoded}");
         binary.identify(&targets[..1], &plan, root).unwrap();
         assert!(binary.matches_hint("subject", "same", None));
         binary.target = "not-declared".to_owned();

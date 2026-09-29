@@ -226,6 +226,8 @@ final harness compilation, nextest inventory, baseline, census, sweep and confir
 pass-through target selectors cannot contradict it, and package selectors cannot bypass the
 eligibility check.
 
+### Mutation source selection
+
 The source engine parses Rust for structure and spans but rewrites the original bytes rather than
 pretty-printing an AST. Textual rewriting preserves comments, formatting, macros, and literal
 spelling. Byte-accurate spans are therefore part of the correctness model, not merely an
@@ -382,8 +384,8 @@ meaningful only when its excluded population remains visible.
 
 Workspace packages are handled in dependency order so that failures are localized and useful work
 can progress without waiting for one global rollback loop. A final workspace build applies Cargo's
-real feature unification and produces the test binaries. Example and benchmark targets are not
-built: cargo-gamma does not execute them, so they are not part of its compilation oracle.
+real feature unification and produces the test binaries. Ordinary mode follows Cargo's test-target
+selection, including example or benchmark targets explicitly marked `test = true`.
 
 Ordinary pristine validation uses `cargo check --tests --keep-going`. Library-only validation
 uses a full `cargo test --no-run --lib` over eligible roots: `check --lib` would not validate

@@ -86,15 +86,18 @@ or diagnostic-free isolation builds: each counted round is one aggregate invocat
 returned compiler diagnostics authorize withdrawal. The final library build retains preflight's
 package feature scope rather than performing optional target-name narrowing.
 
-Artifacts carry target kinds and workspace-relative source roots and are associated with metadata
-before any execution. That association preserves the source-workspace Cargo package identity
-across scratch rebuilds. Nextest inventories the final build's package roots with `--lib`, even
+Artifacts retain Cargo package IDs and carry target kinds and workspace-relative source roots.
+They are associated with metadata before any execution. Persisted hint identities combine package
+and target names with kind and relative source root, without recording checkout-specific package
+IDs or executable paths. Nextest inventories the final build's package roots with `--lib`, even
 when linkage or oracle-package filtering omits some built binaries from execution.
 
 Killer and generalized binary hints optionally carry the complete logical identity. Legacy
 package/name hints are admitted only when the declared inventory contains one matching test
 target, including targets excluded from the current oracle. All hints remain fresh checked
 probes, never verdict reuse. Custom harnesses bypass libtest enumeration.
+Identity-enriched hints remain readable alongside legacy name-only hints by this reader;
+older readers that reject the additional identity field cannot consume them.
 
 The effective target policy is part of the population shaping record and its canonical key.
 It also participates in build/execution cache policy and test-selection terms. Diagnostic binary

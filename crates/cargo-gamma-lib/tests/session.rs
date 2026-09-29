@@ -600,9 +600,15 @@ fn promote_hints(dir: &TempDir) -> (i32, String) {
 }
 
 fn read_diagnostics(dir: &TempDir) -> serde_json::Value {
-    serde_json::from_str(&fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-diagnostics.json")).unwrap()).unwrap()
+    let text = fs::read_to_string(dir.path().join("target/cargo-gamma/gamma-diagnostics.json"))
+        .expect("the measured campaign publishes diagnostics");
+    serde_json::from_str(&text).expect("the published diagnostics are JSON")
 }
 
+#[expect(
+    clippy::unnecessary_debug_formatting,
+    reason = "Debug quotes and escapes paths as Rust source string literals"
+)]
 fn library_only_campaign(nextest: bool) {
     let dir = workspace("pub fn greater(left: i32, right: i32) -> bool { left > right }\n");
     let library_marker = dir.path().join("library-launches");
@@ -624,8 +630,8 @@ mod tests {{
 }}
 "#
     );
-    fs::write(dir.path().join("src/lib.rs"), source).unwrap();
-    fs::create_dir(dir.path().join("tests")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), source).expect("write fixture library");
+    fs::create_dir(dir.path().join("tests")).expect("create fixture tests");
     fs::write(
         dir.path().join("tests/subject.rs"),
         format!(
@@ -634,13 +640,13 @@ mod tests {{
 "#
         ),
     )
-    .unwrap();
-    fs::create_dir(dir.path().join("src/bin")).unwrap();
+    .expect("write integration fixture");
+    fs::create_dir(dir.path().join("src/bin")).expect("create fixture binaries");
     fs::write(
         dir.path().join("src/bin/excluded.rs"),
         "compile_error!(\"excluded binary must not compile\"); fn main() {}",
     )
-    .unwrap();
+    .expect("write excluded binary fixture");
     let mut options = vec![
         "--lib",
         "--mutators",
@@ -657,11 +663,11 @@ mod tests {{
     assert_eq!(code, EXIT_OK, "{output}");
     assert!(output.contains("1 killed"), "{output}");
     assert!(!integration_marker.exists());
-    let launches = fs::read_to_string(&library_marker).unwrap();
+    let launches = fs::read_to_string(&library_marker).expect("the library test writes its execution marker");
     assert!(launches.lines().any(str::is_empty), "baseline/confirmation: {launches}");
     assert!(launches.lines().any(|line| !line.is_empty()), "mutant execution: {launches}");
     let diagnostics = read_diagnostics(&dir);
-    let binaries = diagnostics["binaries"].as_array().unwrap();
+    let binaries = diagnostics["binaries"].as_array().expect("diagnostics contain a binary inventory");
     assert!(!binaries.is_empty(), "{diagnostics}");
     for binary in binaries {
         assert_eq!(binary["targetKind"], serde_json::json!(["lib"]), "{binary}");
@@ -672,7 +678,7 @@ mod tests {{
         dir.path().join("tests/subject.rs"),
         "compile_error!(\"excluded integration must not compile\");",
     )
-    .unwrap();
+    .expect("break the excluded integration target");
     let (code, output) = session(&dir, &options);
     assert_eq!(code, EXIT_OK, "{output}");
     assert!(!integration_marker.exists());
@@ -892,15 +898,40 @@ fn configured_library_policy_and_cli_listing_share_population_context() {
 fn library_only_supports_cargos_library_crate_kinds() {
     step_aside_if_nested!();
     for kind in ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"] {
-        let dir = workspace("fn greater(x: i32, y: i32) -> bool { x > y }\n#[test] fn check() { assert!(greater(2, 1)); }");
+        let dir = workspace("pub fn greater(x: i32, y: i32) -> bool { x > y }\n");
         let manifest = fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            format!("{manifest}\n[workspace]\nmembers = [\"oracle\"]\n"),
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("oracle/src")).unwrap();
         let setting = if kind == "proc-macro" {
             "proc-macro = true".to_owned()
         } else {
             format!("crate-type = [{kind:?}]")
         };
-        fs::write(dir.path().join("Cargo.toml"), format!("{manifest}\n[lib]\n{setting}\n")).unwrap();
-        let (code, output) = session(&dir, &["--lib", "--mutators", "relational.gt_to_eq", "--incremental", "no"]);
+        fs::write(dir.path().join("oracle/Cargo.toml"), format!(
+            "[package]\nname = \"oracle\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nsubject = {{ path = \"..\" }}\n[lib]\n{setting}\n")).unwrap();
+        fs::write(
+            dir.path().join("oracle/src/lib.rs"),
+            "#[test] fn check() { assert!(subject::greater(2, 1)); }\n",
+        )
+        .unwrap();
+        let (code, output) = session(
+            &dir,
+            &[
+                "--lib",
+                "--package",
+                "subject",
+                "--test-package",
+                "oracle",
+                "--mutators",
+                "relational.gt_to_eq",
+                "--incremental",
+                "no",
+            ],
+        );
         assert_eq!(code, EXIT_OK, "{kind}: {output}");
         assert!(output.contains("1 killed"), "{kind}: {output}");
         assert!(
@@ -932,14 +963,14 @@ fn library_only_convergence_attributes_only_reported_sibling_errors_and_honors_b
             .unwrap();
             fs::write(
                 dir.path().join(name).join("src/lib.rs"),
-                r#"
+                r"
 pub trait Value {}
 impl Value for () {}
 #[cfg(not(test))]
 impl Default for &'static dyn Value { fn default() -> Self { &() } }
 pub fn value() -> Option<&'static dyn Value> { None }
 #[test] fn original() { assert!(value().is_none()); }
-"#,
+",
             )
             .unwrap();
         }
@@ -1103,6 +1134,47 @@ fn library_only_never_compiled_binary_candidates_remain_not_built() {
     assert_eq!(mutants.len(), 1, "{report}");
     assert_eq!(mutants[0]["status"], "Ignored", "{report}");
     assert!(mutants[0]["statusReason"].as_str().unwrap().starts_with("not built:"), "{report}");
+}
+
+#[test]
+fn library_only_legacy_hints_require_unambiguous_declared_targets() {
+    step_aside_if_nested!();
+    for ambiguous in [false, true] {
+        let dir = workspace("pub fn greater(x: i32, y: i32) -> bool { x > y }\n#[test] fn ordering() { assert!(greater(2, 1)); }\n");
+        if ambiguous {
+            fs::create_dir(dir.path().join("tests")).unwrap();
+            fs::write(dir.path().join("tests/subject.rs"), "compile_error!(\"excluded integration\");").unwrap();
+        }
+        let mut host = Sink::default();
+        assert_eq!(
+            run(
+                &mut host,
+                vec![
+                    "gamma",
+                    "list",
+                    "mutants",
+                    "--json",
+                    "--mutators",
+                    "relational.gt_to_eq",
+                    "--dir",
+                    dir.path().to_str().unwrap()
+                ]
+            ),
+            EXIT_OK
+        );
+        let mutants: serde_json::Value = serde_json::from_str(&host.out()).unwrap();
+        let id = mutants[0]["id"].as_str().unwrap();
+        fs::write(dir.path().join("gamma-hints.yaml"), format!(
+            "version: 3\ntool: cargo-gamma 0.2.1\ncontext:\n  repo_sha: '0000000000000000000000000000000000000000'\n  generated_on: '2026-09-29'\nfiles:\n- path: src/lib.rs\n  killers:\n  - package: subject\n    target: subject\n    test: ordering\n  mutants:\n  - id: '{id}'\n    killer: 0\n"
+        )).unwrap();
+        let (code, out, err) = session_on_with(Sink::default(), &dir, &["--lib", "--mutators", "relational.gt_to_eq"], false);
+        let output = format!("{out}{err}");
+        assert_eq!(code, EXIT_OK, "{output}");
+        assert!(output.contains("1 killed"), "{output}");
+        let diagnostics = read_diagnostics(&dir);
+        let probes = diagnostics["phases"]["sweep"]["exactProbes"].as_u64().unwrap();
+        assert_eq!(probes, u64::from(!ambiguous), "{diagnostics}");
+    }
 }
 
 #[test]

@@ -23,7 +23,7 @@ use super::compile_fail::{CompileFailTarget, compile_fail_targets};
 use super::glob::{Glob, normalize_separators};
 use super::killers::Killers;
 use super::shard::shard_of;
-use super::{Diff, Plan, TargetFile, TestTarget, is_library, modules, test_inventory};
+use super::{Diff, Plan, TargetFile, TestTarget, modules, test_inventory};
 use crate::cfg::{CfgSet, Cfgs, features};
 use crate::commands::{FeatureArgs, SelectArgs};
 use crate::elements::{Scope, SelectionKind};
@@ -488,7 +488,7 @@ impl Survey {
             selected: sorted(selected),
             tests: test_targets(&metadata),
             targets: test_inventory(&metadata)?,
-            compile_fail: compile_fail_targets(&metadata),
+            compile_fail: compile_fail_targets(&metadata, cargo.lib),
             roots,
             specs,
             cfgs,
@@ -2103,7 +2103,10 @@ fn is_mutable_target(target: &Target, enabled: Option<&Vec<String>>) -> bool {
     }
 
     // #[gamma::skip(iter.any_to_all, reason = "Cargo metadata gives a target one primary kind; any and all are therefore identical for the accepted-kind predicate")]
-    let kind = is_library(target) || target.is_bin();
+    let kind = target
+        .kind
+        .iter()
+        .any(|kind| matches!(kind, TargetKind::Lib | TargetKind::RLib | TargetKind::CDyLib | TargetKind::Bin));
 
     // Library targets carry no `required-features` — cargo rejects a manifest that gives them
     // any — so this is the binary gate and nothing else.

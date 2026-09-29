@@ -782,6 +782,11 @@ impl Workspace {
     ///
     /// Returns an error if nextest is not installed or cannot read the tree.
     pub(super) fn capture_nextest_list(&self, binaries: &[TestBinary]) -> Result<String> {
+        if self.cargo.lib && self.library_inventory.is_empty() {
+            return Err(error!(
+                "cannot run `cargo nextest list --lib`: the library harness build supplied no package inventory"
+            ));
+        }
         let command = self.nextest_list_command(binaries);
 
         self.capture(command, "cargo nextest list")
@@ -3964,6 +3969,14 @@ mod tests {
         );
         assert!(args.windows(2).any(|pair| pair == ["--package", "leaf-id"]));
         assert!(args.windows(2).any(|pair| pair == ["--package", "enabler-id"]));
+    }
+
+    #[test]
+    fn library_nextest_refuses_missing_roots_before_launching_cargo() {
+        let mut work = unsettled_default();
+        work.cargo.lib = true;
+        let error = work.capture_nextest_list(&[]).unwrap_err();
+        assert!(error.to_string().contains("no package inventory"), "{error}");
     }
 
     /// The default cache directory's name is a cross-release contract, not a private detail.

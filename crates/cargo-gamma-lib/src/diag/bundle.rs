@@ -907,7 +907,7 @@ fn binaries_of(session: &Session, redaction: Redaction) -> Vec<Binary> {
         .map(|binary| Binary {
             package: redaction.apply(&binary.package),
             target: redaction.apply(&binary.target),
-            package_id: binary.identity.as_ref().and_then(|identity| redaction.apply(&identity.package_id)),
+            package_id: redaction.apply(&binary.package_id),
             target_kind: binary.identity.as_ref().map_or_else(Vec::new, |identity| identity.kind.clone()),
             target_source: binary
                 .identity
