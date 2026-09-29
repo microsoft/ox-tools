@@ -24,7 +24,7 @@ use cargo_gamma_lib::internals::ci::{self, Level};
 use cargo_gamma_lib::internals::discover::matches_glob;
 use cargo_gamma_lib::internals::estimate;
 use cargo_gamma_lib::internals::fix::{Edit, apply};
-use cargo_gamma_lib::internals::model::{Mutant, Outcome};
+use cargo_gamma_lib::internals::model::{MUTANT_ID_VERSION, Mutant, Outcome};
 use cargo_gamma_lib::internals::ops::collect::{Shape, collect};
 use cargo_gamma_lib::internals::ops::registry::Selection;
 use cargo_gamma_lib::internals::parse::SourceFile;
@@ -42,6 +42,15 @@ fn repository() -> Utf8PathBuf {
 
 /// Builds a report document holding one file's worth of mutants, for the merge tests.
 fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: &[(&str, &str)]) -> cargo_gamma_lib::internals::elements::Report {
+    let mut shaping = serde_json::json!({
+        "idScheme": MUTANT_ID_VERSION,
+        "mutators": ["fn_value.one"],
+        "packages": {"subject": ["", "0.0.0"]},
+        "features": {"subject": []},
+        "files": [], "excludeFiles": [], "opaque": {},
+    });
+    shaping.sort_all_objects();
+    let context = blake3::hash(&serde_json::to_vec(&shaping).unwrap()).to_hex().to_string();
     let json = serde_json::json!({
         "schemaVersion": "1.0",
         "thresholds": { "high": 80, "low": 60 },
@@ -49,6 +58,15 @@ fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: &[(&str, &st
         "config": {
             "startedAt": started_at,
             "shard": shard.map(|(index, count)| serde_json::json!({ "index": index, "count": count })),
+            "population": {
+                "version": 1,
+                "selection": "discovery",
+                "contexts": { context.clone(): shaping },
+                "context": context,
+                "completeFiles": if shard.is_none() { vec!["src/lib.rs"] } else { vec![] },
+                "reductions": if shard.is_some() { vec!["shard"] } else { vec![] },
+                "assertions": [],
+            },
         },
         "files": {
             "src/lib.rs": {
