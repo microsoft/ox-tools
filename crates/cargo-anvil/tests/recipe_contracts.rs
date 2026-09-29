@@ -729,30 +729,46 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
         String::from_utf8_lossy(&missing.stderr)
     );
 
-    let version = run(&["--evaluate", "cargo_unique_target_names_version"]);
-    assert!(
-        version.status.success(),
-        "reading the generated checker pin failed:\n{}",
-        String::from_utf8_lossy(&version.stderr)
-    );
-    let install = Command::new("cargo")
-        .args(["install", "--locked", "--debug", "--version"])
-        .arg(format!("={}", String::from_utf8_lossy(&version.stdout).trim()))
-        .arg("cargo-unique-target-names")
-        .arg("--root")
-        .arg(installation.path())
+    // The dev-dependency restores the checker's dependencies before tests run.
+    let build = Command::new("cargo")
+        .args(["build", "--locked", "--offline", "--package", "cargo-unique-target-names"])
+        .arg("--manifest-path")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../cargo-unique-target-names/Cargo.toml"))
         .arg("--target-dir")
         .arg(installation.path().join("target"))
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTDOCFLAGS")
         .output()
-        .expect("Cargo is required to provision the fixture's checker");
+        .expect("Cargo is required to build the fixture's checker");
     assert!(
-        install.status.success(),
-        "installing the fixture's checker failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&install.stdout),
-        String::from_utf8_lossy(&install.stderr)
+        build.status.success(),
+        "building the fixture's checker offline failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let binary_name = format!("cargo-unique-target-names{}", std::env::consts::EXE_SUFFIX);
+    let executable = installation.path().join("bin").join(&binary_name);
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    fs::copy(installation.path().join("target/debug").join(&binary_name), &executable).unwrap();
+    let version = Command::new(&executable)
+        .args(["unique-target-names", "--version"])
+        .output()
+        .expect("the fixture's checker was built and copied above");
+    assert!(
+        version.status.success(),
+        "the fixture's checker must report its version:\n{}",
+        String::from_utf8_lossy(&version.stderr)
+    );
+    let version = String::from_utf8(version.stdout).unwrap();
+    let version = version.trim().strip_prefix("cargo-unique-target-names ").unwrap();
+    // Model Cargo's registry-install catalogue without installing or downloading.
+    write(
+        &installation.path().join(".crates.toml"),
+        &format!(
+            "[v1]\n\"cargo-unique-target-names {version} (registry+https://github.com/rust-lang/crates.io-index)\" = [\"{binary_name}\"]\n"
+        ),
     );
 
     let clean = run(&["anvil-unique-target-names"]);
@@ -761,7 +777,7 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
         "the clean workspace must pass:\n{}",
         String::from_utf8_lossy(&clean.stderr)
     );
-    assert!(String::from_utf8_lossy(&clean.stdout).contains("All workspace targets uplift to their own path"));
+    assert!(String::from_utf8_lossy(&clean.stdout).contains(&cargo_unique_target_names::Outcome::Clean.render()));
 
     let original = root.join("crates/alpha/examples/alpha_basic.rs");
     let colliding = root.join("crates/alpha/examples/beta_basic.rs");

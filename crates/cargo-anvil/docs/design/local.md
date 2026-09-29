@@ -140,7 +140,7 @@ diff-scoped against the PR base; `scheduled-exhaustive` runs the
 full-workspace mutants recipe:
 
 ```just
-anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
+anvil-pr-fast: anvil-unique-target-names anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
                anvil-ensure-no-cyclic-deps anvil-ensure-no-default-features \
                anvil-doc-build anvil-readme-check anvil-spellcheck anvil-pr-title \
                anvil-deny anvil-audit anvil-udeps anvil-semver-check \
