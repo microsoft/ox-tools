@@ -500,6 +500,24 @@ mod tests {
     }
 
     #[test]
+    fn foreign_metadata_can_use_common_names_without_claiming_gamma_semantics() {
+        let report = read_text(
+            r#"{
+                "schemaVersion": "2",
+                "thresholds": { "high": 80, "low": 60 },
+                "framework": { "name": "another-producer" },
+                "config": {
+                    "startedAt": "2026-01-01T00:00:00Z",
+                    "population": { "meaning": "producer-specific" }
+                },
+                "files": {}
+            }"#,
+        )
+        .expect("the interchange schema does not reserve foreign configuration keys");
+        assert!(report.config.is_none());
+    }
+
+    #[test]
     fn repeated_ids_are_rejected_within_and_across_files() {
         for files in [
             r#""a.rs":{"source":"","language":"rust","mutants":[

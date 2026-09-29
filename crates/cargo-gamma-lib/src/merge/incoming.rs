@@ -87,7 +87,7 @@ impl TryFrom<Incoming> for Report {
         let config = incoming
             .config
             .map(|config| {
-                let recognized = framework.name == "cargo-gamma" || config.get("startedAt").is_some();
+                let recognized = framework.name == "cargo-gamma";
                 if recognized && config.get("population").is_some_and(|population| !population.is_object()) {
                     return Err(error!("malformed cargo-gamma report metadata: population must be an object").usage());
                 }
