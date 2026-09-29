@@ -50,7 +50,9 @@ fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: &[(&str, &st
         "files": [], "excludeFiles": [], "opaque": {},
     });
     shaping.sort_all_objects();
-    let context = blake3::hash(&serde_json::to_vec(&shaping).unwrap()).to_hex().to_string();
+    let context = blake3::hash(&serde_json::to_vec(&shaping).expect("JSON values contain only serializable JSON data"))
+        .to_hex()
+        .to_string();
     let json = serde_json::json!({
         "schemaVersion": "1.0",
         "thresholds": { "high": 80, "low": 60 },
