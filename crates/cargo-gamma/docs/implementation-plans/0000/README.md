@@ -28,7 +28,7 @@ separate abstraction for every name.
 | 2 | cargo-gamma: enable greater-than-to-equality mutation by default | [Relational mutation](02-relational-default.md) | None |
 | 3 | cargo-gamma: fail on unresolved flaky outcomes by default | [Flaky-result gate](03-flaky-gate.md) | Layer 1 provenance |
 | 4 | cargo-gamma: enforce library-only compilation and verdict targets | [Library targets](04-library-targets.md) | Layer 1 context |
-| 5 | cargo-gamma: support external Cargo artifacts with preserved Git context | [External artifacts](05-external-artifacts.md) | None |
+| 5 | cargo-gamma: support external Cargo artifacts with unchanged source handling | [External artifacts](05-external-artifacts.md) | None |
 | 6 | cargo-gamma: replay and explain exact mutant identities | [Exact replay](06-mutant-replay.md) | Layer 1 compatibility |
 | 7 | cargo-gamma: mutate const functions by default | [Const functions](07-const-functions.md) | Layers 1, 3, 4, 5, and 6 |
 
@@ -58,11 +58,13 @@ to the original report directory.
 | 08 | Flaky outcomes fail independently of the percentage score. | Layer 3, strict by default |
 | 09 | Optional no-match exclusions for reusable policies. | Current strict behavior accepted; no implementation |
 | 10 | Greater-than to equality is independently selectable. | Layer 2, also in `@default` |
-| 12 | Heavy Cargo artifacts can live outside the checkout without losing the selected checkout's build-time Git context. | Layer 5 |
+| 12 | Heavy Cargo artifacts can move outside the checkout without changing existing scratch-source/Git handling. | Layer 5 |
 
 No layer introduces `--iterate-from`, optional exclusions, a generalized
 unsupported-region inventory, or a const-specific public verdict vocabulary.
 No layer reuses historical test detections as new-run evidence.
+Layer 5 is artifact-only placement, not Git virtualization: no proxy, global Git
+redirection, or original-checkout root/dirty-state guarantees are introduced.
 
 ## Shared behavioral contracts
 
@@ -140,7 +142,7 @@ to code and to these plans.
 | 1 | Versioned scope, inherited completeness assertions, verdict provenance, bounded report reading, legacy unknown-state handling |
 | 3 | Lossless Gamma outcome decoding, effective confirmation policy, default flaky-gate evaluation |
 | 4 | Unambiguous test-target identity and one policy used by every Cargo/harness path |
-| 5 | Independently located artifacts, source-checkout Git context, owned scratch-generation rules |
+| 5 | Independently located artifacts, unchanged scratch-source/Git handling, owned state lookup |
 | 6 | All-or-nothing exact resolution and corroborated report-to-current-source matching |
 | 7 | Runtime/static execution routing without changing the public meaning of a mutant or verdict |
 
@@ -188,7 +190,7 @@ Do not leave a generated README different from its Rust documentation source.
 | A narrow report looks like a population snapshot | Layer 1 proves completeness and context compatibility explicitly. |
 | Repeated sites inherit another site's old ID | Layer 6 corroborates matches using enclosing-source context, not just IDs. |
 | Library-only fallback widens targets | Layer 4 tests every command-producing path with a forbidden integration target. |
-| Relocation changes Git metadata meaning | Layer 5 requires a mechanism proof against the actual metadata consumer. |
+| Artifact relocation changes source handling | Layer 5 compares equivalent Gamma runs without changing or proxying Git. |
 | Confirmation reruns a static mutant | Layer 7 uses an immutable baseline executable for unmutated confirmation. |
 | Runtime reach evidence hides a compile-time mutation | Layer 7 bypasses negative runtime-census conclusions for static candidates. |
 | Estimates omit const compilation | Layer 7 accounts for per-variant builds and serialized work without suppressing coverage. |
