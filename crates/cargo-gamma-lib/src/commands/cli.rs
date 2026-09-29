@@ -624,6 +624,7 @@ pub struct RunArgs {
     ///
     /// Uses current configuration and obtains fresh verdicts. Every requested historical site
     /// must still match; use explicit IDs to choose a valid subset after source changes.
+    /// A changed ID is a new mutant, even after formatting; report evidence never remaps IDs.
     #[arg(long, value_name = "PATH", help_heading = "Selecting what to mutate")]
     pub from_report: Option<Utf8PathBuf>,
 

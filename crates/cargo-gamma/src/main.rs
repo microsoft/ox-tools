@@ -175,9 +175,11 @@
 //! Replace the example IDs with IDs from your workspace. Every distinct requested ID must resolve
 //! before building; missing, stale, ambiguous or suppressed entries fail the whole request.
 //! Report-backed replay corroborates the enclosing source item, not just the ID: deleting a
-//! repeated site must not redirect an old occurrence ID. Separate test edits and unambiguous
-//! formatting or item motion can preserve correspondence. Choose an explicit valid subset after
-//! production changes rather than relying on silent intersection.
+//! repeated site must not redirect an old occurrence ID. Separate test edits, formatting and item
+//! motion can preserve correspondence only when the emitted ID remains unchanged. Scheme 5
+//! distinguishes `a+b` from `a + b`: a changed ID is a new mutant, with no fuzzy matching,
+//! fallback or remapping from report evidence. Rediscover and select the new ID, or choose an
+//! explicit valid subset after production changes rather than relying on silent intersection.
 //!
 //! Current configuration applies, and reports supply no fresh verdicts or executable settings.
 //! Without explicit CLI/configured mutators, exact lookup includes opt-in registry entries.
@@ -1636,7 +1638,7 @@
 //! SARIF rule identifiers are the stable mutator names, so GitHub's grouping and dismissal work per
 //! mutator: a team can permanently dismiss every `literal.int_zero` alert without touching anything
 //! else, and that decision keeps applying to code written next year. Results are fingerprinted by the
-//! content-addressed mutant ID, so an alert follows its code through reformatting instead of being
+//! content-addressed mutant ID, so an alert follows its code while that ID is unchanged instead of being
 //! dismissed and resurrected. The level is `note` by default, because a surviving mutant is an
 //! observation about the test suite rather than a defect in the code, and drowning the security tab is
 //! how a good signal gets turned off; `--sarif-level warning` raises it.

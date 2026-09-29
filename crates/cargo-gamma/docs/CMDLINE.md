@@ -49,6 +49,9 @@ not accepted. `run --from-report PATH` replays the entire named report populatio
 explicit IDs narrow it to a corroborated subset. All requested IDs must resolve before
 building: source drift never silently turns the request into its matching remainder.
 Exact requests conflict with survivor iteration, diff selection and sharding.
+A changed ID is a new mutant. For example, scheme 5 distinguishes `a+b` from `a + b`:
+replay of the old ID fails rather than mapping it to the new ID. Rediscover and explicitly
+select the new ID. Report-backed source matching only rejects unsafe same-ID retargeting.
 
 Use `explain ID --dir PATH` for current discovery, or `explain ID --report PATH` for
 historical embedded evidence without its checkout. Registry selectors such as

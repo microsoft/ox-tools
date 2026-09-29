@@ -879,7 +879,9 @@ whole population. A mutant ID instead derives from stable semantic context, incl
 - normalized source at the site;
 - occurrence and `replacement_index` where needed to distinguish repeated forms.
 
-Comments and insignificant inter-token whitespace do not move an identity; literal contents do.
+Normalization removes comments and collapses whitespace runs, but not every formatting edit
+preserves an identity: `a+b` and `a + b` have different normalized site text and different IDs.
+Literal contents remain identity-significant.
 The digest is rendered as twelve hex characters. The identity joins reports, shards, suppressions,
 SARIF findings, and incremental records.
 
@@ -902,8 +904,10 @@ reapplying its shard.
 Report-backed correspondence requires a Gamma producer, supported report schema, explicit
 current ID scheme, matching file/mutator/replacement, enclosing-item tokens and the site's
 position within those tokens.
-Comments, formatting and unambiguous item motion are normalized; unrelated test items do
-not affect correspondence. Changes within the enclosing body conservatively invalidate
+Corroboration normalizes comments, formatting and unambiguous item motion only after the same
+emitted ID resolves currently; unrelated test items do not affect that context. A changed ID
+is a new mutant, even when the source change is only formatting. Missing historical IDs never
+fall back to similar source, aliases or remapped IDs. Changes within the enclosing body conservatively invalidate
 history, including deletion of a repeated site whose occurrence index could be reused.
 The existing identity scheme is unchanged. Legacy reports remain explainable but cannot
 authorize replay without sufficient corroboration.

@@ -344,6 +344,38 @@ fn exact_report_replay_and_explanation_follow_the_producers_bom_columns() {
 }
 
 #[test]
+fn exact_replay_treats_formatting_that_changes_an_id_as_a_new_mutant() {
+    let dir = workspace("pub fn f(a: i32, b: i32) -> i32 { a+b }\n");
+    let (old, _, prior) = exact_report(&dir, "arith.add_to_sub");
+    assert_eq!(old.len(), 1);
+    fs::write(dir.path().join("src/lib.rs"), "pub fn f(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+    let (code, host) = invoke(&dir, &["list", "mutants", "--mutators", "arith.add_to_sub", "--json"]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let fresh: serde_json::Value = serde_json::from_str(&host.out()).unwrap();
+    let fresh_id = fresh[0]["id"].as_str().unwrap();
+    assert_ne!(old[0], fresh_id);
+    for args in [vec!["run", "--mutant-id", &old[0]], vec!["run", "--from-report", prior.as_str()]] {
+        let (code, host) = invoke(&dir, &args);
+        assert_eq!(code, EXIT_USAGE, "{}", host.err());
+        assert!(host.err().contains(&old[0]), "{}", host.err());
+        assert!(host.err().contains("unknown current mutant"), "{}", host.err());
+        assert!(!scratch_base(&dir).exists());
+    }
+    let (code, host) = invoke(&dir, &["run", "--from-report", prior.as_str(), "--mutant-id", fresh_id]);
+    assert_eq!(code, EXIT_USAGE, "{}", host.err());
+    assert!(host.err().contains("not present in the input report"), "{}", host.err());
+    let (code, host) = invoke(&dir, &["explain", &old[0], "--report", prior.as_str()]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    assert!(host.out().contains("original (embedded source): a+b"), "{}", host.out());
+    let (code, host) = invoke(&dir, &["run", "--dry-run", "--mutant-id", fresh_id]);
+    assert_eq!(code, EXIT_OK, "{}", host.err());
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.path().join("target/cargo-gamma/gamma-report.json")).unwrap()).unwrap();
+    assert_eq!(report["files"]["src/lib.rs"]["mutants"][0]["id"], fresh_id);
+    assert_eq!(report["config"]["population"]["exact"]["ids"], serde_json::json!([fresh_id]));
+}
+
+#[test]
 fn exact_historical_explanation_needs_no_checkout_and_does_not_claim_freshness() {
     let dir = workspace(EXACT_SOURCE);
     let (ids, mut report, path) = exact_report(&dir, "arith.add_to_sub");

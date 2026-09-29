@@ -20,6 +20,8 @@ previous report, and explain either current or historical findings.
 
 An ID is not a `--mutators` selector. Use complete IDs, never ordinal numbers or
 implicitly accepted prefixes.
+If an ID changes, it is a new mutant. There is no fuzzy matching, fallback,
+remapping or aliasing from a missing historical ID to a new ID.
 
 The report is a selection/evidence input, not a source of fresh verdicts and not
 an executable configuration file. Current effective package, feature, profile,
@@ -102,9 +104,12 @@ insufficient.
 
 Use a conservative enclosing-function/item token fingerprint to corroborate
 historical matches, with comments/formatting normalized consistently with the
-engine. Function-local changes can invalidate a report-backed match even when
-the smaller mutation-site ID remains unchanged. Test edits in separate test
-items and unambiguous line movement need not invalidate it.
+engine, only after the same emitted ID resolves currently. Function-local changes
+can invalidate a report-backed match even when the smaller mutation-site ID remains
+unchanged. Test edits in separate test items, formatting and unambiguous line movement
+need not invalidate it when they preserve the actual emitted identity. Scheme 5
+distinguishes `a+b` from `a + b`; that formatting change creates a new mutant.
+Corroboration only rejects unsafe same-ID retargeting and never bridges changed IDs.
 
 This specifically handles occurrence-index reuse: deleting the first of two
 identical sites may give the remaining site the removed site's old ID. A hash
@@ -165,7 +170,8 @@ commands.
 | Valid report with only some resolvable candidates | Whole-request failure before execution, not a silent subset. |
 | Opt-in catalog mutator without explicit preset restriction | ID is discoverable without guessing its family selector. |
 | Explicit conflicting mutator/file/package/suppression policy | Actionable conflict; no silent widening. |
-| Test-only edits and unambiguous formatting/line movement | Corroborated match remains usable. |
+| Test-only edits and formatting/line movement preserving the emitted ID | Corroborated match remains usable. |
+| Formatting changes `a+b` to `a + b`, changing the emitted ID | The old missing ID fails; rediscovery names a new mutant. No remapping. |
 | First of two identical sites deleted | Old occurrence IDs are not silently retargeted. |
 | Source changes after resolution | Synchronization check prevents execution of the wrong generation. |
 | Historical report with no current checkout | Explanation works from embedded evidence. |

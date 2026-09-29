@@ -52,6 +52,9 @@ containing item's tokens with module/implementation headers, and its token-index
 position. Sibling items do not participate. The containing body and site position prevent
 occurrence renumbering or different edit coalescing from redirecting historical selections.
 Exact lookup preserves ordinary coalescing and identity construction.
+Historical matching is restricted to the same emitted ID. Token/context correspondence only
+rejects unsafe retargeting; it never bridges changed IDs. Under scheme 5, `a+b` becoming
+`a + b` creates a new mutant even though the enclosing token context matches.
 
 `Survey` retains the resolved scan and its source digests for exact requests. Measurement
 validates those digests against the synchronized tree before preflight and consumes the

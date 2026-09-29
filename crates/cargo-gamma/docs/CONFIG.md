@@ -34,6 +34,7 @@ If neither CLI nor configuration explicitly names mutators, exact lookup searche
 registry; an explicit `mutators` value remains a constraint. Configured sharding conflicts with
 exact replay. Current-ID explanation resolves the same configuration; registry and historical
 explanation do not read it.
+Changed IDs identify new mutants; report evidence cannot remap them, including after formatting.
 
 `gamma.toml` in the directory being analyzed — so the workspace root for a workspace run, and
 `--dir` decides it otherwise.
