@@ -43,8 +43,8 @@ RUN apt-get update \
         libssl-dev pkg-config tar \
     && rm -rf /var/lib/apt/lists/*
 
-# pwsh is not optional: every generated anvil recipe is a `script("pwsh",
-# "-NoProfile")` recipe.
+# pwsh remains required by container orchestration and selected multi-step
+# checks, even though ordinary generated recipes are direct tool invocations.
 RUN curl -fsSLo /tmp/powershell.tar.gz \
         "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-x64.tar.gz" \
     && echo "${POWERSHELL_SHA256}  /tmp/powershell.tar.gz" | sha256sum -c - \

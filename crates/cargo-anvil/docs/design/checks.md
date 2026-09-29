@@ -67,7 +67,6 @@ flowchart LR
     pr_fast --> deny[deny]:::check
     pr_fast --> audit[audit]:::check
     pr_fast --> udeps[udeps]:::check
-    pr_fast --> semver_check[semver-check]:::check
     pr_fast --> external_types[external-types]:::check
     pr_fast --> aprz[aprz]:::check
 
@@ -116,7 +115,7 @@ jobs/stages. Locally, `just anvil-pr-slow` invokes those groups in order, and
 
 | Group              | OS scope                              | Purpose                                                                                                              |
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
+| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, and external-types compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
 | `pr-msrv`         | Same default as `pr-test`             | Affected-package all-target tests under the declared MSRV, in all-features and default-features configurations. The recipe is a no-op when no root MSRV is declared. |
 | `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
@@ -189,7 +188,6 @@ while paired prerequisite validation remains read-only.
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
-| `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
 | `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
 
 ### `pr-slow` umbrella
@@ -261,12 +259,20 @@ available.
 
 | Check     | Invocation                                                                  | Source |
 |-----------|-----------------------------------------------------------------------------|--------|
-| `mutants` | Resolves the base ref, writes `git diff <base>..HEAD` to a temporary unified-diff file, then runs `cargo mutants --in-diff <file> --no-shuffle --jobs 0`. Self-skips on aarch64-pc-windows-msvc where cargo-mutants doesn't build; other ARM legs run normally. | oxidizer-github |
+| `mutants` | Resolves the base ref, writes `git diff <base>` against the working tree to a temporary unified-diff file, then runs `cargo mutants --in-diff <file> --no-shuffle --jobs 0`. Self-skips on aarch64-pc-windows-msvc where cargo-mutants doesn't build; other ARM legs run normally. | oxidizer-github |
 
 The mutants check requires a base ref. Resolution precedence is `BASE_REF`,
 the ADO target branch, the GitHub base branch, then `origin/main`. Repositories
 whose default branch is not `main` set `BASE_REF` for local runs. GitHub passes
 `${{ github.event.pull_request.base.sha }}` explicitly.
+
+Both mutation recipes select `.cargo/mutants.<os>.toml` when it exists, using
+Just's native host OS name, and pass it through cargo-mutants' `--config` option.
+Otherwise they retain cargo-mutants' default configuration discovery. These are
+complete native configurations, not overlays or Cargo metadata. See
+[the rationale and configuration contract](./local.md#9-platform-specific-mutation-configuration):
+cargo-mutants can mutate source that the current platform compiles out, producing
+false `MISSED` results because no behavioral change reaches the tests.
 
 ### `scheduled-test`
 
@@ -366,7 +372,7 @@ What that means concretely:
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,
   `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
-  `udeps`, `semver-check`, `external-types`, `careful`, `loom`, `bolero`,
+  `udeps`, `external-types`, `careful`, `loom`, `bolero`,
   diff-scoped `mutants`.
 - **Run only in scheduled** -- the expensive whole-workspace work that doesn't fit a PR
   budget: the non-stacked miri profiles `miri-tree-borrows`, `miri-strict-provenance`,
@@ -407,7 +413,7 @@ Bucket assignments per check:
 | Bucket    | Checks                                                                                                                |
 |-----------|-----------------------------------------------------------------------------------------------------------------------|
 | modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features` |
-| affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `msrv-test`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
+| affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `msrv-test`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `external-types`, `bench` |
 | required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
 | unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck` |
 
@@ -431,25 +437,14 @@ template (`crates/README.j2` / `README.j2`) and the root `.spelling` dictionary 
 change to one of those would be silently scoped out. These ignore impact scoping and
 always run.
 
-The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
-is no collision with real package names. Recipes test for it with
-`$include -eq '--skip'` and exit 0 to keep the cloud-workflow job green while signalling that
-nothing in that tier needed to run.
-
-Impact and target discovery use three outcomes: work found, proven no work, and
-failure. Only the first two may continue successfully. Malformed impact tiers,
-unknown package names, failed Cargo metadata, unavailable PR metadata in a PR
-build, and failed tool discovery are errors; they never collapse to `--skip`.
-When cargo-delta reports a manifest directory leaf instead of a package or library
-name, Anvil accepts it only if it uniquely identifies one workspace package;
-missing or ambiguous aliases fail rather than silently dropping affected work.
-Advisory checks may report policy findings without failing, but failure to execute
-the advisory tool is still an operational error unless the baseline itself has become
-unusable because one of its dependency versions was subsequently yanked.
+Impact package files use three outcomes: a nonempty file means work was found,
+an empty file is a proven successful no-op, and a missing/malformed file is a
+failure. cargo-each consumes the canonical `name@version` lines directly, so
+recipes do not parse or reverse-map cargo-delta output.
 
 The recipe-side mechanics are in
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe). The cloud workflow-side wiring (the
-`anvil-impact` building block, how downstream jobs consume the include files) is in
+`anvil-impact` building block, how downstream jobs consume the package files) is in
 [github.md](./github.md#impact-scoping) and [ado.md](./ado.md#impact-scoping).
 
 Trade-off acknowledged: the risk cargo-delta introduces is that a misconfigured analysis
@@ -460,67 +455,3 @@ bias toward full runs whenever config changes; (2) `unscoped` checks (`deny`, `a
 `aprz`, `pr-title`, `mutants-full`) always run regardless of impact analysis;
 (3) scheduled always runs full-workspace, catching anything the PR-scoping missed within 24
 hours;
-
-## 6. Advisory PR comments
-
-Some checks surface findings that are informative for the reviewer but should not block
-the PR. The canonical example is `semver-check`: breaking changes between unreleased
-commits are normal, and forcing every breaking-API PR to bump the major version (or wait
-on a release) would push enforcement to the wrong moment in the lifecycle. The change is
-verifiable at release time, not per PR.
-
-The SemVer comparison is also inconclusive when `cargo-semver-checks` cannot materialize
-or build the target-branch baseline, for example because that baseline resolves a yanked
-dependency. Such an operational failure is reported in the same advisory comment and does
-not block the PR: a broken baseline is not evidence that the PR broke the public API, and
-blocking would prevent the PR that repairs the baseline from merging. This deliberately
-matches the repository's native `semver` job, whose comparison step uses
-`continue-on-error: true`. Failures in Anvil's own preflight (before invoking
-`cargo-semver-checks`) remain enforcing because they indicate that the recipe cannot
-identify the current packages or requested baseline.
-
-To carry this signal without making the recipe non-zero, anvil uses a single shared
-convention:
-
-1. **Recipe writes a file**. Advisory recipes write a complete markdown body to a
-   well-known path, then exit 0. The convention is
-   `target/anvil/comments/<NAME>.md`, where `<NAME>` matches the recipe stem
-   (`semver` for `anvil-semver-check`). When the recipe has nothing to report it
-   removes that file. The body's first line is an invisible HTML marker
-   (`<!-- anvil-<NAME> -->`) so a backend without a native "sticky comment header"
-   concept (ADO) can find an existing thread to update.
-2. **cloud-workflow wiring upserts a sticky PR comment**. After each PR job that runs an
-   advisory-emitting recipe, anvil's cloud workflows templates inspect the convention directory
-   and:
-   - if `<NAME>.md` exists, upsert a sticky PR comment headed `anvil-<NAME>` with the
-     file's contents;
-   - if `<NAME>.md` does not exist (the recipe removed it because the tree is now
-     clean), clear any prior sticky comment with that header.
-3. **One canonical leg per matrix**. cloud-workflow runs the same recipe on multiple OS legs; the
-   upsert/clear steps run only on the x86_64 Linux leg so the matrix doesn't race on the
-   same PR thread. The recipe still writes the file on every leg (local-vs-cloud workflows parity).
-
-Backend wiring:
-
-- **GitHub Actions** — [`marocchino/sticky-pull-request-comment`](https://github.com/marocchino/sticky-pull-request-comment)
-  is invoked twice: with `path:` to upsert when the file exists, and with `delete: true`
-  to clear when it does not. The workflow's reusable job declares
-  `permissions: pull-requests: write`. Fork PRs are skipped via a
-  `github.event.pull_request.head.repo.full_name == github.repository` guard,
-  regardless of whether administrators keep GitHub's default read-only fork
-  token policy or enable write tokens for fork workflows.
-- **Azure DevOps Pipelines** — a pwsh step uses the Azure DevOps REST API
-  (`$(System.AccessToken)` + the project-collection build identity's "Contribute to
-  pull requests" permission) to scan PR threads for the HTML marker, then `PATCH`s the
-  thread's first comment when the file exists or sets the thread `status: closed` when
-  it does not.
-
-Local runs (no PR context) just write/remove the file; nothing posts it. This keeps the
-file useful as a self-service diagnostic and makes the behaviour bit-identical between
-local and cloud workflows.
-
-Currently `semver-check` is the only advisory-emitting recipe. The convention extends
-to any future check that surfaces non-blocking findings (e.g. coverage deltas, security
-advisories) by following the same `target/anvil/comments/<NAME>.md` ↔
-`anvil-<NAME>` mapping; the catalog's wiring templates list each known file
-explicitly so stale comments can be cleared deterministically.

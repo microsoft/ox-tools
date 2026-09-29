@@ -1,12 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! The composed `.anvil/anvil.just` recipe file and the `Justfile` import region.
+//! The generated `.anvil/*.just` recipe files and the `Justfile` import region.
 //!
 //! Source templates remain split by concern for maintainability. Their
 //! top-level recipes become independently addressable delimiter-free catalog
-//! sections; the engine composes them in catalog order into one fully owned
-//! physical file.
+//! sections; the engine composes them in catalog order into a small import hub,
+//! checks file, and setup file. Container recipes compose separately.
 //!
 //! See [`local.md`](../../../docs/design/local.md) for the recipe surface.
 
@@ -21,8 +21,12 @@ const REPEATED_TEMPLATE_HEADER: &str = "# Copyright (c) Microsoft Corporation.\n
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.\n\
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md\n";
 
-/// Repo-root-relative path of the one composed recipe file.
+/// Repo-root-relative path of the generated import hub.
 pub(crate) const ANVIL_JUST_PATH: &str = ".anvil/anvil.just";
+/// Repo-root-relative path of check, group, tier, and impact recipes.
+pub(crate) const CHECKS_JUST_PATH: &str = ".anvil/checks.just";
+/// Repo-root-relative path of tool pins and setup/validation recipes.
+pub(crate) const SETUP_JUST_PATH: &str = ".anvil/setup.just";
 
 /// Contents of `justfiles/anvil/versions.just` baked into the binary.
 const VERSIONS_JUST: &str = include_str!("../../../templates/justfiles/anvil/versions.just");
@@ -31,23 +35,12 @@ const VERSIONS_JUST: &str = include_str!("../../../templates/justfiles/anvil/ver
 const TOOLS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tools.just");
 
 /// Contents of `justfiles/anvil/helpers.just` baked into the binary.
-///
-/// Holds the shared helper recipe `_anvil-base-ref` (reused by the impact
-/// recipe and anvil-mutants-diff) and the bucket legend documenting how
-/// per-check recipes consume the impact cache via `_anvil-impact-include`
-/// (which, along with cache production and `_anvil-impact-format`, lives in
-/// `impact.just`).
+/// Holds shared MSRV, cargo-mutants, and unscoped-tier helpers.
 const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/helpers.just");
 
 /// Contents of `justfiles/anvil/impact.just` baked into the binary.
 ///
-/// The single `anvil-impact` recipe: it snapshots the base ref and the
-/// working tree (two independent cache keys), computes the cargo-delta
-/// impact set, and writes the `target/anvil/impact/` artifacts that the
-/// scoped checks consume via `_anvil-impact-include`. Also owns the tier
-/// projection helper `_anvil-impact-format` (which lives here next to its
-/// sole caller). The same recipe runs locally and in cloud workflows (which
-/// just share the artifacts).
+/// The single `anvil-impact` recipe and package-file selection expressions.
 const IMPACT_JUST: &str = include_str!("../../../templates/justfiles/anvil/impact.just");
 
 /// Emits `(path, include_str!)` pairs for a set of split recipe files that
@@ -112,7 +105,6 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "mutants-full",
         "pr-title",
         "readme-check",
-        "semver-check",
         "spellcheck",
         "udeps",
     ]
@@ -156,8 +148,12 @@ pub(crate) const JUSTFILE_PATH: &str = "Justfile";
 const JUSTFILE_SCAFFOLD: &str = "set unstable\n\
 set windows-shell := [\"pwsh.exe\", \"-NoLogo\", \"-NoProfile\", \"-NonInteractive\", \"-Command\"]\n\n";
 
-fn section(id: impl Into<String>, body: impl Into<String>) -> Artifact {
-    Artifact::owned_file_section(ANVIL_JUST_PATH, id, body)
+fn section(path: &'static str, id: impl Into<String>, body: impl Into<String>) -> Artifact {
+    Artifact::owned_file_section(path, id, body.into().replace("\r\n", "\n"))
+}
+
+pub(crate) fn generated_header(path: &'static str, id: &'static str) -> Artifact {
+    section(path, id, REPEATED_TEMPLATE_HEADER)
 }
 
 fn recipe_name(line: &str) -> Option<&str> {
@@ -176,7 +172,7 @@ pub(crate) fn without_generated_header(body: &str) -> String {
     normalized.strip_prefix(REPEATED_TEMPLATE_HEADER).unwrap_or(&normalized).to_owned()
 }
 
-pub(crate) fn template_sections(path: &str, body: &str) -> Vec<Artifact> {
+pub(crate) fn template_sections(output_path: &'static str, source: &str, body: &str) -> Vec<Artifact> {
     let normalized = without_generated_header(body);
     let body = normalized.as_str();
     let lines = body.split_inclusive('\n').collect::<Vec<_>>();
@@ -187,7 +183,7 @@ pub(crate) fn template_sections(path: &str, body: &str) -> Vec<Artifact> {
         .collect::<Vec<_>>();
 
     if recipe_headers.is_empty() {
-        return vec![section(format!("source:{path}"), body)];
+        return vec![section(output_path, format!("source:{source}"), body)];
     }
 
     let mut starts = Vec::with_capacity(recipe_headers.len());
@@ -206,19 +202,59 @@ pub(crate) fn template_sections(path: &str, body: &str) -> Vec<Artifact> {
 
     let mut out = Vec::with_capacity(starts.len() + 1);
     if starts[0].0 > 0 {
-        out.push(section(format!("source:{path}"), lines[..starts[0].0].concat()));
+        out.push(section(output_path, format!("source:{source}"), lines[..starts[0].0].concat()));
     }
     for (index, (start, name)) in starts.iter().enumerate() {
         let end = starts.get(index + 1).map_or(lines.len(), |(next, _)| *next);
-        out.push(section(format!("recipe:{name}"), lines[*start..end].concat()));
+        out.push(section(output_path, format!("recipe:{name}"), lines[*start..end].concat()));
     }
     out
+}
+
+fn is_setup_recipe(id: &str) -> bool {
+    let Some(name) = id.strip_prefix("recipe:") else {
+        return false;
+    };
+    name.ends_with("-setup")
+        || name.ends_with("-validate-prereqs")
+        || name.starts_with("anvil-tool-")
+        || name.starts_with("anvil-component-")
+        || name.starts_with("anvil-toolchain-")
+        || name.starts_with("_install-")
+        || name.starts_with("_check-")
+        || name == "_anvil-root-msrv"
+}
+
+fn route_setup_sections(sections: &mut [Artifact]) {
+    for artifact in sections {
+        let Artifact::OwnedFileSection(spec) = artifact else {
+            continue;
+        };
+        if is_setup_recipe(&spec.id) {
+            spec.path = SETUP_JUST_PATH;
+        }
+    }
+}
+
+fn check_template_sections(source: &str, body: &str) -> Vec<Artifact> {
+    let mut sections = template_sections(CHECKS_JUST_PATH, source, body);
+    route_setup_sections(&mut sections);
+    sections
 }
 
 /// Header and `anvil` alias for the composed recipe file.
 #[must_use]
 pub fn entry() -> Artifact {
-    section("alias:anvil", ENTRY_JUST)
+    section(ANVIL_JUST_PATH, "alias:anvil", ENTRY_JUST)
+}
+
+/// Generated-content headers for the non-container composed recipe files.
+#[must_use]
+pub fn headers() -> Vec<Artifact> {
+    vec![
+        generated_header(CHECKS_JUST_PATH, "header:checks"),
+        generated_header(SETUP_JUST_PATH, "header:setup"),
+    ]
 }
 
 /// One-time scaffold for a repository that has no root Justfile yet.
@@ -230,51 +266,60 @@ pub(crate) const fn scaffold() -> &'static str {
 /// Pinned toolchain and cargo-subcommand version declarations.
 #[must_use]
 pub fn versions() -> Vec<Artifact> {
-    template_sections("versions", VERSIONS_JUST)
+    template_sections(SETUP_JUST_PATH, "versions", VERSIONS_JUST)
 }
 
 /// Tool install and prerequisite recipes.
 #[must_use]
 pub fn tools() -> Vec<Artifact> {
-    template_sections("tools", TOOLS_JUST)
+    template_sections(SETUP_JUST_PATH, "tools", TOOLS_JUST)
 }
 
 /// Shared helper recipes and impact contract.
 #[must_use]
 pub fn helpers() -> Vec<Artifact> {
-    template_sections("helpers", HELPERS_JUST)
+    check_template_sections("helpers", HELPERS_JUST)
 }
 
 /// Shared `anvil-impact` recipe.
 #[must_use]
 pub fn impact() -> Vec<Artifact> {
-    template_sections("impact", IMPACT_JUST)
+    check_template_sections("impact", IMPACT_JUST)
 }
 
 /// Generic local-development recipe files.
 #[must_use]
 pub fn dev_files() -> Vec<Artifact> {
-    DEV_FILES.iter().flat_map(|&(path, body)| template_sections(path, body)).collect()
+    DEV_FILES
+        .iter()
+        .flat_map(|&(path, body)| check_template_sections(path, body))
+        .collect()
 }
 
 /// The `justfiles/anvil/checks/<check>.just` files — one owned artifact
 /// per catalog check.
 #[must_use]
 pub fn check_files() -> Vec<Artifact> {
-    CHECK_FILES.iter().flat_map(|&(path, body)| template_sections(path, body)).collect()
+    CHECK_FILES
+        .iter()
+        .flat_map(|&(path, body)| check_template_sections(path, body))
+        .collect()
 }
 
 /// The `justfiles/anvil/groups/<group>.just` files — one owned artifact
 /// per group.
 #[must_use]
 pub fn group_files() -> Vec<Artifact> {
-    GROUP_FILES.iter().flat_map(|&(path, body)| template_sections(path, body)).collect()
+    GROUP_FILES
+        .iter()
+        .flat_map(|&(path, body)| check_template_sections(path, body))
+        .collect()
 }
 
 /// `justfiles/anvil/tiers.just` — the tier aggregators.
 #[must_use]
 pub fn tiers() -> Vec<Artifact> {
-    template_sections("tiers", TIERS_JUST)
+    check_template_sections("tiers", TIERS_JUST)
 }
 
 /// Look up one built-in Just recipe by its top-level name.
@@ -325,8 +370,8 @@ mod tests {
     }
 
     impl ImpactPolicy {
-        /// The `_anvil-impact-include` category argument this policy emits, or
-        /// `None` when the check is unscoped and takes no impact dependency.
+        /// The cargo-delta package-file category this policy consumes, or
+        /// `None` when the check is unscoped.
         fn category(self) -> Option<&'static str> {
             match self {
                 Self::Unscoped => None,
@@ -375,7 +420,6 @@ mod tests {
             // cargo-delta does not map to a package, so scoping them would
             // silently skip a changed template/dictionary.
             ("readme-check", Unscoped),
-            ("semver-check", Affected),
             ("spellcheck", Unscoped),
             ("udeps", Required),
         ]
@@ -394,27 +438,49 @@ mod tests {
     #[cfg_attr(miri, ignore = "spawns just; miri isolation forbids it")]
     #[test]
     fn composed_justfile_parses() {
-        let body = Catalog::anvil()
-            .artifacts()
-            .iter()
-            .filter_map(|artifact| match artifact {
-                Artifact::OwnedFileSection(section) if section.path == ANVIL_JUST_PATH => Some(section.body.trim_end_matches('\n')),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let mut files = BTreeMap::<&str, String>::new();
+        for artifact in Catalog::anvil().artifacts() {
+            let Artifact::OwnedFileSection(section) = artifact else {
+                continue;
+            };
+            if !std::path::Path::new(section.path)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("just"))
+            {
+                continue;
+            }
+            let body = files.entry(section.path).or_default();
+            if !body.is_empty() {
+                body.push_str("\n\n");
+            }
+            body.push_str(section.body.trim_matches(['\r', '\n']));
+            body.push('\n');
+        }
         assert_eq!(
-            body.matches("GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.").count(),
-            1,
-            "the composed file must carry one generated-content header"
+            files
+                .values()
+                .map(|body| body.matches("GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.").count())
+                .sum::<usize>(),
+            4,
+            "each generated recipe file must carry one generated-content header"
         );
         let temp = TempDir::new().expect("temporary Justfile directory must be creatable");
-        let path = temp.path().join("anvil.just");
-        std::fs::write(&path, body).expect("composed Justfile fixture must be writable");
+        for (relative, body) in files {
+            let path = temp.path().join(relative);
+            std::fs::create_dir_all(path.parent().expect("generated recipe path has a parent"))
+                .expect("generated recipe directory must be creatable");
+            std::fs::write(path, body).expect("composed Justfile fixture must be writable");
+        }
+        let root = temp.path().join("Justfile");
+        std::fs::write(
+            &root,
+            "set unstable\nset windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\nimport '.anvil/anvil.just'\n",
+        )
+        .expect("root Justfile fixture must be writable");
 
         let output = Command::new("just")
-            .args(["--unstable", "--justfile"])
-            .arg(&path)
+            .args(["--justfile"])
+            .arg(&root)
             .arg("--dump")
             .output()
             .expect("just must be available for generated-recipe tests");
@@ -431,7 +497,7 @@ mod tests {
         let Artifact::OwnedFileSection(section) = recipe else {
             panic!("a Just recipe must be an owned-file section");
         };
-        assert_eq!(section.path, ANVIL_JUST_PATH);
+        assert_eq!(section.path, CHECKS_JUST_PATH);
         assert_eq!(section.id, "recipe:anvil-clippy");
         assert!(section.body.contains("anvil-clippy:"));
         assert!(!section.body.contains("anvil-clippy-setup"));
@@ -531,9 +597,6 @@ mod tests {
             "mutants_command_prefix",
         ] {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
-        }
-        for needle in ["Inconclusive comparisons", "an unbuildable baseline is not evidence"] {
-            assert!(checks.contains(needle), "checks tree missing advisory behavior '{needle}'");
         }
         assert!(
             checks.contains("bolero list --profile release --package '{name}'"),
@@ -745,29 +808,9 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (24, 7),
+            (23, 7),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
-    }
-
-    #[test]
-    fn semver_check_compares_against_the_pr_branch_baseline() {
-        let (_, body) = CHECK_FILES
-            .iter()
-            .find(|(path, _)| *path == "justfiles/anvil/checks/semver-check.just")
-            .expect("semver check template is registered");
-
-        // The recipe must use the same base-ref expression as impact and pass
-        // it to cargo-semver-checks
-        // as the baseline rather than comparing against the last crates.io release.
-        for needle in [
-            "anvil_base_ref",
-            "git rev-parse --verify \"$base^{commit}\"",
-            "git cat-file -e $baselineManifest",
-            "cargo {{ anvil_stable_toolchain_arg }} semver-checks --package $p --baseline-rev $base",
-        ] {
-            assert!(body.contains(needle), "semver check template missing '{needle}'");
-        }
     }
 
     #[test]
@@ -1019,9 +1062,11 @@ mod tests {
     }
 
     #[test]
-    fn entry_section_defines_the_default_alias_without_imports() {
+    fn entry_section_imports_generated_recipe_files_and_defines_alias() {
         assert!(ENTRY_JUST.contains("alias anvil := anvil-pr"));
-        assert!(!ENTRY_JUST.contains("import "));
+        for import in ["setup.just", "checks.just", "container.just"] {
+            assert!(ENTRY_JUST.contains(&format!("import '{import}'")));
+        }
     }
 
     #[test]
@@ -1053,725 +1098,5 @@ mod tests {
     fn justfile_imports_body_is_a_single_import_line() {
         let body = JUSTFILE_IMPORTS_BODY.trim();
         assert_eq!(body, "import '.anvil/anvil.just'");
-    }
-
-    #[cfg(any())]
-    mod stable_toolchain_resolver_tests {
-        #[cfg(unix)]
-        use std::os::unix::fs::PermissionsExt;
-        use std::path::{Path, PathBuf};
-        use std::process::{Command, Output};
-        use std::{env, fs};
-
-        use tempfile::{Builder, TempDir};
-
-        use super::{TOOLS_JUST, VERSIONS_JUST};
-
-        #[derive(Clone, Copy)]
-        enum ResolverOperation {
-            StableArgs,
-            InstallIfMissing,
-            ValidateWorkspaceMsrv,
-            MsrvToolchain,
-            InstallMsrvIfNeeded,
-        }
-
-        fn fixture(cargo_toml: &str) -> TempDir {
-            let temp = Builder::new()
-                .prefix("anvil repo's [copy] (fork) ")
-                .tempdir()
-                .expect("temporary repository must be creatable");
-            fs::write(temp.path().join("Cargo.toml"), cargo_toml).expect("manifest fixture must be writable");
-            fs::write(temp.path().join("versions.just"), VERSIONS_JUST).expect("versions fixture must be writable");
-            fs::write(temp.path().join("tools.just"), TOOLS_JUST).expect("tools fixture must be writable");
-            fs::write(
-                temp.path().join("Justfile"),
-                concat!(
-                    "set unstable\n",
-                    "set windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n",
-                    "import 'versions.just'\n",
-                    "import 'tools.just'\n\n",
-                    "[script(\"pwsh\", \"-NoProfile\")]\n",
-                    "_anvil-test-stable-args:\n",
-                    "    $stableArgs = {{_anvil_stable_toolchain_args}}\n",
-                    "    if ($stableArgs.Count -eq 0) {\n",
-                    "        Write-Output '@()'\n",
-                    "        exit 0\n",
-                    "    }\n",
-                    "    $escaped = ([string] $stableArgs[0]).Replace(\"'\", \"''\")\n",
-                    "    Write-Output (\"@('\" + $escaped + \"')\")\n\n",
-                    "[script(\"pwsh\", \"-NoProfile\")]\n",
-                    "_anvil-test-stable-command:\n",
-                    "    & cargo {{_anvil_stable_toolchain_args}} --version\n",
-                    "\n[script(\"pwsh\", \"-NoProfile\")]\n",
-                    "_anvil-test-stable-command-after-chdir:\n",
-                    "    Set-Location 'nested'\n",
-                    "    & cargo {{_anvil_stable_toolchain_args}} --version\n",
-                ),
-            )
-            .expect("Justfile fixture must be writable");
-            temp
-        }
-
-        fn tools_available() -> bool {
-            Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
-        }
-
-        fn tool_path(name: &str) -> Option<PathBuf> {
-            let executable = format!("{name}{}", env::consts::EXE_SUFFIX);
-            env::split_paths(&env::var_os("PATH").unwrap_or_default())
-                .map(|directory| directory.join(&executable))
-                .find(|candidate| candidate.is_file())
-        }
-
-        fn command(root: &Path) -> Command {
-            let just = tool_path("just").expect("resolver tests call command only after tools_available confirms Just is on PATH");
-            let mut command = Command::new(just);
-            command
-                .args(["--justfile"])
-                .arg(root.join("Justfile"))
-                .current_dir(root)
-                .env_remove("ANVIL_MSRV_TOOLCHAIN")
-                .env_remove("RUSTUP_TOOLCHAIN");
-            command
-        }
-
-        fn command_for_operation(root: &Path, operation: ResolverOperation) -> Command {
-            let mut command = command(root);
-            match operation {
-                ResolverOperation::StableArgs => {
-                    command.arg("_anvil-test-stable-args");
-                }
-                ResolverOperation::InstallIfMissing => {
-                    command.arg("anvil-toolchain-stable-install");
-                }
-                ResolverOperation::ValidateWorkspaceMsrv => {
-                    command.args(["_anvil-resolve-stable", "validate-workspace-msrv"]);
-                }
-                ResolverOperation::MsrvToolchain => {
-                    command.args(["_anvil-resolve-stable", "msrv"]);
-                }
-                ResolverOperation::InstallMsrvIfNeeded => {
-                    command.args(["_anvil-resolve-stable", "install-msrv"]);
-                }
-            }
-            command
-        }
-
-        fn run(root: &Path, operation: ResolverOperation, rustup_toolchain: Option<&str>) -> Output {
-            let mut command = command_for_operation(root, operation);
-            match rustup_toolchain {
-                Some(value) => {
-                    command.env("RUSTUP_TOOLCHAIN", value);
-                }
-                None => {
-                    command.env_remove("RUSTUP_TOOLCHAIN");
-                }
-            }
-            command
-                .output()
-                .expect("just must be available to test generated toolchain selection")
-        }
-
-        fn resolved(root: &Path, rustup_toolchain: Option<&str>) -> String {
-            let output = run(root, ResolverOperation::StableArgs, rustup_toolchain);
-            assert!(
-                output.status.success(),
-                "resolver failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout)
-                .expect("resolver output must be UTF-8")
-                .trim()
-                .to_owned()
-        }
-
-        fn normalized_diagnostic(output: &Output) -> String {
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-        }
-
-        fn path_without_rustup() -> std::ffi::OsString {
-            let path = env::var_os("PATH").unwrap_or_default();
-            let paths = env::split_paths(&path).filter(|directory| {
-                !["rustup", "rustup.exe", "rustup.cmd", "rustup.ps1"]
-                    .iter()
-                    .any(|name| directory.join(name).is_file())
-            });
-            env::join_paths(paths).expect("PATH without rustup must be valid")
-        }
-
-        #[test]
-        fn honors_environment_files_and_msrv_in_precedence_order() {
-            if !tools_available() {
-                return;
-            }
-            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
-            let root = temp.path();
-            assert_eq!(resolved(root, None), "@('+1.93')");
-
-            assert_eq!(resolved(root, Some("custom-toolchain")), "@()");
-            assert_eq!(resolved(root, Some("team's-toolchain")), "@()");
-
-            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n").expect("toolchain fixture must be writable");
-            assert_eq!(resolved(root, None), "@()");
-        }
-
-        #[test]
-        fn passes_selected_arguments_directly_to_cargo() {
-            if !tools_available() {
-                return;
-            }
-            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
-            let shim = TempDir::new().expect("cargo shim directory must be creatable");
-            #[cfg(windows)]
-            {
-                fs::write(shim.path().join("cargo.cmd"), "@echo off\r\necho %*\r\nexit /b 0\r\n").expect("Cargo shim must be writable");
-            }
-            #[cfg(unix)]
-            {
-                let cargo = shim.path().join("cargo");
-                fs::write(&cargo, "#!/bin/sh\nprintf '%s\\n' \"$*\"\nexit 0\n").expect("Cargo shim must be writable");
-                fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).expect("Cargo shim must be executable");
-            }
-            let mut paths = vec![shim.path().to_path_buf()];
-            paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-            let paths = env::join_paths(paths).expect("shim PATH must be valid");
-
-            let output = command(temp.path())
-                .arg("_anvil-test-stable-command")
-                .env("RUSTUP_TOOLCHAIN", "team's-toolchain")
-                .env("PATH", &paths)
-                .output()
-                .expect("direct stable Cargo command must run");
-            assert!(
-                output.status.success(),
-                "direct stable Cargo command failed: {}",
-                normalized_diagnostic(&output)
-            );
-            assert_eq!(
-                String::from_utf8(output.stdout).expect("Cargo shim output must be UTF-8").trim(),
-                "--version"
-            );
-
-            fs::write(temp.path().join("rust-toolchain.toml"), "[toolchain]\ncomponents = [\"clippy\"]\n")
-                .expect("toolchain fixture must be writable");
-            let output = command(temp.path())
-                .arg("_anvil-test-stable-command")
-                .env("PATH", &paths)
-                .output()
-                .expect("repository-selected Cargo command must run");
-            assert!(
-                output.status.success(),
-                "repository-selected Cargo command failed: {}",
-                normalized_diagnostic(&output)
-            );
-            assert_eq!(
-                String::from_utf8(output.stdout).expect("Cargo shim output must be UTF-8").trim(),
-                "--version"
-            );
-
-            fs::remove_file(temp.path().join("rust-toolchain.toml")).expect("toolchain fixture must be removable");
-            let nested = temp.path().join("nested");
-            fs::create_dir(&nested).expect("nested working directory must be creatable");
-
-            let output = command(temp.path())
-                .args(["--working-directory"])
-                .arg(&nested)
-                .arg("_anvil-test-stable-command")
-                .env("PATH", &paths)
-                .output()
-                .expect("stable Cargo command with an explicit working directory must run");
-            assert!(
-                output.status.success(),
-                "working-directory stable Cargo command failed: {}",
-                normalized_diagnostic(&output)
-            );
-            assert_eq!(
-                String::from_utf8(output.stdout).expect("Cargo shim output must be UTF-8").trim(),
-                "+1.93 --version"
-            );
-
-            let output = command(temp.path())
-                .arg("_anvil-test-stable-command-after-chdir")
-                .env("PATH", paths)
-                .output()
-                .expect("stable Cargo command after Set-Location must run");
-            assert!(
-                output.status.success(),
-                "Set-Location stable Cargo command failed: {}",
-                normalized_diagnostic(&output)
-            );
-            assert_eq!(
-                String::from_utf8(output.stdout).expect("Cargo shim output must be UTF-8").trim(),
-                "+1.93 --version"
-            );
-        }
-
-        #[test]
-        fn installs_default_components_on_the_selected_stable_toolchain() {
-            if !tools_available() {
-                return;
-            }
-            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
-            let shim = TempDir::new().expect("component shim directory must be creatable");
-            let cargo_log = shim.path().join("cargo.log");
-            let rustup_log = shim.path().join("rustup.log");
-            #[cfg(windows)]
-            {
-                fs::write(
-                    shim.path().join("cargo.cmd"),
-                    "@echo off\r\n>>\"%ANVIL_CARGO_LOG%\" echo %*\r\nexit /b 1\r\n",
-                )
-                .expect("Cargo shim must be writable");
-                fs::write(
-                    shim.path().join("rustup.cmd"),
-                    "@echo off\r\n>>\"%ANVIL_RUSTUP_LOG%\" echo %*\r\nexit /b 0\r\n",
-                )
-                .expect("rustup shim must be writable");
-            }
-            #[cfg(unix)]
-            {
-                for (name, log_variable, status) in [("cargo", "ANVIL_CARGO_LOG", 1), ("rustup", "ANVIL_RUSTUP_LOG", 0)] {
-                    let executable = shim.path().join(name);
-                    fs::write(
-                        &executable,
-                        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${log_variable}\"\nexit {status}\n"),
-                    )
-                    .expect("component shim must be writable");
-                    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("component shim must be executable");
-                }
-            }
-            let mut paths = vec![shim.path().to_path_buf()];
-            paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-            let paths = env::join_paths(paths).expect("shim PATH must be valid");
-            let run_install = |rustup_toolchain: Option<&str>| {
-                let mut command = command(temp.path());
-                command
-                    .args(["_install-component", "default", "clippy"])
-                    .env("ANVIL_CARGO_LOG", &cargo_log)
-                    .env("ANVIL_RUSTUP_LOG", &rustup_log)
-                    .env("PATH", &paths);
-                if let Some(value) = rustup_toolchain {
-                    command.env("RUSTUP_TOOLCHAIN", value);
-                }
-                command.output().expect("default component installation must run")
-            };
-
-            let output = run_install(Some("custom-toolchain"));
-            assert!(
-                output.status.success(),
-                "override-selected component installation failed: {}",
-                normalized_diagnostic(&output)
-            );
-            assert_eq!(
-                fs::read_to_string(&cargo_log).expect("Cargo shim log must be readable").trim(),
-                "clippy --version"
-            );
-            assert_eq!(
-                fs::read_to_string(&rustup_log).expect("rustup shim log must be readable").trim(),
-                "component add clippy"
-            );
-
-            fs::write(temp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
-                .expect("toolchain fixture must be writable");
-            fs::write(&cargo_log, "").expect("Cargo shim log must be resettable");
-            fs::write(&rustup_log, "").expect("rustup shim log must be resettable");
-            let output = run_install(None);
-            assert!(
-                output.status.success(),
-                "repository-selected component installation failed: {}",
-                normalized_diagnostic(&output)
-            );
-            assert_eq!(
-                fs::read_to_string(&cargo_log).expect("Cargo shim log must be readable").trim(),
-                "clippy --version"
-            );
-            assert_eq!(
-                fs::read_to_string(&rustup_log).expect("rustup shim log must be readable").trim(),
-                "component add clippy"
-            );
-
-            fs::remove_file(temp.path().join("rust-toolchain.toml")).expect("toolchain fixture must be removable");
-            fs::write(&cargo_log, "").expect("Cargo shim log must be resettable");
-            fs::write(&rustup_log, "").expect("rustup shim log must be resettable");
-            let output = run_install(None);
-            assert!(
-                output.status.success(),
-                "MSRV-selected component installation failed: {}",
-                normalized_diagnostic(&output)
-            );
-            assert_eq!(
-                fs::read_to_string(&cargo_log).expect("Cargo shim log must be readable").trim(),
-                "+1.93 clippy --version"
-            );
-            assert_eq!(
-                fs::read_to_string(&rustup_log).expect("rustup shim log must be readable").trim(),
-                "component add --toolchain 1.93 clippy"
-            );
-        }
-
-        #[test]
-        fn rejects_missing_or_too_new_workspace_msrvs() {
-            if !tools_available() {
-                return;
-            }
-            let missing = fixture("[workspace]\nresolver = \"2\"\n");
-            let output = run(missing.path(), ResolverOperation::StableArgs, None);
-            assert!(!output.status.success());
-            let diagnostic = normalized_diagnostic(&output);
-            assert!(
-                diagnostic.contains("no root") && diagnostic.contains("[workspace.package]"),
-                "unexpected resolver diagnostic: {diagnostic}"
-            );
-
-            let workspace =
-                fixture("[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"b\"]\n[workspace.package]\nrust-version = \"1.92\"\n");
-            for (name, version) in [("a", "1.91"), ("b", "1.93")] {
-                let member = workspace.path().join(name);
-                fs::create_dir(&member).expect("member directory must be creatable");
-                fs::write(
-                    member.join("Cargo.toml"),
-                    format!(
-                        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\nrust-version = \"{version}\"\n[lib]\npath = \"lib.rs\"\n"
-                    ),
-                )
-                .expect("member manifest must be writable");
-                fs::write(member.join("lib.rs"), "").expect("member source must be writable");
-            }
-
-            let shim = TempDir::new().expect("Cargo shim directory must be creatable");
-            let log = shim.path().join("cargo.log");
-            fs::write(
-                shim.path().join("cargo.ps1"),
-                concat!(
-                    "Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value ($args -join ' ')\n",
-                    "$metadata = @{\n",
-                    "    workspace_members = @('a-id', 'b-id')\n",
-                    "    packages = @(\n",
-                    "        @{ id = 'a-id'; name = 'a'; rust_version = '1.91' }\n",
-                    "        @{ id = 'b-id'; name = 'b'; rust_version = $env:ANVIL_TEST_B_MSRV }\n",
-                    "    )\n",
-                    "}\n",
-                    "$metadata | ConvertTo-Json -Depth 4 -Compress\n",
-                    "exit 0\n",
-                ),
-            )
-            .expect("Cargo shim must be writable");
-            fs::write(
-                shim.path().join("rustup.ps1"),
-                concat!(
-                    "if (($args -contains 'toolchain') -and ($args -contains 'list')) {\n",
-                    "    $env:ANVIL_TEST_INSTALLED_TOOLCHAINS -split ';' | Where-Object { $_ }\n",
-                    "}\n",
-                    "exit 0\n",
-                ),
-            )
-            .expect("rustup shim must be writable");
-            let mut paths = vec![shim.path().to_path_buf()];
-            paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-            let paths = env::join_paths(paths).expect("shim PATH must be valid");
-            let run_validation = |b_msrv: &str, rustup_toolchain: Option<&str>, installed: &str| {
-                let mut command = command(workspace.path());
-                command
-                    .args(["_anvil-resolve-stable", "validate-workspace-msrv"])
-                    .env("ANVIL_TEST_B_MSRV", b_msrv)
-                    .env("ANVIL_TEST_INSTALLED_TOOLCHAINS", installed)
-                    .env("ANVIL_TEST_LOG", &log)
-                    .env("PATH", &paths);
-                if let Some(value) = rustup_toolchain {
-                    command.env("RUSTUP_TOOLCHAIN", value);
-                }
-                command.output().expect("workspace MSRV validation must run")
-            };
-
-            let output = run_validation("1.92", None, "stable-x86_64-pc-windows-msvc");
-            assert!(!output.status.success(), "validation must not auto-install a missing root MSRV");
-            let diagnostic = normalized_diagnostic(&output);
-            assert!(
-                diagnostic.contains("root MSRV toolchain '1.92' is not installed") && diagnostic.contains("anvil-toolchain-stable-install"),
-                "unexpected missing-toolchain diagnostic: {diagnostic}"
-            );
-            assert!(
-                fs::read_to_string(&log).unwrap_or_default().is_empty(),
-                "Cargo metadata must not run before the root MSRV is known to be installed"
-            );
-
-            let output = run_validation("1.93", None, "1.92-x86_64-pc-windows-msvc");
-            assert!(!output.status.success());
-            let diagnostic = normalized_diagnostic(&output);
-            assert!(
-                diagnostic.contains("newer than the root MSRV") && diagnostic.contains("b (1.93)") && !diagnostic.contains("a (1.91)"),
-                "unexpected resolver diagnostic: {diagnostic}"
-            );
-
-            let output = run_validation("1.92.0", None, "1.92-x86_64-pc-windows-msvc");
-            assert!(
-                output.status.success(),
-                "member MSRVs at or below the root must be compatible: {}",
-                normalized_diagnostic(&output)
-            );
-            let calls = fs::read_to_string(&log).expect("Cargo shim log must be readable");
-            assert!(
-                calls.lines().all(|line| line.starts_with("+1.92 metadata ")),
-                "workspace compatibility metadata must use the root MSRV toolchain:\n{calls}"
-            );
-
-            let output = run_validation("1.93", Some("explicit-toolchain"), "");
-            assert!(output.status.success(), "explicit override must permit differing MSRVs");
-        }
-
-        #[test]
-        fn diagnoses_missing_rustup_before_installing_a_toolchain() {
-            if !tools_available() {
-                return;
-            }
-            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
-            let output = command_for_operation(temp.path(), ResolverOperation::InstallIfMissing)
-                .env("PATH", path_without_rustup())
-                .output()
-                .expect("stable setup must run far enough to diagnose missing rustup");
-            assert!(!output.status.success(), "stable setup without rustup must fail");
-            let diagnostic = normalized_diagnostic(&output);
-            assert!(
-                diagnostic.contains("rustup not found")
-                    && diagnostic.contains("https://rustup.rs")
-                    && diagnostic.contains("ensure it is on PATH"),
-                "unexpected missing-rustup diagnostic: {diagnostic}"
-            );
-
-            let output = command_for_operation(temp.path(), ResolverOperation::InstallIfMissing)
-                .env("RUSTUP_TOOLCHAIN", "selected-stable")
-                .env("PATH", path_without_rustup())
-                .output()
-                .expect("environment-selected setup must diagnose missing rustup");
-            assert!(!output.status.success(), "environment selection without rustup must fail");
-            assert!(
-                normalized_diagnostic(&output).contains("rustup not found"),
-                "environment selection must require rustup"
-            );
-
-            fs::write(temp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.93\"\n")
-                .expect("toolchain fixture must be writable");
-            let output = command_for_operation(temp.path(), ResolverOperation::InstallIfMissing)
-                .env("PATH", path_without_rustup())
-                .output()
-                .expect("file-selected setup must diagnose missing rustup");
-            assert!(!output.status.success(), "toolchain-file selection without rustup must fail");
-            assert!(
-                normalized_diagnostic(&output).contains("rustup not found"),
-                "toolchain-file selection must require rustup"
-            );
-        }
-
-        #[test]
-        fn rejects_an_unpaired_internal_msrv_mapping_for_stable_selection() {
-            if !tools_available() {
-                return;
-            }
-            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
-            let run_with_mapping = |root: &Path| {
-                command(root)
-                    .arg("_anvil-test-stable-args")
-                    .env("ANVIL_MSRV_TOOLCHAIN", "ms-prod-1.93")
-                    .output()
-                    .expect("just must be available to test the generated toolchain selection")
-            };
-
-            let output = run_with_mapping(temp.path());
-            assert!(!output.status.success(), "an unpaired internal MSRV mapping must fail");
-            let diagnostic = normalized_diagnostic(&output);
-            assert!(
-                diagnostic.contains("ANVIL_MSRV_TOOLCHAIN")
-                    && diagnostic.contains("without RUSTUP_TOOLCHAIN")
-                    && diagnostic.contains("unset ANVIL_MSRV_TOOLCHAIN"),
-                "unexpected resolver diagnostic: {diagnostic}"
-            );
-        }
-
-        #[test]
-        fn provisions_public_and_mapped_msrv_toolchains() {
-            if !tools_available() {
-                return;
-            }
-            let run_install = |root: &Path, mapped: Option<&str>, installed: &str, cargo_exit: i32| {
-                let shim = TempDir::new().expect("toolchain shim directory must be creatable");
-                let rustup_log = shim.path().join("rustup.log");
-                let cargo_log = shim.path().join("cargo.log");
-                let installed_output = installed
-                    .lines()
-                    .map(|line| format!("Write-Output '{line}'"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                fs::write(
-                    shim.path().join("rustup.ps1"),
-                    format!(
-                        "Add-Content -LiteralPath $env:ANVIL_RUSTUP_LOG -Value ($args -join ' ')\n\
-                         if (($args -contains 'toolchain') -and ($args -contains 'list')) {{ {installed_output} }}\n\
-                         exit 0\n"
-                    ),
-                )
-                .expect("rustup shim must be writable");
-                fs::write(
-                    shim.path().join("cargo.ps1"),
-                    format!(
-                        "Add-Content -LiteralPath $env:ANVIL_CARGO_LOG -Value ($args -join ' ')\n\
-                         exit {cargo_exit}\n"
-                    ),
-                )
-                .expect("cargo shim must be writable");
-                let mut paths = vec![shim.path().to_path_buf()];
-                paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-                let mut command = command(root);
-                command
-                    .args(["_anvil-resolve-stable", "install-msrv"])
-                    .env("ANVIL_RUSTUP_LOG", &rustup_log)
-                    .env("ANVIL_CARGO_LOG", &cargo_log)
-                    .env("PATH", env::join_paths(paths).expect("shim PATH must be valid"));
-                if let Some(value) = mapped {
-                    command.env("ANVIL_MSRV_TOOLCHAIN", value);
-                }
-                let output = command.output().expect("pwsh must be available to test MSRV provisioning");
-                let rustup_calls = fs::read_to_string(rustup_log).unwrap_or_default();
-                let cargo_calls = fs::read_to_string(cargo_log).unwrap_or_default();
-                (output, rustup_calls, cargo_calls)
-            };
-
-            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
-
-            let (output, rustup_calls, cargo_calls) = run_install(
-                temp.path(),
-                None,
-                "nightly-2026-01-01-x86_64-pc-windows-msvc\n1.93-x86_64-pc-windows-msvc",
-                0,
-            );
-            assert!(
-                output.status.success(),
-                "installed public MSRV provisioning failed: {}",
-                normalized_diagnostic(&output)
-            );
-            assert!(rustup_calls.contains("toolchain list"));
-            assert!(
-                !rustup_calls.contains("toolchain install"),
-                "installed MSRV must not be reinstalled"
-            );
-            assert!(cargo_calls.is_empty(), "public MSRV availability is checked through rustup");
-
-            let (output, rustup_calls, cargo_calls) = run_install(
-                temp.path(),
-                None,
-                "nightly-2026-01-01-x86_64-pc-windows-msvc\n1.93.0-x86_64-pc-windows-msvc",
-                0,
-            );
-            assert!(
-                output.status.success(),
-                "distinct patch-qualified installation must not prevent provisioning the selected MSRV: {}",
-                normalized_diagnostic(&output)
-            );
-            assert!(
-                rustup_calls.contains("toolchain install 1.93 --profile minimal"),
-                "the exact 1.93 selector must be installed when only 1.93.0 exists"
-            );
-            assert!(cargo_calls.is_empty(), "public MSRV availability is checked through rustup");
-
-            let (output, rustup_calls, cargo_calls) = run_install(temp.path(), Some("ms-prod-1.93"), "", 0);
-            assert!(
-                output.status.success(),
-                "mapped MSRV provisioning failed: {}",
-                normalized_diagnostic(&output)
-            );
-            assert!(cargo_calls.contains("+ms-prod-1.93 --version"));
-            assert!(!rustup_calls.contains("toolchain list"));
-            assert!(!rustup_calls.contains("toolchain install"));
-
-            let (output, _, cargo_calls) = run_install(temp.path(), Some("ms-prod-1.93"), "", 9);
-            assert!(!output.status.success(), "an unavailable mapped MSRV must fail");
-            assert!(cargo_calls.contains("+ms-prod-1.93 --version"));
-            let diagnostic = normalized_diagnostic(&output);
-            assert!(
-                diagnostic.contains("mapped MSRV toolchain")
-                    && diagnostic.contains("is unavailable")
-                    && diagnostic.contains("provision")
-                    && diagnostic.contains("ANVIL_MSRV_TOOLCHAIN"),
-                "unexpected mapped MSRV diagnostic: {diagnostic}"
-            );
-        }
-
-        #[test]
-        fn resolves_msrv_whenever_the_root_declares_one() {
-            if !tools_available() {
-                return;
-            }
-            let no_msrv = fixture("[workspace]\nresolver = \"2\"\n");
-            fs::write(no_msrv.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
-                .expect("toolchain fixture must be writable");
-            let output = run(no_msrv.path(), ResolverOperation::InstallMsrvIfNeeded, None);
-            assert!(
-                output.status.success(),
-                "a repository without a declared MSRV must not provision an MSRV"
-            );
-            let output = run(no_msrv.path(), ResolverOperation::MsrvToolchain, None);
-            assert!(
-                output.status.success(),
-                "a repository without a declared MSRV must skip the MSRV test"
-            );
-            assert!(
-                String::from_utf8(output.stdout)
-                    .expect("resolver output must be UTF-8")
-                    .trim()
-                    .is_empty()
-            );
-
-            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
-            let root = temp.path();
-            let output = run(root, ResolverOperation::ValidateWorkspaceMsrv, Some("explicit-toolchain"));
-            assert!(
-                output.status.success(),
-                "an explicit stable override must bypass root-MSRV workspace validation"
-            );
-            let resolve_msrv = |root: &Path| {
-                let output = run(root, ResolverOperation::MsrvToolchain, None);
-                assert!(
-                    output.status.success(),
-                    "MSRV resolution failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                String::from_utf8(output.stdout)
-                    .expect("resolver output must be UTF-8")
-                    .trim()
-                    .to_owned()
-            };
-
-            assert_eq!(resolve_msrv(root), "1.93");
-            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\ncomponents = [\"clippy\"]\n")
-                .expect("toolchain fixture must be writable");
-            assert_eq!(resolve_msrv(root), "1.93");
-
-            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.93.0\"\n").expect("toolchain fixture must be writable");
-            assert_eq!(resolve_msrv(root), "1.93");
-
-            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n").expect("toolchain fixture must be writable");
-            assert_eq!(resolve_msrv(root), "1.93");
-            let output = command(root)
-                .args(["_anvil-resolve-stable", "msrv"])
-                .env("ANVIL_MSRV_TOOLCHAIN", "ms-prod-1.93")
-                .output()
-                .expect("just must be available to test the generated resolver recipe");
-            assert!(output.status.success());
-            assert_eq!(
-                String::from_utf8(output.stdout).expect("resolver output must be UTF-8").trim(),
-                "ms-prod-1.93"
-            );
-
-            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\npath = \"toolchains/custom\"\n")
-                .expect("toolchain fixture must be writable");
-            assert_eq!(resolve_msrv(root), "1.93");
-        }
     }
 }

@@ -26,9 +26,6 @@ const SETUP_STEP: &str = include_str!("../../../templates/ado/steps/setup.yml");
 /// Embedded body of the cargo-delta impact step template.
 const IMPACT_STEP: &str = include_str!("../../../templates/ado/steps/impact.yml");
 
-/// Embedded body of the advisory-comments step template.
-const ADVISORY_COMMENTS_STEP: &str = include_str!("../../../templates/ado/steps/advisory-comments.yml");
-
 /// Embedded body of the dirty-file job wrapper.
 const JOB_WRAPPER: &str = include_str!("../../../templates/ado/steps/job.yml");
 
@@ -117,31 +114,25 @@ fn group_step_path(group: &str) -> String {
     format!(".anvil/ado/steps/{group}.yml")
 }
 
-/// `.pipelines/anvil/steps/setup.yml`.
+/// `.anvil/ado/steps/setup.yml`.
 #[must_use]
 pub fn setup_step() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".anvil/ado/steps/setup.yml", SETUP_STEP)
 }
 
-/// `.pipelines/anvil/steps/impact.yml`.
+/// `.anvil/ado/steps/impact.yml`.
 #[must_use]
 pub fn impact_step() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".anvil/ado/steps/impact.yml", IMPACT_STEP)
 }
 
-/// `.pipelines/anvil/steps/advisory-comments.yml`.
-#[must_use]
-pub fn advisory_comments() -> Artifact {
-    Artifact::backend_file(Backend::Ado, ".anvil/ado/steps/advisory-comments.yml", ADVISORY_COMMENTS_STEP)
-}
-
-/// `.pipelines/anvil/steps/job.yml` — the dirty-file job wrapper.
+/// `.anvil/ado/steps/job.yml` — the dirty-file job wrapper.
 #[must_use]
 pub fn job_wrapper() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".anvil/ado/steps/job.yml", JOB_WRAPPER)
 }
 
-/// Repository check prerequisites, emitted at `.pipelines/anvil/hooks/before-checks.yml`.
+/// Repository check prerequisites, emitted at `.anvil/ado/hooks/before-checks.yml`.
 ///
 /// The empty step template runs after default checkout and input-artifact
 /// downloads, before Anvil setup. Repository edits follow the owned-file flow.
@@ -163,7 +154,7 @@ pub fn before_checks() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".anvil/ado/hooks/before-checks.yml", BEFORE_CHECKS)
 }
 
-/// Repository check finalization, emitted at `.pipelines/anvil/hooks/after-checks.yml`.
+/// Repository check finalization, emitted at `.anvil/ado/hooks/after-checks.yml`.
 ///
 /// Runs after supplied check steps and before artifact publication. Cleanup
 /// tasks can opt into `always()`; the wrapper adds no success-only condition.
@@ -181,19 +172,19 @@ pub fn after_checks() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".anvil/ado/hooks/after-checks.yml", AFTER_CHECKS)
 }
 
-/// `.pipelines/anvil/pr.yml` — the PR-tier stages template.
+/// `.anvil/ado/pr.yml` — the PR-tier stages template.
 #[must_use]
 pub fn pr_stages() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".anvil/ado/pr.yml", PR_STAGES)
 }
 
-/// `.pipelines/anvil/scheduled.yml` — the scheduled-tier stages template.
+/// `.anvil/ado/scheduled.yml` — the scheduled-tier stages template.
 #[must_use]
 pub fn scheduled_stages() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".anvil/ado/scheduled.yml", SCHEDULED_STAGES)
 }
 
-/// `.pipelines/anvil/custom-pr-stages.yml` — the repo-owned extension point
+/// `.anvil/ado/custom/pr-stages.yml` — the repo-owned extension point
 /// for PR-tier stages.
 ///
 /// Emitted once as an empty `stages: []` stub. The PR root pipeline
@@ -206,7 +197,7 @@ pub fn custom_pr_stages() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".anvil/ado/custom/pr-stages.yml", CUSTOM_PR_STAGES)
 }
 
-/// `.pipelines/anvil/custom-scheduled-stages.yml` — the repo-owned extension
+/// `.anvil/ado/custom/scheduled-stages.yml` — the repo-owned extension
 /// point for scheduled-tier stages. See [`custom_pr_stages`].
 #[must_use]
 pub fn custom_scheduled_stages() -> Artifact {
@@ -244,14 +235,7 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
 /// All ADO backend artifacts in emission order.
 #[must_use]
 pub(crate) fn all() -> Vec<Artifact> {
-    let mut out = vec![
-        setup_step(),
-        impact_step(),
-        advisory_comments(),
-        job_wrapper(),
-        before_checks(),
-        after_checks(),
-    ];
+    let mut out = vec![setup_step(), impact_step(), job_wrapper(), before_checks(), after_checks()];
     for (group, path) in GROUP_STEPS {
         out.push(Artifact::backend_file(Backend::Ado, path, render_group_step(group)));
     }

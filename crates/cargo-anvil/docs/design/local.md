@@ -21,30 +21,30 @@ repo/
 │   …repository recipes and imports…
 └── .anvil/
     ├── manifest.toml
-    ├── anvil.just
+    ├── anvil.just                 small import hub and aliases
+    ├── checks.just                check, group, tier, impact, and developer recipes
+    ├── setup.just                 pins and setup/validation recipes
+    ├── container.just             container recipes and private helpers
     └── container/
         ├── Dockerfile
         ├── Dockerfile.dockerignore
-        └── hooks.ps1                  optional and repository-owned
+        └── hooks.ps1              optional and repository-owned
 ```
 
-`.anvil/anvil.just` is one fully owned file. Its source templates remain split
-inside cargo-anvil, and the catalog exposes every top-level recipe as an
-independently addressable delimiter-free section. A derived catalog can add,
-replace, or remove one recipe. On disk, drift and proposals still apply to the
-complete file.
+The three generated recipe files are fully owned physical files. Source
+templates remain split inside cargo-anvil for maintainability, and the catalog
+exposes every top-level recipe as an independently addressable delimiter-free
+section. A derived catalog can add, replace, or remove one recipe while the
+engine composes sections into the appropriate physical file.
 
 Repository-specific recipes belong outside the managed region in `Justfile` or
-in repository-owned imports. Editing `.anvil/anvil.just` is supported by the
-ordinary dirty-owned-file flow, but a later catalog change proposes the whole
-file.
+in repository-owned imports. Editing a generated `.just` file is supported by
+the ordinary dirty-owned-file flow, but a later catalog change proposes that
+complete physical file.
 
-The two settings are a one-time scaffold only when the root Justfile is absent.
-Existing Justfiles keep their repository-owned shell and unstable-feature
-settings; cargo-anvil adds only the managed import region.
-
-The container Dockerfile is different: it is a repository-composed host with
-ordered managed regions. See [containers.md](./containers.md).
+The two root settings are a one-time scaffold only when `Justfile` is absent.
+Existing Justfiles keep their repository-owned settings; cargo-anvil adds only
+the managed import region.
 
 ## 2. Recipe layers
 
@@ -56,12 +56,12 @@ Every check has:
 - `anvil-<check>-setup installer=install|binstall` to provision prerequisites;
 - `anvil-<check>-validate-prereqs` to validate without installation.
 
-The common recipe shape is a single general-purpose tool invocation:
+The common shape is a direct general-purpose tool invocation:
 
 ```just
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     cargo each {{ anvil_affected_selection }} --once -- \
-        cargo {{ anvil_stable_toolchain_arg }} clippy {packages} \
+        cargo {{ anvil_stable_toolchain_arg }} clippy '{packages}' \
         --all-targets --all-features --locked -- -D warnings
 ```
 
@@ -70,13 +70,13 @@ concurrency, and timeouts. `cargo-coverage-gate run` owns collection and
 evaluation. `cargo-delta` owns Git analysis and impact artifacts. `cargo-aprz`
 owns GitHub credential discovery.
 
-Scripts remain only where the domain tool has no equivalent interface: PR-title
-policy, advisory comment aggregation, README comparison, spell dictionary
-generation, Miri artifact execution, cargo-careful cache repair, mutation-diff
-file preparation, Bolero target discovery, and container orchestration. They
-are not shared runners and do not parse package selection.
+Scripts remain only where the domain tool has no equivalent interface:
+PR-title policy, README comparison, spell dictionary generation, Miri profile
+environment, cargo-careful cache repair, mutation-diff preparation, Bolero
+target discovery, and container orchestration. They are not shared Anvil
+runners and do not own generic package iteration.
 
-### Groups
+### Groups and tiers
 
 Groups are the cloud parallelism boundary:
 
@@ -92,21 +92,10 @@ anvil-scheduled-runtime-analysis
 anvil-scheduled-exhaustive
 ```
 
-`anvil-pr-slow` is a local convenience umbrella for the four non-fast PR
-groups. Setup and validation recipes exist at group and tier levels and fan out
-through dependencies.
-
-### Tiers
-
-```text
-anvil-pr
-anvil-scheduled
-anvil-full
-```
-
-`anvil` aliases `anvil-pr`. Scheduled groups execute through the private
-`_anvil-unscoped` wrapper so `ANVIL_IMPACT=off` is inherited while their
-dependency graph is evaluated.
+`anvil-pr-slow` is a local convenience umbrella. `anvil`, `anvil-pr`,
+`anvil-scheduled`, and `anvil-full` are the tier entry points. Scheduled groups
+execute through `_anvil-unscoped` so `ANVIL_IMPACT=off` is inherited while the
+child dependency graph is evaluated.
 
 ## 3. Setup and toolchain policy
 
@@ -114,26 +103,26 @@ Generated recipes require Just 1.47 or newer. `set lazy` ensures
 `cargo install --list` runs only when setup or validation uses the shared tool
 inventory.
 
-Cargo tools follow this contract:
-
-| State | Result |
+| Installed state | Result |
 | --- | --- |
-| Missing or below the catalog minimum | Install exactly the catalog version. |
+| Missing or below catalog minimum | Install exactly the catalog version. |
 | Equal or newer | Accept without reinstalling or downgrading. |
 
 `installer=install` builds from source with `cargo install --locked`.
-`installer=binstall` is an explicit binary-only policy and uses
-`--disable-strategies compile`; it never falls back to source.
+`installer=binstall` is explicit binary-only policy and uses
+`--disable-strategies compile`; it never falls back to source. The selected
+installer is forwarded unchanged through group, tier, stable-toolchain, and
+cargo-each bootstrap setup.
 
-`cargo-each` is the bootstrap Cargo tool. It installs with the Cargo already
-available to the caller. It then resolves `{workspace-rust-version}` and
-provisions the stable fallback. `RUSTUP_TOOLCHAIN` or a root
-`rust-toolchain[.toml]` continues to take precedence. Pinned nightly
-toolchains and components are direct `rustup` invocations.
+`cargo-each` is the bootstrap Cargo tool. It installs with Cargo already
+available to the caller, then resolves `{workspace-rust-version}` for the
+stable fallback. `RUSTUP_TOOLCHAIN` or root `rust-toolchain[.toml]` takes
+precedence. Pinned nightly toolchains and components are direct `rustup`
+invocations.
 
 ## 4. Impact scoping
 
-`anvil-impact` invokes cargo-delta managed mode three times, once per tier:
+`anvil-impact` asks cargo-delta to write:
 
 ```text
 target/anvil/impact/modified.packages
@@ -142,31 +131,84 @@ target/anvil/impact/required.packages
 ```
 
 Each file contains one canonical `name@version` package spec per line. An empty
-file is an explicit empty selection, which cargo-each treats as a successful
-no-op.
+file is an explicit successful no-op in cargo-each. cargo-delta owns merge-base
+resolution, snapshots, cache invalidation, and committed/staged/unstaged/
+deleted/non-ignored-untracked change detection.
 
-cargo-delta owns merge-base resolution, snapshots, cache invalidation, and
-committed/staged/unstaged/deleted/non-ignored-untracked change detection. The
-base-ref precedence is `BASE_REF`, ADO target branch, GitHub base branch, then
-`origin/main`. A repository whose default is not `main` sets `BASE_REF`.
-
-Scoped checks pass the corresponding package file to cargo-each. No recipe
-parses JSON, strips package versions, or synthesizes Cargo argument strings.
+Base-ref precedence is `BASE_REF`, ADO target branch, GitHub base branch, then
+`origin/main`. Repositories whose default is not `main` set `BASE_REF`.
 
 `ANVIL_IMPACT` is strict:
 
 - unset: compute under `target/anvil/impact`;
-- `consume`: trust package files already produced by another job;
-- `off`: use `--workspace` and do not invoke cargo-delta.
+- `consume`: trust package files produced by another job;
+- `off`: select `--workspace` and do not invoke cargo-delta.
 
 In consume mode, `ANVIL_IMPACT_INPUT_DIR` selects an alternate package-file
-directory. Missing files fail through cargo-each rather than widening scope.
-
-PR backends compute and upload the directory once per OS, then group jobs use
-`ANVIL_IMPACT=consume`. Scheduled jobs use `off` as the full-workspace
+directory. Missing files fail closed through cargo-each. PR backends upload and
+consume this directory; scheduled jobs use `off` as the full-workspace
 backstop.
 
-## 5. Daily use
+## 5. Platform-specific cargo-mutants configuration
+
+Cargo-mutants does not evaluate platform cfgs while discovering mutants, so a
+Linux run can otherwise report a Windows-only mutation as missed. Anvil selects
+an optional native cargo-mutants configuration:
+
+| Host | Preferred file |
+| --- | --- |
+| Linux | `.cargo/mutants.linux.toml` |
+| Windows | `.cargo/mutants.windows.toml` |
+| Other | `.cargo/mutants.<just-os-name>.toml` |
+
+When present, both diff and full mutation recipes pass the file through
+cargo-mutants' native `--config` option. Platform files replace cargo-mutants'
+default configuration; they do not overlay it. Repositories duplicate shared
+policy intentionally rather than introducing an Anvil-specific merger.
+
+## 6. Remaining shell-backed check boundaries
+
+### Bolero
+
+The recipe does more than package iteration. For each affected package it runs
+`cargo bolero list --profile release --package <name>`, parses one JSON object
+per discovered fuzz target, normalizes the target identity, and then runs every
+target through `cargo bolero test --profile release --engine libfuzzer -T 60s`.
+It aggregates failures so one target does not hide later targets.
+
+Cargo-each cannot express that today because Bolero fuzz targets are discovered
+by cargo-bolero, not Cargo metadata. A general cargo-each extension could add
+two-phase discovery fan-out: run a discovery command per selected package,
+interpret newline-delimited JSON records, then expand JSON-field placeholders
+in a bounded follow-up command. Such a feature must stay generic and should not
+encode Bolero field aliases or Anvil policy. The narrower alternative is a
+cargo-bolero command that runs every listed target itself.
+
+### Spell dictionary preparation
+
+The recipe converts the repository-owned `.spelling` word list into Hunspell
+`.dic` format: sort lines, remove empty and numeric-only entries, prepend the
+word count, create the output directory, and write deterministic text. This is
+a good boundary for a small standalone tool with explicit input/output paths,
+atomic output, and tests for encoding, ordering, filtering, duplicates, and
+empty/missing inputs.
+
+### cargo-careful cache repair
+
+cargo-careful builds a custom standard library into a stable cache path. Cargo
+fingerprints the `--sysroot` path but not the contents behind that path. When
+the pinned nightly or cargo-careful executable changes, cargo-careful replaces
+the sysroot in place while workspace artifacts can remain apparently fresh;
+the next build may then fail with rustc metadata-version mismatches.
+
+The recipe hashes `rustc -vV` plus the cargo-careful executable, stores that
+identity under `target/anvil/`, and runs `cargo clean` before careful testing
+when the identity changes. The optimal fix belongs in cargo-careful: key its
+sysroot/cache path by compiler and tool identity, or expose a machine-readable
+identity/invalidation command. An unconditional clean is shell-free but makes
+every careful run substantially more expensive.
+
+## 7. Daily use
 
 ```text
 just anvil-pr-fast
@@ -174,7 +216,7 @@ just anvil-pr
 just anvil-scheduled
 just anvil-full
 just anvil-<check>
-just anvil-<check>-setup installer=install
+just anvil-<check>-setup install
 ```
 
 Developer options such as `anvil-fmt --fix`, `anvil-readme --fix`,

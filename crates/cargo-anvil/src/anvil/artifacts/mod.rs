@@ -82,6 +82,7 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         region::gitattributes(),
     ];
 
+    out.extend(justfile::headers());
     out.extend(justfile::tools());
     out.extend(justfile::versions());
     out.extend(justfile::helpers());
@@ -258,7 +259,6 @@ mod tests {
             github::code_review_skill(),
             ado::setup_step(),
             ado::impact_step(),
-            ado::advisory_comments(),
             ado::job_wrapper(),
             ado::pr_stages(),
             ado::scheduled_stages(),

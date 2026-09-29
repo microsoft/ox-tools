@@ -41,14 +41,14 @@ const SCHEDULED_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/sc
 /// Review guidance consumed by GitHub Copilot code review as an agent skill.
 const CODE_REVIEW_SKILL: &str = include_str!("../../../templates/github/code-review-skill.md");
 
-/// `.github/actions/anvil-setup/action.yml`.
+/// `.anvil/github/actions/setup/action.yml`.
 #[inline]
 #[must_use]
 pub fn setup_action() -> Artifact {
     Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/setup/action.yml", SETUP_ACTION)
 }
 
-/// `.github/actions/anvil-setup/just-problem-matcher.json`.
+/// `.anvil/github/actions/setup/just-problem-matcher.json`.
 #[inline]
 #[must_use]
 pub fn just_problem_matcher() -> Artifact {
@@ -59,14 +59,14 @@ pub fn just_problem_matcher() -> Artifact {
     )
 }
 
-/// `.github/actions/anvil-run-group/action.yml`.
+/// `.anvil/github/actions/run-group/action.yml`.
 #[inline]
 #[must_use]
 pub fn run_group_action() -> Artifact {
     Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/run-group/action.yml", RUN_GROUP_ACTION)
 }
 
-/// `.github/actions/anvil-report-status/action.yml`.
+/// `.anvil/github/actions/report-status/action.yml`.
 #[inline]
 #[must_use]
 pub fn report_status_action() -> Artifact {
@@ -77,7 +77,7 @@ pub fn report_status_action() -> Artifact {
     )
 }
 
-/// `.github/actions/anvil-impact/action.yml`.
+/// `.anvil/github/actions/impact/action.yml`.
 #[must_use]
 pub fn impact_action() -> Artifact {
     Artifact::backend_file(Backend::GitHub, ".anvil/github/actions/impact/action.yml", IMPACT_ACTION)
@@ -911,7 +911,7 @@ async function scenario(items) {
             .1;
         assert!(validation_caller.contains("\n    permissions:\n      contents: read"));
         assert!(validation_caller.contains("statuses: write"));
-        assert!(validation_caller.contains("pull-requests: write"));
+        assert!(!validation_caller.contains("pull-requests: write"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("issues: write"));

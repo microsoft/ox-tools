@@ -11,7 +11,8 @@ does not introduce an Anvil-specific runner.
 
 1. Put every Anvil-owned file under `.anvil/` unless a consumer requires a
    conventional location.
-2. Replace the generated Just tree with one imported `.anvil/anvil.just`.
+2. Replace the generated Just tree with a small `.anvil/anvil.just` hub and
+   three responsibility-oriented files: checks, setup, and container.
 3. Keep recipe bodies portable: the shell may launch a command, but control
    flow, JSON processing, workspace traversal, and policy do not live in Bash
    or PowerShell.
@@ -30,7 +31,10 @@ does not introduce an Anvil-specific runner.
 repo/
 ├── .anvil/
 │   ├── manifest.toml
-│   ├── anvil.just
+│   ├── anvil.just                    import hub and alias
+│   ├── checks.just                   checks, groups, tiers, impact, developer commands
+│   ├── setup.just                    pins and setup/validation recipes
+│   ├── container.just                container commands and helpers
 │   ├── container/
 │   │   ├── Dockerfile
 │   │   ├── Dockerfile.dockerignore
@@ -66,12 +70,13 @@ repo/
 └── .gitattributes
 ```
 
-The root `Justfile` imports only `.anvil/anvil.just`. The root file remains
-user-composed and keeps the existing managed-region ownership contract.
+The root `Justfile` imports only `.anvil/anvil.just`; that hub imports the
+three generated responsibility files. The root remains user-composed.
 
 ### 2.1 Files that can move
 
-- The complete `justfiles/anvil/` tree becomes `.anvil/anvil.just`.
+- The complete `justfiles/anvil/` tree becomes four `.anvil/*.just` files,
+  without returning to one file per check.
 - `.anvil.lock` becomes `.anvil/manifest.toml`.
 - GitHub local actions move from `.github/actions/anvil-*` to
   `.anvil/github/actions/*`. A local action may live anywhere in a checked-out
@@ -324,7 +329,7 @@ The existing catalog verbs remain uniform:
         .expect("built-in recipe"),
 )
 .with_artifact(Artifact::owned_file_section(
-    ".anvil/anvil.just",
+    ".anvil/checks.just",
     "command:myorg-check",
     our_check,
 ))
@@ -356,14 +361,14 @@ content emits separate physical files.
 
 Derived catalog authors retain per-recipe add/replace/remove operations.
 Repository authors do not gain delimiter-free per-recipe merge behavior:
-editing one recipe dirties `.anvil/anvil.just` as a whole, and a later template
-change produces `.anvil/anvil.just.anvil-proposed` for the whole file.
+editing one recipe dirties its physical checks/setup/container file as a whole,
+and a later template change proposes that complete file.
 Repository-specific recipes should remain in the root `Justfile` or another
 repository-owned import.
 
-The manifest stores one rendered checksum for `.anvil/anvil.just`; section
-identities contribute independently to the catalog checksum but do not require
-a manifest schema entry.
+The manifest stores one rendered checksum for each generated `.just` file;
+section identities contribute independently to the catalog checksum but do not
+require manifest schema entries.
 
 ## 7. Migration
 
@@ -372,7 +377,7 @@ The first run that carries this design:
 1. reads either legacy `.anvil.lock` or `.anvil/manifest.toml`, refusing when
    both contain different ownership state;
 2. writes `.anvil/manifest.toml` and retires the legacy path;
-3. composes `.anvil/anvil.just`;
+3. composes the `.anvil/*.just` hub, checks, setup, and container files;
 4. retires untouched files under `justfiles/anvil/` and keeps edited files as
    ownership-transferred orphans;
 5. moves untouched backend files and preserves edited old files using the
@@ -390,5 +395,5 @@ one-time reconciliation. The old files are retained as orphans so no
 customization is lost, but they are no longer imported by the generated entry
 point. Maintainers move still-needed recipes into a repository-owned import or
 the root Justfile, preferably under repository-specific names. Moving them into
-`.anvil/anvil.just` would immediately dirty the whole generated file and lose
-the update isolation the old per-check files provided.
+the generated files would immediately dirty that physical file. Repository
+recipes should remain in repository-owned imports.

@@ -11,8 +11,8 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use cargo_anvil::Catalog;
 use cargo_anvil::test_support::{Cli, run_update};
+use cargo_anvil::{Catalog, artifacts};
 use tempfile::TempDir;
 
 fn write(path: &Path, contents: &str) {
@@ -22,7 +22,7 @@ fn write(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
-fn generated_workspace() -> TempDir {
+fn generated_workspace_with(catalog: &Catalog) -> TempDir {
     let temp = TempDir::new().unwrap();
     write(
         &temp.path().join("Cargo.toml"),
@@ -36,7 +36,7 @@ fn generated_workspace() -> TempDir {
     );
     write(&temp.path().join("crate/src/lib.rs"), "pub fn value() -> u8 { 1 }\n");
     run_update(
-        &Catalog::anvil(),
+        catalog,
         &Cli {
             backends: Vec::new(),
             no_backends: true,
@@ -47,6 +47,10 @@ fn generated_workspace() -> TempDir {
     )
     .unwrap();
     temp
+}
+
+fn generated_workspace() -> TempDir {
+    generated_workspace_with(&Catalog::anvil())
 }
 
 fn just(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
@@ -69,7 +73,7 @@ fn stderr(output: &Output) -> String {
 #[test]
 fn impact_recipe_delegates_to_cargo_delta_package_outputs() {
     let temp = generated_workspace();
-    let recipes = std::fs::read_to_string(temp.path().join(".anvil/anvil.just")).unwrap();
+    let recipes = std::fs::read_to_string(temp.path().join(".anvil/checks.just")).unwrap();
 
     for tier in ["modified", "affected", "required"] {
         assert!(recipes.contains(&format!("--{tier} --format packages")));
@@ -131,5 +135,155 @@ fn base_ref_precedence_is_evaluated_without_shell_logic() {
         let output = just(temp.path(), &["--evaluate", "anvil_base_ref"], &env);
         assert!(output.status.success(), "stderr:\n{}", stderr(&output));
         assert_eq!(stdout(&output).trim(), expected);
+    }
+}
+
+fn examples_catalog() -> Catalog {
+    Catalog::anvil()
+        .into_builder()
+        .replace_artifact(artifacts::justfile::recipe("anvil-examples").unwrap().with_body(
+            "anvil-examples: anvil-examples-validate-prereqs anvil-impact\n    \
+                     cargo each {{ anvil_affected_selection }} --once -- pwsh -NoProfile -File \
+                     {{ quote(env(\"FAKE_CHECK_SCRIPT\")) }} '{packages}'\n",
+        ))
+        .replace_artifact(
+            artifacts::justfile::recipe("anvil-examples-validate-prereqs")
+                .unwrap()
+                .with_body("anvil-examples-validate-prereqs:\n"),
+        )
+        .build()
+        .unwrap()
+}
+
+fn catalog_with_noop_validations(names: &[&str]) -> Catalog {
+    let mut builder = Catalog::anvil().into_builder();
+    for name in names {
+        builder = builder.replace_artifact(artifacts::justfile::recipe(name).unwrap().with_body(format!("{name}:\n")));
+    }
+    builder.build().unwrap()
+}
+
+fn run_consumed_examples(root: &Path, impact_dir: &Path, log: &Path) -> Output {
+    let script = root.join("fake-check.ps1");
+    write(&script, "Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value ($args -join ' ')\n");
+    let path = std::env::join_paths(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .filter(|path| !path.ends_with("target/debug") && !path.ends_with("target\\debug")),
+    )
+    .unwrap();
+    Command::new("just")
+        .arg("anvil-examples")
+        .current_dir(root)
+        .env("PATH", path)
+        .env("FAKE_CARGO_LOG", log)
+        .env("FAKE_CHECK_SCRIPT", script)
+        .env("ANVIL_IMPACT", "consume")
+        .env("ANVIL_IMPACT_INPUT_DIR", impact_dir)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn consumed_package_files_drive_skip_selection_and_missing_input_failure() {
+    let temp = generated_workspace_with(&examples_catalog());
+    let root = temp.path();
+    let impact = root.join("impact fixture");
+    std::fs::create_dir_all(&impact).unwrap();
+    let package_file = impact.join("affected.packages");
+    let log = root.join("cargo.log");
+
+    write(&package_file, "fixture@0.1.0\n");
+    let selected = run_consumed_examples(root, &impact, &log);
+    assert!(selected.status.success(), "stderr:\n{}", stderr(&selected));
+    let logged = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        logged.contains("--package fixture@0.1.0"),
+        "selected packages must reach the generated public check\nlog: {logged}\nstdout: {}\nstderr: {}",
+        stdout(&selected),
+        stderr(&selected)
+    );
+
+    let _ = std::fs::remove_file(&log);
+    write(&package_file, "");
+    let empty = run_consumed_examples(root, &impact, &log);
+    assert!(empty.status.success(), "stderr:\n{}", stderr(&empty));
+    assert!(!log.exists(), "empty package files must not invoke the inner Cargo command");
+
+    std::fs::remove_file(&package_file).unwrap();
+    let missing = run_consumed_examples(root, &impact, &log);
+    assert!(!missing.status.success());
+    assert!(
+        stderr(&missing).contains("could not read package file"),
+        "missing consumed input must fail closed:\n{}",
+        stderr(&missing)
+    );
+}
+
+#[test]
+fn empty_affected_selection_skips_careful_and_mutants_before_side_effects() {
+    let catalog = catalog_with_noop_validations(&["anvil-careful-validate-prereqs", "anvil-mutants-diff-validate-prereqs"]);
+    let temp = generated_workspace_with(&catalog);
+    let impact = temp.path().join("impact");
+    std::fs::create_dir_all(&impact).unwrap();
+    write(&impact.join("affected.packages"), "");
+
+    for recipe in ["anvil-careful", "anvil-mutants-diff"] {
+        let output = just(
+            temp.path(),
+            &[recipe],
+            &[
+                ("ANVIL_IMPACT", "consume"),
+                ("ANVIL_IMPACT_INPUT_DIR", impact.to_str().unwrap()),
+                ("BASE_REF", "definitely-missing"),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{recipe} must skip before tool/base/cache work:\n{}",
+            stderr(&output)
+        );
+        assert!(stdout(&output).contains("no affected packages; skipping"));
+    }
+    assert!(
+        !temp.path().join("target/anvil/careful-sysroot.id").exists(),
+        "careful must not rewrite its marker for an empty selection"
+    );
+}
+
+#[test]
+fn msrv_recipes_are_noops_without_a_root_msrv() {
+    let catalog = Catalog::anvil()
+        .into_builder()
+        .replace_artifact(
+            artifacts::justfile::recipe("anvil-tool-cargo-each-install")
+                .unwrap()
+                .with_body("anvil-tool-cargo-each-install installer=\"install\":\n"),
+        )
+        .replace_artifact(
+            artifacts::justfile::recipe("anvil-tool-cargo-each-validate-prereqs")
+                .unwrap()
+                .with_body("anvil-tool-cargo-each-validate-prereqs:\n"),
+        )
+        .build()
+        .unwrap();
+    let temp = generated_workspace_with(&catalog);
+    write(
+        &temp.path().join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crate\"]\n",
+    );
+
+    for invocation in [
+        vec!["anvil-msrv-test-setup", "install"],
+        vec!["anvil-msrv-test-validate-prereqs"],
+        vec!["anvil-msrv-test"],
+    ] {
+        let output = just(temp.path(), &invocation, &[("ANVIL_IMPACT", "off")]);
+        assert!(
+            output.status.success(),
+            "{} must no-op without a root MSRV:\n{}",
+            invocation[0],
+            stderr(&output)
+        );
+        assert!(stdout(&output).contains("no root MSRV declared; skipping"));
     }
 }

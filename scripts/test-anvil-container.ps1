@@ -362,7 +362,7 @@ Write-Section '1. Generated artifacts'
 
 $dockerfile = Join-Path $repo '.anvil/container/Dockerfile'
 $dockerignore = Join-Path $repo '.anvil/container/Dockerfile.dockerignore'
-$containerJust = Join-Path $repo '.anvil/anvil.just'
+$containerJust = Join-Path $repo '.anvil/container.just'
 $hooks = Join-Path $repo '.anvil/container/hooks.ps1'
 
 Assert-That 'Dockerfile emitted' (Test-Path -LiteralPath $dockerfile)

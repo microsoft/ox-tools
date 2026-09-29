@@ -4,6 +4,40 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+# Platform configs replace, rather than overlay, cargo-mutants' default config.
+_anvil_mutants_platform_config := ".cargo/mutants." + os() + ".toml"
+_anvil_mutants_config_arg := if path_exists(justfile_directory() / _anvil_mutants_platform_config) == "true" {
+    "--config=" + _anvil_mutants_platform_config
+} else {
+    ""
+}
+
+# Read the declared root MSRV without resolving it through rustup. `none` is a
+# valid answer when a repository toolchain file selects Rust.
+[private]
+[script("pwsh", "-NoProfile")]
+_anvil-root-msrv:
+    $manifest = Join-Path '{{ replace(justfile_directory(), "'", "''") }}' 'Cargo.toml'
+    $values = @{}
+    $section = ''
+    foreach ($line in Get-Content -LiteralPath $manifest) {
+        if ($line -match '^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$') {
+            $section = $Matches[1].Trim()
+            continue
+        }
+        if ($section -in @('workspace.package', 'package') -and
+            $line -match '^\s*["'']?rust-version["'']?\s*=\s*(["''])([^"'']+)\1\s*(?:#.*)?$') {
+            $values[$section] = $Matches[2]
+        }
+    }
+    if ($values.ContainsKey('workspace.package')) {
+        Write-Output $values['workspace.package']
+    } elseif ($values.ContainsKey('package')) {
+        Write-Output $values['package']
+    } else {
+        Write-Output 'none'
+    }
+
 # Scheduled groups execute a private group recipe in a child Just process so
 # ANVIL_IMPACT=off is visible while that child's dependency graph is evaluated.
 [private]

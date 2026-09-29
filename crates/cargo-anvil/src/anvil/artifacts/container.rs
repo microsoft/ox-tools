@@ -85,6 +85,9 @@ const DOCKERFILE_PATH: &str = ".anvil/container/Dockerfile";
 
 const DOCKERIGNORE_PATH: &str = ".anvil/container/Dockerfile.dockerignore";
 
+/// Repo-root-relative path of the generated container recipes.
+pub(crate) const CONTAINER_JUST_PATH: &str = ".anvil/container.just";
+
 /// The region ids anvil owns inside [`DOCKERFILE_PATH`], in the order a valid
 /// Dockerfile must carry them.
 ///
@@ -134,7 +137,9 @@ pub fn all() -> Vec<Artifact> {
 /// Every top-level container recipe and helper as its own catalog section.
 #[must_use]
 pub fn recipes() -> Vec<Artifact> {
-    super::justfile::template_sections("container", RECIPE)
+    let mut sections = vec![super::justfile::generated_header(CONTAINER_JUST_PATH, "header:container")];
+    sections.extend(super::justfile::template_sections(CONTAINER_JUST_PATH, "container", RECIPE));
+    sections
 }
 
 /// The public `anvil-container` recipe.
@@ -326,7 +331,7 @@ mod tests {
                 matches!(
                     artifact,
                     Artifact::OwnedFileSection(section)
-                        if section.path == ".anvil/anvil.just" && section.id == "recipe:anvil-container"
+                        if section.path == CONTAINER_JUST_PATH && section.id == "recipe:anvil-container"
                 )
             }),
             "the container recipe must be a section of the composed Justfile"
@@ -1035,7 +1040,15 @@ mod tests {
 
     #[test]
     fn the_build_context_stays_scoped_to_the_composed_recipe_file() {
-        assert!(DOCKERIGNORE.contains(".anvil/*\n!.anvil/anvil.just\n!.anvil/container\n"));
+        for path in [
+            "!.anvil/anvil.just",
+            "!.anvil/checks.just",
+            "!.anvil/setup.just",
+            "!.anvil/container.just",
+            "!.anvil/container",
+        ] {
+            assert!(DOCKERIGNORE.contains(path), "build context missing {path}");
+        }
         assert!(!DOCKERIGNORE.contains("!justfiles"));
     }
 

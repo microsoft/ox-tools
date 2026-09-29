@@ -8,7 +8,7 @@ This is the top-level design document. It captures the why, the principles, and 
 user-visible shape of the tool. Detail lives in companion documents:
 
 - [checks.md](./checks.md) — the opinionated check catalog, the group/tier structure
-- [local.md](./local.md) — the composed `.anvil/anvil.just` recipe surface and customization.
+- [local.md](./local.md) — the generated `.anvil/*.just` recipe surface and customization.
 - [updates.md](./updates.md) — ownership, TOML adoption, marker recovery, and retirement.
 - [extensibility.md](./extensibility.md) — how downstream tools ship their own brand + catalog.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
@@ -38,7 +38,7 @@ implemented six different ways:
 | `ox-docs`          | ADO classic               | Monolith                                | caller-provisioned | Mixed C#/.NET + Rust, mdbook/docfx |
 
 The same logical checks (clippy, fmt, deny, miri, mutants, coverage, hack feature-powerset, udeps,
-semver, spellcheck, license headers, doc/doctest, careful, audit, ensure-no-cyclic-deps,
+spellcheck, license headers, doc/doctest, careful, audit, ensure-no-cyclic-deps,
 ensure-no-default-features, doc2readme, …) are spelled in subtly different ways in each repo, with
 different argument sets, different tool versions, and different opinions about which tier (PR vs.
 scheduled) a check belongs to.
@@ -223,8 +223,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --check
 ```
 
-The same commands appear in the corresponding recipe sections of
-`.anvil/anvil.just`, so they remain discoverable without cargo-anvil. The fallback
+The same commands appear in `.anvil/checks.just`, so they remain discoverable
+without cargo-anvil. The fallback
 covers core hygiene only — coverage, miri, mutants, etc. still require their respective tools.
 
 ## 6. Repo Layout
@@ -257,7 +257,10 @@ semantics and proposals. See [updates.md](./updates.md#strict-ownership).
 repo/
 ├── .anvil/
 │   ├── manifest.toml                              sidecar manifest tracking last-rendered checksums
-│   ├── anvil.just                                 composed owned recipe file (see local.md)
+│   ├── anvil.just                                 import hub (see local.md)
+│   ├── checks.just                                checks, groups, tiers, impact
+│   ├── setup.just                                 pins and setup/validation
+│   ├── container.just                             container recipes
 │   ├── container/                                 container image definition (see containers.md)
 │   ├── github/actions/                            GitHub local actions
 │   └── ado/                                       ADO implementation templates
@@ -290,7 +293,7 @@ repo/
 
 Detail on each host:
 
-- **`Justfile` and `.anvil/anvil.just`** — see [local.md](./local.md).
+- **`Justfile` and `.anvil/*.just`** — see [local.md](./local.md).
 - **`.anvil/container/`** — the container image definition: a `Dockerfile` and
   its build-context ignore file, plus an optional `hooks.ps1` supplying
   credentials. These live in the consolidated tool-owned directory; see
@@ -434,7 +437,7 @@ pipeline.
 
 | Group                                                       | OS / arch scope (default)              | Rationale                                                                                                                                          |
 |-------------------------------------------------------------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`, `scheduled-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph -- cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
+| `pr-fast`, `scheduled-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, external-types) that only see the host's compiled crate graph -- cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
 | `pr-test`, `pr-msrv`, `pr-runtime-analysis`, `scheduled-test`          | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface. `pr-msrv` runs the affected test suite under the minimum supported compiler. The slow PR groups run as parallel cloud-workflow jobs for shorter wall-clock per leg. |
 | `pr-mutants`                                                    | GH: Linux x86_64 + Windows x86_64 + Linux aarch64 (windows-arm self-skips). ADO: Linux x86_64 + Windows x86_64 | Diff-scoped mutation testing. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; the recipe self-skips so the windows-arm leg is a no-op. |
 | `scheduled-exhaustive`                                       | Linux x86_64 + Windows x86_64 | Full `cargo-mutants` / `cargo-hack` / `bench`. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; rather than splitting the matrix to add an ARM-Linux leg for cargo-hack and bench, the whole group is x86-only. Adopters with ARM-specific concerns extend the matrix in their root workflow. |

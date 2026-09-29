@@ -69,11 +69,11 @@ impl Catalog {
     /// A `sha256:…` checksum over the whole catalog — every artifact's
     /// identity and rendered body, in canonical (sorted) order.
     ///
-    /// Deterministic and independent of any repository: it depends only on
-    /// the artifact set, not on artifact insertion order and not on the
-    /// [`CliMeta`] identity. Two builds that share a `tool_version` but
-    /// differ in any artifact (an extra file, an overridden body, a swapped
-    /// backend file) produce different checksums. See
+    /// Deterministic and independent of any repository or [`CliMeta`].
+    /// Whole-file and region entries are order-independent. Sections composing
+    /// the same physical owned file are order-sensitive because catalog order
+    /// is their rendering order. Two builds that share a `tool_version` but
+    /// differ in any artifact or section order produce different checksums. See
     /// [`updates.md §1`](../../docs/design/updates.md) and
     /// [`extensibility.md §5.1`](../../docs/design/extensibility.md).
     #[must_use]
@@ -100,8 +100,8 @@ impl Catalog {
 }
 
 /// Canonical, collision-resistant string for one artifact: its full identity
-/// (including gate / syntax) followed by its rendered body. The leading
-/// fields make sorting these strings a canonical, order-independent ordering.
+/// (including gate / syntax) followed by its rendered body. Owned-file sections
+/// also carry their per-path rendering ordinal.
 fn canonical_repr(artifact: &Artifact, section_ordinal: Option<usize>) -> String {
     // U+001F (unit separator) cannot appear in paths/ids and is vanishingly
     // unlikely in bodies, so it disambiguates the joined fields.
@@ -279,9 +279,8 @@ fn structural_errors(artifacts: &[Artifact]) -> Vec<String> {
         .filter_map(|artifact| match artifact {
             Artifact::Region(spec) => match &spec.host {
                 crate::catalog::HostSelector::Path(path) => Some(path.as_str()),
-                crate::catalog::HostSelector::EachMemberManifest
-                | crate::catalog::HostSelector::WorkspaceCargoToml
-                | crate::catalog::HostSelector::SingleCrateCargoToml => None,
+                crate::catalog::HostSelector::WorkspaceCargoToml | crate::catalog::HostSelector::SingleCrateCargoToml => Some("Cargo.toml"),
+                crate::catalog::HostSelector::EachMemberManifest => None,
             },
             Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) => None,
         })
@@ -531,6 +530,23 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(region_host.to_string().contains("conflicts with a managed-region host"));
+
+        for host in [
+            crate::catalog::HostSelector::WorkspaceCargoToml,
+            crate::catalog::HostSelector::SingleCrateCargoToml,
+        ] {
+            let error = Catalog::builder(CliMeta::new("t"))
+                .with_artifact(Artifact::region(crate::catalog::RegionSpec {
+                    host,
+                    id: crate::catalog::RegionId::new("managed-root"),
+                    body: "region".to_owned(),
+                    syntax: crate::region::CommentSyntax::Hash,
+                }))
+                .with_artifact(Artifact::owned_file_section("Cargo.toml", "part", "section"))
+                .build()
+                .unwrap_err();
+            assert!(error.to_string().contains("conflicts with a managed-region host"), "{error}");
+        }
     }
 
     #[test]

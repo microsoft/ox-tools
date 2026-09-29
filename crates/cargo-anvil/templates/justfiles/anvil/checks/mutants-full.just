@@ -11,7 +11,7 @@
 
 # Run exhaustive mutation testing across the workspace.
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
-    {{ mutants_command_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --workspace --no-shuffle --jobs 0
+    {{ mutants_command_prefix }}cargo each --workspace --once -- cargo {{ anvil_stable_toolchain_arg }} mutants --workspace --no-shuffle --jobs 0 {{_anvil_mutants_config_arg}}
 
 # --- scheduled-exhaustive members (mutants-full reuses cargo-mutants;
 #     cargo-hack and bench are dedicated tools) ---

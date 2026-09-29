@@ -4,27 +4,38 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
-anvil_msrv_toolchain_arg := if env("ANVIL_MSRV_TOOLCHAIN", "") == "" {
-    quote("+{workspace-rust-version}")
-} else {
-    "+" + env("ANVIL_MSRV_TOOLCHAIN")
-}
-
-anvil_msrv_install_prefix := if env("ANVIL_MSRV_TOOLCHAIN", "") == "" { "" } else { "# " }
-
 # Run affected-package tests under the declared public MSRV or the explicitly
-# provisioned internal mapping.
+# provisioned internal mapping. A repository without a root MSRV is a no-op.
+[script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
-    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_msrv_toolchain_arg }} test '{packages}' --tests --all-features --locked
-    cargo each {{ anvil_affected_selection }} --once -- cargo {{ anvil_msrv_toolchain_arg }} test '{packages}' --tests --locked
+    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
+    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
+    $toolchain = if ($env:ANVIL_MSRV_TOOLCHAIN) { $env:ANVIL_MSRV_TOOLCHAIN } else { $declared }
+    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$toolchain" test '{packages}' --tests --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$toolchain" test '{packages}' --tests --locked
+    exit $LASTEXITCODE
 
 # Install the declared public MSRV. An internal mapping names a toolchain the
-# environment must provision, so setup deliberately does not mutate it.
+# environment must provision, so setup validates rather than mutates it.
 [group("anvil-setup")]
+[script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
-    {{ anvil_msrv_install_prefix }}cargo each --workspace --once -- rustup toolchain install '{workspace-rust-version}' --profile minimal
+    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
+    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test-setup: no root MSRV declared; skipping'; exit 0 }
+    if ($env:ANVIL_MSRV_TOOLCHAIN) {
+        rustup run $env:ANVIL_MSRV_TOOLCHAIN rustc --version
+    } else {
+        rustup toolchain install $declared --profile minimal
+    }
+    exit $LASTEXITCODE
 
-# Validate the effective MSRV toolchain without rustup auto-install behavior.
+# Validate the MSRV prerequisite without rustup auto-install behavior.
 [group("anvil-setup")]
+[script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
-    cargo each --workspace --once -- rustup run {{ replace(anvil_msrv_toolchain_arg, "+", "") }} rustc --version
+    $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
+    if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
+    $toolchain = if ($env:ANVIL_MSRV_TOOLCHAIN) { $env:ANVIL_MSRV_TOOLCHAIN } else { $declared }
+    rustup run $toolchain rustc --version
+    exit $LASTEXITCODE

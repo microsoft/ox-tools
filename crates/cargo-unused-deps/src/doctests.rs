@@ -16,7 +16,9 @@ use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anyhow::{Context, Result, bail};
+use ohno::{AppError, IntoAppError};
+
+type Result<T> = std::result::Result<T, AppError>;
 
 /// Environment variable naming the file the shim appends its findings to.
 ///
@@ -94,7 +96,7 @@ pub fn shim(args: &[OsString], capture: &Path) -> Result<ExitCode> {
         // would hand rustc an empty program and every doctest would fail.
         .stdin(Stdio::inherit())
         .output()
-        .context("failed to run rustc from the doctest shim")?;
+        .into_app_err("failed to run rustc from the doctest shim")?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     record(capture, &stderr)?;
@@ -103,7 +105,7 @@ pub fn shim(args: &[OsString], capture: &Path) -> Result<ExitCode> {
     // passed through rather than swallowed. The format was normalized to
     // human/no-color above because the capture parser and rustdoc both consume
     // those diagnostics.
-    std::io::Write::write_all(&mut std::io::stderr(), &output.stderr).context("failed to forward rustc diagnostics")?;
+    std::io::Write::write_all(&mut std::io::stderr(), &output.stderr).into_app_err("failed to forward rustc diagnostics")?;
 
     Ok(if output.status.success() {
         ExitCode::SUCCESS
@@ -134,7 +136,7 @@ fn stable_diagnostic_args(args: &[OsString]) -> Vec<OsString> {
 /// Run as Cargo's rustdoc executable and install the doctest compiler shim.
 pub fn rustdoc_wrapper(args: &[OsString]) -> Result<ExitCode> {
     let rustdoc = tool_or_default(std::env::var_os(INNER_RUSTDOC_VAR), "rustdoc");
-    let shim = std::env::current_exe().context("failed to locate this executable to use as the doctest shim")?;
+    let shim = std::env::current_exe().into_app_err("failed to locate this executable to use as the doctest shim")?;
     let status = Command::new(rustdoc)
         .args(args)
         .args(["-Z", "unstable-options", "--no-run", "--test-builder"])
@@ -144,7 +146,7 @@ pub fn rustdoc_wrapper(args: &[OsString]) -> Result<ExitCode> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .context("failed to run rustdoc from the doctest wrapper")?;
+        .into_app_err("failed to run rustdoc from the doctest wrapper")?;
 
     Ok(if status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
@@ -170,10 +172,10 @@ fn record(capture: &Path, stderr: &str) -> Result<()> {
         .write(true)
         .create_new(true)
         .open(&record)
-        .context(format!("failed to create the doctest capture record {}", record.display()))?;
+        .into_app_err(format!("failed to create the doctest capture record {}", record.display()))?;
 
     file.write_all(lines.as_bytes())
-        .context(format!("failed to write the doctest capture record {}", record.display()))
+        .into_app_err(format!("failed to write the doctest capture record {}", record.display()))
 }
 
 /// The dependency named by one output line from rustc, if it is the lint.
@@ -200,11 +202,11 @@ fn unused_name(line: &str) -> Option<String> {
 /// Returns an error when cargo cannot be launched, the doctest build fails, or
 /// the capture file cannot be read.
 pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, shim_path: &Path) -> Result<PackageDoctests> {
-    std::fs::create_dir_all(target_dir).context(format!("failed to create {}", target_dir.display()))?;
+    std::fs::create_dir_all(target_dir).into_app_err(format!("failed to create {}", target_dir.display()))?;
 
     let capture = target_dir.join(format!("doctests-{package}"));
     clear_capture(&capture)?;
-    std::fs::create_dir(&capture).context(format!("failed to create {}", capture.display()))?;
+    std::fs::create_dir(&capture).into_app_err(format!("failed to create {}", capture.display()))?;
     let rustdoc = selected_rustdoc()?;
 
     let cargo = tool_or_default(std::env::var_os("CARGO"), "cargo");
@@ -223,10 +225,10 @@ pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, sh
         .env(RUSTDOC_WRAPPER_VAR, "1")
         .env(CAPTURE_VAR, &capture)
         .output()
-        .context("failed to run `cargo test --doc` to collect doctest evidence")?;
+        .into_app_err("failed to run `cargo test --doc` to collect doctest evidence")?;
 
     if !output.status.success() {
-        bail!(
+        ohno::bail!(
             "`cargo test --doc` failed while collecting doctest evidence for {package}:\n{}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -235,30 +237,35 @@ pub fn gather_package(manifest_path: &Path, package: &str, target_dir: &Path, sh
     read_captures(&capture)
 }
 
-/// Resolve the rustdoc selected by the current rustup toolchain before replacing it.
+/// Resolve the rustdoc that ships with the active rustc before replacing it.
+///
+/// The sysroot is asked of rustc rather than of rustup because not every
+/// toolchain is managed by rustup, and it keeps rustdoc from the same toolchain
+/// as the compiler the shim runs.
 fn selected_rustdoc() -> Result<OsString> {
     if let Some(rustdoc) = std::env::var_os("RUSTDOC") {
         return Ok(rustdoc);
     }
-    let output = Command::new("rustup")
-        .args(["which", "rustdoc"])
+    let rustc = tool_or_default(std::env::var_os("RUSTC"), "rustc");
+    let output = Command::new(rustc)
+        .args(["--print", "sysroot"])
         .output()
-        .context("failed to ask rustup for the selected rustdoc")?;
-    rustdoc_from_rustup(output.status.success(), &output.stdout, &output.stderr)
+        .into_app_err("failed to ask rustc for its sysroot")?;
+    rustdoc_in_sysroot(output.status.success(), &output.stdout, &output.stderr)
 }
 
-fn rustdoc_from_rustup(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<OsString> {
+fn rustdoc_in_sysroot(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<OsString> {
     if !success {
-        bail!(
-            "rustup could not resolve the selected rustdoc:\n{}",
-            String::from_utf8_lossy(stderr).trim()
-        );
+        ohno::bail!("rustc could not report its sysroot:\n{}", String::from_utf8_lossy(stderr).trim());
     }
-    let path = String::from_utf8_lossy(stdout).trim().to_owned();
-    if path.is_empty() {
-        bail!("rustup returned an empty rustdoc path");
+    let sysroot = String::from_utf8_lossy(stdout).trim().to_owned();
+    if sysroot.is_empty() {
+        ohno::bail!("rustc reported an empty sysroot");
     }
-    Ok(OsString::from(path))
+    Ok(Path::new(&sysroot)
+        .join("bin")
+        .join(format!("rustdoc{}", std::env::consts::EXE_SUFFIX))
+        .into_os_string())
 }
 
 /// Use an environment-selected tool or its conventional executable name.
@@ -269,7 +276,7 @@ fn tool_or_default(selected: Option<OsString>, default: &str) -> OsString {
 /// Remove stale captures from an earlier run.
 fn clear_capture(capture: &Path) -> Result<()> {
     if capture.exists() {
-        std::fs::remove_dir_all(capture).context(format!("failed to clear {}", capture.display()))?;
+        std::fs::remove_dir_all(capture).into_app_err(format!("failed to clear {}", capture.display()))?;
     }
     Ok(())
 }
@@ -281,9 +288,9 @@ fn read_captures(capture: &Path) -> Result<PackageDoctests> {
         return Ok(doctests);
     }
 
-    for entry in std::fs::read_dir(capture).context(format!("failed to read {}", capture.display()))? {
-        let path = entry.context(format!("failed to enumerate {}", capture.display()))?.path();
-        let text = std::fs::read_to_string(&path).context(format!("failed to read {}", path.display()))?;
+    for entry in std::fs::read_dir(capture).into_app_err(format!("failed to read {}", capture.display()))? {
+        let path = entry.into_app_err(format!("failed to enumerate {}", capture.display()))?.path();
+        let text = std::fs::read_to_string(&path).into_app_err(format!("failed to read {}", path.display()))?;
         for line in text.lines() {
             match line.strip_prefix('\t') {
                 Some(name) => {
@@ -307,7 +314,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        DoctestEvidence, PackageDoctests, clear_capture, read_captures, record, rustdoc_from_rustup, stable_diagnostic_args,
+        DoctestEvidence, PackageDoctests, clear_capture, read_captures, record, rustdoc_in_sysroot, stable_diagnostic_args,
         tool_or_default, unused_name,
     };
 
@@ -384,12 +391,16 @@ mod tests {
     }
 
     #[test]
-    fn rustup_must_return_a_nonempty_rustdoc_path() {
-        rustdoc_from_rustup(false, b"", b"not installed").expect_err("a failed rustup invocation is an error");
-        rustdoc_from_rustup(true, b"  \n", b"").expect_err("an empty path is an error");
+    fn rustdoc_is_found_in_a_nonempty_sysroot() {
+        let failed = rustdoc_in_sysroot(false, b"", b"no toolchain").expect_err("a failed rustc invocation is an error");
+        assert!(failed.to_string().contains("no toolchain"), "unexpected error: {failed}");
+        rustdoc_in_sysroot(true, b"  \n", b"").expect_err("an empty sysroot is an error");
         assert_eq!(
-            rustdoc_from_rustup(true, b"toolchain/rustdoc\n", b"").expect("a path is valid"),
-            "toolchain/rustdoc"
+            rustdoc_in_sysroot(true, b"toolchain\n", b"").expect("a sysroot is valid"),
+            Path::new("toolchain")
+                .join("bin")
+                .join(format!("rustdoc{}", std::env::consts::EXE_SUFFIX))
+                .into_os_string()
         );
     }
 

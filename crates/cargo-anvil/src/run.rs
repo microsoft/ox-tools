@@ -188,6 +188,7 @@ fn build_plan(
     backends: &[Backend],
     catalog: &Catalog,
 ) -> Result<Plan, AppError> {
+    validate_expanded_section_ownership(workspace, backends, catalog)?;
     let mut plan = Plan::default();
     let mut hosts = HostTextCache::default();
     // Hosts already reported as unsafe to compose. Every region targeting one
@@ -235,6 +236,31 @@ fn build_plan(
     plan_removals(repo_root, manifest, &mut plan, &mut hosts, &composed)?;
 
     Ok(plan)
+}
+
+fn validate_expanded_section_ownership(workspace: &Workspace, backends: &[Backend], catalog: &Catalog) -> Result<(), AppError> {
+    let section_paths = catalog
+        .artifacts()
+        .iter()
+        .filter_map(|artifact| match artifact {
+            Artifact::OwnedFileSection(spec) if spec.gate.is_none_or(|gate| backends.contains(&gate)) => Some(spec.path),
+            Artifact::OwnedFile(_) | Artifact::OwnedFileSection(_) | Artifact::Region(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    for artifact in catalog.artifacts() {
+        let Artifact::Region(spec) = artifact else {
+            continue;
+        };
+        for host in region_host_paths(workspace, spec) {
+            if let Some(section_path) = section_paths.iter().find(|path| path.eq_ignore_ascii_case(host)) {
+                bail!(
+                    "owned-file sections composing '{section_path}' conflict with managed-region host '{host}' after workspace expansion"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 struct ComposedOwnedFile {
@@ -1222,6 +1248,27 @@ mod tests {
         assert_eq!(compose_owned_file_sections(&catalog, &[Backend::GitHub])[0].body, "body\n");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn member_region_conflicts_with_a_section_after_workspace_expansion() {
+        use crate::catalog::{CliMeta, RegionId};
+
+        let temp = empty_workspace();
+        let catalog = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::member_region(RegionId::new("member"), "workspace = true\n"))
+            .with_artifact(Artifact::owned_file_section("crates/alpha/Cargo.toml", "part", "section"))
+            .build()
+            .unwrap();
+
+        let error = run_update(&catalog, &local_only(), temp.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("conflict with managed-region host 'crates/alpha/Cargo.toml'"),
+            "{error}"
+        );
+    }
+
     /// `plan_removals` resolves the host's casing before deciding what to
     /// remove, so this must too. A lock that records `Deny.toml` for a file now
     /// spelled `deny.toml` still owns that region, and the same pass is about
@@ -1691,6 +1738,9 @@ mod tests {
         for expected in [
             "Justfile",
             ".anvil/anvil.just",
+            ".anvil/checks.just",
+            ".anvil/setup.just",
+            ".anvil/container.just",
             ".anvil/manifest.toml",
             ".anvil/container/Dockerfile",
             ".anvil/container/Dockerfile.dockerignore",
@@ -2479,7 +2529,6 @@ mod tests {
         for expected in [
             ".anvil/ado/steps/setup.yml",
             ".anvil/ado/steps/impact.yml",
-            ".anvil/ado/steps/advisory-comments.yml",
             ".anvil/ado/steps/pr-fast.yml",
             ".anvil/ado/steps/pr-test.yml",
             ".anvil/ado/steps/pr-msrv.yml",

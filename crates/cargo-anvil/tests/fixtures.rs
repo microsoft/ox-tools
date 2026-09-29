@@ -99,7 +99,7 @@ fn read_parsing_toml(tmp: &TempDir, relpath: &str) -> String {
 /// `single-crate`: a manifest with a bare `[package]` and no
 /// `[workspace]` should still get the per-crate lints region (not the
 /// workspace one), the Justfile imports region, and the full
-/// composed `.anvil/anvil.just`.
+/// generated `.anvil/*.just` recipe files.
 #[test]
 fn single_crate_emits_crate_lints_and_justfiles() {
     let tmp = stage_fixture("single-crate");
@@ -117,7 +117,14 @@ fn single_crate_emits_crate_lints_and_justfiles() {
         "single-crate fixture must not receive the workspace lints region"
     );
 
-    for rel in ["Justfile", ".anvil/anvil.just", ".anvil/manifest.toml"] {
+    for rel in [
+        "Justfile",
+        ".anvil/anvil.just",
+        ".anvil/checks.just",
+        ".anvil/setup.just",
+        ".anvil/container.just",
+        ".anvil/manifest.toml",
+    ] {
         assert!(tmp.path().join(rel).is_file(), "expected {rel} to be written");
     }
 

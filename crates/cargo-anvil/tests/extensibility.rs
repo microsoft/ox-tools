@@ -23,10 +23,10 @@ use cargo_anvil::test_support::{Cli, Manifest, run_update};
 use cargo_anvil::{Artifact, Catalog, RegionId, artifacts};
 use tempfile::TempDir;
 
-const EXTRA_FILE: &str = ".anvil/anvil.just";
+const EXTRA_FILE: &str = ".anvil/checks.just";
 const EXTRA_ID: &str = "recipe:anvil-demo";
 const METADATA_REGION: &str = "demoforge-metadata";
-const CONTAINER_JUST: &str = ".anvil/anvil.just";
+const CONTAINER_JUST: &str = ".anvil/container.just";
 const DOCKERFILE: &str = ".anvil/container/Dockerfile";
 const DOCKERIGNORE: &str = ".anvil/container/Dockerfile.dockerignore";
 const CONTAINER_HOOKS: &str = ".anvil/container/hooks.ps1";

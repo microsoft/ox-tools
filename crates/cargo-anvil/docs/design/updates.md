@@ -21,7 +21,7 @@ tool_version = "0.4.1"
 catalog_checksum = "sha256:..."
 
 [[file]]
-path = ".anvil/anvil.just"
+path = ".anvil/checks.just"
 checksum = "sha256:..."
 
 [[region]]

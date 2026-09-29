@@ -133,7 +133,7 @@ copies and `.anvil.lock`.
 
 ### Scope, metadata, and compilation
 
-The shared recipe queries `_anvil-impact-include affected` after its
+The shared recipe gives `affected.packages` directly to cargo-each after its
 `anvil-impact` prerequisite has refreshed the cache. It maps the standard,
 Tree Borrows, strict-provenance, and race-coverage parameter values to their
 recipe names and profile flags before invoking Cargo.
@@ -235,10 +235,10 @@ The subsystem is deliberately split so each fact has exactly one owner:
 - **Design docs are the contract.** They describe observable behavior; they are not consulted
   by the code and must not be cited from it (see the root `AGENTS.md`).
 
-The `every_check_matches_its_declared_impact_policy` test in `justfile.rs` is the guard that
-keeps the per-check policy table, the emitted recipes, and the documented mapping in agreement:
-each check's structural `_anvil-impact-include <category>` call (or its absence) is pinned to an
-expected category, so a check silently gaining, losing, or changing scoping fails there.
+The `every_check_matches_its_declared_impact_policy` test in `justfile.rs` keeps
+the per-check policy table, emitted package-file selection, and documented
+mapping in agreement. A check silently gaining, losing, or changing scoping
+fails there.
 
 ### Cache identity and invalidation
 

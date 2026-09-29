@@ -89,9 +89,9 @@ runs:
         # one key. The prefix shares a completed cache across sibling jobs.
         # There is deliberately no fallback across toolchain/catalog changes:
         # those inputs are the cache-pruning boundary.
-        key: anvil-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', '.anvil/anvil.just') }}-${{ github.job }}
+        key: anvil-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', '.anvil/setup.just') }}-${{ github.job }}
         restore-keys: |
-          anvil-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', '.anvil/anvil.just') }}-
+          anvil-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', '.anvil/setup.just') }}-
         # `.crates.toml` and `.crates2.json` track which cargo-installed
         # tools and versions live in ~/.cargo/bin/. Without them in the
         # cache, `cargo install --list` and (downstream) the

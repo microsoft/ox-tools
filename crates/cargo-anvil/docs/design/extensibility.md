@@ -18,7 +18,7 @@ it means there is no namespace to isolate, so the on-disk vocabulary never needs
 Concretely, `anvil` is the name of the **engine and the on-disk format**, not of any particular
 front-end binary. Every tool built on the engine emits the *same* fixed namespace:
 
-- composed owned recipe file `.anvil/anvil.just`
+- generated recipe files `.anvil/{anvil,checks,setup,container}.just`
 - sidecar manifest `.anvil/manifest.toml`
 - review-sibling suffix `.anvil-proposed`
 - managed-region sentinels `# >>> anvil-managed: <id>` … `# <<< anvil-managed: <id>`
@@ -55,6 +55,13 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     cargo_anvil::run_app(myforge::catalog())
 }
+
+pub struct OwnedFileSectionSpec {
+    pub path: &'static str,
+    pub id: String,
+    pub body: String,
+    pub gate: Option<Backend>,
+}
 ```
 
 …plus one function that *describes the catalog* by starting from anvil's and customizing it:
@@ -70,7 +77,7 @@ pub fn catalog() -> Catalog {
         .about("MyForge: unified Rust build scaffolding for the Foo org")
         .version(env!("CARGO_PKG_VERSION"))
         .with_artifact(Artifact::owned_file_section(   // append one recipe section
-            ".anvil/anvil.just",
+            ".anvil/checks.just",
             "recipe:myforge-extra",
             include_str!("../templates/extra.just"),
         ))
@@ -85,7 +92,7 @@ pub fn catalog() -> Catalog {
 ```
 
 That is the whole contract: **one line in `main`, plus a `Catalog` value.** Note the new recipe
-section still composes into `.anvil/anvil.just` and any new region still uses `anvil-managed`
+section still composes into `.anvil/checks.just` and any new region still uses `anvil-managed`
 sentinels — the fork extends the anvil namespace, it does not create its own.
 
 ## 4. The shape of a catalog
@@ -111,12 +118,14 @@ pub struct CliMeta {
 injects (`cargo myforge` → argv `myforge …`) and to render `--help`. It is never interpolated
 into a path, a sentinel, or a recipe name.
 
-The catalog's content is an ordered set of **artifacts**. There are just two kinds:
+The catalog's content is an ordered set of **artifacts**. There are three kinds:
 
-- **`OwnedFile`** — a fully tool-owned file. The justfile tree members live here, and so does
-  every cloud-workflow backend file (composite actions / step templates, workflows / stages, root
-  workflows / pipelines). An owned file may be **gated** on a backend (see §4.3) so it is emitted
-  only when that backend is selected. Identity: its repo-root-relative path.
+- **`OwnedFile`** — a fully tool-owned file. Backend actions, workflows, and
+  pipeline templates live here. It may be gated on a backend; identity is its
+  repository-relative path.
+- **`OwnedFileSection`** — one delimiter-free catalog section of a composed
+  owned file. Built-in recipes compose into the generated `.anvil/*.just`
+  files. Identity: `(path, id)`; catalog order is rendering order.
 - **`ManagedRegion`** — a sentinel-delimited region spliced into a user-composed host file
   (Justfile imports, `[workspace.lints]`, `deny.toml`, `rustfmt.toml`, `.delta.toml`,
   spellcheck, per-member `[lints]`). Identity: `(host-selector, region_id)`.
@@ -124,6 +133,7 @@ The catalog's content is an ordered set of **artifacts**. There are just two kin
 ```rust
 pub enum Artifact {
     OwnedFile(OwnedFileSpec),
+    OwnedFileSection(OwnedFileSectionSpec),
     Region(RegionSpec),
 }
 
@@ -196,7 +206,7 @@ pub mod artifacts {
         pub fn cargo_anvil() -> Artifact;      // .github/instructions/cargo-anvil.instructions.md
         pub fn adoption_skill() -> Artifact;  // .github/skills/cargo-anvil-adoption/SKILL.md
     }
-    // Delimiter-free sections composed into `.anvil/anvil.just`.
+    // Delimiter-free sections composed into generated `.anvil/*.just` files.
     pub mod justfile {
         pub fn entry() -> Artifact;
         pub fn recipe(name: &str) -> Option<Artifact>;
@@ -409,6 +419,8 @@ impl CatalogBuilder {
 impl Artifact {
     pub fn owned_file(path: &'static str, body: impl Into<String>) -> Artifact;  // gate: None
     pub fn backend_file(backend: Backend, path: &'static str, body: impl Into<String>) -> Artifact; // gate: Some
+    pub fn owned_file_section(path: &'static str, id: impl Into<String>, body: impl Into<String>) -> Artifact;
+    pub fn backend_file_section(backend: Backend, path: &'static str, id: impl Into<String>, body: impl Into<String>) -> Artifact;
     pub fn region(spec: RegionSpec) -> Artifact;
     pub fn member_region(id: RegionId, body: impl Into<String>) -> Artifact; // EachMemberManifest + Hash sugar
 }
@@ -549,7 +561,7 @@ ancestors defined seamlessly, as one tool managing one namespace.
   snapshots do not need to change at all.
 - **A second-front-end fixture.** Add a tiny in-repo example catalog (`Catalog::anvil()` with
   subcommand `demoforge` and one extra owned file) and a fixture test asserting: the subcommand
-  parses, the extra recipe is emitted in `.anvil/anvil.just`, and the output is otherwise
+  parses, the extra recipe is emitted in `.anvil/checks.just`, and the output is otherwise
   identical to the base catalog — i.e. nothing in the on-disk vocabulary shifted.
 
 ## 9. Non-goals
@@ -557,7 +569,7 @@ ancestors defined seamlessly, as one tool managing one namespace.
 - **Multiple anvil-family tools per repo.** Out of scope by deliberate constraint (§1). This is
   what lets the on-disk vocabulary stay fixed, with no per-fork rebranding of paths or sentinels.
 - **Per-fork on-disk rebranding.** A fork cannot rename `.anvil/manifest.toml`, the
-  `anvil-managed` sentinels, `.anvil/anvil.just`, or the `anvil-` recipe prefix.
+  `anvil-managed` sentinels, the generated `.anvil/*.just` files, or the `anvil-` recipe prefix.
   Those belong to the engine.
 - **Runtime plugins / dynamic loading.** A catalog is Rust code compiled into the downstream
   binary, not a config file discovered at runtime. This keeps the "writes files, then exits"

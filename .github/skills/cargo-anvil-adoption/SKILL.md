@@ -61,7 +61,7 @@ Search for all local and cloud build surfaces:
 - Rust toolchain files and independent tool-version lists;
 - `rustfmt.toml`, `clippy.toml`, Cargo lint tables, `deny.toml`, audit config,
   spelling dictionaries, coverage configuration, and impact configuration;
-- mutation, Miri, Loom, fuzzing, examples, documentation, semver, external-type,
+- mutation, Miri, Loom, fuzzing, examples, documentation, external-type,
   license, and dependency checks;
 - badges, contributor docs, agent instructions, branch protection, rulesets,
   required contexts, and merge queues.
@@ -147,7 +147,7 @@ After equivalence is established:
 - delete legacy workflows, scheduled jobs, setup actions, recipes, and scripts
   whose complete behavior is now owned by Anvil;
 - remove duplicate tool-version files and updaters when
-  `.anvil/anvil.just` contains the authoritative generated pins;
+  `.anvil/setup.just` contains the authoritative generated pins;
 - update badges, contributor documentation, and agent instructions to name the
   Anvil workflows and recipes;
 - retain scripts and pipelines only for requirements outside Anvil's scope, and

@@ -10,6 +10,16 @@
 [script("pwsh", "-NoProfile")]
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if ('{{ anvil_impact_mode }}' -ne 'off') {
+        $packageFile = Join-Path '{{ replace(anvil_impact_input_dir, "'", "''") }}' 'affected.packages'
+        if (-not (Test-Path -LiteralPath $packageFile -PathType Leaf)) {
+            throw "anvil-careful: missing impact package file $packageFile"
+        }
+        if ((Get-Item -LiteralPath $packageFile).Length -eq 0) {
+            Write-Host 'anvil-careful: no affected packages; skipping'
+            exit 0
+        }
+    }
     # Guard against cargo-careful's stale-sysroot hazard. cargo-careful
     # builds a custom std ("careful sysroot": debug-assertions + extra UB
     # checks) into a STABLE cache path -- ProjectDirs(de.ralfj.cargo-careful),

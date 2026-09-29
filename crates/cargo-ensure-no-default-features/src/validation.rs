@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use anyhow::{Context, Result};
+use ohno::{AppError, IntoAppError};
 
 /// Validates a single dependency entry and returns an error message if invalid.
 fn validate_dependency(name: &str, value: &toml::Value) -> Result<(), String> {
@@ -55,6 +55,9 @@ fn validate_deps_table(
     }
 }
 
+/// Invalid-dependency messages, dependency names found, and section labels checked.
+type ValidationOutcome = (Vec<String>, Vec<String>, Vec<&'static str>);
+
 /// Validates all dependencies in the given Cargo.toml content.
 ///
 /// Checks `[workspace.dependencies]` if a `[workspace]` section exists,
@@ -67,8 +70,8 @@ fn validate_deps_table(
 /// * A vector of error messages for invalid dependencies
 /// * A vector of all dependency names found
 /// * A vector of section labels that were checked (e.g. `"[workspace.dependencies]"`, `"[dependencies]"`)
-pub fn validate_dependencies(content: &str, exceptions: &[String]) -> Result<(Vec<String>, Vec<String>, Vec<&'static str>)> {
-    let parsed: toml::Value = toml::from_str(content).context("Failed to parse Cargo.toml")?;
+pub fn validate_dependencies(content: &str, exceptions: &[String]) -> Result<ValidationOutcome, AppError> {
+    let parsed: toml::Value = toml::from_str(content).into_app_err("Failed to parse Cargo.toml")?;
 
     let has_workspace = parsed.get("workspace").is_some();
     let has_package = parsed.get("package").is_some();
@@ -79,20 +82,20 @@ pub fn validate_dependencies(content: &str, exceptions: &[String]) -> Result<(Ve
 
     // Check [workspace.dependencies] if [workspace] exists
     if has_workspace && let Some(deps) = parsed.get("workspace").and_then(|w| w.get("dependencies")) {
-        let deps_table = deps.as_table().context("[workspace.dependencies] is not a table")?;
+        let deps_table = deps.as_table().into_app_err("[workspace.dependencies] is not a table")?;
         checked_sections.push("[workspace.dependencies]");
         validate_deps_table(deps_table, exceptions, &mut errors, &mut found_deps);
     }
 
     // Check [dependencies] if [package] exists (plain crate)
     if has_package && let Some(deps) = parsed.get("dependencies") {
-        let deps_table = deps.as_table().context("[dependencies] is not a table")?;
+        let deps_table = deps.as_table().into_app_err("[dependencies] is not a table")?;
         checked_sections.push("[dependencies]");
         validate_deps_table(deps_table, exceptions, &mut errors, &mut found_deps);
     }
 
     if checked_sections.is_empty() {
-        anyhow::bail!("No [workspace.dependencies] or [dependencies] section found");
+        ohno::bail!("No [workspace.dependencies] or [dependencies] section found");
     }
 
     Ok((errors, found_deps, checked_sections))

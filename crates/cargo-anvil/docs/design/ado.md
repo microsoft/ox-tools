@@ -635,8 +635,8 @@ stages:
 
 The impact set propagates as a **published pipeline artifact** — the entire
 `target/anvil/impact/` cache — not as stage output variables. Each group stage
-**downloads** it and its scoped checks read the cache directly, exactly as a local run
-does (`anvil-impact` → `include_<tier>.txt` → `_anvil-impact-include`). This ensures
+**downloads** it and its scoped checks read package files directly, exactly as a local run
+does (`anvil-impact` → `<tier>.packages` → cargo-each `--package-file`). This ensures
 CI and local execution take the identical code path rather than CI
 threading pre-formatted strings the local run never produces. The chain:
 
@@ -656,8 +656,7 @@ threading pre-formatted strings the local run never produces. The chain:
    artifact — set `ANVIL_IMPACT=consume` in the step environment. In consume mode `anvil-impact` is a pure
    no-op — it trusts the downloaded cache verbatim and **neither snapshots nor
    recomputes**, so it needs neither cargo-delta nor a fetched base ref. Each scoped
-   check reads its category's scope from the cache file via `_anvil-impact-include` (into a
-   local `$include` variable).
+   check gives its category's package file directly to cargo-each.
 4. **Scheduled stages download nothing** and always validate the full workspace, so the
    group step sets `ANVIL_IMPACT=off` in the step environment. Like the PR `consume`, this is fixed by group
    class at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
@@ -675,8 +674,8 @@ check is green. Treating impact as a gate turns a broken impact into an unambigu
 blocking failure.
 
 The wiring never branches on impact's *result*, though. When impact succeeds,
-each group always runs; recipes inside the group decide whether a given check no-ops
-by testing for the literal sentinel `--skip` in the relevant include var. This matters
+each group always runs; cargo-each treats an empty package file as the scoped
+check's successful no-op. This matters
 because unscoped checks (`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
 must run on every PR. See
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe) for the
@@ -747,8 +746,8 @@ pull-request environment.
 manual web-UI wiring is needed.
 
 The recipes read PR-context strings from the env vars a group sets (e.g. `PR_TITLE`),
-but impact **scope** is not threaded at all: each scoped check reads its tier from the
-downloaded `target/anvil/impact/` cache via `_anvil-impact-include <tier>` (the catalog
+but impact **scope** is not threaded at all: each scoped check reads its tier's
+downloaded package file via cargo-each (the catalog
 records the check → tier mapping, see [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)).
 A PR group job downloads the `anvil-impact-<os>` artifact and its checks read that cache
 directly, exactly as a local run — no `include_*` variables or template parameters carry
@@ -788,9 +787,9 @@ need to approve a binary-installation service.
 via `anvil-tool-cargo-delta-install` and runs the shared **`just anvil-impact`**
 recipe — the same building block adopters run locally. The recipe resolves the base
 ref (`_anvil-base-ref`, which reads `$(System.PullRequest.TargetBranch)` or `$BASE_REF`),
-snapshots the base ref and the working tree, runs `cargo delta impact`, and
-writes the cache under `target/anvil/impact/` (the per-tier `include_<tier>.txt` lists,
-`impact.json`, and the `snapshots/`). The `compute_<os>` job then publishes that whole
+uses cargo-delta managed mode and writes `modified.packages`,
+`affected.packages`, and `required.packages` under `target/anvil/impact/`.
+The `compute_<os>` job then publishes that whole
 directory as the `anvil-impact-<os>` pipeline artifact (via `job.yml`'s `artifacts:`
 parameter). This is the only job that runs cargo-delta to compute the impact set.
 (Group setup jobs also install cargo-delta as a prerequisite, but in `consume`
@@ -923,8 +922,8 @@ the resulting coverage report -- a single-leg publish would systematically under
 the coverage of `cfg(target_os = ...)` branches. ADO's `PublishCodeCoverageResults@2`
 coalesces multiple publishes against the same build into one combined report.
 `failIfCoverageEmpty: false` keeps the step from failing the build when no LCOV
-file exists -- which is exactly the "nothing impacted" case (the `anvil-llvm-cov` recipe
-no-ops when its tier is `--skip`, producing no file), as well as a tooling issue. No
+file exists -- which is exactly the "nothing impacted" case (cargo-each sees
+an empty affected package file and produces no coverage file), as well as a tooling issue. No
 impact value is threaded into the condition; the presence of the file is the signal.
 
 The data appears in the ADO build page's "Code Coverage" tab natively — totals, file
@@ -935,60 +934,3 @@ for the unified-coverage discussion).
 anvil does not gate the PR on coverage. The LCOV upload is informational;
 adopters who want gating add `BuildQualityChecks@9` (Microsoft DevLabs marketplace
 task) downstream of the test step and configure it via their branch policy.
-
-## 11. Advisory PR comments
-
-Recipes that surface non-blocking findings exit 0 and write a markdown body to
-`target/anvil/comments/<NAME>.md` (see [checks.md §6](./checks.md#6-advisory-pr-comments)
-for the cross-backend convention). The ADO backend turns presence/absence of those
-files into upserts/deletions of a sticky PR comment via the Azure DevOps REST API
-(ADO has no marketplace equivalent of marocchino's sticky-comment action; the REST
-path is the supported way).
-
-The wiring lives in the `pr_fast` stage of `pr-stages.yml`, as a pwsh step that runs
-on the canonical Linux leg after the `pr-fast` group's `pwsh: just anvil-pr-fast`
-step:
-
-```yaml
-- task: PowerShell@2
-  displayName: anvil advisory PR comments
-  condition: and(succeededOrFailed(), eq(variables['Build.Reason'], 'PullRequest'))
-  env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-  inputs:
-    targetType: inline
-    pwsh: true
-    script: |
-      # iterate known files, find existing thread by HTML marker,
-      # PATCH first comment / POST new thread / set status: closed
-```
-
-Key ADO-specific details:
-
-- **Marker-based thread lookup**. ADO comments have no "sticky header" parameter; we
-  embed an HTML marker (`<!-- anvil-<NAME> -->`) as the first line of the comment
-  body. The script lists PR threads (`GET pullRequests/{id}/threads`), finds the one
-  whose first comment contains the marker, and PATCHes its first comment with the new
-  body or sets the thread `status` to `closed` when there's nothing to report. The
-  marker is invisible to human readers.
-- **`$(System.AccessToken)` opt-in**. ADO does not expose `System.*` variables to
-  scripts by default. The step explicitly maps it via `env:`, and `checkout` must run
-  with `persistCredentials: true` so the token actually carries write permission.
-- **Build identity permission**. The "Project Collection Build Service (<org>)"
-  identity needs **Contribute to pull requests** on the repo. 1ESPT pipelines usually
-  have this; vanilla ADO sometimes requires a one-time admin grant. Without it the
-  REST call returns 403 and the comment is silently skipped (the step is wrapped to
-  exit 0 on auth failures so it doesn't break PRs in repos that haven't opted in).
-- **No fork story**. ADO's PR-from-fork support is limited compared to GitHub; the
-  REST call works for same-org PRs, which is the only case 1ESPT actually supports
-  on internal repos. Forks fail closed (no comment posted) rather than fail open
-  (build red).
-- **Canonical leg**. As on the GitHub side, the step runs only on the Linux job so the
-  Linux/Windows matrix doesn't race on the same thread.
-
-Adding a new advisory check is a two-step change: the recipe writes
-`target/anvil/comments/<NEW>.md` (and removes it on a clean run); the pwsh step's
-`@checks` table gains a `@{ name = '<NEW>'; file = 'target/anvil/comments/<NEW>.md' }`
-entry. There's deliberately no auto-discovery loop over the convention dir — explicit
-per-check entries keep stale comments deterministically clearable when a check is
-removed from the catalog.

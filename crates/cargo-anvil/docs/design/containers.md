@@ -115,14 +115,18 @@ printed, since a caller that asked not to build is usually asking which image is
 ```text
 repo/
 └── .anvil/
-    ├── anvil.just                         all generated recipes, including anvil-container
+    ├── anvil.just                         import hub
+    ├── checks.just                        checks, groups, tiers, and impact
+    ├── setup.just                         pins and setup/validation
+    ├── container.just                     container recipes
     └── container/
         ├── Dockerfile                     composed: anvil's five regions, your content in the gaps
         ├── Dockerfile.dockerignore        what the build context admits
         └── hooks.ps1                      optional; not emitted by default (§7)
 ```
 
-`.anvil/anvil.just` and `Dockerfile.dockerignore` are owned files carrying the usual `DO NOT EDIT DIRECTLY` marker.
+The generated `.anvil/*.just` files and `Dockerfile.dockerignore` are owned
+files carrying the usual `DO NOT EDIT DIRECTLY` marker.
 
 The Dockerfile is **composed**, not owned: anvil maintains five managed regions inside it, and the repository owns
 everything between them. Regions are updated in place on every run. Gap content is preserved byte-for-byte and is
@@ -209,9 +213,11 @@ an image at all. The ignore file already scopes the context to precisely the ima
 what the context admits and what the image contains the same set. `.anvil/container/` rides along with it; that is the
 committed input a gap `COPY`s from, and the image never runs it.
 
-`Dockerfile.dockerignore` scopes the build context to `.anvil/anvil.just`, `.anvil/container/`, and a root toolchain file in
-either spelling, denying everything else. The composed recipe file is copied because `just` has
-to parse it to run `anvil-setup`, and it is hashed whole (§4). `.anvil/container/` is admitted so a gap can `COPY` a
+`Dockerfile.dockerignore` scopes the build context to the generated
+`.anvil/*.just` files, `.anvil/container/`, and a root toolchain file in either
+spelling, denying everything else. The recipe files are copied because `just`
+must parse them to run `anvil-setup`, and all are hashed (§4).
+`.anvil/container/` is admitted so a gap can `COPY` a
 file placed beside the Dockerfile; anvil's own `.anvil-proposed` review artifacts are excluded from both the context
 and the digest. BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`, so the repository
 neither needs to own a root ignore file nor can have one silently override this.
@@ -227,7 +233,7 @@ define the image. The name derives from the repository directory (§5.1).
 | --- | --- |
 | every file under `.anvil/container/` | always |
 | `rust-toolchain.toml` or `rust-toolchain` | when the repository owns one |
-| `.anvil/anvil.just` | always |
+| `.anvil/{anvil,checks,setup,container}.just` | always |
 | the declared root MSRV | always |
 
 `.anvil/container/` is hashed by walking it, not as a fixed list of three known files. The Dockerfile is composed, so a
@@ -344,7 +350,7 @@ The recipe resolves this while assembling the run, before the container starts: 
 than on the git directory differing from the common one, because a redirect without a separate worktree entry leaves
 the two equal. It adds a bind mount for the common directory and a second one placing a generated `.git` file over the
 checkout's own, naming that mount. Git then resolves the history by ordinary discovery. This is what lets the checks
-that read history — the impact-scoped filters, `anvil-mutants-diff`, `anvil-semver-check` — work from a worktree at
+that read history — the impact-scoped filters and `anvil-mutants-diff` — work from a worktree at
 all; without it git resolves nothing inside the container and each of them fails a long way from the cause. A git
 directory that does not sit under its common directory cannot be expressed as one mount and is refused rather than
 mounted at a path that climbs out of it.
@@ -365,8 +371,8 @@ Tools and toolchains therefore always come from the image layer the tag names.
 
 `target/` stays on the bind mount, shared with the host and visible from it. A native run and a containerized run write
 incompatible artifacts to the same paths, so switching between them recompiles the workspace. Giving the container its
-own build directory through `CARGO_TARGET_DIR` avoids that but breaks `cargo-semver-checks`, which builds a baseline
-and the current crate and then cannot find its rustdoc output; the recompilation is the lesser cost.
+own build directory through `CARGO_TARGET_DIR` avoids that, but sharing the
+ordinary target directory keeps native and container checks behaviorally aligned.
 
 The caller's working directory is mapped to its in-container equivalent, so relative paths resolve when
 `anvil-container` is invoked from a subdirectory.
@@ -672,10 +678,10 @@ private-environment catalog rewrites the base and tool layers and nothing else. 
 second tool list the design exists to avoid, and is almost never right.
 
 **A replacement must keep the ignore file in step.** The setup region `COPY`s the context whole, so the ignore file is
-what decides the image's contents. A region that needs anything outside `.anvil/anvil.just`, `.anvil/container/`, and a root
+what decides the image's contents. A region that needs anything outside the generated `.anvil/*.just` files, `.anvil/container/`, and a root
 toolchain file must also replace `artifacts::container::dockerignore()` (§3), or the added
 paths never reach the build context. Widening it also moves content into the image that the digest does not hash: the
-walk covers `.anvil/container/` and `.anvil/anvil.just` and nothing else, so a newly admitted tree has to be brought
+walk covers `.anvil/container/` and the generated recipe files and nothing else, so a newly admitted tree has to be brought
 under one of them, or the tag stops covering what the image contains.
 
 **Anything extra it copies is digested, provided it lives under `.anvil/container/`.** The hashed set is that whole
@@ -684,7 +690,7 @@ editing it renames the tag and the next run rebuilds. Content copied from elsewh
 tag will not move when it changes — keep it under `.anvil/container/` and the identity guarantee holds without a
 manual `ANVIL_CONTAINER_NO_CACHE=1`.
 
-The generated recipe input is the single `.anvil/anvil.just`; other image
+The generated recipe inputs are the four `.anvil/*.just` files; other image
 assets belong under `.anvil/container/`. These statements describe the ignore
 file anvil ships; a replacement that admits another tree carries the
 obligation above.
@@ -697,7 +703,7 @@ guard. A different base OS with a different toolchain source is two region repla
 - On ARM64 hosts the `linux/amd64` image is emulated and is substantially slower.
 - The first build takes several minutes, installing a toolchain and the entire pinned tool catalog. Later runs reuse
   it until an input changes.
-- Any edit to `.anvil/anvil.just` renames the image and rebuilds it, including edits to a check body that cannot
+- Any edit to a generated recipe file renames the image and rebuilds it, including edits to a check body that cannot
   change what the image contains. Precision here would mean deriving the install closure rather than hashing the files
   that express it; until then the digest errs towards rebuilding, because the alternative error — a tag that names
   contents the image does not have — is silent (§4.1).

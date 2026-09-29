@@ -33,6 +33,9 @@
 !.anvil
 .anvil/*
 !.anvil/anvil.just
+!.anvil/checks.just
+!.anvil/setup.just
+!.anvil/container.just
 !.anvil/container
 .anvil/container/**/*.anvil-proposed
 !rust-toolchain.toml

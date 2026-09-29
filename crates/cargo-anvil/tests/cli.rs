@@ -125,6 +125,9 @@ fn apply_writes_files_then_dry_run_is_clean() {
         .success()
         .stdout(predicates::str::contains("Will create"));
     assert!(ws.path().join(".anvil/anvil.just").is_file());
+    assert!(ws.path().join(".anvil/checks.just").is_file());
+    assert!(ws.path().join(".anvil/setup.just").is_file());
+    assert!(ws.path().join(".anvil/container.just").is_file());
     assert!(ws.path().join(".anvil/manifest.toml").is_file());
 
     // Second dry-run against the now-up-to-date tree: no changes, exit 0.

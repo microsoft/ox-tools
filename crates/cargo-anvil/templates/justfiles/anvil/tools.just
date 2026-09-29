@@ -209,11 +209,6 @@ anvil-tool-cargo-nextest-install installer="install": (anvil-toolchain-stable-in
 anvil-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
 
 [group("anvil-setup")]
-anvil-tool-cargo-semver-checks-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-semver-checks" cargo_semver_checks_version installer)
-[group("anvil-setup")]
-anvil-tool-cargo-semver-checks-validate-prereqs: (_check-tool "cargo-semver-checks" cargo_semver_checks_version)
-
-[group("anvil-setup")]
 anvil-tool-cargo-sort-install installer="install": (anvil-toolchain-stable-install installer) (_install-tool "cargo-sort" cargo_sort_version installer)
 [group("anvil-setup")]
 anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)

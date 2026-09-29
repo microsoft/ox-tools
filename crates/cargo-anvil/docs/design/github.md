@@ -302,8 +302,7 @@ a `.anvil-proposed` sibling on the next `update` — see
   `*_runner` inputs.
 - **Different schedule** for the scheduled tier.
 - **Path filters** to skip the workflow on docs-only PRs (though anvil's
-  `cargo delta impact` step already produces a `--skip` sentinel for the include lists
-  when nothing relevant changed).
+  cargo-delta package files are empty when nothing relevant changed).
 
 anvil ships two defaults in the root workflow that adopters typically keep but can
 remove if they have specific reasons:
@@ -369,7 +368,7 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { fetch-depth: 0 }  # semver-check needs origin/<base> resolvable for --baseline-rev
+        with: { fetch-depth: 0 }  # mutation and impact checks need the PR base history
       # Download the impact cache computed on this leg's OS into
       # target/anvil/impact/ (arm reuses its OS-family artifact). pr-test /
       # pr-runtime-analysis / pr-mutants do the identical download.
@@ -461,11 +460,11 @@ jobs are skipped and the run fails at impact (we add no `if: always()` / `if:
 !cancelled()` override that would let them run anyway). This keeps a broken impact a
 blocking failure rather than leaving the run green with a lone red impact job.
 
-The wiring never branches on impact's *output values*, though. When impact succeeds,
-each group always runs; recipes inside the group decide whether a given check no-ops,
-by testing for the literal sentinel `--skip` in the relevant include var. This matters
-because unscoped checks (`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
-must run on every PR, including docs-only PRs where every tier comes back `--skip`. See
+The wiring never branches on impact's *output values*. When impact succeeds,
+each group always runs; cargo-each turns an empty package file into a per-check
+no-op. This matters because unscoped checks (`deny`, `audit`, `aprz`,
+`pr-title`, `mutants-full`) must run on every PR, including docs-only PRs where
+every package file is empty. See
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe) for the recipe-side
 contract.
 
@@ -580,7 +579,7 @@ runs:
       env:
         ANVIL_GROUP: ${{ inputs.group }}
         # The impact set reaches scoped checks through the downloaded
-        # target/anvil/impact cache (read via `_anvil-impact-include`), not
+        # target/anvil/impact package files (read by cargo-each), not
         # threaded --package strings. This action only fixes the mode.
         ANVIL_IMPACT: ${{ inputs.impact_mode }}
         GITHUB_TOKEN: ${{ github.token }}
@@ -626,8 +625,8 @@ The reusable workflow sets `PR_TITLE` on the `pr-fast` group step and
 `BASE_REF` on the `pr-mutants` group step. They are environment variables rather
 than action inputs because only the recipes consume them.
 
-The recipes themselves consume the downloaded impact cache (via
-`_anvil-impact-include`) and only the PR-context env vars they need; the catalog
+The recipes themselves consume downloaded package files via cargo-each and
+only the PR-context env vars they need; the catalog
 records the tier mapping (see
 [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)).
 Fixing only the mode (`consume`/`off`) at each group-action invocation, rather
@@ -819,11 +818,11 @@ Other groups retain the action's disabled default.
    needs. **This is the only job that runs cargo-delta to compute the impact
    set.** (Group setup jobs also install cargo-delta as a prerequisite, but in
    `consume` mode they never run it -- they read the downloaded impact cache.)
-3. `just anvil-impact`, which resolves the base ref (`_anvil-base-ref`), snapshots the
-   base ref (in a throwaway worktree) and the working tree, runs
-   `cargo delta impact`, and writes the durable cache under `target/anvil/impact/`:
-   the per-tier `include_<tier>.txt` lists (via `_anvil-impact-format`), `impact.json`,
-   and the `snapshots/`.
+3. `just anvil-impact`, which invokes cargo-delta managed mode and writes one
+   canonical `name@version` per line to `modified.packages`,
+   `affected.packages`, and `required.packages` under
+   `target/anvil/impact/`. cargo-delta owns merge-base snapshots and cache
+   invalidation under its own target directory.
 4. Uploads that whole directory as the `anvil-impact-<runner.os>` artifact
    (`actions/upload-artifact`).
 
@@ -833,8 +832,8 @@ The impact set propagates as an **uploaded workflow artifact** — the entire
 `target/anvil/impact/` cache — not as job outputs or environment variables. Each group
 job **downloads** it and its scoped checks read the cache directly, exactly as a local
 run does: this is the whole point — CI and local execution take the identical code
-path (`anvil-impact` → `include_<tier>.txt` → `_anvil-impact-include`), rather than CI
-threading pre-formatted strings that local runs never see. The chain in
+path (`anvil-impact` → `<tier>.packages` → cargo-each `--package-file`), rather
+than CI threading pre-formatted strings that local runs never see. The chain in
 `anvil-pr-impl.yml`:
 
 1. **Two impact jobs**, `impact-linux` and `impact-windows`, each run the
@@ -853,10 +852,10 @@ threading pre-formatted strings that local runs never see. The chain in
    `anvil-impact` is a pure no-op — it trusts the downloaded cache verbatim and
    **neither snapshots nor recomputes**, so it needs neither cargo-delta nor a fetched
    base ref (a group job installs the former and shallow-checks-out without the latter).
-   Each scoped check then reads its category's scope from
-   `target/anvil/impact/include_<tier>.txt` via `_anvil-impact-include` (into a local
-   `$include` variable). This is why the group jobs stay lean and can't be tripped up by
-   an environmental difference from the impact job.
+   Each scoped check gives its category's package file directly to cargo-each.
+   A present empty file is an explicit successful no-op; a missing file fails
+   closed. This is why group jobs stay lean and cannot diverge from the impact
+   job's selection.
 4. **Scheduled group jobs download nothing** and always validate the full workspace, so
    their group action exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by
    group class at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
@@ -866,9 +865,9 @@ threading pre-formatted strings that local runs never see. The chain in
    state could ever flip a scheduled job into impact scoping and skip the full-workspace
    backstop.)
 
-The wiring never gates jobs on the impact result — every job runs regardless of `--skip`
-status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
-`mutants-full`) must run on every PR even when every tier reports `--skip`. Steps that
+The wiring never gates jobs on the impact result. This is intentional: unscoped
+checks (`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`) must run on every
+PR even when every package file is empty. Steps that
 need a per-tier side decision read the downloaded cache file directly (e.g. the Codecov
 upload is gated on both coverage files existing via `hashFiles(...)`), never on a job
 output.
@@ -1124,61 +1123,3 @@ Repositories that do not want issue publication set the
 lives in repository settings instead of an Anvil-owned workflow, so the root workflow
 stays on the automatic update path. The scheduled call retains `issues: write`; the
 publisher's condition prevents use of that permission when publication is disabled.
-
-## 12. Advisory PR comments
-
-Recipes that surface non-blocking findings exit 0 and write a markdown body to
-`target/anvil/comments/<NAME>.md` (see [checks.md §6](./checks.md#6-advisory-pr-comments)
-for the cross-backend convention). The GitHub backend turns presence/absence of those
-files into upserts/deletions of a sticky PR comment via
-[`marocchino/sticky-pull-request-comment`](https://github.com/marocchino/sticky-pull-request-comment).
-
-The wiring lives in the `pr-fast` job of `anvil-pr-impl.yml` (the only group whose
-recipes emit comments today). Two steps run after the composite that executes the
-`pr-fast` group:
-
-```yaml
-- name: Upsert anvil-semver advisory
-  if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && hashFiles('target/anvil/comments/semver.md') != ''
-  uses: marocchino/sticky-pull-request-comment
-  with:
-    header: anvil-semver
-    path: target/anvil/comments/semver.md
-- name: Clear anvil-semver advisory
-  if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && hashFiles('target/anvil/comments/semver.md') == ''
-  uses: marocchino/sticky-pull-request-comment
-  with:
-    header: anvil-semver
-    delete: true
-```
-
-Conditions explained:
-
-- `always()` keeps the comment in sync even if an unrelated `pr-fast` check failed; the
-  advisory state is independent of the rest of the job's pass/fail.
-- `github.event_name == 'pull_request'` skips the steps on `merge_group` and other
-  triggers where there's no PR thread to post to.
-- `matrix.os == 'linux'` picks the canonical x86_64 Linux leg so the four-OS matrix
-  doesn't race on the same comment.
-- `head.repo.full_name == github.repository` skips fork PRs. GitHub doesn't grant
-  `pull-requests: write` to fork-PR workflow runs by default, so the action would 403.
-
-Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
-`pull-requests: write` on the `validation` job that calls
-`anvil-pr-impl.yml`. The called workflow declares no permission overrides, so all
-of its jobs inherit that caller ceiling. Only the guarded sticky-comment steps
-use `pull-requests: write`. Merge-group executions share this caller but cannot
-reach the pull-request-only write steps. Fork PRs cannot reach them either,
-regardless of whether an administrator has enabled write tokens for fork
-workflows.
-
-Adding a new advisory check is a two-step change: the recipe writes
-`target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains
-a matching `Upsert anvil-<NEW>` / `Clear anvil-<NEW>` pair with
-`header: anvil-<NEW>`. There's deliberately no auto-discovery loop over the
-convention dir — explicit per-check steps keep stale comments deterministically
-clearable when a check is removed from the catalog.

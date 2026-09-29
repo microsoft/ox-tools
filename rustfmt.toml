@@ -8,7 +8,7 @@ newline_style = "Unix"
 use_field_init_shorthand = true
 use_try_shorthand = true
 # The following options require nightly rustfmt. anvil-fmt invokes
-# `cargo +{{ rust_nightly }} fmt`; `.anvil/anvil.just` carries the generated
+# `cargo +{{ rust_nightly }} fmt`; `.anvil/setup.just` carries the generated
 # pin and docs/design/local.md describes setup policy.
 unstable_features = true
 # Format Rust code blocks inside `///` doc comments. Catches stale

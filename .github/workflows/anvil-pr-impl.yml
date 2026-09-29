@@ -100,7 +100,7 @@ jobs:
   pr-fast:
     name: "Check Group: Fast Checks (${{ matrix.os }})"
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
-    # checks (clippy, doc-build, udeps, semver-check, external-types)
+    # checks (clippy, doc-build, udeps, external-types)
     # whose results can differ across host for crates that use
     # #[cfg(target_os = ...)] or #[cfg(target_arch = ...)] gating.
     needs: [impact-linux, impact-windows]
@@ -116,15 +116,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
-          # anvil-semver-check compares the affected crates' current API
-          # against the PR's target branch (origin/<base>) via
-          # `cargo semver-checks --baseline-rev`. That resolves the
-          # baseline commit from the LOCAL object store (no fetch), so the
-          # target branch history must be present -- the default shallow
-          # PR checkout narrows the refspec to the PR merge ref and leaves
-          # origin/<base> absent. Full history makes the baseline
-          # resolvable; the other pr-fast checks only touch the HEAD tree.
-          fetch-depth: 0
       - name: Download impact artifact
         # Pull the impact cache computed on this leg's OS family into
         # target/anvil/impact/ so the group's scoped checks read it via their
@@ -142,29 +133,6 @@ jobs:
         env:
           BASE_REF: ${{ inputs.base_ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
-      # Advisory PR comments. Recipes that surface non-blocking findings
-      # (e.g. cargo-semver-checks) write a markdown body to
-      # `target/anvil/comments/<name>.md` and exit 0. The steps below
-      # turn presence/absence of those files into upserts/deletions of
-      # a sticky PR comment. We post from the canonical x86_64 Linux leg
-      # only so the matrix doesn't race on the same comment, and we use
-      # `always()` so the comment is updated even when an unrelated
-      # check in pr-fast failed. The `head.repo.full_name ==
-      # github.repository` guard skips fork PRs even when an administrator
-      # has opted into sending write tokens to fork workflows.
-      - name: Upsert anvil-semver advisory
-        if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') != ''
-        uses: marocchino/sticky-pull-request-comment@v3.0.5 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
-        with:
-          header: anvil-semver
-          path: target/anvil/comments/semver.md
-      - name: Clear anvil-semver advisory
-        if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') == ''
-        uses: marocchino/sticky-pull-request-comment@v3.0.5 # pinned by tag: this release is an immutable release (GitHub locks the tag to a commit)
-        with:
-          header: anvil-semver
-          delete: true
-
   pr-test:
     name: "Check Group: Tests and Coverage (${{ matrix.os }})"
     # Tests + coverage: llvm-cov / doc-test / examples.

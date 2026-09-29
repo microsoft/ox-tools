@@ -4,5 +4,9 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+import 'setup.just'
+import 'checks.just'
+import 'container.just'
+
 # Friendly default: `just anvil` runs the PR tier.
 alias anvil := anvil-pr
