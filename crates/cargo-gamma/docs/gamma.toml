@@ -98,6 +98,10 @@
 # Building
 # ---------------------------------------------------------------------------------------------
 
+# To place compiler artifacts outside the checkout without moving Gamma's synchronized sources,
+# leave --cache-dir unset and use CARGO_TARGET_DIR or build.target-dir in .cargo/config.toml.
+# These are Cargo settings, not keys in this file. --artifact-dir moves published reports instead.
+
 # The cargo profile to build with. Default: cargo's own default for `cargo test`.
 #
 # An optimized profile can pay for a CPU-heavy suite because the build is paid once and the suite

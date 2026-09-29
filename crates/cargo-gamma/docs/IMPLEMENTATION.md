@@ -60,6 +60,18 @@ Ownership markers prevent two workspaces from sharing mutable state
 accidentally. An explicit cache directory is validated before use and must be
 empty when first claimed.
 
+Cargo metadata resolves `CARGO_TARGET_DIR` or `build.target-dir` before `campaign_base` derives
+the workspace-specific artifact location. `Workspace::cargo` passes that campaign's `target/`
+directory to every Cargo build. `gamma_base`, its source/runtime tree and the stable workspace
+lock do not depend on the target setting. The existing VCS exposure is shared by local-target
+and external-target runs; artifact placement adds no Git interception or redirection.
+
+The installed-binary artifact-placement fixtures compare equivalent Gamma campaigns against
+ordinary and linked worktrees. Their build scripts query revision, branch and tag metadata,
+and their test harnesses consume the embedded results. Build-script and test-launch markers
+distinguish warm Cargo artifacts from freshly executed verdicts. The fixtures also exercise
+the persisted locator and workspace-owned cleanup next to unrelated target contents.
+
 Completed runs always publish JSON, self-contained HTML, SARIF, Markdown
 performance advice, and a versioned diagnostics bundle. Before a build,
 cargo-gamma clears stale `baseline-failures/` records. Each named baseline test

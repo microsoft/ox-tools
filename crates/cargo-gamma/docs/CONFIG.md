@@ -199,6 +199,27 @@ Changing profiles invalidates compiler-unviability reuse and may change verdicts
 code generation. Scores from different profiles are not directly comparable, so choose the
 profile before a long campaign and keep it fixed across runs and shards that will be merged.
 
+### External compiler artifacts
+
+Leave Gamma's `--cache-dir` unset and use Cargo's `CARGO_TARGET_DIR` environment variable or
+`build.target-dir` in `.cargo/config.toml`:
+
+```toml
+[build]
+target-dir = "/fast/disk/cargo-target"
+```
+
+These are Cargo settings, not `gamma.toml` keys. Gamma places reusable compiler artifacts and
+campaign state under the resolved target directory, while retaining its default synchronized
+sources, Git-metadata arrangement and workspace lock. Reusing the location keeps Cargo artifacts
+warm; tests still execute for each campaign.
+
+`--cache-dir` instead moves the source copy and artifacts together and refuses an arrangement that
+hides visible VCS metadata. `--artifact-dir` controls published reports, not the compiler cache.
+`hints` and `suppress` follow the owned locator for the latest completed campaign. To clean an
+external campaign's compiler artifacts, run `cargo gamma clean` with the same Cargo target setting;
+unrelated contents of that target directory remain untouched.
+
 ## Running tests
 
 ```toml

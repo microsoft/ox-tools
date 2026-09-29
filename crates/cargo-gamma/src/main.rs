@@ -409,9 +409,26 @@
 //! default external scratch area serializes commands targeting the same original workspace, while
 //! a second lock protects redirected cache state.
 //!
+//! To move only the heavy compiler artifacts, leave `--cache-dir` unset and configure Cargo's
+//! target directory through `CARGO_TARGET_DIR` or `.cargo/config.toml`:
+//!
+//! ```toml
+//! [build]
+//! target-dir = "/fast/disk/cargo-target"
+//! ```
+//!
+//! The configured directory may be outside the checkout. Gamma keeps its synchronized sources,
+//! Git-metadata arrangement and workspace lock in the same default scratch location; only Cargo
+//! artifacts and reusable campaign state move. This does not make the instrumented scratch tree
+//! behave like the original checkout for Git root or dirty-state queries. An all-in-one
+//! `--cache-dir` that would hide visible VCS metadata remains unsupported.
+//!
 //! `cargo gamma clean` deletes the workspace-specific external scratch and target-resident campaign
 //! cache after taking the same lock as a run. It leaves published reports under
-//! `target/cargo-gamma`, checked-in hints and source suppressions untouched.
+//! `target/cargo-gamma`, checked-in hints, source suppressions and unrelated Cargo artifacts untouched.
+//! Select the same Cargo target directory when cleaning that campaign's artifacts.
+//! `hints` and `suppress` use the validated locator for the latest completed campaign, even when
+//! its target setting is no longer active.
 //!
 //! As soon as a measured run acquires its campaign cache, it truncates `gamma-progress.log`. Every
 //! mutant verdict is appended and flushed there as it

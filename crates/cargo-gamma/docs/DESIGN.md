@@ -439,6 +439,19 @@ rather than published artifacts. An explicit `--cache-dir` retains the all-in-on
 relocates the synchronized workspace, Cargo artifacts, and campaign state together. `--artifact-dir`
 relocates all five published artifacts together, and its directory is created when absent.
 
+`CARGO_TARGET_DIR` and Cargo's `build.target-dir` select the compiler-artifact location in the
+default split layout. An external target directory changes neither synchronized-source placement
+nor the existing Git-metadata arrangement. Revision, branch and tag metadata visible to a
+local-target Gamma build remain visible to an equivalent external-target Gamma build. This is
+artifact placement, not Git virtualization: scratch-root and dirty-state queries need not describe
+the original checkout. Explicit all-in-one caches still refuse relocation that hides visible VCS
+metadata, and that diagnostic names the artifact-only controls.
+
+Repeated runs at the same target location can reuse Cargo artifacts without reusing test verdicts.
+`hints` and `suppress` resolve the latest completed campaign through its owned locator, independently
+of the current target setting. `clean` removes the selected target's workspace-owned campaign cache
+and the default scratch state, not the shared target root or another workspace's artifacts.
+
 The diagnostics bundle contains aggregate algorithm-health telemetry rather than one row per
 mutant. Build rounds attribute newly withdrawn mutants to packages while retaining the round's
 actual workspace-wide elapsed time; they do not invent per-package build durations. Census

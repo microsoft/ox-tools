@@ -580,6 +580,9 @@ pub struct MeasureArgs {
     /// checkout. The path is the cache itself, must be empty on first use, and becomes owned by this
     /// workspace; another workspace cannot share it. Build artifacts live here too, so reusing the
     /// directory across this workspace's runs keeps them incremental while a fresh one starts cold.
+    ///
+    /// To move only Cargo artifacts, omit this option and set `CARGO_TARGET_DIR` or Cargo's
+    /// `build.target-dir`. This leaves the default synchronized-source and VCS handling unchanged.
     #[arg(long, value_name = "PATH", help_heading = "Cache")]
     pub cache_dir: Option<Utf8PathBuf>,
 

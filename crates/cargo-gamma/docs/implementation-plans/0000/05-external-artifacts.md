@@ -35,7 +35,7 @@ not artifact-placement requirements.
 | `cargo-gamma-lib\src\exec\copy.rs`, `sync.rs` | Existing synchronized-source behavior |
 | `cargo-gamma-lib\src\discover\record.rs` | Conservative build knowledge and campaign state |
 | `cargo-gamma-lib\src\commands\clean.rs`, `hints.rs`, `suppress.rs` | Owned state lookup and postprocessing |
-| `cargo-gamma-lib\tests\session.rs` | Owned real-Cargo fixtures |
+| `cargo-gamma\tests\external_artifacts.rs` | Owned executable fixtures exercising the production split layout rather than the library test harness's private all-in-one cache |
 
 ## Implementation sequence
 

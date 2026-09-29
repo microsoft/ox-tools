@@ -1499,10 +1499,9 @@ fn ensure_copy_layout_terminates(source: &Utf8Path, scratch: &Utf8Path, excluded
 
 /// Refuses a relocation that would hide VCS metadata a build can currently read.
 ///
-/// The copier omits VCS directories deliberately. A default scratch tree lies below the source
-/// tree and still reaches its ancestor metadata, while a relocated one may not. Letting the two
-/// builds differ turns `--cache-dir` into an undocumented build-input switch, so the unsupported
-/// arrangement is rejected before it creates or copies anything.
+/// The copier omits VCS directories deliberately. An all-in-one cache below the repository can
+/// still reach its ancestor metadata, while a relocated one may not. The default split layout
+/// exposes metadata separately; an explicit cache must retain visibility without that arrangement.
 fn ensure_vcs_visibility(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
     let source_metadata = visible_vcs_metadata(source);
 
@@ -1519,7 +1518,8 @@ fn ensure_vcs_visibility(source: &Utf8Path, scratch: &Utf8Path) -> Result<()> {
 
     Err(error!(
         "`--cache-dir` would relocate the cached workspace to `{scratch}`, where build scripts cannot see VCS metadata available from `{source}`: {}. \
-         Use a cache directory beneath the same repository, or remove the build-time VCS dependency.",
+         To move only Cargo artifacts, omit --cache-dir and set CARGO_TARGET_DIR or Cargo's build.target-dir instead; \
+         this keeps cargo-gamma's default source and VCS handling. For an all-in-one cache, choose a directory beneath the same repository.",
         hidden.iter().map(|marker| marker.as_str()).collect::<Vec<_>>().join(", ")
     )
     .usage())
