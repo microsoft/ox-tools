@@ -21,7 +21,8 @@ use super::test_binary::{Reachability, TestBinary};
 #[cfg(test)]
 use super::test_binary::{TestScope, order_reachable, reaches};
 use super::verdict::{
-    Attempt, BinaryRun, DIAGNOSTIC_TAIL_LINES, Only, ReachObservation, Verdict, reach_hint_is_final, run_binary, run_binary_observed, tail,
+    Attempt, BinaryRun, DIAGNOSTIC_TAIL_LINES, Only, ReachObservation, Verdict, failure_label, reach_hint_is_final, run_binary,
+    run_binary_observed, tail,
 };
 use super::workspace::Workspace;
 use crate::discover::{
@@ -111,10 +112,13 @@ fn stall_note(test: Option<&str>) -> String {
 /// unreliable and left to find it, which is worse than recording it as a survivor would be —
 /// at least a survivor names a line. The wording puts the remedy on the test rather than on the
 /// mutant, because the mutant was never judged.
-fn flaky_note(binary: &Utf8Path, test: Option<&str>) -> String {
-    let which = test.map_or_else(|| "a test".to_owned(), |name| format!("test `{name}`"));
+fn flaky_note(binary: &Utf8Path, test: Option<&str>, confirmation: &str) -> String {
+    let which = test.map_or_else(|| "a test".to_owned(), |name| format!("test `{}`", failure_label(name)));
+    let binary = failure_label(binary.as_str());
 
-    format!("{which} in `{binary}` fails with no mutant active as well as with one, so this mutant was never judged")
+    format!(
+        "{which} in `{binary}`: mutated observation failed; confirmation with no mutant active {confirmation}, so this mutant was never judged"
+    )
 }
 
 /// Describes a mutant that prevents nextest from creating the selected test list.
@@ -1852,10 +1856,10 @@ fn terminal_judgement(binary: &TestBinary, verdict: Verdict) -> Option<Judgement
             None,
             Some(memory_note(&binary.path, peak, limit)),
         )),
-        Verdict::Flaky(test) => Some(Judgement::Reached(
+        Verdict::Flaky(test, confirmation) => Some(Judgement::Reached(
             Outcome::Flaky,
             None,
-            Some(flaky_note(&binary.path, test.as_deref())),
+            Some(flaky_note(&binary.path, test.as_deref(), confirmation)),
         )),
         Verdict::Unmetered(reason) => Some(Judgement::Abandoned(reason)),
         Verdict::Unjudged(reason) => Some(Judgement::Reached(Outcome::Pending, None, Some(reason))),
@@ -3342,7 +3346,7 @@ mod tests {
     /// survivor at least names a line.
     #[test]
     fn a_flaky_note_names_the_test_and_says_nothing_was_judged() {
-        let note = flaky_note(Utf8Path::new("target/debug/deps/unit-abc"), Some("a::b"));
+        let note = flaky_note(Utf8Path::new("target/debug/deps/unit-abc"), Some("a::b"), "failed");
 
         assert!(note.contains("test `a::b`"), "{note}");
         assert!(note.contains("unit-abc"), "{note}");
@@ -3357,7 +3361,7 @@ mod tests {
     /// sentence with a hole in it.
     #[test]
     fn a_flaky_note_without_a_test_name_still_reads() {
-        let note = flaky_note(Utf8Path::new("target/debug/deps/unit-abc"), None);
+        let note = flaky_note(Utf8Path::new("target/debug/deps/unit-abc"), None, "failed");
 
         assert!(note.starts_with("a test in"), "{note}");
         assert!(note.contains("never judged"), "{note}");
@@ -5207,7 +5211,7 @@ mod tests {
             Some(Judgement::Reached(Outcome::OutOfMemory, None, Some(note))) if note.contains("20 bytes")
         ));
         assert!(matches!(
-            terminal_judgement(&binary, Verdict::Flaky(Some("tests::flake".to_owned()))),
+            terminal_judgement(&binary, Verdict::Flaky(Some("tests::flake".to_owned()), "failed")),
             Some(Judgement::Reached(Outcome::Flaky, None, Some(note))) if note.contains("tests::flake")
         ));
         assert!(matches!(

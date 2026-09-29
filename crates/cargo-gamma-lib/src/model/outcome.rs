@@ -38,14 +38,14 @@ pub enum Outcome {
     /// The mutant could not be compiled. Not a test-suite failing.
     CompileError,
 
-    /// A test failed both with the mutant active and with no mutant active.
+    /// A mutant failure lacked a passing unmutated confirmation.
     ///
-    /// The suite noticed something, but not the mutant, so crediting the mutant with a kill would
+    /// The confirmation failed or was inconclusive, so crediting the mutant with a kill would
     /// let one unreliable test manufacture a detection against every mutant it happened to be run
     /// against. Recording it as a survivor is just as wrong in the other direction: a survivor is a
     /// claim that the tests have a gap, and it sends the reader to write an assertion for code an
-    /// assertion already covers. The useful report is neither verdict but the name of the test that
-    /// failed both ways, which is what this outcome carries a note for.
+    /// assertion already covers. The useful report names the failing test and the unmutated
+    /// observation, which is what this outcome carries a note for.
     ///
     /// Excluded from the score on the same reasoning as [`Self::CompileError`]: nothing was
     /// established about the tests, so counting it either way would be a lie.

@@ -60,6 +60,15 @@ pub struct Merged {
     /// Valid mutants, the denominator of the score.
     pub valid: usize,
 
+    /// Presented Gamma verdicts whose unmutated confirmation was inconclusive.
+    pub flaky: usize,
+
+    /// Presented Gamma detections produced with confirmation explicitly disabled.
+    pub unconfirmed: usize,
+
+    /// Presented detections for which confirmation provenance is unavailable.
+    pub confirmation_unknown: usize,
+
     /// Verdicts dropped because the code they were formed against no longer exists.
     ///
     /// A mutant's identity is content-addressed, so editing the code it was generated from gives

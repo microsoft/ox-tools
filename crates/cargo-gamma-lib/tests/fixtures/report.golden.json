@@ -61,6 +61,8 @@
     }
   },
   "config": {
+    "confirm": true,
+    "failOnFlaky": true,
     "startedAt": 1700000000,
     "mutantIdVersion": 5,
     "shard": {

@@ -75,6 +75,9 @@ pub struct Config {
     /// Believe a failing test without re-running it with no mutant active.
     pub no_confirm: Option<bool>,
 
+    /// Disable only the gate on inconclusive flaky outcomes.
+    pub no_fail_on_flaky: Option<bool>,
+
     /// Packages to mutate. Empty means every package in the workspace.
     pub packages: Vec<String>,
 
@@ -333,6 +336,12 @@ impl Config {
         args.measure.exclude_tests.extend(self.exclude_tests.iter().cloned());
         args.no_baseline = args.no_baseline || self.no_baseline.unwrap_or(false);
         args.no_confirm = args.no_confirm || self.no_confirm.unwrap_or(false);
+        args.no_fail_on_flaky = args.no_fail_on_flaky || self.no_fail_on_flaky.unwrap_or(false);
+        if args.no_confirm && !args.no_fail_on_flaky {
+            return Err(
+                error!("effective --no-confirm requires explicit --no-fail-on-flaky or no-fail-on-flaky = true in gamma.toml").usage(),
+            );
+        }
         args.artifact_dir = args.artifact_dir.take().or_else(|| self.artifact_dir.clone());
         if !args.measure.test_packages.is_empty() && args.measure.test_workspace {
             return Err(contradiction(
@@ -480,6 +489,40 @@ mod tests {
         assert!(!args.measure.nextest);
         assert!(!args.no_baseline);
         assert!(!args.no_confirm);
+        assert!(!args.no_fail_on_flaky);
+    }
+
+    #[test]
+    fn flaky_confirmation_policy_validates_combined_cli_and_configuration() {
+        for cli_confirm_disabled in [false, true] {
+            for configured_confirm_disabled in [None, Some(false), Some(true)] {
+                for cli_opt_out in [false, true] {
+                    for configured_opt_out in [None, Some(false), Some(true)] {
+                        let mut args = RunArgs {
+                            no_confirm: cli_confirm_disabled,
+                            no_fail_on_flaky: cli_opt_out,
+                            ..RunArgs::default()
+                        };
+                        let config = Config {
+                            no_confirm: configured_confirm_disabled,
+                            no_fail_on_flaky: configured_opt_out,
+                            ..Config::default()
+                        };
+                        let result = config.apply(&mut args);
+                        let disabled = cli_confirm_disabled || configured_confirm_disabled == Some(true);
+                        let opted_out = cli_opt_out || configured_opt_out == Some(true);
+                        assert_eq!(result.is_err(), disabled && !opted_out, "{config:?} {args:?}");
+                        if let Err(error) = result {
+                            assert!(error.to_string().contains("--no-fail-on-flaky"));
+                        }
+                    }
+                }
+            }
+        }
+        let config = Config::parse("no-confirm = true\nno-fail-on-flaky = true").unwrap();
+        let mut args = RunArgs::default();
+        config.apply(&mut args).unwrap();
+        assert!(args.no_confirm && args.no_fail_on_flaky);
     }
 
     /// `packages` in the file and `--workspace` on the command line both reach `selected_packages`,
@@ -1130,6 +1173,7 @@ mod tests {
             incremental: Some(IncrementalMode::No),
             no_baseline: Some(true),
             no_confirm: Some(true),
+            no_fail_on_flaky: Some(true),
             packages: vec!["package-from-the-file".to_owned()],
             test_packages: vec!["test-package-from-the-file".to_owned()],
             test_workspace: Some(false),

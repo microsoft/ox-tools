@@ -268,7 +268,7 @@ fn retry_failed_binaries<O>(
     for (binary, slot) in binaries.iter().zip(measured) {
         let retry = slot
             .as_ref()
-            .is_some_and(|(_elapsed, observed)| matches!(&observed.verdict, Verdict::Failed(_) | Verdict::Flaky(_)));
+            .is_some_and(|(_elapsed, observed)| matches!(&observed.verdict, Verdict::Failed(_) | Verdict::Flaky(_, _)));
 
         if !retry {
             continue;
@@ -305,11 +305,11 @@ fn retry_failed_binaries<O>(
                 binary.target, binary.package
             ));
             let failed_test = slot.as_ref().and_then(|(_elapsed, observed)| match &observed.verdict {
-                Verdict::Failed(test) | Verdict::Flaky(test) => test.clone(),
+                Verdict::Failed(test) | Verdict::Flaky(test, _) => test.clone(),
                 _ => None,
             });
             Observation {
-                verdict: Verdict::Flaky(failed_test),
+                verdict: Verdict::Flaky(failed_test, "passed on retry"),
                 failure: previous_failure,
                 ..observation
             }
@@ -404,7 +404,7 @@ fn baseline_failure_error(
     let runner = runner_name(work.runner().is_some());
     let directory = working_directory(work, binary);
     let (kind, test, last_test, reason, limit) = match verdict {
-        Verdict::Failed(test) | Verdict::Flaky(test) => ("testFailure", test.as_deref(), None, None, None),
+        Verdict::Failed(test) | Verdict::Flaky(test, _) => ("testFailure", test.as_deref(), None, None, None),
         Verdict::TestEnumerationFailed(reason) => ("enumerationFailure", None, None, Some(reason.as_str()), None),
         Verdict::TimedOut => (
             "timeout",
@@ -1315,7 +1315,7 @@ mod tests {
                 None,
             ),
             (
-                Verdict::Flaky(Some("case::flaky".to_owned())),
+                Verdict::Flaky(Some("case::flaky".to_owned()), "passed on retry"),
                 "testFailure",
                 Some("case::flaky"),
                 None,
@@ -1540,7 +1540,7 @@ mod tests {
         assert!(matches!(measured[0].as_ref().unwrap().1.verdict, Verdict::Passed));
         assert!(matches!(
             measured[1].as_ref().unwrap().1.verdict,
-            Verdict::Flaky(Some(ref test)) if test == "red::case"
+            Verdict::Flaky(Some(ref test), _) if test == "red::case"
         ));
         assert_eq!(measured[1].as_ref().unwrap().1.tests, Some(8));
         assert_eq!(

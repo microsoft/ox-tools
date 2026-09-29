@@ -782,7 +782,7 @@
 //!
 //! ```text
 //! FLAKY src/ledger.rs:41:9: delete self.audit.push(entry); [stmt.delete_call]:
-//!       test `audit::retries` in `unit-2181f69f` fails with no mutant active as well as with one,
+//!       test `audit::retries` in `unit-2181f69f`: mutated observation failed; confirmation with no mutant active failed,
 //!       so this mutant was never judged
 //!
 //! Summary 2 mutants (2 killed, 0 survived, 0 timed out, 0 out of memory, 0 uncovered => 100.0%),
@@ -795,9 +795,22 @@
 //! score entirely — the way an unviable mutant does — and the report names the test to fix, which is the
 //! only thing anybody can act on here. Incremental runs retry flakes rather than carrying them forward.
 //!
-//! The confirmation costs one extra run per kill, of the cheapest kind: it stops at the first failing
-//! test rather than running the whole binary. `--no-confirm` turns it off, which buys that time back at
-//! the price of a score that counts flakes as kills and cannot show you which ones they were.
+//! **Flaky outcomes fail `run` and `merge` by default**, with exit code `2`, even at a 100% score
+//! or without `--min-score`. An all-flaky campaign also fails. `--no-fail-on-flaky` opts out of
+//! only this gate; flaky outcomes remain excluded, and all other protections remain active.
+//!
+//! Confirmation runs the failing test again with no mutant active. A failed or inconclusive
+//! confirmation cannot establish a detection. It does not prove that the suite is deterministic.
+//! `--no-confirm` requires an explicit `--no-fail-on-flaky` opt-out (or its configuration key);
+//! the combined CLI/configuration policy is checked before building. `--no-baseline` skips the
+//! initial baseline but leaves confirmation and flaky gating active.
+//!
+//! Reports record the effective policy. Merge evaluates only the final compatible, presented
+//! winners, not all historical observations. Newer results can supersede flakes, but pending
+//! listings cannot hide them and age alone does not remove them. Merge does not inherit a
+//! producer's gate opt-out or read `gamma.toml`. Known unconfirmed Gamma detections require an
+//! explicit merge opt-out; legacy missing confirmation metadata remains unknown and is reported
+//! as an evidentiary limitation, not fabricated confirmation or flakiness.
 //!
 //! ## Suppressing mutations
 //!
@@ -1567,13 +1580,13 @@
 //!
 //! | Code | Meaning |
 //! | ---- | ------- |
-//! | `0` | The run finished and every gate that was configured passed. |
+//! | `0` | The run finished and every enabled gate passed. |
 //! | `1` | Usage error: an argument, a filter pattern or a configuration key was wrong. |
-//! | `2` | The run finished and a gate failed: score was below `--min-score`, or a `gamma::expect` was contradicted. |
+//! | `2` | An enabled flaky-result, percentage, pending/ungraded-score, or source-expectation gate failed. |
 //! | `3` | The run could not proceed: the baseline failed, the tree would not compile, or scratch dir was in use. |
 //! | `70` | An internal error. This is a bug; the message says what to report. |
 //!
-//! **Surviving mutants do not fail the process on their own.** A run with survivors and no gate exits
+//! **Surviving mutants do not fail the process on their own.** A run with only survivors and no percentage gate exits
 //! `0`, deliberately: adopting mutation testing on an existing codebase starts with survivors, and a
 //! tool that fails the build on the first day is a tool that gets removed on the second. A CI job that
 //! wants survivors to be fatal says so:

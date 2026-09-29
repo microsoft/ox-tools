@@ -146,23 +146,74 @@ pub(crate) fn surviving_mutants(report: &Report) -> Result<HashSet<MutantId>, St
         .files
         .values()
         .flat_map(|file| file.mutants.iter())
-        .filter(|mutant| mutant.status == "Survived" && mutant.status_reason.is_none())
+        .filter(|mutant| {
+            if report.verdict_policy(&mutant.id).0 == Some(FRAMEWORK_NAME) {
+                report.gamma_outcome(mutant) == Some(Outcome::Survived)
+            } else {
+                // Merged Gamma documents can carry foreign or legacy unknown producers.
+                // Preserve standard survivor selection without interpreting their reason text.
+                mutant.status == "Survived" && mutant.status_reason.is_none()
+            }
+        })
         .map(|mutant| MutantId::new(&mutant.id))
         .collect())
 }
 
 pub(super) fn settled_verdict(status: &str, reason: Option<&str>) -> Option<Outcome> {
-    let reason_is = |prefix: &str| reason.is_some_and(|reason| reason.starts_with(prefix));
+    match gamma_outcome(status, reason)? {
+        Outcome::Killed => Some(Outcome::Killed),
+        Outcome::Timeout if status != "Timeout" || reason.is_some() => Some(Outcome::Timeout),
+        Outcome::CompileError => Some(Outcome::CompileError),
+        Outcome::Ignored if reason.is_some() => Some(Outcome::Ignored),
+        _ => None,
+    }
+}
 
+/// Interprets Gamma's status/reason protocol, without granting verdict reuse.
+pub(crate) fn gamma_outcome(status: &str, reason: Option<&str>) -> Option<Outcome> {
+    let reason_is = |prefix: &str| reason.is_some_and(|reason| reason.starts_with(prefix));
     match status {
-        "Survived" if reason_is(OUT_OF_MEMORY_PREFIX) => None,
-        "Survived" if reason_is(TIMEOUT_PREFIX) => Some(Outcome::Timeout),
-        "Timeout" if reason.is_none() || reason_is(OUT_OF_MEMORY_PREFIX) => None,
-        "Ignored" if reason.is_none() || reason_is(NOT_BUILT_PREFIX) || reason_is(FLAKY_PREFIX) => None,
+        "Pending" => Some(Outcome::Pending),
         "Killed" => Some(Outcome::Killed),
+        "Survived" | "Timeout" if reason_is(OUT_OF_MEMORY_PREFIX) => Some(Outcome::OutOfMemory),
+        "Survived" if reason_is(TIMEOUT_PREFIX) => Some(Outcome::Timeout),
+        "Survived" => Some(Outcome::Survived),
         "Timeout" => Some(Outcome::Timeout),
         "CompileError" => Some(Outcome::CompileError),
+        "Ignored" if reason_is(FLAKY_PREFIX) => Some(Outcome::Flaky),
+        "Ignored" if reason_is(NOT_BUILT_PREFIX) => Some(Outcome::NotBuilt),
         "Ignored" => Some(Outcome::Ignored),
-        _other => None,
+        "NoCoverage" => Some(Outcome::NoCoverage),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lossless_decoding_does_not_grant_reuse() {
+        for (status, reason, outcome, reusable) in [
+            ("Survived", None, Outcome::Survived, None),
+            ("Survived", Some("timed out: budget"), Outcome::Timeout, Some(Outcome::Timeout)),
+            ("Survived", Some("out of memory: ceiling"), Outcome::OutOfMemory, None),
+            ("Ignored", Some("flaky: test failed"), Outcome::Flaky, None),
+            ("Ignored", Some("not built: build failed"), Outcome::NotBuilt, None),
+            ("Ignored", Some("suppressed by policy"), Outcome::Ignored, Some(Outcome::Ignored)),
+            ("Ignored", None, Outcome::Ignored, None),
+            ("Pending", None, Outcome::Pending, None),
+            ("NoCoverage", None, Outcome::NoCoverage, None),
+            ("Killed", None, Outcome::Killed, Some(Outcome::Killed)),
+            ("CompileError", None, Outcome::CompileError, Some(Outcome::CompileError)),
+        ] {
+            assert_eq!(gamma_outcome(status, reason), Some(outcome));
+            assert_eq!(settled_verdict(status, reason), reusable);
+        }
+        assert_eq!(gamma_outcome("RuntimeError", Some("flaky: foreign")), None);
+        assert_eq!(
+            gamma_outcome("Survived", Some("flaky: not an ignored result")),
+            Some(Outcome::Survived)
+        );
     }
 }

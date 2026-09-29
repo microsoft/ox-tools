@@ -20,7 +20,7 @@ The command layer normalizes Cargo's inserted `gamma` argument and inserts
 help; configuration is resolved afterward so split settings such as shard count
 in `gamma.toml` and shard index on the command line can be validated as one
 effective value. The top-level boundary maps help and success to `0`, usage to
-`1`, failed score or source-expectation gates to `2`, inability to proceed to
+`1`, failed flaky-result, score or source-expectation gates to `2`, inability to proceed to
 `3`, and an uncaught internal panic to `70`.
 
 ## Mutation discovery
@@ -129,6 +129,26 @@ or silently discarding provenance. Independent contexts can be kept in separate 
 The reader validates recognized metadata and cross-record references rather than discarding
 failed parses. The writer preserves source authority even for empty projected files; staged
 merges therefore retain empty snapshots independently of mutant provenance.
+
+## Flaky evidence and gating
+
+Run configuration resolves `no-confirm` and `no-fail-on-flaky` before discovery/build and rejects
+disabled confirmation without explicit gate opt-out. Completed observations are graded separately
+from their execution: infrastructure/build inability takes precedence, then flaky, expectation,
+pending and percentage checks. The reports already exist when grading returns an exit code.
+
+`elements::gamma_outcome` decodes Gamma's status/reason pair without granting reuse eligibility.
+The merge retains producer identity and optional confirmation policy in both winning-verdict
+provenance and original staged observations. Its real-verdict-before-pending ranking otherwise
+uses original timestamps, so neither listings nor intermediate publication refresh the evidence.
+Flaky and known unconfirmed detection counts are taken only after retirement and presentation
+compatibility. Unknown producer or confirmation metadata is never synthesized from a merged
+document's top-level framework. Each merge records its own effective gate policy.
+
+Confirmation settlement retains the test identity and categorical mutated/unmutated observations.
+Resource-limited confirmation is inconclusive rather than an assertion failure. Published notes
+encode control characters and never contain raw subprocess output or ambient environment values.
+Existing bounded local diagnostics and baseline failure artifacts remain separate from these notes.
 
 ## Test fixtures
 

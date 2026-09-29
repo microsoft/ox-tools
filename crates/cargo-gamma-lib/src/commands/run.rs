@@ -108,6 +108,8 @@ pub(super) fn memory_policy(args: &RunArgs) -> exec::MemoryPolicy {
 /// know the convention.
 fn run_info(args: &RunArgs, tests: Option<usize>, dropped: &[String]) -> crate::elements::RunInfo {
     crate::elements::RunInfo {
+        confirm: Some(!args.no_confirm),
+        fail_on_flaky: Some(!args.no_fail_on_flaky),
         population: None,
         tests,
         started_at: seconds_since_epoch(SystemTime::now()),
@@ -393,7 +395,13 @@ pub(super) fn distinguish(score: f64, minimum: f64) -> (String, String) {
 
 // #[gamma::skip(all, reason = "exit-code gating is covered end-to-end through the injected Host; private branch mutants duplicate the directly tested gate predicates and rendered diagnostics")]
 pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: Styler) -> crate::Result<i32> {
-    let Executed { plan, stuck } = measured(host, args, progress_when, styler)?;
+    let executed = measured(host, args, progress_when, styler)?;
+    gate(host, args, styler, &executed)
+}
+
+/// Judges completed observations independently of the machinery that obtained them.
+fn gate<H: Host>(host: &mut H, args: &RunArgs, styler: Styler, executed: &Executed) -> crate::Result<i32> {
+    let Executed { plan, stuck } = executed;
 
     // A build the tool could not make compile is not a run that passed, whatever the mutants it did
     // get to say. It is reported first and it wins: the population the gate would judge is missing
@@ -412,6 +420,31 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
 
     let summary = crate::model::Summary::of(&plan.mutants);
     let broken = broken_expectations(&plan.mutants);
+
+    let flaky_failed = !args.no_fail_on_flaky && summary.flaky > 0;
+    if flaky_failed {
+        for mutant in plan.mutants.iter().filter(|mutant| mutant.outcome == Outcome::Flaky) {
+            writeln!(
+                host.error(),
+                "{} flaky mutant `{}` at {}:{}: {}; evidence is inconclusive, not a survivor",
+                styler.error("error:"),
+                encode_controls(mutant.id.as_str()),
+                encode_controls(mutant.file.as_str()),
+                mutant.line,
+                encode_controls(
+                    mutant
+                        .note
+                        .as_deref()
+                        .unwrap_or("unmutated confirmation did not establish a passing suite")
+                ),
+            )?;
+        }
+        writeln!(
+            host.error(),
+            "{} flaky-result gate failed; --no-fail-on-flaky disables only this gate",
+            styler.error("error:")
+        )?;
+    }
 
     if !broken.is_empty() {
         let mut stream = host.error();
@@ -455,12 +488,8 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
     // in its denominator. That prints as 100%, which is the right answer to "how much of what ran
     // was caught" and the wrong one to hand a threshold.
     let Some(score) = summary.scored() else {
-        return Ok(ungraded(
-            host,
-            args,
-            styler,
-            plan.mutants.iter().any(|mutant| mutant.expectation.is_some()),
-        ));
+        let ungraded = ungraded(host, args, styler, plan.mutants.iter().any(|mutant| mutant.expectation.is_some()));
+        return Ok(if flaky_failed { EXIT_GATE_FAILED } else { ungraded });
     };
 
     if let Some(minimum) = args.min_score
@@ -477,7 +506,7 @@ pub(super) fn run_session<H: Host>(host: &mut H, args: &RunArgs, progress_when: 
         return Ok(EXIT_GATE_FAILED);
     }
 
-    Ok(EXIT_OK)
+    Ok(if flaky_failed { EXIT_GATE_FAILED } else { EXIT_OK })
 }
 
 // #[gamma::skip(all, reason = "the gate truth table is asserted directly; instrumentation of this private predicate is not distinguishable from the calling gate branch")]
@@ -1854,12 +1883,136 @@ mod tests {
     fn run_metadata_stamps_the_identity_scheme_and_preserves_optional_inputs() {
         let info = run_info(&RunArgs::default(), Some(17), &["unavailable".to_owned()]);
 
+        assert_eq!(info.confirm, Some(true));
+        assert_eq!(info.fail_on_flaky, Some(true));
         assert_eq!(info.tests, Some(17));
         assert_eq!(info.mutant_id_version, Some(crate::model::MUTANT_ID_VERSION));
         assert!(!info.merged);
         assert!(info.not_built.is_none());
         assert_eq!(info.dropped_test_packages, ["unavailable"]);
         assert!(info.merge_provenance.is_none());
+        let opted_out = run_info(
+            &RunArgs {
+                no_confirm: true,
+                no_fail_on_flaky: true,
+                ..RunArgs::default()
+            },
+            None,
+            &[],
+        );
+        assert_eq!(opted_out.confirm, Some(false));
+        assert_eq!(opted_out.fail_on_flaky, Some(false));
+    }
+
+    fn completed(mutants: Vec<Mutant>) -> Executed {
+        Executed {
+            stuck: Vec::new(),
+            plan: Some(Plan {
+                population: None,
+                root: Utf8PathBuf::new(),
+                files: Vec::new(),
+                mutants,
+                suppressed: 0,
+                idle: Vec::new(),
+                sharded_out: 0,
+                settled_out: 0,
+                digests: crate::HashMap::default(),
+                skipped: Vec::new(),
+                reach: crate::HashMap::default(),
+                specs: crate::HashMap::default(),
+            }),
+        }
+    }
+
+    #[test]
+    fn flaky_run_gate_is_independent_of_the_percentage_and_baseline() {
+        let mut mutants: Vec<_> = (0..99).map(|id| mutant(0, Outcome::Killed, id)).collect();
+        mutants.push(Mutant {
+            note: Some("test `case::flaky`: mutated failure; unmutated confirmation failed".to_owned()),
+            ..mutant(0, Outcome::Flaky, 99)
+        });
+        let executed = completed(mutants);
+        assert_eq!(
+            crate::model::Summary::of(&executed.plan.as_ref().unwrap().mutants).scored(),
+            Some(100.0)
+        );
+        for min_score in [None, Some(100.0)] {
+            for no_baseline in [false, true] {
+                let mut host = Sink::default();
+                let args = RunArgs {
+                    min_score,
+                    no_baseline,
+                    ..RunArgs::default()
+                };
+                assert_eq!(gate(&mut host, &args, Styler::new(false), &executed).unwrap(), EXIT_GATE_FAILED);
+                assert!(host.err().contains("m99"), "{}", host.err());
+                assert!(host.err().contains("case::flaky"), "{}", host.err());
+                assert!(host.err().contains("inconclusive, not a survivor"), "{}", host.err());
+                let args = RunArgs {
+                    no_fail_on_flaky: true,
+                    ..args
+                };
+                assert_eq!(gate(&mut host, &args, Styler::new(false), &executed).unwrap(), EXIT_OK);
+            }
+        }
+    }
+
+    #[test]
+    fn flaky_only_and_clean_run_gates_use_actual_outcomes() {
+        for (outcome, expected) in [
+            (Outcome::Flaky, EXIT_GATE_FAILED),
+            (Outcome::Killed, EXIT_OK),
+            (Outcome::Ignored, EXIT_OK),
+            (Outcome::NotBuilt, EXIT_OK),
+        ] {
+            let executed = completed(vec![mutant(0, outcome, 1)]);
+            let mut host = Sink::default();
+            assert_eq!(
+                gate(&mut host, &RunArgs::default(), Styler::new(false), &executed).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_flaky_run_still_reports_contradicted_expectations() {
+        let executed = completed(vec![mutant(0, Outcome::Flaky, 0), expecting(Outcome::Killed, false)]);
+        let mut host = Sink::default();
+        assert_eq!(
+            gate(&mut host, &RunArgs::default(), Styler::new(false), &executed).unwrap(),
+            EXIT_GATE_FAILED
+        );
+        assert!(host.err().contains("flaky-result gate failed"), "{}", host.err());
+        assert!(host.err().contains("expected survived"), "{}", host.err());
+    }
+
+    #[test]
+    fn flaky_opt_out_preserves_other_run_gates_and_inability_precedence() {
+        for (other, minimum, stuck, expected) in [
+            (mutant(0, Outcome::Flaky, 1), None, false, EXIT_OK),
+            (mutant(0, Outcome::Flaky, 1), Some(0.0), false, EXIT_GATE_FAILED),
+            (mutant(0, Outcome::Survived, 1), Some(100.0), false, EXIT_GATE_FAILED),
+            (mutant(0, Outcome::Pending, 1), Some(0.0), false, EXIT_GATE_FAILED),
+            (expecting(Outcome::Killed, false), None, false, EXIT_GATE_FAILED),
+            (mutant(0, Outcome::NotBuilt, 1), None, true, EXIT_CANNOT_PROCEED),
+            (mutant(0, Outcome::Timeout, 1), Some(100.0), false, EXIT_GATE_FAILED),
+            (mutant(0, Outcome::OutOfMemory, 1), Some(100.0), false, EXIT_GATE_FAILED),
+        ] {
+            let mut executed = completed(vec![mutant(0, Outcome::Flaky, 0), other]);
+            if stuck {
+                executed.stuck.push("build unavailable".to_owned());
+                assert_eq!(
+                    gate(&mut Sink::default(), &RunArgs::default(), Styler::new(false), &executed).unwrap(),
+                    EXIT_CANNOT_PROCEED,
+                );
+            }
+            let args = RunArgs {
+                no_fail_on_flaky: true,
+                min_score: minimum,
+                ..RunArgs::default()
+            };
+            assert_eq!(gate(&mut Sink::default(), &args, Styler::new(false), &executed).unwrap(), expected);
+        }
     }
 
     #[test]

@@ -14,9 +14,9 @@ mod population;
 mod publication;
 mod report;
 
-pub(crate) use digest::surviving_mutants;
 #[doc(inline)]
 pub use digest::{Digest, FileDigest, FrameworkDigest, MutantDigest, settled_mutants};
+pub(crate) use digest::{gamma_outcome, surviving_mutants};
 pub(crate) use population::context_key;
 #[doc(inline)]
 pub use population::{Observation, Population, PopulationAssertion, PopulationOrigin, Scope, SelectionKind};
@@ -27,9 +27,9 @@ pub(crate) use publication::{
 pub(crate) use publication::{before_next_publication, fail_next_directory_sync, next_scratch_path};
 #[doc(inline)]
 pub use publication::{publish, write};
+pub(crate) use report::{FRAMEWORK_NAME, build_from, supported_schema_version, validate_file_result, validate_schema};
 #[doc(inline)]
 pub use report::{
     FileResult, Framework, Location, MergeProvenance, MutantResult, Position, Report, RunInfo, ShardInfo, SourceProvenance, Thresholds,
     VerdictProvenance, build, to_json, write_json,
 };
-pub(crate) use report::{build_from, supported_schema_version, validate_file_result, validate_schema};

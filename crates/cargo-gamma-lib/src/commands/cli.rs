@@ -113,6 +113,12 @@ pub struct CleanArgs {
 /// Arguments for `merge`.
 #[derive(Debug, Args)]
 pub struct MergeArgs {
+    /// Allow flaky outcomes and known unconfirmed detections without failing their gate.
+    ///
+    /// Does not disable the percentage gate or inherit any input report's opt-out.
+    #[arg(long, help_heading = "Run control")]
+    pub no_fail_on_flaky: bool,
+
     /// The reports to merge. A directory is read for its `*.json` files.
     #[arg(value_name = "REPORTS", required = true)]
     pub inputs: Vec<Utf8PathBuf>,
@@ -656,6 +662,7 @@ pub struct RunArgs {
     ///
     /// Faster, and strictly less trustworthy: without it there is no evidence that a failure was
     /// caused by the mutant rather than by the suite already being red.
+    /// Later unmutated confirmation and the flaky-result gate remain active.
     #[arg(long, help_heading = "Run control")]
     pub no_baseline: bool,
 
@@ -663,8 +670,16 @@ pub struct RunArgs {
     ///
     /// Saves one run per kill, and gives up the ability to tell a detection from a flaky test: a
     /// test that fails either way is counted as having caught every mutant it was run against.
+    /// Requires explicit `--no-fail-on-flaky` or its configuration key.
     #[arg(long, help_heading = "Run control")]
     pub no_confirm: bool,
+
+    /// Allow inconclusive flaky outcomes without failing their gate.
+    ///
+    /// Flaky outcomes remain excluded from the score. Other gates and confirmation remain active.
+    /// Required when disabling confirmation with `--no-confirm`.
+    #[arg(long, help_heading = "Run control")]
+    pub no_fail_on_flaky: bool,
 
     /// Find and report mutants without building or running anything.
     #[arg(long, help_heading = "Run control")]

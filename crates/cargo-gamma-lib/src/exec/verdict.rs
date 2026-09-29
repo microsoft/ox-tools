@@ -199,9 +199,8 @@ pub(super) enum Verdict {
     ///
     /// Not a verdict about the mutant either way. The suite noticed something, but the same thing
     /// happens without the mutant, so nothing about this run is evidence about this mutant.
-    /// Carries the test that failed, which is the only actionable thing here: the remedy is to fix
-    /// that test, not to write a new one.
-    Flaky(Option<String>),
+    /// Carries the failing test and a bounded description of the unmutated confirmation.
+    Flaky(Option<String>, &'static str),
 
     /// The run-wide machinery could not continue producing trustworthy verdicts.
     ///
@@ -540,57 +539,35 @@ fn confirm_kill(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, tes
         },
     );
 
-    match observe(work, binary, exonerating_attempt).verdict {
-        // The suite is green without the mutant and red with it. That is a detection, and the only
-        // observation in this match that is one.
-        Verdict::Passed => Verdict::Failed(test),
-
-        // Neither a detection nor a gap in the tests. Crediting the mutant would let one
-        // unreliable test manufacture a kill for every mutant it happens to be run against;
-        // recording a survivor would send the reader to write an assertion for code an assertion
-        // already covers. The test that failed both ways travels with the verdict, because fixing
-        // it is the only thing anybody can do about this.
-        Verdict::Failed(also) => Verdict::Flaky(test.or(also)),
-
-        // The confirmation could not be metered as this run was configured, so it decided nothing.
-        // The reason travels rather than being replaced by a verdict nobody established.
-        Verdict::Unmetered(reason) => Verdict::Unmetered(reason),
-
-        // The same, one scope down: the machinery refused this one run, so the exoneration
-        // established nothing and the mutant goes unjudged rather than taking the sweep with it.
-        Verdict::Unjudged(reason) => Verdict::Unjudged(reason),
-
-        // The exoneration exceeded a budget instead of finishing, so the suite was never observed
-        // green without the mutant — and the one thing this must not do is read "not observed" as
-        // "observed green". The exoneration inherits the mutant run's budgets while running the
-        // whole binary, where the mutant's own run stopped at its first failing test, so an
-        // overrun here is as much a fact about the machine as about anything.
-        //
-        // Recorded as a flake rather than as an unmetered run: nothing about the mutant was
-        // established, but the machinery worked, and abandoning the whole sweep over a slow
-        // confirmation would be a far worse answer than leaving one mutant out of the score. The
-        // failing test travels for the same reason it does above.
-        //
-        // The remaining variants cannot arrive from an exoneration — `TestEnumerationFailed` is
-        // only settled with a mutant active, and `Flaky` is reached from here rather than from
-        // `observe` — and they are folded in rather than matched separately because the conclusion
-        // would be the same either way: nothing was established.
-        _unestablished => Verdict::Flaky(test),
-    }
+    let unmutated = observe(work, binary, exonerating_attempt).verdict;
+    settle_confirmation(Verdict::Failed(test), unmutated)
 }
 
 /// Confirms that nextest's inability to enumerate tests was caused by the active mutant.
 fn confirm_enumeration(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, output: String) -> Verdict {
-    match observe(work, binary, attempt.exonerating()).verdict {
-        Verdict::Passed => Verdict::TestEnumerationFailed(output),
-        Verdict::Failed(test) => Verdict::Flaky(test),
+    settle_confirmation(
+        Verdict::TestEnumerationFailed(output),
+        observe(work, binary, attempt.exonerating()).verdict,
+    )
+}
+
+/// Preserves both observations as bounded categories, never publishing subprocess output.
+fn settle_confirmation(mutated: Verdict, unmutated: Verdict) -> Verdict {
+    let test = match &mutated {
+        Verdict::Failed(test) => test.clone(),
+        _ => None,
+    };
+    match unmutated {
+        Verdict::Passed => mutated,
+        Verdict::Failed(also) => Verdict::Flaky(test.or(also), "failed"),
         Verdict::Unmetered(reason) => Verdict::Unmetered(reason),
         Verdict::Unjudged(reason) => Verdict::Unjudged(reason),
-
-        // Timeout or memory-limit evidence from an exonerating run cannot be attributed to the
-        // mutant because no mutant was active. Returning either verdict would record the suite as
-        // having missed a mutant that was switched off for the run that produced the evidence.
-        _unestablished => Verdict::Flaky(None),
+        // Resource evidence from an unmutated run cannot be attributed to the mutant.
+        Verdict::TimedOut => Verdict::Flaky(test, "timed out"),
+        Verdict::Stalled(_) => Verdict::Flaky(test, "stalled"),
+        Verdict::MemoryLimit { .. } => Verdict::Flaky(test, "exceeded its memory ceiling"),
+        Verdict::TestEnumerationFailed(_) => Verdict::Flaky(test, "could not enumerate tests"),
+        Verdict::Flaky(_, _) => Verdict::Flaky(test, "was inconclusive"),
     }
 }
 
@@ -1178,6 +1155,16 @@ fn diagnostic_tail(bytes: &[u8]) -> (String, bool) {
     let truncated = text.lines().count() > OUTPUT_TAIL_LINES;
 
     (tail(&text, OUTPUT_TAIL_LINES).into_owned(), truncated)
+}
+
+/// Bounds published test identities by the existing failure-output budget.
+pub(super) fn failure_label(text: &str) -> String {
+    let mut text = crate::report::encode_controls(text).into_owned();
+    if text.len() > OUTPUT_TAIL_CAP {
+        text.truncate(text.floor_char_boundary(OUTPUT_TAIL_CAP));
+        text.push_str(" [truncated]");
+    }
+    text
 }
 
 fn termination(status: ExitStatus) -> Termination {
@@ -2100,6 +2087,47 @@ mod tests {
         let (text, truncated) = diagnostic_tail(over.as_bytes());
         assert_eq!(text, expected);
         assert!(truncated);
+    }
+
+    #[test]
+    fn flaky_confirmation_preserves_inconclusive_observations_without_raw_output() {
+        for (unmutated, reason) in [
+            (Verdict::Failed(Some("case::also".to_owned())), "failed"),
+            (Verdict::TimedOut, "timed out"),
+            (Verdict::Stalled(None), "stalled"),
+            (Verdict::MemoryLimit { peak: Some(10), limit: 9 }, "exceeded its memory ceiling"),
+            (
+                Verdict::TestEnumerationFailed("secret output".to_owned()),
+                "could not enumerate tests",
+            ),
+        ] {
+            assert_eq!(
+                settle_confirmation(Verdict::Failed(Some("case::mutated".to_owned())), unmutated),
+                Verdict::Flaky(Some("case::mutated".to_owned()), reason),
+            );
+        }
+        for verdict in [Verdict::Failed(None), Verdict::TestEnumerationFailed("details".to_owned())] {
+            assert_eq!(settle_confirmation(verdict, Verdict::TimedOut), Verdict::Flaky(None, "timed out"));
+        }
+        assert_eq!(settle_confirmation(Verdict::Failed(None), Verdict::Passed), Verdict::Failed(None),);
+        assert_eq!(
+            settle_confirmation(Verdict::Failed(None), Verdict::Unmetered("infrastructure".to_owned())),
+            Verdict::Unmetered("infrastructure".to_owned()),
+        );
+        assert_eq!(
+            settle_confirmation(Verdict::Failed(None), Verdict::Unjudged("transient".to_owned())),
+            Verdict::Unjudged("transient".to_owned()),
+        );
+    }
+
+    #[test]
+    fn flaky_evidence_labels_are_bounded_and_control_encoded() {
+        assert_eq!(failure_label("case\n\u{1b}"), "case\\n\\e");
+        let long = format!("{}é", "x".repeat(OUTPUT_TAIL_CAP - 1));
+        let shown = failure_label(&long);
+        assert!(shown.ends_with(" [truncated]"));
+        assert_eq!(shown.len(), OUTPUT_TAIL_CAP - 1 + " [truncated]".len());
+        assert_eq!(failure_label(&"x".repeat(OUTPUT_TAIL_CAP)).len(), OUTPUT_TAIL_CAP);
     }
 
     #[test]
@@ -3825,7 +3853,7 @@ mod tests {
 
         // Neither a kill nor a survivor, and the test that failed travels with it: that name is the
         // only thing anybody can act on here.
-        assert_eq!(verdict, Verdict::Flaky(Some("a::b".to_owned())), "{verdict:?}");
+        assert_eq!(verdict, Verdict::Flaky(Some("a::b".to_owned()), "timed out"), "{verdict:?}");
     }
 
     /// The exonerating run's own overrun is never handed back as the mutant's verdict.
@@ -3853,7 +3881,7 @@ mod tests {
             "nextest could not list the tests".to_owned(),
         );
 
-        assert_eq!(verdict, Verdict::Flaky(None), "{verdict:?}");
+        assert_eq!(verdict, Verdict::Flaky(None, "timed out"), "{verdict:?}");
     }
 
     /// A test that fails with the mutant and fails again without it is flaky, not a detection.
@@ -3883,7 +3911,7 @@ mod tests {
                 },
                 true
             ),
-            Verdict::Flaky(Some("a::b".to_owned()))
+            Verdict::Flaky(Some("a::b".to_owned()), "failed")
         );
     }
 

@@ -296,6 +296,7 @@ cargo gamma run [OPTIONS] [-- <TEST_ARGS>...]
 | `--leak-dirs` |  | Keep an incomplete scratch workspace after errors so it can be inspected. |
 | `--no-baseline` |  | Skip the baseline run. |
 | `--no-confirm` |  | Believe a failing test without re-running it with no mutant active. |
+| `--no-fail-on-flaky` |  | Allow inconclusive flaky outcomes without failing their gate. |
 | `--dry-run` |  | Find and report mutants without building or running anything. |
 | `--estimate` |  | Project what the rest of the run will cost, once the build and baseline have been measured. |
 | `--no-stall-detection` |  | Wait out the whole budget for every mutant instead of cutting off one that has stopped making progress. |
@@ -475,6 +476,7 @@ cargo gamma suppress [OPTIONS] [-- <TEST_ARGS>...]
 | `--leak-dirs` |  | Keep an incomplete scratch workspace after errors so it can be inspected. |
 | `--no-baseline` |  | Skip the baseline run. |
 | `--no-confirm` |  | Believe a failing test without re-running it with no mutant active. |
+| `--no-fail-on-flaky` |  | Allow inconclusive flaky outcomes without failing their gate. |
 | `--dry-run` |  | Find and report mutants without building or running anything. |
 | `--estimate` |  | Project what the rest of the run will cost, once the build and baseline have been measured. |
 | `--no-stall-detection` |  | Wait out the whole budget for every mutant instead of cutting off one that has stopped making progress. |
@@ -540,6 +542,13 @@ Combine per-shard reports into one answer
 cargo gamma merge [OPTIONS] <REPORTS>...
 ```
 
+**Run control**
+
+| Option | Value | What it does |
+| --- | --- | --- |
+| `--no-fail-on-flaky` |  | Allow flaky outcomes and known unconfirmed detections without failing their gate. |
+| `--min-score` | `<PERCENT>` | Fail if the merged assertion-killed score is below this percentage. |
+
 **Arguments**
 
 | Option | Value | What it does |
@@ -558,12 +567,6 @@ cargo gamma merge [OPTIONS] <REPORTS>...
 | Option | Value | What it does |
 | --- | --- | --- |
 | `--window` | `<DAYS>` | Days after which a verdict is reported as stale. Zero disables the freshness window. Defaults to `30`. |
-
-**Run control**
-
-| Option | Value | What it does |
-| --- | --- | --- |
-| `--min-score` | `<PERCENT>` | Fail if the merged assertion-killed score is below this percentage. |
 
 ### `gamma hints`
 

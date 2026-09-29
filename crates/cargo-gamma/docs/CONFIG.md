@@ -273,12 +273,27 @@ no-baseline = false
 
 # Believe a failing test without re-running it with no mutant active.
 no-confirm = false
+
+# Disable only the default flaky-result gate.
+no-fail-on-flaky = false
 ```
 
 Both trade trustworthiness for speed, and both defaults are the trustworthy choice. Without a
 baseline there is no evidence that a failing test was caused by the mutant rather than by a suite
 that was already red, and no measurement to derive a timeout or a memory ceiling from — so a run
 with `no-baseline = true` and `memory = "enforce"` must also set `memory-limit` explicitly.
+Skipping the baseline does not disable later unmutated confirmation or the flaky gate.
+
+Disabling confirmation requires an explicit flaky-gate opt-out. Validation uses the effective
+options after merging CLI and file settings, before any build. These negative boolean flags
+combine by enabling an opt-out if either source sets it; a CLI flag takes effect even over a
+configured `false`, and `--no-config` disregards configured opt-outs.
+
+Flaky outcomes fail `run` and `merge` by default with code `2`, independent of the percentage
+score, including a perfect or absent score. They remain inconclusive and excluded from the score.
+`no-fail-on-flaky = true` only affects the run's flaky gate: score, expectations, pending/ungraded,
+baseline, build and resource protections remain active. Merge reads only its named reports and
+uses its own `--no-fail-on-flaky` flag, never a producer's opt-out or an implicit `gamma.toml`.
 
 ## Memory
 

@@ -115,6 +115,8 @@ fn sample() -> Report {
         },
         files: files.into_iter().collect(),
         config: Some(RunInfo {
+            confirm: Some(true),
+            fail_on_flaky: Some(true),
             population: None,
             started_at: 1_700_000_000,
             mutant_id_version: Some(cargo_gamma_lib::internals::model::MUTANT_ID_VERSION),

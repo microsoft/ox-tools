@@ -11,10 +11,10 @@ use super::merged::Merged;
 use super::status::{NEVER_RUN, scoring};
 use super::verdict::Verdict;
 use crate::elements::{
-    FileResult, MergeProvenance, MutantResult, Observation, Population, PopulationAssertion, PopulationOrigin, Report, RunInfo, Scope,
-    SourceProvenance, VerdictProvenance,
+    FRAMEWORK_NAME, FileResult, MergeProvenance, MutantResult, Observation, Population, PopulationAssertion, PopulationOrigin, Report,
+    RunInfo, Scope, SourceProvenance, VerdictProvenance,
 };
-use crate::model::{MUTANT_ID_VERSION, Scoring};
+use crate::model::{MUTANT_ID_VERSION, Outcome, Scoring};
 
 /// Merges reports, keeping the most recent verdict per mutant ID.
 ///
@@ -94,6 +94,8 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
         retain(
             &mut latest,
             Candidate {
+                producer: observation.verdict.producer.clone(),
+                confirm: observation.verdict.confirm,
                 population: population.cloned(),
                 mutant,
                 path,
@@ -142,9 +144,20 @@ pub fn merge(reports: &[(String, Report)], now: u64, window: Option<u64>) -> Mer
             Some(Scoring::Detected) => {
                 out.valid += 1;
                 out.detected += 1;
+                match (verdict.producer.as_deref(), verdict.confirm) {
+                    (Some(FRAMEWORK_NAME), Some(false)) => out.unconfirmed += 1,
+                    (Some(FRAMEWORK_NAME), Some(true)) => {}
+                    _ => out.confirmation_unknown += 1,
+                }
             }
             Some(Scoring::Undetected) => out.valid += 1,
             Some(Scoring::Excluded) | None => {}
+        }
+
+        if verdict.producer.as_deref() == Some(FRAMEWORK_NAME)
+            && crate::elements::gamma_outcome(&verdict.mutant.status, verdict.mutant.status_reason.as_deref()) == Some(Outcome::Flaky)
+        {
+            out.flaky += 1;
         }
 
         files.entry(verdict.file).or_default().push(verdict);
@@ -181,6 +194,8 @@ fn identity_version(report: &Report) -> u32 {
 
 /// One original verdict considered alongside a source-compatible presentation.
 struct Candidate<'report> {
+    producer: Option<String>,
+    confirm: Option<bool>,
     population: Option<PopulationOrigin>,
     mutant: &'report MutantResult,
     path: &'report str,
@@ -194,6 +209,8 @@ struct Candidate<'report> {
 /// Retains the newest verdict and the newest presentation that fits the selected source.
 fn retain<'report>(latest: &mut HashMap<&'report str, Verdict<'report>>, candidate: Candidate<'report>) {
     let Candidate {
+        producer,
+        confirm,
         population,
         mutant,
         path,
@@ -208,6 +225,8 @@ fn retain<'report>(latest: &mut HashMap<&'report str, Verdict<'report>>, candida
     match entry {
         Entry::Vacant(slot) => {
             let _ = slot.insert(Verdict {
+                producer,
+                confirm,
                 population,
                 mutant,
                 file: path,
@@ -241,6 +260,8 @@ fn retain<'report>(latest: &mut HashMap<&'report str, Verdict<'report>>, candida
                 };
 
                 let _ = slot.insert(Verdict {
+                    producer,
+                    confirm,
                     population,
                     mutant,
                     file,
@@ -398,6 +419,7 @@ fn observations<'report>(reports: &[&'report (String, Report)], lineages: &mut L
             let source_key = source_key(file);
             for mutant in &file.mutants {
                 let (started_at, origin, lineage) = verdict_provenance(name, report, mutant, lineages);
+                let (producer, confirm) = report.verdict_policy(&mutant.id);
                 let observation = Observation {
                     file: path.clone(),
                     source_key: source_key.clone(),
@@ -408,6 +430,8 @@ fn observations<'report>(reports: &[&'report (String, Report)], lineages: &mut L
                     },
                     mutant: mutant.clone(),
                     verdict: VerdictProvenance {
+                        producer: producer.map(str::to_owned),
+                        confirm,
                         population: population_origin(report, mutant, source_at, source_origin, &source_lineage),
                         started_at,
                         origin: origin.to_owned(),
@@ -688,6 +712,8 @@ fn rebuild(
                     let _ = provenance.verdicts.insert(
                         mutant.id.to_string(),
                         VerdictProvenance {
+                            producer: verdict.producer.clone(),
+                            confirm: verdict.confirm,
                             population: verdict.population.clone(),
                             started_at: verdict.tested_at,
                             origin: verdict.origin.to_owned(),
@@ -737,6 +763,8 @@ fn rebuild(
         framework: base.framework.clone(),
         files: merged_files,
         config: Some(RunInfo {
+            confirm: None,
+            fail_on_flaky: None,
             population: Some(Population::Known(population)),
             started_at: newest,
             mutant_id_version: Some(identity_version(base)),
@@ -847,6 +875,80 @@ mod tests {
 
     fn roundtrip(report: &Report) -> Report {
         serde_json::from_str(&crate::elements::to_json(report).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn flaky_gate_counts_only_presented_winners_but_does_not_age_them_out() {
+        let flaky = MutantResult {
+            status_reason: Some("flaky: test failed both ways".to_owned()),
+            ..mutant("m1", 1, "Ignored")
+        };
+        let old = report(None, 100, vec![flaky]);
+        let stale = merge(&[("old".to_owned(), old.clone())], 1_000, Some(1));
+        assert_eq!(stale.flaky, 1);
+        assert_eq!(stale.stale, 1);
+        assert_eq!(stale.scored(), None);
+
+        let retired = report(None, 200, vec![]);
+        let merged = merge(&[("old".to_owned(), old.clone()), ("retired".to_owned(), retired)], 300, None);
+        assert_eq!(merged.flaky, 0);
+        assert_eq!(merged.withdrawn, 1);
+        let staged = roundtrip(&merged.report.unwrap());
+        assert_eq!(
+            merge(&[("stage".to_owned(), staged), ("old".to_owned(), old.clone())], 400, None).flaky,
+            0
+        );
+
+        let different = with_shaping(report(None, 200, vec![]), "features", serde_json::json!({"subject": ["different"]}));
+        let merged = merge(&[("old".to_owned(), old.clone()), ("different".to_owned(), different)], 300, None);
+        assert_eq!(merged.flaky, 1);
+        assert_eq!(merged.withdrawn, 0);
+
+        let mut incompatible = partial(report(None, 200, vec![]), crate::elements::SelectionKind::Diff);
+        incompatible.files.get_mut("src/lib.rs").unwrap().source = "fn changed() {}".to_owned();
+        let merged = merge(&[("old".to_owned(), old), ("incompatible".to_owned(), incompatible)], 300, None);
+        assert_eq!(merged.incompatible, 1);
+        assert_eq!(merged.flaky, 0);
+    }
+
+    #[test]
+    fn retired_unconfirmed_detections_do_not_gate_and_missing_legacy_provenance_stays_unknown() {
+        let mut old = report(None, 100, vec![mutant("m1", 1, "Killed")]);
+        old.config.as_mut().unwrap().confirm = Some(false);
+        let retired = report(None, 200, vec![]);
+        let merged = merge(&[("old".to_owned(), old.clone()), ("retired".to_owned(), retired)], 300, None);
+        assert_eq!(merged.unconfirmed, 0);
+        let staged = roundtrip(&merged.report.unwrap());
+        assert_eq!(
+            merge(&[("stage".to_owned(), staged), ("old".to_owned(), old)], 400, None).unconfirmed,
+            0
+        );
+
+        let legacy = report(None, 100, vec![mutant("m1", 1, "Killed")]);
+        let merged = merge(&[("legacy".to_owned(), legacy)], 200, None);
+        assert_eq!(merged.confirmation_unknown, 1);
+        assert_eq!(merged.unconfirmed, 0);
+        let stage = roundtrip(&merged.report.unwrap());
+        let verdict = &stage.config.as_ref().unwrap().merge_provenance.as_ref().unwrap().verdicts["m1"];
+        assert_eq!(verdict.confirm, None);
+        assert_eq!(verdict.producer.as_deref(), Some("cargo-gamma"));
+        let merged = merge(&[("stage".to_owned(), stage)], 300, None);
+        assert_eq!(merged.confirmation_unknown, 1);
+        assert_eq!(merged.flaky, 0);
+    }
+
+    #[test]
+    fn mixed_and_legacy_merged_survivors_keep_their_selection_scope() {
+        let mut foreign = report(Some((0, 2)), 100, vec![mutant("foreign", 1, "Survived")]);
+        foreign.framework.name = "foreign".to_owned();
+        let gamma = report(Some((1, 2)), 200, vec![mutant("gamma", 1, "Survived")]);
+        let merged = merge(&[("foreign".to_owned(), foreign), ("gamma".to_owned(), gamma)], 300, None);
+        let mut stage = roundtrip(&merged.report.unwrap());
+        let survivors = crate::elements::surviving_mutants(&stage).unwrap();
+        assert!(survivors.contains(&crate::model::MutantId::new("foreign")));
+        assert!(survivors.contains(&crate::model::MutantId::new("gamma")));
+        stage.config.as_mut().unwrap().merge_provenance = None;
+        assert_eq!(crate::elements::surviving_mutants(&stage).unwrap(), survivors);
     }
 
     #[test]
@@ -1582,6 +1684,8 @@ mod tests {
             let _ = provenance.verdicts.insert(
                 "aaa".to_owned(),
                 VerdictProvenance {
+                    producer: None,
+                    confirm: None,
                     population: None,
                     started_at: verdict_at,
                     origin: "verdict".to_owned(),

@@ -38,7 +38,7 @@ const SCHEMA_VERSION: &str = "2";
 pub(super) const SUPPORTED_SCHEMA_MAJOR: u32 = 2;
 
 /// The `framework.name` this tool writes, and the only one a cross-run reader accepts.
-pub(super) const FRAMEWORK_NAME: &str = "cargo-gamma";
+pub(crate) const FRAMEWORK_NAME: &str = "cargo-gamma";
 
 type SchemaResult<T> = core::result::Result<T, String>;
 
@@ -80,6 +80,18 @@ pub struct Report {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunInfo {
+    /// Whether this run confirmed suspected detections with no mutant active.
+    ///
+    /// Absence means unknown, not confirmed. Merged reports keep this per verdict instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<bool>,
+
+    /// Whether this operation enabled the flaky-result gate.
+    ///
+    /// A subsequent merge decides its own gate policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_on_flaky: Option<bool>,
+
     /// Discovery context and explicit completeness; absence is non-authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub population: Option<Population>,
@@ -195,6 +207,14 @@ pub struct SourceProvenance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerdictProvenance {
+    /// Original producer, which determines whether Gamma's outcome protocol applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer: Option<String>,
+
+    /// Original confirmation policy; absence is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<bool>,
+
     /// The original population observation, distinct from the verdict's test time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub population: Option<PopulationOrigin>,
@@ -210,6 +230,30 @@ pub struct VerdictProvenance {
     /// from their retained mutant result so they remain readable.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lineage: String,
+}
+
+impl Report {
+    /// Original producer and confirmation policy for a rendered verdict.
+    pub(crate) fn verdict_policy(&self, id: &str) -> (Option<&str>, Option<bool>) {
+        if let Some(config) = &self.config {
+            if let Some(verdict) = config.merge_provenance.as_ref().and_then(|provenance| provenance.verdicts.get(id)) {
+                return (verdict.producer.as_deref(), verdict.confirm);
+            }
+            if config.merged {
+                // Older merged documents copied one input's framework, not each verdict's producer.
+                return (None, None);
+            }
+            return (Some(&self.framework.name), config.confirm);
+        }
+        (Some(&self.framework.name), None)
+    }
+
+    /// Decodes a Gamma verdict without assigning meaning to foreign free-form reasons.
+    pub(crate) fn gamma_outcome(&self, mutant: &MutantResult) -> Option<Outcome> {
+        (self.verdict_policy(&mutant.id).0 == Some(FRAMEWORK_NAME))
+            .then(|| crate::elements::gamma_outcome(&mutant.status, mutant.status_reason.as_deref()))
+            .flatten()
+    }
 }
 
 /// Identifies one shard of a rotation.
@@ -440,7 +484,7 @@ fn reason_for(mutant: &Mutant) -> Option<String> {
             mutant
                 .note
                 .clone()
-                .unwrap_or_else(|| "a test failed with no mutant active as well as with one".to_owned())
+                .unwrap_or_else(|| "unmutated confirmation did not establish a passing suite".to_owned())
         )),
         // The sweep already built a note saying how far past the ceiling the run went, and dropping
         // it here would leave the reader a bare `Survived` with nothing to explain the distinct
@@ -1169,6 +1213,18 @@ mod tests {
         }
         for version in ["", "0", "3", "01", "1.", "1.0.0.0", "1.01", "1.a", "1.2a"] {
             assert!(!supported_schema_version(version), "{version}");
+        }
+    }
+
+    #[test]
+    fn every_gamma_outcome_roundtrips_losslessly_without_changing_its_score() {
+        let source = SourceFile::parse("src/lib.rs", "fn f() {}".to_owned()).unwrap();
+        for outcome in Outcome::ALL {
+            let rendered = render(&mutant(outcome, 0..1), &source);
+            let read: MutantResult = serde_json::from_str(&serde_json::to_string(&rendered).unwrap()).unwrap();
+            let decoded = crate::elements::gamma_outcome(&read.status, read.status_reason.as_deref()).unwrap();
+            assert_eq!(decoded, outcome);
+            assert_eq!(decoded.scoring(), outcome.scoring());
         }
     }
 
@@ -1977,6 +2033,8 @@ mod tests {
             specs: HashMap::default(),
         };
         let info = RunInfo {
+            confirm: None,
+            fail_on_flaky: None,
             population: None,
             started_at: 0,
             mutant_id_version: None,
@@ -2005,6 +2063,8 @@ mod tests {
             &clean,
             Thresholds::default(),
             Some(RunInfo {
+                confirm: None,
+                fail_on_flaky: None,
                 population: None,
                 started_at: 0,
                 mutant_id_version: None,

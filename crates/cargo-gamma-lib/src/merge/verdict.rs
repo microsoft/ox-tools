@@ -13,6 +13,10 @@ use crate::elements::{MutantResult, PopulationOrigin};
 /// merged document is built. The reports outlive the merge, which is what makes the borrow possible.
 #[derive(Debug, Clone)]
 pub(super) struct Verdict<'reports> {
+    /// Original producer and confirmation policy, independent of presentation.
+    pub(super) producer: Option<String>,
+    pub(super) confirm: Option<bool>,
+
     /// Discovery authority, never inferred from the merged document's publication time.
     pub(super) population: Option<PopulationOrigin>,
     /// The mutant as reported.

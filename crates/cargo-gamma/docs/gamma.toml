@@ -206,8 +206,15 @@
 # no-baseline = false
 
 # Believe a failing test without re-running it with no mutant active. Default: false.
+# Requires an explicit no-fail-on-flaky opt-out, including when these settings are split across CLI and file.
 #
 # no-confirm = false
+
+# Disable only the default flaky-result gate. Flaky mutants remain excluded from the score.
+# This does not disable confirmation, baseline, percentage, expectation, build or resource protections.
+# Merge has its own --no-fail-on-flaky option and does not read this configuration.
+#
+# no-fail-on-flaky = false
 
 # ---------------------------------------------------------------------------------------------
 # Memory

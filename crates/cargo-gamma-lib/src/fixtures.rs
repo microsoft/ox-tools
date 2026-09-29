@@ -135,6 +135,8 @@ pub(crate) fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: V
     Report {
         files,
         config: Some(RunInfo {
+            confirm: None,
+            fail_on_flaky: None,
             population: Some(population(shard.is_none())),
             started_at,
             mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),

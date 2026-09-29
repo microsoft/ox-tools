@@ -10,8 +10,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use super::cli::MergeArgs;
 use super::dispatch::{EXIT_GATE_FAILED, EXIT_OK};
 use super::host::Host;
-use crate::elements::Report;
+use crate::elements::{FRAMEWORK_NAME, Report};
 use crate::error::error;
+use crate::model::Outcome;
 use crate::report::{Styler, encode_controls, quantity};
 
 /// The most independently produced reports one merge retains.
@@ -25,6 +26,10 @@ const MAX_REPORTS: usize = 4_096;
 /// String data in a decoded report cannot exceed its JSON representation, so this bounds the
 /// untrusted text retained by the report vector in addition to the per-report read cap.
 const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Keeps a large unconfirmed campaign from burying the gate diagnostic.
+/// Complete findings remain in the input and optional output reports.
+const MAX_CONFIRMATION_NOTES: usize = 20;
 
 /// Implements `merge`.
 pub(super) fn merge<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler) -> crate::Result<i32> {
@@ -43,6 +48,9 @@ fn merge_at<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler, now: Option
 
     let window = (args.window > 0).then(|| args.window.saturating_mul(86_400));
     let mut merged = crate::merge::merge(&inputs, now.unwrap_or(0), window);
+    if let Some(config) = merged.report.as_mut().and_then(|report| report.config.as_mut()) {
+        config.fail_on_flaky = Some(!args.no_fail_on_flaky);
+    }
 
     if now.is_none() {
         merged.fresh = 0;
@@ -63,6 +71,15 @@ fn merge_at<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler, now: Option
             crate::html::write_page(report, path)?;
             writeln!(host.error(), "{} {}", styler.verb("Wrote"), encode_controls(path.as_str()))?;
         }
+    }
+
+    if !args.no_fail_on_flaky && (merged.flaky > 0 || merged.unconfirmed > 0) {
+        writeln!(
+            host.error(),
+            "{} flaky-result gate failed; rerun the affected tests with confirmation, or explicitly use --no-fail-on-flaky",
+            styler.error("error:")
+        )?;
+        return Ok(EXIT_GATE_FAILED);
     }
 
     if let Some(minimum) = args.min_score {
@@ -285,6 +302,7 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
     }
 
     report_population(&mut stream, merged, styler)?;
+    report_confirmation(&mut stream, merged, styler)?;
 
     if let Some(count) = merged.shard_count {
         writeln!(
@@ -302,6 +320,55 @@ fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::
 
             writeln!(stream, "{} shards never run: {}", styler.verb("Note"), names.join(", "))?;
         }
+    }
+
+    fn report_confirmation(stream: &mut impl Write, merged: &crate::merge::Merged, styler: Styler) -> crate::Result<()> {
+        let mut shown = 0;
+        if merged.confirmation_unknown > 0 {
+            writeln!(
+                stream,
+                "{} {} detections have unknown confirmation provenance; legacy or foreign evidence does not establish Gamma confirmation",
+                styler.verb("Note"),
+                merged.confirmation_unknown,
+            )?;
+        }
+        if let Some(report) = &merged.report {
+            for (file, result) in &report.files {
+                for mutant in &result.mutants {
+                    let (producer, confirm) = report.verdict_policy(&mutant.id);
+                    let finding = if report.gamma_outcome(mutant) == Some(Outcome::Flaky) {
+                        "flaky, inconclusive"
+                    } else if producer == Some(FRAMEWORK_NAME) && confirm == Some(false) && mutant.status == "Killed" {
+                        "unconfirmed detection"
+                    } else {
+                        continue;
+                    };
+                    if shown == MAX_CONFIRMATION_NOTES {
+                        continue;
+                    }
+                    shown += 1;
+                    writeln!(
+                        stream,
+                        "{} {} mutant `{}` at {}:{}: {}",
+                        styler.verb("Note"),
+                        finding,
+                        encode_controls(mutant.id.as_str()),
+                        encode_controls(file),
+                        mutant.location.start.line,
+                        encode_controls(mutant.status_reason.as_deref().unwrap_or("confirmation was disabled")),
+                    )?;
+                }
+            }
+        }
+        let remaining = merged.flaky.saturating_add(merged.unconfirmed).saturating_sub(shown);
+        if remaining > 0 {
+            writeln!(
+                stream,
+                "{} {remaining} more flaky or unconfirmed findings; see the input reports or write --json-report for the complete merged findings",
+                styler.verb("Note"),
+            )?;
+        }
+        Ok(())
     }
 
     // Two runs at different shard counts partitioned the population differently, so the coverage
@@ -347,7 +414,7 @@ fn report_population(stream: &mut impl Write, merged: &crate::merge::Merged, sty
         if scope.contexts.len() > 1 {
             writeln!(
                 stream,
-                "{} incompatible discovery contexts cannot retire each other's observations",
+                "{} incompatible discovery contexts cannot retire each other's observations; select inputs from a coherent current campaign",
                 styler.verb("Note")
             )?;
         }
@@ -384,6 +451,8 @@ mod tests {
         Report {
             files,
             config: Some(RunInfo {
+                confirm: None,
+                fail_on_flaky: None,
                 population: Some(fixtures::population(false)),
                 started_at: 100 + u64::from(index),
                 mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
@@ -415,6 +484,8 @@ mod tests {
         Report {
             files,
             config: Some(RunInfo {
+                confirm: None,
+                fail_on_flaky: None,
                 population: Some(fixtures::population(true)),
                 started_at,
                 mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
@@ -444,6 +515,7 @@ mod tests {
         fs::write(input_dir.join("ignored.txt"), "not a report").expect("ignore");
 
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input_dir],
             json_report: Some(root.join("out/report.json")),
             html_report: Some(root.join("out/report.html")),
@@ -505,6 +577,7 @@ mod tests {
         let dir = workdir("merge-empty-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![root],
             json_report: None,
             html_report: None,
@@ -529,6 +602,7 @@ mod tests {
         write_report(&input_dir.join("b.json"), &report(1, 4, "Survived"));
 
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input_dir],
             json_report: Some(root.join("out/report.json")),
             html_report: Some(root.join("out/report.html")),
@@ -548,6 +622,7 @@ mod tests {
         write_report(&input, &report(0, 1, "Killed"));
 
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input],
             json_report: None,
             html_report: None,
@@ -574,6 +649,7 @@ mod tests {
         write_report(&legacy_path, &legacy);
         write_report(&current_path, &report(1, 2, "Killed"));
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![legacy_path, current_path],
             json_report: None,
             html_report: None,
@@ -599,6 +675,7 @@ mod tests {
         let input = root.join("a.json");
         write_report(&input, &report(0, 1, "Killed"));
         let mut args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input],
             json_report: None,
             html_report: None,
@@ -625,6 +702,7 @@ mod tests {
     #[test]
     fn inexact_merged_boundary_scores_do_not_render_as_exact_boundaries() {
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![Utf8PathBuf::from("unused")],
             json_report: None,
             html_report: None,
@@ -650,6 +728,7 @@ mod tests {
     #[test]
     fn inconsistent_report_paths_are_encoded_before_printing() {
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: Vec::new(),
             json_report: None,
             html_report: None,
@@ -685,6 +764,7 @@ mod tests {
         write_report(&input, &report(0, 1, "NoCoverage"));
 
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input],
             json_report: None,
             html_report: None,
@@ -711,6 +791,7 @@ mod tests {
         let missing = root.join("gone");
 
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![missing.clone()],
             json_report: None,
             html_report: None,
@@ -741,6 +822,7 @@ mod tests {
         write_report(&input_dir.join("new.json"), &unsharded_report(200, "bbb", 1, "Killed"));
 
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input_dir],
             json_report: None,
             html_report: None,
@@ -770,6 +852,7 @@ mod tests {
         prior.config.as_mut().expect("config").population = None;
         write_report(&input, &prior);
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input],
             json_report: None,
             html_report: None,
@@ -795,6 +878,7 @@ mod tests {
         write_report(&input_dir.join("new.json"), &unsharded_report(200, "bbb", 1, "Killed"));
 
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input_dir],
             json_report: None,
             html_report: None,
@@ -832,6 +916,8 @@ mod tests {
         Report {
             files,
             config: Some(RunInfo {
+                confirm: None,
+                fail_on_flaky: None,
                 population: None,
                 started_at: 100,
                 mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),
@@ -861,6 +947,7 @@ mod tests {
         write_report(&input, &population(&["Ignored", "Ignored"]));
 
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input],
             json_report: None,
             html_report: None,
@@ -883,6 +970,7 @@ mod tests {
         write_report(&input, &population(&["Killed", "Pending"]));
 
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input],
             json_report: None,
             html_report: None,
@@ -911,6 +999,7 @@ mod tests {
         write_report(&input, &population(&["Killed", "Killed", "Survived"]));
 
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![input],
             json_report: None,
             html_report: None,
@@ -936,6 +1025,7 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 path");
         let output = root.join("merged");
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![root.join("missing.json")],
             json_report: Some(output.clone()),
             html_report: Some(output),
@@ -959,6 +1049,7 @@ mod tests {
 
         std::os::unix::fs::symlink(target.as_std_path(), alias.as_std_path()).expect("symlink");
         let args = MergeArgs {
+            no_fail_on_flaky: false,
             inputs: vec![root.join("missing.json")],
             json_report: Some(target),
             html_report: Some(alias),

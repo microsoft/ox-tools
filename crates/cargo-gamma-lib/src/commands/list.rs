@@ -222,6 +222,8 @@ fn write_population<H: Host>(
     path: &Utf8PathBuf,
 ) -> crate::Result<()> {
     let info = crate::elements::RunInfo {
+        confirm: None,
+        fail_on_flaky: None,
         population: None,
         started_at: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs()),
         mutant_id_version: Some(crate::model::MUTANT_ID_VERSION),

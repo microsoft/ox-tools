@@ -802,9 +802,20 @@ explicitly, while a user-requested guarantee fails rather than pretending to be 
 
 ### Flakiness
 
-A failing mutant run is confirmed where policy requires it. A failure that disappears without any
-source change is reported as flaky rather than credited as a kill. Flaky evidence must not improve
-the score or become durable campaign knowledge.
+A failing mutant run is confirmed with no mutant active. A confirmation that fails or cannot
+establish a passing unmutated observation leaves the mutant flaky, not killed or survived.
+Confirmation does not prove suite determinism. Flaky outcomes are excluded from the score and
+are never reused as campaign knowledge.
+
+`run` and `merge` fail with exit code `2` when their effective results contain a flaky outcome,
+independently of `--min-score`, including a 100 percent score or an all-flaky population.
+`--no-fail-on-flaky` disables only this gate. Baseline, resource, percentage, pending, ungraded
+and expectation protections remain in force; infrastructure/build inability retains code `3`
+precedence. Reports are published before gating.
+
+The run configuration key `no-fail-on-flaky` follows the existing negative-boolean precedence.
+Effective `--no-confirm` requires this explicit opt-out, validated after configuration resolution
+and before building. `--no-baseline` skips initial measurement, not confirmation or flaky gating.
 
 ## Identity and knowledge across campaigns
 
@@ -925,6 +936,22 @@ rendered over the selected source is diagnosed as incompatible, not withdrawn. O
 rendered verdicts enter the score. Merge notes identify unknown or incompatible scope; omitted
 candidates are never manufactured as pending or killed results.
 
+Gamma outcomes are decoded from status and Gamma's reason prefixes together: timeouts and memory
+limits use `Survived`, while flaky and not-built results use `Ignored`. Foreign free-form reasons
+are not this protocol. Each merged observation preserves its original producer and confirmation
+policy, including through staged merges. Missing legacy provenance remains unknown and is
+reported as a limitation, not inferred confirmation or flakiness.
+
+Only compatible, presented winning verdicts enter flaky gating. A newer verdict supersedes an
+older one, including a newer flake replacing a detection; a pending listing cannot replace real
+evidence. Retired and superseded observations do not gate. Stale retained flakes still fail:
+freshness does not establish retirement. Incompatible contexts require choosing a coherent
+current campaign's inputs, not automatically discarding unreliable evidence.
+
+Merge has its own opt-out and never inherits a producer's gate policy or implicitly reads
+`gamma.toml`. Known unconfirmed winning Gamma detections require that explicit opt-out and are
+diagnosed as unconfirmed, not relabeled flaky.
+
 ## Verdicts and scoring
 
 A verdict states what evidence the campaign obtained:
@@ -939,7 +966,7 @@ A verdict states what evidence the campaign obtained:
 | `unviable` | The mutation could not compile | Excluded |
 | `ignored` | Explicit policy suppressed the mutant | Excluded |
 | `notbuilt` | The selected build did not compile that source | Excluded |
-| `flaky` | The observed failure was not repeatable | Excluded and retried |
+| `flaky` | Unmutated confirmation did not establish a passing suite | Excluded; fails the default flaky gate |
 | `pending` | The run ended without judging the mutant | Excluded; makes a requested score gate incomplete |
 
 The mutation score is:
