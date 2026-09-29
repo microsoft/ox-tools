@@ -30,8 +30,8 @@ allowed_external_types = []
 # public rustdoc for cargo-doc2readme to turn into a README.
 disable = true
 
-# `unicode-ident` is a deliberate version pin, never referenced from this crate's code.
-# See the dependency comment below.
+# `unicode-ident` is a deliberate compatibility bound, never referenced from this crate's
+# code. See the dependency comment below.
 [package.metadata.cargo-udeps.ignore]
 normal = ["unicode-ident"]
 
