@@ -75,6 +75,13 @@ pub(crate) struct EachArgs {
     #[arg(long)]
     pub(crate) once: bool,
 
+    /// Skip successfully when the root manifest declares no workspace Rust
+    /// version. Invalid declarations and inconsistent member versions remain
+    /// errors. Applies even when the command does not use the corresponding
+    /// placeholder.
+    #[arg(long)]
+    pub(crate) skip_without_workspace_rust_version: bool,
+
     /// Run once for each selected Cargo target of this kind. Repeatable;
     /// kinds are OR-combined. Cannot be combined with --once.
     #[arg(long = "each-target", value_name = "KIND", conflicts_with = "once")]

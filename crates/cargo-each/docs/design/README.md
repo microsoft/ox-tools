@@ -247,6 +247,7 @@ filtered set is empty, `cargo-each` exits 0, exactly like an empty selection.
 |------|---------|
 | *(default)* | **per-package**: run `<COMMAND>` once per selected member, in name order, with placeholders substituted. |
 | `--once` | **once**: run `<COMMAND>` exactly once when the set is non-empty (skip when empty). Use `{packages}` to inject the selection. |
+| `--skip-without-workspace-rust-version` | For a nonempty plan, resolve and validate the root workspace Rust version before execution. If the root declaration is absent, exit 0 without spawning the command. Invalid declarations and inconsistent member versions remain errors. This gate applies even when `<COMMAND>` does not use `{workspace-rust-version}`. |
 | `--each-target <KIND>` | **per-target**: run once for each selected member target of `KIND`. Repeatable; kinds are OR-combined and each target runs at most once. Mutually exclusive with `--once`. |
 | `--target-required-feature <FEATURE>` | In per-target mode, retain targets whose `required-features` contains `FEATURE`. Repeatable; values are AND-combined. Requires `--each-target`. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
@@ -284,12 +285,14 @@ workspace member to expose a resolved `rust_version` no newer than the root
 floor. Missing values, a member requiring a newer compiler, or a non-Rust
 semantic version is a configuration error. Lower member minima are valid. This
 matches the meaning of one compiler selected for a complete workspace; it is
-not a per-package toolchain matrix. The validation is lazy: commands that do
-not contain the placeholder do not require a workspace Rust version, and a
-resolved plan with no invocations does not resolve or validate the value even
-when the template contains the placeholder. Placeholder mode validation still
-runs before that no-op decision, so misuse remains an exit-2 usage error on an
-empty set.
+not a per-package toolchain matrix. The validation is lazy by default: commands
+that do not contain the placeholder do not require a workspace Rust version.
+`--skip-without-workspace-rust-version` explicitly requests the same validation
+even without the placeholder, using absence of the root declaration as a
+successful execution gate. A resolved plan with no invocations does not resolve
+or validate the value in either mode. Placeholder mode validation still runs
+before that no-op decision, so misuse remains an exit-2 usage error on an empty
+set.
 
 Targets run in package-name order and then target-name order. A target matching
 more than one requested kind runs once. No matching targets is a successful
@@ -307,6 +310,11 @@ no-op.
 - **Empty set is success.** Both an empty selection (`--none`, or an impact
   variable that resolved to nothing) and an empty *filtered* set exit 0 after a
   one-line note to stderr. This is what lets callers drop their `--skip` guards.
+- **An absent optional workspace Rust version is success.**
+  `--skip-without-workspace-rust-version` exits 0 with a one-line note when a
+  nonempty plan's root manifest has no workspace Rust-version declaration. It
+  does not absorb malformed TOML, invalid version strings, missing member
+  versions, or members newer than the root floor.
 - **No shell.** The command is spawned directly (argv, not a shell string), so
   there is no quoting/dialect surface. Placeholder expansion is textual and
   happens before spawn.
@@ -449,7 +457,7 @@ The setup graph can use `{workspace-rust-version}` to install the single root
 MSRV fallback without parsing Cargo TOML in a shell:
 
 ```just
-cargo each --workspace --once -- \
+cargo each --workspace --once --skip-without-workspace-rust-version -- \
     rustup toolchain install {workspace-rust-version} --profile minimal
 ```
 

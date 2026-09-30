@@ -76,7 +76,17 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let workspace_rust_version = if uses_workspace_rust_version(&args.command) {
+    let command_uses_workspace_rust_version = uses_workspace_rust_version(&args.command);
+    let workspace_rust_version = if args.skip_without_workspace_rust_version {
+        let Some(version) = workspace
+            .workspace_rust_version_if_declared()
+            .into_app_err("failed to resolve workspace Rust version")?
+        else {
+            eprintln!("cargo each: root manifest declares no workspace Rust version; nothing to do");
+            return Ok(ExitCode::SUCCESS);
+        };
+        Some(version)
+    } else if command_uses_workspace_rust_version {
         Some(
             workspace
                 .workspace_rust_version()

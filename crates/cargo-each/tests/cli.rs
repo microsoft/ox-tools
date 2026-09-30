@@ -562,6 +562,7 @@ fn none_is_a_successful_noop() {
         .args([
             "--none",
             "--once",
+            "--skip-without-workspace-rust-version",
             "--dry-run",
             "--",
             "cargo",
@@ -1405,6 +1406,83 @@ fn workspace_rust_version_rejects_missing_or_invalid_root_floor() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn missing_workspace_rust_version_can_gate_a_command_that_uses_no_placeholder() {
+    let (_tmp, manifest) = rust_version_fixture(None, &[("alpha", Some("1.70"))]);
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--once",
+            "--skip-without-workspace-rust-version",
+            "--",
+            "rustc",
+            "--version",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(
+            predicate::str::contains("root manifest declares no workspace Rust version").and(predicate::str::contains("nothing to do")),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn workspace_rust_version_gate_runs_and_substitutes_when_declared() {
+    let (_tmp, manifest) = rust_version_fixture(Some("1.80"), &[("alpha", Some("workspace"))]);
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--once",
+            "--skip-without-workspace-rust-version",
+            "--dry-run",
+            "--",
+            "echo",
+            "{workspace-rust-version}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo 1.80"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn workspace_rust_version_gate_does_not_absorb_invalid_configuration() {
+    let (_invalid, invalid_manifest) = rust_version_fixture(Some("2.0"), &[("alpha", Some("1.70"))]);
+    each(&invalid_manifest)
+        .args([
+            "--workspace",
+            "--once",
+            "--skip-without-workspace-rust-version",
+            "--dry-run",
+            "--",
+            "echo",
+            "must-not-run",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("2.0").and(predicate::str::contains("Rust 1.x")));
+
+    let (_missing_member, missing_member_manifest) = rust_version_fixture(Some("1.80"), &[("alpha", Some("workspace")), ("beta", None)]);
+    each(&missing_member_manifest)
+        .args([
+            "--workspace",
+            "--once",
+            "--skip-without-workspace-rust-version",
+            "--dry-run",
+            "--",
+            "echo",
+            "must-not-run",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("beta").and(predicate::str::contains("rust-version")));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn workspace_rust_version_uses_root_package_for_single_package_repository() {
     let (_tmp, manifest) = single_package_fixture("1.75");
     each(&manifest)
@@ -1439,6 +1517,20 @@ fn jobs_help_documents_auto_and_default() {
                 .and(predicate::str::contains("available parallelism"))
                 .and(predicate::str::contains("Defaults to 1")),
         );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary; miri does not support processes")]
+#[test]
+fn help_documents_the_optional_workspace_rust_version_gate() {
+    Command::cargo_bin("cargo-each")
+        .expect("binary")
+        .args(["each", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--skip-without-workspace-rust-version"))
+        .stdout(predicate::str::contains(
+            "Invalid declarations and inconsistent member versions remain errors",
+        ));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]

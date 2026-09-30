@@ -80,6 +80,10 @@ can be double-quoted. Expression atoms:
   name order, substituting the per-package placeholders below.
 * `--once`: run the command exactly once when the set is non-empty (skip
   when empty), using the `{packages}` placeholder to inject the selection.
+* `--skip-without-workspace-rust-version`: for a nonempty plan, require a
+  valid root workspace Rust version before execution, but exit 0 without
+  spawning the command when the root declaration is absent. The gate applies
+  even when the command does not use `{workspace-rust-version}`.
 * `--each-target <KIND>`: run once per matching Cargo target, using
   `{target}` plus the package placeholders. Repeated kinds are OR-combined;
   `--target-required-feature` further narrows targets.
@@ -123,10 +127,13 @@ no brace-escape, so this passthrough is part of the contract.
 An empty resolved selection (via `--none`, or a filter that removes every
 member) is a **successful no-op**: `cargo-each` prints a one-line note and
 exits 0. This is what lets callers drop bespoke nothing-to-do guards.
-Workspace Rust-version validation is lazy: it runs only when the command
-uses `{workspace-rust-version}` and the resolved plan has work, then requires
-every member’s resolved minimum to be present and no newer than the root
-floor. Placeholder mode validation still runs before an empty-plan no-op.
+Workspace Rust-version validation is lazy by default: it runs only when the
+command uses `{workspace-rust-version}` and the resolved plan has work, then
+requires every member’s resolved minimum to be present and no newer than the
+root floor. `--skip-without-workspace-rust-version` forces that validation
+for a nonempty plan and turns only an absent root declaration into a
+successful no-op. Placeholder mode validation still runs before an
+empty-plan no-op.
 
 The effective worker count is the requested `--jobs` value capped by plan
 size. An effective count of one uses sequential
