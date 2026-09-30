@@ -57,6 +57,11 @@ anvil_required_selection := if anvil_impact_mode == "off" {
     "--package-file " + quote(anvil_impact_input_dir + "/required.packages")
 }
 
+# Some tools represent the complete workspace by omitting package selectors
+# rather than accepting Cargo's `--workspace` flag. In scoped modes cargo-each
+# still expands the selected set to explicit `--package` arguments.
+anvil_explicit_package_args := if anvil_impact_mode == "off" { "" } else { "'{packages}'" }
+
 # Resolve the command toolchain without overriding either RUSTUP_TOOLCHAIN or a
 # repository toolchain file. Repositories with neither use their declared
 # workspace rust-version through cargo-each's portable placeholder.

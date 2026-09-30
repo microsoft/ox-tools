@@ -611,6 +611,16 @@ mod tests {
         ] {
             assert!(!is_setup_recipe(id), "{id} must remain outside setup.just");
         }
+
+        let mut sections = vec![
+            Artifact::owned_file("unrelated", "body"),
+            section(CHECKS_JUST_PATH, "recipe:anvil-check-setup", "setup"),
+            section(CHECKS_JUST_PATH, "recipe:anvil-check", "check"),
+        ];
+        route_setup_sections(&mut sections);
+        assert!(matches!(&sections[0], Artifact::OwnedFile(spec) if spec.path == "unrelated"));
+        assert!(matches!(&sections[1], Artifact::OwnedFileSection(spec) if spec.path == SETUP_JUST_PATH));
+        assert!(matches!(&sections[2], Artifact::OwnedFileSection(spec) if spec.path == CHECKS_JUST_PATH));
     }
 
     #[test]
@@ -638,7 +648,7 @@ mod tests {
         for needle in [
             "anvil-bolero: target discovery failed",
             "${prefix}: cargo metadata failed",
-            "coverage-gate '{packages}' run",
+            "coverage-gate {{ anvil_explicit_package_args }} run",
             "could not resolve the cargo-careful executable",
             "mutants_command_prefix",
         ] {

@@ -327,13 +327,11 @@ mod tests {
             .collect();
         assert_eq!(paths(&owned), [DOCKERIGNORE_PATH]);
         assert!(
-            all.iter().any(|artifact| {
-                matches!(
-                    artifact,
-                    Artifact::OwnedFileSection(section)
-                        if section.path == CONTAINER_JUST_PATH && section.id == "recipe:anvil-container"
-                )
-            }),
+            matches!(
+                recipe(),
+                Artifact::OwnedFileSection(section)
+                    if section.path == CONTAINER_JUST_PATH && section.id == "recipe:anvil-container"
+            ),
             "the container recipe must be a section of the composed Justfile"
         );
         assert_eq!(region_ids(&all), DOCKERFILE_REGION_ORDER);

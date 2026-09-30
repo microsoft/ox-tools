@@ -130,6 +130,20 @@ fn off_mode_selects_the_complete_workspace() {
 }
 
 #[test]
+fn explicit_package_arguments_are_omitted_only_for_the_complete_workspace() {
+    let temp = generated_workspace();
+    for (mode, expected) in [("off", ""), ("consume", "'{packages}'")] {
+        let output = just(
+            temp.path(),
+            &["--evaluate", "anvil_explicit_package_args"],
+            &[("ANVIL_IMPACT", mode)],
+        );
+        assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+        assert_eq!(stdout(&output).trim(), expected);
+    }
+}
+
+#[test]
 fn base_ref_precedence_is_evaluated_without_shell_logic() {
     let temp = generated_workspace();
     for (env, expected) in [

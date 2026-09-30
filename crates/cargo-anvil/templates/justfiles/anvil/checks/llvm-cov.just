@@ -8,7 +8,7 @@
 # instrumentation, handle platform export limits, and enforce package coverage
 # policy through cargo-coverage-gate.
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
-    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} coverage-gate '{packages}' run --no-coverage-target aarch64-pc-windows-msvc
+    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} coverage-gate {{ anvil_explicit_package_args }} run --no-coverage-target aarch64-pc-windows-msvc
 
 # Install prerequisites for the `anvil-llvm-cov` recipe.
 [group("anvil-setup")]

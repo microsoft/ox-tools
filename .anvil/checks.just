@@ -74,6 +74,11 @@ anvil_required_selection := if anvil_impact_mode == "off" {
     "--package-file " + quote(anvil_impact_input_dir + "/required.packages")
 }
 
+# Some tools represent the complete workspace by omitting package selectors
+# rather than accepting Cargo's `--workspace` flag. In scoped modes cargo-each
+# still expands the selected set to explicit `--package` arguments.
+anvil_explicit_package_args := if anvil_impact_mode == "off" { "" } else { "'{packages}'" }
+
 # Resolve the command toolchain without overriding either RUSTUP_TOOLCHAIN or a
 # repository toolchain file. Repositories with neither use their declared
 # workspace rust-version through cargo-each's portable placeholder.
@@ -460,7 +465,7 @@ anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
 # instrumentation, handle platform export limits, and enforce package coverage
 # policy through cargo-coverage-gate.
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
-    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} coverage-gate '{packages}' run --no-coverage-target aarch64-pc-windows-msvc
+    cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- cargo +{{ rust_nightly }} coverage-gate {{ anvil_explicit_package_args }} run --no-coverage-target aarch64-pc-windows-msvc
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 

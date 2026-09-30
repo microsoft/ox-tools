@@ -119,7 +119,7 @@ fn coverage_is_one_domain_tool_invocation() {
     let recipes = generated().checks;
     assert!(recipes.contains(
         "cargo +{{ rust_nightly }} each {{ anvil_affected_selection }} --once -- \
-         cargo +{{ rust_nightly }} coverage-gate '{packages}' run \
+         cargo +{{ rust_nightly }} coverage-gate {{ anvil_explicit_package_args }} run \
          --no-coverage-target aarch64-pc-windows-msvc"
     ));
     assert!(!recipes.contains("Invoke-AnvilLcovReport"));
