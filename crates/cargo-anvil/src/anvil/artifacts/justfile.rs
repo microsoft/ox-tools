@@ -126,6 +126,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "semver-check",
         "spellcheck",
         "udeps",
+        "unique-target-names",
     ]
 );
 
@@ -296,6 +297,12 @@ mod tests {
             ("semver-check", Affected),
             ("spellcheck", Unscoped),
             ("udeps", Required),
+            // Unscoped: a target-name collision is a property of the whole
+            // workspace, and only one member of a contending pair needs to
+            // appear in a diff to create one. Scoping it to the changed
+            // packages would pass on the very change that introduces the
+            // collision.
+            ("unique-target-names", Unscoped),
         ]
     };
 
@@ -599,7 +606,7 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (24, 7),
+            (24, 8),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
     }
