@@ -593,16 +593,15 @@ anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs (_an
 # Run Miri tests with the Tree Borrows model.
 anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs (_anvil-miri-test "tree-borrows")
 
-# Run affected-package tests under the declared public MSRV or the explicitly
-# provisioned internal mapping. A repository without a root MSRV is a no-op.
+# Run affected-package tests under the declared public MSRV. A repository
+# without a root MSRV is a no-op.
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
     if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
-    $toolchain = if ($env:ANVIL_MSRV_TOOLCHAIN) { $env:ANVIL_MSRV_TOOLCHAIN } else { $declared }
-    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$toolchain" test '{packages}' --tests --all-features --locked
+    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$declared" test '{packages}' --tests --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$toolchain" test '{packages}' --tests --locked
+    & cargo each {{ anvil_affected_selection }} --once -- cargo "+$declared" test '{packages}' --tests --locked
     exit $LASTEXITCODE
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md

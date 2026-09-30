@@ -144,7 +144,8 @@ fn setup_uses_lazy_inventory_and_exact_install_policy() {
 
 #[test]
 fn released_domain_tool_versions_are_pinned() {
-    let recipes = generated().setup;
+    let generated = generated();
+    let recipes = &generated.setup;
     for pin in [
         "cargo_aprz_version := \"1.2.0\"",
         "cargo_coverage_gate_version := \"0.6.0\"",
@@ -154,6 +155,15 @@ fn released_domain_tool_versions_are_pinned() {
         assert!(recipes.contains(pin), "missing released tool pin: {pin}");
     }
     assert!(!recipes.contains("cargo_semver_checks_version"));
+}
+
+#[test]
+fn msrv_recipes_use_only_the_declared_root_version() {
+    let generated = generated();
+    assert!(generated.checks.contains("cargo \"+$declared\" test"));
+    assert!(generated.setup.contains("rustup toolchain install $declared --profile minimal"));
+    assert!(generated.setup.contains("rustup run $declared rustc --version"));
+    assert!(!generated.all_recipes().contains("ANVIL_MSRV_TOOLCHAIN"));
 }
 
 #[test]

@@ -638,18 +638,13 @@ anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-
 [group("anvil-setup")]
 anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
-# Install the declared public MSRV. An internal mapping names a toolchain the
-# environment must provision, so setup validates rather than mutates it.
+# Install the declared public MSRV.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install installer)
     $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
     if ($declared -eq 'none') { Write-Host 'anvil-msrv-test-setup: no root MSRV declared; skipping'; exit 0 }
-    if ($env:ANVIL_MSRV_TOOLCHAIN) {
-        rustup run $env:ANVIL_MSRV_TOOLCHAIN rustc --version
-    } else {
-        rustup toolchain install $declared --profile minimal
-    }
+    rustup toolchain install $declared --profile minimal
     exit $LASTEXITCODE
 
 # Validate the MSRV prerequisite without rustup auto-install behavior.
@@ -658,8 +653,7 @@ anvil-msrv-test-setup installer="install": (anvil-tool-cargo-each-install instal
 anvil-msrv-test-validate-prereqs: anvil-tool-cargo-each-validate-prereqs
     $declared = (& "{{ just_executable() }}" _anvil-root-msrv).Trim()
     if ($declared -eq 'none') { Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'; exit 0 }
-    $toolchain = if ($env:ANVIL_MSRV_TOOLCHAIN) { $env:ANVIL_MSRV_TOOLCHAIN } else { $declared }
-    rustup run $toolchain rustc --version
+    rustup run $declared rustc --version
     exit $LASTEXITCODE
 
 # --- pr-mutants members ---

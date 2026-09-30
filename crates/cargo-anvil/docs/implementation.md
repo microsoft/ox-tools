@@ -55,14 +55,12 @@ rustup's native environment and working-directory-sensitive toolchain-file
 behavior, including profiles, components, targets, and path channels, without
 Anvil parsing or replaying suppressed options.
 
-`_anvil-resolve-stable` owns the setup actions. The optional
-`ANVIL_MSRV_TOOLCHAIN` maps only the dedicated MSRV run and is rejected as an
-unpaired stable configuration when no ordinary stable selector exists.
-Workspace-MSRV validation is read-only: it confirms rustup is present and the
-exact root-MSRV toolchain is installed before invoking metadata, so Cargo
-cannot auto-install a compiler during validation. Installation uses the same
-anchored toolchain-list match and emits a dedicated rustup bootstrap diagnostic
-when the executable is absent.
+The dedicated MSRV run always names the exact version declared by the root
+manifest. Setup installs that public toolchain through rustup; prerequisite
+validation is read-only and verifies the same version with `rustup run` before
+tests start. Environments substituting an internally built compiler must expose
+it through rustup under the declared public name rather than supplying a
+separate Anvil mapping.
 
 `tools.just` additionally exposes the declared root MSRV as the `root-msrv`
 action, answering with the version or `none`. It exists for the container image
