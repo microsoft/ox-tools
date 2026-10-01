@@ -177,7 +177,7 @@ while paired prerequisite validation remains read-only.
 
 | Check                          | Invocation                                                | Source |
 |--------------------------------|-----------------------------------------------------------|--------|
-| `unique-target-names`          | `cargo unique-target-names`. Rejects workspace targets that write the same build artifact, including Windows debug-info collisions on every host. Runs before the other fast checks and always inspects the entire workspace, even when only one owning package changed. | [`cargo-unique-target-names`](../../../cargo-unique-target-names) |
+| `unique-target-names`          | `cargo unique-target-names`. Rejects workspace targets that uplift to the same file under `target/<profile>/` — the set Cargo reports as `output filename collision` — with the Windows debug-info file considered on every host. Runs before the other fast checks, and over the full workspace because a target in a changed package can collide with a target in an unchanged package. | [`cargo-unique-target-names`](../../../cargo-unique-target-names) |
 | `fmt`                          | `cargo each --workspace --keep-going -- cargo +<pinned-nightly> fmt --manifest-path {manifest} --check`. `cargo-each` resolves workspace membership and invokes rustfmt once per manifest, keeping child commands bounded on every platform while reporting every failing member. Unlike `cargo fmt --all`, local path dependencies outside the workspace are not included. Local `--fix` removes `--check`; cloud workflows never pass it. | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
 | `cargo-sort`                   | `cargo sort --workspace --grouped --check --check-format`. Since cargo-sort 2.1.2, formatting-only differences are warnings unless `--check-format` is set; Anvil keeps it load-bearing so dependency ordering and Cargo manifest formatting are both enforced. `--grouped` preserves intentional blank-line-separated dependency groups. | oxidizer-github |
@@ -195,11 +195,18 @@ while paired prerequisite validation remains read-only.
 | `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
 
 `unique-target-names` delegates artifact identity and diagnostics to the published Rust
-tool. It does not reject duplicate test or benchmark names whose outputs remain
-metadata-hashed. Collisions, unreadable workspace metadata, and rejected invocations
-all fail the check; they are not advisory findings. Setup installs the catalog pin
-through the shared tool installer, and prerequisite validation follows the same
-installed-version policy as other Cargo tools.
+tool, and inherits its contract exactly: it reproduces the collisions Cargo itself
+reports among uplifted outputs, and nothing wider. Ways a workspace can still lose an
+artifact without Cargo warning — dep-info files that collapse by file stem, and target
+names differing only in case on a case-insensitive filesystem — are outside that model
+and are recorded as known misses in
+[the tool's design document](../../../cargo-unique-target-names/docs/design/README.md#6-known-misses).
+A green check therefore means "no Cargo-reported output filename collision", not "no two
+outputs can overwrite one another". It does not reject duplicate test or benchmark names
+whose outputs remain metadata-hashed. Collisions, unreadable workspace metadata, and
+rejected invocations all fail the check; they are not advisory findings. Setup installs
+the catalog pin through the shared tool installer, and prerequisite validation follows
+the same installed-version policy as other Cargo tools.
 
 ### `pr-slow` umbrella
 
@@ -454,7 +461,8 @@ external risk DB. `readme-check` and `spellcheck` also belong here: their inputs
 repo-level files cargo-delta does not map to any package — the workspace-level README
 template (`crates/README.j2` / `README.j2`) and the root `.spelling` dictionary — so a
 change to one of those would be silently scoped out. `unique-target-names` must compare
-every workspace target because a changed target can collide with an unchanged member.
+every workspace target because a target in a changed package can collide with a target
+in an unchanged package.
 These checks ignore impact scoping and always run.
 
 The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there

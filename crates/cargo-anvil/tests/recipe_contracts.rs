@@ -11,13 +11,15 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
+use std::{env, fs};
 
+use cargo_anvil::Catalog;
 use cargo_anvil::test_support::{Cli, run_update};
+use cargo_unique_target_names::Outcome;
 use tempfile::TempDir;
 
 const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
@@ -585,6 +587,21 @@ fn just_command(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)])
     command
 }
 
+/// Whether `installed` is at least `pin`, comparing numeric release components
+/// the way the generated prerequisite check does.
+fn semver_at_least(installed: &str, pin: &str) -> bool {
+    let components = |version: &str| {
+        version
+            .split('-')
+            .next()
+            .unwrap_or_default()
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or_default())
+            .collect::<Vec<_>>()
+    };
+    components(installed) >= components(pin)
+}
+
 fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Output {
     let _powershell = powershell_process_lock();
     just_command(root, arguments, environment)
@@ -648,12 +665,11 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
     if !tools_available() {
         return;
     }
-    let _powershell = powershell_process_lock();
     let tmp = TempDir::new().unwrap();
     let installation = TempDir::new().unwrap();
     let mut paths = vec![installation.path().join("bin")];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
-    let path = std::env::join_paths(paths).unwrap();
+    paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+    let path = env::join_paths(paths).unwrap();
     let root = tmp.path();
     write(
         &root.join("Cargo.toml"),
@@ -672,7 +688,7 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
         write(&root.join(format!("crates/{name}/examples/{name}_basic.rs")), "fn main() {}\n");
     }
     run_update(
-        &cargo_anvil::Catalog::anvil(),
+        &Catalog::anvil(),
         &Cli {
             backends: vec![],
             no_backends: true,
@@ -685,7 +701,11 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
     seed_include(root, "modified", "--package alpha");
     seed_include(root, "affected", "--package alpha");
     seed_include(root, "required", "--package alpha");
+    // Only these launches start a PowerShell host, so the process-wide guard
+    // belongs here rather than around the whole fixture -- which also builds a
+    // checker from cold and would otherwise block every other recipe test.
     let run = |arguments: &[&str]| {
+        let _powershell = powershell_process_lock();
         Command::new("just")
             .args(["--justfile", "Justfile", "--color", "never"])
             .args(arguments)
@@ -720,16 +740,22 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
         }
     }
 
-    // An executable on PATH is not proof that Cargo registered an installation.
-    let missing = run(&["anvil-unique-target-names-validate-prereqs"]);
-    assert_eq!(missing.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&missing.stderr).contains("required tool 'cargo-unique-target-names' not found"),
-        "the fixture must not use an ambient tool installation:\n{}",
-        String::from_utf8_lossy(&missing.stderr)
-    );
+    // The checker the recipe must drive is the one Anvil pins, so the fixture
+    // reads the pin out of the generated catalog rather than assuming a version.
+    let versions = fs::read_to_string(root.join("justfiles/anvil/versions.just")).unwrap();
+    let pin = versions
+        .lines()
+        .find_map(|line| line.strip_prefix("cargo_unique_target_names_version := "))
+        .expect("the generated catalog must pin the checker")
+        .trim()
+        .trim_matches('"');
 
-    // The dev-dependency restores the checker's dependencies before tests run.
+    // The dev-dependency on the checker makes this test invocation resolve and
+    // cache its locked dependency graph, which is what lets the build below run
+    // offline. The inherited instrumentation flags are dropped because this is a
+    // nested build of a different package: a coverage or sanitizer RUSTFLAGS set
+    // for the test process would be applied to the checker too, and the resulting
+    // binary would not be the one adopters install.
     let build = Command::new("cargo")
         .args(["build", "--locked", "--offline", "--package", "cargo-unique-target-names"])
         .arg("--manifest-path")
@@ -748,7 +774,7 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let binary_name = format!("cargo-unique-target-names{}", std::env::consts::EXE_SUFFIX);
+    let binary_name = format!("cargo-unique-target-names{}", env::consts::EXE_SUFFIX);
     let executable = installation.path().join("bin").join(&binary_name);
     fs::create_dir_all(executable.parent().unwrap()).unwrap();
     fs::copy(installation.path().join("target/debug").join(&binary_name), &executable).unwrap();
@@ -758,17 +784,38 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
         .expect("the fixture's checker was built and copied above");
     assert!(
         version.status.success(),
-        "the fixture's checker must report its version:\n{}",
+        "the fixture's checker must run from the isolated PATH:\n{}",
         String::from_utf8_lossy(&version.stderr)
     );
     let version = String::from_utf8(version.stdout).unwrap();
-    let version = version.trim().strip_prefix("cargo-unique-target-names ").unwrap();
+    let version = version.trim().strip_prefix("cargo-unique-target-names ").unwrap().to_owned();
+    assert!(
+        semver_at_least(&version, pin),
+        "the fixture builds {version} but the catalog pins {pin}; prerequisite validation accepts \
+         installed >= pin, so a behind-pin build would exercise a checker no adopter can receive"
+    );
+
+    // The executable is now on PATH. Validation must still refuse it, because
+    // the contract is a Cargo-registered installation of the pinned tool, not
+    // any binary that happens to be reachable.
+    let missing = run(&["anvil-unique-target-names-validate-prereqs"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("required tool 'cargo-unique-target-names' not found"),
+        "an executable on PATH must not satisfy prerequisite validation:\n{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+
     // Model Cargo's registry-install catalogue without installing or downloading.
     write(
         &installation.path().join(".crates.toml"),
         &format!(
             "[v1]\n\"cargo-unique-target-names {version} (registry+https://github.com/rust-lang/crates.io-index)\" = [\"{binary_name}\"]\n"
         ),
+    );
+    assert!(
+        run(&["anvil-unique-target-names-validate-prereqs"]).status.success(),
+        "validation must accept the registered installation of the pinned checker"
     );
 
     let clean = run(&["anvil-unique-target-names"]);
@@ -777,7 +824,7 @@ fn unique_target_names_emitted_gate_checks_unchanged_workspace_members() {
         "the clean workspace must pass:\n{}",
         String::from_utf8_lossy(&clean.stderr)
     );
-    assert!(String::from_utf8_lossy(&clean.stdout).contains(&cargo_unique_target_names::Outcome::Clean.render()));
+    assert!(String::from_utf8_lossy(&clean.stdout).contains(&Outcome::Clean.render()));
 
     let original = root.join("crates/alpha/examples/alpha_basic.rs");
     let colliding = root.join("crates/alpha/examples/beta_basic.rs");

@@ -4368,9 +4368,12 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
-# Unscoped: a modified target can collide with an unchanged workspace member.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Check that workspace targets do not overwrite each other's build artifacts.
+# Runs over the full workspace because a target in a changed package can collide
+# with a target in an unchanged package.
+
+# Check that no two workspace targets uplift to the same build artifact.
 [script("pwsh", "-NoProfile")]
 anvil-unique-target-names: anvil-unique-target-names-validate-prereqs
     $ErrorActionPreference = 'Stop'
