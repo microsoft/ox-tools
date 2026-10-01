@@ -143,7 +143,7 @@ plan-contiguous waves capped by the effective worker count; each completed
 wave is emitted and dropped before the next wave starts, bounding retained
 temporary-file storage. Untimed effective-one execution uses an ordinary
 child, preserving terminal foreground behavior and Ctrl-C delivery; a
-post-spawn wait failure gets bounded child cleanup and reaper ownership.
+post-spawn wait failure makes one best-effort child-termination request.
 Timed and genuinely parallel commands use a job or process group. Without
 `--timeout`, cargo-each observes only the leader and does not kill background
 descendants. Every genuinely parallel invocation redirects stdout and
@@ -158,15 +158,10 @@ preserved descendant can keep the backing storage allocated and growing
 until its inherited writer closes. Capture create, reopen, length, seek, and
 read failures are infrastructure failures.
 
-Timed-out group termination gets a bounded 250 ms reap grace. If the group
-still has not completed, its handle moves to a cargo-each-local polling
-reaper started before any command. The reaper checks every retained group
-without blocking on one child, remains the wait owner after the caller
-returns, and exits after all senders disconnect and retained groups are
-collected. Interrupted observations are retried; terminal observation
-errors are reported and removed. Reaper startup and handoff failures are
-explicit infrastructure failures; a failed handoff retains the group handle
-in a persistent fallback queue and starts an emergency polling reaper.
+At a timeout, cargo-each makes one termination request for the Windows job
+or Unix process group and returns without waiting for operating-system
+teardown to finish. A failed termination request is an infrastructure
+failure; otherwise the invocation is reported as timed out.
 Child commands inherit `PATH` explicitly. On Windows this makes relative
 program lookup honor the inherited `PATH` order instead of preferring an
 unrelated executable beside `cargo-each`.
