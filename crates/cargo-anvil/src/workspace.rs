@@ -166,11 +166,16 @@ fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMemb
             // Pattern with no matches is not an error — Cargo itself tolerates this.
             return Ok(());
         }
-        let entries = glob_member_paths(&parent_path, |path| {
-            std::fs::read_dir(path).map(|entries| entries.filter_map(Result::ok).map(|entry| entry.path()).collect())
-        })?;
+        let mut entries: Vec<_> = std::fs::read_dir(&parent_path)
+            .into_app_err_with(|| format!("failed to read directory {}", parent_path.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .filter(|path| path.join("Cargo.toml").is_file())
+            .collect();
+        entries.sort_by_key(|path| path.file_name().map(OsStr::to_os_string));
         for entry in entries {
-            let name = entry.file_name().unwrap_or_default();
+            let name = entry.file_name().expect("read_dir child paths always have a final path component");
             let name_str = member_name(name, &parent_path)?;
             let relpath = format!("{parent}/{name_str}/Cargo.toml");
             out.push(WorkspaceMember {
@@ -194,38 +199,6 @@ fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMemb
     Ok(())
 }
 
-fn glob_member_paths(
-    parent_path: &Path,
-    read_directory: impl FnOnce(&Path) -> std::io::Result<Vec<PathBuf>>,
-) -> Result<Vec<PathBuf>, AppError> {
-    let candidates = read_directory(parent_path)
-        .into_app_err_with(|| format!("failed to read directory {}", parent_path.display()))?
-        .into_iter()
-        .map(|path| MemberCandidate {
-            is_directory: path.is_dir(),
-            has_manifest: path.join("Cargo.toml").is_file(),
-            path,
-        });
-    Ok(filtered_member_paths(candidates))
-}
-
-struct MemberCandidate {
-    path: PathBuf,
-    is_directory: bool,
-    has_manifest: bool,
-}
-
-fn filtered_member_paths(candidates: impl IntoIterator<Item = MemberCandidate>) -> Vec<PathBuf> {
-    let mut entries: Vec<_> = candidates
-        .into_iter()
-        .filter(|entry| entry.is_directory)
-        .filter(|entry| entry.has_manifest)
-        .map(|entry| entry.path)
-        .collect();
-    entries.sort_by_key(|path| path.file_name().map(OsStr::to_os_string));
-    entries
-}
-
 fn member_name<'a>(name: &'a OsStr, parent_path: &Path) -> Result<&'a str, AppError> {
     name.to_str()
         .ok_or_else(|| app_err!("non-UTF-8 directory name in {}", parent_path.display()))
@@ -246,7 +219,12 @@ fn normalize_relpath(relpath: &str) -> String {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt as _;
 
     use tempfile::TempDir;
 
@@ -369,7 +347,8 @@ members = ["crates/alpha"]
     #[cfg_attr(miri, ignore = "canonicalizes a missing path; miri isolation forbids it")]
     #[test]
     fn nonexistent_start_path_returns_an_error_instead_of_panicking() {
-        find_workspace_root(Path::new("a-directory-that-does-not-exist")).unwrap_err();
+        let tmp = TempDir::new().unwrap();
+        find_workspace_root(&tmp.path().join("missing")).unwrap_err();
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -470,59 +449,12 @@ members = ["cra*tes"]
         assert_eq!(paths, ["crates/alpha/Cargo.toml", "crates/beta/Cargo.toml"]);
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
-    #[test]
-    fn glob_member_filter_and_sort_are_independently_observable() {
-        let tmp = TempDir::new().unwrap();
-        let parent = tmp.path().join("crates");
-        write(&parent.join("zeta/Cargo.toml"), "");
-        write(&parent.join("alpha/Cargo.toml"), "");
-        let candidates = [
-            MemberCandidate {
-                path: parent.join("zeta"),
-                is_directory: true,
-                has_manifest: true,
-            },
-            MemberCandidate {
-                path: parent.join("not-a-directory"),
-                is_directory: false,
-                has_manifest: true,
-            },
-            MemberCandidate {
-                path: parent.join("no-manifest"),
-                is_directory: true,
-                has_manifest: false,
-            },
-            MemberCandidate {
-                path: parent.join("alpha"),
-                is_directory: true,
-                has_manifest: true,
-            },
-        ];
-        let paths = filtered_member_paths(candidates);
-
-        assert_eq!(paths, [parent.join("alpha"), parent.join("zeta")]);
-    }
-
-    #[test]
-    fn glob_directory_read_failure_is_returned_instead_of_unwrapped() {
-        let parent = Path::new("crates");
-        let err = glob_member_paths(parent, |_| Err(std::io::Error::other("injected read failure"))).unwrap_err();
-        assert!(err.to_string().contains("failed to read directory crates"), "{err}");
-    }
-
     #[test]
     fn non_utf8_member_name_is_returned_as_an_error() {
         #[cfg(unix)]
-        let name = {
-            use std::os::unix::ffi::OsStringExt as _;
-            std::ffi::OsString::from_vec(vec![0xff])
-        };
+        let name = OsString::from_vec(vec![0xff]);
         #[cfg(windows)]
-        let name = {
-            use std::os::windows::ffi::OsStringExt as _;
-            std::ffi::OsString::from_wide(&[0xd800])
-        };
+        let name = OsString::from_wide(&[0xd800]);
 
         let err = member_name(&name, Path::new("crates")).unwrap_err();
         assert_eq!(err.to_string(), "non-UTF-8 directory name in crates");

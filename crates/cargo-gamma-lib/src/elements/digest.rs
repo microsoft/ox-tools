@@ -93,8 +93,8 @@ impl MutantDigest<'_> {
 ///
 /// Returns an error if the text is not a compatible report from this tool.
 #[cfg_attr(
-    not(feature = "internals"),
-    allow(
+    all(not(feature = "internals"), not(test)),
+    expect(
         dead_code,
         reason = "kept to verify that writer and incremental reader agree about settled verdicts"
     )

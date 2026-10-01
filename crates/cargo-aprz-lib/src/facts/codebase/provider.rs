@@ -25,6 +25,7 @@ use crate::{HashMap, Result};
 
 pub(super) const LOG_TARGET: &str = "  codebase";
 
+// Bound simultaneous repository work on hosts whose CPU, disk, and process limits are unknown.
 const MAX_CONCURRENT_REQUESTS: usize = 5;
 
 #[derive(Debug, Clone)]
@@ -314,7 +315,6 @@ impl Provider {
         log::debug!(target: LOG_TARGET, "Detecting workflows in repository '{repo_spec}'");
 
         let repo_path_owned = repo_path.to_path_buf();
-        // #[gamma::skip(try.propagate_to_unwrap, reason = "workflow discovery is a filesystem adapter boundary whose errors must remain recoverable")]
         let workflows = spawn_blocking(move || sniff_github_workflows(&repo_path_owned))
             .await
             .expect("task must not panic")
@@ -392,7 +392,7 @@ impl Provider {
             last_commit_at: repo_data.last_commit_at,
         };
 
-        _ = Self::analyze_source_files(crate_path.as_std_path(), &mut codebase_data).await;
+        Self::analyze_source_files(crate_path.as_std_path(), &mut codebase_data).await;
 
         let result = match self.cache.save(&filename, &codebase_data) {
             Ok(()) => ProviderResult::Found(codebase_data),
@@ -412,20 +412,19 @@ impl Provider {
     ///
     /// Individual files that cannot be read or parsed are skipped, so the walk as a whole
     /// never fails.
-    async fn analyze_source_files(crate_path: &Path, codebase_data: &mut CodebaseData) -> bool {
+    async fn analyze_source_files(crate_path: &Path, codebase_data: &mut CodebaseData) {
         const MAX_FILES: usize = 10_000;
         const MAX_FILE_SIZE: u64 = 5_000_000; // 5MB
         const MAX_DEPTH: usize = 50;
 
         let src_dir = crate_path.join("src");
         if !src_dir.exists() {
-            return false;
+            return;
         }
 
         // Collect file paths first (blocking directory walk)
         let file_paths: Vec<_> = spawn_blocking(move || {
             walkdir::WalkDir::new(&src_dir)
-                // #[gamma::skip(literal.bool_flip, reason = "symlink traversal policy belongs to the external filesystem walker adapter")]
                 .follow_links(false) // Don't follow symlinks to prevent loops
                 // #[gamma::skip(expr.decrement, expr.increment, reason = "maximum filesystem traversal depth is an adapter safety limit")]
                 .max_depth(MAX_DEPTH)
@@ -440,7 +439,7 @@ impl Provider {
         .expect("task must not panic");
 
         if file_paths.is_empty() {
-            return true;
+            return;
         }
 
         if file_paths.len() == MAX_FILES {
@@ -458,7 +457,7 @@ impl Provider {
         // file just adds scheduling overhead for tasks that immediately queue.
         let num_workers = source_analysis_worker_count(std::thread::available_parallelism().ok());
         let chunk_size = source_analysis_chunk_size(file_paths.len(), num_workers);
-        let mut analysis_tasks: Vec<JoinHandle<Vec<Result<_, ohno::AppError>>>> = Vec::with_capacity(num_workers);
+        let mut analysis_tasks: Vec<JoinHandle<Vec<Result<_, ohno::AppError>>>> = Vec::with_capacity(num_workers.get());
         for chunk in file_paths.chunks(chunk_size) {
             let chunk = chunk.to_vec();
 
@@ -466,7 +465,6 @@ impl Provider {
                 chunk
                     .into_iter()
                     .map(|path| {
-                        // #[gamma::skip(try.propagate_to_unwrap, reason = "reading source text is a filesystem adapter boundary and unreadable files are intentionally skipped")]
                         let content =
                             fs::read_to_string(&path).into_app_err_with(|| format!("reading source file '{}'", path.display()))?;
                         Ok(source_file_analyzer::analyze_source_file(&content))
@@ -494,7 +492,6 @@ impl Provider {
                 codebase_data.source_files_with_errors += 1;
             }
         }
-        true
     }
 
     /// Get the sanitized host/owner/repo path components for a repository.
@@ -565,6 +562,10 @@ impl Provider {
     }
 }
 
+/// RAII guard that completes one tracked topic when the repository operation exits.
+///
+/// `fetch_and_analyze_repo` retains the guard for its full scope so every ordinary return path is
+/// accounted for.
 struct RequestCompletion {
     tracker: RequestTracker,
     topic: TrackedTopic,
@@ -582,12 +583,14 @@ impl Drop for RequestCompletion {
     }
 }
 
-fn source_analysis_worker_count(available: Option<core::num::NonZeroUsize>) -> usize {
-    available.map_or(4, core::num::NonZero::get)
+fn source_analysis_worker_count(available: Option<core::num::NonZeroUsize>) -> core::num::NonZeroUsize {
+    // Four workers keep source analysis useful when parallelism detection is unavailable without
+    // assuming a large or unconstrained host.
+    available.unwrap_or_else(|| core::num::NonZeroUsize::new(4).expect("the fallback worker count is non-zero"))
 }
 
-fn source_analysis_chunk_size(file_count: usize, worker_count: usize) -> usize {
-    file_count.div_ceil(worker_count).max(1)
+fn source_analysis_chunk_size(file_count: usize, worker_count: core::num::NonZeroUsize) -> usize {
+    file_count.div_ceil(worker_count.get()).max(1)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -599,13 +602,12 @@ fn filter_walk_entry(entry: walkdir::Result<walkdir::DirEntry>) -> Option<walkdi
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn is_rust_source_entry(entry: &walkdir::DirEntry) -> bool {
-    !entry.file_type().is_dir() && entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs")
+    entry.file_type().is_file() && entry.path().extension().and_then(|extension| extension.to_str()) == Some("rs")
 }
 
 fn filter_source_entry(entry: &walkdir::DirEntry, max_file_size: u64) -> Option<PathBuf> {
     let metadata = entry
-        .path()
-        .symlink_metadata()
+        .metadata()
         .inspect_err(|error| log::debug!(target: LOG_TARGET, "Could not read metadata for {}: {error:#}", entry.path().display()))
         .ok()?;
 
@@ -639,7 +641,6 @@ fn classify_metadata_result(
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::process::Command;
@@ -651,6 +652,7 @@ mod tests {
 
     use super::*;
     use crate::facts::Progress;
+    use crate::facts::request_tracker::TopicStatus;
 
     #[test]
     fn test_safe_repo_components() {
@@ -706,12 +708,23 @@ mod tests {
         assert!(!filename.contains("../"));
     }
 
-    #[test]
-    fn provider_uses_the_declared_request_limit() {
+    #[tokio::test]
+    #[cfg_attr(all(miri, windows), ignore = "Miri cannot call CreateIoCompletionPort on Windows")]
+    async fn provider_uses_the_declared_request_limit() {
         let cache = Cache::new("unused-provider-limit-test-cache", Duration::from_hours(1), false);
         let provider = Provider::new(cache);
-        let debug = format!("{:?}", provider.throttler);
-        assert!(debug.contains("permits: 5"), "unexpected throttler state: {debug}");
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONCURRENT_REQUESTS {
+            permits.push(provider.throttler.acquire().await);
+        }
+
+        let waiting = provider.throttler.acquire();
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+
+        drop(permits.pop());
+        tokio::task::yield_now().await;
+        let _permit = waiting.await;
     }
 
     // ---------------------------------------------------------------------
@@ -913,8 +926,8 @@ jobs:
     const BOB: [&str; 4] = ["-c", "user.name=Bob Fixture", "-c", "user.email=bob@example.invalid"];
 
     impl RepoFixture {
-        /// Build a repository with five commits from two distinct authors,
-        /// dated 500, 300, 100, 30 and 1 days ago.
+        /// Build a repository with commits outside the largest window and inside the 365-, 180-,
+        /// and 90-day windows. One commit deliberately falls between the 90- and 180-day cutoffs.
         fn new(options: FixtureOptions) -> Self {
             let tmp = tempfile::tempdir().expect("creating temp dir");
             let path = tmp.path().join("fixture-repo");
@@ -1087,6 +1100,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_analyze_local_repository_end_to_end() {
         let fixture = RepoFixture::new(FixtureOptions::default());
@@ -1124,6 +1138,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn get_codebase_data_tracks_one_request_per_repository() {
         let fixture = RepoFixture::new(FixtureOptions::default());
@@ -1134,13 +1149,43 @@ jobs:
         let crates: Arc<[CrateSpec]> = Arc::from(vec![crate_spec("aprz-fixture", &repo_spec), crate_spec("aprz-helper", &repo_spec)]);
 
         assert_eq!(provider.get_codebase_data(crates, &tracker).await.count(), 2);
-        assert_eq!(
-            tracker.topic_state(TrackedTopic::Codebase),
-            (1, 1, crate::facts::request_tracker::TopicStatus::Done)
-        );
+        assert_eq!(tracker.topic_state(TrackedTopic::Codebase), (1, 1, TopicStatus::Done));
     }
 
     #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
+    async fn get_codebase_data_completes_tracking_after_repository_analysis_failure() {
+        let fixture = RepoFixture::new(FixtureOptions {
+            manifest: None,
+            ..FixtureOptions::default()
+        });
+        let cache_dir = tempfile::tempdir().expect("creating temp dir");
+        let provider = Provider::new(test_cache(cache_dir.path()));
+        let repo_spec = fixture.repo_spec();
+        let tracker = test_tracker();
+        let crates: Arc<[CrateSpec]> = Arc::from(vec![crate_spec("aprz-fixture", &repo_spec)]);
+
+        assert_eq!(provider.get_codebase_data(crates, &tracker).await.count(), 1);
+        assert_eq!(tracker.topic_state(TrackedTopic::Codebase), (1, 1, TopicStatus::Done));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
+    async fn get_codebase_data_completes_tracking_after_repository_sync_failure() {
+        let tmp = tempfile::tempdir().expect("creating temp dir");
+        let missing = tmp.path().join("missing-repository");
+        let repo_spec = repo_spec_for_url(&Url::from_file_path(&missing).expect("temporary path is absolute"));
+        let cache_dir = tempfile::tempdir().expect("creating temp dir");
+        let provider = Provider::new(test_cache(cache_dir.path()));
+        let tracker = test_tracker();
+        let crates: Arc<[CrateSpec]> = Arc::from(vec![crate_spec("aprz-fixture", &repo_spec)]);
+
+        assert_eq!(provider.get_codebase_data(crates, &tracker).await.count(), 1);
+        assert_eq!(tracker.topic_state(TrackedTopic::Codebase), (1, 1, TopicStatus::Done));
+    }
+
+    #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_analyze_local_repository_without_workflows() {
         let fixture = RepoFixture::new(FixtureOptions {
@@ -1158,6 +1203,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_workflow_without_clippy_or_miri_is_detected_but_empty() {
         let fixture = RepoFixture::new(FixtureOptions {
@@ -1175,6 +1221,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_second_call_is_served_from_cache() {
         let fixture = RepoFixture::new(FixtureOptions::default());
@@ -1196,6 +1243,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_second_call_updates_existing_clone() {
         let fixture = RepoFixture::new(FixtureOptions::default());
@@ -1214,6 +1262,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_reclones_when_git_directory_is_missing() {
         let fixture = RepoFixture::new(FixtureOptions::default());
@@ -1268,6 +1317,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_broken_manifest_makes_cargo_metadata_fail() {
         let fixture = RepoFixture::new(FixtureOptions {
@@ -1283,6 +1333,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_crate_not_present_in_repository() {
         let fixture = RepoFixture::new(FixtureOptions::default());
@@ -1344,6 +1395,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_repo_data_tolerates_a_non_git_directory() {
         // A directory holding a valid manifest but no git history: `cargo metadata`
@@ -1394,8 +1446,7 @@ jobs:
         let tmp = tempfile::tempdir().expect("creating temp dir");
         let mut data = empty_codebase_data();
 
-        let src_existed = Provider::analyze_source_files(tmp.path(), &mut data).await;
-        assert!(!src_existed);
+        Provider::analyze_source_files(tmp.path(), &mut data).await;
         assert_eq!(data.source_files_analyzed, 0);
     }
 
@@ -1406,20 +1457,21 @@ jobs:
         write_file(&tmp.path().join("src").join("notes.txt"), "not rust\n");
         let mut data = empty_codebase_data();
 
-        assert!(Provider::analyze_source_files(tmp.path(), &mut data).await);
+        Provider::analyze_source_files(tmp.path(), &mut data).await;
 
         assert_eq!(data.source_files_analyzed, 0);
     }
 
     #[test]
-    fn source_analysis_parallelism_is_deterministic_at_its_seams() {
+    fn source_analysis_worker_and_chunk_helpers_preserve_non_zero_counts() {
         let eight = core::num::NonZeroUsize::new(8).unwrap();
-        assert_eq!(source_analysis_worker_count(Some(eight)), 8);
-        assert_eq!(source_analysis_worker_count(None), 4);
-        assert_eq!(source_analysis_chunk_size(0, 8), 1);
-        assert_eq!(source_analysis_chunk_size(1, 8), 1);
-        assert_eq!(source_analysis_chunk_size(9, 8), 2);
-        assert_eq!(source_analysis_chunk_size(16, 8), 2);
+        assert_eq!(source_analysis_worker_count(Some(eight)), eight);
+        let fallback = source_analysis_worker_count(None);
+        assert_eq!(fallback.get(), 4);
+        assert_eq!(source_analysis_chunk_size(0, eight), 1);
+        assert_eq!(source_analysis_chunk_size(1, eight), 1);
+        assert_eq!(source_analysis_chunk_size(9, eight), 2);
+        assert_eq!(source_analysis_chunk_size(16, eight), 2);
     }
 
     #[tokio::test]
@@ -1500,6 +1552,7 @@ jobs:
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem; Miri isolation forbids it")]
     fn rust_source_filter_rejects_directories_with_rs_names() {
         let tmp = tempfile::tempdir().expect("creating temp dir");
         let source_dir = tmp.path().join("module.rs");
@@ -1515,7 +1568,9 @@ jobs:
         assert!(!is_rust_source_entry(&entry));
     }
 
+    #[cfg(unix)]
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem; Miri isolation forbids it")]
     fn source_entry_metadata_errors_are_skipped() {
         let tmp = tempfile::tempdir().expect("creating temp dir");
         let path = tmp.path().join("vanished.rs");
@@ -1530,6 +1585,45 @@ jobs:
         fs::remove_file(&path).unwrap();
 
         assert_eq!(filter_source_entry(&entry, 1_000), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri does not support creating filesystem symlinks")]
+    fn rust_source_filter_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("creating temp dir");
+        let target = tmp.path().join("target");
+        fs::write(&target, "pub fn target() {}\n").expect("writing symlink target");
+        let link = tmp.path().join("linked.rs");
+        symlink(&target, &link).expect("creating source symlink");
+        let link_entry = walkdir::WalkDir::new(tmp.path())
+            .min_depth(1)
+            .max_depth(1)
+            .into_iter()
+            .filter_map(Result::ok)
+            .find(|entry| entry.path() == link)
+            .expect("fixture contains the symlink");
+        assert!(!is_rust_source_entry(&link_entry));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "Miri does not support creating filesystem symlinks")]
+    async fn source_analysis_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("creating temp dir");
+        write_file(&tmp.path().join("src").join("lib.rs"), "pub fn local() {}\n");
+        let outside = tmp.path().join("outside");
+        write_file(&outside.join("external.rs"), "pub fn external() {}\n");
+        symlink(&outside, tmp.path().join("src").join("linked")).expect("creating directory symlink");
+
+        let mut data = empty_codebase_data();
+        Provider::analyze_source_files(tmp.path(), &mut data).await;
+
+        assert_eq!(data.source_files_analyzed, 1);
     }
 
     #[test]
@@ -1561,6 +1655,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_count_transitive_dependencies_for_unknown_package() {
         let tmp = tempfile::tempdir().expect("creating temp dir");
@@ -1624,6 +1719,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_missing_crate_survives_a_failed_cache_write() {
         let fixture = RepoFixture::new(FixtureOptions::default());
@@ -1637,6 +1733,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_failure_to_cache_a_successful_analysis_is_an_error() {
         let fixture = RepoFixture::new(FixtureOptions::default());
@@ -1651,6 +1748,7 @@ jobs:
 
     #[cfg(unix)]
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_unreadable_workflow_file_fails_repository_analysis() {
         use std::os::unix::fs::PermissionsExt;
@@ -1679,6 +1777,7 @@ jobs:
 
     #[cfg(unix)]
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_analyze_source_files_tolerates_an_unwalkable_directory() {
         use std::os::unix::fs::PermissionsExt;
@@ -1736,6 +1835,7 @@ jobs:
         const MAX_FILES: usize = 10_000;
 
         // The "limit reached" notice is logged at debug level; evaluate its arguments too.
+        #[cfg(not(miri))]
         crate::facts::test_logging::enable_log_argument_evaluation();
 
         let tmp = tempfile::tempdir().expect("creating temp dir");
@@ -1778,7 +1878,7 @@ jobs:
     }
 
     #[tokio::test]
-    #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
+    #[cfg(not(miri))]
     async fn test_cargo_metadata_timeout_is_reported() {
         let tmp = tempfile::tempdir().expect("creating temp dir");
         write_file(&tmp.path().join("Cargo.toml"), FIXTURE_STANDALONE_MANIFEST);
@@ -1823,6 +1923,7 @@ jobs:
     }
 
     #[tokio::test]
+    #[gamma::resource("cargo-aprz-cargo-subprocess")]
     #[cfg_attr(miri, ignore = "Miri cannot run external commands")]
     async fn test_crate_with_a_parentless_manifest_path_is_unavailable() {
         // `cargo metadata` always reports an absolute manifest path, so the only way to

@@ -95,7 +95,6 @@ impl Pending {
 /// A note without an active run has no host that can say it, so it is ignored. A poisoned lock is
 /// ignored for the same reason: failing a run over a courtesy diagnostic makes that diagnostic the
 /// reason the command stopped.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn note(message: impl Into<String>) {
     let Some(run) = current() else {
         return;
@@ -113,7 +112,6 @@ pub(crate) fn note(message: impl Into<String>) {
 
 /// Takes this thread's running command's notes, leaving its buffer empty.
 #[must_use]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn drain() -> Vec<String> {
     let Some(run) = current() else {
         return Vec::new();
@@ -150,6 +148,7 @@ pub(crate) fn alone<T>(body: impl FnOnce() -> T) -> T {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::sync::Barrier;
 

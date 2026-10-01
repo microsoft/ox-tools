@@ -14,6 +14,8 @@
 
 use core::fmt::Write as _;
 
+use clap::Command;
+
 use crate::ops::registry::{PRESETS, REGISTRY, families};
 
 /// The marker that opens a generated block in a documentation file.
@@ -93,24 +95,28 @@ fn options() -> String {
         out.push('\n');
     }
 
-    for sub in command.get_subcommands() {
-        render_options(&mut out, &format!("gamma {}", sub.get_name()), sub);
-
-        for nested in sub.get_subcommands() {
-            render_options(&mut out, &format!("gamma {} {}", sub.get_name(), nested.get_name()), nested);
-        }
-    }
+    render_subcommands(&mut out, "gamma", &command);
 
     out.trim_end().to_owned()
 }
 
-fn render_options(out: &mut String, invocation: &str, command: &clap::Command) {
+fn render_subcommands(out: &mut String, parent: &str, command: &Command) {
+    for subcommand in command.get_subcommands() {
+        let invocation = format!("{parent} {}", subcommand.get_name());
+        render_options(out, &invocation, subcommand);
+        render_subcommands(out, &invocation, subcommand);
+    }
+}
+
+fn render_options(out: &mut String, invocation: &str, command: &Command) {
     let _ = writeln!(out, "### `{invocation}`\n");
 
     if let Some(about) = command.get_about() {
         let _ = writeln!(out, "{about}\n");
     }
 
+    // clap renders usage with the binary name first; `usage` replaces that prefix with this
+    // command's documented invocation.
     let _ = writeln!(out, "```text\n{}\n```\n", usage(invocation, command));
 
     for (heading, arguments) in grouped(command) {
@@ -136,7 +142,9 @@ fn render_options(out: &mut String, invocation: &str, command: &clap::Command) {
 fn usage(invocation: &str, sub: &clap::Command) -> String {
     let mut sub = sub.clone();
     let rendered = sub.render_usage().to_string().replace("Usage: ", "");
-    let suffix = rendered.strip_prefix(sub.get_name()).unwrap_or(&rendered);
+    let suffix = rendered
+        .strip_prefix(sub.get_name())
+        .expect("clap usage begins with the command name supplied by the same Command");
 
     format!("cargo {invocation}{suffix}")
 }
@@ -312,10 +320,10 @@ fn question(family: &str) -> &'static str {
         "assign" => "Does this compound assignment's operator matter?",
         "assign_value" => "Is the value assigned here ever read in a way that would notice?",
         "logical" => "Is this `&&` really an `&&`?",
-        "bool_expr" => "Does anything observe this boolean value's polarity?",
+        "bool_expr" => "Does anything observe whether this boolean value is true or false?",
         "cond" => "Does anything depend on this branch being taken?",
         "match_guard" => "Does anything depend on this guard being right?",
-        "match_arm" => "Is this arm reachable, and does anything notice when it stops matching?",
+        "match_arm" => "Does anything depend on what this pattern matches?",
         "loop" => "Does this `break` or `continue` carry the loop's meaning?",
         "return_value" => "Does this early return carry the value its caller needs?",
         "range" => "Is this bound inclusive on purpose?",
@@ -326,7 +334,7 @@ fn question(family: &str) -> &'static str {
         "struct_field" => "Does this field's value matter, or is the default good enough?",
         "option" => "Is the present case distinguished from the absent one?",
         "result" => "Is success distinguished from failure?",
-        "try" => "Is graceful propagation distinguished from a panic?",
+        "try" => "Does anything distinguish propagation with `?` from a panic?",
         "fallback" => "Does the absent or error path produce the right fallback value?",
         "iter" => "Does anything observe that this was ordered, deduplicated, or taken from one end?",
         "string" => "Does the prefix, the case, or the trimmed end actually matter?",
@@ -398,5 +406,27 @@ mod tests {
         // documentation and pass every check that follows.
         assert!(block("mutators").is_some());
         assert!(block("nonesuch").is_none());
+    }
+
+    #[test]
+    fn nested_usage_replaces_claps_command_name_with_the_complete_invocation() {
+        let command = clap::Command::new("mutants").arg(clap::Arg::new("json").long("json"));
+
+        assert_eq!(usage("gamma list mutants", &command), "cargo gamma list mutants [OPTIONS]");
+    }
+
+    #[test]
+    fn option_reference_walks_the_complete_subcommand_tree() {
+        let command =
+            clap::Command::new("gamma")
+                .subcommand(clap::Command::new("one").subcommand(
+                    clap::Command::new("two").subcommand(clap::Command::new("three").arg(clap::Arg::new("deep").long("deep"))),
+                ));
+        let mut rendered = String::new();
+
+        render_subcommands(&mut rendered, "gamma", &command);
+
+        assert!(rendered.contains("### `gamma one two three`"), "{rendered}");
+        assert!(rendered.contains("`--deep`"), "{rendered}");
     }
 }

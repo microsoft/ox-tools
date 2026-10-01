@@ -57,8 +57,11 @@ pub(super) fn return_values(output: &ReturnType, types: &Types<'_>) -> Vec<Repla
 /// nothing, because a value that type-checks is still worth trying even when its shape is unknown.
 #[expect(clippy::too_many_lines, reason = "the match exhaustively maps every return-type kind")]
 pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<ReplacementValue> {
-    let resolved = types.resolve_alias(ty);
-    let aliased = !core::ptr::eq(ty, resolved);
+    let alias_resolved = types.resolve_alias(ty);
+    let source = types.concrete_self_type_or_associated(alias_resolved).unwrap_or(ty);
+    let resolved = types.resolve_alias(source);
+    let aliased = !core::ptr::eq(source, resolved);
+    // The zero-argument alias has a concrete success type that ordinary payload lookup cannot see.
     let fmt_result = types.is_fmt_result(resolved);
     let kind = if fmt_result { Kind::Result } else { resolve_type(resolved) };
 
@@ -72,18 +75,21 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         return Vec::new();
     }
 
-    // An error type from another crate contributes nothing for the same reason, but with a stronger
-    // warrant: `Default::default()` is not a guess that might be wrong here, it is one that has been
-    // measured wrong over and over. This is the largest single cause of mutants that cannot compile.
-    if kind == Kind::Unknown && !types.has_default(resolved) {
+    // Withhold an unknown concrete type only when source-visible evidence proves it cannot be
+    // defaulted. An unresolved dependency type stays eligible: the compile oracle can withdraw a
+    // bad guess, while dropping the candidate here would make a real `Default` implementation
+    // impossible to discover.
+    if kind == Kind::Unknown && types.lacks_default(resolved) {
         return Vec::new();
     }
+    // An alias must preserve its declared constructor shape rather than borrowing the standard
+    // collection spelling of the type it resolves to.
     if aliased && matches!(kind, Kind::Collection | Kind::Map) && !types.has_default(resolved) {
         return Vec::new();
     }
 
     if depth == 0 {
-        return if types.has_default(resolved) {
+        return if kind != Kind::Result && (types.has_default(resolved) || kind == Kind::Unknown && !types.lacks_default(resolved)) {
             vec![("fn_value.default", "Default::default()".into())]
         } else {
             Vec::new()
@@ -98,6 +104,8 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         | Kind::Unsigned
         | Kind::Float
         | Kind::StaticStr
+        // A string literal is shared, and leaking an allocation would invent ownership and
+        // lifetime behavior, so `literal_values` deliberately returns nothing for `&mut str`.
         | Kind::MutStr
         | Kind::String
         | Kind::NonZero) => literal_values(kind, resolved),
@@ -106,10 +114,10 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // what the recursion supplies.
         Kind::Option => {
             let mut values = vec![("fn_value.none", "None".into())];
-            let inner = inner_values(ty, 0, depth, types);
+            let inner = inner_values(source, 0, depth, types);
 
             if inner.is_empty() {
-                if types.payload(ty, 0).is_some_and(|inner| types.has_default(inner)) {
+                if types.payload(source, 0).is_some_and(|inner| types.has_default(&inner)) {
                     values.push(("fn_value.some_default", "Some(Default::default())".into()));
                 }
             } else {
@@ -123,9 +131,9 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             if fmt_result {
                 return vec![("fn_value.ok_default", "Ok(Default::default())".into())];
             }
-            let inner = inner_values(ty, 0, depth, types);
+            let inner = inner_values(source, 0, depth, types);
             let mut values = if inner.is_empty() {
-                if types.payload(ty, 0).is_some_and(|inner| types.has_default(inner)) {
+                if types.payload(source, 0).is_some_and(|inner| types.has_default(&inner)) {
                     vec![("fn_value.ok_default", "Ok(Default::default())".into())]
                 } else {
                     Vec::new()
@@ -149,7 +157,7 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             // is whatever the alias fixed it to — almost never something with a `Default`. Offering
             // `Err(Default::default())` on a guess buys one mutant that usually cannot compile, so
             // it is offered only when the second argument is present and not abstract.
-            if types.payload(ty, 1).is_some_and(|inner| types.has_default(inner)) {
+            if types.payload(source, 1).is_some_and(|inner| types.has_default(&inner)) {
                 values.push(("fn_value.err_default", "Err(Default::default())".into()));
             }
 
@@ -159,15 +167,19 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // Every one of these builds from an iterator of its element type, so one construction
         // covers all of them and the element values come from the recursion.
         Kind::Collection => {
-            let empty = if aliased || types.defaults.has_default(resolved) {
-                CompactString::new("Default::default()")
+            let mut values = if aliased || types.prefers_default_constructor(resolved) {
+                vec![("fn_value.empty_collection", CompactString::new("Default::default()"))]
+            } else if types.is_local_type(resolved) {
+                Vec::new()
             } else {
-                format_compact!("{}::new()", collection_ctor(resolved))
+                vec![(
+                    "fn_value.empty_collection",
+                    format_compact!("{}::new()", collection_ctor(resolved)),
+                )]
             };
-            let mut values = vec![("fn_value.empty_collection", empty)];
 
             values.extend(
-                inner_values(ty, 0, depth, types)
+                inner_values(source, 0, depth, types)
                     .into_iter()
                     .map(|(_name, text)| ("fn_value.one_element", format_compact!("core::iter::once({text}).collect()"))),
             );
@@ -178,15 +190,15 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // A map's element is a pair, so its one-element form needs both parameters rather than the
         // first alone.
         Kind::Map => {
-            let empty = if aliased || types.defaults.has_default(resolved) {
+            let empty = if aliased || types.prefers_default_constructor(resolved) {
                 CompactString::new("Default::default()")
             } else {
                 format_compact!("{}::new()", collection_ctor(resolved))
             };
             let mut values = vec![("fn_value.empty_collection", empty)];
 
-            let keys = inner_values(ty, 0, depth, types);
-            let vals = inner_values(ty, 1, depth, types);
+            let keys = inner_values(source, 0, depth, types);
+            let vals = inner_values(source, 1, depth, types);
 
             if let (Some((_kn, key)), Some((_vn, value))) = (keys.first(), vals.first()) {
                 values.push((
@@ -201,6 +213,8 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         // A smart pointer is transparent to the caller's reasoning, so the values worth trying are
         // its contents wrapped back up.
         Kind::Wrapper => {
+            // Unsized string wrappers need shape-specific constructors; `Default` cannot construct
+            // their unsized payload directly.
             if is_unsized_string_wrapper(resolved) {
                 return vec![
                     (
@@ -215,7 +229,7 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
             }
             let ctor = wrapper_ctor(resolved);
 
-            cap(inner_values(ty, 0, depth, types)
+            cap(inner_values(source, 0, depth, types)
                 .into_iter()
                 .map(|(name, text)| (name, format_compact!("{ctor}({text})")))
                 .collect())
@@ -228,7 +242,7 @@ pub(super) fn values_for(ty: &Type, depth: usize, types: &Types<'_>) -> Vec<Repl
         Kind::Cow => {
             let ctor = collection_ctor(resolved);
 
-            cap(inner_values(ty, 0, depth, types)
+            cap(inner_values(source, 0, depth, types)
                 .into_iter()
                 .map(|(name, text)| (name, format_compact!("{ctor}::Owned({text})")))
                 .collect())
@@ -343,17 +357,6 @@ pub(super) fn literal_values(kind: Kind, ty: &Type) -> Vec<ReplacementValue> {
             ("fn_value.xyzzy_string", "\"xyzzy\"".into()),
         ],
 
-        // A literal will not do here — it is `&'static str`, and the signature asked for a mutable
-        // slice. This is the narrow standard unsized shape for which leaking the exact boxed
-        // referent is a constructor, rather than a generic attempt to invent an arbitrary borrow.
-        Kind::MutStr => vec![
-            ("fn_value.empty_string", "Box::leak(String::new().into_boxed_str())".into()),
-            (
-                "fn_value.xyzzy_string",
-                "Box::leak(String::from(\"xyzzy\").into_boxed_str())".into(),
-            ),
-        ],
-
         Kind::String => vec![
             ("fn_value.empty_string", "String::new()".into()),
             ("fn_value.xyzzy_string", "\"xyzzy\".to_owned()".into()),
@@ -415,7 +418,7 @@ pub(super) fn cap(mut values: Vec<ReplacementValue>) -> Vec<ReplacementValue> {
 pub(super) fn inner_values(ty: &Type, index: usize, depth: usize, types: &Types<'_>) -> Vec<ReplacementValue> {
     types
         .payload(ty, index)
-        .map_or_else(Vec::new, |inner| values_for(inner, depth.saturating_sub(1), types))
+        .map_or_else(Vec::new, |inner| values_for(&inner, depth.saturating_sub(1), types))
 }
 
 /// The `Item` type an `impl Iterator` signature binds, when it wrote one.
@@ -446,12 +449,20 @@ pub(super) fn iterator_item(ty: &Type) -> Option<&Type> {
 
 /// The `index`th type argument of a path type, ignoring lifetimes and const generics.
 pub(super) fn type_argument(ty: &Type, index: usize) -> Option<&Type> {
+    type_argument_values(ty).get(index).copied()
+}
+
+/// The type arguments of a path type, ignoring lifetimes and const generics.
+pub(super) fn type_argument_values(ty: &Type) -> Vec<&Type> {
     let Type::Path(path) = strip(ty) else {
-        return None;
+        return Vec::new();
     };
 
-    let PathArguments::AngleBracketed(args) = &path.path.segments.last()?.arguments else {
-        return None;
+    let Some(segment) = path.path.segments.last() else {
+        return Vec::new();
+    };
+    let PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return Vec::new();
     };
 
     args.args
@@ -460,7 +471,7 @@ pub(super) fn type_argument(ty: &Type, index: usize) -> Option<&Type> {
             GenericArgument::Type(inner) => Some(inner),
             _ => None,
         })
-        .nth(index)
+        .collect()
 }
 
 /// The path text of a type, so that an associated function can be called on it.
@@ -530,7 +541,7 @@ pub(super) enum Kind {
     Unsigned,
     Float,
     StaticStr,
-    /// A mutable string slice, whose values cannot be string literals.
+    /// A mutable string slice, for which no leak-free source-independent value exists.
     MutStr,
     String,
     NonZero,
@@ -636,6 +647,7 @@ pub(super) fn resolve_type(ty: &Type) -> Kind {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use syn::punctuated::Punctuated;
     use syn::{Path, TypeImplTrait, TypePath, parse_quote};
@@ -643,6 +655,7 @@ mod tests {
     use super::*;
     use crate::HashMap;
     use crate::ops::collect::Defaults;
+    use crate::ops::collect::collector::types::Alias;
 
     fn empty_path_type() -> Type {
         Type::Path(TypePath {
@@ -691,7 +704,13 @@ mod tests {
         let imports = HashMap::default();
         let defaults = Defaults::default();
         let mut aliases = HashMap::default();
-        let _old = aliases.insert("Set".to_owned(), Some(parse_quote!(HashSet<u8, NoDefault>)));
+        let _old = aliases.insert(
+            "Set".to_owned(),
+            Some(Alias {
+                parameters: Vec::new(),
+                target: parse_quote!(HashSet<u8, NoDefault>),
+            }),
+        );
         let types = Types {
             abstracts: &abstracts,
             defaulted: &defaulted,
@@ -711,6 +730,63 @@ mod tests {
         assert_eq!(
             texts(values_for(&parse_quote!(Result<T, NoDefault>), RETURN_DEPTH, &types)),
             ["fn_value.ok_default:Ok(Default::default())"]
+        );
+    }
+
+    #[test]
+    fn concrete_self_associated_types_are_resolved_before_abstract_filtering() {
+        let abstracts = Vec::new();
+        let imports = HashMap::default();
+        let defaults = Defaults::default();
+        let associated = HashMap::from_iter([("Value".to_owned(), parse_quote!(bool))]);
+        let known = Types {
+            abstracts: &abstracts,
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: None,
+            self_type: None,
+            self_associated: Some(&associated),
+        };
+        let unresolved = test_types(&abstracts, &imports, &defaults);
+
+        assert_eq!(
+            texts(values_for(&parse_quote!(Self::Value), RETURN_DEPTH, &known)),
+            ["fn_value.bool_true:true", "fn_value.bool_false:false"]
+        );
+        assert!(values_for(&parse_quote!(Self::Value), RETURN_DEPTH, &unresolved).is_empty());
+    }
+
+    #[test]
+    fn alias_payloads_follow_declared_parameter_roles() {
+        let abstracts = Vec::new();
+        let imports = HashMap::default();
+        let defaults = Defaults::default();
+        let mut aliases = HashMap::default();
+        let _old = aliases.insert(
+            "Flip".to_owned(),
+            Some(Alias {
+                parameters: vec!["Error".to_owned(), "Value".to_owned()],
+                target: parse_quote!(Result<Value, Error>),
+            }),
+        );
+        let types = Types {
+            abstracts: &abstracts,
+            defaulted: &[],
+            imports: &imports,
+            defaults: &defaults,
+            aliases: Some(&aliases),
+            self_type: None,
+            self_associated: None,
+        };
+
+        assert_eq!(
+            texts(values_for(&parse_quote!(Flip<bool, &'static str>), RETURN_DEPTH, &types)),
+            [
+                "fn_value.ok:Ok(\"\")",
+                "fn_value.ok:Ok(\"xyzzy\")",
+                "fn_value.err_default:Err(Default::default())"
+            ]
         );
     }
 

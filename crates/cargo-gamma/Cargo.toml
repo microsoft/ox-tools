@@ -15,6 +15,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma"
+exclude = ["docs/TODO.md"]
 
 [package.metadata.docs.rs]
 all-features = true

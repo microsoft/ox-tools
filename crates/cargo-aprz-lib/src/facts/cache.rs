@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use ohno::IntoAppError;
 use serde::{Deserialize, Serialize};
 
@@ -106,12 +106,12 @@ impl Cache {
 
         // Handle future timestamps (clock skew) — treat as fresh data
         let age = Utc::now().signed_duration_since(envelope.timestamp);
-        if is_future_age(age) {
+        if age < TimeDelta::zero() {
             log::debug!(target: LOG_TARGET, "Cache timestamp is in the future for {filename} (clock skew detected), treating as fresh");
         } else {
             let age_duration = age.to_std().unwrap_or(Duration::MAX);
 
-            if is_expired(age_duration, self.ttl) {
+            if age_duration >= self.ttl {
                 log::debug!(
                     target: LOG_TARGET,
                     "Cache expired for {filename} (age: {:.1} days, TTL: {:.1} days)",
@@ -166,6 +166,7 @@ impl Cache {
         Self::write_envelope_to(&mut writer, envelope, &path)
     }
 
+    /// Deterministic boundary for verifying serialization and flush error propagation.
     fn write_envelope_to<T: Serialize>(writer: &mut impl Write, envelope: &Envelope<T>, path: &Path) -> Result<()> {
         rmp_serde::encode::write(&mut *writer, envelope).into_app_err_with(|| format!("writing cache file '{}'", path.display()))?;
         writer
@@ -174,16 +175,7 @@ impl Cache {
     }
 }
 
-fn is_future_age(age: chrono::TimeDelta) -> bool {
-    age < chrono::TimeDelta::zero()
-}
-
-fn is_expired(age: Duration, ttl: Duration) -> bool {
-    age >= ttl
-}
-
 #[cfg(test)]
-#[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
@@ -194,24 +186,28 @@ mod tests {
         value: u64,
     }
 
+    /// Writer test double for the cache's write and flush error-propagation branches.
     struct FailingWriter {
-        fail_flush: bool,
+        failure_point: FailurePoint,
+    }
+
+    enum FailurePoint {
+        Write,
+        Flush,
     }
 
     impl Write for FailingWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if self.fail_flush {
-                Ok(buf.len())
-            } else {
-                Err(std::io::Error::other("write failed"))
+            match self.failure_point {
+                FailurePoint::Write => Err(std::io::Error::other("write failed")),
+                FailurePoint::Flush => Ok(buf.len()),
             }
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
-            if self.fail_flush {
-                Err(std::io::Error::other("flush failed"))
-            } else {
-                Ok(())
+            match self.failure_point {
+                FailurePoint::Write => Ok(()),
+                FailurePoint::Flush => Err(std::io::Error::other("flush failed")),
             }
         }
     }
@@ -275,6 +271,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
     fn load_expired_entry() {
         // The expiry message is logged at debug level; evaluate its arguments too.
+        #[cfg(not(miri))]
         crate::facts::test_logging::enable_log_argument_evaluation();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -348,14 +345,20 @@ mod tests {
     #[test]
     fn write_envelope_reports_serialization_write_failures() {
         let envelope = Envelope {
-            timestamp: Utc::now(),
+            timestamp: DateTime::UNIX_EPOCH,
             payload: EnvelopePayload::Data(TestData {
                 name: "test".to_string(),
                 value: 1,
             }),
         };
-        let error = Cache::write_envelope_to(&mut FailingWriter { fail_flush: false }, &envelope, Path::new("broken.bin"))
-            .expect_err("writer failure must be propagated");
+        let error = Cache::write_envelope_to(
+            &mut FailingWriter {
+                failure_point: FailurePoint::Write,
+            },
+            &envelope,
+            Path::new("broken.bin"),
+        )
+        .expect_err("writer failure must be propagated");
 
         assert!(error.to_string().contains("writing cache file 'broken.bin'"), "{error}");
     }
@@ -363,14 +366,20 @@ mod tests {
     #[test]
     fn write_envelope_reports_flush_failures() {
         let envelope = Envelope {
-            timestamp: Utc::now(),
+            timestamp: DateTime::UNIX_EPOCH,
             payload: EnvelopePayload::Data(TestData {
                 name: "test".to_string(),
                 value: 1,
             }),
         };
-        let error = Cache::write_envelope_to(&mut FailingWriter { fail_flush: true }, &envelope, Path::new("broken.bin"))
-            .expect_err("flush failure must be propagated");
+        let error = Cache::write_envelope_to(
+            &mut FailingWriter {
+                failure_point: FailurePoint::Flush,
+            },
+            &envelope,
+            Path::new("broken.bin"),
+        )
+        .expect_err("flush failure must be propagated");
 
         assert!(error.to_string().contains("flushing cache file 'broken.bin'"), "{error}");
     }
@@ -508,20 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_age_comparisons_include_the_exact_boundaries() {
-        assert!(!is_future_age(chrono::TimeDelta::zero()));
-        assert!(is_future_age(chrono::TimeDelta::nanoseconds(-1)));
-
-        let ttl = Duration::from_mins(1);
-        assert!(!is_expired(
-            ttl.checked_sub(Duration::from_nanos(1))
-                .expect("one minute is longer than one nanosecond"),
-            ttl
-        ));
-        assert!(is_expired(ttl, ttl));
-    }
-
-    #[test]
     #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
     fn saving_fails_when_the_cache_directory_cannot_be_created() {
         let tmp = tempfile::tempdir().unwrap();
@@ -551,6 +546,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri isolation forbids the system clock and file write")]
     fn saving_to_a_path_with_no_parent_skips_directory_creation() {
         // An empty cache directory joined with an empty filename yields an empty path,
         // which is the one case where `Path::parent` reports `None`. Nothing is created

@@ -11,7 +11,7 @@ use crate::suppress::Idle;
 use crate::{HashMap, HashSet};
 
 /// Everything a run needs, worked out before any building happens.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Plan {
     /// Absolute path of the workspace root.
     pub root: Utf8PathBuf,

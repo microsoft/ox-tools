@@ -9,7 +9,7 @@ use super::cli::ExplainArgs;
 use super::dispatch::EXIT_OK;
 use super::host::Host;
 use crate::error::error;
-use crate::model::{MUTANT_ID_HEX_LEN, MUTANT_ID_VERSION};
+use crate::model::MUTANT_ID_VERSION;
 use crate::ops::registry;
 
 /// Implements `explain`.
@@ -43,7 +43,7 @@ pub(super) fn explain<H: Host>(host: &mut H, args: &ExplainArgs) -> crate::Resul
 }
 
 fn mutant_id_syntax(subject: &str) -> bool {
-    subject.len() == MUTANT_ID_HEX_LEN && subject.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    super::CanonicalMutantId::parse(subject).is_ok()
 }
 
 #[expect(

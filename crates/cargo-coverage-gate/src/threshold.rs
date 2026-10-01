@@ -88,6 +88,7 @@ mod tests {
     fn member(name: &str, min_lines_percent: Option<f64>) -> Member {
         Member {
             name: name.to_owned(),
+            version: "1.2.3".to_owned(),
             manifest_dir: PathBuf::from(format!("/repo/crates/{name}")),
             min_lines_percent,
             expect_no_coverable_lines: false,

@@ -16,13 +16,13 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::Verdict;
 use crate::aggregate::{LineTotals, aggregate};
 use crate::attribute::{AttributionOutcome, attribute};
-use crate::error::{CoverageGateError, UnknownPackageSelectorError};
+use crate::error::{CoverageGateError, InvalidPackageSelectorError, UnknownPackageSelectorError};
 use crate::lcov_cov::{CoverageReport, FileReport};
 use crate::threshold::{Threshold, ThresholdSource};
 use crate::workspace::{Member, Workspace};
+use crate::{Verdict, package_glob};
 
 /// Status of a single package against its threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +114,7 @@ impl Report {
 /// `gated_packages` is the result of applying `--package` to the
 /// workspace's member list: when empty, every member is gated. Each
 /// entry is a cargo-style package selector — a literal name or a Unix
-/// glob pattern (`*` and `?`). A literal that matches no workspace
+/// glob pattern (`*`, `?`, and bracket character classes). A literal that matches no workspace
 /// member, or a glob that matches none, produces a [`CoverageGateError`].
 pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_packages: &[String]) -> Result<Report, CoverageGateError> {
     let gated = resolve_gated(workspace, gated_packages)?;
@@ -190,9 +190,9 @@ fn diagnostics(files: &[&FileReport], member: &Member, status: Status) -> Vec<Li
 /// workspace.
 ///
 /// An empty `packages` list selects every member. Otherwise each
-/// selector is matched against member names: bare identifiers require
-/// exact match, while selectors containing `*` or `?` are matched as
-/// Unix shell globs (mirroring `cargo build -p 'tokio-*'`). A selector
+/// selector is matched against member names: bare identifiers require an
+/// exact match, while Unix shell globs support `*`, `?`, and bracket character
+/// classes (mirroring `cargo build -p 'tokio-*'`). A selector
 /// that matches no member is a configuration error. Members matched by
 /// multiple selectors appear only once.
 pub(crate) fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -> Result<Vec<&'w Member>, CoverageGateError> {
@@ -202,9 +202,15 @@ pub(crate) fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -
     let mut seen: HashSet<&str> = HashSet::new();
     let mut out = Vec::with_capacity(packages.len());
     for spec in packages {
-        let matches: Vec<&Member> = workspace.members.iter().filter(|m| glob_matches(spec, &m.name)).collect();
+        let diagnostic = package_glob::diagnostic(spec);
+        let pattern = package_glob::parse(spec).map_err(|error| InvalidPackageSelectorError::caused_by(diagnostic.clone(), error))?;
+        let matches: Vec<&Member> = workspace
+            .members
+            .iter()
+            .filter(|member| spec == &member.spec() || pattern.matches(&member.name))
+            .collect();
         if matches.is_empty() {
-            return Err(UnknownPackageSelectorError::new(spec.clone()).into());
+            return Err(UnknownPackageSelectorError::new(diagnostic).into());
         }
         for m in matches {
             if seen.insert(m.name.as_str()) {
@@ -213,40 +219,6 @@ pub(crate) fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -
         }
     }
     Ok(out)
-}
-
-/// Tiny Unix-style glob matcher: `*` matches any run of characters
-/// (including empty), `?` matches exactly one character. Everything
-/// else matches literally. No character classes, no escapes — package
-/// names are simple identifiers, so this is sufficient.
-fn glob_matches(pattern: &str, name: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let n: Vec<char> = name.chars().collect();
-    let (mut pattern_index, mut name_index) = (0, 0);
-    let mut star = None;
-
-    while name_index < n.len() {
-        if pattern_index < p.len() && (p[pattern_index] == '?' || p[pattern_index] == n[name_index]) {
-            pattern_index += 1;
-            name_index += 1;
-        } else if
-        // #[gamma::skip(cond.always_true, tag = "timeout", reason = "treating every remaining character as a star prevents the matcher from consuming ordinary literals")]
-        pattern_index < p.len() && p[pattern_index] == '*' {
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, tag = "timeout", reason = "the matcher must advance past the star before attempting to match its suffix")]
-            pattern_index = pattern_index.saturating_add(1);
-            star = Some((pattern_index, name_index));
-        } else if let Some((suffix_index, star_match)) = star.as_mut() {
-            pattern_index = *suffix_index;
-            // #[gamma::skip(stmt.delete_assign, literal.int_decrement, tag = "timeout", reason = "star backtracking must advance through the candidate name")]
-            *star_match = star_match.saturating_add(1);
-            // #[gamma::skip(stmt.delete_assign, tag = "timeout", reason = "the next comparison must use the advanced star match position")]
-            name_index = *star_match;
-        } else {
-            return false;
-        }
-    }
-
-    p[pattern_index..].iter().all(|token| *token == '*')
 }
 
 /// Compare `totals` against `threshold` and classify the outcome.
@@ -306,6 +278,7 @@ mod tests {
     fn make_member(name: &str, manifest_dir: &str, min_lines_percent: Option<f64>) -> Member {
         Member {
             name: name.to_owned(),
+            version: "1.2.3".to_owned(),
             manifest_dir: PathBuf::from(manifest_dir),
             min_lines_percent,
             expect_no_coverable_lines: false,
@@ -315,6 +288,7 @@ mod tests {
     fn make_member_expect_empty(name: &str, manifest_dir: &str) -> Member {
         Member {
             name: name.to_owned(),
+            version: "1.2.3".to_owned(),
             manifest_dir: PathBuf::from(manifest_dir),
             min_lines_percent: None,
             expect_no_coverable_lines: true,
@@ -486,11 +460,32 @@ mod tests {
     }
 
     #[test]
+    fn exact_name_and_version_selector_matches_member() {
+        let ws = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", None)], None);
+        let report = make_report(vec![make_file("/repo/crates/alpha/src/lib.rs", 10, 10)]);
+        let evaluated = evaluate(&report, &ws, &["alpha@1.2.3".to_owned()]).expect("exact package spec must match");
+        assert_eq!(evaluated.outcomes.len(), 1);
+        assert_eq!(evaluated.outcomes[0].name, "alpha");
+    }
+
+    #[test]
     fn glob_matching_no_member_errors() {
         let ws = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", None)], None);
         let report = make_report(Vec::new());
         let err = evaluate(&report, &ws, &["beta*".to_owned()]).expect_err("no match must error");
         assert!(err.to_string().contains("beta*"));
+    }
+
+    #[test]
+    fn selector_errors_encode_terminal_controls() {
+        let ws = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", None)], None);
+        let report = make_report(Vec::new());
+        for selector in ["lib[\n\r\u{1b}[2J", "missing\n\r\u{1b}[2J"] {
+            let error = evaluate(&report, &ws, &[selector.to_owned()]).expect_err("selector must fail");
+            let rendered = error.to_string();
+            assert!(!rendered.contains(selector));
+            assert!(rendered.contains(r"\n\r\u{1b}[2J"));
+        }
     }
 
     #[test]
@@ -509,54 +504,6 @@ mod tests {
         let r = evaluate(&report, &ws, &["alpha".to_owned(), "alpha*".to_owned()]).expect("evaluate");
         let names: Vec<_> = r.outcomes.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "alpha_macros"]);
-    }
-
-    #[test]
-    fn glob_matcher_handles_wildcards() {
-        assert!(super::glob_matches("alpha*", "alpha"));
-        assert!(super::glob_matches("alpha*", "alpha_macros"));
-        assert!(super::glob_matches("*macros", "alpha_macros"));
-        assert!(super::glob_matches("*alpha*", "my_alpha_lib"));
-        assert!(super::glob_matches("a?pha", "alpha"));
-        assert!(!super::glob_matches("alpha", "alphax"));
-        assert!(!super::glob_matches("alpha*", "beta"));
-        assert!(!super::glob_matches("a?pha", "axxpha"));
-        // Multiple consecutive `*` collapse.
-        assert!(super::glob_matches("a**b", "ab"));
-        assert!(super::glob_matches("a**b", "axyzb"));
-        // Pattern with literal chars after `*` that the name doesn't satisfy.
-        // Guards the `pi == p.len()` shortcut in glob_inner from being short-circuited.
-        assert!(!super::glob_matches("a*b", "ac"));
-        assert!(!super::glob_matches("a*b", "axyz"));
-        // `?` requires exactly one remaining name char: a trailing `?`
-        // with the name exhausted must not match (guards the
-        // `ni >= n.len()` early-return in the `?` arm).
-        assert!(!super::glob_matches("a?", "a"));
-        assert!(!super::glob_matches("alpha?", "alpha"));
-        assert!(glob_matches("*a", "a"));
-        assert!(glob_matches("*a", "ba"));
-        assert!(!glob_matches("*a", ""));
-        assert!(!glob_matches("?a", "a"));
-        assert!(glob_matches("ab*cd", "abxxcd"));
-        assert!(!glob_matches(&format!("{}z", "*".repeat(10_000)), &"a".repeat(10_000)));
-    }
-
-    #[test]
-    fn glob_backtracking_matches_the_complete_pattern() {
-        for (pattern, name, expected) in [
-            ("*ab", "aaab", true),
-            ("*ab", "aaaa", false),
-            ("a*ab", "aaab", true),
-            ("a*ab", "aaba", false),
-            ("*a*b", "xxaayb", true),
-            ("*a*b", "xxaaya", false),
-            ("ab**cd", "abxxcd", true),
-            ("ab**cd", "abxxce", false),
-            ("?*?", "ab", true),
-            ("?*?", "a", false),
-        ] {
-            assert_eq!(glob_matches(pattern, name), expected, "{pattern:?} against {name:?}");
-        }
     }
 
     #[test]

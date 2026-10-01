@@ -530,22 +530,9 @@ fn every_return_type_is_served_the_values_that_belong_to_it() {
         ("f32", &["fn_value.minus_one=-1.0", "fn_value.one=1.0", "fn_value.zero=0.0"]),
         ("f64", &["fn_value.minus_one=-1.0", "fn_value.one=1.0", "fn_value.zero=0.0"]),
         ("&'static str", &["fn_value.empty_string=\"\"", "fn_value.xyzzy_string=\"xyzzy\""]),
-        // A string literal is `&'static str` and will not type-check where a mutable slice was
-        // promised, so a leaked boxed `str` stands in for it.
-        (
-            "&'static mut str",
-            &[
-                "fn_value.empty_string=Box::leak(String::new().into_boxed_str())",
-                "fn_value.xyzzy_string=Box::leak(String::from(\"xyzzy\").into_boxed_str())",
-            ],
-        ),
-        (
-            "&mut str",
-            &[
-                "fn_value.empty_string=Box::leak(String::new().into_boxed_str())",
-                "fn_value.xyzzy_string=Box::leak(String::from(\"xyzzy\").into_boxed_str())",
-            ],
-        ),
+        // No automatic replacement may retain one fresh allocation per invocation.
+        ("&'static mut str", &[]),
+        ("&mut str", &[]),
         (
             "String",
             &["fn_value.empty_string=String::new()", "fn_value.xyzzy_string=\"xyzzy\".to_owned()"],
@@ -748,8 +735,11 @@ fn parameter_shadowing_skips_const_functions_and_reference_patterns() {
 }
 
 #[test]
-fn f4_semantics_require_positive_type_and_source_shape_evidence() {
+fn mutators_require_positive_type_and_source_shape_evidence() {
     let cfg = CfgSet::unconditional();
+    // Each case omits one source-visible fact the collector requires before emitting a candidate:
+    // expression position, direct defaultability, iterator shape, an unqualified local signature,
+    // or an array whose guard preserves temporary lifetimes.
     let cases = [
         (
             "struct Flags { applied: bool } fn f(applied: bool) -> Flags { Flags { applied } }",
@@ -781,33 +771,54 @@ fn f4_semantics_require_positive_type_and_source_shape_evidence() {
 }
 
 #[test]
-fn f4_semantics_remain_available_with_positive_evidence() {
-    let source = "
-        #[derive(Default)] struct Flags { applied: bool }
-        fn local() -> usize { 1 }
-        fn fields(applied: bool) -> Flags { Flags { applied: applied } }
-        fn fallback(value: Option<usize>, other: usize) -> usize { value.unwrap_or(other) }
-        fn filtered(value: impl Iterator<Item = usize>) -> impl Iterator<Item = usize> {
-            value.filter(|value| *value > 0)
-        }
-        fn calls() -> usize { local() }
-        fn arrays() { let _ = [1, 2]; }
-    ";
-    let found = mutators(
-        source,
-        "bool_expr.negate,fallback.unwrap_or_to_default,iter.remove_filter,call.replace_with_default,call_result.default,collection.reverse_array",
-        &CfgSet::unconditional(),
-    );
-
-    for expected in [
-        "bool_expr.negate",
-        "fallback.unwrap_or_to_default",
-        "iter.remove_filter",
-        "call.replace_with_default",
-        "call_result.default",
-        "collection.reverse_array",
+fn mutators_remain_available_with_positive_evidence() {
+    // The paired fixture supplies those facts explicitly, proving that the conservative gates
+    // withhold only unresolved cases rather than disabling the mutator families.
+    for (source, selection, expected) in [
+        (
+            "#[derive(Default)] struct Flags { applied: bool } fn fields(applied: bool) -> Flags { Flags { applied: applied } }",
+            "bool_expr.negate",
+            vec![("bool_expr.negate", "!(applied)", "applied")],
+        ),
+        (
+            "fn fallback(value: Option<usize>, other: usize) -> usize { value.unwrap_or(other) }",
+            "fallback.unwrap_or_to_default",
+            vec![(
+                "fallback.unwrap_or_to_default",
+                "(value).unwrap_or_default()",
+                "value.unwrap_or(other)",
+            )],
+        ),
+        (
+            "fn filtered(value: impl Iterator<Item = usize>) -> impl Iterator<Item = usize> { value.filter(|value| *value > 0) }",
+            "iter.remove_filter",
+            vec![("iter.remove_filter", "value", "value.filter(|value| *value > 0)")],
+        ),
+        (
+            "fn local() -> usize { 1 } fn calls() -> usize { local() }",
+            "call.replace_with_default,call_result.default",
+            vec![
+                ("call.replace_with_default", "Default::default()", "local()"),
+                ("call_result.default", "{ let _ = local(); Default::default() }", "local()"),
+            ],
+        ),
+        (
+            "fn arrays() { let _ = [1, 2]; }",
+            "collection.reverse_array",
+            vec![("collection.reverse_array", "[2, 1]", "[1, 2]")],
+        ),
     ] {
-        assert!(found.contains(&expected), "{expected}: {found:?}");
+        let found = collect_in(
+            &SourceFile::parse("test.rs", source.to_owned()).unwrap(),
+            &Selection::parse(selection).unwrap(),
+            &CfgSet::unconditional(),
+        );
+        let found: Vec<_> = found
+            .iter()
+            .map(|candidate| (candidate.mutator, candidate.replacement.as_str(), &source[candidate.span.clone()]))
+            .collect();
+
+        assert_eq!(found, expected, "{selection}: {source}");
     }
 }
 
@@ -1282,13 +1293,19 @@ fn rename_method_refuses_call_text_past_the_file() {
 }
 
 #[test]
-fn typed_and_inferred_let_else_divergence_is_visited() {
-    for source in [
-        "fn f(value: Option<usize>) { loop { let Some(index): Option<usize> = value else { continue; }; consume(index); } }",
-        "fn f(value: usize, values: &[u8]) { loop { let index = value else { continue; }; consume(values[index]); } }",
+fn typed_and_inferred_let_else_divergence_repairs_are_each_visited() {
+    for (source, expected) in [
+        (
+            "fn f(value: Option<usize>) { loop { let Some(index): Option<usize> = value else { continue; }; consume(index); } }",
+            "loop.continue_to_break",
+        ),
+        (
+            "fn f(value: usize, values: &[u8]) { loop { let index = value else { continue; }; consume(values[index]); } }",
+            "expr.increment",
+        ),
     ] {
         let found = mutators(source, "loop.continue_to_break,expr.increment", &CfgSet::unconditional());
-        assert!(!found.is_empty(), "{source}: {found:?}");
+        assert!(found.contains(&expected), "{source}: expected {expected}: {found:?}");
     }
 }
 

@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #![cfg(not(miri))]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 
 //! End-to-end tests of the command-line surface, driven through a fake host.
 
@@ -599,7 +601,7 @@ fn list_help_shows_modes_instead_of_unrelated_run_options() {
 }
 
 #[test]
-fn list_mode_help_contains_only_that_modes_options() {
+fn list_mode_help_contains_only_options_for_that_mode() {
     let mut host = Sink::default();
     let code = run(&mut host, ["cargo-gamma", "gamma", "list", "mutators", "--help"]);
     let help = host.out();

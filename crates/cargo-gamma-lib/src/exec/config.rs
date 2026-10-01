@@ -100,7 +100,7 @@ pub struct Config {
     pub test_packages: Vec<String>,
 
     /// Whether only library unit-test harnesses may decide verdicts.
-    pub test_lib: bool,
+    pub(crate) test_lib: bool,
 
     /// Test target name globs whose tests may decide a verdict. Empty means all of them.
     pub include_tests: Vec<String>,
@@ -128,7 +128,7 @@ pub struct Config {
     pub nextest: bool,
 
     /// Shared test-resource capacities, after command-line and file policy are merged.
-    pub resources: Vec<ResourceLimit>,
+    pub(crate) resources: Vec<ResourceLimit>,
 
     /// How an incremental run reuses state from the previous run.
     pub incremental: IncrementalMode,
@@ -229,6 +229,7 @@ mod tests {
         assert!(!config.leak_dirs);
         assert!(config.cache_dir.is_none());
         assert!(!config.copy_ignored);
+        assert!(!config.test_lib);
         assert!(!config.test_workspace);
         assert!(!config.optimize_test_execution);
         assert!(!config.whole_test_binaries);

@@ -642,6 +642,10 @@ const LIST_CAP: usize = 4 * 1024 * 1024;
 /// the answer for not spinning a core for the length of the budget on the one that hangs.
 const LIST_POLL: Duration = Duration::from_millis(5);
 
+/// Listing has three policies: ordinary census applies user filters and rejects an empty listing;
+/// selected-list validation applies filters but accepts empty; resource discovery bypasses user
+/// filters, retains marker records, and accepts empty.
+///
 /// Asks a test binary to name its tests.
 ///
 /// The binary is run directly even when the run is under nextest, because listing is a question
@@ -653,17 +657,25 @@ const LIST_POLL: Duration = Duration::from_millis(5);
 /// `fn main()` ignores the flags and runs its suite instead. Either way the binary is left without
 /// a census and therefore run in full, which is the answer this had before the census existed.
 pub(super) fn list(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
-    list_raw(work, binary).map(|names| names.into_iter().filter(|name| !super::resources::is_marker(name)).collect())
+    list_selected_nonempty(work, binary).map(|mut names| {
+        names.retain(|name| !super::resources::is_marker(name));
+        names
+    })
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(super) fn list_selected_allow_empty(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
-    let command = listing_command(work, binary, true);
-    listed(command, LIST_BUDGET).map(|names| names.into_iter().filter(|name| !super::resources::is_marker(name)).collect())
+/// Lists user-selected cases, removes resource markers, and accepts an empty successful listing.
+pub(super) fn list_selected_allow_empty(work: &Workspace, binary: &TestBinary, request: MemoryRequest) -> Option<Vec<Box<str>>> {
+    let command = listing_command(work, binary, true, false);
+    listed_with_request(command, LIST_BUDGET, request).map(|mut names| {
+        names.retain(|name| !super::resources::is_marker(name));
+        names
+    })
 }
 
-pub(super) fn list_raw(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
-    let command = listing_command(work, binary, true);
+/// Lists all libtest records with user filters applied, rejecting an empty successful listing.
+pub(super) fn list_selected_nonempty(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
+    let command = listing_command(work, binary, true, false);
 
     // A successful process with no libtest records may be a custom harness that ignored both
     // flags. Without a positive record there is no evidence that the output was a complete census,
@@ -671,16 +683,20 @@ pub(super) fn list_raw(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<
     listed(command, LIST_BUDGET).filter(|names| !names.is_empty())
 }
 
-pub(super) fn list_resource_markers(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
+/// Lists without user filters, retaining resource markers and accepting an empty harness.
+pub(super) fn list_resource_markers(work: &Workspace, binary: &TestBinary, request: MemoryRequest) -> Option<Vec<Box<str>>> {
     #[cfg(test)]
     RESOURCE_LISTING_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
 
-    let command = listing_command(work, binary, false);
+    let command = listing_command(work, binary, false, true);
 
     // An empty libtest harness is a successful enumeration with no resource markers. Unlike the
     // execution census, resource discovery needs that distinction from a launch failure so a
     // package with no tests does not make the campaign fail closed.
-    listed(command, LIST_BUDGET)
+    listed_with_request(command, LIST_BUDGET, request).map(|mut names| {
+        names.retain(|name| super::resources::is_marker(name));
+        names
+    })
 }
 
 #[cfg(test)]
@@ -699,10 +715,16 @@ pub(super) fn resource_listing_calls() -> usize {
 }
 
 /// Builds the direct `--list` invocation for one test binary.
-fn listing_command(work: &Workspace, binary: &TestBinary, include_filters: bool) -> Command {
+fn listing_command(work: &Workspace, binary: &TestBinary, include_filters: bool, ignored_only: bool) -> Command {
     let mut command = Command::new(binary.path.as_std_path());
 
     let _ = command.args(["--list", "--format=terse"]);
+    if ignored_only {
+        // Resource attributes expand to ignored marker tests. Asking libtest for ignored records
+        // authenticates that provenance instead of treating an ordinary test with a reserved-looking
+        // name as scheduling metadata.
+        let _ = command.arg("--ignored");
+    }
     if include_filters {
         // The user's own filters, so the census only ever records tests that are actually going to
         // run. Without them the listing discovers names outside the filter and feeds them back as a
@@ -772,19 +794,21 @@ fn read_listing(pipe: &mut impl io::Read) -> (Vec<u8>, bool) {
 /// believes some tests do not exist, and a test believed not to exist is one no mutant is ever run
 /// against.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn listed(mut command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
+fn listed(command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
+    listed_with_request(command, budget, MemoryRequest::default())
+}
+
+fn listed_with_request(mut command: Command, budget: Duration, request: MemoryRequest) -> Option<Vec<Box<str>>> {
     enum ListingStatus {
         Observed(std::process::ExitStatus),
         Missing,
     }
 
-    // Nothing is metered — the question is what the binary is, not what it costs — so the request
-    // asks for no measurement and no ceiling. Containment does not follow that request: `prepare`
-    // seals every launch it can, and the listing of a `harness = false` target is exactly the kind
-    // of repository-controlled code that spawns things and leaves the process group behind it.
+    // Resource discovery carries the pre-baseline memory policy into this repository-controlled
+    // launch. Ordinary optional census listing uses the default unmetered request.
     let _ = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
 
-    let prepared = prepare(command, MemoryRequest::default()).ok()?;
+    let prepared = prepare(command, request).ok()?;
     let spawned = prepared.spawn().ok()?;
 
     let mut subtree = match ProcessTree::adopt(spawned) {
@@ -1271,8 +1295,8 @@ fn sample(work: &Workspace, binary: &TestBinary, names: &[&str], path: &Utf8Path
         census: Some(path),
     };
 
-    let started = Instant::now();
     let _resources = work.acquire_resources(binary, Only::These(names));
+    let started = Instant::now();
 
     match observe(work, binary, attempt).verdict {
         Verdict::Passed => {}
@@ -1470,7 +1494,7 @@ mod tests {
     fn listing_output_beyond_the_cap_is_not_authoritative() {
         let (_directory, work) =
             crate::testing::helper_workspace("census-list-cap", &["flood:4194305", "print:meaningful::killer: test", "exit:0"]);
-        let command = listing_command(&work, &crate::testing::helper(), true);
+        let command = listing_command(&work, &crate::testing::helper(), true, false);
 
         assert!(listed(command, Duration::from_secs(30)).is_none());
     }
@@ -1478,7 +1502,7 @@ mod tests {
     #[test]
     fn listing_output_exactly_at_the_cap_is_still_a_whole_stream() {
         let (_directory, work) = crate::testing::helper_workspace("census-list-cap-exact", &["flood:4194304", "exit:0"]);
-        let command = listing_command(&work, &crate::testing::helper(), true);
+        let command = listing_command(&work, &crate::testing::helper(), true, false);
 
         assert_eq!(
             listed(command, Duration::from_secs(30)),
@@ -1490,7 +1514,7 @@ mod tests {
     #[test]
     fn listing_reader_thread_failure_degrades_to_no_census() {
         let (_directory, work) = crate::testing::helper_workspace("census-list-thread", &["print:a::test: test", "exit:0"]);
-        let command = listing_command(&work, &crate::testing::helper(), true);
+        let command = listing_command(&work, &crate::testing::helper(), true, false);
         let _refused = faults::arm(Fault::Thread);
 
         assert!(listed(command, Duration::from_secs(30)).is_none());
@@ -1499,7 +1523,7 @@ mod tests {
     #[test]
     fn a_listing_child_that_cannot_be_adopted_degrades_to_no_census() {
         let (_directory, work) = crate::testing::helper_workspace("census-list-adopt", &["print:a::test: test", "exit:0"]);
-        let command = listing_command(&work, &crate::testing::helper(), true);
+        let command = listing_command(&work, &crate::testing::helper(), true, false);
         let _refused = process_faults::arm(ProcessFault::Adopt);
 
         assert!(listed(command, Duration::from_secs(30)).is_none());
@@ -1514,7 +1538,7 @@ mod tests {
         let (_scratch, work) = crate::testing::helper_workspace("list-loader", &["exit:0"]);
         let mut binary = crate::testing::helper();
         binary.manifest_dir = work.root().join("crate");
-        let command = listing_command(&work, &binary, true);
+        let command = listing_command(&work, &binary, true, false);
         let arguments: Vec<_> = command.get_args().collect();
         let configured = command
             .get_envs()
@@ -1540,6 +1564,22 @@ mod tests {
             cache_home,
             expected_cache_home.as_deref().map(|path| path.as_std_path().as_os_str()),
             "the listing launch omitted the isolated cache home inherited by test processes"
+        );
+    }
+
+    #[test]
+    fn resource_marker_listing_requests_only_ignored_tests() {
+        let (_scratch, work) = crate::testing::helper_workspace("list-resource-markers", &["exit:0"]);
+        let command = listing_command(&work, &crate::testing::helper(), false, true);
+        let arguments: Vec<_> = command.get_args().collect();
+
+        assert_eq!(
+            arguments,
+            [
+                std::ffi::OsStr::new("--list"),
+                std::ffi::OsStr::new("--format=terse"),
+                std::ffi::OsStr::new("--ignored"),
+            ]
         );
     }
 
@@ -3193,7 +3233,11 @@ mod tests {
             "when-arg:tests::z|write-le:GAMMA_CENSUS|7|4294967293",
             "exit:0",
         ];
+        // Deliberately above the helper's expected runtime: this test covers persistence and
+        // reporting, not the economic deadline.
+        const GENEROUS_WALK_BUDGET: Duration = Duration::from_secs(30);
         let _serial = WALK_TEST.lock().expect("the census walk test lock is not poisoned");
+
         let (_directory, mut work) = crate::testing::helper_workspace("census-take-complete-", SCRIPT);
         isolate_census_base(&mut work);
         let mut binary = crate::testing::helper();
@@ -3206,7 +3250,7 @@ mod tests {
             &work,
             core::slice::from_ref(&binary),
             &targets,
-            Duration::from_secs(30),
+            GENEROUS_WALK_BUDGET,
             1,
             Stall::NONE,
             &mut events,

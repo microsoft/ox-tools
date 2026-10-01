@@ -3,13 +3,59 @@
 
 //! What the file's own declarations say about the types a function mentions.
 
-use syn::{GenericParam, Generics, ReturnType, Type};
+use std::borrow::Cow;
+
+use syn::{GenericArgument, GenericParam, Generics, PathArguments, ReturnType, Type};
 
 use super::super::defaults::{DefaultPaths, standard_defaulted_parameters};
 use super::predicates::payload;
 use super::values::{Kind, resolve_type, strip, type_name};
 use crate::ops::collect::Defaults;
 use crate::{HashMap, HashSet};
+
+#[derive(Clone, PartialEq)]
+pub(super) struct Alias {
+    pub(super) parameters: Vec<String>,
+    pub(super) target: Type,
+}
+
+fn substitute_type(ty: &Type, substitutions: &HashMap<String, Type>) -> Type {
+    if let Type::Path(path) = ty
+        && path.qself.is_none()
+        && let Some(ident) = path.path.get_ident()
+        && let Some(replacement) = substitutions.get(&ident.to_string())
+    {
+        return replacement.clone();
+    }
+
+    let mut substituted = ty.clone();
+    match &mut substituted {
+        Type::Array(array) => *array.elem = substitute_type(&array.elem, substitutions),
+        Type::Group(group) => *group.elem = substitute_type(&group.elem, substitutions),
+        Type::Paren(paren) => *paren.elem = substitute_type(&paren.elem, substitutions),
+        Type::Path(path) => {
+            for segment in &mut path.path.segments {
+                if let PathArguments::AngleBracketed(arguments) = &mut segment.arguments {
+                    for argument in &mut arguments.args {
+                        if let GenericArgument::Type(inner) = argument {
+                            *inner = substitute_type(inner, substitutions);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Ptr(pointer) => *pointer.elem = substitute_type(&pointer.elem, substitutions),
+        Type::Reference(reference) => *reference.elem = substitute_type(&reference.elem, substitutions),
+        Type::Slice(slice) => *slice.elem = substitute_type(&slice.elem, substitutions),
+        Type::Tuple(tuple) => {
+            for element in &mut tuple.elems {
+                *element = substitute_type(element, substitutions);
+            }
+        }
+        _ => {}
+    }
+    substituted
+}
 
 /// What the value-choosing functions know about the file they are reasoning inside.
 ///
@@ -30,7 +76,7 @@ pub(super) struct Types<'a> {
     pub(super) defaults: &'a Defaults,
 
     /// Locally visible aliases, used to preserve their declared shape.
-    pub(super) aliases: Option<&'a HashMap<String, Option<Type>>>,
+    pub(super) aliases: Option<&'a HashMap<String, Option<Alias>>>,
 
     /// The concrete type named by `Self` inside an `impl` block.
     pub(super) self_type: Option<&'a Type>,
@@ -40,6 +86,39 @@ pub(super) struct Types<'a> {
 }
 
 impl Types<'_> {
+    fn instantiate_alias(&self, ty: &Type) -> Option<Type> {
+        let aliases = self.aliases?;
+        let mut resolved = ty.clone();
+        let mut visited = HashSet::default();
+        let mut changed = false;
+
+        loop {
+            let Type::Path(path) = strip(&resolved) else {
+                return changed.then_some(resolved);
+            };
+            if path.qself.is_some() || path.path.segments.len() != 1 {
+                return changed.then_some(resolved);
+            }
+
+            let name = path.path.segments[0].ident.to_string();
+            if !visited.insert(name.clone()) {
+                return None;
+            }
+            let Some(alias) = aliases.get(&name).and_then(Option::as_ref) else {
+                return changed.then_some(resolved);
+            };
+            let arguments = super::values::type_argument_values(&resolved);
+            let substitutions = alias
+                .parameters
+                .iter()
+                .zip(arguments)
+                .map(|(parameter, argument)| (parameter.clone(), argument.clone()))
+                .collect();
+            resolved = substitute_type(&alias.target, &substitutions);
+            changed = true;
+        }
+    }
+
     pub(super) fn resolve_alias<'a>(&'a self, ty: &'a Type) -> &'a Type {
         let Some(aliases) = self.aliases else {
             return ty;
@@ -60,22 +139,18 @@ impl Types<'_> {
             let Some(target) = aliases.get(&name).and_then(Option::as_ref) else {
                 return resolved;
             };
-            resolved = target;
+            resolved = &target.target;
         }
     }
 
-    pub(super) fn payload<'a>(&'a self, ty: &'a Type, index: usize) -> Option<&'a Type> {
-        let resolved = self.resolve_alias(ty);
-        let payload = payload(resolved, index)?;
-        let Type::Path(path) = strip(payload) else {
-            return Some(payload);
-        };
-
-        if !core::ptr::eq(ty, resolved) && path.path.get_ident().is_some() {
-            return super::values::type_argument(ty, index).or(Some(payload));
+    pub(super) fn payload<'a>(&'a self, ty: &'a Type, index: usize) -> Option<Cow<'a, Type>> {
+        if let Some(resolved) = self.instantiate_alias(ty) {
+            return payload(&resolved, index).map(|payload| Cow::Owned(payload.clone()));
         }
 
-        Some(payload)
+        let resolved = self.resolve_alias(ty);
+        let payload = payload(resolved, index)?;
+        Some(Cow::Borrowed(payload))
     }
 
     /// Returns positive source-visible evidence that a value of `ty` can be defaulted.
@@ -87,8 +162,15 @@ impl Types<'_> {
             .unwrap_or(ty);
 
         match resolve_type(concrete) {
-            Kind::Unit | Kind::Bool | Kind::Signed | Kind::Unsigned | Kind::Float | Kind::String | Kind::Option | Kind::Result => true,
+            Kind::Unit | Kind::Bool | Kind::Signed | Kind::Unsigned | Kind::Float | Kind::String | Kind::Option => true,
             Kind::Collection => {
+                if self
+                    .defaults
+                    .defines(&type_name(concrete).map(ToString::to_string).unwrap_or_default())
+                {
+                    return self.local_generic_default(concrete);
+                }
+
                 let name = type_name(concrete).map(ToString::to_string).unwrap_or_default();
                 if name == "HashSet" {
                     payload(concrete, 1).is_none_or(|hasher| self.has_default(hasher))
@@ -97,6 +179,12 @@ impl Types<'_> {
                 }
             }
             Kind::Map => {
+                if self
+                    .defaults
+                    .defines(&type_name(concrete).map(ToString::to_string).unwrap_or_default())
+                {
+                    return self.local_generic_default(concrete);
+                }
                 let name = type_name(concrete).map(ToString::to_string).unwrap_or_default();
                 if name == "HashMap" {
                     payload(concrete, 2).is_none_or(|hasher| self.has_default(hasher))
@@ -104,6 +192,7 @@ impl Types<'_> {
                     true
                 }
             }
+
             Kind::Wrapper => payload(concrete, 0).is_some_and(|inner| self.has_default(inner)),
             Kind::Tuple => {
                 matches!(strip(concrete), Type::Tuple(tuple) if tuple.elems.iter().all(|element| self.has_default(element)))
@@ -112,15 +201,20 @@ impl Types<'_> {
                 let Type::Path(path) = strip(concrete) else {
                     return false;
                 };
-                let segments = path
-                    .path
-                    .segments
-                    .iter()
-                    .map(|segment| segment.ident.to_string())
-                    .collect::<Vec<_>>();
-                if matches!(segments.as_slice(), [root, module, error] if matches!(root.as_str(), "std" | "core") && module == "fmt" && error == "Error")
-                    || matches!(segments.as_slice(), [module, error] if module == "fmt" && error == "Error")
-                {
+                if path.path.is_ident("str") {
+                    return false;
+                }
+                let segments = &path.path.segments;
+                let standard_fmt_error = segments.len() == 3
+                    && segments
+                        .first()
+                        .is_some_and(|segment| segment.ident == "std" || segment.ident == "core")
+                    && segments.iter().nth(1).is_some_and(|segment| segment.ident == "fmt")
+                    && segments.last().is_some_and(|segment| segment.ident == "Error");
+                let relative_fmt_error = segments.len() == 2
+                    && segments.first().is_some_and(|segment| segment.ident == "fmt")
+                    && segments.last().is_some_and(|segment| segment.ident == "Error");
+                if standard_fmt_error || relative_fmt_error {
                     return true;
                 }
                 if path.path.is_ident("Error")
@@ -138,8 +232,48 @@ impl Types<'_> {
                     .is_some_and(|ident| self.defaulted.contains(&ident.to_string()))
                     || self.defaults.has_default(concrete)
             }
-            Kind::StaticStr | Kind::MutStr | Kind::NonZero | Kind::Cow | Kind::Iterator | Kind::Reference => false,
+            Kind::Result | Kind::StaticStr | Kind::MutStr | Kind::NonZero | Kind::Cow | Kind::Iterator | Kind::Reference => false,
         }
+    }
+
+    /// Whether a collection-shaped local type must use the trait constructor.
+    ///
+    /// Standard collections have stable inherent `new` constructors. A local type may deliberately
+    /// reuse one of their names without providing that constructor; positive `Default` evidence is
+    /// then the only constructor syntax the source proves.
+    pub(super) fn prefers_default_constructor(&self, ty: &Type) -> bool {
+        let ty = self.resolve_alias(ty);
+        let concrete = self
+            .concrete_self_type(ty)
+            .or_else(|| self.concrete_self_associated_type(ty))
+            .unwrap_or(ty);
+        let name = type_name(concrete).map(ToString::to_string).unwrap_or_default();
+
+        self.defaults.defines(&name) && self.local_generic_default(concrete)
+    }
+
+    pub(super) fn is_local_type(&self, ty: &Type) -> bool {
+        let ty = self.resolve_alias(ty);
+        let concrete = self
+            .concrete_self_type(ty)
+            .or_else(|| self.concrete_self_associated_type(ty))
+            .unwrap_or(ty);
+        type_name(concrete).is_some_and(|name| self.defaults.defines(&name.to_string()))
+    }
+
+    fn local_generic_default(&self, ty: &Type) -> bool {
+        self.defaults.declares_default(ty)
+            && matches!(
+                strip(ty),
+                Type::Path(path)
+                    if path.path.segments.last().is_some_and(|segment| match &segment.arguments {
+                        syn::PathArguments::None => true,
+                        syn::PathArguments::AngleBracketed(arguments) => arguments.args.iter().all(|argument| {
+                            !matches!(argument, syn::GenericArgument::Type(argument) if !self.has_default(argument))
+                        }),
+                        syn::PathArguments::Parenthesized(_) => false,
+                    })
+            )
     }
 
     /// Returns whether a type has no `Default` to reach for.
@@ -153,7 +287,8 @@ impl Types<'_> {
             .unwrap_or(ty);
         let concrete = self.resolve_alias(concrete);
 
-        is_foreign_error(concrete, self.imports)
+        matches!(strip(concrete), Type::Path(path) if path.path.is_ident("str"))
+            || is_foreign_error(concrete, self.imports)
             || Self::is_standard_time_without_default(concrete, self.imports)
             || self.defaults.lacks_default(concrete)
     }
@@ -209,6 +344,10 @@ impl Types<'_> {
                 .is_some_and(|path| matches!(path.as_slice(), [root] if matches!(root.as_str(), "std" | "core"))),
             _ => false,
         }
+    }
+
+    pub(super) fn concrete_self_type_or_associated<'a>(&'a self, ty: &Type) -> Option<&'a Type> {
+        self.concrete_self_type(ty).or_else(|| self.concrete_self_associated_type(ty))
     }
 
     fn concrete_self_type<'a>(&'a self, ty: &Type) -> Option<&'a Type> {
@@ -356,7 +495,8 @@ pub(super) fn is_abstract_type(ty: &Type, abstracts: &[String]) -> bool {
             };
 
             if path.path.segments.len() > 1 {
-                return abstracts.contains(&path.path.segments[0].ident.to_string());
+                let root = &path.path.segments[0].ident;
+                return root == "Self" || abstracts.contains(&root.to_string());
             }
 
             // `Box<dyn Reader>` is exactly as unconstructable as the `dyn Reader` inside it.
@@ -390,6 +530,7 @@ pub(super) fn undefaulted_parameters(generics: &Generics, defaults: &DefaultPath
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use syn::punctuated::Punctuated;
     use syn::{Path, PathSegment, TypePath, parse_quote};
@@ -480,7 +621,22 @@ mod tests {
         let abstracts = Vec::new();
         let defaulted = Vec::new();
         let imports = HashMap::default();
-        let aliases = HashMap::from_iter([("A".to_owned(), Some(parse_quote!(B))), ("B".to_owned(), Some(parse_quote!(A)))]);
+        let aliases = HashMap::from_iter([
+            (
+                "A".to_owned(),
+                Some(Alias {
+                    parameters: Vec::new(),
+                    target: parse_quote!(B),
+                }),
+            ),
+            (
+                "B".to_owned(),
+                Some(Alias {
+                    parameters: Vec::new(),
+                    target: parse_quote!(A),
+                }),
+            ),
+        ]);
         let types = Types {
             abstracts: &abstracts,
             defaulted: &defaulted,
@@ -493,6 +649,61 @@ mod tests {
         let original: Type = parse_quote!(A);
 
         assert_eq!(types.resolve_alias(&original), &original);
+    }
+
+    #[test]
+    fn chained_generic_aliases_substitute_each_declared_parameter_role() {
+        let defaults = Defaults::default();
+        let abstracts = Vec::new();
+        let defaulted = Vec::new();
+        let imports = HashMap::default();
+        let aliases = HashMap::from_iter([
+            (
+                "Outer".to_owned(),
+                Some(Alias {
+                    parameters: vec!["T".to_owned()],
+                    target: parse_quote!(Inner<Option<T>>),
+                }),
+            ),
+            (
+                "Inner".to_owned(),
+                Some(Alias {
+                    parameters: vec!["U".to_owned()],
+                    target: parse_quote!(Result<U, Error>),
+                }),
+            ),
+        ]);
+        let types = Types {
+            abstracts: &abstracts,
+            defaulted: &defaulted,
+            imports: &imports,
+            defaults: &defaults,
+            aliases: Some(&aliases),
+            self_type: None,
+            self_associated: None,
+        };
+
+        assert_eq!(
+            types.payload(&parse_quote!(Outer<bool>), 0).as_deref(),
+            Some(&parse_quote!(Option<bool>))
+        );
+        assert_eq!(types.payload(&parse_quote!(Outer<bool>), 1).as_deref(), Some(&parse_quote!(Error)));
+    }
+
+    #[test]
+    fn generic_substitution_descends_through_every_supported_type_container() {
+        let substitutions = HashMap::from_iter([("T".to_owned(), parse_quote!(bool))]);
+
+        for (input, expected) in [
+            (parse_quote!([T; 1]), parse_quote!([bool; 1])),
+            (parse_quote!((T)), parse_quote!((bool))),
+            (parse_quote!(*const T), parse_quote!(*const bool)),
+            (parse_quote!(&T), parse_quote!(&bool)),
+            (parse_quote!([T]), parse_quote!([bool])),
+            (parse_quote!((T, Option<T>)), parse_quote!((bool, Option<bool>))),
+        ] {
+            assert_eq!(substitute_type(&input, &substitutions), expected);
+        }
     }
 
     #[test]

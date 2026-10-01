@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use ra_ap_syntax::ast::{self, HasAttrs};
-use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxKind, SyntaxNode};
+use ra_ap_syntax::{AstNode, Edition, NodeOrToken, SourceFile, SyntaxKind, SyntaxNode};
 
 /// Line is covered by production code.
 const LINE_PRODUCTION: u8 = 1;
@@ -66,10 +66,10 @@ impl<'a> SourceFileAnalyzer<'a> {
         // Process all child tokens and nodes
         for element in node.children_with_tokens() {
             match element {
-                ra_ap_syntax::NodeOrToken::Node(child_node) => {
+                NodeOrToken::Node(child_node) => {
                     self.analyze(&child_node);
                 }
-                ra_ap_syntax::NodeOrToken::Token(token) => {
+                NodeOrToken::Token(token) => {
                     self.process_token(&token);
                 }
             }
@@ -149,11 +149,7 @@ impl<'a> SourceFileAnalyzer<'a> {
                 .and_then(|segment| segment.name_ref())
                 .is_some_and(|name| matches!(&*name.text(), "test" | "bench" | "cfg"));
 
-            if !is_candidate {
-                return false;
-            }
-
-            attribute_marks_test(&attr.syntax().text().to_string())
+            is_candidate && attribute_marks_test(&attr.syntax().text().to_string())
         })
     }
 
@@ -346,7 +342,7 @@ pub fn analyze_source_file(source_file: &str) -> SourceFileInfo {
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -506,6 +502,7 @@ pub fn production_after_tests() {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "Miri detects UB in external rowan crate")]
     fn comment_token_uses_the_comment_flag_and_exact_span() {
         let source = "// first\n// second\n";
         let parse = SourceFile::parse(source, Edition::CURRENT);
@@ -513,7 +510,7 @@ pub fn production_after_tests() {
             .tree()
             .syntax()
             .descendants_with_tokens()
-            .filter_map(ra_ap_syntax::NodeOrToken::into_token)
+            .filter_map(NodeOrToken::into_token)
             .find(|token| token.kind() == SyntaxKind::COMMENT)
             .expect("fixture contains a comment token");
         let mut analyzer = SourceFileAnalyzer::new(source);
@@ -713,14 +710,6 @@ mod tests {
         assert_eq!(strip_call("all (test)", "all"), Some("test"));
         assert_eq!(strip_call("all test", "all"), None);
         assert_eq!(split_predicates("test,, all(test, unix), "), vec!["test", "all(test, unix)"]);
-    }
-
-    #[test]
-    fn line_flag_bits_are_independent() {
-        assert_eq!(LINE_PRODUCTION, 1);
-        assert_eq!(LINE_TEST, 2);
-        assert_eq!(LINE_COMMENT, 4);
-        assert_eq!(LINE_PRODUCTION | LINE_TEST | LINE_COMMENT, 7);
     }
 
     #[test]

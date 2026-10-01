@@ -40,7 +40,6 @@ pub(super) fn suppress<H: Host>(host: &mut H, args: &SuppressArgs, _progress_whe
     suppress_plan(host, args, &plan, &eligible, &record, styler)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn suppress_plan<H: Host>(
     host: &mut H,
     args: &SuppressArgs,
@@ -68,10 +67,15 @@ fn suppress_plan<H: Host>(
         let files = edits.iter().map(|edit| &edit.file).collect::<BTreeSet<_>>().len();
         writeln!(
             host.error(),
-            "{} {} in {} would be written; pass `--apply` to do it",
+            "{}: proposed {} in {}; pass `--apply` to write and verify them",
             styler.verb("Preview"),
             quantity(edits.len(), "skip directive"),
             quantity(files, "file")
+        )?;
+        writeln!(
+            host.error(),
+            "{}: apply verifies the resulting mutant population and can still reject and revert directives with collateral effects",
+            styler.verb("Note")
         )?;
 
         return Ok(EXIT_OK);
@@ -91,7 +95,6 @@ fn suppress_plan<H: Host>(
     )
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn eligible_files(record: &RunRecord, eligible: &[crate::fix::Eligible]) -> crate::Result<crate::HashMap<Utf8PathBuf, usize>> {
     let mut affected = crate::HashMap::default();
 
@@ -117,7 +120,6 @@ struct CurrentSources {
     stale: Vec<String>,
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn current_sources(root: &Utf8Path, record: &RunRecord, affected: &crate::HashMap<Utf8PathBuf, usize>) -> crate::Result<CurrentSources> {
     let outcomes = record.outcomes();
     let mut contents = crate::HashMap::default();
@@ -163,7 +165,6 @@ fn current_sources(root: &Utf8Path, record: &RunRecord, affected: &crate::HashMa
     })
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix::Eligible]) -> crate::Result<(Plan, Vec<String>)> {
     let outcomes = record.outcomes();
     let mut files = Vec::new();
@@ -177,7 +178,7 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
     } = current_sources(root, record, &affected)?;
 
     for outcome in outcomes {
-        if !is_affected(&affected, &outcome.file) {
+        if !affected.contains_key(&outcome.file) {
             continue;
         }
         let is_eligible = eligible.iter().any(|entry| entry.outcome() == outcome.outcome);
@@ -274,10 +275,6 @@ fn plan_from_record(root: &Utf8Path, record: &RunRecord, eligible: &[crate::fix:
     apply_source_policy(&mut plan)?;
 
     Ok((plan, stale))
-}
-
-fn is_affected(affected: &crate::HashMap<Utf8PathBuf, usize>, file: &Utf8Path) -> bool {
-    affected.contains_key(file)
 }
 
 fn apply_source_policy(plan: &mut Plan) -> crate::Result<()> {
@@ -384,12 +381,10 @@ fn apply_all_with_lock<H: Host>(
     date: &str,
     workspace_locked: bool,
 ) -> crate::Result<Written> {
-    if args.apply {
-        let paths: Vec<&Utf8Path> = edits.iter().map(|edit| edit.file.as_path()).collect();
+    let paths: Vec<&Utf8Path> = edits.iter().map(|edit| edit.file.as_path()).collect();
 
-        reject_external_sources(&plan.root, &paths)?;
-        recoverable(&plan.root, &paths, args.allow_dirty)?;
-    }
+    reject_external_sources(&plan.root, &paths)?;
+    recoverable(&plan.root, &paths, args.allow_dirty)?;
 
     let mut written = Written::new();
 
@@ -434,7 +429,6 @@ pub(super) fn reject_external_sources(root: &Utf8Path, paths: &[&Utf8Path]) -> c
 /// version control from someone who is not using it would be a different command.
 ///
 /// Shared with `unsuppress`, whose edit loop has the same shape and the same hazard.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn recoverable(root: &Utf8Path, paths: &[&Utf8Path], allow_dirty: bool) -> crate::Result<()> {
     if allow_dirty {
         return Ok(());
@@ -500,7 +494,6 @@ fn uncommitted(root: &Utf8Path, paths: &[&Utf8Path]) -> Option<Vec<String>> {
 /// Every step is fallible and every step uses `?`, which is what makes the caller's compensation
 /// necessary: this stops where it fails and says nothing about the files it already changed beyond
 /// what it has put in `written`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn edit_files<H: Host>(
     host: &mut H,
     args: &SuppressArgs,
@@ -594,7 +587,6 @@ pub(super) fn reverted(root: &Utf8Path, written: Written, cause: crate::error::E
     reverted_with_lock(root, written, cause, false)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn reverted_with_lock(root: &Utf8Path, written: Written, cause: crate::error::Error, workspace_locked: bool) -> crate::error::Error {
     if written.is_empty() {
         return cause;
@@ -741,7 +733,6 @@ fn finish_verification<H: Host>(
 /// directives missing their target, which is a failure the reader can neither explain nor act on.
 /// Stable IDs remain the comparison key, but the diagnostic translates them back to source
 /// descriptions so the reader can understand the rejected edit without consulting a report.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn unclean(result: &crate::fix::Verification, before: &Plan) -> crate::error::Error {
     const SHOWN: usize = 3;
 
@@ -809,6 +800,7 @@ fn unclean(result: &crate::fix::Verification, before: &Plan) -> crate::error::Er
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fmt::Write as _;
 
@@ -816,14 +808,6 @@ mod tests {
     #[cfg(unix)]
     use crate::testing::workdir;
     use crate::testing::{Sink, fails_at_every_line};
-
-    #[test]
-    fn only_files_with_an_eligible_outcome_are_affected() {
-        let affected = crate::HashMap::from_iter([(Utf8PathBuf::from("src/lib.rs"), 1)]);
-
-        assert!(is_affected(&affected, Utf8Path::new("src/lib.rs")));
-        assert!(!is_affected(&affected, Utf8Path::new("src/other.rs")));
-    }
 
     fn crate_dir(name: &str) -> tempfile::TempDir {
         crate::fixtures::crate_dir(name, "pub fn answer() -> i32 { 42 }\n").0

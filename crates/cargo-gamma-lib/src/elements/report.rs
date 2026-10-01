@@ -1559,13 +1559,16 @@ mod tests {
 
     #[test]
     fn unviable_and_timeout_mutants_explain_their_status() {
+        let mut compile_error = mutant(Outcome::CompileError, 0..1);
         let mut timed_out = mutant(Outcome::Timeout, 0..1);
 
         // These verdicts are not self-explanatory in the report viewer, so the reason field
         // distinguishes a compile failure from a budget overrun.
+        assert_eq!(reason_for(&compile_error), Some("the mutant does not compile".to_owned()));
+        compile_error.note = Some("trait bound `T: Default` is not satisfied".to_owned());
         assert_eq!(
-            reason_for(&mutant(Outcome::CompileError, 0..1)),
-            Some("the mutant does not compile".to_owned())
+            reason_for(&compile_error),
+            Some("trait bound `T: Default` is not satisfied".to_owned())
         );
         assert_eq!(
             reason_for(&timed_out),

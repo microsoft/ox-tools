@@ -1,6 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+//! Multiline progress display for planning and testing.
+//!
+//! [`Dashboard`] owns the visible lifecycle: it starts in planning, transitions to testing, folds
+//! events into telemetry, rate-limits redraws, and clears or finalizes the frame before ordinary
+//! output resumes. The smaller state types below describe pieces of that lifecycle.
+
 use core::fmt::Write as _;
 use core::time::Duration;
 use std::collections::VecDeque;
@@ -21,10 +27,15 @@ const MINIMUM_WIDTH: usize = 40;
 const MEDIUM_WIDTH: usize = 80;
 const LARGE_WIDTH: usize = 136;
 const COLUMN_GAP: &str = "   ";
+/// A ten-cell side keeps the large-population waffle at one cell per percentage point.
+const WAFFLE_SIDE: usize = 10;
+const WAFFLE_CELLS: usize = WAFFLE_SIDE * WAFFLE_SIDE;
+const WAFFLE_CELL_WIDTH: usize = 2;
 const BEGIN_SYNCHRONIZED_UPDATE: &str = "\x1b[?2026h";
 const END_SYNCHRONIZED_UPDATE: &str = "\x1b[?2026l";
 const ERASE_TO_END: &str = "\x1b[J";
 
+/// Campaign phase whose metrics and layout the dashboard currently renders.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Phase {
     #[default]
@@ -32,6 +43,7 @@ enum Phase {
     Testing,
 }
 
+/// Verdict classification represented by one waffle cell and legend row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WaffleState {
     Unviable,
@@ -93,6 +105,7 @@ impl WaffleState {
     }
 }
 
+/// Widths of the rows in the last frame, used to erase wrapped terminal rows.
 #[derive(Debug, Clone)]
 struct DrawnFrame {
     line_widths: Vec<usize>,
@@ -113,6 +126,7 @@ impl DrawnFrame {
     }
 }
 
+/// Probe attempts and conclusive hits for one test-selection tier.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Attempts {
     total: usize,
@@ -152,6 +166,7 @@ pub(super) struct Dashboard {
     maximum_runtime_ms: u64,
     maximum_memory: Option<u64>,
     saved_ms: u64,
+    selection_cost_ms: crate::HashMap<u32, u64>,
     explicit_hints: Attempts,
     inferred_hints: Attempts,
 }
@@ -181,6 +196,7 @@ impl Dashboard {
             maximum_runtime_ms: 0,
             maximum_memory: None,
             saved_ms: 0,
+            selection_cost_ms: crate::HashMap::default(),
             explicit_hints: Attempts::default(),
             inferred_hints: Attempts::default(),
         }
@@ -279,6 +295,9 @@ impl Dashboard {
             return;
         }
 
+        // Exact is the explicit persisted-hint row; item, reach, and file are inferred hints.
+        // Census, selected, whole, and hinted fallback remain ordinary selection telemetry.
+        // A successful explicit or inferred probe avoids the remainder of its fallback estimate.
         match attempt.tier {
             SelectionTier::Exact => self.explicit_hints.record(attempt),
             SelectionTier::Item | SelectionTier::Reach | SelectionTier::File => self.inferred_hints.record(attempt),
@@ -289,13 +308,21 @@ impl Dashboard {
         } else {
             self.specific_test_launches = self.specific_test_launches.saturating_add(1);
         }
-        if attempt.result == SelectionResult::Hit
-            && matches!(
+        let chain_cost = self
+            .selection_cost_ms
+            .entry(attempt.ordinal)
+            .and_modify(|elapsed| *elapsed = elapsed.saturating_add(attempt.elapsed_ms))
+            .or_insert(attempt.elapsed_ms);
+        if attempt.result == SelectionResult::Hit {
+            if matches!(
                 attempt.tier,
                 SelectionTier::Exact | SelectionTier::Item | SelectionTier::Reach | SelectionTier::File
-            )
-        {
-            self.saved_ms = self.saved_ms.saturating_add(attempt.fallback_ms.saturating_sub(attempt.elapsed_ms));
+            ) {
+                self.saved_ms = self.saved_ms.saturating_add(attempt.fallback_ms.saturating_sub(*chain_cost));
+            }
+            self.selection_cost_ms.remove(&attempt.ordinal);
+        } else if attempt.tier == SelectionTier::Whole {
+            self.selection_cost_ms.remove(&attempt.ordinal);
         }
         self.runtime_ms = self.runtime_ms.saturating_add(attempt.elapsed_ms);
         self.maximum_runtime_ms = self.maximum_runtime_ms.max(attempt.elapsed_ms);
@@ -489,12 +516,13 @@ impl Dashboard {
             self.labelled(
                 "Mutants",
                 &format!(
-                    "K {} · S {} · T {} · OOM {} · F {} · P {}",
+                    "K {} · S {} · T {} · OOM {} · F {} · U {} · P {}",
                     self.summary.killed,
                     self.summary.survived,
                     self.summary.timeout,
                     self.summary.out_of_memory,
                     self.summary.flaky,
+                    self.summary.uncovered,
                     self.summary.pending
                 ),
             ),
@@ -524,12 +552,13 @@ impl Dashboard {
             self.labelled(
                 "Mutants",
                 &format!(
-                    "killed {} · survived {} · timeout {} · OOM {} · flaky {} · pending {}",
+                    "killed {} · survived {} · timeout {} · OOM {} · flaky {} · uncovered {} · pending {}",
                     self.summary.killed,
                     self.summary.survived,
                     self.summary.timeout,
                     self.summary.out_of_memory,
                     self.summary.flaky,
+                    self.summary.uncovered,
                     self.summary.pending
                 ),
             ),
@@ -560,8 +589,10 @@ impl Dashboard {
 
     fn header(&self) -> String {
         if self.phase == Phase::Planning {
-            let detail_width = self.width.saturating_sub(crate::report::continuation().len() + 1);
-            return format!("{} {}", self.styler.verb("Planning"), Self::fit(self.status.clone(), detail_width));
+            let detail_width = self
+                .width
+                .saturating_sub(visible_width(&crate::report::continuation()).saturating_add(1));
+            return format!("{} {}", self.styler.verb("Planning"), Self::fit(&self.status, detail_width));
         }
 
         self.status.clone()
@@ -569,43 +600,37 @@ impl Dashboard {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn labelled(&self, label: &str, detail: &str) -> String {
-        let plain = Self::fit(format!("{label:<9} {detail}"), self.width);
+        let text = format!("{label:<9} {detail}");
+        let plain = Self::fit(&text, self.width);
         let Some(rest) = plain.strip_prefix(label) else {
             return plain;
         };
         format!("{}{rest}", self.styler.apply(label, Style::new().bold().cyan()))
     }
 
-    fn fit(line: String, width: usize) -> String {
-        if line.chars().count() <= width {
-            return line;
-        }
-
-        let retained = width.saturating_sub(3);
-        let mut fitted = line.chars().take(retained).collect::<String>();
-        fitted.push_str("...");
-        fitted
+    fn fit(line: &str, width: usize) -> String {
+        crate::report::fit(line, width)
     }
 
     fn mutants_panel(&self) -> Vec<String> {
         let (cells, columns, rows) = self.waffle();
         let classifications = self.classifications();
-        let mut content = Vec::with_capacity(10);
+        let mut content = Vec::with_capacity(WAFFLE_SIDE);
 
-        for row in 0..10 {
+        for row in 0..WAFFLE_SIDE {
             let chart = if row < rows {
                 let start = row * columns;
                 let end = (start + columns).min(cells.len());
                 let mut chart = cells[start..end].iter().map(|state| state.cell(self.styler)).collect::<String>();
-                chart.push_str(&" ".repeat((10usize.saturating_sub(end - start)) * 2));
+                chart.push_str(&" ".repeat(WAFFLE_SIDE.saturating_sub(end - start) * WAFFLE_CELL_WIDTH));
                 chart
             } else {
-                " ".repeat(20)
+                " ".repeat(WAFFLE_SIDE * WAFFLE_CELL_WIDTH)
             };
 
             let legend = if let Some((state, count)) = classifications.get(row).copied() {
                 format!("{} {:<12}{COLUMN_GAP}{:>7}", state.cell(self.styler), state.label(), count)
-            } else if row == 9 {
+            } else if row == WAFFLE_SIDE - 1 {
                 format!("{:<15}{COLUMN_GAP}{:>7.1}%", "Mutation score", self.summary.score())
             } else {
                 String::new()
@@ -677,7 +702,7 @@ impl Dashboard {
             return (Vec::new(), 1, 0);
         }
 
-        let cell_count = total.min(100);
+        let cell_count = total.min(WAFFLE_CELLS);
         let allocations = apportioned(&classifications, cell_count, total);
         let cells = classifications
             .iter()
@@ -767,17 +792,22 @@ fn duration(milliseconds: u64) -> String {
 }
 
 fn visible_width(text: &str) -> usize {
-    crate::report::unstyled(text).chars().count()
+    crate::report::unstyled_width(text)
 }
 
 fn square_columns(cells: usize) -> usize {
     let mut columns = 1usize;
     while columns.saturating_mul(columns) < cells {
+        // #[gamma::skip(all, reason = "removing the positive increment makes the dashboard calculation non-terminating for every population larger than one")]
         columns = columns.saturating_add(1);
     }
-    columns.min(10)
+    columns.min(WAFFLE_SIDE)
 }
 
+/// Uses proportional largest remainders to fill every cell without changing the total.
+///
+/// Equal remainders retain classification order, which keeps the display stable and gives the
+/// dashboard's established verdict order the tie break.
 fn apportioned(classifications: &[(WaffleState, usize)], cells: usize, total: usize) -> Vec<usize> {
     if total <= cells {
         return classifications.iter().map(|(_, count)| *count).collect();
@@ -802,15 +832,16 @@ fn apportioned(classifications: &[(WaffleState, usize)], cells: usize, total: us
 
 fn panel(title: &str, content: &[String], styler: Styler) -> Vec<String> {
     let border = Style::new().cyan();
+    let title_width = visible_width(title);
     let width = content
         .iter()
         .map(|line| visible_width(line).saturating_add(2))
         .max()
         .unwrap_or(0)
-        .max(title.chars().count().saturating_add(3));
+        .max(title_width.saturating_add(3));
     let mut lines = Vec::with_capacity(content.len().saturating_add(2));
     lines.push(styler.apply(
-        &format!("╭─ {title} {}╮", "─".repeat(width.saturating_sub(title.chars().count() + 3))),
+        &format!("╭─ {title} {}╮", "─".repeat(width.saturating_sub(title_width + 3))),
         border.bold(),
     ));
     lines.extend(content.iter().map(|line| {
@@ -853,7 +884,7 @@ fn metric(label: &str, value: usize) -> String {
 fn metric_text(label: &str, value: &str) -> String {
     const WIDTH: usize = 48;
     let spacing = WIDTH
-        .saturating_sub(label.chars().count().saturating_add(value.chars().count()))
+        .saturating_sub(visible_width(label).saturating_add(visible_width(value)))
         .max(COLUMN_GAP.len());
     format!("{label}{}{value}", " ".repeat(spacing))
 }
@@ -883,6 +914,7 @@ fn ratio(numerator: usize, denominator: usize) -> f64 {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::testing::{Sink, ci_fixture};
@@ -1008,8 +1040,18 @@ mod tests {
 
         let header = dashboard.header();
 
-        assert_eq!(header.chars().count(), 40, "{header}");
+        assert_eq!(visible_width(&header), 40, "{header}");
         assert!(header.ends_with("..."), "{header}");
+    }
+
+    #[test]
+    fn dashboard_width_uses_terminal_columns_for_wide_and_combining_text() {
+        assert_eq!(visible_width("界"), 2);
+        assert_eq!(visible_width("e\u{301}"), 1);
+        assert_eq!(Dashboard::fit("界界界", 5), "界...");
+        assert_eq!(Dashboard::fit("e\u{301}fg", 3), "e\u{301}fg");
+        assert_eq!(Dashboard::fit("👩‍💻abcd", 5), "👩‍💻...");
+        assert_eq!(Dashboard::fit("abc", 2), "..");
     }
 
     #[test]
@@ -1031,7 +1073,7 @@ mod tests {
             "{rendered:?}"
         );
         assert!(rendered.iter().any(|line| line.starts_with("Process   12 bin")), "{rendered:?}");
-        assert!(rendered.iter().all(|line| line.chars().count() <= 60), "{rendered:?}");
+        assert!(rendered.iter().all(|line| visible_width(line) <= 60), "{rendered:?}");
     }
 
     #[test]
@@ -1265,6 +1307,21 @@ mod tests {
         assert_eq!(dashboard.runtime_ms, 1_600);
         assert_eq!(dashboard.maximum_runtime_ms, 700);
         assert_eq!(dashboard.saved_ms, 900);
+    }
+
+    #[test]
+    fn hint_savings_include_failed_attempts_before_the_hit() {
+        let mut dashboard = Dashboard::new(true, Some(160), Styler::new(false));
+        let mut miss = selection(SelectionTier::Exact, SelectionResult::Miss, false, 300, 2_000);
+        miss.ordinal = 7;
+        let mut hit = selection(SelectionTier::Item, SelectionResult::Hit, false, 500, 2_000);
+        hit.ordinal = 7;
+
+        dashboard.record_selection(&miss);
+        dashboard.record_selection(&hit);
+
+        assert_eq!(dashboard.saved_ms, 1_200);
+        assert!(!dashboard.selection_cost_ms.contains_key(&7));
     }
 
     #[test]

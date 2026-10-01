@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use core::fmt::{self, Display, Formatter};
 use core::mem;
 
 use proc_macro2::{Delimiter, Group, Literal, TokenStream, TokenTree};
@@ -8,6 +9,43 @@ use quote::ToTokens as _;
 use syn::parse::Parser as _;
 use syn::punctuated::Punctuated;
 use syn::{Block, Expr, ImplItemFn, ItemFn, Token, TraitItemFn};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResourceError {
+    MalformedName,
+    NonPortableName,
+    NonTestFunction,
+    UnsupportedItem,
+    ExternalModule,
+    ExcessiveArgumentNesting,
+    ExcessiveItemNesting,
+}
+
+impl Display for ResourceError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::MalformedName => "expected one string literal, as in `#[gamma::resource(\"cargo-subprocess\")]`",
+            Self::NonPortableName => {
+                "resource name must start with an ASCII letter and contain only ASCII letters, digits, `.`, `_`, or `-`"
+            }
+            Self::NonTestFunction => "resource annotations on functions require a test attribute such as `#[test]` or `#[tokio::test]`",
+            Self::UnsupportedItem => "resource annotations may only be applied to test functions or test modules",
+            Self::ExternalModule => "resource annotations on modules require an inline module body",
+            Self::ExcessiveArgumentNesting => "resource arguments nest too deeply to be safely parsed",
+            Self::ExcessiveItemNesting => "resource item nests too deeply to be safely parsed",
+        })
+    }
+}
+
+enum ResourceTarget {
+    Function { suffix: String, marker_attributes: TokenStream },
+    Module,
+}
+
+/// Private wire-format literals shared conceptually with cargo-gamma's harness-listing decoder.
+const RESOURCE_MARKER_PREFIX: &str = "__cargo_gamma_resource_";
+const RESOURCE_TEST_SEPARATOR: &str = "test_";
+const RESOURCE_BINARY_SUFFIX: &str = "binary";
 
 /// Validates the argument list of `#[gamma::<name>]` and returns the item untouched.
 ///
@@ -33,36 +71,35 @@ pub fn inert_timeout(name: &str, attr: &TokenStream, item: TokenStream) -> Token
 /// the exact fully qualified test name without source-path heuristics or runtime registration.
 #[must_use]
 pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if exceeds_nesting_limit(&attr, NESTING_LIMIT) {
+        return invalid_resource(ResourceError::ExcessiveArgumentNesting, item);
+    }
+    if exceeds_nesting_limit(&item, NESTING_LIMIT) {
+        return invalid_resource(ResourceError::ExcessiveItemNesting, item);
+    }
+
     let resource = match syn::parse2::<syn::LitStr>(attr) {
-        Ok(resource) if valid_resource_name(&resource.value()) => resource.value(),
-        Ok(_resource) => {
-            return validated_item(
-                "resource",
-                Err("resource name must start with an ASCII letter and contain only ASCII letters, digits, `.`, `_`, or `-`".to_owned()),
-                item,
-            );
+        Ok(resource) => {
+            let resource = resource.value();
+            if !valid_resource_name(&resource) {
+                return invalid_resource(ResourceError::NonPortableName, item);
+            }
+            resource
         }
-        Err(_cause) => {
-            return validated_item(
-                "resource",
-                Err("expected one string literal, as in `#[gamma::resource(\"cargo-subprocess\")]`".to_owned()),
-                item,
-            );
-        }
+        Err(_cause) => return invalid_resource(ResourceError::MalformedName, item),
     };
 
-    let (suffix, module, marker_attributes) = if let Ok(function) = syn::parse2::<ItemFn>(item.clone()) {
+    let target = if let Ok(function) = syn::parse2::<ItemFn>(item.clone()) {
         if !function
             .attrs
             .iter()
             .any(|attribute| attribute.path().segments.last().is_some_and(|segment| segment.ident == "test"))
         {
-            return validated_item(
-                "resource",
-                Err("resource annotations on functions require a test attribute such as `#[test]` or `#[tokio::test]`".to_owned()),
-                item,
-            );
+            return invalid_resource(ResourceError::NonTestFunction, item);
         }
+        // The generated marker must exist under exactly the same conditional compilation as the
+        // annotated test. Other attributes affect execution or diagnostics and do not belong on
+        // scheduling metadata.
         let marker_attributes = function
             .attrs
             .iter()
@@ -71,47 +108,53 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
                 attribute.to_tokens(&mut tokens);
                 tokens
             });
-        (
-            format!("test_{}", hex(function.sig.ident.to_string().trim_start_matches("r#").as_bytes())),
-            false,
+        ResourceTarget::Function {
+            suffix: format!(
+                "{RESOURCE_TEST_SEPARATOR}{}",
+                hex(function.sig.ident.to_string().trim_start_matches("r#").as_bytes())
+            ),
             marker_attributes,
-        )
+        }
     } else if syn::parse2::<syn::ItemMod>(item.clone()).is_ok() {
-        ("binary".to_owned(), true, TokenStream::new())
+        ResourceTarget::Module
     } else {
-        return validated_item(
-            "resource",
-            Err("resource annotations may only be applied to test functions or test modules".to_owned()),
-            item,
-        );
+        return invalid_resource(ResourceError::UnsupportedItem, item);
     };
+    let suffix = match &target {
+        ResourceTarget::Function { suffix, .. } => suffix.as_str(),
+        ResourceTarget::Module => RESOURCE_BINARY_SUFFIX,
+    };
+    // These spellings form a private protocol with cargo-gamma's harness-listing decoder.
     let marker = format!(
-        "#[doc(hidden)] #[test] #[ignore = \"cargo-gamma scheduling metadata\"] fn __cargo_gamma_resource_{}_{suffix}() {{}}",
+        "#[doc(hidden)] #[test] #[ignore = \"cargo-gamma scheduling metadata\"] fn {RESOURCE_MARKER_PREFIX}{}_{suffix}() {{}}",
         hex(resource.as_bytes())
     );
     let marker: TokenStream = marker
         .parse()
         .expect("hex-encoded resource and function names always form a valid Rust item");
-    if module {
-        return marker_inside_module(item.clone(), &marker).unwrap_or_else(|| {
-            validated_item(
-                "resource",
-                Err("resource annotations on modules require an inline module body".to_owned()),
-                item,
-            )
-        });
+    if matches!(target, ResourceTarget::Module) {
+        return marker_inside_module(item.clone(), &marker).unwrap_or_else(|| invalid_resource(ResourceError::ExternalModule, item));
     }
 
     let mut output = item;
-    output.extend(marker_attributes);
+    if let ResourceTarget::Function { marker_attributes, .. } = target {
+        output.extend(marker_attributes);
+    }
     output.extend(marker);
     output
+}
+
+fn invalid_resource(error: ResourceError, item: TokenStream) -> TokenStream {
+    validated_item("resource", Err(error.to_string()), item)
 }
 
 fn marker_inside_module(item: TokenStream, marker: &TokenStream) -> Option<TokenStream> {
     let mut output = TokenStream::new();
     let mut inserted = false;
     for token in item {
+        // `resource` has already established that this is an inline module, so its first brace
+        // group is the module body. Inserting there lets sibling modules use the same marker name:
+        // libtest's module path supplies the namespace while the original item tokens are retained.
         if !inserted
             && let TokenTree::Group(group) = &token
             && group.delimiter() == Delimiter::Brace
@@ -130,6 +173,7 @@ fn marker_inside_module(item: TokenStream, marker: &TokenStream) -> Option<Token
 }
 
 fn valid_resource_name(name: &str) -> bool {
+    // Keep this portable alphabet aligned with cargo-gamma's resource-name validation.
     let mut bytes = name.bytes();
     bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -647,9 +691,9 @@ fn is_positional_multiplier(argument: &[TokenTree]) -> bool {
 ///
 /// The list is split on its top-level commas before any of it is read as a number, because the
 /// comment-directive parser this attribute shares a grammar with splits on them too. Parsing the
-/// whole stream as one `f64` instead refused `2.5,` and `3.0, reason = "slow"` — text the directive
-/// channel accepts — so deleting the `//` in front of a working directive turned it into a compile
-/// error whose message blamed the numeric bound rather than the comma that actually confused it.
+/// whole stream as one `f64` instead refused `3.0, reason = "slow"` — text the directive channel
+/// accepts — so deleting the `//` in front of a working directive turned it into a compile error
+/// whose message blamed the numeric bound rather than the argument shape that actually confused it.
 ///
 /// Position carries no meaning: every argument is classified on its own, exactly as the directive
 /// parser classifies each of its comma-delimited segments, so `arith, 2.5` states a multiplier just
@@ -662,6 +706,8 @@ fn is_positional_multiplier(argument: &[TokenTree]) -> bool {
 /// been stated, so that a second one — in any spelling, in either order — is refused rather than
 /// silently overriding the first.
 fn validate_timeout_multiplier(attr: &TokenStream) -> Result<(), String> {
+    reject_empty_arguments(attr)?;
+
     let mut multiplier = None;
     let mut saw_argument = false;
     let mut current = Vec::new();
@@ -746,6 +792,29 @@ fn validate(attr: TokenStream) -> Result<(), String> {
     validate_shape(attr)
 }
 
+fn reject_empty_arguments(tokens: &TokenStream) -> Result<(), String> {
+    let mut current_is_empty = true;
+    let mut saw_comma = false;
+
+    for token in tokens.clone() {
+        if matches!(&token, TokenTree::Punct(punct) if punct.as_char() == ',') {
+            if current_is_empty {
+                return Err("attribute arguments must not contain an empty comma-delimited segment".to_owned());
+            }
+            current_is_empty = true;
+            saw_comma = true;
+        } else {
+            current_is_empty = false;
+        }
+    }
+
+    if saw_comma && current_is_empty {
+        return Err("attribute arguments must not end with an empty comma-delimited segment".to_owned());
+    }
+
+    Ok(())
+}
+
 /// Checks the structural shape of an argument list.
 ///
 /// Selector *names* are not checked here: the registry lives in the tool, and duplicating it in a
@@ -766,6 +835,8 @@ fn validate(attr: TokenStream) -> Result<(), String> {
 /// level, not just the next token. An attribute argument list is small enough that a hand-rolled
 /// bounded-lookahead cursor would not pay for the churn at every lookahead site below.
 fn validate_shape(attr: TokenStream) -> Result<(), String> {
+    reject_empty_arguments(&attr)?;
+
     let mut multiplier = None;
 
     validate_shape_tokens(attr.into_iter().collect(), false, &mut multiplier)
@@ -899,6 +970,7 @@ fn error(message: &str) -> TokenStream {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -1670,24 +1742,22 @@ mod tests {
         // stating nothing at all.
         assert_eq!(
             validate_timeout_multiplier(&stream(",")),
-            Err("expected a timeout multiplier, as in `#[gamma::test_timeout_multiplier(2.0)]`".to_owned())
+            Err("attribute arguments must not contain an empty comma-delimited segment".to_owned())
         );
     }
 
     /// The attribute and the comment directive are deliberately the same text with `//` in front,
     /// so an argument list one accepts must not be a compile error to the other. Reading the whole
-    /// token stream as one `f64` made both of these one: `2.5 ,` and `3.0 , reason = "slow"` parse
-    /// as no number at all, and the message blamed the numeric bound rather than the comma.
+    /// token stream as one `f64` made `3.0 , reason = "slow"` parse as no number at all, and the
+    /// message blamed the numeric bound rather than the argument shape.
     ///
     /// `cargo-gamma-lib`'s agreement test drives both channels with this same argument text; this
     /// pins the attribute side on its own, so a regression here is reported by the crate that owns
     /// the parser rather than only by the crate that compares the two.
     #[test]
-    fn a_positional_multiplier_may_be_followed_by_a_comma_and_by_further_arguments() {
+    fn a_positional_multiplier_may_be_followed_by_further_arguments() {
         for arguments in [
-            "2.5,",
             "3.0, reason = \"slow\"",
-            "3.0, reason = \"slow\",",
             "2.5, tag = \"integration\"",
             "2.5, arith",
             "2.5, arith, reason = \"complex math\"",
@@ -1695,7 +1765,6 @@ mod tests {
             // directive as one stated before them, and the tool's own test suite has read
             // `#[gamma::test_timeout_multiplier(arith, 4.0)]` that way all along.
             "arith, 2.5",
-            "arith, 2.5,",
             "arith, 2.5, reason = \"complex math\"",
             "reason = \"slow\", 2.5",
             "arith, literal, 2.5",
@@ -1704,6 +1773,17 @@ mod tests {
                 validate_timeout_multiplier(&stream(arguments)),
                 Ok(()),
                 "`{arguments}` should have been accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_comma_delimited_arguments_are_rejected() {
+        for arguments in [",arith", "arith,,reason = \"covered\"", "arith,", ","] {
+            assert!(validate(stream(arguments)).is_err(), "selector attribute accepted `{arguments}`");
+            assert!(
+                validate_timeout_multiplier(&stream(arguments)).is_err(),
+                "timeout attribute accepted `{arguments}`"
             );
         }
     }
@@ -1717,7 +1797,7 @@ mod tests {
             "-1.0, reason = \"slow\"",
             "0, reason = \"slow\"",
             "inf, reason = \"slow\"",
-            "1e300,",
+            "1e300",
             // Late, too: a bad multiplier is a bad multiplier wherever in the list it sits, and
             // the arguments before it neither excuse it nor change the message.
             "arith, -1.0",

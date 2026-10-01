@@ -661,7 +661,7 @@ fn a_second_timeout_multiplier_is_refused_in_every_spelling_and_order() {
 /// one written before them, and the proc-macro validator accepts exactly the same lists.
 #[test]
 fn a_positional_multiplier_is_read_wherever_in_the_argument_list_it_sits() {
-    for arguments in ["2.5, arith", "arith, 2.5", "arith, 2.5,", "reason = \"slow\", 2.5"] {
+    for arguments in ["2.5, arith", "arith, 2.5", "reason = \"slow\", 2.5"] {
         let source = format!("#[gamma::test_timeout_multiplier({arguments})]\nfn f(a: i32) -> i32 {{ a + 1 }}");
         let found = directives(&file(&source)).expect("a bounded multiplier is accepted");
 

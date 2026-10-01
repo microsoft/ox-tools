@@ -39,6 +39,8 @@ normal = ["unicode-ident"]
 allowed = ["unicode-ident"]
 
 [package.metadata.coverage-gate]
+# Every retained production line must be exercised across the supported test configurations;
+# regressions are addressed in tests rather than by lowering this gate.
 min-lines-percent = 100.0
 
 [features]

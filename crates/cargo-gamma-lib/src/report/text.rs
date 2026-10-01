@@ -3,6 +3,8 @@
 
 //! The small pieces of phrasing every rendering here shares.
 
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+
 /// Width of the status verb column, matching cargo.
 pub(super) const VERB_WIDTH: usize = 12;
 const MAX_SCORE_PRECISION: usize = 12;
@@ -42,6 +44,99 @@ pub(crate) fn unstyled(text: &str) -> String {
     }
 
     plain
+}
+
+pub(crate) fn unstyled_width(text: &str) -> usize {
+    unstyled(text).width()
+}
+
+/// Fits terminal text to `width`, preserving complete control sequences and visible clusters.
+pub(crate) fn fit(text: &str, width: usize) -> String {
+    if unstyled_width(text) <= width {
+        return text.to_owned();
+    }
+
+    let ellipsis = ".".repeat(width.min(3));
+    let retained = width.saturating_sub(ellipsis.len());
+    let mut shown = 0usize;
+    let mut end = 0;
+    let mut at = 0;
+
+    while at < text.len() {
+        let character = text[at..]
+            .chars()
+            .next()
+            .expect("the byte cursor is advanced only along UTF-8 character boundaries");
+        if character == '\u{1b}' {
+            let Some(sequence_end) = control_sequence_end(text, at) else {
+                break;
+            };
+            end = sequence_end;
+            at = sequence_end;
+            continue;
+        }
+
+        let cluster_start = at;
+        at += character.len_utf8();
+        while at < text.len() {
+            let next = text[at..]
+                .chars()
+                .next()
+                .expect("the byte cursor is advanced only along UTF-8 character boundaries");
+            if next == '\u{1b}' {
+                break;
+            }
+            if next == '\u{200d}' {
+                at += next.len_utf8();
+                if at < text.len() {
+                    let joined = text[at..]
+                        .chars()
+                        .next()
+                        .expect("the byte cursor is advanced only along UTF-8 character boundaries");
+                    at += joined.len_utf8();
+                }
+                continue;
+            }
+            if next.width().unwrap_or(0) == 0 {
+                at += next.len_utf8();
+                continue;
+            }
+            break;
+        }
+
+        let cluster_width = text[cluster_start..at].width();
+        if shown.saturating_add(cluster_width) > retained {
+            break;
+        }
+        shown += cluster_width;
+        end = at;
+    }
+
+    let mut fitted = text[..end].to_owned();
+    let styled = fitted.contains('\u{1b}');
+    fitted.push_str(&ellipsis);
+    if styled {
+        fitted.push_str("\u{1b}[0m");
+    }
+    fitted
+}
+
+fn control_sequence_end(text: &str, start: usize) -> Option<usize> {
+    let mut characters = text[start..].char_indices();
+    let (_, escape) = characters.next()?;
+    debug_assert_eq!(escape, '\u{1b}');
+    let (next_at, next) = characters.next()?;
+    let mut end = start + next_at + next.len_utf8();
+    if next != '[' {
+        return Some(end);
+    }
+    for (at, character) in characters {
+        end = start + at + character.len_utf8();
+        if matches!(character, '\u{40}'..='\u{7e}') {
+            return Some(end);
+        }
+    }
+    None
 }
 
 /// Renders a count with its noun, pluralized.
@@ -104,11 +199,32 @@ mod tests {
             "    Building [==>   ] 3/9"
         );
         assert_eq!(unstyled("nothing to strip"), "nothing to strip");
+        assert_eq!(unstyled_width("\u{1b}[1;36mBuilding\u{1b}[0m 3/9"), "Building 3/9".chars().count());
+        assert_eq!(unstyled_width("nothing to strip"), "nothing to strip".chars().count());
+        assert_eq!(unstyled_width("\u{1b}[1m界e\u{301}\u{1b}[0m"), 3);
+        assert_eq!(unstyled_width("\u{1b}[1m👩‍💻\u{1b}[0m"), 2);
     }
 
     #[test]
     fn an_escape_that_never_terminates_consumes_the_rest_rather_than_leaking_it() {
         assert_eq!(unstyled("kept\u{1b}[38;5;"), "kept");
+    }
+
+    #[test]
+    fn fit_preserves_clusters_controls_and_width() {
+        assert_eq!(fit("abcdefghij", 6), "abc...");
+        assert_eq!(fit("界界界", 5), "界...");
+        assert_eq!(fit("👩‍💻abcd", 5), "👩‍💻...");
+        assert_eq!(fit("\u{1b}[1mBuilding\u{1b}[0m", 8), "\u{1b}[1mBuilding\u{1b}[0m");
+        assert_eq!(unstyled(&fit("\u{1b}[1mBuilding\u{1b}[0m", 5)), "Bu...");
+        assert!(fit("\u{1b}[1mBuilding\u{1b}[0m", 5).ends_with("\u{1b}[0m"));
+    }
+
+    #[test]
+    fn fit_respects_widths_narrower_than_an_ellipsis() {
+        assert_eq!(fit("abc", 0), "");
+        assert_eq!(fit("abc", 1), ".");
+        assert_eq!(fit("abc", 2), "..");
     }
 
     #[test]

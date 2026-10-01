@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use ohno::{AppError, IntoAppError as _};
+use ohno::{AppError, IntoAppError as _, app_err};
 
 /// Read a file's contents to a string, returning `Ok(None)` if the file
 /// does not exist. Any other I/O error is propagated as an `AppError`.
@@ -40,14 +40,18 @@ pub fn read_file_if_present(path: &Path) -> Result<Option<String>, AppError> {
 /// ASCII case folding is sufficient and deliberate: every catalog path is a
 /// fixed ASCII literal (`Justfile`, `Cargo.toml`, `deny.toml`, …), so there is
 /// no non-ASCII segment for which Unicode case folding could matter.
-#[must_use]
-pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> String {
+/// # Errors
+///
+/// Returns an error when a segment has multiple case-insensitive matches and
+/// no exact match. Choosing either candidate would make ownership depend on
+/// filesystem enumeration order.
+pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> Result<String, AppError> {
     let segments: Vec<&str> = relpath.split('/').filter(|s| !s.is_empty()).collect();
     let mut resolved: Vec<String> = Vec::with_capacity(segments.len());
 
     for (index, segment) in segments.iter().enumerate() {
         let current_dir = repo_root.join(resolved.join("/"));
-        if let Some(actual) = find_entry_case_insensitive(&current_dir, segment) {
+        if let Some(actual) = find_entry_case_insensitive(&current_dir, segment)? {
             resolved.push(actual);
         } else {
             // This segment (and everything below it) isn't on disk yet;
@@ -57,33 +61,60 @@ pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> Str
         }
     }
 
-    resolved.join("/")
+    Ok(resolved.join("/"))
 }
 
 /// Find a directory entry of `dir` whose name equals `name`, preferring an
 /// exact-case match and falling back to an ASCII-case-insensitive one. Returns
 /// the entry's real on-disk name.
-fn find_entry_case_insensitive(dir: &Path, name: &str) -> Option<String> {
-    select_entry_case_insensitive(
-        std::fs::read_dir(dir)
-            .ok()?
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned()),
-        name,
-    )
+fn find_entry_case_insensitive(dir: &Path, name: &str) -> Result<Option<String>, AppError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err::<Option<String>, _>(error).into_app_err_with(|| format!("failed to read directory {}", dir.display()));
+        }
+    };
+    let names = collect_entry_names(
+        entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())),
+        dir,
+    )?;
+    selected_entry_with_context(select_entry_case_insensitive(names, name), dir, name)
 }
 
-fn select_entry_case_insensitive(entries: impl IntoIterator<Item = String>, name: &str) -> Option<String> {
-    let mut case_insensitive: Option<String> = None;
+fn selected_entry_with_context(selected: Result<Option<String>, Vec<String>>, dir: &Path, name: &str) -> Result<Option<String>, AppError> {
+    selected.map_err(|matches| {
+        app_err!(
+            "cannot resolve path segment '{name}' in {} because these entries differ only by ASCII case: {}",
+            dir.display(),
+            matches.join(", ")
+        )
+    })
+}
+
+fn collect_entry_names(entries: impl IntoIterator<Item = std::io::Result<String>>, dir: &Path) -> Result<Vec<String>, AppError> {
+    entries
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .into_app_err_with(|| format!("failed to enumerate directory {}", dir.display()))
+}
+
+fn select_entry_case_insensitive(entries: impl IntoIterator<Item = String>, name: &str) -> Result<Option<String>, Vec<String>> {
+    let mut case_insensitive = Vec::new();
     for entry_name in entries {
         if entry_name == name {
-            return Some(entry_name);
+            return Ok(Some(entry_name));
         }
-        if case_insensitive.is_none() && entry_name.eq_ignore_ascii_case(name) {
-            case_insensitive = Some(entry_name);
+        if entry_name.eq_ignore_ascii_case(name) {
+            case_insensitive.push(entry_name);
         }
     }
-    case_insensitive
+    case_insensitive.sort();
+    match case_insensitive.len() {
+        0 => Ok(None),
+        1 => Ok(case_insensitive.pop()),
+        _ => Err(case_insensitive),
+    }
 }
 
 #[cfg(test)]
@@ -105,9 +136,9 @@ mod tests {
     #[test]
     fn nonexistent_path_keeps_canonical_casing() {
         let tmp = TempDir::new().unwrap();
-        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile"), "Justfile");
+        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile").unwrap(), "Justfile");
         assert_eq!(
-            resolve_existing_case_insensitive(tmp.path(), "justfiles/anvil/mod.just"),
+            resolve_existing_case_insensitive(tmp.path(), "justfiles/anvil/mod.just").unwrap(),
             "justfiles/anvil/mod.just"
         );
     }
@@ -117,14 +148,14 @@ mod tests {
     fn exact_match_is_returned() {
         let tmp = TempDir::new().unwrap();
         touch(tmp.path(), "Justfile");
-        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile"), "Justfile");
+        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile").unwrap(), "Justfile");
     }
 
     #[test]
     fn exact_match_wins_over_an_earlier_case_insensitive_match() {
         let entries = ["justfile".to_owned(), "Justfile".to_owned()];
 
-        assert_eq!(select_entry_case_insensitive(entries, "Justfile"), Some("Justfile".to_owned()));
+        assert_eq!(select_entry_case_insensitive(entries, "Justfile"), Ok(Some("Justfile".to_owned())));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -132,23 +163,69 @@ mod tests {
     fn empty_path_segments_are_ignored() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("justfile"), "").unwrap();
-        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "//Justfile"), "justfile");
+        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "//Justfile").unwrap(), "justfile");
     }
 
     #[test]
-    fn first_case_insensitive_match_is_stable() {
-        let entries = ["JUSTFILE".to_owned(), "justfile".to_owned()];
+    fn ambiguous_case_insensitive_matches_are_rejected_in_any_order() {
+        for entries in [
+            ["JUSTFILE".to_owned(), "justfile".to_owned()],
+            ["justfile".to_owned(), "JUSTFILE".to_owned()],
+        ] {
+            assert_eq!(
+                select_entry_case_insensitive(entries, "Justfile"),
+                Err(vec!["JUSTFILE".to_owned(), "justfile".to_owned()])
+            );
+        }
+    }
 
-        assert_eq!(select_entry_case_insensitive(entries, "Justfile"), Some("JUSTFILE".to_owned()));
+    #[test]
+    fn ambiguous_case_insensitive_matches_report_path_context() {
+        let error = selected_entry_with_context(
+            Err(vec!["JUSTFILE".to_owned(), "justfile".to_owned()]),
+            Path::new("catalog"),
+            "Justfile",
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "cannot resolve path segment 'Justfile' in catalog because these entries differ only by ASCII case: JUSTFILE, justfile"
+        );
     }
 
     #[cfg_attr(miri, ignore = "reads a directory; miri isolation forbids it")]
     #[test]
-    fn unreadable_directory_is_treated_as_no_match() {
-        assert_eq!(
-            find_entry_case_insensitive(Path::new("a-directory-that-does-not-exist"), "Justfile"),
-            None
-        );
+    fn missing_directory_is_treated_as_no_match() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("missing-directory");
+        assert_eq!(find_entry_case_insensitive(&missing, "Justfile").unwrap(), None);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn directory_enumeration_errors_are_propagated_with_path_context() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("not-a-directory");
+        std::fs::write(&file, "").unwrap();
+
+        let error = find_entry_case_insensitive(&file, "Justfile").unwrap_err();
+
+        assert!(error.to_string().contains("failed to read directory"), "{error}");
+        assert!(error.to_string().contains(&file.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn directory_entry_errors_are_propagated_with_path_context() {
+        let dir = Path::new("catalog");
+        let entries = [Err::<String, _>(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "entry denied",
+        ))];
+
+        let error = collect_entry_names(entries, dir).unwrap_err();
+
+        assert!(error.to_string().contains("failed to enumerate directory catalog"), "{error}");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -157,7 +234,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         touch(tmp.path(), "justfile");
         // Catalog asks for `Justfile`; the real on-disk name is `justfile`.
-        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile"), "justfile");
+        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile").unwrap(), "justfile");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

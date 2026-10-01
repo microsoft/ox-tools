@@ -3,6 +3,8 @@
 
 //! Assigning a mutant to one shard of a split run, stably across runs and shard counts.
 
+use core::num::NonZeroU32;
+
 /// Assigns a mutant to a shard.
 ///
 /// This uses jump consistent hashing rather than `hash % count`, because the two behave very
@@ -11,8 +13,9 @@
 /// only the fraction that must move does. Shard membership is therefore something a team can
 /// reason about across a config change instead of a fresh random assignment each time.
 #[must_use]
-pub fn shard_of(id: &str, count: u32) -> u32 {
-    if count <= 1 {
+pub fn shard_of(id: &str, count: NonZeroU32) -> u32 {
+    let count = count.get();
+    if count == 1 {
         return 0;
     }
 
@@ -54,23 +57,24 @@ const fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
     #[test]
-    fn one_shard_holds_everything() {
+    fn one_count_selects_shard_zero() {
         for id in ["a", "b", "deadbeef1234"] {
-            assert_eq!(shard_of(id, 0), 0);
-            assert_eq!(shard_of(id, 1), 0);
+            assert_eq!(shard_of(id, NonZeroU32::MIN), 0);
         }
     }
 
     #[test]
     fn shards_are_always_in_range() {
         for count in 1_u32..=16 {
+            let nonzero = NonZeroU32::new(count).expect("the range starts at one");
             for index in 0..500_u32 {
                 let id = format!("mutant{index:04}");
-                let shard = shard_of(&id, count);
+                let shard = shard_of(&id, nonzero);
 
                 assert!(shard < count, "{id} landed in shard {shard} of {count}");
             }
@@ -79,7 +83,8 @@ mod tests {
 
     #[test]
     fn sharding_is_deterministic() {
-        assert_eq!(shard_of("abc123def456", 7), shard_of("abc123def456", 7));
+        let count = NonZeroU32::new(7).expect("seven is nonzero");
+        assert_eq!(shard_of("abc123def456", count), shard_of("abc123def456", count));
     }
 
     #[test]
@@ -87,8 +92,9 @@ mod tests {
         let ids: Vec<String> = (0..300).map(|index| format!("mutant{index:04}")).collect();
 
         for count in [2_u32, 5, 7, 16] {
+            let nonzero = NonZeroU32::new(count).expect("the fixture counts are nonzero");
             let total: usize = (0..count)
-                .map(|shard| ids.iter().filter(|id| shard_of(id, count) == shard).count())
+                .map(|shard| ids.iter().filter(|id| shard_of(id, nonzero) == shard).count())
                 .sum();
 
             assert_eq!(total, ids.len(), "shard count {count} lost or duplicated mutants");
@@ -99,10 +105,11 @@ mod tests {
     fn shards_are_reasonably_balanced() {
         let ids: Vec<String> = (0..2000).map(|index| format!("mutant{index:05}")).collect();
         let count = 8_u32;
+        let nonzero = NonZeroU32::new(count).expect("eight is nonzero");
         let expected = ids.len() / count as usize;
 
         for shard in 0..count {
-            let size = ids.iter().filter(|id| shard_of(id, count) == shard).count();
+            let size = ids.iter().filter(|id| shard_of(id, nonzero) == shard).count();
 
             assert!(
                 size > expected / 2 && size < expected * 2,
@@ -116,7 +123,9 @@ mod tests {
         // The whole reason for jump consistent hashing: a team that raises its nightly shard count
         // should keep most of its coverage history, not reshuffle everything.
         let ids: Vec<String> = (0..2000).map(|index| format!("mutant{index:05}")).collect();
-        let moved = ids.iter().filter(|id| shard_of(id, 8) != shard_of(id, 9)).count();
+        let eight = NonZeroU32::new(8).expect("eight is nonzero");
+        let nine = NonZeroU32::new(9).expect("nine is nonzero");
+        let moved = ids.iter().filter(|id| shard_of(id, eight) != shard_of(id, nine)).count();
         let total = ids.len();
 
         // A modulus would move about 8/9 of them.
@@ -126,7 +135,8 @@ mod tests {
     #[test]
     fn different_ids_can_land_in_different_shards() {
         let ids: Vec<String> = (0..100).map(|index| format!("mutant{index:04}")).collect();
-        let distinct: crate::HashSet<u32> = ids.iter().map(|id| shard_of(id, 4)).collect();
+        let count = NonZeroU32::new(4).expect("four is nonzero");
+        let distinct: crate::HashSet<u32> = ids.iter().map(|id| shard_of(id, count)).collect();
 
         assert!(distinct.len() > 1, "sharding put everything in one shard");
     }

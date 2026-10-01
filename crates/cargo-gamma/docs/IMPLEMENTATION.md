@@ -52,6 +52,26 @@ collision-checked, with a short identity digest added only when needed.
 Artifact publication is separate from the cache, and `--artifact-dir` moves
 the complete user-facing set.
 
+## Compiler convergence
+
+The library checks the complete pending schema before generating test binaries.
+Unattributed failures enter target-scoped isolation with exact active subsets:
+all unrelated pending mutants are restored while one subset is proved. Local
+limits are 4,096 candidates and 32 proofs per context; campaign limits are 64
+contexts and 256 proofs. Exhausted contexts publish their pending mutants as
+`notbuilt`.
+
+Narrow checks and builds are transactional. Every verdict-bearing convergence
+field is snapshotted before narrowing and restored before a wider retry.
+Isolation and interaction minimization live in
+`cargo-gamma-lib/src/exec/build/isolation.rs`; splice deltas and the incremental
+guard index remain in `build/splices.rs`. Ordinary reporters do not request
+Cargo evidence decoding, while diagnostic reporters opt in through `Events`.
+
+Target-frontier acceptance was rejected by deterministic invocation-count
+fixtures: retaining global confirmation always adds work, while omitting it is
+unsound for feature-unified downstream and cross-target interaction cases.
+
 ## Runtime protocol
 
 The injected runtime uses fixed static buffers and native startup-environment

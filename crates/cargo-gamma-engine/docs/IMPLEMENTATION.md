@@ -25,6 +25,17 @@ written type evidence to their operands. Signed and unresolved zero remains
 eligible for decrement, and an explicit textual, temporal, or container type
 vetoes a conflicting numeric-use guess.
 
+Workspace `Default` evidence is formed by order-independent unions of per-file
+indexes. Repeated unqualified type names preserve positive evidence when every
+definition is defaultable and preserve negative evidence when none are. A mixed
+collision remains unknown because a bare name cannot prove which definition it
+denotes. An unqualified generic local path retains the declaration's evidence,
+and value synthesis separately verifies that its concrete arguments satisfy
+the derived or declared bounds. Qualified and absolute paths remain unknown to
+this syntax-only index. When a local type shadows a standard collection but its
+concrete arguments fail those bounds, synthesis stops rather than falling
+through to the standard collection's similarly spelled inherent constructor.
+
 Return-value construction resolves local aliases without replacing their
 declared shape. Recursive products stop when any member lacks construction
 evidence. Reference construction is deliberately limited to source-independent
@@ -50,8 +61,10 @@ into a block.
 Fallback mutations preserve the surrounding method-call spelling, replace only
 the selected fallback span, and require positive direct-`Default` evidence from
 that expression. Call suppression is limited to unqualified locally indexed
-functions with a positively defaultable return type, avoiding same-named
-qualified APIs. Option-style `filter` receivers are excluded from iterator
+functions with a positively defaultable return type, and expression-type
+inference applies that same unqualified-path check before consulting the local
+return map. Same-named qualified APIs therefore cannot inherit bare local
+evidence. Option-style `filter` receivers are excluded from iterator
 removal. Boolean struct-field shorthand is traversed without offering an
 expression replacement, and arrays borrowed through `.as_slice()` are not
 reversed because a guarded expression would shorten their temporary lifetime.
@@ -75,3 +88,9 @@ Focused fixtures make every cfg-bearing syntax level observable through either
 a malformed stated value or candidate evidence. Agreement tests compare the
 proc-macro and source scanners across generated syntax families without
 exporting their corpus generators as supported API.
+
+Selected positive counterexamples also apply each discovered replacement
+directly and compile the resulting standalone fixture with the workspace Rust
+edition. This oracle intentionally skips shapes such as `Shape::IterBlock`
+whose viability depends on later schema instrumentation wrapping both branches
+with `gamma_rt::Either`; dedicated instrumentation tests cover those shapes.

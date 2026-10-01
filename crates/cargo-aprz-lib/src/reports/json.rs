@@ -121,9 +121,10 @@ fn metric_value_to_json(value: &MetricValue, buf: &mut String) -> serde_json::Va
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use core::fmt;
+    use std::panic::catch_unwind;
     use std::sync::Arc;
 
     use chrono::{DateTime, Utc};
@@ -341,7 +342,7 @@ mod tests {
 
     #[test]
     fn generate_propagates_writer_errors_without_panicking() {
-        let result = std::panic::catch_unwind(|| generate(&[], &mut FailWriter));
+        let result = catch_unwind(|| generate(&[], &mut FailWriter));
 
         assert!(result.is_ok(), "writer errors must not panic");
         assert!(result.expect("checked above").is_err());

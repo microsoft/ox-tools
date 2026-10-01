@@ -180,6 +180,10 @@ impl CommentStyle {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt as _;
     use std::path::PathBuf;
 
     use super::*;
@@ -281,8 +285,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn detect_returns_none_for_non_utf8_file_name_and_extension() {
-        use std::os::unix::ffi::OsStringExt as _;
-
+        // 0xff is deliberately invalid as a standalone UTF-8 byte.
         let invalid_name = PathBuf::from(OsString::from_vec(vec![0xff]));
         assert_eq!(FileKind::detect(&invalid_name, None), None);
 
@@ -298,8 +301,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn detect_returns_none_for_non_utf8_file_name_and_extension() {
-        use std::os::windows::ffi::OsStringExt as _;
-
+        // 0xd800 is deliberately an unpaired UTF-16 surrogate.
         let invalid_name = PathBuf::from(OsString::from_wide(&[0xd800]));
         assert_eq!(FileKind::detect(&invalid_name, None), None);
 

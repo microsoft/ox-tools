@@ -357,6 +357,7 @@ mod fuzz {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::super::source_file::{SourceFile, line_starts};
     use super::*;

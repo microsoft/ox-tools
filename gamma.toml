@@ -14,4 +14,6 @@ exclude-files = [
 exclude-trait-impls = ["Debug"]
 
 [resources]
+# Two concurrent Cargo subprocesses preserve useful parallelism without recreating the target-dir
+# lock contention that this shared admission resource is intended to prevent.
 cargo-aprz-cargo-subprocess = 2

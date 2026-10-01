@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::path::Path;
+
 use camino::Utf8Path;
 use serde::Serialize;
 
@@ -87,10 +89,10 @@ pub trait Events {
         self.phase("", detail);
     }
 
-    /// The build reported how far along it is, in a line of its own rendering.
+    /// The build reported how far along its current Cargo invocation is.
     ///
-    /// Passed through rather than reconstructed: cargo holds the unit graph, so it is the only
-    /// party that knows the denominator.
+    /// Hidden by default because convergence launches multiple invocations with unrelated unit
+    /// graphs. Reporters may expose it as part of an explicitly requested raw build transcript.
     fn build_progress(&mut self, _bar: &str) {}
 
     /// The build wrote a line, or the compiler rendered a diagnostic.
@@ -112,6 +114,46 @@ pub trait Events {
 
     /// The build finished, so anything drawn in its place can be taken down.
     fn build_finished(&mut self) {}
+
+    /// The number of mutants the compiler has proved unviable so far.
+    fn convergence_progress(&mut self, _unviable: usize) {}
+
+    /// Whether convergence work evidence has a consumer.
+    ///
+    /// The evidence requires another pass over Cargo's JSON transcript. Reporters that do not
+    /// retain it should leave this false so ordinary runs pay only for verdict-bearing decoding.
+    fn wants_convergence_evidence(&self) -> bool {
+        false
+    }
+
+    /// Reports what changed and what Cargo rebuilt during one convergence round.
+    fn convergence_evidence(
+        &mut self,
+        _round: u32,
+        _written: &[&Path],
+        _fresh: usize,
+        _rebuilt: usize,
+        _rebuilt_targets: &[String],
+        _failed_targets: &[String],
+    ) {
+    }
+
+    /// Whether isolation proof evidence has a consumer.
+    fn wants_isolation_evidence(&self) -> bool {
+        false
+    }
+
+    /// Reports one proof build used to isolate an unattributed compiler failure.
+    fn isolation_evidence(
+        &mut self,
+        _active: usize,
+        _population: usize,
+        _written: &[&Path],
+        _fresh: usize,
+        _rebuilt: usize,
+        _failed_targets: &[String],
+    ) {
+    }
 
     /// Something about this run is likely to cost far more than it is worth, and the user can fix it.
     ///
@@ -208,6 +250,9 @@ mod tests {
         events.end(", done");
         events.complete("the result");
         events.outcome(", noted");
+        events.convergence_progress(3);
+        events.convergence_progress(5);
+        events.isolation_evidence(4, 10, &[Path::new("src/lib.rs")], 6, 2, &["subject (test)".to_owned()]);
         events.measured(&plan, &session);
         events.sweep_planned(&work, 3);
         events.mutant_started();
@@ -229,6 +274,8 @@ mod tests {
         assert_eq!(events.sweep_plan, Some((1, 3)));
         assert_eq!(events.mutant_starts, 1);
         assert_eq!(events.heartbeats, 1);
+        assert_eq!(events.convergence, [3, 5]);
+        assert!(events.convergence.windows(2).all(|counts| counts[0] < counts[1]));
     }
 
     /// The one hook with no default has to be routed by the implementor, not by the trait.

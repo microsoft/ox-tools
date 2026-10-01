@@ -271,9 +271,9 @@ fn attribute_accepts(arguments: &str) -> bool {
 /// deleting those characters. So an argument list one channel reads must not be a compile error to
 /// the other.
 ///
-/// The proc macro used to parse everything after a leading number as one `f64`, which made `2.5,`
-/// and `3.0, reason = "slow"` — both perfectly ordinary to the directive scanner, which splits on
-/// commas first — into compile errors blaming the numeric bound rather than the comma. Deleting the
+/// The proc macro used to parse everything after a leading number as one `f64`, which made
+/// `3.0, reason = "slow"` — ordinary to the directive scanner, which splits on commas first —
+/// into a compile error blaming the numeric bound rather than the argument shape. Deleting the
 /// `//` from a working directive broke the build, and the message pointed at the wrong thing.
 ///
 /// Splitting on commas alone was not enough, because the proc macro then read only the *first*
@@ -290,9 +290,7 @@ fn attribute_accepts(arguments: &str) -> bool {
 fn the_two_channels_agree_on_timeout_multiplier_arguments() {
     let accepted: &[(&str, f64)] = &[
         ("2.5", 2.5),
-        ("2.5,", 2.5),
         ("3.0, reason = \"slow\"", 3.0),
-        ("3.0, reason = \"slow\",", 3.0),
         ("2.5, tag = \"integration\"", 2.5),
         ("2.5, arith", 2.5),
         ("2.5, arith, reason = \"complex math\"", 2.5),
@@ -301,7 +299,6 @@ fn the_two_channels_agree_on_timeout_multiplier_arguments() {
         // along, so a proc macro that only ever looked at the first argument made valid,
         // already-supported text a compile error.
         ("arith, 2.5", 2.5),
-        ("arith, 2.5,", 2.5),
         ("arith, 2.5, reason = \"complex math\"", 2.5),
         ("reason = \"slow\", 2.5", 2.5),
         ("test_timeout_multiplier = 2.5", 2.5),
@@ -317,6 +314,15 @@ fn the_two_channels_agree_on_timeout_multiplier_arguments() {
             directive_multiplier(arguments).map(f64::to_bits),
             Some(expected.to_bits()),
             "the directive channel did not read {expected} out of `{arguments}`"
+        );
+    }
+
+    for arguments in [",arith", "arith,,reason = \"covered\"", "arith,", ","] {
+        assert!(!attribute_accepts(arguments), "the attribute channel accepted `{arguments}`");
+        assert_eq!(
+            directive_multiplier(arguments),
+            None,
+            "the directive channel accepted `{arguments}`"
         );
     }
 

@@ -11,6 +11,7 @@
 //! compiles as its own crate and sees nothing such a gate creates, which would leave the
 //! integration tests maintaining a second capturing host of their own.
 
+#![cfg_attr(coverage_nightly, coverage(off))]
 // This module is test scaffolding that happens to be compiled as a library module, so the lints
 // written for production code do not apply to it: a fixture builder whose result is dropped is a
 // test bug the test itself reveals, and `panic` is how a fixture reports one.
@@ -255,7 +256,6 @@ pub struct Sink {
     /// Everything written to the diagnostic stream.
     pub err: Vec<u8>,
 
-    terminal: bool,
     width: Option<u16>,
     env: Vec<(String, String)>,
 }
@@ -264,13 +264,16 @@ impl Sink {
     /// Presents the host as a terminal of the given width.
     #[must_use]
     pub fn terminal(mut self, width: u16) -> Self {
-        self.terminal = true;
         self.width = Some(width);
         self
     }
 
     /// Changes the width reported by this terminal.
     pub fn resize_terminal(&mut self, width: u16) {
+        assert!(
+            self.width.is_some(),
+            "Sink::resize_terminal requires a Sink constructed with Sink::terminal"
+        );
         self.width = Some(width);
     }
 
@@ -304,7 +307,7 @@ impl Host for Sink {
     }
 
     fn is_terminal(&self) -> bool {
-        self.terminal
+        self.width.is_some()
     }
 
     fn terminal_width(&self) -> Option<u16> {
@@ -704,7 +707,7 @@ pub struct Recorder {
     /// Number of workload entries and worker lanes announced for the sweep.
     pub sweep_plan: Option<(usize, usize)>,
 
-    /// Number of workers announced as they started a mutant.
+    /// Number of mutant-start events announced by workers.
     pub mutant_starts: usize,
 
     /// Number of quiet-sweep heartbeat events.
@@ -712,6 +715,9 @@ pub struct Recorder {
 
     /// Every warning the run raised, in order.
     pub warnings: Vec<String>,
+
+    /// Every compiler-unviability census update, in publication order.
+    pub convergence: Vec<usize>,
 }
 
 impl crate::exec::Events for Recorder {
@@ -737,6 +743,10 @@ impl crate::exec::Events for Recorder {
 
     fn heartbeat(&mut self) {
         self.heartbeats = self.heartbeats.saturating_add(1);
+    }
+
+    fn convergence_progress(&mut self, unviable: usize) {
+        self.convergence.push(unviable);
     }
 }
 
@@ -1073,6 +1083,12 @@ mod tests {
         assert_eq!(sink.terminal_width(), Some(80));
         assert_eq!(sink.env("CI").as_deref(), Some("true"));
         assert_eq!(sink.env("OTHER"), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Sink::resize_terminal requires a Sink constructed with Sink::terminal")]
+    fn a_redirected_sink_cannot_be_resized_into_a_mixed_terminal_state() {
+        Sink::default().resize_terminal(80);
     }
 
     #[test]

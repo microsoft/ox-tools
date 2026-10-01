@@ -51,6 +51,9 @@ pub enum RefusalRemedy {
     BetweenManagedRegions,
     /// The region collides with a table the repository wrote.
     HandWrittenTable,
+    /// The catalog rendered TOML that does not parse even without any host
+    /// content. Repository edits cannot repair the generated body.
+    InvalidGeneratedToml,
     /// The region is live, but its body on disk matches neither the body anvil
     /// last generated nor the current template. Nothing was parsed and no
     /// table collided; the host's format is irrelevant.
@@ -266,12 +269,12 @@ pub fn toml_introduction_refusal(
         newline,
     } = request;
     if !is_toml_host(host_relpath) {
-        return Option::default();
+        return None;
     }
     let base = host_text.unwrap_or("");
     // A malformed region is a separate diagnosis, raised by the planner.
     if find_region(base, region_id, syntax).is_err() {
-        return Option::default();
+        return None;
     }
 
     let spliced = match splice(host_relpath, host_text, region_id, rendered_body, syntax, placement, newline) {
@@ -288,11 +291,11 @@ pub fn toml_introduction_refusal(
         .err()?;
     Some(TomlHostRefusal {
         reason: format!("splicing the region would leave {host_relpath} unparsable as TOML: {error}"),
-        remedy: classify_refusal(base, &spliced, region_id, syntax, retiring),
+        remedy: classify_refusal(base, &spliced, rendered_body, region_id, syntax, retiring),
     })
 }
 
-/// Which of the three faults produced a failing whole-host parse.
+/// Which of the four faults produced a failing whole-host parse.
 ///
 /// The order matters, because only one of them is this region's doing. A host
 /// that already fails to parse fails again whatever is spliced into it, so it
@@ -303,12 +306,22 @@ pub fn toml_introduction_refusal(
 /// Once the base is known good, masking every *other* managed region answers
 /// the remaining question: if the splice parses without them, the collision
 /// needs one of them and nothing hand-written is involved.
-fn classify_refusal(base: &str, spliced: &str, region_id: &str, syntax: CommentSyntax, retiring: &BTreeSet<String>) -> RefusalRemedy {
+fn classify_refusal(
+    base: &str,
+    spliced: &str,
+    rendered_body: &str,
+    region_id: &str,
+    syntax: CommentSyntax,
+    retiring: &BTreeSet<String>,
+) -> RefusalRemedy {
     if mask_retiring_managed_regions(base, syntax, retiring)
         .parse::<DocumentMut>()
         .is_err()
     {
         return RefusalRemedy::HostAlreadyUnparsable;
+    }
+    if rendered_body.parse::<DocumentMut>().is_err() {
+        return RefusalRemedy::InvalidGeneratedToml;
     }
     let others: BTreeSet<String> = managed_region_ids(spliced, syntax)
         .into_iter()
@@ -513,7 +526,7 @@ mod tests {
     fn a_missing_host_is_not_classified_as_already_unparsable() {
         assert_eq!(
             remedy(None, request("deny.toml", "r", "[invalid")),
-            Some(RefusalRemedy::HandWrittenTable)
+            Some(RefusalRemedy::InvalidGeneratedToml)
         );
     }
 
@@ -912,6 +925,8 @@ yanked = \"deny\"
         let body = "trip_wire_patterns = []\n";
         let host = "[git]\nremote_branch = \"origin/main\"\n\n# >>> anvil-managed: r\ntrip_wire_patterns = []\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
+        // The stale recorded checksum makes placement, rather than checksum
+        // equality, prove that a current generated body can be moved safely.
         manifest.set_region("delta.toml", "r", "sha256:stale");
 
         let item = plan_managed_region(

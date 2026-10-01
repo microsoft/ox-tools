@@ -213,12 +213,13 @@ a general invalid-input repair contract.
 
 The backstop judges each write against the host's accumulated text: regions this
 pass has already written are seen with their new bodies, and regions it has not
-reached yet with the bodies still on disk. Three faults can make that parse fail,
+reached yet with the bodies still on disk. Four faults can make that parse fail,
 and the refusal names which one, because they have different answers:
 
 | Fault | What the refusal says |
 | --- | --- |
 | The host already fails to parse before this region is spliced | The existing TOML has to be repaired; no run can write the region until it is |
+| The generated region body is invalid TOML on its own | Repair the catalog template; repository edits cannot make the generated body valid |
 | Two managed regions declare one table | Nothing hand-written is involved; re-run to finish a move, and if the refusal repeats the catalog is exchanging tables, which is unsupported |
 | A managed region and hand-written text declare one table | Reconcile the hand-written table with the managed one |
 
