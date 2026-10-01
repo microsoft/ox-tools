@@ -2482,21 +2482,24 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
         Write-Error "anvil-doc-test: could not parse cargo metadata output: $_"
         exit 1
     }
-    $docPackages = @{}
+    $docPackages = [System.Collections.Generic.Dictionary[string, bool]]::new(
+        [System.StringComparer]::Ordinal
+    )
     foreach ($package in $meta.packages) {
         if ($package.targets | Where-Object { $_.doctest -eq $true }) {
-            $docPackages[$package.name] = $true
+            $docPackages["$($package.name)@$($package.version)"] = $true
         }
     }
     $specs = if ($selection -contains '--workspace') {
-        @($docPackages.Keys | Sort-Object)
+        $workspaceSpecs = [string[]]@($docPackages.Keys)
+        [Array]::Sort($workspaceSpecs, [System.StringComparer]::Ordinal)
+        $workspaceSpecs
     } else {
         @(
             for ($i = 0; $i -lt $selection.Count; $i++) {
                 if ($selection[$i] -eq '--package' -and ($i + 1) -lt $selection.Count) {
                     $spec = $selection[++$i]
-                    $name = ($spec -split '@', 2)[0]
-                    if ($docPackages.ContainsKey($name)) { $spec }
+                    if ($docPackages.ContainsKey($spec)) { $spec }
                 }
             }
         )

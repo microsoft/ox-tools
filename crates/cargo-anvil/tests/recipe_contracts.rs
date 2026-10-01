@@ -2236,7 +2236,7 @@ fn doc_test_selects_only_doctest_capable_affected_packages() {
     seed_include(
         tmp.path(),
         "affected",
-        "--package rlib-package@0.1.0 --package bin-only@0.1.0 --package macro-package@0.1.0",
+        "--package Foo@0.1.0 --package foo@0.1.0 --package macro-package@0.1.0",
     );
     let output = run_just(
         tmp.path(),
@@ -2244,9 +2244,9 @@ fn doc_test_selects_only_doctest_capable_affected_packages() {
         &[
             ("ANVIL_IMPACT", OsStr::new("consume")),
             ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_PACKAGE_NAME", OsStr::new("rlib-package")),
+            ("FAKE_PACKAGE_NAME", OsStr::new("Foo")),
             ("FAKE_FIRST_RLIB", OsStr::new("1")),
-            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("bin-only")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("foo")),
             ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
             ("FAKE_SECOND_DOCTEST_FALSE", OsStr::new("1")),
             ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
@@ -2264,28 +2264,28 @@ fn doc_test_selects_only_doctest_capable_affected_packages() {
     assert_eq!(doc_commands.len(), 2, "both feature configurations must run:\n{commands}");
     for command in doc_commands {
         assert!(
-            command.contains("--package rlib-package@0.1.0"),
-            "an explicit doctest-capable crate type was dropped:\n{command}"
+            command.contains("--package Foo@0.1.0"),
+            "an explicit doctest-capable case-distinct crate was dropped:\n{command}"
         );
         assert!(
             command.contains("--package macro-package@0.1.0"),
             "a proc-macro doctest package was dropped:\n{command}"
         );
         assert!(
-            !command.contains("bin-only"),
-            "a bin-only package reached cargo test --doc:\n{command}"
+            !command.contains("--package foo@0.1.0"),
+            "a case-distinct bin-only package reached cargo test --doc:\n{command}"
         );
     }
 
     fs::remove_file(&log).unwrap();
-    seed_include(tmp.path(), "affected", "--package bin-only@0.1.0");
+    seed_include(tmp.path(), "affected", "--package foo@0.1.0");
     let bin_only = run_just(
         tmp.path(),
         &["anvil-doc-test"],
         &[
             ("ANVIL_IMPACT", OsStr::new("consume")),
             ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_PACKAGE_NAME", OsStr::new("bin-only")),
+            ("FAKE_PACKAGE_NAME", OsStr::new("foo")),
             ("FAKE_FIRST_DOCTEST_FALSE", OsStr::new("1")),
         ],
     );
