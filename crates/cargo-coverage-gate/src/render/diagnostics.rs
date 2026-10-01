@@ -31,13 +31,19 @@ pub(crate) fn diagnostic_line_count(outcome: &PackageOutcome) -> usize {
 }
 
 pub(crate) fn displayed_diagnostics(outcome: &PackageOutcome) -> Vec<(&std::path::Path, &[u32])> {
+    displayed_diagnostics_from(&outcome.diagnostics)
+}
+
+fn displayed_diagnostics_from<'a>(
+    diagnostics: impl IntoIterator<Item = &'a crate::verdict::LineDiagnostic>,
+) -> Vec<(&'a std::path::Path, &'a [u32])> {
     let mut remaining = MAX_DIAGNOSTIC_LINES;
     let mut displayed_diagnostics = Vec::new();
+    let mut diagnostics = diagnostics.into_iter();
 
-    for diagnostic in &outcome.diagnostics {
-        if remaining == 0 {
-            break;
-        }
+    while remaining > 0
+        && let Some(diagnostic) = diagnostics.next()
+    {
         let displayed = diagnostic.lines.len().min(remaining);
         if displayed == 0 {
             continue;
@@ -151,6 +157,32 @@ mod tests {
 
         assert_eq!(displayed.len(), 2);
         assert_eq!(displayed[0].1, (1..=60).collect::<Vec<_>>());
+        assert_eq!(displayed[1].1, (61..=100).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn displayed_diagnostics_stop_requesting_items_when_the_budget_is_exhausted() {
+        let diagnostics = [
+            LineDiagnostic {
+                path: "first.rs".into(),
+                lines: (1..=60).collect(),
+            },
+            LineDiagnostic {
+                path: "second.rs".into(),
+                lines: (61..=120).collect(),
+            },
+        ];
+        let iterator = diagnostics
+            .iter()
+            .map(Some)
+            .chain(std::iter::once_with(|| {
+                panic!("the exhausted traversal requested another diagnostic")
+            }))
+            .map(|diagnostic| diagnostic.expect("the finite diagnostics are present"));
+
+        let displayed = displayed_diagnostics_from(iterator);
+
+        assert_eq!(displayed.len(), 2);
         assert_eq!(displayed[1].1, (61..=100).collect::<Vec<_>>());
     }
 

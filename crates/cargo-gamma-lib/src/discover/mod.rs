@@ -44,7 +44,7 @@ pub use shard::shard_of;
 #[cfg(test)]
 #[doc(inline)]
 pub use survey::plan;
-pub(crate) use survey::plan_for_build;
+pub(crate) use survey::{LibraryTestTarget, plan_for_build};
 #[doc(inline)]
 pub use survey::{Scanned, Survey, load_metadata};
 #[doc(inline)]

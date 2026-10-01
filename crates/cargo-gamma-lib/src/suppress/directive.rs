@@ -126,9 +126,13 @@ struct Arguments {
 /// `arith.add_to_sub` or `@default` or `!bitwise` is a perfectly good token sequence but not a
 /// well-formed meta path. Reading tokens keeps the directive grammar identical to the one
 /// `--mutators` accepts, which is the whole point of having a single vocabulary.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn parse_arguments(tokens: &TokenStream) -> Arguments {
     let mut arguments = Arguments::default();
+    if let Some(error) = empty_argument_error(tokens) {
+        arguments.errors.push(error.to_owned());
+        return arguments;
+    }
+
     let mut selectors: Vec<String> = Vec::new();
     let mut current: Vec<TokenTree> = Vec::new();
 
@@ -242,6 +246,25 @@ fn parse_arguments(tokens: &TokenStream) -> Arguments {
     arguments
 }
 
+fn empty_argument_error(tokens: &TokenStream) -> Option<&'static str> {
+    let mut current_is_empty = true;
+    let mut saw_comma = false;
+
+    for token in tokens.clone() {
+        if matches!(&token, TokenTree::Punct(punct) if punct.as_char() == ',') {
+            if current_is_empty {
+                return Some("directive arguments must not contain an empty comma-delimited segment");
+            }
+            current_is_empty = true;
+            saw_comma = true;
+        } else {
+            current_is_empty = false;
+        }
+    }
+
+    (saw_comma && current_is_empty).then_some("directive arguments must not end with an empty comma-delimited segment")
+}
+
 /// Records the one timeout multiplier a directive may state, refusing a second.
 ///
 /// An item has one timeout, so a second multiplier — positional or named, and in whichever order
@@ -279,7 +302,6 @@ fn is_string_literal(tokens: &[TokenTree]) -> bool {
 ///
 /// Anything that is not a string literal passes through unchanged — the *whole* input, not the
 /// remains of the prefix strip, which is what the selector rendering path relies on.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn unquote(text: &str) -> String {
     let body = text.strip_prefix('r').unwrap_or(text);
     let hashes = body.len() - body.trim_start_matches('#').len();
@@ -294,6 +316,7 @@ fn unquote(text: &str) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use proc_macro2::{Group, Ident, Literal, Punct, Spacing};
 
@@ -301,12 +324,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_empty_argument_between_commas_does_not_create_a_selector() {
-        let tokens: TokenStream = "arith,,reason = \"covered\"".parse().expect("tokens");
-        let parsed = parse_arguments(&tokens);
+    fn empty_comma_delimited_arguments_are_rejected() {
+        for arguments in [",arith", "arith,,reason = \"covered\"", "arith,", ","] {
+            let source = format!("#[gamma::skip({arguments})]\nfn f(a: i32) -> i32 {{ a + 1 }}");
+            let error = directives(&file(&source)).expect_err("empty arguments must not widen or alter a directive");
 
-        assert_eq!(parsed.selectors, "arith");
-        assert_eq!(parsed.reason.as_deref(), Some("covered"));
+            assert!(error.to_string().contains("empty comma-delimited segment"), "{arguments}: {error}");
+        }
     }
 
     fn file(source: &str) -> SourceFile {

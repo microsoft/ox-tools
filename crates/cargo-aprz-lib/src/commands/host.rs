@@ -17,14 +17,12 @@ pub trait Host: Send + Sync {
 
 /// Test host that captures output to in-memory buffers
 #[cfg(test)]
-#[cfg(not(miri))]
 pub struct TestHost {
     pub output_buf: Vec<u8>,
     pub error_buf: Vec<u8>,
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
 impl TestHost {
     pub fn new() -> Self {
         Self {
@@ -38,7 +36,6 @@ impl TestHost {
 // the in-crate one is only ever driven by whichever unit test happens to need it, and its unused
 // methods must not count against the crate's coverage.
 #[cfg(test)]
-#[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 impl Host for TestHost {
     fn output(&mut self) -> impl Write {

@@ -321,7 +321,12 @@ drift per member — no per-fork engine changes.
 > **On-disk casing.** Host paths and owned-file paths are canonical (`Justfile`, `Cargo.toml`), but
 > the engine resolves each against the repo case-insensitively and reuses whatever casing already
 > exists on disk (e.g. an adopter's lowercase `justfile`). A fork authors canonical paths and never
-> has to think about case variants — this is engine behavior, not per-catalog.
+> has to think about case variants — this is engine behavior, not per-catalog. An exact spelling
+> always wins. If a case-sensitive filesystem contains multiple non-exact spellings that fold to
+> the same canonical path, the run refuses that ambiguous lookup rather than letting directory
+> enumeration order choose which file cargo-anvil owns. A genuinely missing directory preserves
+> canonical casing for the path that will be created; permission and directory-enumeration errors
+> fail with path context rather than being mistaken for absence.
 
 ### 4.3 Backends: a fixed set, overridable in parts
 

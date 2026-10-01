@@ -27,22 +27,13 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
     $selection = @(if ($include) { -split $include } else { '--workspace' })
-    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
-    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-doc-test: cargo metadata failed'; exit $LASTEXITCODE }
-    try {
-        $meta = $metadataJson | ConvertFrom-Json
-    } catch {
-        Write-Error "anvil-doc-test: could not parse cargo metadata output: $_"
-        exit 1
-    }
+    $capableText = (& "{{ just_executable() }}" _anvil-impact-doctest-packages)
+    $capabilityExit = $LASTEXITCODE
+    if ($capabilityExit -ne 0) { exit $capabilityExit }
     $docPackages = [System.Collections.Generic.Dictionary[string, bool]]::new(
         [System.StringComparer]::Ordinal
     )
-    foreach ($package in $meta.packages) {
-        if ($package.targets | Where-Object { $_.doctest -eq $true }) {
-            $docPackages["$($package.name)@$($package.version)"] = $true
-        }
-    }
+    foreach ($spec in @(-split "$capableText")) { if ($spec) { $docPackages[$spec] = $true } }
     $specs = if ($selection -contains '--workspace') {
         $workspaceSpecs = [string[]]@($docPackages.Keys)
         [Array]::Sort($workspaceSpecs, [System.StringComparer]::Ordinal)

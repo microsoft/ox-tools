@@ -35,16 +35,37 @@ metadata.
   classified on its own, so an attribute accepts exactly the text the equivalent
   comment-form directive accepts. A positional timeout multiplier
   therefore carries no positional meaning: it may sit before, between, or after
-  selectors, a `reason`, a `tag`, or a trailing comma. What it may not do is
+  selectors, a `reason`, or a `tag`. Every comma-delimited argument must be
+  non-empty, so leading, repeated, comma-only, and trailing commas are rejected
+  instead of being confused with the intentionally bare all-mutator form. What a multiplier may not do is
   appear twice — a second multiplier, in any spelling and in either order, is
   refused rather than silently overriding the first, and the tool's directive
   parser refuses the same text.
 - Mutation-control attributes return the original item unchanged after
   validation.
 - A resource attribute accepts one portable string name on a test function or
-  inline test module and emits an ignored marker test. The marker identifier encodes
-  the resource and, for a function, the test name; the harness supplies the
-  enclosing module path in its listing.
+  inline test module and emits an ignored marker test. Portable names start with
+  an ASCII letter and otherwise contain only ASCII letters, digits, `.`, `_`,
+  or `-`. Function annotations require a test attribute and apply to that test;
+  module annotations require an inline module and apply to the containing test
+  target. Resource arguments and annotated items pass the same bounded
+  token-shape guard as stated values before either reaches `syn`. Distinct
+  resource validation failures remain typed internally until the proc-macro
+  boundary renders the final `compile_error!`.
+
+## Resource marker protocol
+
+The emitter and cargo-gamma's harness-listing decoder share a private marker
+grammar. Marker names begin with `__cargo_gamma_resource_`, followed by the
+lowercase hexadecimal UTF-8 bytes of the resource name. Function markers then
+use `_test_` and the encoded Rust function name; module markers use `_binary`.
+Libtest adds the enclosing module path, which distinguishes identical
+binary-wide markers in sibling modules.
+
+Function markers copy only `cfg` and `cfg_attr` attributes, so scheduling
+metadata exists under the same conditional compilation as the annotated test.
+Other attributes are intentionally not propagated. Any change to this grammar
+must update both this crate's emitter and cargo-gamma's decoder.
 
 ## Stability
 

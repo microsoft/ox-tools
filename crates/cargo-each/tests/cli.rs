@@ -5,6 +5,9 @@
 //! fixture workspace so selection / filtering / execution are exercised
 //! against real `cargo metadata`.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -188,6 +191,19 @@ fn main() {
             thread::sleep(Duration::from_millis(if name == "alpha" { 250 } else { 20 }));
             println!("{name}:end");
             append(&args[3], name);
+        }
+        "parallel-ordered" => {
+            let name = &args[2];
+            let beta_complete = std::path::Path::new(&args[3]).with_extension("beta-complete");
+            println!("{name}:start");
+            if name == "alpha" {
+                wait_for(&beta_complete);
+            }
+            println!("{name}:end");
+            append(&args[3], name);
+            if name == "beta" {
+                fs::write(beta_complete, "").expect("write beta completion marker");
+            }
         }
         "fail-order" => {
             let name = &args[2];
@@ -1525,7 +1541,7 @@ fn parallel_output_is_buffered_in_plan_order() {
     let output = each(&manifest)
         .args(["-p", "alpha", "-p", "beta", "--jobs", "2", "--"])
         .arg(&probe)
-        .args(["ordered", "{name}"])
+        .args(["parallel-ordered", "{name}"])
         .arg(&completion_log)
         .output()
         .expect("run cargo-each");

@@ -30,6 +30,7 @@ pub fn diff(path: &Utf8Path, before: &str, after: &str) -> String {
 }
 
 /// One line's fate in a diff.
+#[derive(Debug, PartialEq, Eq)]
 enum Step<'a> {
     Kept(&'a str),
     Added(&'a str),
@@ -56,7 +57,6 @@ const DIFF_LIMIT: usize = 2_000;
     clippy::many_single_char_names,
     reason = "n, m, d, k, x and y are Myers' own names for these; renaming them would make the algorithm harder to check against the paper, not easier"
 )]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn script<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Step<'a>> {
     let (n, m) = (old.len(), new.len());
     let max = n + m;
@@ -88,7 +88,7 @@ fn script<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Step<'a>> {
     // `2 · max + 1` values into a fresh allocation `d` times, for tens of megabytes of transient
     // garbage on a large diff and no more information.
     let mut rounds: Vec<isize> = Vec::new();
-    let shift = |k: isize| usize::try_from(k + bounded_isize(max)).unwrap_or(0);
+    let shift = |k: isize| usize::try_from(k + isize::try_from(max).unwrap_or(isize::MAX)).unwrap_or(0);
 
     for d in 0..=isize::try_from(max).unwrap_or(isize::MAX) {
         rounds.extend_from_slice(furthest.get(shift(-d)..=shift(d)).unwrap_or_default());
@@ -123,10 +123,6 @@ fn script<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Step<'a>> {
     }
 
     Vec::new()
-}
-
-fn bounded_isize(value: usize) -> isize {
-    isize::try_from(value).unwrap_or(isize::MAX)
 }
 
 /// Recovers the edit script from the recorded rounds, by walking the corner back to the origin.
@@ -193,6 +189,7 @@ fn walk_back<'a>(old: &[&'a str], new: &[&'a str], rounds: &[isize], d: isize) -
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -204,13 +201,12 @@ mod tests {
         let new: Vec<&str> = new.iter().map(String::as_str).collect();
         let steps = script(&old, &new);
 
-        assert_eq!(steps.len(), old.len() + new.len());
-        assert!(steps[..old.len()].iter().all(|step| matches!(step, Step::Removed(_))));
-        assert!(steps[old.len()..].iter().all(|step| matches!(step, Step::Added(_))));
-    }
+        let expected: Vec<Step<'_>> = old
+            .iter()
+            .map(|line| Step::Removed(line))
+            .chain(new.iter().map(|line| Step::Added(line)))
+            .collect();
 
-    #[test]
-    fn sizes_beyond_the_signed_index_range_saturate_at_the_largest_valid_index() {
-        assert_eq!(bounded_isize(usize::MAX), isize::MAX);
+        assert_eq!(steps, expected);
     }
 }

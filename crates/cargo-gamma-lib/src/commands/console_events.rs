@@ -102,12 +102,20 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn build_progress(&mut self, bar: &str) {
-        // Suppressed while cargo's own output is coming through, because both redraw the same line.
-        if self.show_build {
+        if !self.show_build {
             return;
         }
 
         self.progress.borrowed(self.host, bar);
+    }
+
+    fn convergence_progress(&mut self, unviable: usize) {
+        let detail = format!("unviable mutants ({unviable} found)");
+        if self.dashboard.is_active() {
+            self.dashboard.status(self.host, "Excluding", &detail);
+            return;
+        }
+        self.progress.update_phase(self.host, &detail);
     }
 
     fn build_output(&mut self, line: &str) {
@@ -181,7 +189,7 @@ impl<H: Host> crate::exec::Events for ConsoleEvents<'_, H> {
             _ => {}
         }
 
-        self.progress.record_mutant(mutant);
+        self.progress.record(mutant.outcome);
         self.dashboard.record(mutant);
         self.sync_testing_status();
         if self.dashboard.is_active() {
@@ -578,6 +586,59 @@ mod tests {
         events.build_output("warning: unused variable: `x`");
 
         assert!(host.err().is_empty(), "{}", host.err());
+    }
+
+    #[test]
+    fn cargo_unit_progress_is_hidden_unless_build_output_was_requested() {
+        for show_build in [false, true] {
+            let mut host = Sink::default().terminal(120);
+            {
+                let mut events = ConsoleEvents {
+                    host: &mut host,
+                    progress: Progress::new(true, Styler::new(false), Some(120)),
+                    dashboard: Dashboard::new(false, Some(120), Styler::new(false)),
+                    styler: Styler::new(false),
+                    show_build,
+                    verdict_log: VerdictLog::default(),
+                };
+                events.build_progress("Building [====>    ] 4/17: serde_core");
+            }
+
+            assert_eq!(host.err().contains("4/17"), show_build, "{}", host.err());
+        }
+    }
+
+    #[test]
+    fn convergence_progress_replaces_the_phase_with_the_monotonic_unviable_count() {
+        let mut host = Sink::default().terminal(120);
+        let mut events = ConsoleEvents {
+            host: &mut host,
+            progress: Progress::new(true, Styler::new(false), Some(120)),
+            dashboard: Dashboard::new(false, Some(120), Styler::new(false)),
+            styler: Styler::new(false),
+            show_build: false,
+            verdict_log: VerdictLog::default(),
+        };
+
+        events.begin("Excluding", "Excluded", "unviable mutants (0 found)");
+        events.convergence_progress(10);
+        events.complete("10 unviable mutants, leaving 20 viable mutants");
+
+        let rendered = host.err();
+        assert!(rendered.contains("Excluding unviable mutants (10 found)"), "{rendered}");
+        assert!(
+            rendered.contains("Excluded 10 unviable mutants, leaving 20 viable mutants"),
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches('\n').count(),
+            1,
+            "the completed result must overwrite the active phase row: {rendered:?}"
+        );
+        assert!(!rendered.contains("(0 found)   Excluding"), "{rendered}");
+        assert!(!rendered.contains("schema checks"), "{rendered}");
+        assert!(!rendered.contains("round"), "{rendered}");
+        assert!(!rendered.contains("Cargo reused"), "{rendered}");
     }
 
     /// A warning about what a run is about to cost is worth nothing if it is only shown when

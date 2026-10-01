@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #![cfg(not(miri))] // miri can't spawn subprocesses or do the FS ops these tests need.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -22,6 +24,7 @@ use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt as _;
+use predicates::str::contains;
 use tempfile::TempDir;
 
 /// Write `contents` to `path`, creating parent directories as needed.
@@ -87,7 +90,7 @@ fn version_flag_prints_version() {
     anvil(tmp.path(), &["--version"])
         .assert()
         .success()
-        .stdout(predicates::str::contains(env!("CARGO_PKG_VERSION")));
+        .stdout(contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
@@ -96,8 +99,8 @@ fn help_flag_succeeds_and_describes_backends() {
     anvil(tmp.path(), &["--help"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("--backend"))
-        .stdout(predicates::str::contains("--no-backends"));
+        .stdout(contains("--backend"))
+        .stdout(contains("--no-backends"));
 }
 
 #[test]
@@ -106,7 +109,7 @@ fn invalid_backend_name_is_rejected() {
     anvil(ws.path(), &["--backend", "gitlab"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("gitlab"));
+        .stderr(contains("gitlab"));
 }
 
 #[test]
@@ -120,14 +123,17 @@ fn dry_run_on_fresh_workspace_reports_changes_and_exits_1() {
 #[test]
 fn apply_writes_files_then_dry_run_is_clean() {
     let ws = workspace();
+    let canonical_root = ws.path().canonicalize().expect("temporary workspace path should canonicalize");
     // First apply: writes the managed tree, exits 0.
     anvil(ws.path(), &["--no-backends"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("Will create"))
-        .stdout(predicates::str::contains("repo_root="))
-        .stdout(predicates::str::contains("INFO").not())
-        .stdout(predicates::str::contains("cargo_anvil::run").not());
+        // Structured fields stay useful while tracing level and target
+        // metadata remain absent from user-facing output.
+        .stdout(contains("Will create"))
+        .stdout(contains(format!("repo_root={}", canonical_root.display())))
+        .stdout(contains("INFO").not())
+        .stdout(contains("cargo_anvil::run").not());
     assert!(ws.path().join("justfiles/anvil/mod.just").is_file());
     assert!(ws.path().join(".anvil.lock").is_file());
 
@@ -151,7 +157,7 @@ fn dry_run_fails_when_only_the_lockfile_is_stale() {
         .assert()
         .failure()
         .code(1)
-        .stdout(predicates::str::contains(".anvil.lock"));
+        .stdout(contains(".anvil.lock"));
 
     assert_eq!(std::fs::read_to_string(lock_path).unwrap(), stale);
 }
@@ -167,8 +173,8 @@ fn dry_run_refusal_exits_1_without_writing() {
         .assert()
         .failure()
         .code(1)
-        .stdout(predicates::str::contains("Refused: 1 item(s)"))
-        .stdout(predicates::str::contains("Refused to manage .delta.toml"));
+        .stdout(contains("Refused: 1 item(s)"))
+        .stdout(contains("Refused to manage .delta.toml"));
 
     assert_eq!(snapshot_tree(ws.path()), before, "dry-run refusal must not modify the workspace");
 }
@@ -184,7 +190,7 @@ fn autodetect_github_backend_from_git_origin() {
         .assert()
         .failure()
         .code(1)
-        .stdout(predicates::str::contains(".github/workflows/anvil-pr.yml"));
+        .stdout(contains(".github/workflows/anvil-pr.yml"));
 }
 
 #[test]
@@ -203,10 +209,7 @@ fn apply_with_autodetected_github_backend_writes_workflows() {
 fn autodetect_fails_for_unrecognized_origin_host() {
     let ws = workspace();
     git_init_with_origin(ws.path(), "https://gitlab.com/example/repo.git");
-    anvil(ws.path(), &["--dry-run"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("autodetect"));
+    anvil(ws.path(), &["--dry-run"]).assert().failure().stderr(contains("autodetect"));
 }
 
 #[test]
@@ -228,6 +231,6 @@ fn missing_git_returns_an_error_instead_of_panicking() {
         .env("PATH", "")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("failed to invoke `git config`"))
-        .stderr(predicates::str::contains("panicked").not());
+        .stderr(contains("failed to invoke `git config`"))
+        .stderr(contains("panicked").not());
 }

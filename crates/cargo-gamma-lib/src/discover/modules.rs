@@ -182,6 +182,7 @@ pub(super) fn excluded_files(roots: &[Utf8PathBuf], declared: &[(Utf8PathBuf, Ve
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

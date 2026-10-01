@@ -588,6 +588,11 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
         affected_clean.contains("alpha") && !affected_clean.contains("--workspace"),
         "clean run should scope the affected tier to the committed crate, got: {affected_clean}"
     );
+    let doctest_packages = impact_dir.join("doctest_packages.txt");
+    assert!(
+        doctest_packages.is_file(),
+        "a clean impact run must produce the doctest capability projection"
+    );
 
     // Dirty the tree with an *uncommitted* edit to a DIFFERENT crate (beta).
     // cargo-delta only sees the committed alpha change, so without the safety
@@ -608,6 +613,10 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
     );
     // modified is empty (not --skip), so its workspace-wide tools still run.
     assert_eq!(fs::read_to_string(impact_dir.join("include_modified.txt")).unwrap().trim(), "");
+    assert!(
+        !doctest_packages.exists(),
+        "a dirty-tree widen must invalidate the stale doctest capability projection"
+    );
 
     // The warning must fire on EVERY dirty invocation, not just the first --
     // running again with the same dirty tree still warns (the dirty check runs
@@ -883,6 +892,9 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "introduce anvil"]);
 
+    let impact_dir = root.join("target/anvil/impact");
+    fs::create_dir_all(&impact_dir).unwrap();
+    write(&impact_dir.join("doctest_packages.txt"), "stale@0.1.0");
     let out = run_impact(root);
     assert!(
         out.contains("baseline has no workspace") || out.contains("no root Cargo.toml"),
@@ -890,7 +902,6 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     );
     // The affected/required tiers default to --workspace (run everything),
     // and the impact set is still produced (no failure).
-    let impact_dir = root.join("target/anvil/impact");
     assert_eq!(
         fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap().trim(),
         "--workspace"
@@ -898,6 +909,10 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     assert_eq!(
         fs::read_to_string(impact_dir.join("include_required.txt")).unwrap().trim(),
         "--workspace"
+    );
+    assert!(
+        !impact_dir.join("doctest_packages.txt").exists(),
+        "a workspace-less baseline widen must invalidate the stale doctest capability projection"
     );
 }
 
@@ -1390,6 +1405,14 @@ fn consume_without_downloaded_cache_fails_loudly() {
 /// resolution and fail-hard on unmappable names -- in isolation from the
 /// snapshot/cache machinery, which the snapshot tests only pin as emitted *text*.
 fn run_format(root: &Path, tier: &str, impact_json_rel: &str) -> (String, String, bool) {
+    if !root.join("Cargo.lock").exists() {
+        let lock = Command::new("cargo")
+            .arg("generate-lockfile")
+            .current_dir(root)
+            .output()
+            .expect("cargo is required to prepare locked metadata discovery");
+        assert!(lock.status.success(), "failed to create formatter fixture lockfile");
+    }
     let out = just_cmd(root, &["_anvil-impact-format", tier, impact_json_rel]).output().unwrap();
     (
         String::from_utf8_lossy(&out.stdout).trim().to_owned(),

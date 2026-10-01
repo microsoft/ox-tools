@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::{env, io};
 
 use ohno::{AppError, bail};
 use tracing::info;
@@ -53,10 +54,10 @@ pub struct RunOutcome {
 ///
 /// Returns an error when the underlying update flow fails.
 pub fn run(catalog: &Catalog, cli: &Cli) -> Result<i32, AppError> {
-    run_with_current_dir(catalog, cli, std::env::current_dir())
+    run_with_current_dir(catalog, cli, env::current_dir())
 }
 
-fn run_with_current_dir(catalog: &Catalog, cli: &Cli, current_dir: std::io::Result<PathBuf>) -> Result<i32, AppError> {
+fn run_with_current_dir(catalog: &Catalog, cli: &Cli, current_dir: io::Result<PathBuf>) -> Result<i32, AppError> {
     let outcome = run_update(catalog, cli, &current_dir?)?;
     print!("{}", outcome.plan.summary(Some(&outcome.previous_manifest)));
     Ok(if cli.dry_run { outcome.plan.dry_run_exit_code() } else { 0 })
@@ -114,7 +115,7 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
     let applied = !args.dry_run;
     if applied {
         plan.apply_files(&repo_root)?;
-        // #[gamma::skip(try.propagate_to_unwrap, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "timeout", reason = "a forced panic aborts manifest-write failure reporting before the mutation subprocess can publish a verdict")]
         next.save(&repo_root)?;
     }
 
@@ -162,20 +163,17 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
 /// Computed before anything is planned, because the validity check each region
 /// runs has to know which of the regions already in its host are on their way
 /// out — and removals are not planned until every region has been visited.
-fn live_region_keys(repo_root: &Path, workspace: &Workspace, catalog: &Catalog) -> BTreeSet<(String, String)> {
-    catalog
-        .artifacts()
-        .iter()
-        .filter_map(|artifact| match artifact {
-            Artifact::Region(spec) => Some(spec),
-            Artifact::OwnedFile(_) => None,
-        })
-        .flat_map(|spec| {
-            region_host_paths(workspace, spec)
-                .into_iter()
-                .map(|host| (resolve_existing_case_insensitive(repo_root, host), spec.id.as_str().to_owned()))
-        })
-        .collect()
+fn live_region_keys(repo_root: &Path, workspace: &Workspace, catalog: &Catalog) -> Result<BTreeSet<(String, String)>, AppError> {
+    let mut keys = BTreeSet::new();
+    for artifact in catalog.artifacts() {
+        let Artifact::Region(spec) = artifact else {
+            continue;
+        };
+        for host in region_host_paths(workspace, spec) {
+            keys.insert((resolve_existing_case_insensitive(repo_root, host)?, spec.id.as_str().to_owned()));
+        }
+    }
+    Ok(keys)
 }
 
 fn build_plan(
@@ -190,7 +188,7 @@ fn build_plan(
     // Hosts already reported as unsafe to compose. Every region targeting one
     // hits the same fault, and four copies of one message is noise.
     let mut composed = ComposedHosts {
-        live: live_region_keys(repo_root, workspace, catalog),
+        live: live_region_keys(repo_root, workspace, catalog)?,
         ..ComposedHosts::default()
     };
     // Adoption, validation, and retirement must see the same repaired text.
@@ -200,7 +198,7 @@ fn build_plan(
     // by `push_region_at` when it plans the region, with that region's own
     // comment syntax rather than the `Hash` assumed below.
     for key in manifest.regions.keys() {
-        let host = resolve_existing_case_insensitive(repo_root, &key.host);
+        let host = resolve_existing_case_insensitive(repo_root, &key.host)?;
         if !composed.live.contains(&(host.clone(), key.id.clone())) {
             // An unpaired result is left for the path that plans the region:
             // it refuses there, where the region's own id is being handled.
@@ -213,7 +211,7 @@ fn build_plan(
             Artifact::OwnedFile(spec) => {
                 let selected = spec.gate.is_none_or(|gate| backends.contains(&gate));
                 if selected {
-                    let path = resolve_existing_case_insensitive(repo_root, spec.path);
+                    let path = resolve_existing_case_insensitive(repo_root, spec.path)?;
                     plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body)?);
                 }
             }
@@ -352,7 +350,7 @@ fn push_region_at(
     host: &str,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
-    let host = resolve_existing_case_insensitive(repo_root, host);
+    let host = resolve_existing_case_insensitive(repo_root, host)?;
     if !repair_or_refuse(repo_root, plan, hosts, &host, spec.id.as_str(), spec.syntax, false)? {
         return Ok(());
     }
@@ -520,6 +518,10 @@ fn refuse_region(plan: &mut Plan, host: String, id: &str, reason: &str, remedy: 
     let stop = if reason.trim_end().ends_with('.') { "" } else { "." };
     let remedy = match remedy {
         RefusalRemedy::HandWrittenTable => "Reconcile the hand-written table with the managed one before retrying.",
+        RefusalRemedy::InvalidGeneratedToml => {
+            "The generated region is invalid TOML even without repository content. Repair the catalog template \
+             that renders this region before retrying."
+        }
         RefusalRemedy::HostAlreadyUnparsable => {
             "This file does not parse as it stands, before this region is written, so no run can write it \
              until the existing TOML is repaired."
@@ -711,7 +713,7 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
     // an upgraded directive, and a bare prefix match would cut the file's own
     // line in half.
     let first_line_end = text.find('\n').unwrap_or(text.len());
-    // #[gamma::skip(literal.char_to_nul, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+    // #[gamma::skip(literal.char_to_nul, tag = "timeout", reason = "a NUL line terminator prevents malformed marker recovery from reaching a stable boundary within the campaign budget")]
     let first_line = text[..first_line_end].trim_end_matches('\r');
     let key = opening.split_once('=').map(|(key, _)| key);
     let carries_directive =
@@ -985,7 +987,7 @@ fn plan_removals(
         // the two are compared through the same resolution. Without it a
         // case-only rename makes anvil's own file look retired and the removal
         // below deletes the artifact this very pass just wrote.
-        let resolved = resolve_existing_case_insensitive(repo_root, path);
+        let resolved = resolve_existing_case_insensitive(repo_root, path)?;
         if live_files.contains(&resolved) {
             continue;
         }
@@ -1047,7 +1049,7 @@ fn plan_removals(
         // No `resolved_host != key.host` guard: the `continue` above has
         // already established that the recorded key is not live, so when the
         // resolution changes nothing this lookup repeats it and fails.
-        let resolved_host = resolve_existing_case_insensitive(repo_root, &key.host);
+        let resolved_host = resolve_existing_case_insensitive(repo_root, &key.host)?;
         // A refused host was not opened, and "nothing was written to it" has to
         // be true of the lock as well as the file -- the same invariant the
         // owned-file loop above keeps. A lock entry naming a region the catalog
@@ -1107,7 +1109,7 @@ fn plan_removals(
                         plan,
                         resolved_host.clone(),
                         &key.id,
-                        // #[gamma::skip(literal.str_to_xyzzy, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+                        // #[gamma::skip(literal.str_to_xyzzy, tag = "timeout", reason = "changes only the terminal refusal text after retirement has already stopped; the subprocess exhausts its budget before a distinct verdict")]
                         "this retired managed region contains edits. Restore its last generated body, empty it, or remove it to complete retirement",
                         RefusalRemedy::EditedRetirement,
                     );
@@ -1152,7 +1154,7 @@ mod tests {
 
     use super::*;
     use crate::anvil::artifacts::region;
-
+    use crate::{CliMeta, RegionId};
     fn write(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -1274,6 +1276,9 @@ mod tests {
 
             let hand_written = remedy_for(RefusalRemedy::HandWrittenTable);
             assert!(hand_written.contains("Reconcile the hand-written table"), "{hand_written}");
+
+            let generated = remedy_for(RefusalRemedy::InvalidGeneratedToml);
+            assert!(generated.contains("Repair the catalog template"), "{generated}");
 
             let already = remedy_for(RefusalRemedy::HostAlreadyUnparsable);
             assert!(already.contains("does not parse as it stands"), "{already}");
@@ -1810,7 +1815,6 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses filesystem")]
     #[test]
     fn marker_recovery_preserves_content_and_settles_for_both_syntaxes() {
-        use crate::catalog::{CliMeta, RegionId};
         for syntax in [CommentSyntax::Hash, CommentSyntax::SlashSlash] {
             let prefix = if syntax == CommentSyntax::Hash { "#" } else { "//" };
             let open = format!("{prefix} >>> anvil-managed: repair\r\n");
@@ -2116,10 +2120,10 @@ mod tests {
     }
 
     fn empty_catalog() -> Catalog {
-        use crate::catalog::CliMeta;
-
         Catalog::builder(CliMeta::new("anvil")).build().unwrap()
     }
+
+    // Command-boundary and error-propagation contracts.
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
@@ -2188,8 +2192,6 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn live_non_hash_regions_are_not_pre_repaired_as_hash_regions() {
-        use crate::catalog::{CliMeta, RegionId};
-
         let tmp = empty_workspace();
         let host = concat!(
             "# >>> anvil-managed: live\n",
@@ -2251,6 +2253,8 @@ mod tests {
 
         assert!(err.to_string().contains("generated.txt"), "{err}");
     }
+
+    // Host-cache and composed-host preparation contracts.
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
@@ -2441,6 +2445,8 @@ mod tests {
         }
     }
 
+    // Lock ownership, workspace lookup, and process-exit contracts.
+
     fn seed_lock_owner(root: &Path, tool: &str) {
         let m = Manifest {
             tool: Some(tool.to_owned()),
@@ -2452,7 +2458,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "canonicalizes a missing workspace; miri isolation forbids it")]
     #[test]
     fn workspace_lookup_failure_is_returned_instead_of_panicking() {
-        run_update(&Catalog::anvil(), &local_only(), Path::new("a-workspace-that-does-not-exist")).unwrap_err();
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("missing-workspace");
+        let err = run_update(&Catalog::anvil(), &local_only(), &missing).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("cannot canonicalize start path"), "{message}");
+        assert!(message.contains(&missing.display().to_string()), "{message}");
     }
 
     #[test]
@@ -3427,9 +3438,6 @@ mod tests {
     /// One region on one host, for staging the state a later catalog grows out
     /// of.
     fn one_region_catalog(host: &str, id: &str, body: &str) -> Catalog {
-        use crate::catalog::CliMeta;
-        use crate::catalog::artifact::RegionId;
-
         let id: &'static str = Box::leak(id.to_owned().into_boxed_str());
         Catalog::builder(CliMeta::new("anvil"))
             .with_artifact(Artifact::region(RegionSpec {
@@ -3443,9 +3451,6 @@ mod tests {
     }
 
     fn two_region_catalog(host: &str, id_a: &str, body_a: &str, id_b: &str, body_b: &str) -> Catalog {
-        use crate::catalog::CliMeta;
-        use crate::catalog::artifact::RegionId;
-
         let region = |id: &'static str, body: &str| {
             Artifact::region(RegionSpec {
                 host: HostSelector::Path(host.to_owned()),
@@ -3684,9 +3689,6 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn splitting_a_region_removes_old_and_keeps_new_in_one_host() {
-        use crate::catalog::CliMeta;
-        use crate::catalog::artifact::RegionId;
-
         let tmp = empty_workspace();
 
         // First run: a single combined region on shared.toml.

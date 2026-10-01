@@ -80,7 +80,10 @@ therefore covers the complete descendant tree.
   proven to reach this run's descendants after numeric identities may have been
   reused. A failure of that final boundary sweep is included in the observation
   error while the observation failure retains precedence.
-- The `fault-injection` feature is test-only infrastructure.
+- The `fault-injection` feature is test-only infrastructure. It exposes every
+  lifecycle fault available to this crate's unit tests, including capture,
+  observation, cleanup, and Windows job failures, so dependent-crate tests do
+  not see a smaller fault vocabulary.
 - Tests that need a capability the host may not have are marked ignored and fail
   when asked for by name on a host that cannot supply it, rather than returning
   early and reporting a pass. Tests that spend process-wide state which cannot be

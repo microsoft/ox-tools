@@ -23,9 +23,11 @@ all-features = true
 # This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
 disable = true
 
-# Establish the cross-platform CI baseline for this new crate. Raise it as coverage improves.
+# Production code is measured while test-only modules and scaffolding opt out with
+# `#[cfg_attr(coverage_nightly, coverage(off))]`. This floor records the lowest cross-platform
+# production result from the coverage-gate CI matrix; raise it only after that matrix improves.
 [package.metadata.coverage-gate]
-min-lines-percent = 99.78
+min-lines-percent = 98.86223
 
 [features]
 # Exposes the crate's internal modules so that the integration tests in `tests/` can drive them
@@ -60,6 +62,7 @@ tempfile = { workspace = true, optional = true }
 tick = { workspace = true, features = ["fmt"] }
 toml = { workspace = true, features = ["parse", "display", "serde", "std"] }
 toml_edit = { workspace = true, features = ["parse", "display"] }
+unicode-width = { workspace = true }
 walkdir = { workspace = true }
 yaml_serde = { workspace = true, features = ["std"] }
 

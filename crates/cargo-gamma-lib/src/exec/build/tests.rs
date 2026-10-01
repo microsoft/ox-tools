@@ -4,21 +4,22 @@
 use core::fmt::Write as _;
 use core::ops::Range;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::{fs, io, thread};
 
-use camino::Utf8Path;
 use serde_json::Value;
 
+use super::blame::AttributionEvidence;
 use super::complaints::Diagnostic;
 use super::invoke::{
     OutputLimits, Stream, compile, drained, finish_readers, is_progress, read_pipe, read_pipe_with_limits, rendered_diagnostic,
     spawn_failure, supervise, supervise_with_limits,
 };
-use super::messages::dep_files;
+use super::messages::{build_evidence, dep_files};
 use super::*;
 use crate::discover::TargetFile;
 use crate::schema::Position;
+use crate::testing::Recorder;
 
 /// The ordinals [`blame`] attributed, without the error codes it attributed them under.
 ///
@@ -34,6 +35,677 @@ fn artifact_message(path: &Utf8Path) -> String {
         "filenames": [path.as_str()],
     })
     .to_string()
+}
+
+#[test]
+fn build_evidence_distinguishes_fresh_rebuilt_and_failed_targets() {
+    let stdout = [
+        serde_json::json!({
+            "reason": "compiler-artifact",
+            "fresh": true,
+            "target": {"name": "ready", "kind": ["lib"]},
+            "profile": {"test": false},
+        }),
+        serde_json::json!({
+            "reason": "compiler-artifact",
+            "fresh": false,
+            "target": {"name": "subject", "kind": ["lib"]},
+            "profile": {"test": true},
+        }),
+        serde_json::json!({
+            "reason": "compiler-message",
+            "target": {"name": "subject", "kind": ["lib"]},
+            "message": {"level": "error", "message": "failed"},
+        }),
+    ]
+    .map(|message| message.to_string())
+    .join("\n");
+
+    assert_eq!(
+        build_evidence(&stdout, true),
+        messages::BuildEvidence {
+            fresh: 1,
+            rebuilt: 1,
+            rebuilt_targets: vec!["subject (test)".to_owned()],
+            failed_targets: vec!["subject (lib)".to_owned(), "subject (test)".to_owned()],
+        }
+    );
+}
+
+#[test]
+fn campaign_scale_transcript_decoding_counts_each_artifact_once() {
+    const MESSAGES: usize = 40_000;
+    let line = serde_json::json!({
+        "reason": "compiler-artifact",
+        "fresh": true,
+        "target": {"name": "subject", "kind": ["lib"]},
+        "profile": {"test": false},
+    })
+    .to_string();
+    let transcript = core::iter::repeat_n(line, MESSAGES).collect::<Vec<_>>().join("\n");
+
+    let evidence = build_evidence(&transcript, false);
+
+    assert_eq!(evidence.fresh, MESSAGES);
+    assert_eq!(evidence.rebuilt, 0);
+    assert!(evidence.rebuilt_targets.is_empty());
+    assert!(evidence.failed_targets.is_empty());
+}
+
+#[test]
+fn cargo_invocation_identifies_test_harness_compilation() {
+    for verb in [
+        &["test", "--no-run", "--lib"][..],
+        &["check", "--tests"][..],
+        &["build", "--test", "cli"][..],
+        &["check", "--all-targets"][..],
+    ] {
+        assert!(compiles_test_harnesses(verb), "{verb:?}");
+    }
+    for verb in [&["check", "--lib"][..], &["build", "--bin", "cli"][..]] {
+        assert!(!compiles_test_harnesses(verb), "{verb:?}");
+    }
+}
+
+#[derive(Default)]
+struct EvidenceEvents {
+    convergence: usize,
+    isolation: usize,
+}
+
+impl Events for EvidenceEvents {
+    fn phase(&mut self, _verb: &str, _detail: &str) {}
+
+    fn mutant(&mut self, _mutant: &Mutant) {}
+
+    fn wants_convergence_evidence(&self) -> bool {
+        true
+    }
+
+    fn convergence_evidence(
+        &mut self,
+        _round: u32,
+        _written: &[&std::path::Path],
+        _fresh: usize,
+        _rebuilt: usize,
+        _rebuilt_targets: &[String],
+        _failed_targets: &[String],
+    ) {
+        self.convergence = self.convergence.saturating_add(1);
+    }
+
+    fn wants_isolation_evidence(&self) -> bool {
+        true
+    }
+
+    fn isolation_evidence(
+        &mut self,
+        _active: usize,
+        _population: usize,
+        _written: &[&std::path::Path],
+        _fresh: usize,
+        _rebuilt: usize,
+        _failed_targets: &[String],
+    ) {
+        self.isolation = self.isolation.saturating_add(1);
+    }
+}
+
+#[test]
+fn convergence_evidence_remains_available_to_explicit_consumers() {
+    let (_dir, work) = trivial_workspace("build-evidence-opt-in-");
+    let plan = empty_plan(&work);
+    let mut events = EvidenceEvents::default();
+
+    let result = Converger::default()
+        .converge(&work, &plan, None, &["check", "--lib"], BuildLimits::default(), &mut events)
+        .expect("check");
+
+    assert!(matches!(result, Convergence::Built(_)));
+    assert_eq!(events.convergence, 1);
+}
+
+#[test]
+fn mixed_test_invocations_preserve_the_exact_failed_verb() {
+    let (_dir, work) = trivial_workspace("build-failure-context-");
+    let plan = empty_plan(&work);
+    let stdout = serde_json::json!({
+        "reason": "compiler-message",
+        "package_id": "path+file:///workspace#trivial@0.0.0",
+        "target": {"name": "trivial", "kind": ["lib"]},
+        "message": {
+            "level": "error",
+            "message": "failed",
+            "code": {"code": "E0308"},
+            "spans": [{"file_name": "src/lib.rs", "is_primary": true}],
+        },
+    })
+    .to_string();
+
+    assert_eq!(
+        failure_contexts(&stdout, &plan, &work.root, &["check", "--tests"]),
+        [FailureContext {
+            package: "trivial".to_owned(),
+            target: "trivial".to_owned(),
+            kind: "lib".to_owned(),
+            proof_verb: vec!["check".to_owned(), "--tests".to_owned()],
+            files: HashSet::from_iter([Utf8PathBuf::from("src/lib.rs")]),
+            codes: HashSet::from_iter(["E0308".to_owned()]),
+        }]
+    );
+    assert_eq!(
+        failure_contexts(&stdout, &plan, &work.root, &["check", "--tests"])[0].verb(),
+        ["check", "--tests"]
+    );
+}
+
+#[test]
+fn failure_contexts_ignore_incomplete_messages_and_preserve_outside_spans() {
+    let (_dir, work) = trivial_workspace("build-failure-context-edges-");
+    let plan = empty_plan(&work);
+    let stdout = [
+        "not JSON".to_owned(),
+        serde_json::json!({
+            "reason": "compiler-message",
+            "message": {"level": "error", "message": "no target"},
+        })
+        .to_string(),
+        serde_json::json!({
+            "reason": "compiler-message",
+            "target": {"name": "unknown", "kind": ["lib"]},
+            "message": {"level": "error", "message": "no package"},
+        })
+        .to_string(),
+        serde_json::json!({
+            "reason": "compiler-message",
+            "package_id": "path+file:///workspace#trivial@0.0.0",
+            "target": {"name": "trivial", "kind": ["lib"]},
+            "message": {
+                "level": "error",
+                "message": "failed",
+                "spans": [
+                    {"is_primary": false},
+                    {"file_name": "C:/outside/lib.rs", "is_primary": true},
+                ],
+            },
+        })
+        .to_string(),
+    ]
+    .join("\n");
+
+    let contexts = failure_contexts(&stdout, &plan, &work.root, &["check", "--lib"]);
+
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].files, HashSet::from_iter([Utf8PathBuf::from("C:/outside/lib.rs")]));
+}
+
+#[test]
+fn type_diagnostics_try_type_affecting_mutators_before_the_complete_population() {
+    let mut plan = empty_plan(&trivial_workspace("build-effect-tier-").1);
+    plan.mutants = vec![
+        Mutant {
+            ordinal: 1,
+            mutator: "relational.lt_to_le".into(),
+            ..mutant()
+        },
+        Mutant {
+            ordinal: 2,
+            mutator: "fn_value.default".into(),
+            ..mutant()
+        },
+    ];
+    let mut tiers = Vec::new();
+
+    push_isolation_tiers(
+        &mut tiers,
+        HashSet::from_iter([1, 2]),
+        &plan,
+        &HashSet::from_iter(["E0308".to_owned()]),
+    );
+
+    assert_eq!(tiers, [HashSet::from_iter([2]), HashSet::from_iter([1, 2])]);
+}
+
+#[test]
+fn unattributed_isolation_expands_only_through_the_failing_packages_dependency_cone() {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the oracle matches subset_fails's Option<bool> verdict, where None is an indeterminate build"
+    )]
+    fn dependency_mutant_fails(active: &HashSet<u32>) -> Option<bool> {
+        Some(active.contains(&2))
+    }
+
+    let (_dir, work) = trivial_workspace("build-causal-cone-");
+    let mut plan = empty_plan(&work);
+    plan.reach
+        .insert("app".to_owned(), HashSet::from_iter(["app".to_owned(), "dependency".to_owned()]));
+    plan.mutants = vec![
+        Mutant {
+            ordinal: 1,
+            package: "app".to_owned().into(),
+            file: Utf8PathBuf::from("app/src/lib.rs").into(),
+            ..mutant()
+        },
+        Mutant {
+            ordinal: 2,
+            package: "dependency".to_owned().into(),
+            file: Utf8PathBuf::from("dependency/src/lib.rs").into(),
+            ..mutant()
+        },
+        Mutant {
+            ordinal: 3,
+            package: "unrelated".to_owned().into(),
+            file: Utf8PathBuf::from("unrelated/src/lib.rs").into(),
+            ..mutant()
+        },
+    ];
+    let stdout = serde_json::json!({
+        "reason": "compiler-message",
+        "package_id": "path+file:///workspace#app@0.0.0",
+        "target": {"name": "app", "kind": ["lib"]},
+        "message": {
+            "level": "error",
+            "message": "failed",
+            "spans": [{"file_name": "app/src/lib.rs", "is_primary": true}],
+        },
+    })
+    .to_string();
+    let mut converger = Converger {
+        subset_oracle: Some(dependency_mutant_fails),
+        ..Converger::default()
+    };
+    let failed_roots = vec!["app".to_owned(), "feature-enabler".to_owned()];
+
+    let isolated = converger
+        .isolate_scoped(
+            &work,
+            &plan,
+            &stdout,
+            &["check", "--lib"],
+            Some(&failed_roots),
+            BuildLimits::default(),
+            &mut crate::testing::Recorder::default(),
+        )
+        .expect("the scripted proof builds ran");
+
+    assert!(matches!(isolated.as_slice(), [Isolation::Blamed(ordinals)] if ordinals == &[2]));
+    assert!(
+        converger
+            .proof_roots
+            .iter()
+            .all(|roots| roots.as_deref() == Some(failed_roots.as_slice())),
+        "every proof must preserve the failed invocation's package roots"
+    );
+}
+
+#[test]
+fn a_failure_mode_that_does_not_reproduce_with_the_complete_cone_is_not_unresolved() {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the oracle matches subset_fails's Option<bool> verdict, where None is an indeterminate build"
+    )]
+    fn mode_compiles(_active: &HashSet<u32>) -> Option<bool> {
+        Some(false)
+    }
+
+    let (_dir, work) = trivial_workspace("build-non-reproducing-mode-");
+    let mut plan = empty_plan(&work);
+    plan.reach.insert("trivial".to_owned(), HashSet::from_iter(["trivial".to_owned()]));
+    plan.mutants = vec![Mutant {
+        ordinal: 1,
+        package: "trivial".to_owned().into(),
+        file: Utf8PathBuf::from("src/lib.rs").into(),
+        ..mutant()
+    }];
+    let stdout = serde_json::json!({
+        "reason": "compiler-message",
+        "package_id": "path+file:///workspace#trivial@0.0.0",
+        "target": {"name": "trivial", "kind": ["lib"]},
+        "message": {
+            "level": "error",
+            "message": "failed",
+            "spans": [{"file_name": "src/lib.rs", "is_primary": true}],
+        },
+    })
+    .to_string();
+    let mut converger = Converger {
+        subset_oracle: Some(mode_compiles),
+        ..Converger::default()
+    };
+
+    let isolated = converger
+        .isolate_scoped(
+            &work,
+            &plan,
+            &stdout,
+            &["check", "--tests"],
+            None,
+            BuildLimits::default(),
+            &mut Recorder::default(),
+        )
+        .expect("the scripted proof builds ran");
+
+    assert!(
+        isolated.is_empty(),
+        "a failure context that succeeds with every candidate is not unresolved"
+    );
+}
+
+#[test]
+fn inconclusive_failure_modes_remain_unresolved() {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the oracle matches subset_fails's Option<bool> verdict, where None is an indeterminate build"
+    )]
+    fn pristine_fails(_active: &HashSet<u32>) -> Option<bool> {
+        Some(true)
+    }
+
+    fn populated_is_indeterminate(active: &HashSet<u32>) -> Option<bool> {
+        active.is_empty().then_some(false)
+    }
+
+    let (_dir, work) = trivial_workspace("build-inconclusive-mode-");
+    let mut plan = empty_plan(&work);
+    plan.reach.insert("trivial".to_owned(), HashSet::from_iter(["trivial".to_owned()]));
+    plan.mutants = vec![Mutant {
+        ordinal: 1,
+        package: "trivial".to_owned().into(),
+        file: Utf8PathBuf::from("src/lib.rs").into(),
+        ..mutant()
+    }];
+    let stdout = serde_json::json!({
+        "reason": "compiler-message",
+        "package_id": "path+file:///workspace#trivial@0.0.0",
+        "target": {"name": "trivial", "kind": ["lib"]},
+        "message": {
+            "level": "error",
+            "message": "failed",
+            "spans": [{"file_name": "src/lib.rs", "is_primary": true}],
+        },
+    })
+    .to_string();
+
+    for oracle in [pristine_fails as fn(&HashSet<u32>) -> Option<bool>, populated_is_indeterminate] {
+        let mut converger = Converger {
+            subset_oracle: Some(oracle),
+            ..Converger::default()
+        };
+        let isolated = converger
+            .isolate_scoped(
+                &work,
+                &plan,
+                &stdout,
+                &["check", "--tests"],
+                None,
+                BuildLimits::default(),
+                &mut Recorder::default(),
+            )
+            .expect("the scripted proof builds ran");
+
+        assert_eq!(isolated.len(), 1, "one exact failed invocation produces one unresolved context");
+        assert!(matches!(
+            isolated.as_slice(),
+            [Isolation::Unresolved { ordinals, .. }] if ordinals == &[1]
+        ));
+        assert_eq!(
+            converger.isolation_budget.proof_count(),
+            2,
+            "the exact failed invocation must be proved once rather than once per possible mode"
+        );
+    }
+}
+
+#[test]
+fn isolation_with_no_candidates_has_no_result() {
+    let (_dir, work) = trivial_workspace("build-empty-isolation-");
+    let plan = empty_plan(&work);
+
+    let isolated = Converger::default()
+        .isolate(
+            &work,
+            &plan,
+            None,
+            &["check", "--lib"],
+            BuildLimits::default(),
+            &mut Recorder::default(),
+        )
+        .expect("the empty isolation ran");
+
+    assert!(isolated.is_none());
+}
+
+#[test]
+fn an_over_limit_complete_context_remains_unresolved_without_proof_builds() {
+    let (_dir, work) = trivial_workspace("build-over-limit-isolation-");
+    let mut plan = empty_plan(&work);
+    plan.reach.insert("trivial".to_owned(), HashSet::from_iter(["trivial".to_owned()]));
+    plan.mutants = (1..=isolation::MAX_ISOLATION_CANDIDATES + 1)
+        .map(|ordinal| Mutant {
+            ordinal: u32::try_from(ordinal).expect("the isolation limit fits in u32"),
+            package: "trivial".to_owned().into(),
+            file: Utf8PathBuf::from("src/lib.rs").into(),
+            ..mutant()
+        })
+        .collect();
+    let stdout = serde_json::json!({
+        "reason": "compiler-message",
+        "package_id": "path+file:///workspace#trivial@0.0.0",
+        "target": {"name": "trivial", "kind": ["lib"]},
+        "message": {
+            "level": "error",
+            "message": "failed",
+            "spans": [{"file_name": "src/lib.rs", "is_primary": true}],
+        },
+    })
+    .to_string();
+    let mut converger = Converger::default();
+
+    let isolated = converger
+        .isolate_scoped(
+            &work,
+            &plan,
+            &stdout,
+            &["check", "--lib"],
+            None,
+            BuildLimits::default(),
+            &mut Recorder::default(),
+        )
+        .expect("an over-limit context is reported without proof builds");
+
+    assert!(matches!(
+        isolated.as_slice(),
+        [Isolation::Unresolved { ordinals, .. }]
+            if ordinals.len() == isolation::MAX_ISOLATION_CANDIDATES + 1
+    ));
+    assert_eq!(converger.isolation_budget.proof_count(), 0);
+}
+
+#[test]
+fn one_failed_round_isolates_independent_targets_together() {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the oracle matches subset_fails's Option<bool> verdict, where None is an indeterminate build"
+    )]
+    fn either_mutant_fails(active: &HashSet<u32>) -> Option<bool> {
+        Some(active.contains(&1) || active.contains(&2))
+    }
+
+    let (_dir, work) = trivial_workspace("build-independent-targets-");
+    let mut plan = empty_plan(&work);
+    plan.reach.insert("first".to_owned(), HashSet::from_iter(["first".to_owned()]));
+    plan.reach.insert("second".to_owned(), HashSet::from_iter(["second".to_owned()]));
+    plan.mutants = vec![
+        Mutant {
+            ordinal: 1,
+            package: "first".to_owned().into(),
+            file: Utf8PathBuf::from("first/src/lib.rs").into(),
+            ..mutant()
+        },
+        Mutant {
+            ordinal: 2,
+            package: "second".to_owned().into(),
+            file: Utf8PathBuf::from("second/src/lib.rs").into(),
+            ..mutant()
+        },
+    ];
+    let stdout = [
+        serde_json::json!({
+            "reason": "compiler-message",
+            "package_id": "path+file:///workspace#first@0.0.0",
+            "target": {"name": "first", "kind": ["lib"]},
+            "message": {
+                "level": "error",
+                "message": "failed",
+                "spans": [{"file_name": "first/src/lib.rs", "is_primary": true}],
+            },
+        })
+        .to_string(),
+        serde_json::json!({
+            "reason": "compiler-message",
+            "package_id": "path+file:///workspace#second@0.0.0",
+            "target": {"name": "second", "kind": ["lib"]},
+            "message": {
+                "level": "error",
+                "message": "failed",
+                "spans": [{"file_name": "second/src/lib.rs", "is_primary": true}],
+            },
+        })
+        .to_string(),
+    ]
+    .join("\n");
+    let mut converger = Converger {
+        subset_oracle: Some(either_mutant_fails),
+        ..Converger::default()
+    };
+
+    let isolated = converger
+        .isolate_scoped(
+            &work,
+            &plan,
+            &stdout,
+            &["check", "--lib"],
+            None,
+            BuildLimits::default(),
+            &mut crate::testing::Recorder::default(),
+        )
+        .expect("the scripted proof builds ran");
+
+    assert_eq!(isolated.len(), 2);
+    assert!(
+        isolated
+            .iter()
+            .any(|result| matches!(result, Isolation::Blamed(ordinals) if ordinals == &[1]))
+    );
+    assert!(
+        isolated
+            .iter()
+            .any(|result| matches!(result, Isolation::Blamed(ordinals) if ordinals == &[2]))
+    );
+}
+
+#[test]
+fn proof_tiers_hold_unrelated_pending_mutants_inactive_and_find_cross_tier_interactions() {
+    #[expect(clippy::unnecessary_wraps, reason = "the oracle type also represents indeterminate proof builds")]
+    fn only_pair_fails(active: &HashSet<u32>) -> Option<bool> {
+        Some(active == &HashSet::from_iter([1, 2]))
+    }
+
+    let (_dir, work) = trivial_workspace("build-cross-tier-interaction-");
+    let mut plan = empty_plan(&work);
+    plan.reach
+        .insert("app".to_owned(), HashSet::from_iter(["app".to_owned(), "dependency".to_owned()]));
+    plan.mutants = vec![
+        Mutant {
+            ordinal: 1,
+            package: "app".to_owned().into(),
+            file: Utf8PathBuf::from("app/src/lib.rs").into(),
+            ..mutant()
+        },
+        Mutant {
+            ordinal: 2,
+            package: "dependency".to_owned().into(),
+            file: Utf8PathBuf::from("dependency/src/lib.rs").into(),
+            ..mutant()
+        },
+    ];
+    let stdout = serde_json::json!({
+        "reason": "compiler-message",
+        "package_id": "path+file:///workspace#app@0.0.0",
+        "target": {"name": "app", "kind": ["lib"]},
+        "message": {
+            "level": "error",
+            "message": "failed",
+            "spans": [{"file_name": "app/src/lib.rs", "is_primary": true}],
+        },
+    })
+    .to_string();
+    let mut converger = Converger {
+        subset_oracle: Some(only_pair_fails),
+        ..Converger::default()
+    };
+
+    let isolated = converger
+        .isolate_scoped(
+            &work,
+            &plan,
+            &stdout,
+            &["check", "--lib"],
+            None,
+            BuildLimits::default(),
+            &mut Recorder::default(),
+        )
+        .expect("proof builds");
+
+    assert!(matches!(
+        isolated.as_slice(),
+        [Isolation::Interaction { members, .. }] if members == &[1, 2]
+    ));
+}
+
+#[test]
+fn interaction_minimization_reuses_halves_already_proved_clean() {
+    static OBSERVED: OnceLock<Mutex<Vec<Vec<u32>>>> = OnceLock::new();
+
+    #[expect(clippy::unnecessary_wraps, reason = "the oracle type also represents indeterminate proof builds")]
+    fn only_pair_fails(active: &HashSet<u32>) -> Option<bool> {
+        let mut key = active.iter().copied().collect::<Vec<_>>();
+        key.sort_unstable();
+        OBSERVED
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .expect("oracle observations")
+            .push(key);
+        Some(active == &HashSet::from_iter([1, 2]))
+    }
+
+    let observations = OBSERVED.get_or_init(|| Mutex::new(Vec::new()));
+    observations.lock().expect("oracle observations").clear();
+    let (_dir, work) = trivial_workspace("build-proof-cache-");
+    let mut plan = empty_plan(&work);
+    plan.mutants = [1, 2]
+        .map(|ordinal| Mutant {
+            ordinal,
+            item_path: format!("subject::item_{ordinal}").into(),
+            ..mutant()
+        })
+        .into();
+    let mut converger = Converger {
+        subset_oracle: Some(only_pair_fails),
+        ..Converger::default()
+    };
+
+    let isolated = converger
+        .isolate(&work, &plan, None, &["check"], BuildLimits::default(), &mut Recorder::default())
+        .expect("proofs")
+        .expect("interaction");
+    let observed = observations.lock().expect("oracle observations").clone();
+
+    assert!(matches!(isolated, Isolation::Interaction { .. }));
+    assert_eq!(observed.iter().filter(|active| active.as_slice() == [1]).count(), 1);
+    assert_eq!(observed.iter().filter(|active| active.as_slice() == [2]).count(), 1);
+    assert_eq!(converger.isolation_budget.proof_count(), observed.len());
 }
 
 /// The bar is what a reader watches during the long silences, so it has to be recognised.
@@ -395,6 +1067,40 @@ fn a_narrowed_build_that_fails_is_retried_across_the_whole_workspace() {
     assert!(build.widened, "the build should have reported that it widened");
 }
 
+#[test]
+fn widened_check_and_build_restore_every_narrow_verdict_before_succeeding() {
+    for verb in [&["check", "--keep-going", "--lib"][..], &["build", "--keep-going", "--tests"][..]] {
+        let (_dir, work) = trivial_workspace("build-widen-state-");
+        let plan = empty_plan(&work);
+        let mut converger = Converger::default();
+        let before = converger.verdict_state();
+
+        let _ = converger.withdrawn.insert(7);
+        let _ = converger.abandoned.insert(8);
+        let _ = converger.interactions.insert(8, vec![8, 9]);
+        let _ = converger.unresolved.insert(10, "narrow target".to_owned());
+        let _ = converger.unavailable.insert(11);
+        let _ = converger.census.insert(7, CompilerReason::isolated());
+        let _ = converger.probed.insert(7);
+        converger.ordering.offered = 1;
+        converger.restore_verdict_state(before);
+
+        let widened = converger
+            .converge(&work, &plan, None, verb, BuildLimits::default(), &mut Recorder::default())
+            .expect("the widened graph compiles");
+
+        assert!(matches!(widened, Convergence::Built(_)));
+        assert!(converger.withdrawn.is_empty());
+        assert!(converger.abandoned.is_empty());
+        assert!(converger.interactions.is_empty());
+        assert!(converger.unresolved.is_empty());
+        assert!(converger.unavailable.is_empty());
+        assert!(converger.census.is_empty());
+        assert!(converger.probed.is_empty());
+        assert_eq!(converger.ordering, OrderingHints::default());
+    }
+}
+
 /// Targets that cargo-gamma will not run do not belong to its compilation oracle.
 #[test]
 fn the_final_build_does_not_compile_examples_or_benches() {
@@ -429,25 +1135,45 @@ fn the_final_build_does_not_compile_examples_or_benches() {
         !build.binaries.is_empty(),
         "the test oracle still contains its runnable test binary"
     );
+    assert_eq!(
+        build.history.len(),
+        2,
+        "one successful check and one successful build settle the schema"
+    );
 }
 
-/// Library-only selection must narrow before compilation, not discard integration binaries after
-/// Cargo has already tried to build them.
+/// Library-only selection applies to preflight, staging, and the deciding build.
 #[test]
 fn a_library_only_oracle_never_compiles_integration_targets() {
-    let (_dir, work) = trivial_workspace("build-test-lib-");
+    let (_dir, mut work) = trivial_workspace("build-test-lib-");
 
     fs::write(
         work.root.join("src/lib.rs").as_std_path(),
-        "#[cfg(test)] mod tests { #[test] fn unit() {} }\n",
+        "#[cfg(all(test, not(feature = \"library-tests\")))] compile_error!(\"selected feature is required\");\n\
+         #[cfg(all(test, feature = \"library-tests\"))] mod tests { #[test] fn unit() {} }\n",
     )
     .expect("lib");
+    let manifest = work.root.join("Cargo.toml");
+    fs::write(
+        manifest.as_std_path(),
+        format!(
+            "{}\n[features]\nlibrary-tests = []\n",
+            fs::read_to_string(manifest.as_std_path()).expect("manifest")
+        ),
+    )
+    .expect("feature");
+    work.cargo.features = vec!["--features".to_owned(), "library-tests".to_owned()];
     fs::create_dir_all(work.root.join("tests").as_std_path()).expect("tests");
     fs::write(
         work.root.join("tests/trivial.rs").as_std_path(),
         "compile_error!(\"integration target must not compile\");\n",
     )
     .expect("integration test");
+    fs::write(
+        work.root.join("src/main.rs").as_std_path(),
+        "compile_error!(\"binary target must not compile\");\n",
+    )
+    .expect("binary target");
 
     let mut plan = empty_plan(&work);
     let selected = ["trivial".to_owned()];
@@ -460,19 +1186,20 @@ fn a_library_only_oracle_never_compiles_integration_targets() {
         &selected,
         true,
         BuildLimits::default(),
-        &mut crate::testing::Recorder::default(),
+        &mut Recorder::default(),
     )
     .expect("the library harness compiles without the broken integration target");
     converger.target_discovery(preflight.discovery);
+    assert!(
+        converger
+            .stage(&work, &mut plan, &selected, BuildLimits::default(), &mut Recorder::default(),)
+            .expect("the library-only staging build runs")
+            .is_none(),
+        "staging must not compile the broken binary or integration target"
+    );
 
     let build = converger
-        .finish(
-            &work,
-            &mut plan,
-            Some(&selected),
-            BuildLimits::default(),
-            &mut crate::testing::Recorder::default(),
-        )
+        .finish(&work, &mut plan, Some(&selected), BuildLimits::default(), &mut Recorder::default())
         .expect("the final library-only build succeeds");
 
     assert!(build.stuck.is_none());
@@ -562,18 +1289,17 @@ fn unified_workspace(prefix: &str) -> (tempfile::TempDir, Workspace) {
     (dir, work)
 }
 
-/// The preflight says which scope proved the tree, not merely that some scope did.
+/// A selected-package run keeps the Cargo feature graph the caller requested.
 ///
-/// A narrow failure that the whole workspace survives is a statement about the *selection*: the
-/// tree compiles under cargo's feature unification and does not compile under a subset of it.
-/// Answering `Ok(())` and dropping which scope answered leaves the run free to narrow again.
+/// A whole-workspace retry would activate `leaf`'s missing feature through `app` and silently
+/// measure a different conditional API surface from the selected-package invocation.
 #[test]
-fn a_check_that_only_the_whole_workspace_passes_says_so() {
+fn a_check_that_only_the_whole_workspace_passes_rejects_the_selected_graph() {
     let (_dir, work) = unified_workspace("build-preflight-unified-");
     let plan = empty_plan(&work);
     let select = vec!["leaf".to_owned()];
 
-    let cleared = Converger::preflight(
+    let error = Converger::preflight(
         &work,
         &plan,
         Some(&select),
@@ -582,13 +1308,9 @@ fn a_check_that_only_the_whole_workspace_passes_says_so() {
         BuildLimits::default(),
         &mut crate::testing::Recorder::default(),
     )
-    .expect("the workspace compiles when its features are unified");
+    .expect_err("preflight must not widen the selected Cargo root set");
 
-    assert!(
-        cleared.whole_workspace,
-        "the check widened to succeed and then reported nothing about it"
-    );
-    assert!(cleared.dropped.is_empty(), "{:?}", cleared.dropped);
+    assert!(error.to_string().contains("cannot find value `WIDE`"), "{error}");
 }
 
 /// A converger told the tree only builds whole does not narrow again.
@@ -637,20 +1359,18 @@ fn a_whole_workspace_requirement_survives_into_the_staged_builds() {
     );
 }
 
-/// A package nobody asked to mutate, and which does not compile, must not stop the whole run.
+/// Every explicitly selected package remains part of the graph preflight validates.
 ///
-/// Both wider checks fail on it and neither says anything about the code the caller asked
-/// about. Refusing to run on that evidence turns somebody else's broken crate into a tool that
-/// cannot be used at all, when narrowing by hand would have worked — which is a flag the caller
-/// had no reason to know they needed.
+/// Silently dropping one would also remove its tests from the verdict oracle and could turn kills
+/// into survivors without the caller asking for that narrower campaign.
 #[test]
-fn a_broken_package_nobody_is_mutating_is_dropped_rather_than_failing_the_run() {
+fn a_broken_selected_package_is_not_dropped_from_preflight() {
     let (_dir, work) = split_workspace("build-preflight-retreat-");
     let plan = empty_plan(&work);
     let select = vec!["broken".to_owned(), "good".to_owned()];
     let mutating = vec!["good".to_owned()];
 
-    let dropped = Converger::preflight(
+    let error = Converger::preflight(
         &work,
         &plan,
         Some(&select),
@@ -659,15 +1379,9 @@ fn a_broken_package_nobody_is_mutating_is_dropped_rather_than_failing_the_run() 
         BuildLimits::default(),
         &mut crate::testing::Recorder::default(),
     )
-    .expect("the package being mutated compiles on its own");
+    .expect_err("preflight must preserve every explicitly selected package");
 
-    // Named, because the run is about to stop building and running their tests, and a mutant
-    // they would have killed will be reported as a survivor.
-    assert_eq!(dropped.dropped, vec!["broken".to_owned()]);
-    assert!(
-        !dropped.whole_workspace,
-        "a retreat narrows the scope, so it cannot be reporting that only the whole workspace built"
-    );
+    assert!(error.to_string().contains("gamma-broken-marker"), "{error}");
 }
 
 /// The retreat is not a way to run over code that does not compile.
@@ -810,6 +1524,26 @@ fn hitting_the_rollback_round_limit_is_reported_rather_than_retried_forever() {
     assert!(stuck_reason(convergence).contains("rollback"));
 }
 
+#[test]
+fn isolation_withdrawals_use_the_same_rollback_round_budget() {
+    let limits = BuildLimits {
+        timeout: None,
+        multiplier: None,
+        rollback_rounds: 1,
+    };
+    let mut converger = Converger {
+        rounds: 1,
+        ..Converger::default()
+    };
+
+    assert!(!converger.admit_withdrawal_round(2, limits));
+    assert_eq!(converger.per_round, [2]);
+    assert!(
+        converger.withdrawn.is_empty(),
+        "the budget is checked before isolation changes verdict state"
+    );
+}
+
 /// A stage that cannot be converged gives up on its own mutants instead of ending the run, and
 /// records them as never built rather than as unviable.
 ///
@@ -902,6 +1636,24 @@ fn a_stage_the_run_gave_up_on_leaves_a_tree_the_next_build_can_still_compile() {
 }
 
 #[test]
+fn proof_build_candidates_exclude_pristine_withdrawn_and_unselected_mutants() {
+    let mut pristine = mutant();
+    pristine.ordinal = 0;
+    let mut withdrawn = mutant();
+    withdrawn.ordinal = 2;
+    let mut other_package = mutant();
+    other_package.ordinal = 3;
+    other_package.package = "other".to_owned().into();
+    let withdrawn_ordinals = HashSet::from_iter([2]);
+    let packages = vec!["pkg".to_owned()];
+
+    assert!(!isolation_candidate(&pristine, &withdrawn_ordinals, Some(&packages)));
+    assert!(!isolation_candidate(&withdrawn, &withdrawn_ordinals, Some(&packages)));
+    assert!(!isolation_candidate(&other_package, &withdrawn_ordinals, Some(&packages)));
+    assert!(isolation_candidate(&mutant(), &withdrawn_ordinals, Some(&packages)));
+}
+
+#[test]
 fn an_unattributed_failure_is_isolated_to_the_mutant_that_provably_breaks_the_build() {
     let (_dir, work) = trivial_workspace("build-isolates-unattributed-");
     let text = "pub fn bad() -> i32 { 1 }\n\
@@ -966,15 +1718,13 @@ fn an_unattributed_failure_is_isolated_to_the_mutant_that_provably_breaks_the_bu
     assert!(matches!(isolated, Isolation::Blamed(ordinals) if ordinals == vec![1]));
 }
 
-/// Mutants that compile alone but fail only together settle to `NotBuilt`, not `CompileError`.
+/// Mutants that compile alone but fail only together exclude one member without blaming either.
 ///
-/// When `isolate` narrows an unattributed failure to an interaction inside one item it returns
-/// [`Isolation::Item`], and convergence abandons those ordinals so [`Converger::settle`] records
-/// them as never judged rather than accusing honest mutants of being unviable. No cheap real
-/// fixture makes two mutations compile apart and fail together, so the proof build is scripted
-/// through the test-only `subset_oracle`: each mutant compiles on its own, only the pair fails.
+/// No cheap real fixture makes two mutations compile apart and fail together, so the proof build
+/// is scripted through the test-only `subset_oracle`: each mutant compiles on its own, only the
+/// pair fails.
 #[test]
-fn an_item_only_interaction_settles_its_mutants_to_not_built() {
+fn an_interaction_excludes_only_one_member_without_blame() {
     #[expect(
         clippy::unnecessary_wraps,
         reason = "the oracle matches subset_fails's Option<bool> verdict, where None is an indeterminate build"
@@ -1006,20 +1756,14 @@ fn an_item_only_interaction_settles_its_mutants_to_not_built() {
         .expect("the interaction was isolated to its item");
 
     assert!(
-        matches!(&isolated, Isolation::Item(ordinals) if *ordinals == vec![1, 2]),
-        "an interaction with no single culprit must be an item isolation, not a blamed one"
+        matches!(&isolated, Isolation::Interaction { excluded: 1, members } if *members == vec![1, 2]),
+        "an interaction with no single culprit must identify a conflict rather than blame either member"
     );
 
-    // Convergence withdraws every isolated ordinal but abandons only an `Item` one, and abandoning
-    // is what makes `settle` record it as never built rather than as compiler-rejected.
-    let ordinals = match &isolated {
-        Isolation::Blamed(ordinals) | Isolation::Item(ordinals) => ordinals.clone(),
-    };
-    for ordinal in &ordinals {
-        let _ = converger.withdrawn.insert(*ordinal);
-    }
-    if let Isolation::Item(ordinals) = &isolated {
-        converger.abandoned.extend(ordinals.iter().copied());
+    if let Isolation::Interaction { excluded, members } = isolated {
+        let _ = converger.withdrawn.insert(excluded);
+        let _ = converger.abandoned.insert(excluded);
+        let _ = converger.interactions.insert(excluded, members);
     }
 
     converger.settle(&mut plan);
@@ -1027,13 +1771,9 @@ fn an_item_only_interaction_settles_its_mutants_to_not_built() {
     assert_eq!(
         plan.mutants[0].outcome,
         Outcome::NotBuilt,
-        "an item-only interaction is never judged"
+        "one member is excluded without being called unviable"
     );
-    assert_eq!(
-        plan.mutants[1].outcome,
-        Outcome::NotBuilt,
-        "an item-only interaction is never judged"
-    );
+    assert_eq!(plan.mutants[1].outcome, Outcome::Pending, "the other member remains in the schema");
 }
 
 /// A plan holding one mutant of the trivial fixture's `const`, which cannot be guarded and so
@@ -1060,12 +1800,42 @@ fn unguardable_plan(work: &Workspace, ordinal: u32) -> Plan {
     });
     plan.mutants.push(Mutant {
         ordinal,
+        package: "trivial".to_owned().into(),
         span: start..start + 1,
         replacement: "2".to_owned().into(),
         ..mutant()
     });
 
     plan
+}
+
+#[test]
+fn speculative_convergence_defers_census_progress_until_committed() {
+    for (publish_progress, expected) in [(false, Vec::new()), (true, vec![1])] {
+        let (_dir, work) = trivial_workspace("build-progress-publication-");
+        let plan = unguardable_plan(&work, 1);
+        let mut converger = Converger::default();
+        let mut events = crate::testing::Recorder::default();
+
+        let result = converger
+            .converge_scoped(
+                &work,
+                &plan,
+                BuildScope {
+                    roots: None,
+                    mutants: None,
+                    publish_progress,
+                },
+                &["check", "--lib"],
+                BuildLimits::default(),
+                &mut events,
+            )
+            .expect("the compiler withdraws the unguardable mutant");
+
+        assert!(matches!(result, Convergence::Built(_)));
+        assert_eq!(converger.census.len(), 1);
+        assert_eq!(events.convergence, expected);
+    }
 }
 
 /// `--rollback-rounds` caps the rounds one build may spend converging, and a run performs
@@ -1343,11 +2113,12 @@ fn a_mutant_from_another_source_generation_receives_a_non_internal_outcome() {
         .insert(Utf8PathBuf::from("src/lib.rs"), crate::discover::digest(b"a different generation"));
     let mut converger = Converger::default();
 
-    let guards = converger
+    let (guards, written) = converger
         .instrument_schema(&work, &plan, &HashSet::default())
         .expect("a generation mismatch is a recorded outcome, not an instrumentation error");
 
     assert!(guards.is_empty());
+    assert!(written.is_empty());
 
     converger.settle(&mut plan);
 
@@ -1811,24 +2582,6 @@ fn mutant() -> Mutant {
     }
 }
 
-#[test]
-fn proof_build_candidates_exclude_pristine_withdrawn_and_unselected_mutants() {
-    let mut pristine = mutant();
-    pristine.ordinal = 0;
-    let mut withdrawn = mutant();
-    withdrawn.ordinal = 2;
-    let mut other_package = mutant();
-    other_package.ordinal = 3;
-    other_package.package = "other".to_owned().into();
-    let withdrawn_ordinals = HashSet::from_iter([2]);
-    let packages = vec!["pkg".to_owned()];
-
-    assert!(!isolation_candidate(&pristine, &withdrawn_ordinals, Some(&packages)));
-    assert!(!isolation_candidate(&withdrawn, &withdrawn_ordinals, Some(&packages)));
-    assert!(!isolation_candidate(&other_package, &withdrawn_ordinals, Some(&packages)));
-    assert!(isolation_candidate(&mutant(), &withdrawn_ordinals, Some(&packages)));
-}
-
 /// The failure this tier exists for, taken from a real tree: a deleted `continue` makes a path
 /// that could not be reached statically reachable, so a value moved earlier is now seen to be
 /// used again — and rustc reports that at the use, at the move and at the reinitialization,
@@ -1892,9 +2645,28 @@ fn a_single_mutant_diagnostic_retains_its_normalized_reason() {
         Some(&CompilerReason {
             code: "E0308".to_owned(),
             category: "mismatched types for <value> at #".to_owned(),
-            replacement_site: true,
+            evidence: AttributionEvidence::ReplacementPrimary,
         })
     );
+
+    for path in [
+        "/home/person/project/secret.rs",
+        "/home/person/work trees/project/secret.rs",
+        r"C:\users\person\project\secret.rs",
+        r"C:\users\person\work trees\project\secret.rs",
+    ] {
+        let stdout = reason_message(
+            Some("E0308"),
+            &format!("mismatched types in {path} at 123"),
+            &[span("src/lib.rs", 10, 5, 10, 9, true)],
+            &[],
+        );
+        let reasons = blame(&stdout, Utf8Path::new(""), &guards);
+        let reason = reasons.get(&7).expect("the diagnostic is attributed to the guard");
+
+        assert_eq!(reason.category, "mismatched types in <path> at #");
+        assert!(!reason.category.contains("person"), "{}", reason.category);
+    }
 }
 
 #[test]
@@ -1925,7 +2697,7 @@ fn one_diagnostic_can_retain_the_same_reason_for_several_mutants() {
             Some(&CompilerReason {
                 code: "E0277".to_owned(),
                 category: "the trait bound <value> is not satisfied".to_owned(),
-                replacement_site: true,
+                evidence: AttributionEvidence::ReplacementPrimary,
             })
         );
     }
@@ -1950,7 +2722,7 @@ fn a_follow_on_without_a_mutant_span_does_not_replace_the_root_reason() {
         Some(&CompilerReason {
             code: "E0308".to_owned(),
             category: "mismatched types".to_owned(),
-            replacement_site: false,
+            evidence: AttributionEvidence::OtherDiagnostic,
         })
     );
 }
@@ -1977,7 +2749,7 @@ fn a_diagnostic_without_a_code_still_retains_its_category() {
         Some(&CompilerReason {
             code: String::new(),
             category: "aborting due to # previous errors".to_owned(),
-            replacement_site: true,
+            evidence: AttributionEvidence::ReplacementPrimary,
         })
     );
 }
@@ -2031,12 +2803,12 @@ fn the_census_counts_mutants_rather_than_diagnostics_and_leads_with_the_densest_
     let type_error = CompilerReason {
         code: "E0308".to_owned(),
         category: "mismatched types".to_owned(),
-        replacement_site: true,
+        evidence: AttributionEvidence::ReplacementPrimary,
     };
     let move_error = CompilerReason {
         code: "E0382".to_owned(),
         category: "use of moved value: <value>".to_owned(),
-        replacement_site: false,
+        evidence: AttributionEvidence::OtherDiagnostic,
     };
     let _ = converger.census.insert(1, type_error.clone());
     let _ = converger.census.insert(2, type_error.clone());
@@ -2087,6 +2859,11 @@ fn the_census_counts_mutants_rather_than_diagnostics_and_leads_with_the_densest_
     assert_eq!(
         settled.mutants[2].note.as_deref(),
         Some("rustc E0382: use of moved value: <value>; primary span did not identify the replacement site")
+    );
+
+    assert_eq!(
+        CompilerReason::isolated().note(),
+        "rustc: isolated compiler failure; isolated by proof builds without diagnostic-span attribution"
     );
 }
 
@@ -2648,7 +3425,7 @@ fn a_span_with_a_complete_start_but_no_end_is_not_read_as_a_position() {
 
 #[test]
 fn build_errors_are_formatted_without_running_cargo() {
-    let timeout = Converger::build_timeout_error(Duration::from_secs(2)).to_string();
+    let timeout = Converger::build_timeout_error("check --tests", Duration::from_secs(2)).to_string();
     let stdout = compiler_message(&[span("src/lib.rs", 1, 1, 1, 2, true)]);
     let (_dir, mut work) = trivial_workspace("build-errors-");
 
@@ -2661,6 +3438,9 @@ fn build_errors_are_formatted_without_running_cargo() {
     // These messages are the user's only explanation of build failures that happen before any
     // test binary can run, so the pure formatting paths are kept under test.
     assert!(timeout.contains("after 2s"));
+    assert!(timeout.contains("cargo check --tests"));
+    assert!(timeout.contains("bounded proof invocations"));
+    assert!(!timeout.contains("builds once"));
     assert!(unattributed.contains("could not be attributed"));
     assert!(limited.contains("32 of the 32 rollback rounds"), "{limited}");
     assert!(limited.contains("16 blamed during this build"), "{limited}");
@@ -2689,6 +3469,29 @@ fn build_errors_are_formatted_without_running_cargo() {
 
     assert!(swept.contains("--leak-dirs"), "{swept}");
     assert!(!swept.contains(work.root.as_str()), "{swept}");
+}
+
+#[test]
+fn budget_exhausted_isolation_is_reported_as_not_built_with_its_context() {
+    let (_dir, work) = trivial_workspace("build-budget-unresolved-");
+    let mut plan = empty_plan(&work);
+    let mut candidate = mutant();
+    candidate.ordinal = 1;
+    plan.mutants.push(candidate);
+    let mut converger = Converger::default();
+    let _ = converger.withdrawn.insert(1);
+    let _ = converger.abandoned.insert(1);
+    let _ = converger.unresolved.insert(1, "subject (test)".to_owned());
+
+    converger.settle(&mut plan);
+
+    assert_eq!(plan.mutants[0].outcome, Outcome::NotBuilt);
+    assert!(
+        plan.mutants[0]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("subject (test)") && note.contains("campaign budget"))
+    );
 }
 
 #[test]
@@ -3144,6 +3947,10 @@ fn a_second_round_rewrites_only_the_files_it_withdrew_from() {
 
     assert_eq!(first.guards.len(), 2, "both mutants were guarded");
     assert!(first.unavailable.is_empty());
+    assert_eq!(
+        HashSet::from_iter(first.written),
+        HashSet::from_iter([Utf8PathBuf::from("src/a.rs"), Utf8PathBuf::from("src/b.rs")])
+    );
 
     let sentinel = "// this round never touched me\n";
 
@@ -3171,6 +3978,7 @@ fn a_second_round_rewrites_only_the_files_it_withdrew_from() {
     assert!(second.guards.contains_key(&2));
     assert!(!second.guards.contains_key(&1));
     assert!(second.unavailable.is_empty());
+    assert_eq!(second.written, [Utf8PathBuf::from("src/a.rs")]);
 }
 
 /// A workspace linked against the real guard runtime, so a spliced guard can actually compile.
@@ -3367,8 +4175,13 @@ fn probe_plan(work: &Workspace, unviable: usize, viable: usize) -> Plan {
         plan.mutants.push(Mutant {
             id: format!("mutant-{index}").into(),
             ordinal: u32::try_from(index).expect("the fixture is small") + 1,
+            package: "trivial".to_owned().into(),
             span: start..start + 1,
-            replacement: "2".to_owned().into(),
+            replacement: if index < unviable {
+                "undefined_gamma_fixture_value".to_owned().into()
+            } else {
+                "2".to_owned().into()
+            },
             ..mutant()
         });
     }
@@ -3627,13 +4440,13 @@ fn diagnostic_blame_is_limited_to_the_stage_being_judged() {
     assert_eq!(blamed, HashMap::from_iter([(1, reason("E0308"))]));
 }
 
-/// Widening Cargo's roots must not widen the mutant population physically present in the tree.
+/// Cargo roots and the mutant population are independent scopes.
 ///
-/// Filtering diagnostics alone cannot provide this isolation: a deferred mutant can prevent the
-/// compiler from reaching the current stage or mask its diagnostics. The instrumentation exclusion
-/// set therefore includes both previously withdrawn mutants and every mutant outside the stage.
+/// A restricted attribution scope physically excludes other mutants, while the complete-schema
+/// scope excludes only mutants the compiler already withdrew. The latter is what lets a narrowed
+/// set of test roots compile mutations owned by their dependencies in the same convergence.
 #[test]
-fn workspace_stage_withdraws_mutants_outside_the_attribution_scope() {
+fn attribution_scope_controls_which_mutants_are_instrumented() {
     let (_dir, work) = guarded_workspace("build-stage-selection-");
     let mut plan = probe_plan(&work, 0, 3);
     plan.mutants[1].package = "elsewhere".to_owned().into();
@@ -3641,7 +4454,9 @@ fn workspace_stage_withdraws_mutants_outside_the_attribution_scope() {
     let mut converger = Converger::default();
     let _ = converger.withdrawn.insert(plan.mutants[2].ordinal);
 
-    let withdrawn = converger.scoped_withdrawn(&plan, Some(&packages));
+    let restricted = converger.scoped_withdrawn(&plan, Some(&packages));
+    let complete = converger.scoped_withdrawn(&plan, None);
 
-    assert_eq!(withdrawn, HashSet::from_iter([plan.mutants[1].ordinal, plan.mutants[2].ordinal]));
+    assert_eq!(restricted, HashSet::from_iter([plan.mutants[1].ordinal, plan.mutants[2].ordinal]));
+    assert_eq!(complete, HashSet::from_iter([plan.mutants[2].ordinal]));
 }

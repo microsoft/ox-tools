@@ -81,7 +81,6 @@ impl WorkspaceSnapshot {
 
     /// Captures the workspace and every local path dependency Cargo can compile against.
     // #[gamma::skip(all, reason = "snapshot capture combines physical filesystem identity, external roots, and parallel traversal; exact cache eligibility is covered by filesystem integration tests and several branches are platform-dependent")]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn capture_with_external(
         root: &Utf8Path,
         excluded: &[Utf8PathBuf],
@@ -186,7 +185,6 @@ impl WorkspaceSnapshot {
     }
 
     /// Whether every source generation discovered for a completed plan belongs to this snapshot.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn contains_plan_sources(&self, plan: &Plan) -> bool {
         let retained: crate::HashMap<&Utf8Path, &str> = plan
             .files
@@ -235,7 +233,6 @@ impl WorkspaceSnapshot {
 /// joins every worker thread before this function reads it back, and the results list, locked only
 /// long enough to push one already-computed [`SnapshotFile`].
 // #[gamma::skip(all, reason = "parallel filesystem walking, symlink handling, and completion propagation are covered by platform-specific snapshot tests; isolated mutations are scheduling or platform dependent")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn capture_tree(root: &Utf8Path, excluded: &[Utf8PathBuf], complete: &mut bool) -> Vec<SnapshotFile> {
     let boundary = fs::canonicalize(root.as_std_path())
         .ok()
@@ -382,7 +379,6 @@ fn modified_at(path: &Utf8Path) -> Option<u64> {
 }
 
 /// A symlink's own modification time, without following its target.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn symlink_modified_at(path: &Utf8Path) -> Option<u64> {
     modified(&fs::symlink_metadata(path.as_std_path()).ok()?)
 }
@@ -416,6 +412,7 @@ fn exclusions(root: &Utf8Path, excluded: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
 
 #[cfg(test)]
 #[cfg(not(miri))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
 

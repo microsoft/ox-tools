@@ -269,9 +269,11 @@ mod tests {
         // instrumentation time — the shape only changes how the guard is wrapped, not how the
         // change is described to a human.
         let expr = mutant(Shape::Expr, "a + b", "a - b");
+        let iterator = mutant(Shape::IterExpr, "values.map(f)", "values.filter_map(f)");
         let block = mutant(Shape::Block, "{ a() }", "{ b() }");
 
         assert_eq!(expr.summary(), "replace a + b with a - b");
+        assert_eq!(iterator.summary(), "replace values.map(f) with values.filter_map(f)");
         assert_eq!(block.summary(), "replace { a() } with { b() }");
     }
 

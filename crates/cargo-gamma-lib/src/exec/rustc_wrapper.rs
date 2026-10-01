@@ -30,6 +30,9 @@ pub(crate) struct RustcInvocation {
 /// Runs cargo-gamma as Cargo's rustc wrapper when the private capture marker is present.
 ///
 /// Returns `None` for an ordinary cargo-gamma invocation.
+///
+/// Coverage excludes this process-boundary entry point because it forwards a real compiler and
+/// preserves its operating-system exit status; subprocess tests exercise that contract.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn run_if_requested(args: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
     let directory = std::env::var_os(CAPTURE_DIR_VAR).filter(|directory| !directory.is_empty())?;
@@ -95,6 +98,8 @@ fn publish_capture(directory: &camino::Utf8Path, bytes: &[u8]) -> std::io::Resul
     publish_capture_with(directory, bytes, next_capture_stem)
 }
 
+// Exclusive creation, flushing, hard-link publication, and cleanup are filesystem race/failure
+// boundaries covered by the wrapper subprocess tests rather than deterministic line coverage.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn publish_capture_with(directory: &camino::Utf8Path, bytes: &[u8], mut next_stem: impl FnMut() -> String) -> std::io::Result<()> {
     fs::create_dir_all(directory.as_std_path())?;

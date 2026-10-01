@@ -365,6 +365,7 @@ pub fn normalize_site_text(text: &str) -> CompactString {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

@@ -519,6 +519,7 @@ a CI shell and threading the result between jobs as environment variables.
 | `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha (`current.key`); the dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
 | `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth; `{}` when nothing changed). |
 | `include_<tier>.txt`         | the pre-projected per-tier scope string (see below), one file per tier. |
+| `doctest_packages.txt`       | Ordinally sorted `name@version` specs for workspace members with at least one metadata target marked `doctest = true`. It is projected from the formatter's locked metadata read and lets doc-test avoid a redundant metadata process. |
 
 Because the modified/current set comes from cargo-delta's **committed** git diff against
 the base, local scoping reflects the commits your branch adds on top of the base ref, the
@@ -563,7 +564,15 @@ argument string like `--package alpha@1.0.0 --package beta@0.2.0` (version-quali
 specs, so `-p` resolves uniquely even against a like-named transitive dependency), or a
 full-workspace default (`--workspace` for affected/required, empty for modified) when the
 tier is unscoped. Every value comes from the shared `_anvil-impact-format` helper via the
-cache.
+cache. The doc-test recipe additionally reads `doctest_packages.txt` and intersects it
+with the affected selection. A clean computed or downloaded cache therefore performs no
+metadata discovery in the doc-test process: its exact Cargo work is the locked
+all-features doctest command followed by the locked default-features command. When impact
+is off, local safety widening exits before projection, or a cache predates the projection,
+doc-test performs one locked metadata query and applies the same `workspace_members`
+filter before launching those two commands. Every pre-projection full-workspace fallback
+deletes any older capability projection first, so a stale file cannot suppress a newly
+added or newly doctest-capable workspace member.
 
 `_anvil-impact-format` **fails the recipe** (non-zero exit, aborting `anvil-impact`)
 when at least one name cargo-delta reported cannot be resolved to exactly one workspace
@@ -632,7 +641,10 @@ back to another cache or full-workspace scope. The directory must contain all th
 directory are supported, and paths are interpreted literally rather than as wildcards.
 Unset or empty uses `target/anvil/impact/`, preserving existing CI behavior.
 The override is ignored outside consume mode: computing impact still writes only to
-the default cache, and `off` still disables scoping. Tests can inject the fixture
+the default cache, and `off` still disables scoping. `doctest_packages.txt` is an
+additive cache projection: consume mode uses it when present and safely falls back to
+locked discovery when reading an older cache, while the three include files remain the
+minimum complete scoping contract. Tests can inject the fixture
 without copying it into a temporary repository or running impact analysis.
 Containerized checks reject the override rather than inherit it: it names a host path
 that need not exist inside the container, so `anvil-container` fails fast when it is

@@ -263,7 +263,9 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn read_config_file_missing_path_is_config_not_found() {
-        let err = read_config_file(Path::new("/definitely/missing/.cargo-heather.toml")).unwrap_err();
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("missing").join(".cargo-heather.toml");
+        let err = read_config_file(&missing).unwrap_err();
         assert!(matches!(err, HeatherError::ConfigNotFound(_)), "{err}");
     }
 
@@ -412,9 +414,13 @@ mod tests {
     #[test]
     fn load_config_propagates_cargo_manifest_parse_error() {
         let tmp = TempDir::new().unwrap();
-        write(tmp.path(), "Cargo.toml", "not = = toml");
+        let path = write(tmp.path(), "Cargo.toml", "not = = toml");
         let err = load_config(tmp.path()).expect_err("malformed Cargo.toml must fail");
-        assert!(matches!(err, HeatherError::ConfigParse { .. }), "{err}");
+        let HeatherError::ConfigParse { path: reported, message } = err else {
+            panic!("unexpected error: {err}");
+        };
+        assert_eq!(reported, path);
+        assert!(message.contains("TOML parse error"), "unexpected parse diagnostic: {message}");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -498,13 +504,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let p = write(tmp.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
         let err = find_workspace_root(&p).unwrap_err();
-        assert!(matches!(err, HeatherError::ConfigInvalid(_)), "{err}");
+        let HeatherError::ConfigInvalid(message) = err else {
+            panic!("unexpected error: {err}");
+        };
+        assert!(message.contains("no workspace root Cargo.toml found"), "{message}");
     }
 
     #[test]
     fn find_workspace_root_rejects_path_without_parent() {
         let err = find_workspace_root(Path::new("")).expect_err("a parentless path must be rejected");
-        assert!(matches!(err, HeatherError::ConfigInvalid(_)), "{err}");
+        let HeatherError::ConfigInvalid(message) = err else {
+            panic!("unexpected error: {err}");
+        };
+        assert!(message.contains("cannot determine parent directory"), "{message}");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -531,7 +543,10 @@ mod tests {
 
         let err = try_load_from_cargo_toml(&member).expect_err("missing workspace root must be returned");
 
-        assert!(matches!(err, HeatherError::ConfigInvalid(_)), "{err}");
+        let HeatherError::ConfigInvalid(message) = err else {
+            panic!("unexpected error: {err}");
+        };
+        assert!(message.contains("no workspace root Cargo.toml found"), "{message}");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

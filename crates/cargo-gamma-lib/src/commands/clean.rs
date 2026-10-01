@@ -11,7 +11,6 @@ use crate::exec::{campaign_base, clean_cache, gamma_base};
 use crate::report::{Styler, encode_controls};
 
 /// Deletes the cache belonging to the resolved workspace.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn clean<H: Host>(host: &mut H, args: &CleanArgs, styler: Styler) -> crate::Result<i32> {
     let metadata = load_metadata(&args.dir, &FeatureArgs::default())?;
     let root = camino::Utf8Path::new(metadata.workspace_root.as_str());
@@ -42,6 +41,7 @@ pub(super) fn clean<H: Host>(host: &mut H, args: &CleanArgs, styler: Styler) -> 
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
 

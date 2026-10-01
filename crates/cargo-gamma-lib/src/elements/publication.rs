@@ -131,6 +131,9 @@ pub(crate) fn remove_if_unchanged(workspace: &Utf8Path, path: &Utf8Path, expecte
 }
 
 /// Removes `path` only when it still holds `expected`, under a lock held by the caller.
+///
+/// Filesystem replacement, durability, and race injection are exercised through the publication
+/// integration tests; line coverage cannot deterministically force those host boundaries.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn remove_if_unchanged_locked(destination: &Utf8Path, path: &Utf8Path, expected: &str) -> Result<Publication> {
     before_publication(destination);
@@ -203,6 +206,9 @@ fn replace(path: &Utf8Path, destination: &Utf8Path, fill: impl FnOnce(&mut dyn i
 ///
 /// Returns the reason when the directory, the temporary file, the link or the durability of the
 /// link fails.
+///
+/// The excluded paths are host-filesystem failure and durability boundaries covered by the
+/// publication integration tests rather than deterministic in-process branches.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn publish(path: &Utf8Path, contents: &str) -> Result<bool> {
     create_parents(path)?;
@@ -236,6 +242,9 @@ pub fn publish(path: &Utf8Path, contents: &str) -> Result<bool> {
 }
 
 /// Creates the directories `path` will be written into.
+///
+/// Its excluded failure edge depends on host filesystem permissions and is asserted through the
+/// publication integration tests.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn create_parents(path: &Utf8Path) -> Result<()> {
     if let Some(parent) = path.parent() {

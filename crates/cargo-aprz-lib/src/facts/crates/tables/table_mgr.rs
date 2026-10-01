@@ -22,6 +22,7 @@ use tar::Archive;
 use tokio::sync::mpsc;
 use url::Url;
 
+use super::table::map_table_file;
 use super::{
     CategoriesTable, CrateDownloadsTable, CrateOwnersTable, CratesCategoriesTable, CratesKeywordsTable, CratesTable, DependenciesTable,
     KeywordsTable, Table, TeamsTable, UsersTable, VersionDownloadsTable, VersionsTable,
@@ -144,7 +145,7 @@ macro_rules! define_tables {
                     let file_size = metadata.len() as usize;
 
                     $(#[$meta])*
-                    let mmap = super::map_table_file(file, file_size)
+                    let mmap = map_table_file(file, file_size)
                         .into_app_err_with(|| format!("loading {}", <$type>::TABLE_NAME))?;
 
                     $(#[$meta])*

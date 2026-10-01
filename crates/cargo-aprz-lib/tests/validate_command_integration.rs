@@ -12,6 +12,9 @@
 
 #![cfg(not(miri))]
 
+#[gamma::resource("cargo-aprz-cargo-subprocess")]
+mod cargo_subprocess_resource {}
+
 use std::io::Cursor;
 
 use cargo_aprz_lib::Host;

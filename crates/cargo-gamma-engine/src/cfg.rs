@@ -517,6 +517,7 @@ fn combine(answers: &mut dyn Iterator<Item = Verdict>, settles: Verdict, otherwi
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

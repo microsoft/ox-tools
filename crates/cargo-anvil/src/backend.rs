@@ -180,6 +180,8 @@ pub fn resolve(flag_backends: &[String], no_backends: bool, repo_root: &Path) ->
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::fs::{read, write};
+
     use tempfile::TempDir;
 
     use super::*;
@@ -288,8 +290,11 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "spawns git to inspect the configured origin")]
     fn resolve_without_flags_propagates_origin_lookup_failure() {
-        let result = resolve(&[], false, Path::new("a-directory-that-does-not-exist"));
-        result.unwrap_err();
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("missing-repository");
+        let err = resolve(&[], false, &missing).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("failed to invoke `git config`"), "{message}");
     }
 
     #[cfg_attr(miri, ignore = "spawns git; miri cannot run child processes")]
@@ -301,9 +306,9 @@ mod tests {
 
         let status = Command::new("git").arg("init").current_dir(tmp.path()).status().unwrap();
         assert!(status.success());
-        let mut config = std::fs::read(tmp.path().join(".git/config")).unwrap();
+        let mut config = read(tmp.path().join(".git/config")).unwrap();
         config.extend_from_slice(b"\n[remote \"origin\"]\n\turl = \xff\n");
-        std::fs::write(tmp.path().join(".git/config"), config).unwrap();
+        write(tmp.path().join(".git/config"), config).unwrap();
 
         let err = read_origin_url(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("git config output was not valid UTF-8"), "{err}");

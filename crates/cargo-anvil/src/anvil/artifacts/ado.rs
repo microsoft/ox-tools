@@ -280,14 +280,12 @@ mod tests {
     fn fixed_artifacts_keep_their_emission_order() {
         let paths: Vec<_> = all()
             .into_iter()
-            .take(6)
             .map(|artifact| match artifact {
                 Artifact::OwnedFile(spec) => spec.path,
                 Artifact::Region(_) => panic!("ADO artifacts must be owned files"),
             })
             .collect();
-        assert_eq!(
-            paths,
+        let expected: Vec<_> = [
             [
                 ".pipelines/anvil/steps/setup.yml",
                 ".pipelines/anvil/steps/impact.yml",
@@ -296,7 +294,20 @@ mod tests {
                 ".pipelines/anvil/hooks/before-checks.yml",
                 ".pipelines/anvil/hooks/after-checks.yml",
             ]
-        );
+            .as_slice(),
+            &GROUP_STEPS.iter().map(|(_, path)| *path).collect::<Vec<_>>(),
+            [
+                ".pipelines/anvil/pr.yml",
+                ".pipelines/anvil/scheduled.yml",
+                ".pipelines/anvil/custom-pr-stages.yml",
+                ".pipelines/anvil/custom-scheduled-stages.yml",
+                ".pipelines/anvil-pr.yml",
+                ".pipelines/anvil-scheduled.yml",
+            ]
+            .as_slice(),
+        ]
+        .concat();
+        assert_eq!(paths, expected);
     }
 
     #[test]

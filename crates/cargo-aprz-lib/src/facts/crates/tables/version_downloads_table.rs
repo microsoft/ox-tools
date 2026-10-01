@@ -22,10 +22,11 @@ define_rows! {
 
 impl VersionDownloadRow {
     /// Converts the row's raw day count into a calendar date.
+    ///
+    /// Returns `None` when cached data contains a day count the table writer cannot produce.
     #[must_use]
-    pub fn date_naive(&self) -> NaiveDate {
-        let days = i32::try_from(self.date).unwrap_or(0);
-        NaiveDate::from_epoch_days(days).unwrap_or_default()
+    pub fn date_naive(&self) -> Option<NaiveDate> {
+        i32::try_from(self.date).ok().and_then(NaiveDate::from_epoch_days)
     }
 }
 
@@ -49,7 +50,6 @@ define_table! {
 }
 
 #[cfg(test)]
-#[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::super::{RowReader, RowWriter, Table};
@@ -74,17 +74,22 @@ mod tests {
 
         assert_eq!(row.version_id, VersionId(123));
         assert_eq!(row.downloads, 4567);
-        assert_eq!(row.date_naive(), NaiveDate::from_ymd_opt(2024, 7, 8).expect("valid date literal"));
+        assert_eq!(
+            row.date_naive(),
+            Some(NaiveDate::from_ymd_opt(2024, 7, 8).expect("valid date literal"))
+        );
     }
 
     #[test]
-    fn out_of_range_day_counts_fall_back_to_the_epoch() {
-        let row = VersionDownloadRow {
-            version_id: VersionId(1),
-            downloads: 2,
-            date: u64::MAX,
-        };
+    fn out_of_range_day_counts_are_rejected() {
+        for date in [u64::MAX, i32::MAX as u64] {
+            let row = VersionDownloadRow {
+                version_id: VersionId(1),
+                downloads: 2,
+                date,
+            };
 
-        assert_eq!(row.date_naive(), NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch date"));
+            assert_eq!(row.date_naive(), None, "day count {date} cannot be emitted by the table writer");
+        }
     }
 }

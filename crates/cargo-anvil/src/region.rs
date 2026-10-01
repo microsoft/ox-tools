@@ -68,14 +68,6 @@ impl CommentSyntax {
     }
 }
 
-fn is_line_ending(character: char) -> bool {
-    matches!(character, '\n' | '\r')
-}
-
-fn is_horizontal_whitespace(character: char) -> bool {
-    matches!(character, ' ' | '\t')
-}
-
 /// One managed region located inside a host file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Region<'a> {
@@ -129,6 +121,14 @@ pub enum MarkerRepair {
     /// Markers for this id exist but none of them form a pair, so the
     /// boundary of whatever anvil last generated cannot be proven.
     Unpaired,
+}
+
+fn is_line_ending(character: char) -> bool {
+    matches!(character, '\n' | '\r')
+}
+
+fn is_horizontal_whitespace(character: char) -> bool {
+    matches!(character, ' ' | '\t')
 }
 
 /// Remove only redundant marker lines for one id, around a complete pair.
@@ -300,7 +300,8 @@ pub(crate) fn upsert_region_with_newline(
             let without_region = remove_region(text, id, syntax)?;
             return Ok(prepend_region(&without_region, &rendered, syntax, newline));
         }
-        let mut out = String::new();
+        // #[gamma::skip(literal.int_increment, reason = "changes only spare String capacity; emitted region text is identical")]
+        let mut out = String::with_capacity(text.len() + rendered.len());
         out.push_str(&text[..region.start_line.start]);
         out.push_str(&rendered);
         out.push_str(&text[region.end_line.end..]);
@@ -339,7 +340,7 @@ pub(crate) fn upsert_region_with_newline(
                 .map_or(text.len(), |index| offset + index + 1)
         };
         let (before, after) = text.split_at(offset);
-        // #[gamma::skip(literal.int_increment, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+        // #[gamma::skip(literal.int_increment, tag = "timeout", reason = "changes only spare String capacity; emitted bytes are identical and the mutant exhausts the campaign budget")]
         let mut out = String::with_capacity(text.len() + rendered.len() + 2);
         out.push_str(before);
         separate_region(&mut out, newline);
@@ -353,7 +354,7 @@ pub(crate) fn upsert_region_with_newline(
 
     // No region present — append at the end with one blank line of separation
     // if the file is non-empty and doesn't end in two newlines.
-    // #[gamma::skip(literal.int_increment, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+    // #[gamma::skip(literal.int_increment, tag = "timeout", reason = "changes only spare String capacity; emitted bytes are identical and the mutant exhausts the campaign budget")]
     let mut out = String::with_capacity(text.len() + rendered.len() + 1);
     out.push_str(text);
     separate_region(&mut out, newline);
@@ -380,7 +381,7 @@ pub(crate) fn start_region_offset(text: &str, syntax: CommentSyntax) -> usize {
 
 fn prepend_region(text: &str, rendered: &str, syntax: CommentSyntax, newline: &str) -> String {
     let (header, text) = text.split_at(start_region_offset(text, syntax));
-    // #[gamma::skip(arith.add_to_sub, literal.int_increment, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+    // #[gamma::skip(arith.add_to_sub, literal.int_increment, tag = "timeout", reason = "mutates only the allocation estimate; adoption output is unchanged and the mutant exhausts the campaign budget")]
     let mut out = String::with_capacity(header.len() + text.len() + rendered.len() + 1);
     out.push_str(header);
     separate_region(&mut out, newline);
@@ -613,7 +614,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         {
             return TomlAdoption::Unrelocatable {
                 table: parent.join("."),
-                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+                // #[gamma::skip(literal.str_to_empty, literal.str_to_xyzzy, tag = "timeout", reason = "changes only refusal text for malformed legacy input and exhausts the campaign budget before a distinct verdict")]
                 tail_table: tail.join("."),
             };
         }
@@ -626,7 +627,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         && let Some(legacy_candidates) = headed_tables(&legacy_masked)
     {
         let mut legacy_boundaries: Vec<usize> = legacy_candidates.iter().map(|table| table.header.start).collect();
-        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+        // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "removing protected boundaries drives legacy adoption through an intentionally exhaustive malformed-input path that exceeds the campaign budget")]
         legacy_boundaries.extend(protected.iter().map(|range| range.start));
         legacy_boundaries.sort_unstable();
         if let Some(adoption) = adopt_dotted_child_assignments(text, &managed, &legacy_candidates, &legacy_boundaries, &protected) {
@@ -644,13 +645,13 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 
         let Some(managed_values) = managed
             .iter()
-            // #[gamma::skip(logical.and_remove_left, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+            // #[gamma::skip(logical.and_remove_left, tag = "timeout", reason = "accepting array tables here sends malformed legacy adoption through an exhaustive search that exceeds the campaign budget")]
             .find(|table| !table.array_of_tables && table.path == candidate.path)
             .map(|table| &table.values)
         else {
             continue;
         };
-        // #[gamma::skip(expr.increment, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+        // #[gamma::skip(expr.increment, tag = "timeout", reason = "advancing this boundary past the next table makes malformed adoption scan an unbounded synthetic tail until the campaign timeout")]
         let end = boundary_after(&boundaries, candidate.header.start, text.len());
 
         let mut kept = String::new();
@@ -675,7 +676,7 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         });
         if !kept.trim().is_empty() && candidate.path != tail {
             return TomlAdoption::Unrelocatable {
-                // #[gamma::skip(literal.str_to_xyzzy, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+                // #[gamma::skip(literal.str_to_xyzzy, tag = "timeout", reason = "changes only refusal text for an unrelocatable table and exhausts the campaign budget before a distinct verdict")]
                 table: candidate.path.join("."),
                 tail_table: tail.join("."),
             };
@@ -708,6 +709,10 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
 }
 
 fn mask_legacy_lint_region_to_header(text: &str, syntax: CommentSyntax) -> String {
+    // The parser view exposes only the legacy parent header so dotted
+    // assignments keep their table context while generated assignments remain
+    // hidden. An empty retiring region has no original header to restore, so
+    // synthesize it there; malformed non-empty bodies stay masked.
     let mut masked = mask_managed_regions(text, syntax).into_bytes();
     restore_legacy_lint_header(&mut masked, text, "anvil-workspace-lints", "[workspace.lints]", syntax);
     restore_legacy_lint_header(&mut masked, text, "anvil-lints", "[lints]", syntax);
@@ -760,26 +765,26 @@ pub(crate) fn lint_region_placement(region_id: &str, current: Option<&str>) -> O
     if matches!(find_region(text, region_id, CommentSyntax::Hash), Ok(Some(_))) {
         return Some(RegionPlacement::End);
     }
-    let mut successors = order.iter();
-    for candidate in successors.by_ref() {
-        if *candidate == region_id {
-            break;
-        }
-    }
+    let position = order
+        .iter()
+        .position(|candidate| *candidate == region_id)
+        .expect("guarded by the WORKSPACE and SINGLE_CRATE membership checks above");
+    let (_, from_requested) = order.split_at(position);
+    let (_, successors) = from_requested
+        .split_first()
+        .expect("position identifies a member of the selected lint-region order");
     for successor in successors {
         if let Ok(Some(region)) = find_region(text, successor, CommentSyntax::Hash) {
             return Some(RegionPlacement::At(region.start_line.start));
         }
     }
 
-    let mut retiring = BTreeSet::new();
-    let _ = retiring.insert("anvil-workspace-lints".to_owned());
-    let _ = retiring.insert("anvil-lints".to_owned());
+    let retiring = BTreeSet::from(["anvil-workspace-lints".to_owned(), "anvil-lints".to_owned()]);
     let parseable = mask_retiring_managed_regions(text, CommentSyntax::Hash, &retiring);
     let before_profiles = headed_tables(&parseable).and_then(|tables| {
         tables
             .into_iter()
-            // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+            // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "broadens the table-root filter into an exhaustive legacy scan that exceeds the campaign budget")]
             .filter(|table| table.path.first().is_some_and(|root| root == "patch" || root == "profile"))
             .map(|table| table.header.start)
             .min()
@@ -806,12 +811,12 @@ fn adopt_dotted_child_assignments(
     protected: &[ByteRange],
 ) -> Option<TomlAdoption> {
     let [managed] = managed else {
-        return Option::default();
+        return None;
     };
     let (namespace, parent_path) = managed.path.split_last()?;
     let candidate = candidates
         .iter()
-        // #[gamma::skip(logical.and_remove_left, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+        // #[gamma::skip(logical.and_remove_left, tag = "timeout", reason = "accepting array tables as parents drives malformed dotted adoption through a search that exceeds the campaign budget")]
         .find(|table| !table.array_of_tables && table.path == parent_path)?;
     let end = boundary_after(boundaries, candidate.header.start, text.len());
     let mut deletions = Vec::new();
@@ -1106,7 +1111,7 @@ fn canonical_value(value: &toml_edit::Value) -> String {
         Value::Datetime(value) => value.value().to_string(),
         Value::Array(values) => format!("[{}]", values.iter().map(canonical_value).collect::<Vec<_>>().join(", ")),
         Value::InlineTable(table) => {
-            // #[gamma::skip(call_result.default, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+            // #[gamma::skip(call_result.default, tag = "timeout", reason = "discarding canonical inline-table entries defeats ordered traversal and the mutation campaign cannot complete within its budget")]
             let sorted: BTreeMap<_, _> = table.iter().map(|(key, value)| (key, canonical_value(value))).collect();
             format!("{sorted:?}")
         }
@@ -1125,7 +1130,7 @@ fn adopt_unmanaged_root_settings(text: &str, body: &str, syntax: CommentSyntax) 
     };
     let values = table_values(managed.as_table());
     let mut boundaries: Vec<_> = tables.iter().map(|table| table.header.start).collect();
-    // #[gamma::skip(call_result.default, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-26")]
+    // #[gamma::skip(call_result.default, tag = "timeout", reason = "discarding table boundaries makes adoption rescan the remaining document and exceed the campaign budget")]
     boundaries.extend(managed_region_ranges(text, syntax).iter().map(|range| range.start));
     boundaries.sort_unstable();
     let mut out = String::new();
@@ -1235,10 +1240,8 @@ fn entry_start(key: &Key, text: &str) -> usize {
     if let Some(prefix) = key.leaf_decor().prefix().and_then(RawString::span) {
         return prefix.start;
     }
-    let at = key.span().map_or_else(usize::default, |span| span.start);
-    text[..at]
-        .rfind('\n')
-        .map_or_else(usize::default, |newline| newline.saturating_add(1))
+    let at = key.span().map_or(0, |span| span.start);
+    text[..at].rfind('\n').map_or(0, |newline| newline + 1)
 }
 
 /// The first boundary strictly after `start`, or `fallback` when none follows.
@@ -1268,6 +1271,9 @@ fn mask_managed_regions(text: &str, syntax: CommentSyntax) -> String {
 /// would compose into a duplicate header that neither could see.
 #[must_use]
 pub fn mask_retiring_managed_regions(text: &str, syntax: CommentSyntax, retiring: &BTreeSet<String>) -> String {
+    if retiring.is_empty() {
+        return text.to_owned();
+    }
     let ranges: Vec<ByteRange> = managed_region_ranges_with_ids(text, syntax)
         .into_iter()
         .filter_map(|(id, range)| retiring.contains(&id).then_some(range))
@@ -1345,7 +1351,7 @@ fn trim_leading_blank_lines(text: &str) -> &str {
     let mut rest = text;
     loop {
         let trimmed = rest.trim_start_matches(is_horizontal_whitespace);
-        // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-24")]
+        // #[gamma::skip(literal.str_to_empty, tag = "timeout", reason = "an empty line-ending probe prevents the iterator from finding a terminating boundary and exceeds the campaign budget")]
         match trimmed.strip_prefix('\n').or_else(|| trimmed.strip_prefix("\r\n")) {
             Some(next) => rest = next,
             None => return rest,
@@ -1376,7 +1382,7 @@ impl Iterator for LineIter<'_> {
         // generated by `cargo mutants` against the arithmetic / comparison
         // operators above) in debug builds.
         debug_assert!(end > start, "LineIter::next must make progress");
-        // #[gamma::skip(assign_value.default, stmt.delete_assign, tag = "timeout", reason = "written by cargo gamma suppress 2026-09-24")]
+        // #[gamma::skip(assign_value.default, stmt.delete_assign, tag = "timeout", reason = "without advancing pos, LineIter repeats the same range forever and necessarily times out")]
         self.pos = end;
         Some(ByteRange { start, end })
     }
@@ -1385,6 +1391,8 @@ impl Iterator for LineIter<'_> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use toml_edit::{Document, Value};
+
     use super::*;
 
     const SYN: CommentSyntax = CommentSyntax::Hash;
@@ -2689,11 +2697,15 @@ mod tests {
         let retiring = BTreeSet::from(["a".to_owned()]);
         let masked = mask_retiring_managed_regions(text, SYN, &retiring);
         assert_eq!(masked.len(), text.len());
-        assert_eq!(masked.matches('\r').count(), text.matches('\r').count());
-        assert_eq!(masked.matches('\n').count(), text.matches('\n').count());
-        assert!(masked.starts_with("head\r\n"));
-        assert!(masked.ends_with("tail"));
-        assert!(!masked.contains("body"));
+        let retired = managed_region_ranges_with_ids(text, SYN)[0].1;
+        for (index, (original, actual)) in text.bytes().zip(masked.bytes()).enumerate() {
+            let expected = if (retired.start..retired.end).contains(&index) && original != b'\r' && original != b'\n' {
+                b' '
+            } else {
+                original
+            };
+            assert_eq!(actual, expected, "masked byte at offset {index}");
+        }
         assert_eq!(mask_retiring_managed_regions(text, SYN, &BTreeSet::new()), text);
 
         let ranges: Vec<_> = iterate_lines("a\nbb\nccc").collect();
@@ -2732,6 +2744,8 @@ mod tests {
         assert_eq!(trim_leading_blank_lines(" \t\r\n\t\nvalue"), "value");
         assert_eq!(trim_leading_blank_lines("\tvalue"), "\tvalue");
     }
+
+    // Marker parsing, repair, and placement contracts.
 
     #[test]
     fn mutation_contract_marker_repair_preserves_exact_line_boundaries() {
@@ -2772,6 +2786,8 @@ mod tests {
         upsert_region(malformed, "x", "new\n", SYN).unwrap_err();
         insert_after_region(malformed, "x", "extra\n", SYN).unwrap_err();
     }
+
+    // Legacy lint-region migration contracts.
 
     #[test]
     fn mutation_contract_empty_legacy_region_reports_exact_table_names() {
@@ -2850,6 +2866,8 @@ mod tests {
         );
     }
 
+    // Dotted-table adoption and protected-boundary contracts.
+
     #[test]
     fn mutation_contract_dotted_adoption_rejects_invalid_internal_shapes() {
         let empty_path = HeadedTable {
@@ -2907,6 +2925,8 @@ mod tests {
         );
     }
 
+    // Residue preservation and canonical-value contracts.
+
     #[test]
     fn mutation_contract_dotted_adoption_continues_after_unrelated_entries() {
         let text = "[lints]\nworkspace = true\nrust.custom = \"warn\"\nrust.managed = \"warn\"\n";
@@ -2942,14 +2962,15 @@ mod tests {
             adopt_dotted_child_assignments(text, &[managed], &[candidate], &[text.len()], &[protected])
         }
 
-        for (text, entry_start, protected) in [
-            ("Xrust.custom = \"warn\"\n", 0, ByteRange { start: 0, end: 1 }),
-            ("XYrust.custom = \"warn\"\n", 1, ByteRange { start: 0, end: 2 }),
-            ("XYrust.custom = \"warn\"\n", 2, ByteRange { start: 0, end: 2 }),
+        for (text, entry_start, protected, expected_text) in [
+            ("Xrust.custom = \"warn\"\n", 0, ByteRange { start: 0, end: 1 }, "X"),
+            ("XYrust.custom = \"warn\"\n", 1, ByteRange { start: 0, end: 2 }, "XY"),
+            ("XYrust.custom = \"warn\"\n", 2, ByteRange { start: 0, end: 2 }, "XY"),
         ] {
-            let Some(TomlAdoption::Adopted { residue, .. }) = adoption(text, entry_start, protected) else {
+            let Some(TomlAdoption::Adopted { text, residue }) = adoption(text, entry_start, protected) else {
                 panic!("the synthetic dotted entry must be adopted");
             };
+            assert_eq!(text, expected_text);
             assert_eq!(residue, "custom = \"warn\"\n");
         }
     }
@@ -3052,7 +3073,7 @@ mod tests {
 
     #[test]
     fn mutation_contract_inline_tables_have_canonical_values() {
-        let value: toml_edit::Value = "{ z = 2, a = true }".parse().unwrap();
+        let value: Value = "{ z = 2, a = true }".parse().unwrap();
         assert_eq!(canonical_value(&value), r#"{"a": "true", "z": "2"}"#);
     }
 
@@ -3090,7 +3111,7 @@ mod tests {
     fn mutation_contract_entry_start_defaults_to_byte_zero() {
         assert_eq!(entry_start(&Key::new("missing-span"), "value = 1"), 0);
 
-        let document = toml_edit::Document::parse("first = 1\n").unwrap();
+        let document = Document::parse("first = 1\n").unwrap();
         let (key, _) = document.as_table().get_key_value("first").expect("the fixture declares the key");
         assert_eq!(entry_start(key, "first = 1\n"), 0);
     }

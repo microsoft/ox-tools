@@ -5,6 +5,7 @@
 //! apply filters, build the plan, and run it.
 
 use std::collections::BTreeSet;
+use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::num::NonZeroUsize;
 use std::panic::{self, UnwindSafe};
@@ -17,6 +18,7 @@ use std::{fmt, thread};
 use cargo_metadata::TargetKind;
 use command_group::{CommandGroup as _, GroupChild};
 use ohno::{AppError, IntoAppError};
+use tempfile::NamedTempFile;
 
 use crate::cli::EachArgs;
 use crate::error::{InvalidTargetKindError, JobsConflictWithOnceError};
@@ -101,7 +103,7 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     build_options.workspace_rust_version = workspace_rust_version.as_deref();
 
     let plan = Plan::build(&members, &args.command, build_options)
-        .expect("Plan::is_empty above validates the same build options before a nonempty plan is built");
+        .expect("the preceding emptiness check validated these build options before building a nonempty command plan");
 
     if args.dry_run {
         for inv in &plan.invocations {
@@ -564,7 +566,8 @@ fn combine_captured_output(stdout: CapturedStream, stderr: CapturedStream, resul
         .flatten()
         .collect::<Vec<_>>()
         .join("; ");
-    let result = add_infrastructure_failure(result, failure);
+    let mut result = result;
+    add_infrastructure_failure(&mut result, failure);
     BufferedOutcome {
         stdout: stdout.output,
         stderr: stderr.output,
@@ -572,17 +575,18 @@ fn combine_captured_output(stdout: CapturedStream, stderr: CapturedStream, resul
     }
 }
 
-fn add_infrastructure_failure(result: InvocationResult, failure: String) -> InvocationResult {
+fn add_infrastructure_failure(result: &mut InvocationResult, failure: String) {
     if failure.is_empty() {
-        return result;
+        return;
     }
-    InvocationResult::Infrastructure(match result {
+    let message = match result {
         InvocationResult::Infrastructure(primary) => format!("{primary}; {failure}"),
         InvocationResult::TimedOut(duration) => {
-            format!("invocation timed out after {}; {failure}", display_duration(duration))
+            format!("invocation timed out after {}; {failure}", display_duration(*duration))
         }
         InvocationResult::Exited(_) => failure,
-    })
+    };
+    *result = InvocationResult::Infrastructure(message);
 }
 
 fn command_for(invocation: &Invocation) -> Result<(&str, Command), String> {
@@ -609,12 +613,12 @@ fn spawn_child(mut command: Command) -> Result<Child, String> {
 }
 
 fn create_output_capture(_stream: &'static str) -> io::Result<(Box<dyn SnapshotSource>, Stdio)> {
-    create_output_capture_with(tempfile::NamedTempFile::new, tempfile::NamedTempFile::reopen)
+    create_output_capture_with(NamedTempFile::new, NamedTempFile::reopen)
 }
 
 fn create_output_capture_with(
-    create: impl FnOnce() -> io::Result<tempfile::NamedTempFile>,
-    mut reopen: impl FnMut(&tempfile::NamedTempFile) -> io::Result<std::fs::File>,
+    create: impl FnOnce() -> io::Result<NamedTempFile>,
+    mut reopen: impl FnMut(&NamedTempFile) -> io::Result<File>,
 ) -> io::Result<(Box<dyn SnapshotSource>, Stdio)> {
     let temporary = create()?;
     let reader = reopen(&temporary)?;
@@ -1063,14 +1067,7 @@ fn emit_buffered_to(
         Err(OutputEmitError::Destination(error)) => return Err(error),
     }
     if !source_failures.is_empty() {
-        let failure = source_failures.join("; ");
-        outcome.result = InvocationResult::Infrastructure(match &outcome.result {
-            InvocationResult::Infrastructure(primary) => format!("{primary}; {failure}"),
-            InvocationResult::TimedOut(duration) => {
-                format!("invocation timed out after {}; {failure}", display_duration(*duration))
-            }
-            InvocationResult::Exited(_) => failure,
-        });
+        add_infrastructure_failure(&mut outcome.result, source_failures.join("; "));
     }
     match &outcome.result {
         InvocationResult::TimedOut(duration) => {
@@ -1261,7 +1258,7 @@ fn exit_byte(raw: Option<i32>) -> u8 {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::io::{Read as _, Seek as _};
     use std::num::NonZeroUsize;
@@ -1273,9 +1270,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, OnceLock, mpsc};
     use std::time::{Duration, Instant};
-    use std::{io, thread};
+    use std::{env, fs, io, thread};
 
     use clap::Parser as _;
+    use tempfile::NamedTempFile;
 
     use super::{
         BufferedOutcome, CHILD_LEADER_OBSERVATION, CHILD_OBSERVATION, CapturedOutput, CapturedStream, DISCONNECTED_REAPER_MESSAGE,
@@ -1480,6 +1478,7 @@ mod tests {
     }
 
     #[derive(Debug)]
+    /// Snapshot source requiring the first read to hit an exact full-buffer boundary.
     struct ExactReadSize {
         bytes: Vec<u8>,
         position: usize,
@@ -1516,7 +1515,7 @@ mod tests {
     }
 
     fn sleeping_test_command() -> Command {
-        let mut command = Command::new(std::env::current_exe().expect("the test binary knows its path"));
+        let mut command = Command::new(env::current_exe().expect("the test binary knows its path"));
         let _ = command
             .args(["--exact", "run::tests::child_sleep_probe", "--nocapture"])
             .env("CARGO_EACH_CHILD_SLEEP_MS", "30000")
@@ -1527,15 +1526,15 @@ mod tests {
 
     #[test]
     fn child_sleep_probe() {
-        if let Some(duration) = std::env::var_os("CARGO_EACH_CHILD_SLEEP_MS") {
-            if let Some(marker) = std::env::var_os("CARGO_EACH_CHILD_STARTED_MARKER") {
-                std::fs::write(marker, b"started").expect("the parent passes a writable start marker path");
+        if let Some(duration) = env::var_os("CARGO_EACH_CHILD_SLEEP_MS") {
+            if let Some(marker) = env::var_os("CARGO_EACH_CHILD_STARTED_MARKER") {
+                fs::write(marker, b"started").expect("the parent passes a writable start marker path");
             }
             let millis = duration.to_string_lossy().parse().expect("the parent passes milliseconds");
             thread::sleep(Duration::from_millis(millis));
         }
-        if let Some(marker) = std::env::var_os("CARGO_EACH_CHILD_MARKER") {
-            std::fs::write(marker, b"completed").expect("the parent passes a writable marker path");
+        if let Some(marker) = env::var_os("CARGO_EACH_CHILD_MARKER") {
+            fs::write(marker, b"completed").expect("the parent passes a writable marker path");
         }
     }
 
@@ -1893,7 +1892,7 @@ mod tests {
     fn process_polling_uses_the_bounded_ten_millisecond_cadence() {
         assert_eq!(PROCESS_POLL_INTERVAL, Duration::from_millis(10));
         let elapsed = Cell::new(Duration::ZERO);
-        let pauses = std::cell::RefCell::new(Vec::new());
+        let pauses = RefCell::new(Vec::new());
         let process = FakeProcess {
             observations: VecDeque::from([Ok(None), Ok(None), Ok(Some(successful_status()))]),
             termination: None,
@@ -1914,7 +1913,7 @@ mod tests {
         assert_eq!(*pauses.borrow(), [Duration::from_millis(10), Duration::from_millis(10)]);
 
         let elapsed = Cell::new(Duration::ZERO);
-        let pauses = std::cell::RefCell::new(Vec::new());
+        let pauses = RefCell::new(Vec::new());
         let process = FakeProcess {
             observations: VecDeque::from([Ok(None), Ok(Some(successful_status()))]),
             termination: None,
@@ -1960,7 +1959,7 @@ mod tests {
     #[test]
     fn termination_polling_caps_each_pause_and_observes_the_deadline() {
         let elapsed = Cell::new(Duration::ZERO);
-        let pauses = std::cell::RefCell::new(Vec::new());
+        let pauses = RefCell::new(Vec::new());
         let mut polls = 0;
         let mut control = ();
         let result = poll_process_exit_with(
@@ -2081,7 +2080,7 @@ mod tests {
 
         let temporary = tempfile::tempdir().expect("create marker directory");
         let group_marker = temporary.path().join("group-completed");
-        let mut command = Command::new(std::env::current_exe().expect("the test binary knows its path"));
+        let mut command = Command::new(env::current_exe().expect("the test binary knows its path"));
         let _ = command
             .args(["--exact", "run::tests::child_sleep_probe", "--nocapture"])
             .env("CARGO_EACH_CHILD_SLEEP_MS", "20")
@@ -2092,7 +2091,7 @@ mod tests {
         reaper.handoff_group(group).expect("captured receiver remains connected");
 
         let child_marker = temporary.path().join("child-completed");
-        let mut command = Command::new(std::env::current_exe().expect("the test binary knows its path"));
+        let mut command = Command::new(env::current_exe().expect("the test binary knows its path"));
         let child = command
             .args(["--exact", "run::tests::child_sleep_probe", "--nocapture"])
             .env("CARGO_EACH_CHILD_SLEEP_MS", "20")
@@ -2107,13 +2106,13 @@ mod tests {
         let group_job = jobs.remove(0);
         group_job();
         assert_eq!(
-            std::fs::read(&group_marker).expect("group reaper waits for marker process"),
+            fs::read(&group_marker).expect("group reaper waits for marker process"),
             b"completed"
         );
         let child_job = jobs.remove(0);
         child_job();
         assert_eq!(
-            std::fs::read(&child_marker).expect("child reaper waits for marker process"),
+            fs::read(&child_marker).expect("child reaper waits for marker process"),
             b"completed"
         );
     }
@@ -2131,7 +2130,7 @@ mod tests {
         let temporary = tempfile::tempdir().expect("create marker directory");
         let started_marker = temporary.path().join("child-started");
         let marker = temporary.path().join("child-completed");
-        let child = Command::new(std::env::current_exe().expect("the test binary knows its path"))
+        let child = Command::new(env::current_exe().expect("the test binary knows its path"))
             .args(["--exact", "run::tests::child_sleep_probe", "--nocapture"])
             .env("CARGO_EACH_CHILD_SLEEP_MS", "1000")
             .env("CARGO_EACH_CHILD_STARTED_MARKER", &started_marker)
@@ -2152,7 +2151,7 @@ mod tests {
         let child_job = jobs.pop().expect("child reaper job is captured last");
         child_job();
         assert_eq!(
-            std::fs::read(&marker).expect("child reaper job must wait for the marker process"),
+            fs::read(&marker).expect("child reaper job must wait for the marker process"),
             b"completed"
         );
     }
@@ -2665,12 +2664,12 @@ mod tests {
         .expect_err("create failure propagates");
         assert_eq!(create_error.to_string(), "injected create failure");
 
-        let temporary = tempfile::NamedTempFile::new().expect("create test temporary file");
+        let temporary = NamedTempFile::new().expect("create test temporary file");
         let path = temporary.path().to_owned();
         drop(temporary);
         let mut calls = 0;
         let first_reopen = create_output_capture_with(
-            || tempfile::NamedTempFile::new_in(path.parent().expect("temporary path has a parent")),
+            || NamedTempFile::new_in(path.parent().expect("temporary path has a parent")),
             |_| {
                 calls += 1;
                 Err(io::Error::other("injected first reopen failure"))
@@ -2681,7 +2680,7 @@ mod tests {
         assert_eq!(calls, 1);
 
         let mut calls = 0;
-        let second_reopen = create_output_capture_with(tempfile::NamedTempFile::new, |temporary| {
+        let second_reopen = create_output_capture_with(NamedTempFile::new, |temporary| {
             calls += 1;
             if calls == 2 {
                 Err(io::Error::other("injected second reopen failure"))
@@ -2747,8 +2746,8 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "uses filesystem-backed temporary files; Miri isolation forbids them")]
     fn temporary_snapshot_seek_rewinds_the_independent_reader() {
-        let temporary = tempfile::NamedTempFile::new().expect("create named temporary capture");
-        std::fs::write(temporary.path(), b"snapshot").expect("write temporary capture");
+        let temporary = NamedTempFile::new().expect("create named temporary capture");
+        fs::write(temporary.path(), b"snapshot").expect("write temporary capture");
         let reader = temporary.reopen().expect("reopen temporary capture reader");
         let path = temporary.into_temp_path();
         let mut snapshot = TemporarySnapshot { _path: path, reader };
@@ -2999,24 +2998,18 @@ mod tests {
 
     #[test]
     fn infrastructure_failure_merging_preserves_primary_context() {
-        assert!(matches!(
-            add_infrastructure_failure(InvocationResult::Exited(successful_status()), String::new()),
-            InvocationResult::Exited(status) if status.success()
-        ));
+        let mut success = InvocationResult::Exited(successful_status());
+        add_infrastructure_failure(&mut success, String::new());
+        assert!(matches!(success, InvocationResult::Exited(status) if status.success()));
+        let mut timeout = InvocationResult::TimedOut(Duration::from_millis(10));
+        add_infrastructure_failure(&mut timeout, "drain failed".to_owned());
         assert_eq!(
-            result_infrastructure_message(add_infrastructure_failure(
-                InvocationResult::TimedOut(Duration::from_millis(10)),
-                "drain failed".to_owned(),
-            )),
+            result_infrastructure_message(timeout),
             "invocation timed out after 10ms; drain failed"
         );
-        assert_eq!(
-            result_infrastructure_message(add_infrastructure_failure(
-                InvocationResult::Infrastructure("wait failed".to_owned()),
-                "drain failed".to_owned(),
-            )),
-            "wait failed; drain failed"
-        );
+        let mut infrastructure = InvocationResult::Infrastructure("wait failed".to_owned());
+        add_infrastructure_failure(&mut infrastructure, "drain failed".to_owned());
+        assert_eq!(result_infrastructure_message(infrastructure), "wait failed; drain failed");
     }
 
     #[test]
@@ -3158,9 +3151,11 @@ mod tests {
         assert_eq!(REAPER_START_CONTEXT, "failed to start cargo-each process reaper");
 
         let reported = Arc::new(Mutex::new(None));
-        let captured = Arc::clone(&reported);
-        reaper_diagnostic_job("observation failed".to_owned(), move |message| {
-            *captured.lock().expect("diagnostic capture mutex is not poisoned") = Some(message.to_owned());
+        reaper_diagnostic_job("observation failed".to_owned(), {
+            let reported = Arc::clone(&reported);
+            move |message| {
+                *reported.lock().expect("diagnostic capture mutex is not poisoned") = Some(message.to_owned());
+            }
         })();
         assert_eq!(
             *reported.lock().expect("diagnostic capture mutex is not poisoned"),

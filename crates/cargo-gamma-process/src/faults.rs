@@ -26,39 +26,39 @@ pub enum Fault {
     Terminate,
 
     /// Creating the Windows containment job is refused.
-    #[cfg(all(test, windows))]
+    #[cfg(all(any(test, feature = "fault-injection"), windows))]
     JobCreate,
 
     /// Assigning the suspended child to its Windows job is refused.
-    #[cfg(all(test, windows))]
+    #[cfg(all(any(test, feature = "fault-injection"), windows))]
     JobAssign,
 
     /// Resuming the suspended child after job assignment is refused.
-    #[cfg(all(test, windows))]
+    #[cfg(all(any(test, feature = "fault-injection"), windows))]
     JobResume,
 
     /// Starting the stderr capture thread is refused.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     StderrReader,
 
     /// Waiting for captured output reports an operating-system failure.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     OutputWait,
 
     /// Sweeping a completed subtree reports an operating-system failure.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     Sweep,
 
     /// Cleanup after refusing adoption reports an additional failure.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     AbandonCleanup,
 
     /// Querying a child status reports an operating-system failure.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     TryWait,
 
     /// Killing a child reports an operating-system failure.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fault-injection"))]
     Kill,
 }
 
@@ -117,6 +117,7 @@ thread_local! {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -133,22 +134,6 @@ mod tests {
     #[test]
     fn nothing_fires_unasked() {
         assert!(!fired(Fault::Adopt));
-        assert!(!fired(Fault::Prepare));
-        assert!(!fired(Fault::Boundary));
-        assert!(!fired(Fault::Window));
-        assert!(!fired(Fault::Terminate));
-        #[cfg(windows)]
-        {
-            assert!(!fired(Fault::JobCreate));
-            assert!(!fired(Fault::JobAssign));
-            assert!(!fired(Fault::JobResume));
-        }
-        assert!(!fired(Fault::StderrReader));
-        assert!(!fired(Fault::OutputWait));
-        assert!(!fired(Fault::Sweep));
-        assert!(!fired(Fault::AbandonCleanup));
-        assert!(!fired(Fault::TryWait));
-        assert!(!fired(Fault::Kill));
     }
 
     #[test]

@@ -5,8 +5,8 @@ use std::collections::hash_map::Entry;
 
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, File, GenericParam, Generics, ImplItem, Item, ItemEnum, ItemImpl, ItemStruct, ItemType, ItemUnion, Path, TraitItem, Type,
-    TypeParamBound, UseTree, WherePredicate,
+    Attribute, File, GenericParam, Generics, ImplItem, Item, ItemEnum, ItemImpl, ItemMod, ItemStruct, ItemType, ItemUnion, Path, TraitItem,
+    Type, TypeParamBound, UseTree, WherePredicate,
 };
 
 use crate::cfg::CfgSet;
@@ -352,12 +352,18 @@ pub struct Defaults {
     /// Those of them that derive or implement the standard `Default` trait.
     defaulted: HashSet<String>,
 
-    /// Unqualified names defined more than once across the indexed source.
+    /// Unqualified names whose definitions disagree about implementing `Default`.
     ///
-    /// Positive evidence is unsafe for these names: one definition implementing `Default` does not
-    /// prove that another type with the same final segment does. Negative evidence remains safe
-    /// when no definition with that name implements `Default`.
+    /// Uniform collisions remain useful evidence: two `Config` definitions that both implement
+    /// `Default` prove the property whichever one a bare name denotes, and two that both lack it
+    /// prove the opposite. Only a mixed collision is undecidable.
     ambiguous: HashSet<String>,
+
+    /// Names declared with type or const parameters.
+    ///
+    /// A bare use can fill omitted parameters from declaration defaults whose instantiated bounds
+    /// are not visible at the use site, so the name alone is not positive `Default` evidence.
+    generic: HashSet<String>,
 
     /// For each `type Alias<T, E = SomeError> = Result<T, E>`, the name of that default error type.
     ///
@@ -378,6 +384,9 @@ pub struct Defaults {
 
     /// Whether the indexed declarations are complete enough to supply negative evidence.
     negative: bool,
+
+    /// Lexical module nesting while visiting implementations.
+    module_depth: usize,
 }
 
 /// Folds one alias into the map, demoting a key two files disagree about.
@@ -459,17 +468,26 @@ impl Defaults {
     /// whatever order they finished. Every field resolves a collision without reference to that
     /// order, because the order is not reproducible and the result decides which mutants exist.
     ///
-    /// `defined` and `defaulted` are unions. A name defined in both inputs becomes ambiguous, so
-    /// positive evidence from one definition is not applied to the other. The `defaulted` union
-    /// still proves negative evidence only when no definition with that name implements `Default`.
+    /// `defined` and `defaulted` are unions. A name defined in both inputs becomes ambiguous only
+    /// when the inputs disagree about whether it implements `Default`; uniform positive and
+    /// negative collisions preserve their evidence.
     /// `result_error` cannot union, because its values are single names rather than membership, so
     /// a key two files disagree about is demoted to "unknown" instead — see [`merge_alias`].
     pub fn absorb(&mut self, other: Self) {
         self.negative |= other.negative;
-        self.ambiguous.extend(self.defined.intersection(&other.defined).cloned());
+        let collisions = self.defined.intersection(&other.defined).cloned().collect::<Vec<_>>();
+        for name in collisions {
+            if self.ambiguous.contains(&name)
+                || other.ambiguous.contains(&name)
+                || self.defaulted.contains(&name) != other.defaulted.contains(&name)
+            {
+                let _inserted = self.ambiguous.insert(name);
+            }
+        }
         self.ambiguous.extend(other.ambiguous);
         self.defined.extend(other.defined);
         self.defaulted.extend(other.defaulted);
+        self.generic.extend(other.generic);
 
         for (alias, error) in other.result_error {
             merge_alias(&mut self.result_error, alias, error);
@@ -492,11 +510,26 @@ impl Defaults {
     }
 
     /// Returns positive workspace evidence that the named type implements `Default`.
+    ///
+    /// Evidence is limited to an unambiguous, bare, non-generic type name indexed from a direct
+    /// standard `Default` derive or implementation. `false` means only that positive evidence is
+    /// unavailable: qualified, absolute, generic, ambiguous, and unknown paths remain undecided
+    /// rather than proving that the type lacks `Default`.
     #[must_use]
-    pub fn has_default(&self, ty: &Type) -> bool {
+    pub(crate) fn has_default(&self, ty: &Type) -> bool {
         unqualified_name_of(ty).is_some_and(|name| {
-            !self.ambiguous.contains(&name) && (self.defaulted.contains(&name) || (!self.negative && self.defined.contains(&name)))
+            !self.ambiguous.contains(&name)
+                && !self.generic.contains(&name)
+                && (self.defaulted.contains(&name) || (!self.negative && self.defined.contains(&name)))
         })
+    }
+
+    /// Returns whether a local type has an explicit standard `Default` implementation or derive.
+    ///
+    /// Unlike [`Self::has_default`], this admits a generic declaration. The caller must separately
+    /// prove that the concrete type arguments satisfy the bounds a derived implementation may add.
+    pub(crate) fn declares_default(&self, ty: &Type) -> bool {
+        unqualified_type_name(ty).is_some_and(|name| !self.ambiguous.contains(&name) && self.defaulted.contains(&name))
     }
 
     /// Returns the error type a `Result` alias fixed, given the alias's name.
@@ -508,13 +541,18 @@ impl Defaults {
         self.result_error.get(alias)?.as_deref()
     }
 
-    fn note_derive(&mut self, name: &str, attributes: &[syn::Attribute]) {
-        if !self.defined.insert(name.to_owned()) {
+    fn note_derive(&mut self, name: &str, generics: &Generics, attributes: &[syn::Attribute]) {
+        let defaulted = derives_default(attributes, &self.paths);
+        if self.defined.contains(name) && self.defaulted.contains(name) != defaulted {
             let _inserted = self.ambiguous.insert(name.to_owned());
         }
+        let _inserted = self.defined.insert(name.to_owned());
 
-        if derives_default(attributes, &self.paths) {
+        if defaulted {
             let _inserted = self.defaulted.insert(name.to_owned());
+        }
+        if !generics.params.is_empty() {
+            let _inserted = self.generic.insert(name.to_owned());
         }
     }
 }
@@ -525,45 +563,46 @@ impl Defaults {
 )]
 impl<'ast> Visit<'ast> for Defaults {
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
-        if !self.cfg.holds_for(&node.attrs) {
+        if self.cfg.skip_gate(&node.attrs) {
             return;
         }
 
-        self.note_derive(&node.ident.to_string(), &node.attrs);
+        self.note_derive(&node.ident.to_string(), &node.generics, &node.attrs);
 
         // #[gamma::skip(stmt.delete_call, reason = "`Defaults` has no callbacks for fields or field types, so descending cannot change this visitor's state")]
         visit::visit_item_struct(self, node);
     }
 
     fn visit_item_enum(&mut self, node: &'ast ItemEnum) {
-        if !self.cfg.holds_for(&node.attrs) {
+        if self.cfg.skip_gate(&node.attrs) {
             return;
         }
 
-        self.note_derive(&node.ident.to_string(), &node.attrs);
+        self.note_derive(&node.ident.to_string(), &node.generics, &node.attrs);
 
         // #[gamma::skip(stmt.delete_call, reason = "`Defaults` has no callbacks for variants or their contents, so descending cannot change this visitor's state")]
         visit::visit_item_enum(self, node);
     }
 
     fn visit_item_union(&mut self, node: &'ast ItemUnion) {
-        if !self.cfg.holds_for(&node.attrs) {
+        if self.cfg.skip_gate(&node.attrs) {
             return;
         }
 
-        self.note_derive(&node.ident.to_string(), &node.attrs);
+        self.note_derive(&node.ident.to_string(), &node.generics, &node.attrs);
 
         // #[gamma::skip(stmt.delete_call, reason = "`Defaults` has no callbacks for union fields or types, so descending cannot change this visitor's state")]
         visit::visit_item_union(self, node);
     }
 
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
-        if !self.cfg.holds_for(&node.attrs) {
+        if self.cfg.skip_gate(&node.attrs) {
             return;
         }
 
         if let Some((path, _for)) = &node.trait_
             && self.paths.is_standard_trait(path)
+            && (self.module_depth == 0 || path.segments.len() > 1)
             && let Some(name) = name_of(&node.self_ty)
         {
             let _inserted = self.defaulted.insert(name);
@@ -573,8 +612,18 @@ impl<'ast> Visit<'ast> for Defaults {
         visit::visit_item_impl(self, node);
     }
 
+    fn visit_item_mod(&mut self, node: &'ast ItemMod) {
+        if self.cfg.skip_gate(&node.attrs) {
+            return;
+        }
+
+        self.module_depth += 1;
+        visit::visit_item_mod(self, node);
+        self.module_depth -= 1;
+    }
+
     fn visit_item_type(&mut self, node: &'ast ItemType) {
-        if !self.cfg.holds_for(&node.attrs) {
+        if self.cfg.skip_gate(&node.attrs) {
             return;
         }
 
@@ -647,6 +696,17 @@ fn unqualified_name_of(ty: &Type) -> Option<String> {
     }
 }
 
+fn unqualified_type_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+            path.path.segments.first().map(|segment| segment.ident.to_string())
+        }
+        Type::Paren(paren) => unqualified_type_name(&paren.elem),
+        Type::Group(group) => unqualified_type_name(&group.elem),
+        _ => None,
+    }
+}
+
 /// The name of a type's `index`th generic argument.
 fn payload_name(ty: &Type, index: usize) -> Option<String> {
     let Type::Path(path) = ty else {
@@ -668,6 +728,7 @@ fn payload_name(ty: &Type, index: usize) -> Option<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use proc_macro2::TokenStream;
     use syn::{parse_file, parse_quote};
@@ -682,6 +743,15 @@ mod tests {
         }
 
         defaults
+    }
+
+    #[test]
+    fn same_file_type_name_collisions_are_unknown() {
+        let defaults = index(&["mod one { #[derive(Default)] struct Config; } mod two { struct Config; }"]);
+        let ty: Type = parse_quote!(Config);
+
+        assert!(!defaults.has_default(&ty));
+        assert!(!defaults.lacks_default(&ty));
     }
 
     #[test]
@@ -728,6 +798,18 @@ mod tests {
     }
 
     #[test]
+    fn uniformly_defaulted_colliding_names_preserve_positive_evidence() {
+        let defaults = index(&[
+            "#[derive(Default)] pub struct Config;",
+            "pub struct Config; impl Default for Config { fn default() -> Self { Self } }",
+        ]);
+        let ty: Type = parse_quote!(Config);
+
+        assert!(defaults.has_default(&ty));
+        assert!(!defaults.lacks_default(&ty));
+    }
+
+    #[test]
     fn repeated_non_default_type_names_still_supply_negative_evidence() {
         let defaults = index(&["pub struct Error;", "pub enum Error { One }"]);
         let ty: Type = parse_quote!(Error);
@@ -758,6 +840,11 @@ mod tests {
             "mod custom { pub trait Default { fn default() -> Self; } } use custom::Default as Alias; impl Alias for Error { fn default() -> Self { Self } }",
         ]);
         let custom_derive = index(&["#[derive(custom::Default)] pub struct Error;"]);
+        let nested_custom = index(&["mod nested {
+                pub trait Default { fn default() -> Self; }
+                pub struct Error;
+                impl Default for Error { fn default() -> Self { Self } }
+            }"]);
 
         assert!(!standard_alias.lacks_default(&ty));
         assert!(!standard_module_alias.lacks_default(&ty));
@@ -765,6 +852,7 @@ mod tests {
         assert!(custom.lacks_default(&ty));
         assert!(custom_alias.lacks_default(&ty));
         assert!(custom_derive.lacks_default(&ty));
+        assert!(nested_custom.lacks_default(&ty));
     }
 
     #[test]
@@ -906,6 +994,13 @@ mod tests {
 
         assert!(!defaults.has_default(&ty));
         assert!(!defaults.lacks_default(&ty));
+    }
+
+    #[test]
+    fn a_bare_generic_name_with_omitted_defaults_is_not_positive_evidence() {
+        let defaults = index(&["#[derive(Default)] pub struct Config<T = NoDefault>(T);"]);
+
+        assert!(!defaults.has_default(&parse_quote!(Config)));
     }
 
     #[test]
