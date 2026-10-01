@@ -179,7 +179,12 @@
 //!   [`cargo-sort`](https://crates.io/crates/cargo-sort), license headers with
 //!   [`cargo-heather`](https://crates.io/crates/cargo-heather),
 //!   [`cargo-ensure-no-cyclic-deps`](https://crates.io/crates/cargo-ensure-no-cyclic-deps),
-//!   and [`cargo-ensure-no-default-features`](https://crates.io/crates/cargo-ensure-no-default-features).
+//!   [`cargo-ensure-no-default-features`](https://crates.io/crates/cargo-ensure-no-default-features),
+//!   and [`cargo-unique-target-names`](https://crates.io/crates/cargo-unique-target-names)
+//!   (`unique-target-names`), which rejects workspace targets that uplift to the
+//!   same file under `target/<profile>/` — the collisions Cargo reports as
+//!   `output filename collision` — across the whole workspace, because a target
+//!   in a changed package can collide with a target in an unchanged package.
 //! - **Documentation and repository policy:** Cargo documentation
 //!   (`doc-build`), documentation tests (`doc-test`), generated README checks
 //!   with [`cargo-doc2readme`](https://crates.io/crates/cargo-doc2readme),

@@ -126,6 +126,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "semver-check",
         "spellcheck",
         "udeps",
+        "unique-target-names",
     ]
 );
 
@@ -296,6 +297,7 @@ mod tests {
             ("semver-check", Affected),
             ("spellcheck", Unscoped),
             ("udeps", Required),
+            ("unique-target-names", Unscoped),
         ]
     };
 
@@ -599,7 +601,7 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (24, 7),
+            (24, 8),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
     }

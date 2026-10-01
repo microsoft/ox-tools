@@ -41,6 +41,9 @@ cargo-gamma-rt = { path = "crates/cargo-gamma-rt", default-features = false, ver
 cargo-gamma-unsafe = { path = "crates/cargo-gamma-unsafe", default-features = false, version = "0.2.1" }
 # external dependencies
 cargo-platform = { version = "0.3.3", default-features = false }
+# local dependencies
+cargo-unique-target-names = { path = "crates/cargo-unique-target-names", default-features = false, version = "0.1.0" }
+# external dependencies
 cargo_metadata = { version = "0.23.1", default-features = false }
 cel = { version = "0.14.4", default-features = false }
 chrono = { version = "0.4.45", default-features = false }

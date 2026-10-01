@@ -140,7 +140,7 @@ diff-scoped against the PR base; `scheduled-exhaustive` runs the
 full-workspace mutants recipe:
 
 ```just
-anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
+anvil-pr-fast: anvil-unique-target-names anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
                anvil-ensure-no-cyclic-deps anvil-ensure-no-default-features \
                anvil-doc-build anvil-readme-check anvil-spellcheck anvil-pr-title \
                anvil-deny anvil-audit anvil-udeps anvil-semver-check \
@@ -588,8 +588,10 @@ dependencies.
 
 The mapping from check to bucket is fixed in the catalog (see
 [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)). Unscoped checks —
-`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, and the repo-level-input checks
-`readme-check` and `spellcheck` (whose inputs cargo-delta maps to no package) — take no
+`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, the repo-level-input checks
+`readme-check` and `spellcheck` (whose inputs cargo-delta maps to no package), and
+`unique-target-names` (a target in a changed package can collide with a target in an
+unchanged package) — take no
 `anvil-impact` dependency and never resolve a scope; they always run. Group recipes do not
 resolve scope themselves; each underlying check reads what it needs.
 

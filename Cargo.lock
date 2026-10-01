@@ -430,6 +430,7 @@ name = "cargo-anvil"
 version = "0.13.0"
 dependencies = [
  "assert_cmd",
+ "cargo-unique-target-names",
  "clap",
  "insta",
  "mutants",

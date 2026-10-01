@@ -215,10 +215,8 @@ Integration with a specific CI system. The tool is a plain cargo subcommand with
 a meaningful exit code; wiring it into a pipeline belongs to whatever drives the
 build.
 
-In this repository that wiring is **follow-up work**, not yet present on `main`:
-a `unique-target-names` check in [`cargo-anvil`](../../../cargo-anvil) will
-invoke this command once the crate is published, because Anvil pins tools by
-published crates.io version. When it lands, the check must be **unscoped** — it
-must not be impact-gated to modified packages, because a collision is a property
-of the whole workspace and only one member of a contending pair needs to appear
-in a diff to create one.
+[`cargo-anvil`](../../../cargo-anvil) supplies the `unique-target-names` check in
+its fast PR group, with setup and prerequisite validation for a published
+crates.io version of this tool. The check is **unscoped**: it always examines the
+whole workspace, because only one member of a contending pair needs to appear
+in a diff to create a collision.
