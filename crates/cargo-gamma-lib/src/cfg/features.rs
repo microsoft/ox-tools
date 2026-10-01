@@ -41,14 +41,18 @@ use crate::{HashMap, HashSet};
 /// interest, and guessing at them would cost a full resolve.
 ///
 /// ```rust,no_run
-/// # use cargo_gamma_lib::internals::cfg::features::enabled;
-/// # use cargo_gamma_lib::internals::commands::FeatureArgs;
-/// # fn example(metadata: &cargo_metadata::Metadata) {
+/// # #[cfg(feature = "internals")]
+/// # fn main() {
+/// use cargo_gamma_lib::internals::cfg::features::enabled;
+/// use cargo_gamma_lib::internals::commands::FeatureArgs;
+/// # let metadata: &cargo_metadata::Metadata = todo!();
 /// let features = enabled(metadata, &FeatureArgs::default());
 ///
 /// // Every member is present, even one with no features at all.
 /// assert!(features.contains_key("my-crate"));
 /// # }
+/// # #[cfg(not(feature = "internals"))]
+/// # fn main() {}
 /// ```
 #[must_use]
 pub fn enabled(metadata: &Metadata, args: &FeatureArgs) -> HashMap<String, Vec<String>> {
