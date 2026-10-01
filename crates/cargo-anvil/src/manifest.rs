@@ -97,6 +97,14 @@ fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
     if path.contains('\\') || drive_qualified {
         bail!("{context} '{path}' must be a relative path inside the repository");
     }
+    let (names, last) = contained_path_shape(path, context)?;
+    if path_names_no_file(names, last) {
+        bail!("{context} '{path}' must name a file inside the repository");
+    }
+    Ok(())
+}
+
+fn contained_path_shape<'a>(path: &'a str, context: &str) -> Result<(usize, &'a str), AppError> {
     let mut names = 0_usize;
     for component in Path::new(path).components() {
         match component {
@@ -110,15 +118,16 @@ fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
             }
         }
     }
+    let last = path.rsplit('/').next().unwrap_or_default();
+    Ok((names, last))
+}
+
+fn path_names_no_file(names: usize, last: &str) -> bool {
     // `Path::components` folds a trailing `.` away, so `a/.` arrives as a lone
     // `Normal("a")` and satisfies the count above while naming a directory.
     // Paths are stored `/`-separated, so the raw final segment is what decides
     // whether a file is named at all.
-    let last = path.rsplit('/').next().unwrap_or_default();
-    if names == 0 || last.is_empty() || last == "." {
-        bail!("{context} '{path}' must name a file inside the repository");
-    }
-    Ok(())
+    names == 0 || last.is_empty() || last == "."
 }
 
 impl Manifest {
@@ -247,28 +256,24 @@ impl Manifest {
             doc.insert("catalog_checksum", value(catalog_checksum.as_str()));
         }
 
-        if !self.files.is_empty() {
-            let mut tables = ArrayOfTables::new();
-            for (path, checksum) in &self.files {
-                let mut t = Table::new();
-                t.insert("path", value(path.as_str()));
-                t.insert("checksum", value(checksum.as_str()));
-                tables.push(t);
-            }
-            doc.insert("file", Item::ArrayOfTables(tables));
+        let mut file_tables = ArrayOfTables::new();
+        for (path, checksum) in &self.files {
+            let mut table = Table::new();
+            table.insert("path", value(path.as_str()));
+            table.insert("checksum", value(checksum.as_str()));
+            file_tables.push(table);
         }
+        doc.insert("file", Item::ArrayOfTables(file_tables));
 
-        if !self.regions.is_empty() {
-            let mut tables = ArrayOfTables::new();
-            for (key, checksum) in &self.regions {
-                let mut t = Table::new();
-                t.insert("host", value(key.host.as_str()));
-                t.insert("id", value(key.id.as_str()));
-                t.insert("checksum", value(checksum.as_str()));
-                tables.push(t);
-            }
-            doc.insert("region", Item::ArrayOfTables(tables));
+        let mut region_tables = ArrayOfTables::new();
+        for (key, checksum) in &self.regions {
+            let mut table = Table::new();
+            table.insert("host", value(key.host.as_str()));
+            table.insert("id", value(key.id.as_str()));
+            table.insert("checksum", value(checksum.as_str()));
+            region_tables.push(table);
         }
+        doc.insert("region", Item::ArrayOfTables(region_tables));
 
         // Normalize to exactly one trailing newline regardless of how
         // toml_edit serialized the document — `trim_end_matches` collapses
@@ -413,6 +418,7 @@ mod tests {
     fn empty_manifest_round_trip() {
         let m1 = Manifest::default();
         let text = m1.to_toml();
+        assert_eq!(text, "version = 1\n");
         let m2 = Manifest::parse(&text).unwrap();
         assert_eq!(m1, m2);
     }
@@ -431,6 +437,11 @@ mod tests {
                 format!("{stripped}\n"),
                 text,
                 "to_toml output must end with exactly one newline, got: {text:?}"
+            );
+            assert_eq!(
+                text.capacity(),
+                text.len(),
+                "to_toml allocates exactly enough room for its normalized trailing newline"
             );
         }
     }
@@ -495,10 +506,47 @@ mod tests {
     }
 
     #[test]
+    fn malformed_toml_reports_the_parse_context() {
+        let err = Manifest::parse("not = [valid").unwrap_err();
+        assert!(err.to_string().contains("manifest is not valid TOML"), "{err}");
+    }
+
+    #[test]
     fn rejects_malformed_file_entry() {
-        let text = "version = 1\n[[file]]\npath = \"foo\"\n";
-        let err = Manifest::parse(text).unwrap_err();
-        assert!(err.to_string().contains("`checksum`"));
+        for (text, expected) in [
+            (
+                "version = 1\n[[file]]\nchecksum = \"sha256:x\"\n",
+                "[[file]] entry is missing `path`",
+            ),
+            (
+                "version = 1\n[[file]]\npath = \"foo\"\n",
+                "[[file]] entry 'foo' is missing `checksum`",
+            ),
+        ] {
+            let err = Manifest::parse(text).unwrap_err();
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_region_entry() {
+        for (text, expected) in [
+            (
+                "version = 1\n[[region]]\nid = \"anvil-x\"\nchecksum = \"sha256:x\"\n",
+                "[[region]] entry is missing `host`",
+            ),
+            (
+                "version = 1\n[[region]]\nhost = \"Cargo.toml\"\nchecksum = \"sha256:x\"\n",
+                "[[region]] entry 'Cargo.toml' is missing `id`",
+            ),
+            (
+                "version = 1\n[[region]]\nhost = \"Cargo.toml\"\nid = \"anvil-x\"\n",
+                "[[region]] entry 'Cargo.toml'/'anvil-x' is missing `checksum`",
+            ),
+        ] {
+            let err = Manifest::parse(text).unwrap_err();
+            assert!(err.to_string().contains(expected), "{err}");
+        }
     }
 
     #[test]
@@ -527,6 +575,14 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
+    fn load_invalid_utf8_returns_an_error_instead_of_panicking() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(Manifest::path_for(tmp.path()), [0xff]).unwrap();
+        Manifest::load(tmp.path()).unwrap_err();
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
     fn save_clears_a_stale_temporary_sibling() {
         // The temporary file is anvil's own name, so an existing one is
         // replaced rather than written through -- otherwise a symlink left at
@@ -549,6 +605,17 @@ mod tests {
         std::fs::create_dir(&sibling).unwrap();
         let err = sample_manifest().save(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("failed to clear"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn save_write_and_rename_failures_return_errors_instead_of_panicking() {
+        let absent = TempDir::new().unwrap();
+        assert!(sample_manifest().save(&absent.path().join("missing")).is_err());
+
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(Manifest::path_for(tmp.path())).unwrap();
+        assert!(sample_manifest().save(tmp.path()).is_err());
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -651,6 +718,7 @@ mod tests {
 
         assert_eq!(manifest.region_checksum("Deny.toml", "anvil-deny-licenses"), Some("sha256:upper"));
         assert_eq!(manifest.region_checksum("deny.toml", "anvil-deny-licenses"), Some("sha256:lower"));
+        assert_eq!(manifest.region_checksum("other.toml", "anvil-deny-licenses"), None);
     }
 
     #[test]
@@ -684,10 +752,35 @@ mod tests {
     }
 
     #[test]
+    fn file_path_errors_retain_the_file_entry_context() {
+        let toml = "version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"../outside.txt\"\nchecksum = \"sha256:x\"\n";
+        let err = Manifest::parse(toml).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "[[file]] entry '../outside.txt' must be a relative path inside the repository"
+        );
+    }
+
+    #[test]
     fn rejects_a_region_host_that_escapes_the_repository() {
         let toml = "version = 1\ntool = \"anvil\"\n\n[[region]]\nhost = \"../Justfile\"\nid = \"anvil-imports\"\nchecksum = \"sha256:x\"\n";
         let err = Manifest::parse(toml).unwrap_err();
-        assert!(format!("{err}").contains("must be a relative path inside the repository"), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "[[region]] host '../Justfile' must be a relative path inside the repository"
+        );
+    }
+
+    #[test]
+    fn contained_path_shape_counts_normal_components_from_zero() {
+        assert_eq!(contained_path_shape("", "test").unwrap(), (0, ""));
+        assert_eq!(contained_path_shape("file", "test").unwrap(), (1, "file"));
+    }
+
+    #[test]
+    fn zero_normal_components_independently_means_no_file() {
+        assert!(path_names_no_file(0, "synthetic-nonempty-segment"));
+        assert!(!path_names_no_file(1, "file"));
     }
 
     #[test]

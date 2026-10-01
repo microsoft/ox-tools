@@ -320,7 +320,7 @@ fn one_row_of_every_generated_block_is_pinned_to_a_hand_written_expectation() {
         "the preset row is not rendered as expected:\n{presets}"
     );
     assert!(
-        families.contains("| [`logical`](#logical) | 2 | Is this `&&` really an `&&`? |"),
+        families.contains("| [`logical`](#logical) | 6 | Is this `&&` really an `&&`? |"),
         "the family row is not rendered as expected:\n{families}"
     );
 

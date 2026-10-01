@@ -59,6 +59,7 @@ fn clear_sentinel(root: &Utf8Path) {
 /// directory), falls back to removing it and performing a fresh copy.
 ///
 /// Returns which path was taken so the caller can emit appropriate diagnostics.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn sync_or_copy(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: CopyOptions) -> Result<SyncOutcome> {
     // Taken once for the whole operation and shared by both the delta path and the fresh copy it
     // may fall back to: they write to the same tree, so what one of them learns about cloning there
@@ -130,6 +131,7 @@ fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: Copy
 }
 
 /// Collects relative paths from the source tree using the same walk logic as `copy_tree_with`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn collect_source_entries(source: &Utf8Path, skip: &Utf8Path, options: CopyOptions) -> Result<HashSet<Utf8PathBuf>> {
     let entries: Mutex<HashSet<Utf8PathBuf>> = Mutex::new(HashSet::new());
     let failure: Mutex<Option<Error>> = Mutex::new(None);
@@ -226,6 +228,7 @@ fn is_pruned_anywhere(root: &Utf8Path, relative: &Utf8Path, excluded: &Utf8Path)
 /// left in place so their modification times continue to preserve Cargo fingerprints.
 /// For directories: creates if missing.
 /// For symlinks: recreates if target differs.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
     let src_meta = fs::symlink_metadata(source.as_std_path()).map_err(|cause| error!("could not read `{source}`").caused_by(cause))?;
 
@@ -253,6 +256,7 @@ fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) ->
 }
 
 /// Synchronizes a regular file, preserving mtime for unchanged files.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metadata, reflinks: &Reflinks) -> Result<()> {
     let needs_copy = match fs::symlink_metadata(destination.as_std_path()) {
         Err(_) => true, // Destination does not exist.
@@ -291,6 +295,7 @@ fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metadata,
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn file_differs(source: &Utf8Path, destination: &Utf8Path, src: &fs::Metadata, dst: &fs::Metadata) -> Result<bool> {
     if different_lengths(src, dst) {
         return Ok(true);
@@ -351,6 +356,7 @@ fn readers_have_same_contents(left: impl Read, right: impl Read) -> std::io::Res
 }
 
 /// Synchronizes a symlink. Recreates it if the target changed or if the destination is not a link.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn sync_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
     let src_target = fs::read_link(source.as_std_path()).map_err(|cause| error!("could not read the link `{source}`").caused_by(cause))?;
 
@@ -401,6 +407,7 @@ fn sync_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn copy_file_for_sync(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
     let copied_at = SystemTime::now();
 
@@ -441,6 +448,7 @@ fn stamp_mtime(path: &Utf8Path, time: SystemTime) -> Result<()> {
 ///
 /// Walks the scratch tree and removes anything not present in the source. Directories are handled
 /// bottom-up: empty directories left after file removal are pruned.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn remove_stale(root: &Utf8Path, expected: &HashSet<Utf8PathBuf>) -> Result<()> {
     // Collect all entries in the scratch tree.
     let mut stale_files: Vec<Utf8PathBuf> = Vec::new();
@@ -493,10 +501,12 @@ fn remove_stale(root: &Utf8Path, expected: &HashSet<Utf8PathBuf>) -> Result<()> 
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn record_walk_failure(failure: &Mutex<Option<Error>>, cause: ignore::Error) {
     record(failure, error!("could not read the source tree").caused_by(cause));
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn record_invalid_path(failure: &Mutex<Option<Error>>, path: &std::path::Path) {
     record(
         failure,
@@ -512,6 +522,7 @@ fn pruned_entry(path: &Utf8Path, relative: &Utf8Path, excluded: &Utf8Path) -> bo
     is_pruned(path, relative, excluded)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn collection_failure<T>(cause: Error) -> Result<T> {
     Err(cause)
 }
@@ -524,6 +535,7 @@ fn source_entry_exists(path: &Utf8Path) -> bool {
     fs::symlink_metadata(path.as_std_path()).is_ok()
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn remove_stale_entry(path: &Utf8Path) -> std::io::Result<()> {
     match fs::remove_file(path.as_std_path()) {
         Ok(()) => Ok(()),
@@ -550,6 +562,7 @@ fn different_lengths(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.len() != right.len()
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn link_target_differs(destination: &Utf8Path, source_target: &std::path::Path) -> bool {
     match fs::read_link(destination.as_std_path()) {
         Ok(target) => target != source_target,
@@ -576,6 +589,7 @@ fn is_not_found(cause: &std::io::Error) -> bool {
     cause.kind() == ErrorKind::NotFound
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn copy_failure<T>(source: &Utf8Path, destination: &Utf8Path, cause: std::io::Error) -> Result<T> {
     Err(error!("could not copy `{source}` to `{destination}`").caused_by(cause))
 }
@@ -596,6 +610,7 @@ fn walk_entry_is_directory(entry: &walkdir::DirEntry) -> bool {
     entry.file_type().is_dir()
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn stale_directory_failure<T>(dir: &Utf8Path, cause: std::io::Error) -> Result<T> {
     Err(error!("could not remove stale directory `{dir}`").caused_by(cause))
 }

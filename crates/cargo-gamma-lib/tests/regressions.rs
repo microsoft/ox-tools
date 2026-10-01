@@ -15,14 +15,12 @@
 //! here would mean widening the API to suit the test. This file covers everything observable from
 //! outside, plus the documentation the fixes promised to keep true.
 
-use core::time::Duration;
 use std::collections::BTreeSet;
 use std::fs;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use cargo_gamma_lib::internals::ci::{self, Level};
 use cargo_gamma_lib::internals::discover::matches_glob;
-use cargo_gamma_lib::internals::estimate;
 use cargo_gamma_lib::internals::fix::{Edit, apply};
 use cargo_gamma_lib::internals::model::{Mutant, Outcome};
 use cargo_gamma_lib::internals::ops::collect::{Shape, collect};
@@ -203,39 +201,6 @@ fn issue_004_a_stall_does_not_claim_to_have_found_the_hung_test() {
         "the design notes no longer qualify the name"
     );
     assert!(!readme.contains("stalled during `"), "the old wording is back in the README");
-}
-
-#[test]
-fn issue_005_the_worst_case_pays_for_confirming_every_timeout() {
-    // A suspected timeout is re-run before it is believed, so a ceiling counting one timeout apiece
-    // is one a real run walks straight past — and a CI budget planned against it gets killed with
-    // no report at all.
-    let budget = Duration::from_secs(100);
-    let work = estimate::Workload {
-        budget,
-        ..estimate::Workload::default()
-    };
-    let estimate = estimate::project(&[], work, Duration::ZERO, Duration::ZERO, 1, true);
-
-    assert!(
-        estimate.worst_case() >= budget.saturating_mul(2),
-        "the ceiling does not pay for the confirmation: {:?}",
-        estimate.worst_case()
-    );
-}
-
-#[test]
-fn issue_005_the_projected_range_never_reaches_past_the_ceiling() {
-    // Above the worst case there is no time left to spend: every mutant has already been given
-    // every second it will ever get.
-    let work = estimate::Workload {
-        suite: Duration::from_secs(10_000),
-        budget: Duration::from_secs(1),
-        single: Duration::from_secs(1),
-    };
-    let estimate = estimate::project(&[], work, Duration::ZERO, Duration::ZERO, 1, true);
-
-    assert!(estimate.high() <= estimate.worst_case());
 }
 
 #[test]

@@ -26,6 +26,8 @@ use crate::facts::{Collector, CrateFacts, CrateRef, Endpoints, ProviderResult};
 use crate::metrics::flatten;
 use crate::reports::{ConsoleOutputMode, ReportableCrate, generate_console, generate_csv, generate_html, generate_json, generate_xlsx};
 
+const RUST_LOG_ENV: &str = "RUST_LOG";
+
 /// Color mode configuration for output
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ColorMode {
@@ -236,6 +238,9 @@ impl<'a, H: super::Host> Common<'a, H> {
     ///
     /// Returns an error if the collector or config cannot be initialized
     pub async fn new(host: &'a mut H, args: &CommonArgs) -> Result<Self> {
+        use std::io::{IsTerminal, stderr};
+
+        // #[gamma::skip(stmt.delete_call, tag = "trivial", reason = "the process-global logger can only be initialized once and cannot be observed safely from an in-process unit test")]
         Self::init_logging(args.log_level);
 
         // Create metadata command for workspace operations
@@ -252,28 +257,24 @@ impl<'a, H: super::Host> Common<'a, H> {
         let config = Config::load(&config_base_path, args.config.as_ref())?;
 
         // Determine cache directory: use provided path or default cache directory for the platform
-        let cache_dir = Self::resolve_cache_dir(args.cache_dir.as_deref())?;
-
-        let delay = if args.log_level == LogLevel::None {
-            Duration::from_millis(300)
-        } else {
-            Duration::from_hours(365 * 24)
+        let cache_dir = match Self::resolve_cache_dir(args.cache_dir.as_deref()) {
+            Ok(cache_dir) => cache_dir,
+            Err(error) => return Err(error),
         };
 
-        let use_colors_for_progress = match args.color {
-            ColorMode::Always => true,
-            ColorMode::Never => false,
-            ColorMode::Auto => {
-                use std::io::{IsTerminal, stderr};
-                stderr().is_terminal()
-            }
-        };
+        let delay = progress_delay(args.log_level);
+
+        let use_colors_for_progress = progress_uses_colors(args.color, stderr().is_terminal());
 
         let progress_reporter = ProgressReporter::new(delay, use_colors_for_progress);
 
         let endpoints = args.endpoints();
         let github_token = discover(args.github_token.as_ref(), args.github_token_from_gh, &endpoints).await;
 
+        let bug_label_matcher = match config.bug_label_matcher() {
+            Ok(matcher) => matcher,
+            Err(error) => return Err(error),
+        };
         let collector = Collector::new(
             github_token.as_ref().map(GitHubToken::expose_secret),
             args.codeberg_token.as_deref(),
@@ -284,7 +285,7 @@ impl<'a, H: super::Host> Common<'a, H> {
             config.coverage_cache_ttl,
             config.advisories_cache_ttl,
             args.ignore_cached,
-            config.bug_label_matcher()?.into(),
+            bug_label_matcher.into(),
             progress_reporter,
             &endpoints,
         )
@@ -320,9 +321,7 @@ impl<'a, H: super::Host> Common<'a, H> {
         if let Some(cache_path) = cache_dir {
             Ok(cache_path.as_std_path().to_path_buf())
         } else {
-            Ok(platform_cache_dir()
-                .into_app_err("could not determine cache directory")?
-                .join("cargo-aprz"))
+            cache_dir_from_platform(platform_cache_dir())
         }
     }
 
@@ -332,7 +331,7 @@ impl<'a, H: super::Host> Common<'a, H> {
             return;
         };
 
-        let env = env_logger::Env::default().filter_or("RUST_LOG", level);
+        let env = env_logger::Env::default().filter_or(RUST_LOG_ENV, level);
 
         env_logger::Builder::from_env(env)
             .format_timestamp(None)
@@ -346,18 +345,16 @@ impl<'a, H: super::Host> Common<'a, H> {
     // crate it belongs to instead. The error arm stays for the day that changes.
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn process_crates(&self, crates: &[CrateRef], suggestions: bool) -> Result<Vec<CrateFacts>> {
-        let results = self.collector.collect(crates, suggestions).await;
-
-        match results {
-            Ok(facts_iter) => Ok(facts_iter.collect()),
-            Err(e) => {
-                eprintln!("{e:#}");
-                Err(e)
-            }
-        }
+        self.collector
+            .collect(crates, suggestions)
+            .await
+            .inspect_err(|error| eprintln!("{error:#}"))
+            .map(Iterator::collect)
     }
 
     pub fn report(&mut self, processed_crates: impl IntoIterator<Item = CrateFacts>) -> Result<()> {
+        use std::io::{IsTerminal, stdout};
+
         // Filter out crates with missing core data (can't be reported)
         let (analyzable_crates, failed_crates): (Vec<_>, Vec<_>) =
             processed_crates.into_iter().partition(|facts| facts.crates_data.is_found());
@@ -369,8 +366,8 @@ impl<'a, H: super::Host> Common<'a, H> {
         }
 
         // Flatten crate facts into metrics and optionally evaluate, creating ReportableCrate instances
-        let has_expressions = !self.config.high_risk.is_empty() || !self.config.eval.is_empty();
-        let should_eval = has_expressions || self.error_if_high_risk || self.error_if_medium_risk;
+        let has_expressions = has_expressions(&self.config);
+        let should_eval = has_expressions || risk_error_requested(self.error_if_high_risk, self.error_if_medium_risk);
 
         // A single instant is used for every crate: expressions such as `now - crate.updated_at`
         // must compare each crate against the same baseline, and it avoids a clock lookup per crate.
@@ -414,9 +411,9 @@ impl<'a, H: super::Host> Common<'a, H> {
         };
 
         // Sort crates by name and version for consistent ordering
-        reportable_crates.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()).then_with(|| a.version.cmp(&b.version)));
+        sort_reportable_crates(&mut reportable_crates);
 
-        let generating_reports = self.html.is_some() || self.excel.is_some() || self.csv.is_some() || self.json.is_some();
+        let generating_reports = reports_requested(self.html.as_ref(), self.excel.as_ref(), self.csv.as_ref(), self.json.as_ref());
 
         // Show console output if:
         // - --console flag is explicitly set, OR
@@ -433,39 +430,35 @@ impl<'a, H: super::Host> Common<'a, H> {
             && !reportable_crates.is_empty()
         {
             let mut console_output = String::new();
-            let use_colors = match self.color {
-                ColorMode::Always => true,
-                ColorMode::Never => false,
-                ColorMode::Auto => {
-                    use std::io::{IsTerminal, stdout};
-                    stdout().is_terminal()
-                }
-            };
+            // #[gamma::skip(bool_expr.negate, tag = "trivial", reason = "the real stdout terminal state is a process boundary; the complete color truth table is tested through progress_uses_colors")]
+            let use_colors = progress_uses_colors(self.color, stdout().is_terminal());
             _ = generate_console(&reportable_crates, use_colors, mode, &mut console_output);
             let _ = write!(self.host.output(), "{console_output}");
         }
 
         if let Some(filename) = &self.html {
             let mut html = String::new();
-            generate_html(&reportable_crates, Local::now(), &mut html)?;
-            fs::write(filename, html)?;
+            generate_html(&reportable_crates, Local::now(), &mut html)
+                .expect("writing HTML into a String cannot fail because fmt::Write for String is infallible");
+            write_text_report(filename, html)?;
         }
 
         if let Some(filename) = &self.excel {
-            let mut file = fs::File::create(filename)?;
-            generate_xlsx(&reportable_crates, &mut file)?;
+            write_excel_report(&reportable_crates, filename)?;
         }
 
         if let Some(filename) = &self.csv {
             let mut csv_output = String::new();
-            generate_csv(&reportable_crates, &mut csv_output)?;
-            fs::write(filename, csv_output)?;
+            generate_csv(&reportable_crates, &mut csv_output)
+                .expect("writing CSV into a String cannot fail because fmt::Write for String is infallible");
+            write_text_report(filename, csv_output)?;
         }
 
         if let Some(filename) = &self.json {
             let mut json_output = String::new();
-            generate_json(&reportable_crates, &mut json_output)?;
-            fs::write(filename, json_output)?;
+            generate_json(&reportable_crates, &mut json_output)
+                .expect("writing JSON into a String cannot fail because fmt::Write for String is infallible");
+            write_text_report(filename, json_output)?;
         }
 
         // If --error-if-medium-risk flag is set, return error if any non-allowed crate is medium or high risk
@@ -480,6 +473,56 @@ impl<'a, H: super::Host> Common<'a, H> {
 
         Ok(())
     }
+}
+
+const fn progress_delay(log_level: LogLevel) -> Duration {
+    match log_level {
+        LogLevel::None => Duration::from_millis(300),
+        LogLevel::Error | LogLevel::Warn | LogLevel::Info | LogLevel::Debug | LogLevel::Trace => Duration::from_hours(365 * 24),
+    }
+}
+
+const fn progress_uses_colors(color: ColorMode, stderr_is_terminal: bool) -> bool {
+    match color {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => stderr_is_terminal,
+    }
+}
+
+fn cache_dir_from_platform(platform_dir: Option<PathBuf>) -> Result<PathBuf> {
+    Ok(platform_dir.into_app_err("could not determine cache directory")?.join("cargo-aprz"))
+}
+
+const fn risk_error_requested(error_if_high_risk: bool, error_if_medium_risk: bool) -> bool {
+    error_if_high_risk || error_if_medium_risk
+}
+
+fn write_excel_report(reportable_crates: &[ReportableCrate], filename: &Utf8Path) -> Result<()> {
+    let mut file = fs::File::create(filename)?;
+    generate_xlsx(reportable_crates, &mut file)
+}
+
+fn write_text_report(filename: &Utf8Path, contents: String) -> Result<()> {
+    fs::write(filename, contents)?;
+    Ok(())
+}
+
+fn sort_reportable_crates(crates: &mut [ReportableCrate]) {
+    crates.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()).then_with(|| a.version.cmp(&b.version)));
+}
+
+const fn has_expressions(config: &Config) -> bool {
+    !config.high_risk.is_empty() || !config.eval.is_empty()
+}
+
+const fn reports_requested(
+    html: Option<&Utf8PathBuf>,
+    excel: Option<&Utf8PathBuf>,
+    csv: Option<&Utf8PathBuf>,
+    json: Option<&Utf8PathBuf>,
+) -> bool {
+    html.is_some() || excel.is_some() || csv.is_some() || json.is_some()
 }
 
 /// The `env_logger` filter for a log level, or `None` when logging is disabled.
@@ -697,6 +740,7 @@ mod tests {
 
     use super::*;
     use crate::commands::config::AllowListEntry;
+    use crate::commands::host::TestHost;
     use crate::expr::Appraisal;
 
     /// A minimal command whose only job is to parse `CommonArgs` the way the real CLI does.
@@ -719,10 +763,8 @@ mod tests {
         // The default depends on the environment, so both answers it can give are accepted: a
         // stripped environment legitimately has no cache location and must ask for `--cache-dir`.
         let resolved = Common::<crate::commands::host::TestHost>::resolve_cache_dir(None);
-        match platform_cache_dir() {
-            Some(cache_dir) => assert_eq!(resolved.expect("a known cache location resolves"), cache_dir.join("cargo-aprz")),
-            None => assert!(resolved.is_err(), "an unknown cache location is an error, not a path"),
-        }
+        let platform = platform_cache_dir();
+        assert_eq!(resolved.ok(), platform.map(|cache_dir| cache_dir.join("cargo-aprz")));
     }
 
     #[test]
@@ -785,6 +827,140 @@ mod tests {
         assert_eq!(endpoints.host_url("github.com"), Some("http://github.test"));
         assert_eq!(endpoints.host_url("codeberg.org"), Some("http://codeberg.test"));
         assert_eq!(endpoints.advisory_url(), "http://advisory.test");
+    }
+
+    #[test]
+    fn progress_settings_preserve_the_cli_contract() {
+        assert_eq!(progress_delay(LogLevel::None), Duration::from_millis(300));
+        for level in [LogLevel::Error, LogLevel::Warn, LogLevel::Info, LogLevel::Debug, LogLevel::Trace] {
+            assert_eq!(progress_delay(level), Duration::from_hours(8_760), "{level:?}");
+        }
+
+        assert!(progress_uses_colors(ColorMode::Always, false));
+        assert!(!progress_uses_colors(ColorMode::Never, true));
+        assert!(progress_uses_colors(ColorMode::Auto, true));
+        assert!(!progress_uses_colors(ColorMode::Auto, false));
+        assert_eq!(RUST_LOG_ENV, "RUST_LOG");
+    }
+
+    #[test]
+    fn absent_platform_cache_directory_has_the_actionable_error() {
+        let error = cache_dir_from_platform(None).expect_err("no platform directory cannot produce a cache path");
+        assert!(error.to_string().contains("could not determine cache directory"));
+    }
+
+    #[test]
+    fn either_risk_flag_requests_evaluation() {
+        assert!(!risk_error_requested(false, false));
+        assert!(risk_error_requested(true, false));
+        assert!(risk_error_requested(false, true));
+        assert!(risk_error_requested(true, true));
+    }
+
+    #[test]
+    fn excel_report_propagates_file_creation_errors() {
+        let root = tempfile::tempdir().expect("creating a report fixture");
+        let missing_parent = Utf8PathBuf::try_from(root.path().join("missing").join("report.xlsx")).expect("temporary paths are UTF-8");
+        let error = write_excel_report(&[], &missing_parent).expect_err("the parent directory does not exist");
+        assert_eq!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn text_report_propagates_write_errors() {
+        let root = tempfile::tempdir().expect("creating a report fixture");
+        let missing_parent = Utf8PathBuf::try_from(root.path().join("missing").join("report.txt")).expect("temporary paths are UTF-8");
+        let error = write_text_report(&missing_parent, "report".to_owned()).expect_err("the parent directory does not exist");
+        assert_eq!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::io::Error>())
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[test]
+    fn expression_and_report_detection_considers_every_input() {
+        let mut config = Config::default();
+        config.high_risk.clear();
+        config.eval.clear();
+        assert!(!has_expressions(&config));
+        config
+            .high_risk
+            .push(crate::expr::Expression::new("high", None, "true", None).expect("the fixture expression is valid"));
+        assert!(has_expressions(&config));
+        config.high_risk.clear();
+        config
+            .eval
+            .push(crate::expr::Expression::new("weighted", None, "true", None).expect("the fixture expression is valid"));
+        assert!(has_expressions(&config));
+
+        let path = Utf8PathBuf::from("report");
+        assert!(!reports_requested(None, None, None, None));
+        assert!(reports_requested(Some(&path), None, None, None));
+        assert!(reports_requested(None, Some(&path), None, None));
+        assert!(reports_requested(None, None, Some(&path), None));
+        assert!(reports_requested(None, None, None, Some(&path)));
+    }
+
+    #[test]
+    fn reportable_crates_are_sorted_by_name_then_version() {
+        let mut crates = vec![
+            make_crate("zeta", Version::new(1, 0, 0), Risk::Low),
+            make_crate("alpha", Version::new(2, 0, 0), Risk::Low),
+            make_crate("alpha", Version::new(1, 0, 0), Risk::Low),
+        ];
+        sort_reportable_crates(&mut crates);
+        assert_eq!(
+            crates
+                .iter()
+                .map(|item| (item.name.as_ref(), item.version.as_ref()))
+                .collect::<Vec<_>>(),
+            [
+                ("alpha", &Version::new(1, 0, 0)),
+                ("alpha", &Version::new(2, 0, 0)),
+                ("zeta", &Version::new(1, 0, 0)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn common_initialization_propagates_configuration_errors() {
+        let root = tempfile::tempdir().expect("creating a configuration fixture");
+        let config_path = Utf8PathBuf::try_from(root.path().join("aprz.toml")).expect("temporary paths are UTF-8");
+        fs::write(&config_path, "bug_labels = [\"(\"]").expect("writing the invalid configuration");
+        let mut args = ArgsHarness::parse_from(["aprz"]).common;
+        args.config = Some(config_path);
+
+        let error = Common::new(&mut TestHost::new(), &args)
+            .await
+            .err()
+            .expect("an invalid bug-label expression must be returned");
+        assert!(error.to_string().contains('('), "unexpected configuration error: {error}");
+    }
+
+    #[tokio::test]
+    async fn common_initialization_propagates_collector_errors() {
+        let root = tempfile::tempdir().expect("creating a cache fixture");
+        let cache_file = Utf8PathBuf::try_from(root.path().join("not-a-directory")).expect("temporary paths are UTF-8");
+        fs::write(&cache_file, "fixture").expect("writing the cache obstacle");
+        let mut args = ArgsHarness::parse_from(["aprz"]).common;
+        args.cache_dir = Some(cache_file);
+
+        let error = Common::new(&mut TestHost::new(), &args)
+            .await
+            .err()
+            .expect("a file cannot be used as the cache directory");
+        assert!(
+            error.to_string().contains("cache") || error.to_string().contains("directory"),
+            "unexpected collector error: {error}"
+        );
     }
 
     fn make_crate(name: &str, version: Version, risk: Risk) -> ReportableCrate {
@@ -865,6 +1041,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn required_check_details_are_omitted_when_console_already_showed_them() {
+        let appraisal = Appraisal::required_check_failure(vec![ExpressionOutcome::new(
+            "Policy Failure".into(),
+            "secret detail".into(),
+            ExpressionDisposition::False,
+        )]);
+        let crates = vec![ReportableCrate::new(
+            "foo".into(),
+            Arc::new(Version::new(1, 0, 0)),
+            vec![],
+            Some(appraisal),
+        )];
+        let message = check_risk_errors(&crates, &Config::default(), false, true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("FAILED: Policy Failure"));
+        assert!(!message.contains("secret detail"));
+    }
+
+    #[test]
     fn test_partial_console_modes_include_rejection_details() {
         let metrics_only = ConsoleOutputMode {
             appraisal: false,
@@ -919,6 +1116,33 @@ mod tests {
             !message.contains(TRUNCATION_HINT),
             "a single crate with a single outcome omits nothing: {message}"
         );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn weighted_check_details_are_omitted_when_console_already_showed_them() {
+        let appraisal = Appraisal::new(
+            Risk::High,
+            vec![ExpressionOutcome::new(
+                "Maintained".into(),
+                "secret weighted detail".into(),
+                ExpressionDisposition::False,
+            )],
+            10,
+            2,
+            20.0,
+        );
+        let crates = vec![ReportableCrate::new(
+            "foo".into(),
+            Arc::new(Version::new(1, 0, 0)),
+            vec![],
+            Some(appraisal),
+        )];
+        let message = check_risk_errors(&crates, &Config::default(), false, true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(!message.contains("Maintained"));
+        assert!(!message.contains("secret weighted detail"));
     }
 
     /// The number of rejected crates that fits without truncation, and the per-crate outcome cap,

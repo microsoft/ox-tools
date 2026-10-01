@@ -82,8 +82,8 @@
 //
 // The rest stand beside the pipeline rather than inside it:
 //
-// - `estimate`: stops a run at the point it would stop measuring and start waiting, and projects
-//   the rest — so a four-hour job is discovered in the first minute rather than the last.
+// - `estimate`: assigns measured expected costs to mutation work so the scheduler can prioritize
+//   expensive work and compare learning opportunities.
 // - `advise`: turns a finished run into findings, each with a measured symptom, a remedy, and what
 //   the remedy costs in signal. This is what the advice artifact and CI job summary carry.
 // - `fix`: plans and applies the source edits behind the `suppress` command.
@@ -197,8 +197,8 @@ macro_rules! expose_internals {
 }
 
 expose_internals!(
-    advise, bounds, cfg, ci, commands, config, diag, discover, docs, elements, error, estimate, exec, fix, html, merge, model, ops, parse,
-    report, schema, suppress
+    advise, bounds, cfg, ci, commands, config, diag, discover, docs, elements, error, exec, fix, html, merge, model, ops, parse, report,
+    schema, suppress
 );
 
 /// Shared test fixtures, reachable from the integration tests as well as the unit tests.

@@ -32,6 +32,7 @@ bytes = { version = "1.12.1", default-features = false }
 camino = { version = "1.2.5", default-features = false }
 # local dependencies
 cargo-aprz-lib = { path = "crates/cargo-aprz-lib", default-features = false, version = "1.2.0" }
+cargo-gamma-attrs = { path = "crates/cargo-gamma-attrs", default-features = false, version = "0.2.1" }
 cargo-gamma-attrs-impl = { path = "crates/cargo-gamma-attrs-impl", default-features = false, version = "0.2.1" }
 cargo-gamma-engine = { path = "crates/cargo-gamma-engine", default-features = false, version = "0.2.1" }
 cargo-gamma-lib = { path = "crates/cargo-gamma-lib", default-features = false, version = "0.2.1" }
@@ -71,11 +72,13 @@ percent-encoding = { version = "2.3.2", default-features = false }
 petgraph = { version = "0.8.3", default-features = false }
 predicates = { version = "3.1.4", default-features = false }
 proc-macro2 = { version = "1.0.107", default-features = false }
+quote = { version = "1.0.42", default-features = false }
 # 0.0.349 includes a parser fixture that crashes CodeQL 2.26.4; retry the bump with a newer CodeQL release.
 ra_ap_syntax = { version = "0.0.331", default-features = false }
 rallocator = { version = "0.1.0", default-features = false }
 reflink-copy = { version = "0.1.30", default-features = false }
 regex = { version = "1.13.1", default-features = false }
+regex-syntax = { version = "0.8.11", default-features = false }
 reqwest = { version = "0.13.4", default-features = false }
 rmp-serde = { version = "1.3.1", default-features = false }
 rust_xlsxwriter = { version = "0.99.0", default-features = false }

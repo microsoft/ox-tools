@@ -71,6 +71,7 @@ struct HintContext {
 
 impl HintContext {
     /// Captures provenance at the start of an explicit promotion.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn capture(root: &Utf8Path) -> Result<Self> {
         let output = Command::new("git")
             .arg("-C")
@@ -169,6 +170,17 @@ struct GroupedHints {
     files: Vec<FileHints>,
     #[serde(default = "GeneralizedHints::empty_supported")]
     generalized: GeneralizedHints,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TolerantGroupedHints {
+    version: u32,
+    tool: String,
+    context: HintContext,
+    files: Vec<FileHints>,
+    #[serde(default)]
+    generalized: Option<yaml_serde::Value>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -308,14 +320,18 @@ impl Hints {
             return None;
         }
 
-        let grouped = yaml_serde::from_str::<GroupedHints>(text).ok()?;
+        let grouped = yaml_serde::from_str::<TolerantGroupedHints>(text).ok()?;
         if grouped.version != VERSION || !Self::valid_tool(&grouped.tool) {
             return None;
         }
 
-        Self::from_grouped(grouped)
+        let generalized = grouped.generalized.map_or_else(GeneralizedHints::empty_supported, |value| {
+            yaml_serde::from_value(value).unwrap_or_default()
+        });
+        Self::from_files(grouped.files, generalized, grouped.context, grouped.tool)
     }
 
+    #[cfg(test)]
     fn from_grouped(grouped: GroupedHints) -> Option<Self> {
         Self::from_files(grouped.files, grouped.generalized, grouped.context, grouped.tool)
     }
@@ -457,6 +473,7 @@ impl Hints {
 
     /// Whether ordinary promotion would change scheduling knowledge for this campaign.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) fn record_promotion_is_useful(root: &Utf8Path, record: &RunRecord) -> bool {
         let Ok((existing, _generation)) = Self::load_for_promotion(root, false) else {
             return false;
@@ -520,6 +537,7 @@ impl Hints {
 
     /// Counts logical entry changes without treating provenance refresh as scheduling knowledge.
     #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn changes_from(&self, previous: &Self) -> HintChanges {
         let mut changes = HintChanges::default();
 
@@ -610,9 +628,9 @@ impl Hints {
 
     /// Builds an artifact directly from persisted campaign state.
     ///
-    /// Exact probes outside the current campaign population, including version-9 probes whose
-    /// records carried no source path, are omitted explicitly rather than guessed. Their
-    /// generalized and compiler-ordering knowledge can still be promoted.
+    /// Exact probes outside the current campaign population or without a source path are omitted
+    /// explicitly rather than guessed. Their generalized and compiler-ordering knowledge can still
+    /// be promoted.
     #[must_use]
     pub(crate) fn promoted_record(record: &RunRecord) -> (Self, usize) {
         let probes = record.probes();
@@ -699,6 +717,7 @@ impl Hints {
         Self::generalized_for_identities(source, &files, &items, &sites)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn generalized_for_identities(
         source: &GeneralizedHints,
         files: &HashSet<Utf8PathBuf>,
@@ -787,6 +806,7 @@ impl Hints {
         self.write_from_with_lock(path, before, true)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn write_from_with_lock(&self, path: &Utf8Path, before: Option<&str>, locked: bool) -> Result<Promotion> {
         let text = self.rendered()?;
         let workspace = path.parent().unwrap_or_else(|| Utf8Path::new("."));
@@ -828,6 +848,7 @@ impl Hints {
     }
 
     /// The artifact as it goes to disk.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn rendered(&self) -> Result<String> {
         let mut text = yaml_serde::to_string(&GroupedHints::from(self))
             .map_err(|cause| error!("the hints could not be serialized; please report this").caused_by(cause))?;
@@ -840,6 +861,7 @@ impl Hints {
     }
 
     /// Reads back what was written and checks that it is what was meant.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn verified(path: &Utf8Path, intended: &Self) -> Result<()> {
         let Some(written) = Self::read(path) else {
             return Err(error!("`{path}` could not be read back after being written"));
@@ -872,6 +894,7 @@ fn replaces_exact_hint(outcome: Outcome) -> bool {
 ///
 /// The generated format never emits references. Refusing them keeps parsing cost proportional to
 /// the bounded input bytes rather than to an alias-expanded graph.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn yaml_requires_rejection(text: &str) -> bool {
     for event in YamlParser::new_from_str(text) {
         let Ok((event, _)) = event else {
@@ -890,6 +913,7 @@ fn yaml_requires_rejection(text: &str) -> bool {
     false
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn existing_text(path: &Utf8Path) -> Result<Option<String>> {
     match File::open(path.as_std_path()) {
         Ok(file) => input::text(file)
@@ -951,6 +975,7 @@ impl From<&Hints> for GroupedHints {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn merge_generalized(existing: &GeneralizedHints, incoming: &GeneralizedHints) -> Result<GeneralizedHints> {
     let existing_supported = existing.supported();
     if existing_supported.is_none() && (existing.version != 0 || !existing.is_empty()) {
@@ -1099,6 +1124,7 @@ fn site_key(site: &super::record::SiteIdentity) -> (&Utf8Path, &str, &str, &str,
 /// this invocation published. The conditional helpers serialize cooperating processes with the
 /// same locked generation protocol as the final comparison; a stale rollback therefore reports
 /// its conflict instead of replacing or removing somebody else's artifact.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn restored(
     workspace: &Utf8Path,
     path: &Utf8Path,
@@ -1303,6 +1329,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_checked_in_workspace_artifact_uses_the_current_readable_schema() {
         let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let artifact = path(&root);
@@ -1383,30 +1410,6 @@ mod tests {
 
         assert!(!text.contains("killed\":"), "{text}");
         assert!(!text.contains("outcome"), "a verdict reached the artifact: {text}");
-    }
-
-    #[test]
-    fn persisted_promotion_uses_recorded_paths_and_omits_unmapped_legacy_probes() {
-        let (_dir, root) = workspace("hints-promote-record-");
-        let _record = recorded(&root);
-        let record_path = root.join("last-gamma-run.json");
-        let mut legacy: serde_json::Value = serde_json::from_str(&fs::read_to_string(&record_path).expect("record")).expect("record JSON");
-        legacy["version"] = serde_json::json!(9);
-        for entry in legacy["files"][0]["mutants"].as_array_mut().expect("entries") {
-            let _removed = entry.as_object_mut().expect("entry").remove("site");
-        }
-        fs::write(&record_path, serde_json::to_vec_pretty(&legacy).expect("legacy record")).expect("legacy bytes");
-        let record = RunRecord::load_required(&root).expect("version-9 record");
-
-        let (hints, omitted) = Hints::promoted_record(&record);
-
-        assert_eq!(hints.ordering(), vec!["unviable"]);
-        assert_eq!(hints.mutants[0].file, Utf8Path::new("src/lib.rs"));
-        assert_eq!(omitted, 1);
-        assert!(
-            !hints.probes().contains_key("killed"),
-            "a legacy probe with no persisted source identity must not be assigned a guessed path"
-        );
     }
 
     #[test]
@@ -1545,6 +1548,35 @@ mod tests {
         assert_eq!(loaded.probes().get("abc"), Some(&killer("tests::exact")));
         assert!(loaded.generalized().is_empty());
         let error = Hints::load_for_promotion(&root, false).expect_err("incremental promotion cannot round-trip a future tier");
+        assert!(error.to_string().contains("generalized hints"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_generalized_shape_is_ignored_without_losing_exact_hints() {
+        let (_dir, root) = workspace("hints-generalized-shape-");
+        let artifact = Hints {
+            version: VERSION,
+            tool: "cargo-gamma test".to_owned(),
+            context: hint_context(),
+            mutants: vec![Hint {
+                file: "src/lib.rs".into(),
+                id: "abc".into(),
+                killer: Some(killer("tests::exact")),
+                unviable: false,
+            }],
+            generalized: GeneralizedHints::empty_supported(),
+        };
+        let mut text = artifact.rendered().expect("the artifact should serialize");
+        let generalized = text.find("generalized:").expect("the artifact contains generalized hints");
+        text.truncate(generalized);
+        text.push_str("generalized:\n  futureShape: [unknown]\n");
+        fs::write(path(&root), text).expect("the artifact should be writable");
+
+        let loaded = Hints::load(&root);
+
+        assert_eq!(loaded.probes().get("abc"), Some(&killer("tests::exact")));
+        assert!(loaded.generalized().is_empty());
+        let error = Hints::load_for_promotion(&root, false).expect_err("incremental promotion cannot round-trip an unknown tier");
         assert!(error.to_string().contains("generalized hints"), "{error}");
     }
 

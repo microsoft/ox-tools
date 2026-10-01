@@ -232,8 +232,20 @@ mod tests {
 
     #[test]
     fn rejects_zero_malformed_and_overflowing_durations() {
-        for value in ["0s", "1", "1h", "-1s", "1.5s", "ms", "18446744073709551615m"] {
-            assert!(parse_duration(value).is_err(), "{value}");
+        for (value, expected) in [
+            ("0s", "duration must be greater than zero"),
+            ("1", "expected a positive integer followed by `ms`, `s`, or `m`"),
+            ("1h", "expected a positive integer followed by `ms`, `s`, or `m`"),
+            ("-1s", "expected a positive integer followed by `ms`, `s`, or `m`"),
+            ("1.5s", "expected a positive integer followed by `ms`, `s`, or `m`"),
+            ("ms", "expected a positive integer followed by `ms`, `s`, or `m`"),
+            (
+                "18446744073709551616s",
+                "duration is too large: number too large to fit in target type",
+            ),
+            ("18446744073709551615m", "duration is too large"),
+        ] {
+            assert_eq!(parse_duration(value).expect_err(value), expected, "{value}");
         }
     }
 

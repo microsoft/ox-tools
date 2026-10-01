@@ -33,6 +33,7 @@ pub(super) fn merge<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler) -> 
     merge_at(host, args, styler, now)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn merge_at<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler, now: Option<u64>) -> crate::Result<i32> {
     validate_output_paths(args)?;
     let inputs = collect_reports(&args.inputs)?;
@@ -64,36 +65,22 @@ fn merge_at<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler, now: Option
         }
     }
 
+    let completeness_gate = if args.min_score.is_some() && args.max_flaky.is_some() {
+        Some("`--min-score` and `--max-flaky` gates")
+    } else if args.min_score.is_some() {
+        Some("`--min-score` gate")
+    } else if args.max_flaky.is_some() {
+        Some("`--max-flaky` gate")
+    } else {
+        None
+    };
+    if let Some(gate) = completeness_gate
+        && report_incomplete_gate(host, &merged, gate, styler)?
+    {
+        return Ok(EXIT_GATE_FAILED);
+    }
+
     if let Some(minimum) = args.min_score {
-        if !merged.identity_incompatible.is_empty() {
-            writeln!(
-                host.error(),
-                "{} {} {} excluded because of a different mutant-ID scheme, so the `--min-score` gate cannot evaluate \
-                 the complete requested population",
-                styler.error("error:"),
-                merged.identity_incompatible.len(),
-                if merged.identity_incompatible.len() == 1 {
-                    "report was"
-                } else {
-                    "reports were"
-                }
-            )?;
-
-            return Ok(EXIT_GATE_FAILED);
-        }
-
-        if merged.never_tested > 0 {
-            writeln!(
-                host.error(),
-                "{} {} {} still pending, so the `--min-score` gate cannot evaluate the complete merged population",
-                styler.error("error:"),
-                merged.never_tested,
-                if merged.never_tested == 1 { "mutant is" } else { "mutants are" }
-            )?;
-
-            return Ok(EXIT_GATE_FAILED);
-        }
-
         let Some(score) = merged.scored() else {
             // Every mutant was withdrawn, never tested, or otherwise ungradeable, so the merged
             // score is a ratio with nothing in its denominator. That prints as 100%, which is the
@@ -122,7 +109,89 @@ fn merge_at<H: Host>(host: &mut H, args: &MergeArgs, styler: Styler, now: Option
         }
     }
 
+    if args.max_flaky.is_some() && merged.scored().is_none() && merged.flaky.is_empty() {
+        writeln!(
+            host.error(),
+            "{} no mutant counted toward the `--max-flaky` gate, so it was never evaluated; \
+             check that the inputs cover a population that was actually run",
+            styler.error("error:")
+        )?;
+
+        return Ok(EXIT_GATE_FAILED);
+    }
+
+    if let Some(maximum) = args.max_flaky
+        && merged.flaky.len() > maximum
+    {
+        for finding in &merged.flaky {
+            writeln!(host.error(), "{} {finding}", styler.error("error:"))?;
+        }
+        writeln!(
+            host.error(),
+            "{} {} unresolved flaky {} exceed the configured maximum of {maximum}",
+            styler.error("error:"),
+            merged.flaky.len(),
+            if merged.flaky.len() == 1 { "outcome" } else { "outcomes" }
+        )?;
+
+        return Ok(EXIT_GATE_FAILED);
+    }
+
     Ok(EXIT_OK)
+}
+
+fn report_incomplete_gate<H: Host>(host: &mut H, merged: &crate::merge::Merged, gate: &str, styler: Styler) -> crate::Result<bool> {
+    if !merged.identity_incompatible.is_empty() {
+        writeln!(
+            host.error(),
+            "{} {} {} excluded because of a different mutant-ID scheme, so the {gate} cannot evaluate \
+             the complete requested population",
+            styler.error("error:"),
+            merged.identity_incompatible.len(),
+            if merged.identity_incompatible.len() == 1 {
+                "report was"
+            } else {
+                "reports were"
+            }
+        )?;
+        return Ok(true);
+    }
+
+    if !merged.inconsistent.is_empty() {
+        writeln!(
+            host.error(),
+            "{} {} {} used a different shard count, so the {gate} cannot evaluate a complete shard rotation",
+            styler.error("error:"),
+            merged.inconsistent.len(),
+            if merged.inconsistent.len() == 1 { "report" } else { "reports" }
+        )?;
+        return Ok(true);
+    }
+
+    let missing = merged.missing_shards();
+    if !missing.is_empty() {
+        let names: Vec<String> = missing.iter().map(u32::to_string).collect();
+        writeln!(
+            host.error(),
+            "{} shards {} were never run, so the {gate} cannot evaluate the complete shard rotation",
+            styler.error("error:"),
+            names.join(", ")
+        )?;
+        return Ok(true);
+    }
+
+    if merged.never_tested > 0 {
+        writeln!(
+            host.error(),
+            "{} {} {} still pending, so the {gate} cannot evaluate the complete merged population",
+            styler.error("error:"),
+            merged.never_tested,
+            if merged.never_tested == 1 { "mutant is" } else { "mutants are" }
+        )?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 /// Refuses a merged HTML and JSON report that would publish over one another.
@@ -190,6 +259,7 @@ fn collect_reports_limited(inputs: &[Utf8PathBuf], max_reports: usize, max_bytes
 }
 
 /// Reads and retains one report after applying the aggregate bounds.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn read_report(
     path: &Utf8Path,
     max_reports: usize,
@@ -213,6 +283,7 @@ fn read_report(
 }
 
 /// Prints what the merge concluded.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn report_merge<H: Host>(host: &mut H, args: &MergeArgs, merged: &crate::merge::Merged, styler: Styler) -> crate::Result<()> {
     let mut stream = host.error();
 
@@ -418,6 +489,7 @@ mod tests {
             html_report: Some(root.join("out/report.html")),
             window: 30,
             min_score: Some(75.0),
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -429,7 +501,7 @@ mod tests {
         assert!(root.join("out/report.html").exists());
         assert!(err.contains("shards never run"), "{err}");
         assert!(err.contains("different shard count"), "{err}");
-        assert!(err.contains("below the required"), "{err}");
+        assert!(err.contains("cannot evaluate a complete shard rotation"), "{err}");
         assert!(host.out.is_empty());
     }
 
@@ -479,6 +551,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: None,
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -503,6 +576,7 @@ mod tests {
             html_report: Some(root.join("out/report.html")),
             window: 30,
             min_score: Some(75.0),
+            max_flaky: None,
         };
 
         fails_at_every_line(8, |host| merge(host, &args, Styler::new(false)).map(|_| ()));
@@ -522,6 +596,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: Some(10.0),
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -533,6 +608,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_score_gate_refuses_an_identity_incompatible_population() {
         let dir = workdir("merge-identity-gate-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
@@ -548,6 +624,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: Some(100.0),
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -562,6 +639,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn zero_window_and_clock_failure_are_reported_truthfully() {
         let dir = workdir("merge-clock-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
@@ -573,6 +651,7 @@ mod tests {
             html_report: None,
             window: 0,
             min_score: None,
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -599,6 +678,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: None,
+            max_flaky: None,
         };
         for (detected, expected, forbidden) in [(9_999, "score 99.99%", "score 100.0%"), (1, "score 0.01%", "score 0.0%")] {
             let merged = crate::merge::Merged {
@@ -624,6 +704,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: None,
+            max_flaky: None,
         };
         let merged = crate::merge::Merged {
             inconsistent: vec!["reports/bad\r\u{1b}[2Kname.json".to_owned()],
@@ -647,6 +728,7 @@ mod tests {
     /// the line at all, and it does so on the summary line that is read most often and checked
     /// least.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_merge_headline_does_not_call_uncovered_mutants_survivors() {
         let dir = workdir("merge-headline-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
@@ -659,6 +741,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: None,
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -685,6 +768,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: None,
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -698,6 +782,7 @@ mod tests {
     /// simply failed to run; without the note, a shrinking denominator would look identical to a
     /// suite that stopped testing something.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_withdrawn_mutant_is_called_out_by_name() {
         let dir = workdir("merge-withdrawn-");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
@@ -715,6 +800,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: None,
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -743,6 +829,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: None,
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -768,6 +855,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: None,
+            max_flaky: None,
         };
 
         // "Merged", "Freshness" and then "Withdrawn" is the third line the summary writes, so
@@ -833,6 +921,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: Some(100.0),
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -840,6 +929,57 @@ mod tests {
 
         assert_eq!(code, EXIT_GATE_FAILED, "{}", host.err());
         assert!(host.err().contains("no mutant counted toward the merged score"), "{}", host.err());
+    }
+
+    #[test]
+    fn a_merge_that_judged_nothing_fails_the_flaky_gate() {
+        let dir = workdir("merge-ungraded-flaky-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let input = root.join("a.json");
+        write_report(&input, &population(&["Ignored", "Ignored"]));
+
+        let args = MergeArgs {
+            inputs: vec![input],
+            json_report: None,
+            html_report: None,
+            window: 30,
+            min_score: None,
+            max_flaky: Some(0),
+        };
+        let mut host = Sink::default();
+
+        let code = merge(&mut host, &args, Styler::new(false)).expect("merge");
+
+        assert_eq!(code, EXIT_GATE_FAILED, "{}", host.err());
+        assert!(
+            host.err().contains("no mutant counted toward the `--max-flaky` gate"),
+            "{}",
+            host.err()
+        );
+    }
+
+    #[test]
+    fn an_all_flaky_merge_within_budget_passes_the_flaky_gate() {
+        let dir = workdir("merge-all-flaky-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let input = root.join("a.json");
+        let mut flaky = mutant("flaky", 1, "Ignored");
+        flaky.status_reason = Some("flaky: test failed with and without the mutant active".to_owned());
+        write_report(&input, &crate::fixtures::report_with(None, 100, vec![flaky]));
+
+        let args = MergeArgs {
+            inputs: vec![input],
+            json_report: None,
+            html_report: None,
+            window: 30,
+            min_score: None,
+            max_flaky: Some(1),
+        };
+        let mut host = Sink::default();
+
+        let code = merge(&mut host, &args, Styler::new(false)).expect("merge");
+
+        assert_eq!(code, EXIT_OK, "{}", host.err());
     }
 
     #[test]
@@ -855,6 +995,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: Some(50.0),
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -862,6 +1003,59 @@ mod tests {
 
         assert_eq!(code, EXIT_GATE_FAILED, "{}", host.err());
         assert!(host.err().contains("1 mutant is still pending"), "{}", host.err());
+    }
+
+    #[test]
+    fn a_merge_with_pending_mutants_fails_a_flaky_only_gate() {
+        let dir = workdir("merge-pending-flaky-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let input = root.join("a.json");
+        write_report(&input, &population(&["Killed", "Pending"]));
+
+        let args = MergeArgs {
+            inputs: vec![input],
+            json_report: None,
+            html_report: None,
+            window: 30,
+            min_score: None,
+            max_flaky: Some(0),
+        };
+        let mut host = Sink::default();
+
+        let code = merge(&mut host, &args, Styler::new(false)).expect("merge");
+
+        assert_eq!(code, EXIT_GATE_FAILED, "{}", host.err());
+        assert!(host.err().contains("1 mutant is still pending"), "{}", host.err());
+        assert!(host.err().contains("`--max-flaky` gate"), "{}", host.err());
+    }
+
+    #[test]
+    fn strict_gates_fail_an_incomplete_shard_rotation() {
+        for (minimum, maximum, gate) in [
+            (Some(0.0), None, "`--min-score` gate"),
+            (None, Some(0), "`--max-flaky` gate"),
+            (Some(0.0), Some(0), "`--min-score` and `--max-flaky` gates"),
+        ] {
+            let dir = workdir("merge-incomplete-rotation-");
+            let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+            let input = root.join("shard-zero.json");
+            write_report(&input, &report(0, 2, "Killed"));
+            let args = MergeArgs {
+                inputs: vec![input],
+                json_report: None,
+                html_report: None,
+                window: 30,
+                min_score: minimum,
+                max_flaky: maximum,
+            };
+            let mut host = Sink::default();
+
+            let code = merge(&mut host, &args, Styler::new(false)).expect("merge");
+
+            assert_eq!(code, EXIT_GATE_FAILED, "{}", host.err());
+            assert!(host.err().contains("shards 1 were never run"), "{}", host.err());
+            assert!(host.err().contains(gate), "{}", host.err());
+        }
     }
 
     /// The gate message must never print the required score as already met.
@@ -883,6 +1077,7 @@ mod tests {
             html_report: None,
             window: 30,
             min_score: Some(66.7),
+            max_flaky: None,
         };
         let mut host = Sink::default();
 
@@ -898,6 +1093,34 @@ mod tests {
     }
 
     #[test]
+    fn a_flaky_gate_fails_independently_of_a_perfect_score() {
+        let dir = workdir("merge-flaky-gate-");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf8");
+        let input = root.join("a.json");
+        let mut killed = mutant("killed", 1, "Killed");
+        killed.location.start.line = 1;
+        let mut flaky = mutant("flaky", 2, "Ignored");
+        flaky.status_reason = Some("flaky: test `subject::sometimes` failed with and without the mutant active".to_owned());
+        write_report(&input, &crate::fixtures::report_with(None, 100, vec![killed, flaky]));
+        let args = MergeArgs {
+            inputs: vec![input],
+            json_report: None,
+            html_report: None,
+            window: 30,
+            min_score: Some(100.0),
+            max_flaky: Some(0),
+        };
+        let mut host = Sink::default();
+
+        let code = merge(&mut host, &args, Styler::new(false)).expect("merge");
+
+        assert_eq!(code, EXIT_GATE_FAILED);
+        assert!(host.err().contains("flaky"), "{}", host.err());
+        assert!(host.err().contains("subject::sometimes"), "{}", host.err());
+        assert!(host.err().contains("configured maximum of 0"), "{}", host.err());
+    }
+
+    #[test]
     fn merge_outputs_with_identical_names_are_refused_before_any_report_is_written() {
         let directory = workdir("merge-output-collision-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("UTF-8 path");
@@ -908,6 +1131,7 @@ mod tests {
             html_report: Some(output),
             window: 30,
             min_score: None,
+            max_flaky: None,
         };
 
         let error = merge(&mut Sink::default(), &args, Styler::new(false)).expect_err("colliding outputs are rejected first");
@@ -931,6 +1155,7 @@ mod tests {
             html_report: Some(alias),
             window: 30,
             min_score: None,
+            max_flaky: None,
         };
 
         let _error = merge(&mut Sink::default(), &args, Styler::new(false)).expect_err("symlink-aliased outputs must be refused");

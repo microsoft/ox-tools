@@ -48,7 +48,7 @@ mod tests {
         let script = String::from_utf8(host.out).expect("the script is not UTF-8");
 
         assert!(script.contains("merge"), "{script}");
-        assert!(script.contains("estimate"), "{script}");
+        assert!(script.contains("suppress"), "{script}");
     }
 
     #[test]

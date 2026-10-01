@@ -76,7 +76,7 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
                         };
                         write!(writer, ",{escaped}")?;
                     } else {
-                        write!(writer, ",")?;
+                        write_missing_cell(writer)?;
                     }
                 }
                 writeln!(writer)?;
@@ -84,6 +84,11 @@ fn generate_with_context<W: Write>(crates: &[ReportableCrate], ctx: &ReportConte
         }
     }
 
+    Ok(())
+}
+
+fn write_missing_cell<W: Write>(writer: &mut W) -> Result<()> {
+    write!(writer, ",")?;
     Ok(())
 }
 
@@ -106,8 +111,12 @@ fn is_textual_metric_value(value: &MetricValue) -> bool {
 /// bypass this helper to preserve numeric cell types. See docs/DESIGN.md and
 /// OWASP's CSV Injection guidance.
 fn escape_csv_untrusted(s: &str) -> Cow<'_, str> {
-    if s.trim_start().starts_with(['=', '+', '-', '@']) {
-        let mut neutralized = String::with_capacity(s.len() + 1);
+    if s.trim_start()
+        .chars()
+        .next()
+        .is_some_and(|first| matches!(first, '=' | '+' | '-' | '@'))
+    {
+        let mut neutralized = String::new();
         neutralized.push('\'');
         neutralized.push_str(s);
         Cow::Owned(escape_csv(&neutralized).into_owned())
@@ -126,6 +135,7 @@ fn escape_csv(s: &str) -> Cow<'_, str> {
     for &b in s.as_bytes() {
         if b == b'"' {
             has_quote = true;
+            // #[gamma::skip(stmt.delete_assign, literal.bool_flip, reason = "has_quote selects the always-quoted branch below, so this redundant needs_quoting assignment cannot affect the result")]
             needs_quoting = true;
         } else if matches!(b, b',' | b'\n' | b'\r') {
             needs_quoting = true;
@@ -254,6 +264,16 @@ mod tests {
     fn test_numeric_metric_values_remain_numeric() {
         assert!(!is_textual_metric_value(&MetricValue::Float(-1.0)));
         assert!(is_textual_metric_value(&MetricValue::String("-1".into())));
+
+        let crate_info = ReportableCrate::new(
+            "numeric".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            vec![Metric::with_value(&TEXT_DEF, MetricValue::Float(-1.0))],
+            None,
+        );
+        let mut output = String::new();
+        generate(&[crate_info], &mut output).unwrap();
+        assert!(output.contains("\ntext,-1.00\n"), "{output}");
     }
 
     #[test]
@@ -471,5 +491,11 @@ mod tests {
                 "the writer failed on write {budget} of {total}, so generation must fail too"
             );
         }
+    }
+
+    #[test]
+    fn missing_cell_separator_write_failure_is_returned() {
+        let mut writer = FailAfter { budget: 0, writes: 0 };
+        assert!(write_missing_cell(&mut writer).is_err());
     }
 }

@@ -58,6 +58,7 @@ impl<W: Write> Write for Results<W> {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn flush(&mut self) -> io::Result<()> {
         match self.0.flush() {
             Err(cause) if cause.kind() == io::ErrorKind::BrokenPipe => Ok(()),

@@ -423,6 +423,11 @@ mod tests {
         assert!(beyond_limit(&text, 8).is_some(), "a stack of unary operators must be refused");
     }
 
+    #[test]
+    fn an_operator_chain_crosses_its_exact_path_limit() {
+        assert_eq!(beyond_limit("+++++", 1), Some(4));
+    }
+
     /// The same run written with spaces between the operators is the same tree.
     #[test]
     fn a_spaced_run_of_prefix_operators_is_still_nesting() {

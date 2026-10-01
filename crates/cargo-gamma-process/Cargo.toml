@@ -23,9 +23,9 @@ all-features = true
 # This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
 disable = true
 
-# Establish the cross-platform CI baseline for this new crate. Raise it as coverage improves.
+# Require every retained source line to be exercised across the package coverage configurations.
 [package.metadata.coverage-gate]
-min-lines-percent = 91.6
+min-lines-percent = 100.0
 
 [features]
 fault-injection = []

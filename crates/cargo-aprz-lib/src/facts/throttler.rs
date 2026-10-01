@@ -29,9 +29,11 @@ pub struct Throttler {
 
 impl Throttler {
     /// Create a new throttler that allows at most `max_concurrent` tasks at a time.
+    // #[gamma::skip(parameter.default_shadow, tag = "timeout", reason = "a zero-capacity semaphore can never issue a work permit")]
     pub fn new(max_concurrent: usize) -> Arc<Self> {
         Arc::new(Self {
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            // #[gamma::skip(literal.bool_flip, tag = "timeout", reason = "a throttler initialized as paused has no task scheduled to resume it")]
             paused: AtomicBool::new(false),
             resume: Notify::new(),
             resume_at: std::sync::Mutex::new(None),
@@ -53,8 +55,11 @@ impl Throttler {
             tokio::pin!(notified);
             let _ = notified.as_mut().enable();
 
+            // #[gamma::skip(cond.always_true, cond.negate, tag = "timeout", reason = "waiting while the throttler is unpaused has no notification that can wake the task")]
+            // #[gamma::skip(cond.always_false, tag = "equivalent", reason = "the second paused check rejects the acquired permit; removing this fast-path only changes a parked waiter into a transient acquire-and-release loop")]
             if self.paused.load(Ordering::Acquire) {
                 notified.await;
+                // #[gamma::skip(loop.delete_continue, tag = "equivalent", reason = "after notification the following permit acquisition and second paused check produce the same externally observable result")]
                 continue;
             }
 
@@ -65,6 +70,7 @@ impl Throttler {
 
             // Double-check: if a pause started while we were waiting for the
             // semaphore, release the permit and wait for the pause to lift.
+            // #[gamma::skip(cond.always_true, cond.negate, tag = "timeout", reason = "rejecting every permit makes acquisition loop forever")]
             if self.paused.load(Ordering::Acquire) {
                 drop(permit);
                 continue;
@@ -97,7 +103,7 @@ impl Throttler {
 
         {
             let mut guard = self.resume_at.lock().expect("lock not poisoned");
-            if guard.is_some_and(|existing| existing + Self::MIN_PAUSE_EXTENSION >= new_resume_at) {
+            if guard.is_some_and(|existing| pause_is_equivalent_or_longer(existing, new_resume_at)) {
                 return false; // an equivalent or longer pause is already active
             }
             *guard = Some(new_resume_at);
@@ -109,8 +115,9 @@ impl Throttler {
         drop(tokio::spawn(async move {
             tokio::time::sleep(duration).await;
 
-            let should_resume = Self::try_resume(&this);
-            if should_resume {
+            // #[gamma::skip(cond.always_false, cond.always_true, cond.negate, tag = "timeout", reason = "the resume condition must both clear paused state and notify only for the current pause")]
+            if Self::try_resume(&this) {
+                // #[gamma::skip(stmt.delete_call, tag = "timeout", reason = "tasks parked for a pause require notification after paused state is cleared")]
                 this.resume.notify_waiters();
             }
         }));
@@ -126,7 +133,7 @@ impl Throttler {
     )]
     fn try_resume(this: &Arc<Self>) -> bool {
         let mut guard = this.resume_at.lock().expect("lock not poisoned");
-        if guard.is_some_and(|t| Instant::now() >= t) {
+        if guard.is_some_and(|t| pause_has_expired(Instant::now(), t)) {
             *guard = None;
             // Clear paused inside the lock so that resume_at and paused
             // are always consistent when observed together.
@@ -136,6 +143,14 @@ impl Throttler {
             false
         }
     }
+}
+
+fn pause_is_equivalent_or_longer(existing: Instant, new_resume_at: Instant) -> bool {
+    existing + Throttler::MIN_PAUSE_EXTENSION >= new_resume_at
+}
+
+fn pause_has_expired(now: Instant, resume_at: Instant) -> bool {
+    now >= resume_at
 }
 
 #[cfg(test)]
@@ -304,6 +319,7 @@ mod tests {
             *guard = Some(Instant::now() + Duration::from_mins(1));
             throttler.paused.store(true, Ordering::Release);
         }
+
         assert!(throttler.is_paused());
         assert!(!Throttler::try_resume(&throttler), "a pause must not resume before its deadline");
         assert!(throttler.is_paused());
@@ -315,9 +331,26 @@ mod tests {
         assert!(Throttler::try_resume(&throttler), "an expired pause must resume immediately");
 
         assert!(!throttler.is_paused());
+        assert!(
+            throttler.resume_at.lock().expect("lock not poisoned").is_none(),
+            "resuming must clear the expired deadline"
+        );
         let _permit = tokio::time::timeout(Duration::from_millis(100), throttler.acquire())
             .await
             .expect("work must acquire promptly after a pause resumes");
+    }
+
+    #[test]
+    fn pause_deadline_comparisons_include_the_exact_boundary() {
+        let now = Instant::now();
+
+        assert!(pause_is_equivalent_or_longer(now, now + Throttler::MIN_PAUSE_EXTENSION));
+        assert!(!pause_is_equivalent_or_longer(
+            now,
+            now + Throttler::MIN_PAUSE_EXTENSION + Duration::from_nanos(1)
+        ));
+        assert!(pause_has_expired(now, now));
+        assert!(!pause_has_expired(now, now + Duration::from_nanos(1)));
     }
 
     #[tokio::test]

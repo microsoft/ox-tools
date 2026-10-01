@@ -103,6 +103,12 @@ The coordinator owns policy: command and configuration precedence, package and t
 incremental reuse, scheduling, scoring, and reporting. It combines evidence from the other domains
 but does not parse Rust or implement operating-system containment itself.
 
+The command-line surface follows the same boundary: each subcommand exposes only settings consumed
+by that operation. Run-only controls such as progress are not global. `list` separates population
+and registry modes so `list mutants`, `list files`, `list mutators`, and `list presets` each
+document only their applicable selection and output controls; bare `list` remains shorthand for
+`list mutants`.
+
 ### Source and mutation engine
 
 The engine discovers mutation sites, evaluates source-level suppression, gives sites stable
@@ -286,6 +292,7 @@ Blocks and statements use equivalent forms suited to their syntax:
 | Expression | Produce the replacement value |
 | Block | Replace the block body |
 | Iterator-returning block | Wrap original and replacement in a shared `Either` type so opaque `impl Iterator` arms agree |
+| Iterator-valued expression | Wrap original and replacement in a shared `Either` type so pipeline transformations retain one concrete type |
 | Loop control | Conditionally execute the replacement while retaining the original diverging tail |
 | Statement | Delete or replace the statement |
 | Match-arm pattern | Add a false guard so matching falls through to a later wildcard arm |
@@ -350,6 +357,14 @@ cargo-gamma resolves this with a rollback fixpoint:
 Withdrawn mutants are reported as unviable. They are not silently discarded, because the score is
 meaningful only when its excluded population remains visible.
 
+Each compiler-blamed unviable mutant retains a bounded reason: rustc's primary error code when
+present, a normalized and length-capped primary-message category, and whether a primary span
+identified the generated replacement text. Quoted source fragments, path-shaped tokens, and
+unbounded rendered diagnostics are not retained. Follow-on diagnostics cannot replace the first
+attributed root cause. Proof builds that isolate a compiler failure without an attributable span
+use a fixed `isolated compiler failure` category. Mutants abandoned because a build could not be
+converged remain `notbuilt`, not unviable.
+
 Workspace packages are handled in dependency order so that failures are localized and useful work
 can progress without waiting for one global rollback loop. A final workspace build applies Cargo's
 real feature unification and produces the test binaries. Example and benchmark targets are not
@@ -358,7 +373,15 @@ built: cargo-gamma does not execute them, so they are not part of its compilatio
 Diagnostic attribution uses guard locations in the instrumented text, not original line numbers.
 Instrumentation changes line positions, and nested mutations can share original spans. The mutated
 branches themselves do not overlap, allowing a compiler error inside a branch to identify the
-specific replacement that caused it.
+specific replacement that caused it. A non-empty replacement is compiler-blamed directly only
+when a diagnostic span identifies generated replacement text. An enclosing or fallback diagnostic
+instead triggers proof-build isolation before that mutant can be reported as unviable. Deletions
+have no generated replacement text, so containment and gated flow-sensitive attribution remain
+valid evidence for them. Within one compiler batch, exact generated-text attribution takes
+precedence over deletion fallbacks so follow-on diagnostics cannot withdraw neighboring mutants;
+any independent failure is exposed by the next rollback round. Isolation builds are bounded proof
+work and do not consume the configured rollback-round allowance; a confirmed mutant is charged to
+the ordinary failed round that required isolation.
 
 ## The scratch workspace
 
@@ -379,7 +402,7 @@ The resolved Cargo target directory contains
 
 - Cargo build artifacts under `target/`;
 - incremental campaign records and transient execution data, including census files,
-  `last-gamma-run.json`, and `gamma-progress.log`.
+  `last-gamma-run.json`, `gamma-progress.log`, and `gamma-selection.jsonl`.
 
 The external per-workspace cache holds a small `campaign-location` locator naming the campaign
 base used by the latest completed run. State-consuming commands first ask Cargo for the selected
@@ -390,13 +413,32 @@ only after resolving the locator back to that record.
 
 Normal runs publish `gamma-report.json`, `gamma-report.html`, `gamma-report.sarif`,
 `gamma-perf-advice.md`, and `gamma-diagnostics.json` under the original workspace's
-`target/cargo-gamma/`. `last-gamma-run.json` and `gamma-progress.log` remain reusable cache state
-rather than published artifacts. An explicit `--cache-dir` retains the all-in-one layout and
-relocates the synchronized workspace, Cargo artifacts, and campaign state together. `--artifact-dir`
-relocates all five published artifacts together, and its directory is created when absent.
+`target/cargo-gamma/`. `last-gamma-run.json`, `gamma-progress.log`, and
+`gamma-selection.jsonl` remain reusable cache state rather than published artifacts. The selection
+journal is append-only JSON Lines. A worker delivers the completed selection attempts for one
+mutant as a batch; the writer then appends and flushes one record per attempt: mutant ordinal,
+candidate tier and rank, binary and optional test identity, conclusive hit, clean miss, or
+inconclusive result, observed duration, and the mutant's canonical fallback estimate. It therefore
+remains useful when a campaign is interrupted and supports later replay of selection heuristics
+without turning diagnostic telemetry into persisted verdict evidence. An explicit `--cache-dir`
+retains the all-in-one layout and relocates the synchronized workspace, Cargo artifacts, and
+campaign state together. The default external synchronized workspace exposes the original
+checkout's version-control metadata to build scripts. When `--cache-dir` explicitly relocates that
+workspace, a repository whose build scripts require checkout-visible Git metadata must choose a
+cache beneath the same repository. To move heavy compiler artifacts independently, leave
+`--cache-dir` unset and use Cargo's `CARGO_TARGET_DIR` environment variable or `build.target-dir`
+configuration; cargo-gamma resolves that target and places campaign artifacts beneath it without
+relocating the source workspace. `--artifact-dir` relocates all five published artifacts together,
+and its directory is created when absent. A relative configured artifact directory is interpreted
+relative to the invoking process for both publication and `explain`.
 
 The diagnostics bundle contains aggregate algorithm-health telemetry rather than one row per
-mutant. Build rounds attribute newly withdrawn mutants to packages while retaining the round's
+mutant. Build withdrawals are grouped by package, mutator, error code, normalized message category,
+and whether the replacement site was primary. Package identifiers and free-form message categories
+both follow the bundle's redaction policy: names remain readable, hashed values remain groupable,
+and omitted values carry no source-authored text. The JSON representation adds these fields
+compatibly, with absent fields in older bundles reading as no package, empty category, and `false`. Build
+rounds attribute newly withdrawn mutants to packages while retaining the round's
 actual workspace-wide elapsed time; they do not invent per-package build durations. Census
 telemetry records candidate binaries and sites, listing attempts and successes, the estimated walk
 cost and economic-gate decision, sample launches, and complete versus partial evidence. Sweep
@@ -542,6 +584,10 @@ The baseline also measures:
 - the longest legitimate period without harness progress;
 - peak memory where the host can measure it.
 
+Its completion summary reports both the number of tests that ran and the number of test binaries
+across which they ran; custom harnesses that do not announce a test count still report the binary
+count and elapsed time.
+
 Timeout, stall, and memory policies derive from these observations rather than from a machine-
 independent constant. The baseline and mutant runs use the same harness and execution environment.
 
@@ -560,7 +606,8 @@ threaded process. cargo-gamma prepares nextest's description of the already-buil
 then reuses it; allowing nextest to rebuild for every mutant would reintroduce compilation into the
 inner loop. Cargo-gamma supplies the same Cargo package and toolchain context to nextest, while
 nextest remains responsible for its runner-specific `NEXTEST_*` values and may normalize values
-according to its own compatibility contract.
+according to its own compatibility contract. A resource-bearing selection limits nextest itself to
+one concurrent test process, matching the one-thread direct-libtest contract.
 
 ## Selecting only tests that can matter
 
@@ -578,6 +625,11 @@ whole-workspace campaign therefore behaves like one package-local campaign per m
 letting reverse dependents improve another package's score. `--test-package` names a different
 oracle, and `--test-workspace` admits every workspace package.
 
+`--test-lib` narrows the admitted target kinds to library unit-test harnesses. Preflight and final
+test compilation use Cargo's `test --no-run --lib` selection, and fallback may widen package scope
+but never add integration, binary, example, or benchmark harnesses. A selected package with no
+runnable library test harness is an error rather than a successful empty oracle.
+
 Within the admitted package set, a test binary cannot execute code it does not link. The Cargo
 dependency graph first identifies binaries that cannot reach a mutated package. Cargo Gamma then
 interposes on the successful preflight's rustc invocations and combines their exact artifact,
@@ -588,8 +640,9 @@ measurement, census, and mutant judgement.
 Compiler capture is an optimization, never an oracle by itself. A missing or corrupt capture,
 ambiguous artifact association, unsupported target kind, opaque path dependency, or untraceable
 workspace `--extern` abandons target-level narrowing and retains package-level behavior. If a build
-using exact Cargo target selectors fails, the same build is retried with all test targets before
-the failure can affect a verdict. Unknown relationships therefore run or build more tests; they
+using exact Cargo target selectors fails, the same build is retried with all admitted target kinds
+before the failure can affect a verdict: all test targets normally, or all selected packages'
+library targets under `--test-lib`. Unknown relationships therefore run or build more tests; they
 never hide one.
 
 ### Guard census
@@ -676,6 +729,14 @@ generalized tier. A tier with eight attempts and no hit stops exploring for that
 keeps it open. Exact mutant hints and canonical fallback are unaffected, so admission can change
 cost but never a verdict.
 
+Only a test failure is a transfer hit and only a clean passing run is a transfer miss. Timeouts,
+stalls, memory exhaustion, flakes, enumeration failures, metering loss, and otherwise unjudged
+launches are inconclusive: they are recorded in `gamma-selection.jsonl` but do not train candidate
+hit/miss rankings. A clean canonical pass contributes half-weight negative evidence to an
+already-known item or file binary candidate. This evidence can lower its priority or make its
+expected economics unattractive, but never creates a candidate, excludes a test binary, or changes
+a verdict.
+
 Workers choose mutants at assignment time rather than advancing through a fixed queue. The first
 unhinted assignment for an item is its scout. While it runs, workers prefer files with no active
 mutant and then inactive items in the least-contended file. If only still-cold siblings of that
@@ -686,9 +747,9 @@ share an active item.
 
 The durable generalized-hint schema stores seed and transfer evidence for those item and file
 rankings plus interned census reach sets keyed by stable source-site identity. It is independently
-versioned and shared by the run record and checked-in hints artifact. Version-one rankings are
-migrated by retaining their identities as seed evidence and resetting the conflated transfer
-statistics. Unsupported generalized tiers are ignored without discarding exact per-mutant probes.
+versioned and shared by the run record and checked-in hints artifact. Older generalized schemas are
+ignored rather than migrated, without discarding exact per-mutant probes from an otherwise valid
+checked-in artifact.
 Diagnostics report candidates, attempts, hits, and rejected candidates separately for exact mutant
 hints and for generalized item, reach, file, and census tiers. Every admitted generalized candidate
 is rerun before use; persistence never turns reach or historical ordering into a verdict.
@@ -815,6 +876,14 @@ Comments and insignificant inter-token whitespace do not move an identity; liter
 The digest is rendered as twelve hex characters. The identity joins reports, shards, suppressions,
 SARIF findings, and incremental records.
 
+`run --mutant <ID>` repeats to select an exact current population. Every requested ID must resolve
+after normal discovery and selection; stale, unknown, suppressed, or filtered IDs fail rather than
+silently yielding an empty campaign. These repair runs establish fresh verdicts and do not adopt
+cached verdicts. `explain <ID>` resolves the same current identity and adds verdict context from the
+current configured artifact directory's `gamma-report.json`; `--report` overrides that path. An
+explicit retained report remains explainable when its source site or workspace is no longer
+present, using the identity version recorded by that report.
+
 ### Incremental knowledge
 
 The target-resident campaign cache stores facts and hints learned by an earlier campaign:
@@ -850,6 +919,10 @@ postprocessing commands validate each affected current source site when they con
 learning first must not leave a knowledge-only record in place of the final ledger; publication
 failure preserves the prior complete generation, is reported explicitly, and suppresses advice for
 a command whose required outcomes were not saved.
+An existing readable campaign-state generation with an unsupported top-level version is never
+treated as an empty record for publication: cargo-gamma leaves it byte-for-byte intact and reports
+that a compatible tool or explicit removal is required. Corrupt cache state may still be replaced
+because it carries no readable versioned contract.
 
 ### Durable hints and suppressions
 
@@ -866,19 +939,21 @@ because an optimization cannot be allowed to stop a run. Explicit incremental pr
 opposite failure policy. It refuses an existing artifact it cannot understand rather than replacing
 unknown knowledge with a partial generation; `--replace` is the explicit permission to discard it.
 That refusal includes an unsupported independently versioned generalized section, whose future
-fields cannot be preserved by today's typed serializer. Publication and legacy migration cleanup
-compare against the exact YAML bytes used for the merge, so another writer's intervening generation
+fields cannot be preserved by today's typed serializer. Publication compares against the exact
+YAML bytes used for the merge, so another writer's intervening generation
 causes a conflict instead of being overwritten. YAML is published atomically and read back before
 success is reported, so interruption cannot leave a partially written artifact.
 
 Suppression is different. It is a reviewed policy decision and therefore lives in source or
 configuration, not in an ephemeral cache. A cache directory must always be safe to delete without
 losing accepted policy. A run that produces a timeout or out-of-memory verdict points to
-`cargo gamma suppress`, which reads the persisted outcome ledger and writes the corresponding
+`cargo gamma suppress`, which reads the persisted outcome ledger and previews the corresponding
 reviewed suppression after using Cargo metadata to validate the current workspace identity, but
-without synchronization, compilation, baselining, or test execution. The ledger records stable
-identity, verdict, workspace-relative source, mutator, source-site identity and location, and
-source-generation evidence. Suppression edits only
+without synchronization, compilation, baselining, or test execution. `--apply` writes the previewed
+edits, matching `unsuppress`. The ledger records stable
+identity, verdict, workspace-relative source, mutator, source-site identity and location,
+source-generation evidence, and the optional bounded compiler reason for unviable mutants.
+Suppression edits only
 uniquely matched unchanged or moved sites, reports stale or ambiguous sites instead of guessing,
 and verifies the source-level effect transactionally without altering the ledger or progress log.
 
@@ -892,8 +967,11 @@ A report records the mutant-ID scheme used to produce its identities. A report t
 metadata is treated as using the current scheme. When inputs explicitly identify different
 schemes, merge isolates the newest scheme and reports every excluded input rather than counting
 identities from different namespaces together. A rotation that spans an identity change must
-therefore be restarted or completed with reports from the new scheme. When `--min-score` is
-requested, any excluded input fails the gate because the requested population is incomplete.
+therefore be restarted or completed with reports from the new scheme. When either `--min-score`
+or `--max-flaky` is requested, any excluded input fails the gate because the requested population
+is incomplete. The same fail-closed rule rejects missing shards and inputs that disagree about the
+shard count: neither a score nor a flaky count over a partial or inconsistent rotation describes
+the selected population.
 
 A shard describes only its slice and cannot prove that a missing mutant was withdrawn. Only an
 unsharded, complete population can withdraw identities from an accumulated report.
@@ -913,7 +991,7 @@ A verdict states what evidence the campaign obtained:
 | `ignored` | Explicit policy suppressed the mutant | Excluded |
 | `notbuilt` | The selected build did not compile that source | Excluded |
 | `flaky` | The observed failure was not repeatable | Excluded and retried |
-| `pending` | The run ended without judging the mutant | Excluded; makes a requested score gate incomplete |
+| `pending` | The run ended without judging the mutant | Excluded; makes a requested score or flaky gate incomplete |
 
 The mutation score is:
 
@@ -925,13 +1003,18 @@ Only `killed` enters the numerator. Timeouts and memory exhaustion establish tha
 changed resource behavior, but they remain undetected because no test assertion rejected the
 change. Consequently, `--min-score 100` fails closed on either outcome.
 
+Flaky outcomes remain outside that percentage because they are inconclusive, but `--max-flaky`
+provides an independent run and merge gate. The default has no flaky budget; a configured value
+fails when the current result contains more flaky findings than allowed. Because confirmation is
+what distinguishes a flaky failure from a reliable kill, this gate conflicts with `--no-confirm`.
+
 Excluded mutants remain visible but make no claim about test quality because they were never
 validly judged.
 
-An empty denominator is printable but not gradeable. A score gate must fail structurally when no
-mutant was judged; it must never pass by interpreting an empty campaign as 100 percent.
-Likewise, a requested score gate fails when any mutant remains pending: a score over only the
-completed subset is not a score over the selected population.
+An empty denominator is printable but not gradeable. A requested score or flaky gate must fail
+structurally when no mutant was judged; it must never pass by interpreting an empty campaign as a
+perfect score or zero flaky outcomes. Likewise, either gate fails when any mutant remains pending:
+neither a score nor a flaky count over only the completed subset describes the selected population.
 
 The distinctions between `survived`, `uncovered`, `unviable`, and `notbuilt` are architectural:
 they may all involve no failing test, but they prescribe different action. Collapsing them would
@@ -941,7 +1024,7 @@ make the report easier to serialize and harder to use correctly.
 
 One verdict model feeds every output surface:
 
-- the console emphasizes actionable survivors and exceptional resource outcomes;
+- the console emphasizes actionable survivors, exceptional resource outcomes, and flaky tests;
 - the mutation-testing-elements JSON report is the interchange artifact;
 - the HTML report provides a browsable, self-contained view;
 - SARIF and CI annotations place survivors on changed source;
@@ -954,13 +1037,55 @@ change or delete files after discovery without changing the report. Artifact key
 diagnostics, console descriptions, and `projectRoot` nevertheless retain original
 workspace-relative and original-project identities; cache paths are never published.
 
-`--only-survivors-from` reads a compatible cargo-gamma JSON report and intersects its genuine
-survivor IDs with the population discovered from the current source. Timeout and memory-limit
-outcomes are not selected even though the interchange schema exports them as `Survived`. This
-supports focused confirmation after tests are added without carrying any prior verdict forward.
+`--only-survivors` reads `gamma-report.json` from the effective artifact directory and intersects
+its genuine survivor IDs with the population discovered from the current source. The effective
+directory is `target/cargo-gamma` by default or the value of `--artifact-dir` when configured.
+Timeout and memory-limit outcomes are not selected even though the interchange schema exports them
+as `Survived`. This supports focused confirmation after tests are added without carrying any prior
+verdict forward.
 
 Command help follows the workspace Cargo-tool convention: green bold headings and usage,
 cyan bold literals, cyan placeholders, and package author/version metadata.
+
+The ordinary live display remains a single cargo-style progress bar. After baseline measurement it
+opens a `Planning` phase, reports how many pending mutants have had their scheduling work
+constructed while reachability, optional census work, hints, projections, and the sweep queue are
+prepared, and closes that phase before workers start. `--dashboard` replaces the planning bar and
+subsequent testing bar with a multiline, in-place dashboard containing mutant outcomes,
+test-selection effectiveness, and test-process costs. The completed
+`Planning N/N mutants planned` line remains above the live testing dashboard just as the completed
+baseline line does. It uses the same terminal eligibility as `--progress`,
+selects small, medium, or large layouts from the current terminal width, adapts when the window is
+resized, and redraws no more than once per second.
+While sweep workers are quiet, the coordinator emits a one-second heartbeat so a repaint deferred
+by that rate limit is eventually flushed and wall-clock-derived values remain current.
+The layouts use Unicode box drawing and hierarchy rather than ASCII approximations. Headings,
+separators, and outcome rows use semantic color when the resolved `--color` policy permits it and
+remain structurally identical without color.
+The testing header is the ordinary cargo-style progress line. In the large layout, a mutant panel
+and equal-height test-execution panel share the first row, with a centered hints panel beneath.
+Each panel derives its width from its longest rendered row, retaining one space of inner padding
+rather than reserving a fixed right margin; metric values therefore remain inside the border.
+Label and value columns use a consistent three-space gutter across all panels.
+The mutant panel uses an adaptive waffle: one cell per mutant through 100 mutants and a fixed
+10-by-10 percentage grid above that. Its legend reports unviable, pending, killed, survived,
+timed-out, out-of-memory, flaky, and uncovered counts in that order, plus the mutation score.
+The hints panel reports only explicit and inferred hint counts and hit rates. The execution panel
+reports binary count, busy workers, recent throughput, whole and filtered selections,
+average and maximum selection runtime, selections per completed mutant, the measured baseline memory peak
+when available, and estimated time avoided by successful hints. Execution metric values share one
+right edge even when a value, such as recent throughput with its unit, is wider than the usual
+numeric column.
+Each refresh is emitted as one synchronized terminal update so the previous frame is not visibly
+erased before its replacement is ready. The dashboard records the visible width of every rendered
+row, moves back by the corresponding physical row count, and erases to the end of the screen.
+Recomputing that count at the current terminal width handles resize reflow without relying on the
+terminal's global saved-cursor slot, which another program may overwrite or a terminal may not
+implement.
+`SURVIVED`, `TIMEOUT`, `OUTOFMEMORY`, and `FLAKY` verdicts remain durable one-line announcements
+above the dashboard rather than transient table content. When progress is disabled or standard
+error is not a terminal, the dashboard is not drawn and the completed summary remains the complete
+console account.
 
 The JSON report is written straight from the verdict model rather than rebuilt through a generic
 tree first, and is validated in that form. Object keys follow schema declaration order, and
@@ -1014,10 +1139,10 @@ score gate must agree because they consume the same outcomes and scoring rules.
 
 Process exit status is another projection of that model: `0` means the command and every requested
 gate or expectation passed, `1` is invalid usage or configuration, `2` is a completed command whose
-correctness or score gate failed, `3` means the requested answer could not be completed, and `70`
-marks an internal cargo-gamma panic. A score gate also fails with `2` when the denominator is empty
-or selected mutants remain pending; without a score gate those states are reportable results rather
-than implicit grading policy.
+correctness, score, or flaky gate failed, `3` means the requested answer could not be completed, and
+`70` marks an internal cargo-gamma panic. A score or flaky gate also fails with `2` when no mutant
+was judged or selected mutants remain pending; without either gate those states are reportable
+results rather than implicit grading policy.
 
 Limits imposed by CI platforms are explicit. Truncating annotations or SARIF silently would make a
 successful upload look like the complete result.
@@ -1050,6 +1175,23 @@ Exactly one active mutant keeps causality clear. A process failure, timeout, or 
 to one source change, and a report can explain that change without disentangling interactions among
 mutants.
 
+### Source names shared resources; execution policy sizes them
+
+Tests declare stable semantic resource names with `#[gamma::resource("name")]`.
+Function declarations require a test attribute such as `#[test]` or
+`#[tokio::test]`; inline module declarations apply to the containing test target.
+Declarations do not embed a machine-dependent concurrency value. `gamma.toml` and
+repeatable command-line overrides assign capacities, with an unspecified
+declared resource defaulting to one. Admission applies consistently to
+baseline, census, mutant, and confirmation launches so calibration and verdict
+execution observe the same contention policy. Gamma discovers declarations
+through ignored test-harness markers and refuses to run when a selected libtest harness
+cannot be enumerated, because source text cannot reliably reveal imported or renamed attributes.
+A custom harness that has no libtest registry cannot contain those markers and contributes no
+declarations. A launch that may consume a declared resource runs its libtest harness with one test
+thread, keeping the admitted process from consuming the same resource concurrently from several
+tests.
+
 ### Caches may save time, never supply faith
 
 Durable verdicts require matching source, build, execution context, workspace inputs, and test
@@ -1076,29 +1218,12 @@ next, and which tests those are depends on the harness's scheduling rather than 
 suite states. Production-handler exercises therefore run in child processes, while registry and
 cgroup lifetime tests use isolated registries with injected recording killers.
 
-### Live completion estimate
+### Testing progress
 
-The testing progress display estimates remaining work rather than extrapolating from the number of
-mutants completed. Before workers start, each pending mutant is priced from the same reachable
-binary baselines, census selections, durable killer hints, timeout budgets, and confirmation policy
-used by scheduling. Exact probes, selected tests, hinted fallbacks, whole-binary work, and
-zero-work uncovered sites retain separate calibration because their costs differ materially.
-
-Worker start events distinguish queued work from work already in flight. Time already spent by an
-active worker is subtracted from that mutant's predicted service time, while an active mutant that
-has outlived its ordinary estimate retains a resource-exhaustion tail in the high estimate.
-Predicted residuals are assigned across the configured worker lanes and the longest lane determines
-the displayed wall-time tail; a serial workload is not merely divided by the job count.
-
-Completed mutants calibrate killed, full-suite, and timeout or memory-limit outcomes independently.
-A bounded-memory exponentially weighted observation gives recent results more influence when the
-campaign's cost composition changes. The measured pre-sweep model remains a prior, so a few unusual
-results cannot immediately dominate it; as representative evidence accumulates, observed outcome
-shares and service times narrow and move the range. No estimate is shown until either enough
-predicted work or a larger minimum population has completed. The display presents a low-to-high
-range while meaningful uncertainty remains instead of implying point accuracy. ETA endpoints use
-rounded whole seconds, minutes, or hours; fractional units would imply more precision than the
-model provides.
+The testing progress display reports completed and total mutants plus observed
+verdict counts. It deliberately omits an ETA because scheduling, resource
+contention, timeouts, confirmation runs, and learned test selection make a
+live completion forecast misleading.
 
 ## Costs and limitations
 

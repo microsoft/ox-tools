@@ -38,20 +38,8 @@ normal = ["unicode-ident"]
 [package.metadata.unused-deps]
 allowed = ["unicode-ident"]
 
-# Coverage threshold slightly below the repo-wide 100% default.
-#
-# On Linux this crate is at 100%: every network-backed provider is driven against a
-# mock server or a local fixture, so the whole crate is exercised offline.
-#
-# Windows lands a little lower for one reason that no test can remove: a handful of
-# I/O-failure branches (an unreadable workflow file, a directory that cannot be walked,
-# a file that cannot be stat'ed or read) are provoked by clearing Unix permission bits.
-# Windows has no std-only equivalent, so those tests are `#[cfg(unix)]` and the branches
-# they cover go unexercised there.
-#
-# Prefer making a test cross-platform over lowering this number.
 [package.metadata.coverage-gate]
-min-lines-percent = 99.5
+min-lines-percent = 100.0
 
 [features]
 # Re-exports the crate internals under `internals` so the crate's own integration tests can reach
@@ -141,6 +129,7 @@ windows = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+cargo-gamma-attrs = { workspace = true }
 insta = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

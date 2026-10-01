@@ -207,6 +207,11 @@ mod tests {
     use crate::fixtures::mutant_at as mutant;
 
     #[test]
+    fn civil_date_conversion_handles_the_end_of_a_four_hundred_year_era() {
+        assert_eq!(civil_from_days(11_017), "2000-03-01");
+    }
+
+    #[test]
     fn a_survivor_is_skipped_even_if_it_reaches_the_planner() {
         let mutants = vec![
             mutant("aaa", "src/lib.rs", 4, "relational.lt_to_le", Outcome::Survived),

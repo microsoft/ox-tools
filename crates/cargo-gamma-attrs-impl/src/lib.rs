@@ -47,7 +47,7 @@
 mod implementation;
 
 #[doc(inline)]
-pub use implementation::{inert, inert_timeout, value};
+pub use implementation::{inert, inert_timeout, resource, value};
 
 /// Development-only access used by the workspace's cross-crate agreement test.
 #[cfg(feature = "agreement")]

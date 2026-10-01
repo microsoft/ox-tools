@@ -83,3 +83,33 @@ fn generic_gamma(n: usize) -> usize {
 fn gamma_leaves_the_annotated_item_callable() {
     assert_eq!(generic_gamma(4), 8);
 }
+
+#[gamma::resource("cargo-subprocess")]
+#[test]
+fn resource_leaves_the_annotated_test_callable() {
+    assert_eq!(2 + 2, 4);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the current test executable to inspect harness listing")]
+fn resource_marker_is_exposed_to_harness_listing() {
+    let executable = std::env::current_exe().expect("the test harness has a current executable");
+    let output = std::process::Command::new(executable)
+        .args(["--list", "--format", "terse"])
+        .output()
+        .expect("the test harness can list its tests");
+    assert!(
+        output.status.success(),
+        "test listing failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listing = String::from_utf8(output.stdout).expect("libtest emits UTF-8 test names");
+
+    assert!(
+        listing.contains(
+            "__cargo_gamma_resource_636172676f2d73756270726f63657373_test_\
+             7265736f757263655f6c65617665735f7468655f616e6e6f74617465645f746573745f63616c6c61626c65: test"
+        ),
+        "{listing}"
+    );
+}

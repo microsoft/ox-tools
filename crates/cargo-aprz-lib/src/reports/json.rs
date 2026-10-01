@@ -123,6 +123,7 @@ fn metric_value_to_json(value: &MetricValue, buf: &mut String) -> serde_json::Va
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+    use core::fmt;
     use std::sync::Arc;
 
     use chrono::{DateTime, Utc};
@@ -328,5 +329,21 @@ mod tests {
         // Pretty-printed JSON should have newlines and indentation
         assert!(output.contains('\n'));
         assert!(output.contains("  "));
+    }
+
+    struct FailWriter;
+
+    impl fmt::Write for FailWriter {
+        fn write_str(&mut self, _s: &str) -> fmt::Result {
+            Err(fmt::Error)
+        }
+    }
+
+    #[test]
+    fn generate_propagates_writer_errors_without_panicking() {
+        let result = std::panic::catch_unwind(|| generate(&[], &mut FailWriter));
+
+        assert!(result.is_ok(), "writer errors must not panic");
+        assert!(result.expect("checked above").is_err());
     }
 }

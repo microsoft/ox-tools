@@ -64,6 +64,10 @@ impl Expression {
     }
 }
 
+fn serialized_field_count(has_description: bool, has_points: bool) -> usize {
+    2 + usize::from(has_description) + usize::from(has_points)
+}
+
 impl Serialize for Expression {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -71,7 +75,8 @@ impl Serialize for Expression {
     {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("Expression", 3)?;
+        let field_count = serialized_field_count(self.description.is_some(), self.points.is_some());
+        let mut state = serializer.serialize_struct("Expression", field_count)?;
         state.serialize_field("name", &*self.name)?;
         if let Some(ref desc) = self.description {
             state.serialize_field("description", &**desc)?;
@@ -80,6 +85,7 @@ impl Serialize for Expression {
         if let Some(points) = self.points {
             state.serialize_field("points", &points)?;
         }
+
         state.end()
     }
 }
@@ -134,7 +140,30 @@ impl Expression {
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+    use std::io;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
     use super::*;
+
+    struct FailAfter {
+        budget: usize,
+        writes: usize,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl io::Write for FailAfter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.writes >= self.budget {
+                return Err(io::Error::other("injected serialization failure"));
+            }
+            self.writes += 1;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     #[cfg_attr(miri, ignore = "compiles CEL programs, which is prohibitively slow under Miri")]
@@ -206,6 +235,47 @@ mod tests {
         assert_eq!(json["expression"], "x > 5");
         assert!(!json.as_object().unwrap().contains_key("description"));
         assert_eq!(json.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn serialized_field_count_matches_each_optional_field_combination() {
+        assert_eq!(serialized_field_count(false, false), 2);
+        assert_eq!(serialized_field_count(true, false), 3);
+        assert_eq!(serialized_field_count(false, true), 3);
+        assert_eq!(serialized_field_count(true, true), 4);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "compiles CEL programs, which is prohibitively slow under Miri")]
+    fn serialization_reports_every_writer_failure_without_panicking() {
+        let expr = Expression::new("test", Some("description"), "x > 5", Some(7)).unwrap();
+        let mut counter = FailAfter {
+            budget: usize::MAX,
+            writes: 0,
+        };
+        serde_json::to_writer(&mut counter, &expr).expect("an unlimited writer must serialize");
+
+        for budget in 0..counter.writes {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                serde_json::to_writer(&mut FailAfter { budget, writes: 0 }, &expr)
+            }));
+            assert!(result.is_ok(), "serialization panicked for writer budget {budget}");
+            assert!(
+                result.expect("checked above").is_err(),
+                "writer budget {budget} must produce an error"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "compiles CEL programs, which is prohibitively slow under Miri")]
+    fn serialization_uses_the_points_field_name() {
+        let expr = Expression::new("test", None, "x > 5", Some(7)).unwrap();
+        let json = serde_json::to_value(&expr).unwrap();
+
+        assert_eq!(json["points"], 7);
+        assert!(json.get("").is_none());
+        assert!(json.get("xyzzy").is_none());
     }
 
     #[test]

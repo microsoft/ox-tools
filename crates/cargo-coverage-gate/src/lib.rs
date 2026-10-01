@@ -448,4 +448,25 @@ mod tests {
         let evaluated = evaluate_many(&[], Some(&tmp.path().join("Cargo.toml")), &[]).expect("host target resolves");
         assert_eq!(evaluated.verdict(), Verdict::Pass);
     }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata")]
+    fn evaluate_forwards_manifest_path_and_package_selectors() {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join("explicit-manifest-only/src")).expect("create member");
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"explicit-manifest-only\"]\n",
+        )
+        .expect("write workspace manifest");
+        fs::write(
+            tmp.path().join("explicit-manifest-only/Cargo.toml"),
+            "[package]\nname = \"explicit-manifest-only\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write member manifest");
+        fs::write(tmp.path().join("explicit-manifest-only/src/lib.rs"), "").expect("write member source");
+
+        evaluate("", Some(&tmp.path().join("Cargo.toml")), &["explicit-manifest-only".to_owned()])
+            .expect("the public wrapper must use the explicit manifest and preserve package selectors");
+    }
 }

@@ -12,22 +12,60 @@ use super::messages::{CompilerMessage, Span, cargo_message};
 use crate::schema::{Guard, Position};
 use crate::{HashMap, HashSet};
 
+/// A bounded, host-independent account of why rustc rejected a mutant.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub(super) struct CompilerReason {
+    /// The primary rustc error code, empty when the diagnostic carried none.
+    pub(super) code: String,
+
+    /// A normalized form of the primary diagnostic message.
+    pub(super) category: String,
+
+    /// Whether a primary span landed in the replacement text itself.
+    pub(super) replacement_site: bool,
+}
+
+impl CompilerReason {
+    pub(super) fn isolated() -> Self {
+        Self {
+            category: "isolated compiler failure".to_owned(),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn note(&self) -> String {
+        let code = if self.code.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", self.code)
+        };
+        let site = if self.replacement_site {
+            "; primary span identified the replacement site"
+        } else {
+            "; primary span did not identify the replacement site"
+        };
+
+        format!("rustc{code}: {}{site}", self.category)
+    }
+}
+
 /// Works out which mutants to blame for a failed build.
 ///
 /// Guard positions come from the instrumented text rather than from the mutants' source lines,
 /// because a guard emits the original text alongside the mutated one and so shifts every later
-/// line. Only primary spans are considered: a diagnostic's notes routinely point at the innocent
-/// declaration a mutated expression happened to misuse.
+/// line. Primary spans drive containment; secondary spans are accepted only when they intersect
+/// generated replacement text, because notes routinely point at innocent declarations.
 ///
 /// A diagnostic landing in some guard's mutated branch names its cause exactly, since that branch
 /// is the only text in the tree that is not a copy of the original and no two of them overlap.
-/// Failing that — a mutant can break code it merely encloses, and a deletion has no replacement
-/// text to land in — the innermost guarded site containing the diagnostic is blamed instead.
-/// Mutants sharing a site are withdrawn together, which can retire one that would have compiled;
-/// it is reported as unviable rather than dropped.
+/// A deletion has no replacement text to land in, so the innermost deleted site containing the
+/// diagnostic remains sufficient evidence. Containment involving a non-empty replacement is only
+/// a candidate: proof builds must isolate it before the mutant is reported as unviable.
 #[expect(clippy::too_many_lines, reason = "the attribution tiers share one parsed diagnostic walk")]
-pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, String> {
-    let mut blamed: HashMap<u32, String> = HashMap::default();
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u32, CompilerReason> {
+    let mut exact_blame: HashMap<u32, CompilerReason> = HashMap::default();
+    let mut deletion_blame: HashMap<u32, CompilerReason> = HashMap::default();
 
     // A failing build reports many diagnostics and a large workspace has many guards, so pairing
     // them off one at a time is quadratic. Grouping by file first makes the common case a lookup.
@@ -61,6 +99,7 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
             primary
         };
         let mut exact = HashSet::default();
+        let mut replacement_sites = HashSet::default();
         let mut enclosing: Option<(u32, HashSet<u32>)> = None;
         let mut contained: Option<(u32, HashSet<u32>)> = None;
 
@@ -95,9 +134,13 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
             };
 
             for (ordinal, guard) in here.iter().copied() {
+                if span.is_primary && guard.mutated.as_ref().is_some_and(|mutated| overlaps(mutated, &reported)) {
+                    let _ = replacement_sites.insert(ordinal);
+                }
+
                 if guard.mutated.as_ref().is_some_and(|mutated| covers(mutated, &reported)) {
                     let _ = exact.insert(ordinal);
-                } else if covers(&guard.site, &reported) {
+                } else if guard.mutated.is_none() && covers(&guard.site, &reported) {
                     let width = guard.site.end.line().saturating_sub(guard.site.start.line());
 
                     match &mut enclosing {
@@ -107,11 +150,11 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
                         Some((best, _ordinals)) if *best < width => {}
                         _ => enclosing = Some((width, HashSet::from_iter([ordinal]))),
                     }
-                } else if covers(&reported, &guard.site) {
+                } else if guard.mutated.is_none() && covers(&reported, &guard.site) {
                     // The diagnostic encloses the guard rather than the other way round, which is
                     // what a borrow checker error looks like: the guard makes some subexpression
                     // non-constant and the complaint lands on the whole construct that depended on
-                    // it. Every guard inside the smallest such region is a candidate, because
+                    // it. Every deletion inside the smallest such region is a candidate, because
                     // nothing narrower distinguishes them.
                     let width = reported.end.line().saturating_sub(reported.start.line());
 
@@ -130,7 +173,7 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
         // a secondary "expected because of this" span. A secondary span is too broad a basis for
         // enclosing-site attribution—it routinely names innocent declarations—but intersection
         // with a mutated branch is exact evidence: that text exists only because gamma emitted it.
-        if exact.is_empty() && enclosing.is_none() && contained.is_none() {
+        if exact.is_empty() {
             for span in diagnostic.spans.iter().filter(|span| !span.is_primary) {
                 let Some(file_name) = span.file_name.as_deref() else {
                     continue;
@@ -151,17 +194,17 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
             }
         }
 
-        // Preference runs from the most specific attribution to the least. The last is a blunt
-        // instrument and can retire mutants that would have compiled, but the alternative is a
-        // diagnostic nothing can be blamed for, which loses the entire run rather than a few
-        // mutants that are then reported as unviable.
-        let ordinals = if exact.is_empty() {
-            enclosing.or(contained).map(|(_width, ordinals)| ordinals)
+        let (ordinals, blamed) = if exact.is_empty() {
+            (
+                enclosing
+                    .or(contained)
+                    .map(|(_width, ordinals)| ordinals)
+                    .or_else(|| diverted(&diagnostic, root, &by_path)),
+                &mut deletion_blame,
+            )
         } else {
-            Some(exact)
+            (Some(exact), &mut exact_blame)
         };
-
-        let ordinals = ordinals.or_else(|| diverted(&diagnostic, root, &by_path));
 
         if let Some(ordinals) = ordinals {
             // The first diagnostic to name a mutant is the one kept. A single unviable mutant can
@@ -169,14 +212,97 @@ pub(super) fn blame(stdout: &str, root: &Utf8Path, guards: &Guards) -> HashMap<u
             // than the cause; the census is only worth reading if each mutant contributes the one
             // error that explains it.
             let code = diagnostic.code.as_ref().map_or("", |code| code.code.as_ref());
+            let category = normalize_category(&diagnostic.message);
 
             for ordinal in ordinals {
-                let _ = blamed.entry(ordinal).or_insert_with(|| code.to_owned());
+                let reason = CompilerReason {
+                    code: code.to_owned(),
+                    category: category.clone(),
+                    replacement_site: replacement_sites.contains(&ordinal),
+                };
+                let _ = blamed.entry(ordinal).or_insert(reason);
             }
         }
     }
 
-    blamed
+    // Exact generated-text evidence wins for the whole compiler batch. rustc commonly emits a
+    // root diagnostic followed by consequences whose broad spans cover neighboring guards. Taking
+    // deletion containment from those follow-ons in the same round would falsely withdraw siblings.
+    // If an independent deletion also fails, the next rollback round will expose and attribute it.
+    if exact_blame.is_empty() { deletion_blame } else { exact_blame }
+}
+
+/// Reduces rustc's primary message to a bounded category without retaining source or host text.
+///
+/// Dynamic values are conventionally quoted by rustc and become one placeholder. Path-shaped
+/// tokens become another, digit runs collapse, whitespace is normalized, and the result is capped.
+/// The category remains readable enough to distinguish type, ownership, and initialization
+/// failures while never becoming a copy of an arbitrarily long compiler message.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn normalize_category(message: &str) -> String {
+    const LIMIT: usize = 96;
+
+    let mut normalized = String::new();
+    let mut characters = message.chars().peekable();
+
+    while let Some(character) = characters.next() {
+        if matches!(character, '`' | '"') {
+            let delimiter = character;
+            for next in characters.by_ref() {
+                if next == delimiter {
+                    break;
+                }
+            }
+            push_piece(&mut normalized, "<value>", LIMIT);
+            continue;
+        }
+
+        if character.is_whitespace() {
+            if !normalized.ends_with(' ') && !normalized.is_empty() {
+                push_piece(&mut normalized, " ", LIMIT);
+            }
+            continue;
+        }
+
+        if character.is_ascii_digit() {
+            while characters.peek().is_some_and(char::is_ascii_digit) {
+                let _ = characters.next();
+            }
+            push_piece(&mut normalized, "#", LIMIT);
+            continue;
+        }
+
+        if character == '/' || character == '\\' {
+            while characters.peek().is_some_and(|next| !next.is_whitespace()) {
+                let _ = characters.next();
+            }
+            while normalized.chars().next_back().is_some_and(|last| !last.is_whitespace()) {
+                let _ = normalized.pop();
+            }
+            push_piece(&mut normalized, "<path>", LIMIT);
+            continue;
+        }
+
+        push_piece(&mut normalized, &character.to_string(), LIMIT);
+    }
+
+    let normalized = normalized.trim().trim_end_matches([':', ';', ',', '.']).trim();
+
+    if normalized.is_empty() {
+        "uncategorized compiler error".to_owned()
+    } else {
+        normalized.to_owned()
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn push_piece(target: &mut String, piece: &str, limit: usize) {
+    for character in piece.chars() {
+        if target.len().saturating_add(character.len_utf8()) > limit {
+            break;
+        }
+        target.push(character);
+    }
 }
 
 /// The rustc error codes whose diagnostics need not point anywhere near their cause.
@@ -225,10 +351,8 @@ pub(super) const FLOW_SENSITIVE: &[&str] = &[
 /// live, so a value moved earlier is now seen to be used again. A substitution changes what a value
 /// is, never where control goes.
 ///
-/// Falling back to every guard in the region is blunt and retires mutants that would have compiled.
-/// It is still the right trade, because the alternative is an unattributable error, which loses the
-/// entire run rather than a handful of mutants — and those are reported as unviable rather than
-/// silently dropped.
+/// Substitutions are never returned by this fallback. A non-empty replacement needs an exact span
+/// or an isolation build before it can be called compiler-unviable.
 pub(super) fn diverted(
     diagnostic: &CompilerMessage<'_>,
     root: &Utf8Path,
@@ -241,8 +365,6 @@ pub(super) fn diverted(
     }
 
     let mut deletions = HashSet::default();
-    let mut all = HashSet::default();
-
     for (file, region) in regions(diagnostic) {
         let relative = Utf8Path::new(file.as_str())
             .strip_prefix(root.as_str())
@@ -264,19 +386,13 @@ pub(super) fn diverted(
                 continue;
             }
 
-            let _ = all.insert(ordinal);
-
             if guard.mutated.is_none() {
                 let _ = deletions.insert(ordinal);
             }
         }
     }
 
-    if !deletions.is_empty() {
-        return Some(deletions);
-    }
-
-    if all.is_empty() { None } else { Some(all) }
+    if deletions.is_empty() { None } else { Some(deletions) }
 }
 
 /// The line span each file contributes to a diagnostic, notes and all.

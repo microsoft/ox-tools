@@ -175,7 +175,8 @@ impl Provider {
             return Err(ohno::app_err!("unexpected HTTP status {status} from {codecov_url}"));
         }
 
-        let text = response.text().await.into_app_err("reading codecov response body")?;
+        // #[gamma::skip(try.propagate_to_unwrap, tag = "external", reason = "reqwest body-read failures require a transport that disconnects after valid response headers; the deterministic classifier seam below verifies the returned context")]
+        let text = classify_response_text(response.text().await)?;
 
         log::debug!(target: LOG_TARGET, "Codecov SVG length: {} bytes", text.len());
 
@@ -206,6 +207,13 @@ impl Provider {
     }
 }
 
+fn classify_response_text<E>(result: core::result::Result<String, E>) -> Result<String>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    result.into_app_err_with(|| "reading codecov response body".to_owned())
+}
+
 /// Map a repository host to the Codecov service path segment.
 ///
 /// Codecov namespaces repositories by the forge that hosts them, so the segment must match
@@ -224,7 +232,34 @@ const fn codecov_service(host: &str) -> Option<&'static str> {
 #[cfg(test)]
 #[cfg(not(miri))]
 mod tests {
+    use semver::Version;
+
     use super::*;
+    use crate::facts::Progress;
+
+    #[derive(Debug)]
+    struct NoOpProgress;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    impl Progress for NoOpProgress {
+        fn set_phase(&self, _phase: &str) {}
+        fn set_determinate(&self, _callback: Box<dyn Fn() -> (u64, u64, String) + Send + Sync + 'static>) {}
+        fn set_indeterminate(&self, _callback: Box<dyn Fn() -> String + Send + Sync + 'static>) {}
+        fn println(&self, _msg: &str) {}
+        fn done(&self) {}
+    }
+
+    fn test_tracker() -> RequestTracker {
+        RequestTracker::new(&(Arc::new(NoOpProgress) as Arc<dyn Progress>))
+    }
+
+    fn repo_spec() -> RepoSpec {
+        RepoSpec::parse(&url::Url::parse("https://github.com/owner/repo").unwrap()).unwrap()
+    }
+
+    fn crate_spec(name: &str) -> CrateSpec {
+        CrateSpec::from_arcs_with_repo(Arc::from(name), Arc::new(Version::new(1, 0, 0)), repo_spec())
+    }
 
     #[test]
     fn test_codecov_service_mapping() {
@@ -292,15 +327,83 @@ mod tests {
 
     #[test]
     fn test_provider_new_default_base_url() {
-        let cache = Cache::new("/tmp/test", core::time::Duration::from_hours(1), false);
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, None);
         assert_eq!(provider.base_url, CODECOV_BASE_URL);
+        let debug = format!("{:?}", provider.throttler);
+        assert!(debug.contains("permits: 5"), "unexpected throttler state: {debug}");
     }
 
     #[test]
     fn test_provider_new_custom_base_url() {
-        let cache = Cache::new("/tmp/test", core::time::Duration::from_hours(1), false);
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(temp.path(), core::time::Duration::from_hours(1), false);
         let provider = Provider::new(cache, Some("https://custom.codecov.io"));
         assert_eq!(provider.base_url, "https://custom.codecov.io");
+    }
+
+    #[tokio::test]
+    async fn provider_sends_the_declared_user_agent() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("<text>73%</text>"))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let provider = Provider::new(Cache::new(temp.path(), core::time::Duration::MAX, false), Some(&server.uri()));
+
+        assert_eq!(provider.try_branch_coverage(&repo_spec(), "gh", "main").await.unwrap(), Some(73.0));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].headers.get("user-agent").unwrap().to_str().unwrap(), "cargo-aprz");
+    }
+
+    #[tokio::test]
+    async fn unknown_badge_wins_over_an_embedded_percentage() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("<text>unknown</text><text>73%</text>"))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let provider = Provider::new(Cache::new(temp.path(), core::time::Duration::MAX, false), Some(&server.uri()));
+
+        assert_eq!(provider.try_branch_coverage(&repo_spec(), "gh", "main").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn transport_errors_are_returned_instead_of_panicking() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider = Provider::new(Cache::new(temp.path(), core::time::Duration::MAX, false), Some("http://[::1"));
+
+        let error = provider.try_branch_coverage(&repo_spec(), "gh", "main").await.unwrap_err();
+
+        assert!(error.to_string().contains("sending HTTP request"), "{error}");
+    }
+
+    #[test]
+    fn truncated_response_reports_the_body_read_context() {
+        let error = classify_response_text(core::result::Result::<String, _>::Err(std::io::Error::other("truncated body"))).unwrap_err();
+        assert!(error.to_string().contains("reading codecov response body"), "{error}");
+        assert_eq!(error.source().map(ToString::to_string).as_deref(), Some("truncated body"));
+    }
+
+    #[tokio::test]
+    async fn coverage_requests_are_counted_by_distinct_repository() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let provider = Provider::new(Cache::new(temp.path(), core::time::Duration::MAX, false), Some(&server.uri()));
+        let tracker = test_tracker();
+        let crates: Arc<[CrateSpec]> = Arc::from(vec![crate_spec("one"), crate_spec("two")]);
+
+        assert_eq!(provider.get_coverage_data(crates, &tracker).await.count(), 2);
+        let debug = format!("{tracker:?}");
+        assert!(debug.contains("issued: 1"), "{debug}");
+        assert!(debug.contains("completed: 1"), "{debug}");
     }
 }

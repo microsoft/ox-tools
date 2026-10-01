@@ -178,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_path_cannot_escape_its_file_property() {
         let mutants = vec![mutant("/w/src/a,b:c\r\n.rs", 12, "relational.gt_to_ge", Outcome::Survived)];
         let lines = annotations(&mutants, &root());

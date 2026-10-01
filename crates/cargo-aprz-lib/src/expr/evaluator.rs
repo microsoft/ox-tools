@@ -78,6 +78,7 @@ pub fn evaluate(
     let has_weighted_points = eval.iter().any(|expr| expr.points().unwrap_or(1) > 0);
     let mut evaluated_positive_weight = false;
     let mut outcomes = high_risk_outcomes;
+    // #[gamma::skip(stmt.delete_call, tag = "trivial", reason = "reserve changes allocation behavior only and cannot affect the returned appraisal")]
     outcomes.reserve(eval.len());
 
     for expr in eval {
@@ -103,12 +104,9 @@ pub fn evaluate(
         ));
     }
 
-    if has_weighted_points
-        && !evaluated_positive_weight
-        && outcomes
-            .iter()
-            .any(|outcome| matches!(outcome.disposition, ExpressionDisposition::Failed(_)))
-    {
+    // A positive-weight expression only leaves `evaluated_positive_weight` false when evaluation
+    // failed, so the outcomes necessarily contain an inconclusive result here.
+    if has_weighted_points && !evaluated_positive_weight {
         return Appraisal::weighted_evaluation_failure(outcomes);
     }
 
@@ -168,8 +166,8 @@ fn build_cel_context(metrics: impl IntoIterator<Item: core::borrow::Borrow<Metri
     let mut context = Context::default();
 
     // Build nested map structure for dotted metric names
-    let mut root_map: crate::HashMap<&str, std::collections::HashMap<Arc<String>, Value>> = crate::hash_map_with_capacity(16);
-    let mut flat_vars: Vec<(&str, Value)> = Vec::with_capacity(16);
+    let mut root_map: crate::HashMap<&str, std::collections::HashMap<Arc<String>, Value>> = crate::HashMap::default();
+    let mut flat_vars: Vec<(&str, Value)> = Vec::new();
 
     for metric in metrics {
         let metric: &Metric = metric.borrow();
@@ -249,6 +247,34 @@ mod tests {
         );
         assert_eq!(outcome.risk, Risk::Low);
         assert!(outcome.expression_outcomes.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn implicit_one_point_checks_preserve_weight_and_failure_semantics() {
+        let passed = Expression::new("passed", None, "true", None).unwrap();
+        let outcome = evaluate(
+            &[],
+            &[passed],
+            std::iter::empty::<Metric>(),
+            test_timestamp(),
+            MEDIUM_THRESHOLD,
+            LOW_THRESHOLD,
+        );
+        assert_eq!(outcome.point_totals(), Some((1, 1)));
+        assert_eq!(outcome.weighted_score(), Some(100.0));
+
+        let failed = Expression::new("failed", None, "missing_metric > 0", None).unwrap();
+        let outcome = evaluate(
+            &[],
+            &[failed],
+            std::iter::empty::<Metric>(),
+            test_timestamp(),
+            MEDIUM_THRESHOLD,
+            LOW_THRESHOLD,
+        );
+        assert!(outcome.is_weighted_evaluation_failure());
+        assert_eq!(outcome.point_totals(), None);
     }
 
     #[test]
@@ -466,6 +492,8 @@ mod tests {
             appraisal.expression_outcomes[0].disposition,
             ExpressionDisposition::Failed(_)
         ));
+        assert_eq!(appraisal.risk(), Risk::High);
+        assert!(appraisal.is_required_check_failure());
     }
 
     #[test]

@@ -72,6 +72,7 @@ fn should_retry_response(result: &crate::Result<reqwest::Response>) -> RecoveryI
         Ok(resp) if resp.status().is_server_error() => RecoveryInfo::retry(),
 
         // Rate-limited (429) – honor Retry-After if present, otherwise default to 5s.
+        // #[gamma::skip(match_guard.always_true, tag = "timeout", reason = "treating every non-server response as rate limited repeatedly incurs retry delays")]
         Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
             let delay = parse_retry_after(resp.headers()).unwrap_or(5);
             RecoveryInfo::retry().delay(Duration::from_secs(delay))
@@ -91,11 +92,11 @@ fn should_retry_response(result: &crate::Result<reqwest::Response>) -> RecoveryI
 /// Retries on network errors, `5xx`, and 429 responses with exponential backoff.
 pub async fn resilient_get(client: &reqwest::Client, url: &str) -> crate::Result<reqwest::Response> {
     let clock = Clock::new_tokio();
-    let context = ResilienceContext::new(&clock).name("http_get");
+    let context = ResilienceContext::new(&clock).name(stringify!(http_get));
 
     let client = client.clone();
     let service = (
-        Retry::layer("retry", &context)
+        Retry::layer(stringify!(retry), &context)
             .clone_input()
             .recovery_with(|result: &crate::Result<reqwest::Response>, _| should_retry_response(result))
             .max_retry_attempts(MAX_RETRY_ATTEMPTS)
@@ -108,7 +109,7 @@ pub async fn resilient_get(client: &reqwest::Client, url: &str) -> crate::Result
                     args.retry_delay().as_millis(),
                 );
             }),
-        Timeout::layer("timeout", &context)
+        Timeout::layer(stringify!(timeout), &context)
             .timeout_error(|_| app_err!("HTTP request timed out"))
             .timeout(DEFAULT_REQUEST_TIMEOUT),
         Execute::new(move |url: String| {
@@ -146,7 +147,7 @@ where
     let timeout_duration = timeout.unwrap_or(DEFAULT_DOWNLOAD_TIMEOUT);
 
     let service = (
-        Retry::layer("retry", &context)
+        Retry::layer(stringify!(retry), &context)
             .clone_input()
             .recovery_with(|result: &crate::Result<Out>, _| match result {
                 Err(_) => RecoveryInfo::retry(),
@@ -162,7 +163,7 @@ where
                     args.retry_delay().as_millis(),
                 );
             }),
-        Timeout::layer("timeout", &context)
+        Timeout::layer(stringify!(timeout), &context)
             .timeout_error(|_| app_err!("download timed out"))
             .timeout(timeout_duration),
         Execute::new(move |input: In| {
@@ -271,6 +272,42 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.text().await.unwrap(), "ok");
+    }
+
+    async fn retry_classification(template: ResponseTemplate) -> RecoveryInfo {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(template).mount(&server).await;
+        let result = reqwest::Client::new().get(server.uri()).send().await.map_err(ohno::AppError::from);
+        should_retry_response(&result)
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "requires network I/O")]
+    async fn rate_limit_retry_delay_uses_the_header_or_exact_default() {
+        let explicit = retry_classification(ResponseTemplate::new(429).insert_header("retry-after", "17")).await;
+        assert_eq!(explicit.kind(), RecoveryKind::Retry);
+        assert_eq!(explicit.get_delay(), Some(Duration::from_secs(17)));
+
+        let defaulted = retry_classification(ResponseTemplate::new(429)).await;
+        assert_eq!(defaulted.kind(), RecoveryKind::Retry);
+        assert_eq!(defaulted.get_delay(), Some(Duration::from_secs(5)));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "requires network I/O")]
+    async fn get_uses_exactly_the_configured_number_of_retries() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(immediate_retry_after(429))
+            .mount(&server)
+            .await;
+
+        let response = resilient_get(&reqwest::Client::new(), &server.uri())
+            .await
+            .expect("HTTP responses are returned after retry exhaustion");
+
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(server.received_requests().await.expect("wiremock records requests").len(), 4);
     }
 
     #[tokio::test]
@@ -414,5 +451,41 @@ mod tests {
 
         assert_eq!(result, "input");
         assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "requires tokio timers")]
+    async fn download_honors_a_custom_timeout() {
+        let error = resilient_download("test_download", (), Some(Duration::from_millis(1)), delayed_success)
+            .await
+            .expect_err("every attempt must exceed the custom timeout");
+
+        assert!(error.to_string().contains("download timed out"), "{error}");
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn delayed_success(_unit: ()) -> crate::Result<()> {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore = "requires tokio timers")]
+    async fn download_uses_exactly_the_configured_number_of_retries() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&attempts);
+
+        let error = resilient_download("test_download", (), Some(Duration::from_secs(30)), move |()| {
+            let counter = Arc::clone(&counter);
+            async move {
+                let _ = counter.fetch_add(1, Ordering::Relaxed);
+                Err::<(), _>(app_err!("always fails"))
+            }
+        })
+        .await
+        .expect_err("all attempts fail");
+
+        assert!(error.to_string().contains("always fails"), "{error}");
+        assert_eq!(attempts.load(Ordering::Relaxed), 4);
     }
 }

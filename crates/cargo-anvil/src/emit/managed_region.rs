@@ -165,9 +165,10 @@ pub fn plan_managed_region(
     };
     let disk_checksum = disk_region.as_ref().map(|region| checksum_str(region.body_str()));
     let needs_reposition = placement == RegionPlacement::Start
-        && disk_region
-            .as_ref()
-            .is_some_and(|region| region.start_line.start != start_region_offset(host_text.unwrap_or(""), syntax));
+        && disk_region.as_ref().is_some_and(|region| {
+            let text = host_text.expect("disk_region can only be present when host_text was present");
+            region.start_line.start != start_region_offset(text, syntax)
+        });
 
     let target = Target::Region {
         host: host_relpath.to_owned(),
@@ -265,12 +266,12 @@ pub fn toml_introduction_refusal(
         newline,
     } = request;
     if !is_toml_host(host_relpath) {
-        return None;
+        return Option::default();
     }
     let base = host_text.unwrap_or("");
     // A malformed region is a separate diagnosis, raised by the planner.
     if find_region(base, region_id, syntax).is_err() {
-        return None;
+        return Option::default();
     }
 
     let spliced = match splice(host_relpath, host_text, region_id, rendered_body, syntax, placement, newline) {
@@ -505,6 +506,14 @@ mod tests {
             refusal(Some(host), request("deny.toml", "r", body)),
             None,
             "an unreadable region is the planner's diagnosis, not this one's"
+        );
+    }
+
+    #[test]
+    fn a_missing_host_is_not_classified_as_already_unparsable() {
+        assert_eq!(
+            remedy(None, request("deny.toml", "r", "[invalid")),
+            Some(RefusalRemedy::HandWrittenTable)
         );
     }
 
@@ -870,13 +879,13 @@ yanked = \"deny\"
     /// this test rather than passing it by accident.
     #[test]
     fn a_non_toml_host_is_not_subject_to_table_adoption() {
-        let host = "[not-a-table]\nbody\n";
-        let item = plan_managed_region(&Manifest::default(), Some(host), request("Justfile", "r", "[not-a-table]\nbody\n")).unwrap();
+        let host = "[recipe]\ncommand = \"cargo test\"\n";
+        let item = plan_managed_region(&Manifest::default(), Some(host), request("Justfile", "r", host)).unwrap();
 
         let spliced = item.spliced_host.as_deref().unwrap();
-        assert!(
-            spliced.starts_with("[not-a-table]\nbody\n"),
-            "host content is preserved verbatim:\n{spliced}"
+        assert_eq!(
+            spliced,
+            "[recipe]\ncommand = \"cargo test\"\n\n# >>> anvil-managed: r\n[recipe]\ncommand = \"cargo test\"\n# <<< anvil-managed: r\n"
         );
     }
 
@@ -903,7 +912,7 @@ yanked = \"deny\"
         let body = "trip_wire_patterns = []\n";
         let host = "[git]\nremote_branch = \"origin/main\"\n\n# >>> anvil-managed: r\ntrip_wire_patterns = []\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
-        manifest.set_region("delta.toml", "r", checksum_str(body));
+        manifest.set_region("delta.toml", "r", "sha256:stale");
 
         let item = plan_managed_region(
             &manifest,
@@ -917,6 +926,24 @@ yanked = \"deny\"
 
         assert_eq!(item.decision, Decision::Write);
         assert!(item.spliced_host.as_deref().unwrap().starts_with("# >>> anvil-managed: r"));
+    }
+
+    #[test]
+    fn explicit_newline_overrides_the_host_newline() {
+        let item = plan_managed_region(
+            &Manifest::default(),
+            Some("user content\n"),
+            ManagedRegionRequest {
+                newline: Some("\r\n"),
+                ..request("Justfile", "r", "body\n")
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            item.spliced_host.as_deref(),
+            Some("user content\n\r\n# >>> anvil-managed: r\r\nbody\r\n# <<< anvil-managed: r\r\n")
+        );
     }
 
     #[test]
@@ -1003,6 +1030,36 @@ yanked = \"deny\"
         let host = "# >>> anvil-managed: r\nbody\n";
 
         let refusal = plan_managed_region(&Manifest::default(), Some(host), request("Justfile", "r", "body\n")).unwrap_err();
+
+        assert_eq!(refusal.remedy, RefusalRemedy::MalformedMarkers);
+    }
+
+    #[test]
+    fn splice_propagates_an_unpaired_marker_error() {
+        let refusal = splice(
+            "Justfile",
+            Some("# >>> anvil-managed: r\nbody\n"),
+            "r",
+            "new body\n",
+            SYN,
+            RegionPlacement::End,
+            None,
+        )
+        .expect_err("an unpaired marker must be returned as a planning refusal");
+
+        assert_eq!(refusal.remedy, RefusalRemedy::MalformedMarkers);
+    }
+
+    #[test]
+    fn an_unpaired_legacy_marker_is_classified_as_a_marker_fault() {
+        let host = "# >>> anvil-managed: anvil-workspace-lints\nbody\n";
+
+        let refusal = plan_managed_region(
+            &Manifest::default(),
+            Some(host),
+            request("Cargo.toml", "anvil-workspace-rust-lints", "[workspace.lints.rust]\n"),
+        )
+        .unwrap_err();
 
         assert_eq!(refusal.remedy, RefusalRemedy::MalformedMarkers);
     }

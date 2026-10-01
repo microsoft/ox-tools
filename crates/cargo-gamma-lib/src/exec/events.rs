@@ -1,15 +1,54 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use core::time::Duration;
-
 use camino::Utf8Path;
+use serde::Serialize;
 
 use super::session::Session;
 use crate::Result;
 use crate::discover::Plan;
-use crate::estimate::{Estimate, MutationWork};
+use crate::estimate::MutationWork;
 use crate::model::Mutant;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SelectionTier {
+    Exact,
+    Item,
+    Reach,
+    File,
+    Census,
+    Selected,
+    Whole,
+    HintedFallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SelectionResult {
+    Hit,
+    Miss,
+    Inconclusive,
+}
+
+/// One test-selection attempt, retained so a completed campaign can be replayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[doc(hidden)]
+pub struct SelectionAttempt {
+    pub(crate) ordinal: u32,
+    pub(crate) tier: SelectionTier,
+    pub(crate) package: String,
+    pub(crate) target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) test: Option<String>,
+    pub(crate) rank: usize,
+    pub(crate) result: SelectionResult,
+    /// Whether the process ran the complete test binary rather than a selected test set.
+    pub(crate) all_tests: bool,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) fallback_ms: u64,
+}
 
 /// Progress notifications, so this module needs to know nothing about terminals.
 pub trait Events {
@@ -80,27 +119,46 @@ pub trait Events {
     /// should perhaps not be. It is also the one kind of progress that has to survive the display
     /// being off: the display resolves to whether a terminal is attached, and a CI job is exactly
     /// where a run that quietly takes six hours is least affordable and least visible.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn warn(&mut self, _message: &str) {}
 
     /// A mutant finished.
     fn mutant(&mut self, mutant: &Mutant);
 
+    /// One candidate or canonical test selection completed.
+    fn selection_attempt(&mut self, _attempt: &SelectionAttempt) {}
+
+    /// Baseline measurement is complete and the sweep is being prepared.
+    ///
+    /// This boundary is deliberately earlier than [`Self::sweep_planned`]: reachability,
+    /// optional census work, hint loading, scheduling-cost construction, and queue construction
+    /// can take long enough that leaving the terminal unchanged makes a healthy run look stalled.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn sweep_planning(&mut self, _plan: &Plan, _binaries: usize, _jobs: usize) {}
+
+    /// One pending mutant's scheduling work has been constructed.
+    fn sweep_plan_progress(&mut self, _completed: usize, _total: usize) {}
+
     /// The sweep has fixed its queue and measured the work represented by every pending mutant.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sweep_planned(&mut self, _work: &[MutationWork], _jobs: usize) {}
 
-    /// A worker began evaluating one mutant at the given offset from the start of the sweep.
-    fn mutant_started(&mut self, _ordinal: u32, _elapsed: Duration) {}
+    /// A worker began evaluating one mutant.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn mutant_started(&mut self) {}
+
+    /// The sweep is still waiting for workers, allowing time-dependent displays to refresh.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn heartbeat(&mut self) {}
 
     /// The fixed cost is paid, the tree compiles, and the first mutant is about to be tested.
-    ///
-    /// The only moment at which a projection of the run is both possible and useful: everything
-    /// before it is measured, everything after it is the wait the user is deciding whether to sit
-    /// through, so the projection is handed over here rather than recomputed by whoever wants it.
-    fn measured(&mut self, _plan: &Plan, _session: &Session, _estimate: &Estimate) {}
+    fn measured(&mut self, _plan: &Plan, _session: &Session) {}
 }
 
 #[cfg(test)]
 mod tests {
+    use core::time::Duration;
+
     use camino::Utf8PathBuf;
 
     use super::*;
@@ -144,32 +202,16 @@ mod tests {
             ordering: crate::exec::OrderingHints::default(),
             phases: crate::exec::Phases::default(),
         };
-        let estimate = Estimate {
-            live: 0,
-            withdrawn: 0,
-            build: Duration::ZERO,
-            baseline: Duration::ZERO,
-            mutants: Duration::ZERO,
-            settled: Duration::ZERO,
-            stalling: Duration::ZERO,
-            jobs: 1,
-            worst: Duration::ZERO,
-        };
-        let work = [MutationWork::new(
-            7,
-            crate::estimate::WorkKind::Whole,
-            Duration::from_secs(1),
-            Duration::from_secs(10),
-            crate::exec::CONFIRM_FACTOR,
-        )];
+        let work = [MutationWork::new(crate::estimate::WorkKind::Whole, Duration::from_secs(1))];
 
         events.begin("Doing", "Done", "the thing");
         events.end(", done");
         events.complete("the result");
         events.outcome(", noted");
-        events.measured(&plan, &session, &estimate);
+        events.measured(&plan, &session);
         events.sweep_planned(&work, 3);
-        events.mutant_started(7, Duration::from_millis(9));
+        events.mutant_started();
+        events.heartbeat();
         events.mutant(&mutant());
 
         // Implementors only have to provide the primitive rendering hooks; the default helpers
@@ -185,7 +227,8 @@ mod tests {
         );
         assert_eq!(events.mutants, 1);
         assert_eq!(events.sweep_plan, Some((1, 3)));
-        assert_eq!(events.mutant_starts, [(7, Duration::from_millis(9))]);
+        assert_eq!(events.mutant_starts, 1);
+        assert_eq!(events.heartbeats, 1);
     }
 
     /// The one hook with no default has to be routed by the implementor, not by the trait.

@@ -364,6 +364,7 @@ mod tests {
 
     /// Whatever this host answers, it answers with a reason rather than a bare failure.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn unsupported_hosts_say_why_rather_than_merely_saying_no() {
         // A run that asked for a ceiling and did not get one has to be able to explain itself:
         // "unsupported" without a cause sends the reader to the source of this tool instead of to

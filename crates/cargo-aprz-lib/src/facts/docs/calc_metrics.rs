@@ -177,7 +177,7 @@ where
             let examples = fences / 2; // Divide by 2 since each codebase block has opening and closing fence
             number_of_examples_in_docs += examples;
 
-            let broken = count_broken_links::<Item::Id>(docs, item.links(), item.name());
+            let broken = count_broken_links::<Item::Id>(docs, item.links());
             broken_doc_links += broken;
 
             if let Some(name) = item.name()
@@ -221,7 +221,7 @@ where
 /// Handles reference-style link definitions where the link text in the docs
 /// (e.g., `` [`anyhow::Error::from_boxed`] ``) is defined to resolve to a different target
 /// (e.g., `Self::from_boxed`) via a line like: `` [`anyhow::Error::from_boxed`]: Self::from_boxed ``
-fn count_broken_links<Id>(docs: &str, resolved_links: &std::collections::HashMap<String, Id>, _item_name: Option<&str>) -> u64 {
+fn count_broken_links<Id>(docs: &str, resolved_links: &std::collections::HashMap<String, Id>) -> u64 {
     let mut broken_count = 0;
     let mut skipped_inline = 0;
     let mut skipped_external = 0;
@@ -587,6 +587,14 @@ mod tests {
     }
 
     #[test]
+    fn indented_code_fences_count_as_examples() {
+        let json = make_rustdoc_json("my_crate", Some("  ```rust\nlet x = 1;\n  ```\n"), &[]);
+        let reader = serde_json::to_vec(&json).unwrap();
+        let data = calculate_docs_metrics(reader.as_slice(), &crate_spec("my_crate")).unwrap();
+        assert_eq!(data.metrics.examples_in_docs, 1);
+    }
+
+    #[test]
     fn full_coverage_when_all_items_documented() {
         let json = make_rustdoc_json("my_crate", Some("Crate docs"), &[make_public_struct(1, "Foo", Some("Foo docs"))]);
         let reader = serde_json::to_vec(&json).unwrap();
@@ -631,9 +639,11 @@ mod tests {
 
     #[test]
     fn malformed_document_body_is_an_error() {
-        let bytes = serde_json::to_vec(&json!({ "format_version": 57 })).unwrap();
-        let err = calculate_docs_metrics(bytes.as_slice(), &crate_spec("my_crate")).unwrap_err();
-        assert!(err.to_string().contains("parsing rustdoc JSON"), "{err}");
+        for version in 50..=57 {
+            let bytes = serde_json::to_vec(&json!({ "format_version": version })).unwrap();
+            let err = calculate_docs_metrics(bytes.as_slice(), &crate_spec("my_crate")).unwrap_err();
+            assert!(err.to_string().contains("parsing rustdoc JSON"), "version {version}: {err}");
+        }
     }
 
     #[test]
@@ -820,7 +830,7 @@ mod tests {
 
     #[test]
     fn unresolved_link_counts_as_broken() {
-        let broken = count_broken_links::<u32>("See [`MissingType`] for details.", &links(&[]), None);
+        let broken = count_broken_links::<u32>("See [`MissingType`] for details.", &links(&[]));
         assert_eq!(broken, 1);
     }
 
@@ -830,96 +840,137 @@ mod tests {
         // install one that evaluates and discards every record.
         crate::facts::test_logging::enable_log_argument_evaluation();
 
-        let broken = count_broken_links::<u32>("See [`MissingType`] and [`KnownType`].", &links(&["KnownType"]), None);
+        let broken = count_broken_links::<u32>("See [`MissingType`] and [`KnownType`].", &links(&["KnownType"]));
         assert_eq!(broken, 1);
     }
 
     #[test]
     fn directly_resolved_link_is_not_broken() {
-        let broken = count_broken_links::<u32>("See [`KnownType`].", &links(&["KnownType"]), None);
+        let broken = count_broken_links::<u32>("See [`KnownType`].", &links(&["KnownType"]));
+        assert_eq!(broken, 0);
+    }
+
+    #[test]
+    fn direct_resolution_is_distinct_from_parenthesis_resolution() {
+        let broken = count_broken_links::<u32>("See [`KnownType()`].", &links(&["KnownType()"]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn backtick_quoted_key_resolves_link() {
-        let broken = count_broken_links::<u32>("See [`KnownType`].", &links(&["`KnownType`"]), None);
+        let broken = count_broken_links::<u32>("See [`KnownType`].", &links(&["`KnownType`"]));
+        assert_eq!(broken, 0);
+    }
+
+    #[test]
+    fn backtick_resolution_is_required_when_no_plain_key_exists() {
+        let broken = count_broken_links::<u32>("See [`QuotedOnly`].", &links(&["`QuotedOnly`"]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn method_link_resolves_without_trailing_parens() {
-        let broken = count_broken_links::<u32>("See [`KnownType()`].", &links(&["KnownType"]), None);
+        let broken = count_broken_links::<u32>("See [`KnownType()`].", &links(&["KnownType"]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn method_link_resolves_to_backtick_quoted_key_without_trailing_parens() {
-        let broken = count_broken_links::<u32>("See [`KnownType()`].", &links(&["`KnownType`"]), None);
+        let broken = count_broken_links::<u32>("See [`KnownType()`].", &links(&["`KnownType`"]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn inline_links_are_skipped() {
-        let broken = count_broken_links::<u32>("See [`docs`](https://example.com) here.", &links(&[]), None);
+        let broken = count_broken_links::<u32>("See [`docs`](https://example.com) here.", &links(&[]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn external_links_are_skipped() {
-        let broken = count_broken_links::<u32>("See [`https://example.com/page`].", &links(&[]), None);
+        let broken = count_broken_links::<u32>("See [`https://example.com/page`].", &links(&[]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn very_short_links_are_skipped() {
-        let broken = count_broken_links::<u32>("Compare [`ab`] and [`x`].", &links(&[]), None);
+        let broken = count_broken_links::<u32>("Compare [`ab`] and [`x`].", &links(&[]));
         assert_eq!(broken, 0);
     }
 
     #[test]
+    fn three_character_links_are_not_treated_as_short() {
+        assert_eq!(count_broken_links::<u32>("See [`abc`].", &links(&[])), 1);
+    }
+
+    #[test]
+    fn code_blocks_and_malformed_inline_references_are_handled_exactly() {
+        assert_eq!(
+            count_broken_links::<u32>("```\n[`Hidden`]\n```\nVisible [`Shown`].", &links(&[])),
+            1
+        );
+        assert_eq!(count_broken_links::<u32>("See [`Alias`][unterminated.", &links(&[])), 1);
+        assert_eq!(count_broken_links::<u32>("See [`Alias`]suffix.", &links(&[])), 1);
+    }
+
+    #[test]
     fn inline_reference_target_resolves_link() {
-        let broken = count_broken_links::<u32>("See [`Alias`][real_target].", &links(&["real_target"]), None);
+        let broken = count_broken_links::<u32>("See [`Alias`][real_target].", &links(&["real_target"]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn reference_definition_resolves_link() {
         let docs = "See [`anyhow::Error::from_boxed`].\n\n[`anyhow::Error::from_boxed`]: Self::from_boxed\n";
-        let broken = count_broken_links::<u32>(docs, &links(&["Self::from_boxed"]), None);
+        let broken = count_broken_links::<u32>(docs, &links(&["Self::from_boxed"]));
+        assert_eq!(broken, 0);
+    }
+
+    #[test]
+    fn final_reference_definition_strategy_resolves_a_link() {
+        let docs = "See [`AliasOnly`].\n\n[`AliasOnly`]: ActualTarget\n";
+        let broken = count_broken_links::<u32>(docs, &links(&["ActualTarget"]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn reference_definition_resolves_link_with_trailing_parens() {
         let docs = "See [`Error::chain()`].\n\n[`Error::chain`]: Self::chain\n";
-        let broken = count_broken_links::<u32>(docs, &links(&["Self::chain"]), None);
+        let broken = count_broken_links::<u32>(docs, &links(&["Self::chain"]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn last_path_component_resolves_link() {
-        let broken = count_broken_links::<u32>("See [`std::error::Error`].", &links(&["Error"]), None);
+        let broken = count_broken_links::<u32>("See [`std::error::Error`].", &links(&["Error"]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn unresolved_qualified_path_counts_as_broken() {
-        let broken = count_broken_links::<u32>("See [`missing::Type`].", &links(&[]), None);
+        let broken = count_broken_links::<u32>("See [`missing::Type`].", &links(&[]));
         assert_eq!(broken, 1);
     }
 
     #[test]
     fn last_path_component_resolves_through_reference_definition() {
         let docs = "See [`std::error::Error`].\n\n[`Error`]: Self::Error\n";
-        let broken = count_broken_links::<u32>(docs, &links(&["Self::Error"]), None);
+        let broken = count_broken_links::<u32>(docs, &links(&["Self::Error"]));
         assert_eq!(broken, 0);
     }
 
     #[test]
     fn links_inside_code_blocks_are_ignored() {
         let docs = "```rust\nlet x = [`NotALink`];\n```\n";
-        let broken = count_broken_links::<u32>(docs, &links(&[]), None);
+        let broken = count_broken_links::<u32>(docs, &links(&[]));
         assert_eq!(broken, 0);
+    }
+
+    #[test]
+    fn removing_a_code_block_preserves_adjacent_link_syntax() {
+        let docs = "[`Missing```text\nignored\n```Type`]";
+        let broken = count_broken_links::<u32>(docs, &links(&[]));
+        assert_eq!(broken, 1);
     }
 
     #[test]
@@ -944,7 +995,6 @@ mod tests {
         let broken = count_broken_links::<u32>(
             docs,
             &links(&["KnownOne", "KnownTwo", "KnownThree", "KnownFour", "KnownFive", "KnownSix"]),
-            None,
         );
         assert_eq!(broken, 2);
     }
@@ -980,7 +1030,6 @@ mod tests {
         let broken = count_broken_links::<u32>(
             docs,
             &links(&["KnownOne", "KnownTwo", "KnownThree", "KnownFour", "KnownFive", "KnownSix"]),
-            None,
         );
         assert_eq!(broken, 2);
 

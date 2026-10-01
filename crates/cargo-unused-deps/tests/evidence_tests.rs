@@ -568,7 +568,10 @@ fn several_development_targets_each_testify_separately() {
     let report = fixture.report();
 
     for used in ["bya", "byb", "bybench", "byexample"] {
-        assert!(!report.contains(used), "{used} is used by one development target: {report}");
+        assert!(
+            !report.contains(&format!("[dev-dependencies] {used}:")),
+            "{used} is used by one development target: {report}"
+        );
     }
     assert!(report.contains("dead: no compiled unit loaded it"), "unexpected report: {report}");
 }
@@ -873,12 +876,22 @@ fn the_tools_own_catalog_is_clean() {
         .arg(&manifest)
         .output()
         .expect("failed to execute the binary");
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(
-        output.status.success(),
-        "this repository's catalog should be clean: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    if output.status.success() {
+        return;
+    }
+
+    if std::env::var_os("CARGO_GAMMA").is_some() {
+        assert!(
+            stderr.contains("Found 2 unused workspace dependencies")
+                && stderr.contains("- gamma_rt")
+                && stderr.contains("- cargo-gamma-rt"),
+            "the instrumented catalog should differ only by cargo-gamma's two injected runtime dependencies: {stderr}"
+        );
+    } else {
+        panic!("this repository's catalog should be clean: {stderr}");
+    }
 }
 
 #[test]

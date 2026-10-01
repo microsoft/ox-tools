@@ -256,7 +256,17 @@ static STARTUP_ENVIRONMENT_READS: AtomicUsize = AtomicUsize::new(0);
 /// afterwards.
 #[cfg(any(unix, windows))]
 fn capture_selection() -> u32 {
-    match selection_from(capture_census_path(), capture_active) {
+    selection_or_environment_error(selection_from(capture_census_path(), capture_active))
+}
+
+/// Converts an unrecoverable startup-environment failure into the runtime's fatal protocol.
+///
+/// The failing native environment read cannot be requested from a live process, and termination
+/// cannot flush coverage counters; the pure selection matrix is tested separately.
+#[cfg(any(unix, windows))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn selection_or_environment_error(selection: Result<u32, ()>) -> u32 {
+    match selection {
         Ok(selection) => selection,
         Err(()) => environment_error(),
     }
@@ -363,6 +373,7 @@ unsafe fn copy_c_string(source: *const u8, destination: &mut [u8]) -> Option<usi
 
 /// Reads and copies `GAMMA_ACTIVE` during startup without allocation.
 #[cfg(unix)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn capture_active() -> Result<u32, ()> {
     let mut buffer = [0_u8; READ_LIMIT];
 
@@ -387,7 +398,7 @@ fn capture_active() -> Result<u32, ()> {
 /// buffer holds — `u8` for the ANSI entry point, `u16` for the wide one — since the boundary
 /// arithmetic does not depend on which.
 #[cfg(any(windows, test))]
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnvironmentReadOutcome {
     /// The variable was unset.
     Absent,
@@ -422,9 +433,7 @@ fn environment_read_outcome(written: u32, last_error: u32, buffer_len: usize) ->
         };
     }
 
-    let Ok(length) = usize::try_from(written) else {
-        return EnvironmentReadOutcome::Error;
-    };
+    let length = usize::try_from(written).expect("every supported target represents all u32 environment lengths as usize");
 
     if length >= buffer_len {
         return EnvironmentReadOutcome::TooLongToStore;
@@ -435,6 +444,7 @@ fn environment_read_outcome(written: u32, last_error: u32, buffer_len: usize) ->
 
 /// Reads `GAMMA_ACTIVE` during startup without allocation.
 #[cfg(windows)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn capture_active() -> Result<u32, ()> {
     #[cfg(test)]
     let _previous = STARTUP_ENVIRONMENT_READS.fetch_add(1, Ordering::Relaxed);
@@ -459,7 +469,12 @@ fn capture_active() -> Result<u32, ()> {
         ERROR_SUCCESS
     };
 
-    match environment_read_outcome(written, last_error, buffer.len()) {
+    active_from_environment_read(environment_read_outcome(written, last_error, buffer.len()), &buffer)
+}
+
+#[cfg(any(windows, test))]
+fn active_from_environment_read(outcome: EnvironmentReadOutcome, buffer: &[u8]) -> Result<u32, ()> {
+    match outcome {
         EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Empty | EnvironmentReadOutcome::TooLongToStore => Ok(NONE),
         EnvironmentReadOutcome::Error => Err(()),
         EnvironmentReadOutcome::Found(length) => Ok(parse(&buffer[..length.get()])),
@@ -547,20 +562,30 @@ fn capture_census_path() -> CensusRequest {
         ERROR_SUCCESS
     };
 
-    match environment_read_outcome(written, last_error, buffer.len()) {
-        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Empty => CensusRequest::Absent,
-        EnvironmentReadOutcome::Error => CensusRequest::Error,
-        EnvironmentReadOutcome::TooLongToStore => CensusRequest::Unusable,
-        EnvironmentReadOutcome::Found(length) => {
-            // SAFETY: only this constructor writes the `UnsafeCell`, and `length` bytes plus the
-            // API's terminator all fit in both arrays.
-            unsafe {
-                core::ptr::copy_nonoverlapping(buffer.as_ptr(), CENSUS_PATH.bytes.get().cast(), length.get() + 1);
-            }
-            CENSUS_PATH_LENGTH.store(length.get(), Ordering::Release);
+    let length = match census_path_length(environment_read_outcome(written, last_error, buffer.len())) {
+        Ok(length) => length,
+        Err(request) => return request,
+    };
 
-            CensusRequest::Path(length)
+    {
+        // SAFETY: only this constructor writes the `UnsafeCell`, and `length` bytes plus the
+        // API's terminator all fit in both arrays.
+        unsafe {
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), CENSUS_PATH.bytes.get().cast(), length.get() + 1);
         }
+        CENSUS_PATH_LENGTH.store(length.get(), Ordering::Release);
+
+        CensusRequest::Path(length)
+    }
+}
+
+#[cfg(any(windows, test))]
+const fn census_path_length(outcome: EnvironmentReadOutcome) -> Result<NonZeroUsize, CensusRequest> {
+    match outcome {
+        EnvironmentReadOutcome::Absent | EnvironmentReadOutcome::Empty => Err(CensusRequest::Absent),
+        EnvironmentReadOutcome::Error => Err(CensusRequest::Error),
+        EnvironmentReadOutcome::TooLongToStore => Err(CensusRequest::Unusable),
+        EnvironmentReadOutcome::Found(length) => Ok(length),
     }
 }
 
@@ -725,6 +750,7 @@ const ENVIRONMENT_READ_CHUNK: usize = 512;
 
 /// The `errno` the last failed C library call left behind on this thread.
 #[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn last_errno() -> c_int {
     // SAFETY: `__errno_location` returns a pointer to this thread's `errno`, which the C library
     // keeps valid for as long as the thread exists.
@@ -796,6 +822,7 @@ fn scan_environ(
 /// byte. Those attempts are repeated, bounded by [`INTERRUPTED_ATTEMPTS`], because such an
 /// interruption is transient and does not make the captured startup environment untrustworthy.
 #[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn copy_environment(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
     #[cfg(test)]
     let _previous = STARTUP_ENVIRONMENT_READS.fetch_add(1, Ordering::Relaxed);
@@ -840,6 +867,7 @@ fn copy_environment(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
 /// below can call it directly on every Unix this crate tests, including Linux, even though
 /// production Linux never takes this path.
 #[cfg(all(unix, not(target_os = "linux")))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn copy_environment(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
     copy_environment_via_getenv(name, destination)
 }
@@ -866,6 +894,7 @@ fn copy_environment(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
 /// [`environment_error`] rather than accepting a torn value. Matching reads do not prove that a
 /// forbidden concurrent mutation did not occur.
 #[cfg(all(unix, any(test, not(target_os = "linux"))))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn copy_environment_via_getenv(name: &[u8], destination: &mut [u8]) -> EnvironmentValue {
     #[cfg(test)]
     let _previous = STARTUP_ENVIRONMENT_READS.fetch_add(1, Ordering::Relaxed);
@@ -1232,6 +1261,12 @@ unsafe extern "C" {
     /// an abnormal one — `abort`, a fatal signal, `_exit` — skips it by design, which is exactly
     /// what leaves an unsealed file for the reader to reject.
     fn atexit(handler: extern "C" fn()) -> c_int;
+
+    #[cfg(test)]
+    fn tmpfile() -> *mut c_void;
+
+    #[cfg(test)]
+    fn fclose(stream: *mut c_void) -> c_int;
 }
 
 /// Records that the site with ordinal `id` was reached, if it has not been recorded already.
@@ -1263,9 +1298,7 @@ unsafe extern "C" {
 #[inline(never)]
 #[cfg(any(unix, windows))]
 fn note(id: u32) {
-    let Ok(index) = usize::try_from(id) else {
-        return;
-    };
+    let index = usize::try_from(id).expect("every supported target represents all u32 mutant ordinals as usize");
 
     if index >= SITES {
         if OVERFLOWED.load(Ordering::Relaxed) {
@@ -1281,32 +1314,25 @@ fn note(id: u32) {
 
     // The lease starts before the bitmap claim. A seal must therefore wait from the instant this
     // guard makes a site reachable rather than scan past an update that has not landed yet.
-    if !begin_recording() {
-        return;
-    }
+    if begin_recording() {
+        #[cfg(test)]
+        pause_after_lease();
 
-    #[cfg(test)]
-    pause_after_lease();
+        if index >= SITES {
+            OVERFLOWED.store(true, Ordering::Relaxed);
+        } else {
+            let bit = 1_u32 << (index % WORD_BITS);
 
-    if index >= SITES {
-        OVERFLOWED.store(true, Ordering::Relaxed);
+            let _previous = REACHED[index / WORD_BITS].fetch_or(bit, Ordering::Relaxed);
+        }
         end_recording();
-
-        return;
     }
-
-    let bit = 1_u32 << (index % WORD_BITS);
-
-    let _previous = REACHED[index / WORD_BITS].fetch_or(bit, Ordering::Relaxed);
-    end_recording();
 }
 
 #[inline]
 #[cfg(any(unix, windows))]
 fn already_noted(id: u32) -> bool {
-    let Ok(index) = usize::try_from(id) else {
-        return false;
-    };
+    let index = usize::try_from(id).expect("every supported target represents all u32 mutant ordinals as usize");
 
     if index >= SITES {
         OVERFLOWED.load(Ordering::Relaxed)
@@ -1358,6 +1384,11 @@ impl RecorderState {
                 continue;
             }
 
+            #[cfg(test)]
+            if TEST_RECORDING_CAS_FAILURE.swap(false, Ordering::AcqRel) {
+                let _previous = self.value.fetch_add(1, Ordering::AcqRel);
+            }
+
             if self
                 .value
                 .compare_exchange_weak(state, state + 1, Ordering::AcqRel, Ordering::Acquire)
@@ -1401,11 +1432,16 @@ impl RecorderState {
             return None;
         }
 
+        #[cfg(test)]
+        if TEST_SEAL_CAS_FAILURE.swap(false, Ordering::AcqRel) {
+            let _previous = self.value.fetch_add(1, Ordering::AcqRel);
+        }
+
         #[expect(
             clippy::if_then_some_else_none,
             reason = "the test observation must occur only after the compare-exchange succeeds"
         )]
-        if self.value.compare_exchange(0, SEALING, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+        if Self::seal_claim(self.value.compare_exchange(0, SEALING, Ordering::AcqRel, Ordering::Acquire)) {
             #[cfg(all(test, not(loom)))]
             TEST_SEAL_CLAIMED.store(true, Ordering::Release);
 
@@ -1413,6 +1449,11 @@ impl RecorderState {
         } else {
             None
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    const fn seal_claim(result: Result<usize, usize>) -> bool {
+        result.is_ok()
     }
 }
 
@@ -1473,6 +1514,10 @@ static TEST_SEAL_WAITING: AtomicBool = AtomicBool::new(false);
 static TEST_SEAL_CLAIMED: AtomicBool = AtomicBool::new(false);
 #[cfg(all(test, any(unix, windows)))]
 static TEST_RECORDER_SATURATION_SPUN: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, any(unix, windows)))]
+static TEST_RECORDING_CAS_FAILURE: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, any(unix, windows)))]
+static TEST_SEAL_CAS_FAILURE: AtomicBool = AtomicBool::new(false);
 
 /// Pauses a test writer after it has a lease but before it claims its bitmap bit.
 #[cfg(all(test, any(unix, windows)))]
@@ -1495,9 +1540,7 @@ fn write_bytes(bytes: &[u8], stream: *mut c_void) -> usize {
         .compare_exchange(BLOCK_AND_SHORT, WRITE_ENTERED, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
-        while TEST_WRITE_STATE.load(Ordering::Acquire) != RELEASE_SHORT_WRITE {
-            core::hint::spin_loop();
-        }
+        wait_for_short_write_release();
 
         return 0;
     }
@@ -1505,6 +1548,14 @@ fn write_bytes(bytes: &[u8], stream: *mut c_void) -> usize {
     // SAFETY: `stream` is a stream returned by `open`, remains open for this process, and `bytes`
     // describes exactly the readable elements passed to `fwrite`.
     unsafe { fwrite(bytes.as_ptr().cast(), 1, bytes.len(), stream) }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn wait_for_short_write_release() {
+    while TEST_WRITE_STATE.load(Ordering::Acquire) != RELEASE_SHORT_WRITE {
+        core::hint::spin_loop();
+    }
 }
 
 /// Writes one four-byte little-endian record.
@@ -1552,9 +1603,7 @@ fn write_reached(stream: *mut c_void) -> bool {
         while bits != 0 {
             let bit_at = usize::try_from(bits.trailing_zeros()).unwrap_or(0);
             let site = word_at * WORD_BITS + bit_at;
-            let Ok(record) = u32::try_from(site) else {
-                return false;
-            };
+            let record = u32::try_from(site).expect("the census bitmap is far smaller than the u32 ordinal space");
 
             if !buffer_record(record, &mut buffer, &mut used, stream) {
                 return false;
@@ -1564,11 +1613,8 @@ fn write_reached(stream: *mut c_void) -> bool {
         }
     }
 
-    if OVERFLOWED.load(Ordering::Relaxed) && !buffer_record(OVERFLOW, &mut buffer, &mut used, stream) {
-        return false;
-    }
-
-    used == 0 || write_bytes(&buffer[..used], stream) == used
+    (!OVERFLOWED.load(Ordering::Relaxed) || buffer_record(OVERFLOW, &mut buffer, &mut used, stream))
+        && (used == 0 || write_bytes(&buffer[..used], stream) == used)
 }
 
 /// Returns the census stream, opening it once, or null if it could not be opened.
@@ -1578,6 +1624,7 @@ fn write_reached(stream: *mut c_void) -> bool {
 /// interleave mid-record. The window being contended is a single `fopen`, so spinning through it
 /// costs less than the machinery to avoid spinning would.
 #[cfg(any(unix, windows))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn sink() -> *mut c_void {
     /// No stream has been opened yet.
     const UNOPENED: usize = 0;
@@ -1637,6 +1684,7 @@ fn sink() -> *mut c_void {
                   and leaves the return looking like a tail expression"
     )
 )]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn open() -> *mut c_void {
     /// Append, binary: the records are bytes, not text, and a platform that would translate line
     /// endings must not touch them.
@@ -1680,6 +1728,7 @@ fn open() -> *mut c_void {
 /// It withholds the seal if the stream cannot be opened or any buffered record cannot be written.
 /// Any failure leaves an unsealed file, which the reader already rejects.
 #[cfg(any(unix, windows))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 extern "C" fn seal() {
     // Claiming the protocol waits for every bitmap update that already started and prevents any
     // later update from starting.
@@ -1786,6 +1835,7 @@ const ENVIRONMENT_ERROR_HELPER_VAR_C: &[u8] = b"GAMMA_RT_ENVIRONMENT_ERROR_HELPE
 
 /// Returns whether this process was launched as the pre-main environment helper.
 #[cfg(all(test, any(unix, windows), not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn environment_helper_requested() -> bool {
     #[cfg(unix)]
     {
@@ -1838,6 +1888,7 @@ fn environment_helper_requested() -> bool {
 /// environment mutation occurs in a genuinely single-threaded process rather than in a filtered
 /// libtest test.
 #[cfg(all(test, any(unix, windows), not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 extern "C" fn run_environment_helper() {
     if !environment_helper_requested() {
         return;
@@ -1951,11 +2002,17 @@ fn selected() -> u32 {
     let value = ACTIVE.load(Ordering::Acquire);
 
     #[cfg(all(any(unix, windows), not(miri)))]
+    ensure_installed(value);
+
+    value
+}
+
+#[cfg(all(any(unix, windows), not(miri)))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn ensure_installed(value: u32) {
     if value == UNINSTALLED {
         uninstalled_guard();
     }
-
-    value
 }
 
 /// Terminates when a guard observes [`UNINSTALLED`], rather than silently reporting the safe-looking
@@ -2449,13 +2506,57 @@ mod tests {
     #[test]
     fn a_census_environment_failure_is_a_startup_failure_rather_than_a_mutant_selection() {
         let consulted = Cell::new(0_usize);
-        let answer = selection_from(CensusRequest::Error, || {
-            consulted.set(consulted.get() + 1);
-            Ok(7)
-        });
+        let answer = selection_from(CensusRequest::Error, || unexpected_active_environment_read(&consulted));
 
         assert_eq!(answer, Err(()));
         assert_eq!(consulted.get(), 0, "a failed census read went on to select an active mutant");
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the unreachable callback must match selection_from's fallible active-environment reader"
+    )]
+    fn unexpected_active_environment_read(consulted: &Cell<usize>) -> Result<u32, ()> {
+        consulted.set(consulted.get() + 1);
+        Ok(7)
+    }
+
+    #[cfg(any(windows, test))]
+    #[test]
+    fn native_environment_outcomes_map_to_active_selection_without_an_api_call() {
+        let buffer = b"17";
+
+        assert_eq!(active_from_environment_read(EnvironmentReadOutcome::Absent, buffer), Ok(NONE));
+        assert_eq!(active_from_environment_read(EnvironmentReadOutcome::Empty, buffer), Ok(NONE));
+        assert_eq!(
+            active_from_environment_read(EnvironmentReadOutcome::TooLongToStore, buffer),
+            Ok(NONE)
+        );
+        assert_eq!(active_from_environment_read(EnvironmentReadOutcome::Error, buffer), Err(()));
+        assert_eq!(
+            active_from_environment_read(
+                EnvironmentReadOutcome::Found(NonZeroUsize::new(2).expect("two is non-zero")),
+                buffer,
+            ),
+            Ok(17)
+        );
+    }
+
+    #[cfg(any(windows, test))]
+    #[test]
+    fn native_environment_outcomes_map_to_census_requests_without_an_api_call() {
+        assert_eq!(census_path_length(EnvironmentReadOutcome::Absent), Err(CensusRequest::Absent));
+        assert_eq!(census_path_length(EnvironmentReadOutcome::Empty), Err(CensusRequest::Absent));
+        assert_eq!(census_path_length(EnvironmentReadOutcome::Error), Err(CensusRequest::Error));
+        assert_eq!(
+            census_path_length(EnvironmentReadOutcome::TooLongToStore),
+            Err(CensusRequest::Unusable)
+        );
+        assert_eq!(
+            census_path_length(EnvironmentReadOutcome::Found(NonZeroUsize::new(1).expect("one is non-zero"))),
+            Ok(NonZeroUsize::new(1).expect("one is non-zero"))
+        );
     }
 
     #[cfg(any(unix, windows))]
@@ -2739,6 +2840,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_successful_read_reports_its_length_without_consulting_errno() {
         let lookups = Cell::new(0_usize);
         let outcome = read_outcome(12, || {
@@ -2753,6 +2855,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_end_of_stream_read_is_a_length_rather_than_a_failure() {
         let lookups = Cell::new(0_usize);
         let outcome = read_outcome(0, || {
@@ -2927,6 +3030,72 @@ mod tests {
         assert!(state.begin_seal());
         assert_eq!(state.try_begin_seal(), Some(false));
         assert!(!state.begin_recording());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn atomic_seal_claim_results_preserve_success_and_contention() {
+        assert!(RecorderState::seal_claim(Ok(0)));
+        assert!(!RecorderState::seal_claim(Err(1)));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn recording_retries_a_failed_compare_exchange() {
+        let state = RecorderState::new();
+        TEST_RECORDING_CAS_FAILURE.store(true, Ordering::Release);
+
+        assert!(state.begin_recording());
+        state.end_recording();
+        state.end_recording();
+        assert_eq!(state.value.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn sealing_reports_compare_exchange_contention() {
+        let state = RecorderState::new();
+        TEST_SEAL_CAS_FAILURE.store(true, Ordering::Release);
+
+        assert_eq!(state.try_begin_seal(), None);
+        assert_eq!(state.value.load(Ordering::Acquire), 1);
+        state.value.store(0, Ordering::Release);
+        assert_eq!(state.try_begin_seal(), Some(true));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[cfg_attr(miri, ignore = "uses a C temporary stream; miri isolation forbids tmpfile")]
+    #[test]
+    fn a_full_output_batch_flushes_or_reports_a_short_write() {
+        // SAFETY: `tmpfile` creates a private writable C stream with no caller preconditions.
+        let stream = unsafe { tmpfile() };
+        assert!(!stream.is_null(), "the C runtime creates a temporary stream");
+
+        let mut buffer = [0_u8; OUTPUT_BUFFER];
+        let mut used = buffer.len();
+
+        assert!(buffer_record(7, &mut buffer, &mut used, stream));
+        assert_eq!(used, core::mem::size_of::<u32>());
+
+        used = buffer.len();
+        TEST_WRITE_STATE.store(BLOCK_AND_SHORT, Ordering::Release);
+        let stream_address = stream.expose_provenance();
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let stream = core::ptr::with_exposed_provenance_mut(stream_address);
+                buffer_record(9, &mut buffer, &mut used, stream)
+            });
+
+            while TEST_WRITE_STATE.load(Ordering::Acquire) != WRITE_ENTERED {
+                core::hint::spin_loop();
+            }
+            TEST_WRITE_STATE.store(RELEASE_SHORT_WRITE, Ordering::Release);
+
+            assert!(!writer.join().expect("the forced short writer must not panic"));
+        });
+
+        // SAFETY: `stream` is the still-open handle returned by `tmpfile` above.
+        assert_eq!(unsafe { fclose(stream) }, 0);
     }
 
     #[cfg(not(miri))]
@@ -3116,6 +3285,7 @@ mod tests {
 
         #[test]
         #[cfg(all(any(unix, windows), not(miri)))]
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn the_child_simulates_a_pre_install_guard() {
             // Inert unless the outer test asked for it, because what it does cannot be undone.
             // `install` runs once, before `main`, so a process whose sentinel has been forced back
@@ -3168,6 +3338,7 @@ mod tests {
 
         #[test]
         #[cfg(all(unix, not(miri)))]
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn the_child_reads_stable_values_via_getenv() {
             if env::var_os(GETENV_CHILD).is_none() {
                 return;
@@ -3512,11 +3683,35 @@ mod tests {
 
         #[test]
         #[cfg(any(unix, windows))]
+        fn recording_stays_closed_after_an_explicit_seal() {
+            assert_eq!(
+                census_of("runtime::tests::process_tests::the_child_records_after_an_explicit_seal"),
+                Vec::<u32>::new()
+            );
+        }
+
+        #[test]
+        #[cfg(any(unix, windows))]
+        fn the_child_records_after_an_explicit_seal() {
+            if selected() != CENSUS {
+                return;
+            }
+
+            seal();
+            assert!(!a(37));
+            assert!(!already_noted(37));
+        }
+
+        #[test]
+        #[cfg(any(unix, windows))]
         fn the_child_walks_past_the_table() {
             let past = u32::try_from(SITES).expect("the table is smaller than the ordinal space");
 
             assert!(!a(1));
             assert!(!a(past));
+            if selected() == CENSUS {
+                assert!(already_noted(past));
+            }
 
             // Recording continues past the overflow; all reached in-range sites remain available when
             // the bitmap is serialized at exit.

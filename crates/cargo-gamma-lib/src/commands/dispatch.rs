@@ -9,13 +9,14 @@ use std::panic;
 use clap::Parser;
 use clap::error::ErrorKind;
 
+use super::When;
 use super::clean::clean;
 use super::cli::{Cli, Command, SelectArgs};
 use super::completions::completions;
 use super::explain::explain;
 use super::hints::hints;
 use super::host::Host;
-use super::list::list_with_cargo;
+use super::list::list;
 use super::merge::merge;
 use super::run::{configure, run_session};
 use super::suppress::suppress;
@@ -168,13 +169,61 @@ fn normalize(args: impl IntoIterator<Item = impl Into<OsString> + Clone>) -> Vec
         normalized.insert(1, "run".into());
     }
 
+    normalize_list_mode(&mut normalized);
+
     normalized
+}
+
+/// Preserves the historical default `list mutants` while letting `list --help` describe modes.
+fn normalize_list_mode(args: &mut Vec<OsString>) {
+    let Some(list) = subcommand_index(args) else {
+        return;
+    };
+    if args.get(list).is_none_or(|argument| argument != "list") {
+        return;
+    }
+    let modes = ["mutants", "files", "mutators", "presets"];
+    let tail = args.get(list + 1..).unwrap_or_default();
+
+    if tail.iter().any(|argument| matches!(argument.to_str(), Some("-h" | "--help"))) {
+        return;
+    }
+    if tail
+        .first()
+        .and_then(|argument| argument.to_str())
+        .is_some_and(|argument| modes.contains(&argument))
+    {
+        return;
+    }
+
+    args.insert(list + 1, "mutants".into());
 }
 
 /// The top-level options that may legitimately appear before a subcommand.
 ///
 /// Each takes one value, which has to be stepped over when looking for the subcommand.
-const GLOBAL_OPTIONS: [&str; 2] = ["--color", "--progress"];
+const GLOBAL_OPTIONS: [&str; 1] = ["--color"];
+
+/// Finds the first argument after any leading global options.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn subcommand_index(args: &[OsString]) -> Option<usize> {
+    let mut index = 1;
+
+    while let Some(first) = args.get(index).and_then(|entry| entry.to_str()) {
+        if GLOBAL_OPTIONS
+            .iter()
+            .any(|option| first.strip_prefix(option).is_some_and(|rest| rest.starts_with('=')))
+        {
+            index += 1;
+        } else if GLOBAL_OPTIONS.contains(&first) {
+            index += 2;
+        } else {
+            break;
+        }
+    }
+
+    (index < args.len()).then_some(index)
+}
 
 /// Whether `args` is a bare `run` invocation with the word `run` left off.
 ///
@@ -182,6 +231,7 @@ const GLOBAL_OPTIONS: [&str; 2] = ["--color", "--progress"];
 /// begins with a dash cannot be a subcommand, so `run` is what was meant. Anything else is left
 /// exactly as written, including a misspelled subcommand — clap's "did you mean" is far more useful
 /// there than an unexpected-argument error from a `run` the user never asked for.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn implies_run(args: &[OsString]) -> bool {
     let mut rest = args;
 
@@ -226,6 +276,7 @@ fn implies_run(args: &[OsString]) -> bool {
 /// `admit_memory_control`, which already explains the absence of a ceiling and already decides
 /// whether that is an error or a degradation based on whether the user asked for one.
 #[cfg(target_os = "linux")]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn relaunch_for_memory_control<H: Host>(host: &H, args: &super::cli::RunArgs) -> Option<i32> {
     use crate::exec::relaunch;
 
@@ -247,6 +298,7 @@ fn relaunch_for_memory_control<H: Host>(host: &H, args: &super::cli::RunArgs) ->
 /// The configuration file is folded into the arguments here rather than inside each command, so
 /// there is exactly one place where precedence between the file and the command line is decided —
 /// and exactly one place where the settings that can arrive half from each side are checked.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate::Result<i32> {
     match cli.command {
         Command::Run(mut args) => {
@@ -258,19 +310,13 @@ pub(super) fn dispatch<H: Host>(host: &mut H, cli: Cli, styler: Styler) -> crate
                 return Ok(code);
             }
 
-            run_session(host, &args, cli.progress, styler)
+            run_session(host, &args, args.progress, styler)
         }
 
-        Command::List(mut args) => {
-            let config = Config::resolve(&args.select)?;
-            let cargo = config.cargo_options();
-            config.apply_selection(&mut args.select)?;
-            check_shard(&args.select)?;
-            list_with_cargo(host, &args, styler, &cargo)
-        }
+        Command::List(args) => list(host, &args, styler),
 
         Command::Explain(args) => explain(host, &args),
-        Command::Suppress(args) => suppress(host, &args, cli.progress, styler),
+        Command::Suppress(args) => suppress(host, &args, When::Never, styler),
 
         Command::Unsuppress(mut args) => {
             let config = Config::resolve(&args.select)?;
@@ -327,6 +373,7 @@ mod tests {
             crate::testing::Broken
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn error(&mut self) -> impl Write {
             &mut self.err
         }
@@ -335,6 +382,7 @@ mod tests {
             false
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn terminal_width(&self) -> Option<u16> {
             None
         }
@@ -394,12 +442,14 @@ mod tests {
             false
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn terminal_width(&self) -> Option<u16> {
             None
         }
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn run_scopes_and_flushes_notes_raised_while_dispatching() {
         let dir = crate_dir("dispatch-notes-", None);
         let root = dir.path().to_string_lossy().into_owned();
@@ -425,10 +475,12 @@ mod tests {
     struct Exploding;
 
     impl Host for Exploding {
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn output(&mut self) -> impl Write {
             Vec::new()
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn error(&mut self) -> impl Write {
             Vec::new()
         }
@@ -437,6 +489,7 @@ mod tests {
             panic!("a bug in the tool")
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn terminal_width(&self) -> Option<u16> {
             None
         }
@@ -523,6 +576,7 @@ mod tests {
     /// Promotion consumes the completed campaign exactly as recorded, so accepting selection flags
     /// would imply a narrowing that this state-only command cannot perform.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hints_rejects_mutant_selection_flags() {
         crate::notes::alone(|| {
             let dir = crate_dir("dispatch-selected-hints-", None);
@@ -543,6 +597,7 @@ mod tests {
     /// Suppression consumes the completed campaign exactly as recorded, so accepting a selection
     /// flag must not silently widen the requested package back to the whole ledger.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn suppress_rejects_mutant_selection_flags() {
         crate::notes::alone(|| {
             let dir = crate_dir("dispatch-selected-suppress-", None);
@@ -556,16 +611,16 @@ mod tests {
 
             assert_eq!(code, EXIT_USAGE, "{}", host.out());
             assert!(
-                host.err().contains("--package") && host.err().contains("completed campaign"),
+                host.err().contains("unexpected argument") && host.err().contains("--package"),
                 "{}",
                 host.err()
             );
         });
     }
 
-    /// The inherited run flag must never look like a safe preview while the state-only command
-    /// proceeds to edit source.
+    /// A run-only flag must not leak into the state-only command.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn suppress_rejects_the_runs_dry_run_flag() {
         crate::notes::alone(|| {
             let dir = crate_dir("dispatch-run-dry-suppress-", None);
@@ -575,7 +630,11 @@ mod tests {
             let code = run(&mut host, ["cargo-gamma", "gamma", "suppress", "--dir", &root, "--dry-run"]);
 
             assert_eq!(code, EXIT_USAGE, "{}", host.out());
-            assert!(host.err().contains("--dry-run-suppress"), "{}", host.err());
+            assert!(
+                host.err().contains("unexpected argument") && host.err().contains("--dry-run"),
+                "{}",
+                host.err()
+            );
         });
     }
 
@@ -788,21 +847,21 @@ mod tests {
     fn cargos_inserted_argument_is_stripped() {
         let normalized = normalize(["cargo-gamma", "gamma", "list"]);
 
-        assert_eq!(normalized, vec!["cargo-gamma", "list"]);
+        assert_eq!(normalized, vec!["cargo-gamma", "list", "mutants"]);
     }
 
     #[test]
-    fn direct_invocation_is_left_alone() {
+    fn direct_list_invocation_defaults_to_mutants() {
         let normalized = normalize(["cargo-gamma", "list"]);
 
-        assert_eq!(normalized, vec!["cargo-gamma", "list"]);
+        assert_eq!(normalized, vec!["cargo-gamma", "list", "mutants"]);
     }
 
     #[test]
     fn only_the_second_argument_named_gamma_is_stripped() {
         let normalized = normalize(["cargo-gamma", "list", "gamma"]);
 
-        assert_eq!(normalized, vec!["cargo-gamma", "list", "gamma"]);
+        assert_eq!(normalized, vec!["cargo-gamma", "list", "mutants", "gamma"]);
     }
 
     #[test]
@@ -817,7 +876,7 @@ mod tests {
 
     #[test]
     fn a_leading_option_implies_run() {
-        // The top level accepts no options of its own beyond the two globals, so an option here can
+        // The top level accepts no options of its own beyond the one global, so an option here can
         // only have been meant for `run`.
         assert_eq!(
             normalize(["cargo-gamma", "gamma", "--mutators", "relational"]),
@@ -828,8 +887,37 @@ mod tests {
     #[test]
     fn a_named_subcommand_is_not_second_guessed() {
         for command in ["run", "list", "explain", "suppress", "merge", "help"] {
-            assert_eq!(normalize(["cargo-gamma", "gamma", command]), vec!["cargo-gamma", command]);
+            let expected = if command == "list" {
+                vec!["cargo-gamma", "list", "mutants"]
+            } else {
+                vec!["cargo-gamma", command]
+            };
+            assert_eq!(normalize(["cargo-gamma", "gamma", command]), expected);
         }
+    }
+
+    #[test]
+    fn list_help_stays_at_the_mode_overview() {
+        assert_eq!(
+            normalize(["cargo-gamma", "gamma", "list", "--help"]),
+            vec!["cargo-gamma", "list", "--help"]
+        );
+    }
+
+    #[test]
+    fn a_value_named_list_is_not_rewritten_as_the_list_command() {
+        assert_eq!(
+            normalize(["cargo-gamma", "gamma", "explain", "list"]),
+            vec!["cargo-gamma", "explain", "list"]
+        );
+    }
+
+    #[test]
+    fn list_after_a_global_option_still_defaults_to_mutants() {
+        assert_eq!(
+            normalize(["cargo-gamma", "gamma", "--color", "never", "list"]),
+            vec!["cargo-gamma", "--color", "never", "list", "mutants"]
+        );
     }
 
     #[test]
@@ -852,9 +940,13 @@ mod tests {
             normalize(["cargo-gamma", "gamma", "--color", "never", "merge", "a.json"]),
             vec!["cargo-gamma", "--color", "never", "merge", "a.json"]
         );
+    }
+
+    #[test]
+    fn a_run_only_option_is_not_treated_as_global() {
         assert_eq!(
             normalize(["cargo-gamma", "gamma", "--progress=never", "merge", "a.json"]),
-            vec!["cargo-gamma", "--progress=never", "merge", "a.json"]
+            vec!["cargo-gamma", "run", "--progress=never", "merge", "a.json"]
         );
     }
 

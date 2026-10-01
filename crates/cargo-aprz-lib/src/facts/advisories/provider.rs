@@ -43,10 +43,15 @@ struct GitFetcher;
 
 impl DbFetcher for GitFetcher {
     fn fetch(&self, repo_path: &Path, database_url: &str) -> Result<()> {
-        Repository::fetch(database_url, repo_path, true, DATABASE_FETCH_TIMEOUT)
+        // #[gamma::skip(call.replace_with_default, call_result.default, tag = "external", reason = "the lock flag only changes rustsec's process-global git-cache locking, which cannot be distinguished deterministically without concurrent external repository access")]
+        Repository::fetch(database_url, repo_path, fetch_locked(), DATABASE_FETCH_TIMEOUT)
             .map(|_| ())
             .map_err(Into::into)
     }
+}
+
+const fn fetch_locked() -> bool {
+    true
 }
 
 impl Provider {
@@ -232,6 +237,15 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct NoOpFetcher;
+
+    impl DbFetcher for NoOpFetcher {
+        fn fetch(&self, _repo_path: &Path, _database_url: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
     /// Progress reporter that records what the provider reported.
     #[derive(Debug, Default)]
     struct RecordingProgress {
@@ -413,6 +427,38 @@ mod tests {
         assert_eq!(provider.get_advisory_data(crates.into()).await.count(), 1);
     }
 
+    #[tokio::test]
+    async fn synchronization_marker_write_failures_are_returned_without_panicking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_root = tmp.path().join("not-a-directory");
+        fs::write(&cache_root, b"blocks cache writes").unwrap();
+        let cache = Cache::new(&cache_root, Duration::from_hours(8760), false);
+
+        let error = Provider::with_fetcher(
+            &cache,
+            Arc::new(RecordingProgress::default()),
+            "https://example.invalid/db.git",
+            Arc::new(NoOpFetcher),
+        )
+        .await
+        .expect_err("an unwritable synchronization marker must be returned as an error");
+
+        assert!(error.to_string().contains("creating directory"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_panicking_blocking_operation_is_returned_without_panicking_the_caller() {
+        let progress = RecordingProgress::default();
+
+        let error = run_blocking_with_progress(&progress, "Panicking operation", "panicking", || -> Result<()> {
+            panic!("deliberate blocking-task panic");
+        })
+        .await
+        .expect_err("a panicking blocking task must be returned as an error");
+
+        assert!(error.to_string().contains("task"), "{error}");
+    }
+
     #[test]
     fn scan_advisories_ignores_withdrawn_advisories() {
         // The scan's summary is logged at debug level; evaluate its arguments too.
@@ -447,6 +493,20 @@ mod tests {
     }
 
     #[test]
+    fn a_withdrawn_advisory_does_not_stop_the_remaining_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_advisory(tmp.path(), "ordered-crate", "RUSTSEC-2020-0001", Some("2021-01-01"));
+        write_advisory(tmp.path(), "ordered-crate", "RUSTSEC-2020-9999", None);
+        let database = Database::open(tmp.path()).unwrap();
+        let crates = vec![CrateSpec::from_arcs("ordered-crate".into(), Arc::new("1.0.0".parse().unwrap()))];
+
+        let results: Vec<_> = scan_advisories(&database, crates).collect();
+        let data = results[0].1.as_ref().expect("the crate is always returned");
+
+        assert_eq!(data.total.unmaintained_warning_count, 1);
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "spawns the capturing helper as a subprocess, which Miri cannot execute")]
     fn scan_summary_log_reports_checked_and_matched_counts() {
         let logs = run_ignored_helper("helper_capture_scan_summary_log");
@@ -455,6 +515,42 @@ mod tests {
             logs.contains("Completed scan of advisory database: checked 3 advisories, found 4 matches for 1 crates"),
             "unexpected logs:\n{logs}"
         );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns the capturing helper as a subprocess, which Miri cannot execute")]
+    fn database_operations_log_their_exact_success_verbs() {
+        let logs = run_ignored_helper("helper_capture_database_operation_logs");
+
+        assert!(logs.contains("Finished opening the advisory database"), "{logs}");
+        assert!(logs.contains("Finished downloading the advisory database"), "{logs}");
+    }
+
+    #[tokio::test]
+    #[ignore = "spawned by database_operations_log_their_exact_success_verbs"]
+    async fn helper_capture_database_operation_logs() {
+        if std::env::var_os("CARGO_APRZ_CAPTURE_LOGS").is_none() {
+            return;
+        }
+
+        install_capturing_logger();
+        let tmp = tempfile::tempdir().unwrap();
+        let seeded = tmp.path().join("seeded");
+        write_advisory(&seeded, "seeded-crate", "RUSTSEC-2020-0100", None);
+        let progress = RecordingProgress::default();
+        let _database = open_db(&seeded, &progress).await.unwrap();
+
+        let downloaded = tmp.path().join("downloaded");
+        download_db(
+            &downloaded,
+            "https://example.invalid/db.git",
+            &progress,
+            Arc::new(FixtureFetcher::default()),
+        )
+        .await
+        .unwrap();
+
+        println!("{}", captured_logs());
     }
 
     #[test]
@@ -505,5 +601,6 @@ mod tests {
     #[test]
     fn advisory_database_fetch_timeout_is_one_minute() {
         assert_eq!(DATABASE_FETCH_TIMEOUT, Duration::from_mins(1));
+        assert!(fetch_locked(), "production fetches must honor the rustsec repository lock");
     }
 }

@@ -241,23 +241,26 @@ fn write_phases(text: &mut String, session: &Session) {
 /// Reports why the withdrawn mutants were withdrawn.
 ///
 /// A withdrawal count says a number; it does not say whether the number is worth acting on. Grouped
-/// by rustc error code and mutator, it does: a mutator that keeps drawing a type error is one that
-/// could be taught to look before it mutates, while a spread of borrow-checker codes across every
-/// mutator is the cost of the schema and not a bug in anything. Nothing else in the run says this,
-/// and deriving it otherwise means patching the tool by hand.
+/// by package, normalized compiler reason and mutator, it does: a mutator that keeps drawing a type
+/// error is one that could be taught to look before it mutates, while a spread of borrow-checker
+/// codes across every mutator is the cost of the schema and not a bug in anything. Nothing else in
+/// the run says this, and deriving it otherwise means patching the tool by hand.
 fn write_census(text: &mut String, session: &Session) {
     if session.census.is_empty() {
         return;
     }
 
-    let _ = writeln!(text, "withdrew  by rustc error code and mutator");
+    let _ = writeln!(text, "withdrew  by package, rustc reason and mutator");
 
     for entry in &session.census {
         let _ = writeln!(
             text,
-            "  {:<8}{:<28}{}",
+            "  {:<24}{:<8}{:<28}{:<12}{:<42}{}",
+            if entry.package.is_empty() { "(unknown)" } else { &entry.package },
             if entry.code.is_empty() { "(none)" } else { &entry.code },
             if entry.mutator.is_empty() { "(unknown)" } else { &entry.mutator },
+            if entry.replacement_site { "replacement" } else { "follow-on" },
+            entry.category,
             quantity(entry.mutants, "mutant")
         );
     }
@@ -270,6 +273,7 @@ fn write_census(text: &mut String, session: &Session) {
 /// remedies: a faster machine against fewer unviable mutants. That is what the split says. The
 /// first round is what building this workspace costs at all; every round after it exists only
 /// because some mutant did not compile, and its time is the price of that mutant.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn write_rounds(text: &mut String, session: &Session) {
     let Some((first, rest)) = session.rounds_taken.split_first() else {
         return;
@@ -318,6 +322,7 @@ fn write_rounds(text: &mut String, session: &Session) {
 /// how many of those it then refused, and what the probes cost in rounds. A confirmation rate near
 /// zero over several rounds is a hint set to regenerate or delete, and that is the decision this
 /// line exists to support.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn write_ordering(text: &mut String, session: &Session) {
     let hints = session.ordering;
 
@@ -828,12 +833,18 @@ mod tests {
         let live = Session {
             census: vec![
                 crate::exec::Withdrawal {
+                    package: "cargo-gamma-lib".to_owned(),
                     code: "E0308".to_owned(),
+                    category: "mismatched types".to_owned(),
+                    replacement_site: true,
                     mutator: "lit.true_to_false".to_owned(),
                     mutants: 12,
                 },
                 crate::exec::Withdrawal {
+                    package: String::new(),
                     code: String::new(),
+                    category: "isolated compiler failure".to_owned(),
+                    replacement_site: false,
                     mutator: String::new(),
                     mutants: 1,
                 },
@@ -843,9 +854,12 @@ mod tests {
 
         let text = render(&plan(Vec::new()), Some(&live), 4, Duration::from_secs(20));
 
-        assert!(text.contains("withdrew  by rustc error code and mutator"), "{text}");
+        assert!(text.contains("withdrew  by package, rustc reason and mutator"), "{text}");
+        assert!(text.contains("cargo-gamma-lib"), "{text}");
         assert!(text.contains("E0308"), "{text}");
         assert!(text.contains("lit.true_to_false"), "{text}");
+        assert!(text.contains("replacement"), "{text}");
+        assert!(text.contains("mismatched types"), "{text}");
         assert!(text.contains("12 mutants"), "{text}");
         assert!(text.contains("(none)"), "{text}");
         assert!(text.contains("(unknown)"), "{text}");

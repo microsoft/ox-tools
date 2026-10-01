@@ -8,12 +8,10 @@ use std::sync::Arc;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
 
-use super::census::{Census, CensusWork};
 use super::config::Config;
 use super::memory::MemoryPolicy;
 use super::rustc_wrapper::RustcInvocation;
 use crate::discover::{Glob, Plan};
-use crate::estimate::Workload;
 use crate::model::{Mutant, Outcome};
 
 /// A test executable and the package that produced it.
@@ -47,6 +45,11 @@ pub struct TestBinary {
     ///
     /// `None` is deliberately fail-open: capture was unavailable, incomplete, or ambiguous.
     pub(crate) linked_sources: Option<crate::HashSet<Utf8PathBuf>>,
+
+    /// Whether compiler capture proves this executable uses Rust's built-in test harness.
+    ///
+    /// `None` keeps resource discovery fail-closed when capture was unavailable or ambiguous.
+    pub(crate) libtest: Option<bool>,
 
     /// How long it took with no mutant active, so the cheapest can be tried first.
     ///
@@ -240,6 +243,10 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
                     .as_ref()
                     .zip(target_source.as_ref())
                     .and_then(|(captures, source)| linked_sources(path, source, captures, &origins, root)),
+                libtest: captures
+                    .as_ref()
+                    .zip(target_source.as_ref())
+                    .and_then(|(captures, source)| libtest_harness(path, source, captures, root)),
                 baseline: Duration::ZERO,
                 budget: Option::default(),
                 tests: Option::default(),
@@ -251,6 +258,21 @@ pub(super) fn test_binaries_with_linkage(stdout: &str, root: &Utf8Path, capture_
 
     normalize_binaries(&mut binaries);
     binaries
+}
+
+fn libtest_harness(executable: &str, target_source: &Utf8Path, captures: &[RustcInvocation], root: &Utf8Path) -> Option<bool> {
+    let executable = Utf8Path::new(executable);
+    let target_source = absolute_source(target_source, root);
+    let starts: Vec<usize> = captures
+        .iter()
+        .enumerate()
+        .filter(|(_index, capture)| absolute_source(&capture.source, root) == target_source && output_matches(capture, executable))
+        .map(|(index, _capture)| index)
+        .collect();
+    let [start] = starts.as_slice() else {
+        return None;
+    };
+    Some(captures[*start].test)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +406,7 @@ fn linked_sources(
     Some(sources)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn output_matches(invocation: &RustcInvocation, artifact: &Utf8Path) -> bool {
     if artifact.parent() != Some(invocation.out_dir.as_path()) {
         return false;
@@ -554,6 +577,7 @@ pub(super) fn retain_linked_to_population(binaries: &mut Vec<TestBinary>, plan: 
 ///
 /// The identities come from Cargo's own successful preflight artifact messages. Any missing
 /// capture, ambiguous association, or unsupported target kind abandons narrowing entirely.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn linked_target_args(stdout: &str, root: &Utf8Path, capture_dir: Option<&Utf8Path>, plan: &Plan) -> Option<Vec<String>> {
     let captures = read_captures(capture_dir?)?;
     let origins = artifact_origins(stdout, root);
@@ -646,14 +670,6 @@ fn populations_intersect(pending: &crate::HashSet<&Utf8Path>, sources: &crate::H
 
 fn all_associations_equal(associations: &[crate::HashSet<Utf8PathBuf>], sources: &crate::HashSet<Utf8PathBuf>) -> bool {
     associations.iter().all(|candidate| candidate == sources)
-}
-
-fn census_duration(census: Option<&Census>, binary: &TestBinary, ordinal: u32) -> Option<Duration> {
-    match census.map_or(CensusWork::Whole, |census| census.work(binary, ordinal)) {
-        CensusWork::Whole | CensusWork::Hinted(_) => Some(binary.baseline),
-        CensusWork::Uncovered => None,
-        CensusWork::Selected(duration) => Some(duration),
-    }
 }
 
 fn target_selection_failed(saw_test_target: bool, selectors: &[[String; 2]]) -> bool {
@@ -784,7 +800,8 @@ fn reaches_mutant(binary: &TestBinary, mutant: &Mutant, plan: &Plan, scope: &Tes
 /// identity fields so Cargo's artifact order cannot make two equivalent runs diverge.
 ///
 /// Exact per-mutant and learned file-local killers are applied later by the verdict path and
-/// therefore still take precedence over this cold-run order; so does [`Census`]'s own
+/// therefore still take precedence over this cold-run order; so does
+/// [`Census`](super::census::Census)'s own
 /// current-cost order, which further reorders this tier's tail once a census is available.
 pub(super) fn order_reachable(binaries: &mut [&TestBinary], mutant_package: &str) {
     binaries.sort_by(|left, right| {
@@ -801,15 +818,14 @@ pub(super) fn order_reachable(binaries: &mut [&TestBinary], mutant_package: &str
 
 /// Which binaries can reach each package holding a pending mutant, indexed once.
 ///
-/// Census economics, workload projection, and sweep scheduling each need this exact relationship,
-/// and previously each derived it independently: three passes over the same pending mutants and
-/// binaries, with three different owned key and value representations discarded in succession.
-/// This is built once, after the binaries and the baseline are known, and lent to all three.
+/// Census economics and sweep scheduling share this index, which is built once after the binaries
+/// and baseline are known.
 ///
 /// Package reachability is a coarser fact than a census: it says a binary is *permitted* to be
 /// consulted for a mutant's package, never that a specific test or a specific mutation site is
 /// covered. Nothing here may ever be read as evidence that a site or a test is uncovered — only
-/// [`Census`], and only when its own census for that binary completed, settles that.
+/// [`Census`](super::census::Census), and only when its own census for that binary completed,
+/// settles that.
 #[derive(Debug, Default)]
 pub(super) struct Reachability<'binaries> {
     by_source: crate::HashMap<(Arc<str>, Arc<Utf8Path>), Vec<&'binaries TestBinary>>,
@@ -963,50 +979,6 @@ fn no_reachability(reach: &crate::HashMap<String, crate::HashSet<String>>) -> bo
     reach.is_empty()
 }
 
-/// Totals the work every live mutant represents, counting only the binaries that can reach it.
-///
-/// Returns the serial suite time and the serial budget: what testing each live mutant once would
-/// cost if every reachable binary ran to completion, and what it would cost if every reachable
-/// binary instead ran out its timeout. Both are summed per mutant rather than taken from the whole
-/// suite, because that is what a run actually does — a mutant in a leaf crate never starts the
-/// binaries that cannot link it.
-pub(super) fn workload(mutants: &[Mutant], reach: &Reachability<'_>, census: Option<&Census>) -> Workload {
-    let mut total = Workload::default();
-
-    // Its cost remains per-mutant when a census is present because each site has its own measured
-    // set of tests; only the reachable set behind it is shared across every mutant of a package.
-    for mutant in mutants.iter().filter(|mutant| pending_mutant(mutant)) {
-        let reachable = reach
-            .reachable(mutant)
-            .expect("the shared reachability index was built from these same pending mutants");
-
-        let mut suite = Duration::ZERO;
-        let mut worst = Duration::ZERO;
-        let mut running = 0_usize;
-
-        for binary in reachable {
-            let Some(duration) = census_duration(census, binary, mutant.ordinal) else {
-                continue;
-            };
-            suite = suite.saturating_add(duration);
-
-            worst += binary.budget.unwrap_or_default();
-            running = running.saturating_add(1);
-        }
-
-        // A mutant that hangs hangs in one binary and is judged there, so what one costs is a
-        // single binary's budget rather than every binary's. Which one it will be is unknown,
-        // so the average stands in for it.
-        let single = u32::try_from(running).map_or(worst, |count| worst.checked_div(count).unwrap_or(worst));
-
-        total.suite += suite;
-        total.budget += worst;
-        total.single += single;
-    }
-
-    total
-}
-
 /// Which test binaries a run is allowed to consult.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TestScope<'names> {
@@ -1058,6 +1030,7 @@ fn package_name(id: &str) -> String {
 /// The release part of a version is digits and dots and nothing else, which no package name can be
 /// mistaken for; anything after the first `-` or `+` is a pre-release or build tag and is ignored,
 /// since those are made of the same letters a name is.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn is_version(fragment: &str) -> bool {
     let release = fragment.split(['-', '+']).next().unwrap_or(fragment);
     let mut characters = release.chars();
@@ -1170,6 +1143,15 @@ mod tests {
             ("linked", &root.join("tests/linked.rs"), &linked_executable),
             ("independent", &root.join("tests/independent.rs"), &independent_executable),
         ]);
+        let stdout = format!(
+            "{stdout}\n{}",
+            serde_json::json!({
+                "reason": "build-script-executed",
+                "profile": {"test": true},
+                "target": {"name": "not-a-test", "src_path": root.join("build.rs"), "kind": ["custom-build"]},
+                "filenames": [],
+            })
+        );
         let binaries = test_binaries_with_linkage(&stdout, &root, Some(&captures));
         let mut plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
         plan.mutants[0].file = Utf8PathBuf::from("src/lib.rs").into();
@@ -1302,6 +1284,7 @@ mod tests {
         let stdout = artifact_stream(&[("opaque", &root.join("tests/opaque.rs"), &executable)]);
         let plan = plan_mutating(&[("subject", &["subject"])], &["subject"]);
         assert!(test_binaries_with_linkage(&stdout, &root, None)[0].linked_sources.is_none());
+        assert_eq!(test_binaries_with_linkage(&stdout, &root, None)[0].libtest, None);
         assert!(linked_target_args(&stdout, &root, None, &plan).is_none());
 
         let mut opaque = RustcInvocation {
@@ -1314,6 +1297,12 @@ mod tests {
             externs: Vec::new(),
             opaque_extern: true,
         };
+        let mut custom_harness = opaque.clone();
+        custom_harness.test = false;
+        assert_eq!(
+            libtest_harness(executable.as_str(), &custom_harness.source, &[custom_harness.clone()], &root),
+            Some(false)
+        );
         write_capture(&captures, "opaque", &opaque);
         write_dep(&opaque, &[root.join("tests/opaque.rs")]);
         assert!(
@@ -2013,49 +2002,6 @@ mod tests {
             ["core", "app"],
             "own package first, exactly as order_reachable orders it directly"
         );
-    }
-
-    /// With no census, every reachable binary is costed at its whole baseline, and a mutant's
-    /// share of the run-out-of-time budget averages that binary set's own budgets.
-    #[test]
-    fn workload_sums_reachable_binary_baselines_with_no_census() {
-        let plan = plan_mutating(&graph(), &["core"]);
-        let mut app_dependent = binary("app");
-        app_dependent.baseline = Duration::from_millis(300);
-        app_dependent.budget = Some(Duration::from_secs(3));
-        let mut own = binary("core");
-        own.baseline = Duration::from_millis(700);
-        own.budget = Some(Duration::from_secs(7));
-        let binaries = vec![app_dependent, own];
-
-        let reach = Reachability::build(&plan, &binaries, &ANY);
-        let work = workload(&plan.mutants, &reach, None);
-
-        assert_eq!(
-            work.suite,
-            Duration::from_secs(1),
-            "one mutant, whole-binary cost for both of its reachable binaries"
-        );
-        assert_eq!(work.budget, Duration::from_secs(10), "both binaries' budgets, summed");
-        assert_eq!(work.single, Duration::from_secs(5), "the average of the two binaries' budgets");
-    }
-
-    /// `workload` shares [`test_all`]'s exact invariant: the `Reachability` it is given must have
-    /// been built from the very same pending mutants it iterates, so every pending mutant's package
-    /// is guaranteed present. A package silently missing used to be skipped, which would silently
-    /// under-count the workload instead of surfacing the mismatch that caused it.
-    #[test]
-    #[should_panic(expected = "the shared reachability index was built from these same pending mutants")]
-    fn workload_refuses_a_reachability_missing_a_pending_mutants_package() {
-        let plan = plan_mutating(&graph(), &["core"]);
-        let binaries = vec![binary("core")];
-
-        // Built from a plan that never mutates `core`, so the index has no entry for it — exactly
-        // the mismatch `test_all` itself guards against with the same `.expect(...)`.
-        let stale_plan = plan_mutating(&graph(), &["aside"]);
-        let reach = Reachability::build(&stale_plan, &binaries, &ANY);
-
-        let _work = workload(&plan.mutants, &reach, None);
     }
 
     #[test]

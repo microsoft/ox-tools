@@ -17,6 +17,7 @@
 //! honoring it silently would mean that file's `exclude_re` entries quietly changing which
 //! mutants this one suppresses.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 
@@ -60,8 +61,14 @@ pub struct Config {
     /// Fail the run below this mutation score.
     pub min_score: Option<f64>,
 
+    /// Fail the run above this many unresolved flaky outcomes.
+    pub max_flaky: Option<usize>,
+
     /// How many mutants to test at once.
     pub jobs: Option<usize>,
+
+    /// Maximum concurrency for source-declared shared test resources.
+    pub resources: BTreeMap<String, usize>,
 
     /// The multiple of each test binary's baseline duration a mutant is allowed.
     pub test_timeout_multiplier: Option<f64>,
@@ -80,6 +87,9 @@ pub struct Config {
 
     /// Packages whose tests decide a verdict. Empty means each mutant's own package.
     pub test_packages: Vec<String>,
+
+    /// Use only library unit-test harnesses as the verdict oracle.
+    pub test_lib: Option<bool>,
 
     /// Let tests from every workspace package judge mutants they can reach.
     pub test_workspace: Option<bool>,
@@ -279,6 +289,10 @@ impl Config {
             return Err(format!("exclude-trait-impls entry `{name}` must be an unqualified Rust identifier"));
         }
 
+        for (name, concurrency) in &self.resources {
+            crate::exec::ResourceLimit::new(name, *concurrency).map_err(|cause| format!("resources.{name}: {cause}"))?;
+        }
+
         Ok(())
     }
 
@@ -301,13 +315,32 @@ impl Config {
     ///
     /// Returns a usage error if the merged settings contradict one another; see
     /// [`validate_effective`](Self::validate_effective).
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn apply(&self, args: &mut RunArgs) -> Result<()> {
         self.apply_selection(&mut args.select)?;
 
         let implied_by_cli = crate::exec::implied_memory_control(args.measure.memory_limit, args.measure.baseline_memory_limit);
 
         args.min_score = args.min_score.or(self.min_score);
+        args.max_flaky = args.max_flaky.or(self.max_flaky);
         args.measure.jobs = args.measure.jobs.or(self.jobs);
+        let mut command_line_resources = BTreeSet::new();
+        for limit in &args.measure.resource_concurrency {
+            if !command_line_resources.insert(limit.name().to_owned()) {
+                return Err(error!(
+                    "`--resource-concurrency` states `{}` more than once; each resource may have only one command-line capacity",
+                    limit.name()
+                )
+                .usage());
+            }
+        }
+        for (name, max_concurrency) in &self.resources {
+            if !command_line_resources.contains(name) {
+                args.measure.resource_concurrency.push(
+                    crate::exec::ResourceLimit::new(name, *max_concurrency).map_err(|cause| error!("resources.{name}: {cause}").usage())?,
+                );
+            }
+        }
         args.measure.test_timeout_multiplier = args.measure.test_timeout_multiplier.or(self.test_timeout_multiplier);
         args.measure.minimum_test_timeout = args.measure.minimum_test_timeout.or(self.minimum_test_timeout);
         args.measure.nextest = args.measure.nextest || self.nextest.unwrap_or(false);
@@ -326,6 +359,7 @@ impl Config {
         args.measure.cargo_args.extend(self.cargo_args.iter().cloned());
         args.measure.cargo_test_args.extend(self.cargo_test_args.iter().cloned());
         args.measure.test_packages.extend(self.test_packages.iter().cloned());
+        args.measure.test_lib = args.measure.test_lib || self.test_lib.unwrap_or(false);
         args.measure.test_workspace = args.measure.test_workspace || self.test_workspace.unwrap_or(false);
         args.measure.optimize_test_execution = args.measure.optimize_test_execution || self.optimize_test_execution.unwrap_or(false);
         args.measure.whole_test_binaries = args.measure.whole_test_binaries || self.whole_test_binaries.unwrap_or(false);
@@ -333,6 +367,9 @@ impl Config {
         args.measure.exclude_tests.extend(self.exclude_tests.iter().cloned());
         args.no_baseline = args.no_baseline || self.no_baseline.unwrap_or(false);
         args.no_confirm = args.no_confirm || self.no_confirm.unwrap_or(false);
+        if args.max_flaky.is_some() && args.no_confirm {
+            return Err(error!("`max-flaky` requires confirmation; remove `--no-confirm` or the `no-confirm` configuration").usage());
+        }
         args.artifact_dir = args.artifact_dir.take().or_else(|| self.artifact_dir.clone());
         if !args.measure.test_packages.is_empty() && args.measure.test_workspace {
             return Err(contradiction(
@@ -351,14 +388,43 @@ impl Config {
             ));
         }
 
+        if args.measure.test_lib
+            && let Some(argument) = args.measure.cargo_args.iter().find(|argument| {
+                matches!(
+                    argument.as_str(),
+                    "--tests"
+                        | "--all-targets"
+                        | "--bins"
+                        | "--bin"
+                        | "--examples"
+                        | "--example"
+                        | "--benches"
+                        | "--bench"
+                        | "--test"
+                        | "--doc"
+                ) || argument.starts_with("--bin=")
+                    || argument.starts_with("--example=")
+                    || argument.starts_with("--bench=")
+                    || argument.starts_with("--test=")
+            })
+        {
+            return Err(error!(
+                "`test-lib` cannot be combined with Cargo target selector `{argument}`, which would widen or replace the library-only oracle"
+            )
+            .usage());
+        }
+
         Ok(())
     }
 
-    /// Folds the file's selection keys into `select` — the step `list`, `unsuppress`, and `hints`
-    /// each take before discovery, and that `run` and `suppress` reach through [`apply`](Self::apply).
+    /// Folds the file's selection keys into `select` — the step `list`, `unsuppress`, `hints`, and
+    /// mutant-ID explanation each take before discovery, and that `run` and `suppress` reach
+    /// through [`apply`](Self::apply).
     ///
-    /// `explain` is deliberately not in that set: it resolves a named subject rather than a
-    /// selection, so it never calls this and the file's selection keys do not reach it.
+    /// Registry-subject explanation does not call this because it resolves a named mutator rather
+    /// than a discovered mutant. Mutant-ID explanation retains the configured file, package,
+    /// feature, error, and trait-implementation filters, then selects all mutators so it can find
+    /// the requested current ID even when the configured mutator set would otherwise exclude it.
     ///
     /// # Errors
     ///
@@ -527,6 +593,8 @@ mod tests {
 
         assert!(text.contains("test-packages"), "{text}");
         assert!(text.contains("test-workspace"), "{text}");
+        assert!(text.contains(RELATIVE_PATH), "{text}");
+        assert!(text.contains("the command line"), "{text}");
     }
 
     /// Neither pair is a contradiction when only one half is stated, which is the ordinary case and
@@ -715,6 +783,30 @@ mod tests {
         config.apply(&mut args).expect("the merged settings do not contradict one another");
 
         assert!(args.measure.test_workspace);
+    }
+
+    #[test]
+    fn a_flaky_gate_requires_confirmation_after_configuration_is_merged() {
+        let config = Config::parse("max-flaky = 0\nno-confirm = true\n").expect("configuration parses");
+        let mut args = RunArgs::default();
+
+        let failure = config
+            .apply(&mut args)
+            .expect_err("the gate cannot observe flakes without confirmation");
+
+        assert!(failure.is_usage(), "{failure}");
+        assert!(failure.to_string().contains("requires confirmation"), "{failure}");
+    }
+
+    #[test]
+    fn no_confirm_is_accepted_without_a_flaky_gate() {
+        let config = Config::parse("no-confirm = true\n").expect("configuration parses");
+        let mut args = RunArgs::default();
+
+        config.apply(&mut args).expect("confirmation can be disabled without a flaky gate");
+
+        assert!(args.no_confirm);
+        assert_eq!(args.max_flaky, None);
     }
 
     #[test]
@@ -1116,8 +1208,8 @@ mod tests {
     ///
     /// Sentinel values rather than plausible ones on purpose: an assignment that reached the wrong
     /// field, or that was deleted and left the default behind, has to fail rather than coincide.
-    /// `test_workspace` is left in its non-conflicting state because it and `test-packages` cannot
-    /// both apply — the pair has a test of its own below.
+    /// Mutually exclusive settings are left in their non-conflicting state; each conflicting pair
+    /// has a focused test of its own below.
     fn every_key_set() -> Config {
         Config {
             mutators: Some(vec!["arith".to_owned(), "!arith.add_to_sub".to_owned()]),
@@ -1125,13 +1217,16 @@ mod tests {
             exclude_files: vec!["excluded-file-from-the-file".to_owned()],
             exclude_trait_impls: vec!["TraitFromTheFile".to_owned()],
             min_score: Some(61.5),
+            max_flaky: Some(2),
             jobs: Some(62),
+            resources: BTreeMap::from([("cargo-subprocess".to_owned(), 2)]),
             test_timeout_multiplier: Some(63.5),
             incremental: Some(IncrementalMode::No),
             no_baseline: Some(true),
-            no_confirm: Some(true),
+            no_confirm: Some(false),
             packages: vec!["package-from-the-file".to_owned()],
             test_packages: vec!["test-package-from-the-file".to_owned()],
+            test_lib: Some(true),
             test_workspace: Some(false),
             optimize_test_execution: Some(false),
             whole_test_binaries: Some(true),
@@ -1189,7 +1284,12 @@ mod tests {
         assert_eq!(args.select.shard_index, Some(9));
 
         assert_eq!(args.min_score, Some(61.5));
+        assert_eq!(args.max_flaky, Some(2));
         assert_eq!(args.measure.jobs, Some(62));
+        assert_eq!(
+            args.measure.resource_concurrency,
+            [crate::exec::ResourceLimit::new("cargo-subprocess", 2).expect("valid resource")]
+        );
         assert_eq!(args.measure.test_timeout_multiplier, Some(63.5));
         assert_eq!(args.measure.minimum_test_timeout, Some(64.5));
         assert!(args.measure.nextest);
@@ -1205,13 +1305,14 @@ mod tests {
         assert_eq!(args.measure.cargo_args, ["--cargo-argument-from-the-file"]);
         assert_eq!(args.measure.cargo_test_args, ["--cargo-test-argument-from-the-file"]);
         assert_eq!(args.measure.test_packages, ["test-package-from-the-file"]);
+        assert!(args.measure.test_lib);
         assert!(!args.measure.test_workspace, "the file said false, so nothing may turn it on");
         assert!(!args.measure.optimize_test_execution);
         assert!(args.measure.whole_test_binaries);
         assert_eq!(args.measure.include_tests, ["included-test-from-the-file"]);
         assert_eq!(args.measure.exclude_tests, ["excluded-test-from-the-file"]);
         assert!(args.no_baseline);
-        assert!(args.no_confirm);
+        assert!(!args.no_confirm);
         assert_eq!(args.artifact_dir.as_deref(), Some(Utf8Path::new("artifacts-from-the-file")));
     }
 
@@ -1396,5 +1497,36 @@ mod tests {
         assert!(error.is_usage(), "{error}");
         assert!(error.to_string().contains("test-packages"), "{error}");
         assert!(error.to_string().contains("test-workspace"), "{error}");
+    }
+
+    #[test]
+    fn command_line_resource_capacity_overrides_the_file() {
+        let config = Config::parse(
+            r"
+            [resources]
+            cargo-subprocess = 2
+            powershell = 1
+            ",
+        )
+        .expect("resource table parses");
+        let mut args = RunArgs::default();
+        args.measure.resource_concurrency = vec![crate::exec::ResourceLimit::new("cargo-subprocess", 4).expect("valid resource")];
+
+        config.apply(&mut args).expect("resource policies merge");
+
+        assert_eq!(
+            args.measure.resource_concurrency,
+            [
+                crate::exec::ResourceLimit::new("cargo-subprocess", 4).expect("valid resource"),
+                crate::exec::ResourceLimit::new("powershell", 1).expect("valid resource")
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_resource_configuration_is_rejected() {
+        for text in ["[resources]\ncargo = 0", "[resources]\n\"two words\" = 1"] {
+            assert!(Config::parse(text).is_err(), "`{text}` should be rejected");
+        }
     }
 }

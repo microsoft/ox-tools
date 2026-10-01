@@ -61,11 +61,9 @@ impl<'a, W: Write> RowWriter<'a, W> {
     }
 
     pub fn write_optional_u64(&mut self, value: Option<u64>) {
+        self.write_bool(value.is_some());
         if let Some(v) = value {
-            self.write_byte(1);
             self.write_u64(v);
-        } else {
-            self.write_byte(0);
         }
     }
 
@@ -165,7 +163,21 @@ fn parse_pg_date(s: &str) -> Result<u64> {
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::io::Error;
+
     use super::*;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(Error::other("synthetic write failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn encoded(value: u64) -> Vec<u8> {
         let mut buffer = Vec::new();
@@ -205,10 +217,83 @@ mod tests {
     }
 
     #[test]
+    fn present_optional_u64_uses_the_one_byte_tag() {
+        let mut buffer = Vec::new();
+        {
+            let mut writer = RowWriter::new(&mut buffer);
+            writer.write_optional_u64(Some(7));
+            writer.row_done().expect("writing to a Vec cannot fail");
+        }
+
+        assert_eq!(buffer, [1, 7]);
+    }
+
+    #[test]
     fn rejects_a_value_that_is_not_a_boolean() {
         let mut buffer = Vec::new();
         let mut writer = RowWriter::new(&mut buffer);
         let error = writer.write_str_as_bool("maybe").expect_err("'maybe' is not a boolean");
         assert!(format!("{error:#}").contains("maybe"));
+    }
+
+    #[test]
+    fn row_done_returns_writer_errors_without_panicking() {
+        let mut output = FailingWriter;
+        let mut writer = RowWriter::new(&mut output);
+        writer.write_byte(42);
+
+        let error = writer.row_done().expect_err("the synthetic writer must fail");
+
+        assert!(format!("{error:#}").contains("synthetic write failure"));
+        assert_eq!(writer.row_count(), 0);
+    }
+
+    #[test]
+    fn invalid_timestamp_is_reported_by_parser_and_writer() {
+        let parse_error = parse_pg_timestamp("not-a-timestamp").expect_err("invalid timestamps must be rejected");
+        assert!(format!("{parse_error:#}").contains("not-a-timestamp"));
+
+        let mut buffer = Vec::new();
+        let mut writer = RowWriter::new(&mut buffer);
+        let write_error = writer
+            .write_str_as_datetime("still-not-a-timestamp")
+            .expect_err("invalid timestamps must be returned by the writer");
+        assert!(format!("{write_error:#}").contains("still-not-a-timestamp"));
+    }
+
+    #[test]
+    fn invalid_date_is_returned_as_an_error() {
+        let error = parse_pg_date("not-a-date").expect_err("invalid dates must be rejected");
+
+        assert!(format!("{error:#}").contains("not-a-date"));
+    }
+
+    #[test]
+    fn pre_epoch_dates_and_timestamps_are_clamped_to_zero() {
+        assert_eq!(parse_pg_timestamp("1969-12-31T23:59:59Z").unwrap(), 0);
+        assert_eq!(parse_pg_date("1969-12-31").unwrap(), 0);
+    }
+
+    #[test]
+    fn empty_urls_remain_empty() {
+        let mut buffer = Vec::new();
+        {
+            let mut writer = RowWriter::new(&mut buffer);
+            writer.write_str_as_url("").expect("empty URLs are represented by an empty string");
+            writer.row_done().expect("writing to a Vec cannot fail");
+        }
+
+        assert_eq!(buffer, [0]);
+    }
+
+    #[test]
+    fn conversion_errors_are_returned_without_panicking() {
+        let mut buffer = Vec::new();
+        let mut writer = RowWriter::new(&mut buffer);
+
+        assert!(writer.write_str_as_u64("not-a-number").is_err());
+        assert!(writer.write_optional_str_as_u64("not-a-number").is_err());
+        assert!(writer.write_str_as_date("not-a-date").is_err());
+        assert!(writer.write_str_as_version("not-a-version").is_err());
     }
 }

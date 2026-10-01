@@ -30,7 +30,7 @@ use crate::ops::collect::Shape;
 /// standard `Default` trait can write `T::default()` instead of `Default::default()`. Those are
 /// the same call, so the mutant is the original program under another name.
 pub(super) fn is_noop(replacement: &str, original: &str, shape: Shape, defaults: &DefaultPaths, defaulted_types: &[String]) -> bool {
-    let original = if shape == Shape::Block || shape == Shape::IterBlock {
+    let original = if matches!(shape, Shape::Block | Shape::IterBlock) {
         let trimmed = original.trim();
 
         trimmed
@@ -404,6 +404,20 @@ mod tests {
         ));
         assert!(!is_same_leak("None", "0", &defaults, &[]));
         assert!(!is_same_leak("Box::leak(Box::new(1))", "0", &defaults, &[]));
+        assert!(is_same_leak("Box::leak(Box::new(1))", "Box::leak(Box::new(1))", &defaults, &[],));
+        assert!(!is_same_leak("Box::leak(Box::new(1))", "Box::leak(Box::new(2))", &defaults, &[],));
+    }
+
+    #[test]
+    fn literal_validation_accepts_only_complete_rust_literals() {
+        assert!(valid_literal(LiteralKind::Int {
+            base: rustc_lexer::Base::Decimal,
+            empty_int: false,
+        }));
+        assert!(!valid_literal(LiteralKind::Int {
+            base: rustc_lexer::Base::Decimal,
+            empty_int: true,
+        }));
     }
 
     #[test]
@@ -432,6 +446,10 @@ mod tests {
         let wrong_tokens = lexemes(wrong_callee).expect("the wrong callee tokenizes");
         assert_eq!(call_argument(wrong_callee, &wrong_tokens, "Box", "new"), None);
 
+        let unterminated = "Box::new(value";
+        let unterminated_tokens = lexemes(unterminated).expect("the unterminated call tokenizes");
+        assert_eq!(call_argument(unterminated, &unterminated_tokens, "Box", "new"), None);
+
         let malformed_path = "Box.new(value)";
         let malformed_tokens = lexemes(malformed_path).expect("the malformed path tokenizes");
         assert!(!path_ends_with(&malformed_tokens[..2], "Box", "new"));
@@ -440,6 +458,10 @@ mod tests {
         let absolute_tokens = lexemes(absolute).expect("the absolute path tokenizes");
         assert!(path_ends_with(&absolute_tokens, "Box", "new"));
         assert!(!path_ends_with(&absolute_tokens, "Vec", "new"));
+
+        let interrupted_leading_colon = ": + Box::new";
+        let interrupted_tokens = lexemes(interrupted_leading_colon).expect("the interrupted path tokenizes");
+        assert!(!path_ends_with(&interrupted_tokens, "Box", "new"));
 
         for malformed in ["::", "Box:", "Box:::new", "Box::new::", "Box::0"] {
             let tokens = lexemes(malformed).expect("the malformed path still tokenizes");
@@ -456,6 +478,13 @@ mod tests {
         let two_parenthesized_terms = "(left) + (right)";
         let two_parenthesized_tokens = lexemes(two_parenthesized_terms).expect("the expression tokenizes");
         assert_eq!(strip_parentheses(&two_parenthesized_tokens).len(), two_parenthesized_tokens.len());
+
+        let unterminated_parenthesis = "(value";
+        let unterminated_parenthesis_tokens = lexemes(unterminated_parenthesis).expect("the expression tokenizes");
+        assert_eq!(
+            strip_parentheses(&unterminated_parenthesis_tokens).len(),
+            unterminated_parenthesis_tokens.len()
+        );
     }
 
     #[test]

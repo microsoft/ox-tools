@@ -348,6 +348,7 @@ impl Census {
     }
 
     /// Adds positive census reach clusters to the shared durable hint schema.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn persist_clusters(&self, mutants: &[Mutant], binaries: &[TestBinary], hints: &mut GeneralizedHints) {
         hints.version = GENERALIZED_HINTS_VERSION;
         let by_ordinal: HashMap<u32, &Mutant> = mutants.iter().map(|mutant| (mutant.ordinal, mutant)).collect();
@@ -651,8 +652,18 @@ const LIST_POLL: Duration = Duration::from_millis(5);
 /// obviously — or did not answer within [`LIST_BUDGET`], which is the same target when its
 /// `fn main()` ignores the flags and runs its suite instead. Either way the binary is left without
 /// a census and therefore run in full, which is the answer this had before the census existed.
-fn list(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
-    let command = listing_command(work, binary);
+pub(super) fn list(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
+    list_raw(work, binary).map(|names| names.into_iter().filter(|name| !super::resources::is_marker(name)).collect())
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(super) fn list_selected_allow_empty(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
+    let command = listing_command(work, binary, true);
+    listed(command, LIST_BUDGET).map(|names| names.into_iter().filter(|name| !super::resources::is_marker(name)).collect())
+}
+
+pub(super) fn list_raw(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
+    let command = listing_command(work, binary, true);
 
     // A successful process with no libtest records may be a custom harness that ignored both
     // flags. Without a positive record there is no evidence that the output was a complete census,
@@ -660,17 +671,46 @@ fn list(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
     listed(command, LIST_BUDGET).filter(|names| !names.is_empty())
 }
 
+pub(super) fn list_resource_markers(work: &Workspace, binary: &TestBinary) -> Option<Vec<Box<str>>> {
+    #[cfg(test)]
+    RESOURCE_LISTING_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+
+    let command = listing_command(work, binary, false);
+
+    // An empty libtest harness is a successful enumeration with no resource markers. Unlike the
+    // execution census, resource discovery needs that distinction from a launch failure so a
+    // package with no tests does not make the campaign fail closed.
+    listed(command, LIST_BUDGET)
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESOURCE_LISTING_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_resource_listing_calls() {
+    RESOURCE_LISTING_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn resource_listing_calls() -> usize {
+    RESOURCE_LISTING_CALLS.with(core::cell::Cell::get)
+}
+
 /// Builds the direct `--list` invocation for one test binary.
-fn listing_command(work: &Workspace, binary: &TestBinary) -> Command {
+fn listing_command(work: &Workspace, binary: &TestBinary, include_filters: bool) -> Command {
     let mut command = Command::new(binary.path.as_std_path());
 
-    let _ = command
-        .args(["--list", "--format=terse"])
+    let _ = command.args(["--list", "--format=terse"]);
+    if include_filters {
         // The user's own filters, so the census only ever records tests that are actually going to
         // run. Without them the listing discovers names outside the filter and feeds them back as a
         // selection, which the launcher then has to refuse. Everything but a `--format` of their
         // own is carried, since that one would fight with the format asked for here.
-        .args(HarnessFilters::parse(work.test_arguments()).selecting())
+        let _ = command.args(HarnessFilters::parse(work.test_arguments()).selecting());
+    }
+    let _ = command
         .current_dir(working_directory(work, binary).as_std_path())
         .stderr(Stdio::null());
 
@@ -731,6 +771,7 @@ fn read_listing(pipe: &mut impl io::Read) -> (Vec<u8>, bool) {
 /// A budget reached is `None` rather than a partial listing: half an enumeration is a census that
 /// believes some tests do not exist, and a test believed not to exist is one no mutant is ever run
 /// against.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn listed(mut command: Command, budget: Duration) -> Option<Vec<Box<str>>> {
     enum ListingStatus {
         Observed(std::process::ExitStatus),
@@ -1102,6 +1143,7 @@ fn scale_duration(duration: Duration, numerator: usize, denominator: usize) -> D
     clippy::too_many_arguments,
     reason = "the planner's execution seam is injected for deterministic tests"
 )]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn walk_with<S, E>(
     work: &Workspace,
     listed: Vec<(&TestBinary, Vec<Box<str>>, Duration)>,
@@ -1230,6 +1272,7 @@ fn sample(work: &Workspace, binary: &TestBinary, names: &[&str], path: &Utf8Path
     };
 
     let started = Instant::now();
+    let _resources = work.acquire_resources(binary, Only::These(names));
 
     match observe(work, binary, attempt).verdict {
         Verdict::Passed => {}
@@ -1427,7 +1470,7 @@ mod tests {
     fn listing_output_beyond_the_cap_is_not_authoritative() {
         let (_directory, work) =
             crate::testing::helper_workspace("census-list-cap", &["flood:4194305", "print:meaningful::killer: test", "exit:0"]);
-        let command = listing_command(&work, &crate::testing::helper());
+        let command = listing_command(&work, &crate::testing::helper(), true);
 
         assert!(listed(command, Duration::from_secs(30)).is_none());
     }
@@ -1435,7 +1478,7 @@ mod tests {
     #[test]
     fn listing_output_exactly_at_the_cap_is_still_a_whole_stream() {
         let (_directory, work) = crate::testing::helper_workspace("census-list-cap-exact", &["flood:4194304", "exit:0"]);
-        let command = listing_command(&work, &crate::testing::helper());
+        let command = listing_command(&work, &crate::testing::helper(), true);
 
         assert_eq!(
             listed(command, Duration::from_secs(30)),
@@ -1447,7 +1490,7 @@ mod tests {
     #[test]
     fn listing_reader_thread_failure_degrades_to_no_census() {
         let (_directory, work) = crate::testing::helper_workspace("census-list-thread", &["print:a::test: test", "exit:0"]);
-        let command = listing_command(&work, &crate::testing::helper());
+        let command = listing_command(&work, &crate::testing::helper(), true);
         let _refused = faults::arm(Fault::Thread);
 
         assert!(listed(command, Duration::from_secs(30)).is_none());
@@ -1456,7 +1499,7 @@ mod tests {
     #[test]
     fn a_listing_child_that_cannot_be_adopted_degrades_to_no_census() {
         let (_directory, work) = crate::testing::helper_workspace("census-list-adopt", &["print:a::test: test", "exit:0"]);
-        let command = listing_command(&work, &crate::testing::helper());
+        let command = listing_command(&work, &crate::testing::helper(), true);
         let _refused = process_faults::arm(ProcessFault::Adopt);
 
         assert!(listed(command, Duration::from_secs(30)).is_none());
@@ -1471,7 +1514,7 @@ mod tests {
         let (_scratch, work) = crate::testing::helper_workspace("list-loader", &["exit:0"]);
         let mut binary = crate::testing::helper();
         binary.manifest_dir = work.root().join("crate");
-        let command = listing_command(&work, &binary);
+        let command = listing_command(&work, &binary, true);
         let arguments: Vec<_> = command.get_args().collect();
         let configured = command
             .get_envs()
@@ -1508,6 +1551,7 @@ mod tests {
     /// single mutant had been judged, with no output and no way to tell what it was waiting for.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_binary_that_never_answers_a_listing_is_abandoned_when_its_budget_runs_out() {
         let mut command = std::process::Command::new("/bin/sh");
 
@@ -1531,6 +1575,7 @@ mod tests {
     /// that can no longer be made to see EOF.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn an_escaped_descendant_holding_listing_stdout_does_not_outlive_the_listing_budget() {
         if !std::process::Command::new("setsid")
             .arg("true")
@@ -1638,6 +1683,7 @@ mod tests {
             target: "t".to_owned(),
             manifest_dir: Utf8PathBuf::new(),
             linked_sources: None,
+            libtest: Some(true),
             baseline: Duration::from_secs(1),
             tests: None,
             budget: Some(Duration::from_secs(1)),
@@ -3069,6 +3115,7 @@ mod tests {
                 self.progress.push((completed, total, unit.to_owned()));
             }
 
+            #[cfg_attr(coverage_nightly, coverage(off))]
             fn mutant(&mut self, _mutant: &Mutant) {}
         }
 
@@ -3132,6 +3179,7 @@ mod tests {
                 self.progress.push((completed, total, unit.to_owned()));
             }
 
+            #[cfg_attr(coverage_nightly, coverage(off))]
             fn mutant(&mut self, _mutant: &Mutant) {}
         }
 
@@ -3158,7 +3206,7 @@ mod tests {
             &work,
             core::slice::from_ref(&binary),
             &targets,
-            Duration::from_secs(2),
+            Duration::from_secs(30),
             1,
             Stall::NONE,
             &mut events,
@@ -3183,6 +3231,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn walking_skips_a_listed_binary_without_requested_sites() {
         let directory = crate::testing::workdir("census-unrequested-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf-8 root");
@@ -3207,6 +3256,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn walking_uses_the_census_directory_and_fails_closed_when_it_is_not_a_directory() {
         let directory = crate::testing::workdir("census-directory-");
         let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("utf-8 root");

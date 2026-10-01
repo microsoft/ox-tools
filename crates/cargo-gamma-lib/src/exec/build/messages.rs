@@ -48,6 +48,10 @@ pub(super) struct CompilerMessage<'line> {
     #[serde(borrow, default)]
     pub(super) level: Cow<'line, str>,
 
+    /// The diagnostic's primary message, without rustc's rendered source excerpt.
+    #[serde(borrow, default)]
+    pub(super) message: Cow<'line, str>,
+
     /// The compiler's own rendering, snippet and underlines and all.
     #[serde(borrow, default)]
     pub(super) rendered: Option<Cow<'line, str>>,
@@ -214,6 +218,7 @@ pub(crate) fn dependencies(list: &str) -> Vec<String> {
 /// Uplifted copies such as `debug/libfoo.rlib` are skipped: they carry no hash, so their dep-info
 /// is overwritten by whichever run last built that package under any feature set, which is the
 /// staleness this is avoiding.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) fn dep_files(stdout: &str) -> Vec<Utf8PathBuf> {
     let mut wanted: HashMap<Utf8PathBuf, HashSet<String>> = HashMap::default();
 

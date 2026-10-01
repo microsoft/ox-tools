@@ -35,7 +35,7 @@
 use syn::visit::{self, Visit};
 use syn::{
     Arm, Attribute, Expr, ExprBinary, ExprForLoop, ExprIndex, ExprMethodCall, Field, ImplItem, ImplItemConst, ImplItemFn, Item, ItemConst,
-    ItemFn, ItemStatic, ItemStruct, ItemUse, Stmt, TraitItem, TraitItemConst, TraitItemFn,
+    ItemFn, ItemStatic, ItemStruct, ItemType, ItemUse, Stmt, TraitItem, TraitItemConst, TraitItemFn,
 };
 
 use crate::Result;
@@ -167,17 +167,25 @@ impl<'ast> Visit<'ast> for PhaseOne<'_> {
 
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         self.audit.on_item_fn(node);
+        self.walk.signature(&node.sig);
         visit::visit_item_fn(self, node);
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
         self.audit.on_impl_item_fn(node);
+        self.walk.signature(&node.sig);
         visit::visit_impl_item_fn(self, node);
     }
 
     fn visit_trait_item_fn(&mut self, node: &'ast TraitItemFn) {
         self.audit.on_trait_item_fn(node);
+        self.walk.signature(&node.sig);
         visit::visit_trait_item_fn(self, node);
+    }
+
+    fn visit_item_type(&mut self, node: &'ast ItemType) {
+        self.walk.alias(&node.ident.to_string(), &node.ty);
+        visit::visit_item_type(self, node);
     }
 
     fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
@@ -249,6 +257,8 @@ mod tests {
             r"
                 use std::vec::Vec;
 
+                type Count = usize;
+
                 struct Record {
                     count: usize,
                 }
@@ -287,6 +297,7 @@ mod tests {
         assert_eq!(indexes.constants.get("CAPACITY"), Some(&true));
         assert_eq!(indexes.fields.get("count"), Some(&true));
         assert_eq!(indexes.imports.get("Vec"), Some(&Some(vec!["std".to_owned(), "vec".to_owned()])));
+        assert!(indexes.aliases.contains_key("Count"));
         assert!(indexes.numeric_uses.names.contains("index"));
     }
 

@@ -77,4 +77,29 @@ mod tests {
             let _ = std::fs::remove_file(generated.as_std_path());
         }
     }
+
+    #[test]
+    fn metadata_errors_keep_their_context() {
+        let mut host = TestHost::new();
+        let args = InitArgs {
+            output: None,
+            manifest_path: Utf8PathBuf::from("missing-manifest-for-init-test.toml"),
+        };
+
+        let error = init_config(&mut host, &args).expect_err("a missing manifest must be reported");
+        assert!(error.to_string().contains("retrieving workspace metadata"));
+    }
+
+    #[test]
+    fn configuration_write_errors_are_returned() {
+        let dir = tempfile::tempdir().expect("creating output fixture");
+        let output = Utf8PathBuf::try_from(dir.path().to_path_buf()).expect("temporary paths are UTF-8");
+        let args = InitArgs {
+            output: Some(output),
+            manifest_path: Utf8PathBuf::from("Cargo.toml"),
+        };
+
+        let error = init_config(&mut TestHost::new(), &args).expect_err("writing over a directory must fail");
+        assert!(error.to_string().contains("writing default configuration"));
+    }
 }

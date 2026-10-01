@@ -148,6 +148,7 @@ pub fn sarif(mutants: &[Mutant], root: &Utf8Path, level: Level) -> Result<(Strin
     // arithmetic rather than in a multi-megabyte `String` that is looked at once and dropped. Only
     // the prefix that fits is rendered, exactly once. The sequence of prefixes is the same one the
     // repeated-render form walked, so the log that comes out is the same log.
+    let mut fitted = None;
     for length in candidate_lengths(results.len()) {
         let rules = rules(&kept[..length], level);
         let log = log(&results[..length], rules);
@@ -157,11 +158,12 @@ pub fn sarif(mutants: &[Mutant], root: &Utf8Path, level: Level) -> Result<(Strin
                 .map_err(|cause| crate::error::error!("could not serialize the SARIF log").caused_by(cause))?;
             let truncation = (found > length).then_some(Truncation { found, written: length });
 
-            return Ok((text, truncation));
+            fitted = Some((text, truncation));
+            break;
         }
     }
 
-    unreachable!("the zero-length SARIF document always fits");
+    Ok(fitted.expect("candidate lengths always end with the zero-length document"))
 }
 
 /// Candidate prefix lengths, ending at the empty prefix that is guaranteed to fit.
@@ -203,6 +205,7 @@ impl Write for Counted {
         Ok(buffer.len())
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }

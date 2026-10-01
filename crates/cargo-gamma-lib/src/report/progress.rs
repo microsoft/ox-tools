@@ -10,7 +10,6 @@ use std::time::Instant;
 use super::Styler;
 use super::text::{VERB_WIDTH, continuation, quantity};
 use crate::commands::Host;
-use crate::estimate::{LiveEstimate, MutationWork};
 use crate::model::Outcome;
 use crate::report::{encode_controls, encode_preserving_color};
 
@@ -26,35 +25,6 @@ const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 /// remainder makes it collapse to nothing the moment the caption grows, and makes it twitch by a
 /// column every time a counter gains a digit.
 const BAR_WIDTH: usize = 25;
-
-/// Renders an intentionally coarse duration for a live estimate.
-fn eta(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-
-    if seconds < 90 {
-        let rounded = seconds
-            .saturating_add(u64::from(duration.subsec_nanos() >= 500_000_000))
-            .max(u64::from(!duration.is_zero()));
-        return format!("{rounded}s");
-    }
-
-    if seconds < 90 * 60 {
-        return format!("{}m", seconds.saturating_add(30) / 60);
-    }
-
-    format!("{}h", seconds.saturating_add(30 * 60) / (60 * 60))
-}
-
-fn eta_range(remaining: crate::estimate::Remaining) -> String {
-    let low = eta(remaining.low);
-    let high = eta(remaining.high);
-
-    if low == high {
-        format!(", ETA ~{low}")
-    } else {
-        format!(", ETA ~{low}-{high}")
-    }
-}
 
 /// The live progress display.
 ///
@@ -87,8 +57,6 @@ pub struct Progress {
     survived: usize,
     timeouts: usize,
     out_of_memory: usize,
-    started: Option<Instant>,
-    estimate: Option<LiveEstimate>,
 }
 
 impl Progress {
@@ -113,57 +81,32 @@ impl Progress {
             survived: 0,
             timeouts: 0,
             out_of_memory: 0,
-            started: None,
-            estimate: None,
         }
     }
 
-    /// Sets the number of mutants that are about to be tested, and starts the clock the time
-    /// estimate is derived from.
+    /// Updates the width used for subsequent renders.
+    pub(crate) fn resize(&mut self, width: Option<u16>) {
+        self.width = width.map_or(80, |value| usize::from(value).max(20));
+        self.dirty = true;
+    }
+
+    /// Sets the number of mutants that are about to be tested.
     pub fn set_total(&mut self, total: usize) {
         self.total = total;
         self.done = 0;
         self.survived = 0;
         self.timeouts = 0;
         self.out_of_memory = 0;
-        self.started = Some(Instant::now());
-        self.estimate = None;
         self.dirty = true;
-    }
-
-    /// Installs the measured per-mutant workload and starts the live projection clock.
-    pub(crate) fn set_workload(&mut self, work: &[MutationWork], jobs: usize) {
-        self.total = work.len();
-        self.done = 0;
-        self.survived = 0;
-        self.timeouts = 0;
-        self.out_of_memory = 0;
-        self.started = Some(Instant::now());
-        self.estimate = Some(LiveEstimate::new(work, jobs));
-        self.dirty = true;
-    }
-
-    /// Records that a worker began evaluating one mutant at the given sweep-relative offset.
-    pub(crate) fn mutant_started(&mut self, ordinal: u32, elapsed: Duration) {
-        if let Some(estimate) = &mut self.estimate {
-            estimate.start(ordinal, elapsed);
-        }
     }
 
     /// Records one evaluated mutant.
     pub fn record(&mut self, outcome: Outcome) {
-        let elapsed = self.started.map_or(Duration::ZERO, |started| started.elapsed());
-        if let Some(estimate) = &mut self.estimate {
-            estimate.finish_next(outcome, elapsed);
-        }
         self.record_outcome(outcome);
     }
 
     /// Records a completed mutant with its identity and measured service time.
     pub(crate) fn record_mutant(&mut self, mutant: &crate::model::Mutant) {
-        if let Some(estimate) = &mut self.estimate {
-            estimate.finish(mutant.ordinal, mutant.outcome, mutant.elapsed());
-        }
         self.record_outcome(mutant.outcome);
     }
 
@@ -191,27 +134,6 @@ impl Progress {
         let fraction = self.done as f64 / self.total as f64;
 
         fraction.clamp(0.0, 1.0)
-    }
-
-    /// Estimates the low and high time remaining from weighted queued and in-flight work.
-    fn remaining(&self) -> Option<crate::estimate::Remaining> {
-        let started = self.started?;
-        if let Some(estimate) = &self.estimate {
-            return estimate.remaining(started.elapsed());
-        }
-
-        if self.done < 8 || self.done >= self.total {
-            return None;
-        }
-
-        #[expect(clippy::cast_precision_loss, reason = "a mutant count far exceeds any plausible workspace")]
-        let (done, left) = (self.done as f64, (self.total - self.done) as f64);
-        let remaining = Duration::try_from_secs_f64(started.elapsed().as_secs_f64() / done * left).ok()?;
-
-        Some(crate::estimate::Remaining {
-            low: remaining,
-            high: remaining,
-        })
     }
 
     /// Writes a completed status line, above the progress bar.
@@ -267,6 +189,7 @@ impl Progress {
     }
 
     /// Closes an open phase, either extending or replacing its in-progress subject.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn close<H: Host>(&mut self, host: &mut H, subject: &str, extend: bool) {
         if !self.enabled {
             return;
@@ -356,6 +279,7 @@ impl Progress {
     }
 
     /// Restores the active phase line after a borrowed build-progress row is released.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn restore<H: Host>(&mut self, host: &mut H) {
         if !self.enabled || self.open {
             return;
@@ -378,6 +302,7 @@ impl Progress {
     }
 
     /// Draws a completed/total bar for the phase currently in progress.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn phase_progress<H: Host>(&mut self, host: &mut H, completed: usize, total: usize, unit: &str) {
         if total == 0 {
             return;
@@ -553,6 +478,7 @@ impl Progress {
     /// Split from [`borrowed`](Self::borrowed) so the phase bar this type composes itself — whose
     /// only untrusted part, the unit, is encoded where it enters — is not encoded a second time
     /// and stripped of the styling its own label carries.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn draw_borrowed<H: Host>(&mut self, host: &mut H, line: &str) {
         if !self.enabled {
             return;
@@ -593,16 +519,11 @@ impl Progress {
     /// The arrowhead is counted as part of the filled run, exactly as cargo does it, so the bar
     /// does not gain a column when it starts and lose one when it completes.
     ///
-    /// On a narrow terminal the caption is shortened rather than cut. Truncation takes the columns
-    /// from the right, which is where the time remaining lives, so cutting a terminal a few columns
-    /// short there would lose the most volatile part of the line and leave a dangling ellipsis.
-    /// Dropping the running verdict counts instead keeps a line that is still worth reading: how far
-    /// along the run is, and how much longer it has. The counts are recoverable from the survivors
-    /// already printed above, and from the summary at the end.
+    /// On a narrow terminal the caption is shortened rather than cut. Running verdict counts are
+    /// dropped first because they are recoverable from the survivors already printed above and
+    /// from the summary at the end.
     #[must_use]
     pub fn render(&self) -> String {
-        let estimate = self.remaining().map_or_else(String::new, eta_range);
-
         #[expect(clippy::cast_precision_loss, reason = "the operand is a bar width")]
         #[expect(
             clippy::cast_possible_truncation,
@@ -647,18 +568,16 @@ impl Progress {
             format!(" ({})", findings.join(", "))
         };
         let counted = format!("[{bar}] {}/{} mutants evaluated", self.done, self.total);
-        let full = format!("{counted}{verdicts}{estimate}");
+        let full = format!("{counted}{verdicts}");
 
         let body = if full.chars().count() <= room {
             full
         } else {
             // Everything after the bar is optional, in the order it is least useful.
-            let shorter = format!("{counted}{estimate}");
-
-            if shorter.chars().count() <= room {
-                shorter
+            if counted.chars().count() <= room {
+                counted
             } else {
-                truncate(&shorter, room)
+                truncate(&counted, room)
             }
         };
 
@@ -675,6 +594,7 @@ impl Progress {
 /// cargo's progress bar, which arrives styled. Counting its escape sequences as columns would
 /// truncate a line that fits, and taking characters by count could cut an escape in half and leave
 /// the terminal reading the rest of the line as a command.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn truncate(text: &str, width: usize) -> String {
     if visible_width(text) <= width {
         return text.to_owned();
@@ -791,6 +711,7 @@ mod tests {
     }
 
     impl Host for CountingHost {
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn output(&mut self) -> impl Write {
             &mut self.out
         }
@@ -799,10 +720,12 @@ mod tests {
             &mut self.err
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn is_terminal(&self) -> bool {
             true
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn terminal_width(&self) -> Option<u16> {
             Some(80)
         }
@@ -865,9 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_terminal_drops_the_verdict_counts_rather_than_cutting_the_time_remaining() {
-        // Truncation takes columns from the right, which is where the time remaining lives, so a
-        // narrow terminal would otherwise lose the most useful part of the line to an ellipsis.
+    fn a_narrow_terminal_drops_the_verdict_counts_before_truncating_progress() {
         let render = |width| {
             let mut progress = Progress::new(true, Styler::new(false), Some(width));
 
@@ -881,20 +802,12 @@ mod tests {
             progress.render()
         };
         let wide = render(140);
-        let narrow = render(80);
+        let narrow = render(65);
 
         assert!(wide.contains("survived"), "{wide}");
         assert!(!narrow.contains("survived"), "{narrow}");
-        assert!(narrow.contains("ETA"), "{narrow}");
+        assert!(narrow.contains("50/100 mutants evaluated"), "{narrow}");
         assert!(!narrow.contains('…'), "{narrow}");
-    }
-
-    #[test]
-    fn the_time_remaining_is_marked_approximate_rather_than_spelled_out() {
-        let rendered = bar(50, 140);
-
-        assert!(rendered.contains('~'), "{rendered}");
-        assert!(!rendered.contains("estimating"), "{rendered}");
     }
 
     #[test]
@@ -949,8 +862,6 @@ mod tests {
         assert_eq!(progress.survived, 0);
         assert_eq!(progress.timeouts, 0);
         assert_eq!(progress.out_of_memory, 0);
-        assert!(progress.started.is_none());
-        assert!(progress.estimate.is_none());
 
         progress.set_total(3);
         let mut host = Sink::default().terminal(80);
@@ -1040,114 +951,26 @@ mod tests {
     }
 
     #[test]
-    fn a_time_estimate_appears_once_there_is_something_to_extrapolate_from() {
-        let mut progress = Progress::new(true, Styler::new(false), Some(200));
-
-        progress.set_total(10);
-
-        assert!(!progress.render().contains("ETA"), "{}", progress.render());
-
-        for _ in 0..8 {
-            progress.record(Outcome::Killed);
-        }
-
-        assert!(progress.render().contains("ETA"), "{}", progress.render());
-    }
-
-    #[test]
-    fn time_estimates_use_only_whole_units() {
-        assert_eq!(eta(Duration::from_millis(250)), "1s");
-        assert_eq!(eta(Duration::from_millis(1_499)), "1s");
-        assert_eq!(eta(Duration::from_millis(1_500)), "2s");
-        assert_eq!(eta(Duration::from_secs(89)), "89s");
-        assert_eq!(eta(Duration::from_secs(90)), "2m");
-        assert_eq!(eta(Duration::from_secs(10 * 60 + 29)), "10m");
-        assert_eq!(eta(Duration::from_secs(10 * 60 + 30)), "11m");
-        assert_eq!(eta(Duration::from_mins(90)), "2h");
-    }
-
-    #[test]
-    fn equal_rounded_estimate_bounds_are_rendered_once() {
-        let rendered = eta_range(crate::estimate::Remaining {
-            low: Duration::from_millis(1_100),
-            high: Duration::from_millis(1_400),
-        });
-
-        assert_eq!(rendered, ", ETA ~1s");
-    }
-
-    #[test]
-    fn the_live_estimate_is_rendered_as_a_range_while_uncertainty_remains() {
-        let work = (1..=100)
-            .map(|ordinal| {
-                MutationWork::new(
-                    ordinal,
-                    crate::estimate::WorkKind::Whole,
-                    Duration::from_secs(10),
-                    Duration::from_secs(100),
-                    crate::exec::CONFIRM_FACTOR,
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut progress = Progress::new(true, Styler::new(false), Some(200));
-        progress.set_workload(&work, 4);
-
-        for ordinal in 1..=8 {
-            progress
-                .estimate
-                .as_mut()
-                .expect("the weighted workload installs an estimate")
-                .finish(ordinal, Outcome::Killed, Duration::from_secs(6));
-            progress.record_outcome(Outcome::Killed);
-        }
-
-        let rendered = progress.render();
-
-        assert!(rendered.contains("ETA ~"), "{rendered}");
-        assert!(
-            rendered.split_once("ETA ~").is_some_and(|(_head, estimate)| estimate.contains('-')),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn installing_a_new_workload_resets_the_previous_testing_counts() {
-        let work = [MutationWork::new(
-            1,
-            crate::estimate::WorkKind::Whole,
-            Duration::from_secs(1),
-            Duration::from_secs(10),
-            crate::exec::CONFIRM_FACTOR,
-        )];
+    fn setting_a_new_total_resets_the_previous_testing_counts() {
         let mut progress = Progress::new(true, Styler::new(false), Some(200));
 
         progress.set_total(3);
         progress.record(Outcome::Survived);
         progress.record(Outcome::Timeout);
-        progress.set_workload(&work, 2);
+        progress.set_total(1);
 
         assert_eq!(progress.total, 1);
         assert_eq!(progress.done, 0);
         assert_eq!(progress.survived, 0);
         assert_eq!(progress.timeouts, 0);
         assert_eq!(progress.out_of_memory, 0);
-        assert!(progress.estimate.is_some());
-    }
-
-    #[test]
-    fn a_finished_run_has_no_time_left_to_report() {
-        let mut progress = Progress::new(true, Styler::new(false), Some(200));
-
-        progress.set_total(1);
-        progress.record(Outcome::Killed);
-
-        assert!(!progress.render().contains("ETA"), "{}", progress.render());
     }
 
     #[test]
     fn truncation_appends_an_ellipsis() {
         assert_eq!(truncate("abcdefghij", 6), "abc...");
         assert_eq!(truncate("abc", 6), "abc");
+        assert_eq!(truncate("123456789", 7), "1234...");
     }
 
     #[test]

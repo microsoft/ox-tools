@@ -260,9 +260,7 @@ fn main() {}
     #[test]
     fn fix_shebang_content_with_shebang_reassembles_header_and_body() {
         let s = fix_shebang_content("#!/bin/sh\n// Old\nbody\n", "New", CommentStyle::DoubleSlash, "\n");
-        assert!(s.starts_with("#!/bin/sh\n"), "{s}");
-        assert!(s.contains("// New"), "{s}");
-        assert!(s.contains("body"), "{s}");
+        assert_eq!(s, "#!/bin/sh\n// New\n\nbody\n");
     }
 
     #[test]

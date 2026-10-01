@@ -16,6 +16,7 @@ use super::{RowReader, RowWriter};
 use crate::Result;
 
 const FORMAT_MAGIC: u64 = 0xC0DE_C0DE_C0DE_0011;
+const TABLE_WRITE_BUFFER_SIZE: usize = 1_048_576;
 
 pub const TABLE_HEADER_SIZE: usize = 24; // 8 bytes magic + 8 bytes count + 8 bytes timestamp
 
@@ -41,23 +42,10 @@ pub trait Table: Sized {
         let path = tables_root.as_ref().join(Self::TABLE_NAME);
         let file = File::open(&path).into_app_err_with(|| format!("opening table file: {}", path.display()))?;
 
-        // Get file size for mapping
-        let metadata = file.metadata().into_app_err("getting file metadata")?;
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "Table files won't exceed usize::MAX on any supported platform"
-        )]
-        let file_size = metadata.len() as usize;
+        // Get file size for the anonymous snapshot.
+        let file_size = table_file_size(file.metadata())?;
 
-        // SAFETY: We have read-only access to the file for the duration of the mmap.
-        // The file is controlled by this application and won't be modified externally.
-        let mmap = unsafe {
-            MmapOptions::new(file_size)?
-                .with_flags(MmapFlags::TRANSPARENT_HUGE_PAGES.union(MmapFlags::SEQUENTIAL))
-                .with_file(&file, 0)
-                .map()
-                .into_app_err("memory-mapping table file")?
-        };
+        let mmap = map_table_file(&file, file_size)?;
 
         Self::open_with(mmap, max_ttl, now)
     }
@@ -66,7 +54,7 @@ pub trait Table: Sized {
         let tables_root = tables_root.as_ref();
         let path = tables_root.join(Self::TABLE_NAME);
 
-        // Open with read+write permissions so we can write AND memory-map with the same handle
+        // Open with read+write permissions so the completed file can be rewound and snapshotted.
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -76,51 +64,92 @@ pub trait Table: Sized {
             .into_app_err_with(|| format!("creating table file: {}", path.display()))?;
 
         // Use a 1MB buffer for better performance with large tables
-        let mut buf_writer = BufWriter::with_capacity(1024 * 1024, file);
+        let mut buf_writer = BufWriter::with_capacity(TABLE_WRITE_BUFFER_SIZE, file);
 
-        // Write header placeholder
-        buf_writer.write_all(&[0u8; TABLE_HEADER_SIZE])?;
+        write_table_contents::<Self>(&mut buf_writer, csv_entry, now)?;
 
-        let mut csv_reader = Reader::from_reader(csv_entry);
-        let mut row_writer = RowWriter::new(&mut buf_writer);
-
-        let headers = csv_reader.headers()?.clone();
-        let mut record = StringRecord::new();
-        while csv_reader.read_record(&mut record)? {
-            let row = record.deserialize(Some(&headers))?;
-            Self::write_row(&row, &mut row_writer)?;
-            row_writer.row_done()?;
-        }
-
-        let count = row_writer.row_count();
-        let timestamp = now.timestamp().max(0).cast_unsigned();
-
-        // padding to ensure vu128 never tries to read past EOF
-        buf_writer.write_all(&[0u8; 10])?;
-
-        // Go back and write the header
-        let _ = buf_writer.seek(SeekFrom::Start(0))?;
-        buf_writer.write_all(&FORMAT_MAGIC.to_le_bytes())?;
-        buf_writer.write_all(&count.to_le_bytes())?;
-        buf_writer.write_all(&timestamp.to_le_bytes())?;
-        buf_writer.flush()?;
-
-        // Return the file handle - it's open with read+write so it can be memory-mapped.
-        let file = buf_writer.into_inner()?;
+        // Return the file handle so the caller can load an immutable snapshot.
+        let file = finish_buffered_writer(buf_writer)?;
         Ok(file)
     }
 
     // Runtime data access
     fn iter(&self) -> impl Iterator<Item = (Self::Row<'_>, Self::Index)>;
     fn get(&self, index: Self::Index) -> Self::Row<'_>;
-    fn len(&self) -> usize;
     fn timestamp(&self) -> DateTime<Utc>;
+}
+
+fn table_file_size(metadata: std::io::Result<std::fs::Metadata>) -> Result<usize> {
+    let metadata = metadata.into_app_err("getting file metadata")?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Table files won't exceed usize::MAX on any supported platform"
+    )]
+    let file_size = metadata.len() as usize;
+    Ok(file_size)
+}
+
+fn write_table_header_placeholder(writer: &mut impl Write) -> Result<()> {
+    writer
+        .write_all(&[0u8; TABLE_HEADER_SIZE])
+        .into_app_err("writing table header placeholder")?;
+    Ok(())
+}
+
+fn write_table_contents<T: Table>(writer: &mut (impl Write + Seek), csv_entry: impl IoRead, now: DateTime<Utc>) -> Result<()> {
+    write_table_header_placeholder(writer)?;
+
+    let mut csv_reader = Reader::from_reader(csv_entry);
+    let mut row_writer = RowWriter::new(&mut *writer);
+    let headers = csv_reader.headers().into_app_err("reading CSV headers")?.clone();
+    let mut record = StringRecord::new();
+    while csv_reader.read_record(&mut record).into_app_err("reading CSV row")? {
+        let row = record.deserialize(Some(&headers)).into_app_err("deserializing CSV row")?;
+        T::write_row(&row, &mut row_writer).into_app_err("converting CSV row")?;
+        row_writer.row_done().into_app_err("writing table row")?;
+    }
+
+    let count = row_writer.row_count();
+    let timestamp = now.timestamp().max(0).cast_unsigned();
+    drop(row_writer);
+
+    writer.write_all(&[0u8; 10]).into_app_err("writing table padding")?;
+    finish_table_header(writer, count, timestamp).into_app_err("finalizing table header")
+}
+
+fn finish_buffered_writer<W: Write>(writer: BufWriter<W>) -> Result<W> {
+    writer
+        .into_inner()
+        .map_err(|error| ohno::app_err!("flushing table data: {}", error.error()))
+}
+
+pub(super) fn map_table_file(file: &File, file_size: usize) -> Result<Mmap> {
+    let mut reader = file.try_clone().into_app_err("cloning table file handle")?;
+    let _ = reader.seek(SeekFrom::Start(0)).into_app_err("rewinding table file")?;
+    let mut mmap = MmapOptions::new(file_size)
+        .into_app_err("creating memory-map options")?
+        .with_flags(MmapFlags::TRANSPARENT_HUGE_PAGES.union(MmapFlags::SEQUENTIAL))
+        .map_mut()
+        .into_app_err("allocating table memory")?;
+    reader.read_exact(&mut mmap).into_app_err("reading table file")?;
+    mmap.make_read_only()
+        .map_err(|(_mmap, cause)| cause)
+        .into_app_err("protecting table memory")
+}
+
+fn finish_table_header(writer: &mut (impl Write + Seek), count: u64, timestamp: u64) -> Result<()> {
+    let _ = writer.seek(SeekFrom::Start(0))?;
+    writer.write_all(&FORMAT_MAGIC.to_le_bytes()).into_app_err("writing table magic")?;
+    writer.write_all(&count.to_le_bytes()).into_app_err("writing table row count")?;
+    writer.write_all(&timestamp.to_le_bytes()).into_app_err("writing table timestamp")?;
+    writer.flush().into_app_err("flushing table header")?;
+    Ok(())
 }
 
 /// Generates a table struct, index type, and implementation from a `snake_case` name and row conversion functions.
 ///
 /// Creates:
-/// - `{Name}Table` - Main table struct with memory-mapped file access
+/// - `{Name}Table` - Main table struct with zero-copy row access over an immutable snapshot
 /// - `{Name}TableIndex` - Type-safe index for accessing rows
 /// - Implementation of `Table` trait
 /// - File name constants derived from the base name (`{name}.csv`, `{name}.table`)
@@ -190,11 +219,6 @@ macro_rules! define_table {
                 fn get(&self, index: Self::Index) -> Self::Row<'_> {
                     let mut reader = super::RowReader::new(&self.mmap[super::TABLE_HEADER_SIZE + index.0..]);
                     Self::read_row(&mut reader)
-                }
-
-                #[expect(clippy::cast_possible_truncation, reason = "Tables won't exceed usize::MAX entries in practice")]
-                fn len(&self) -> usize {
-                    self.count as usize
                 }
 
                 fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
@@ -288,19 +312,16 @@ pub fn validate_table_header(mmap: &Mmap, max_ttl: Duration, now: DateTime<Utc>)
     assert!(mmap.len() > 23, "mmap length sufficient for all header indexing operations");
 
     // Validate format magic identifier
-    let magic_bytes = mmap[0..8].try_into()?;
-    let magic = u64::from_le_bytes(magic_bytes);
+    let magic = read_header_u64(mmap, 0);
     if magic != FORMAT_MAGIC {
         bail!("invalid table format: expected magic 0x{FORMAT_MAGIC:016X}, found 0x{magic:016X}. Database may need regeneration.");
     }
 
     // Read row count
-    let count_bytes = mmap[8..16].try_into()?;
-    let count = u64::from_le_bytes(count_bytes);
+    let count = read_header_u64(mmap, 8);
 
     // Read and validate creation timestamp
-    let timestamp_bytes = mmap[16..24].try_into()?;
-    let table_timestamp = u64::from_le_bytes(timestamp_bytes);
+    let table_timestamp = read_header_u64(mmap, 16);
 
     // Check TTL
     let now_secs = now.timestamp().max(0).cast_unsigned();
@@ -319,16 +340,153 @@ pub fn validate_table_header(mmap: &Mmap, max_ttl: Duration, now: DateTime<Utc>)
     Ok((count, dt))
 }
 
+fn read_header_u64(mmap: &Mmap, offset: usize) -> u64 {
+    let end = offset + size_of::<u64>();
+    let bytes: [u8; size_of::<u64>()] = mmap[offset..end]
+        .try_into()
+        .expect("header length validation guarantees a complete u64");
+    u64::from_le_bytes(bytes)
+}
+
 #[cfg(test)]
 #[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
+    use std::io::{Cursor, Error, ErrorKind};
 
     use chrono::TimeZone as _;
+    use serde::Deserialize;
     use tempfile::TempDir;
 
     use super::*;
+
+    #[derive(Deserialize)]
+    struct TestCsvRow<'a> {
+        value: &'a str,
+    }
+
+    #[derive(Debug)]
+    struct TestTable;
+
+    impl Table for TestTable {
+        type CsvRow<'a> = TestCsvRow<'a>;
+        type Row<'a> = &'a str;
+        type Index = usize;
+
+        const CSV_NAME: &'static str = "test.csv";
+        const TABLE_NAME: &'static str = "test.table";
+
+        fn write_row(csv_row: &Self::CsvRow<'_>, writer: &mut RowWriter<impl Write>) -> Result<()> {
+            if csv_row.value == "reject" {
+                ohno::bail!("synthetic row conversion failure");
+            }
+            writer.write_str(csv_row.value);
+            Ok(())
+        }
+
+        fn read_row<'a>(reader: &mut RowReader<'a>) -> Self::Row<'a> {
+            reader.read_str()
+        }
+
+        fn open_with(_mmap: Mmap, _max_ttl: Duration, _now: DateTime<Utc>) -> Result<Self> {
+            Ok(Self)
+        }
+
+        fn iter(&self) -> impl Iterator<Item = (Self::Row<'_>, Self::Index)> {
+            core::iter::empty()
+        }
+
+        fn get(&self, _index: Self::Index) -> Self::Row<'_> {
+            ""
+        }
+
+        fn timestamp(&self) -> DateTime<Utc> {
+            DateTime::UNIX_EPOCH
+        }
+    }
+
+    struct FailingIo;
+
+    impl Write for FailingIo {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(Error::other("synthetic table write failure"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(Error::other("synthetic table flush failure"))
+        }
+    }
+
+    impl Seek for FailingIo {
+        fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
+            Err(Error::other("synthetic table seek failure"))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedIo {
+        writes_before_failure: Option<usize>,
+        fail_flush: bool,
+    }
+
+    impl ScriptedIo {
+        const fn fail_write_after(successful_writes: usize) -> Self {
+            Self {
+                writes_before_failure: Some(successful_writes),
+                fail_flush: false,
+            }
+        }
+
+        const fn fail_flush() -> Self {
+            Self {
+                writes_before_failure: None,
+                fail_flush: true,
+            }
+        }
+    }
+
+    impl Write for ScriptedIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if let Some(remaining) = &mut self.writes_before_failure {
+                if *remaining == 0 {
+                    return Err(Error::other("synthetic staged write failure"));
+                }
+                *remaining -= 1;
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.fail_flush {
+                Err(Error::other("synthetic staged flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Seek for ScriptedIo {
+        fn seek(&mut self, _pos: SeekFrom) -> std::io::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    struct HeaderThenError {
+        header_sent: bool,
+    }
+
+    impl IoRead for HeaderThenError {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.header_sent {
+                return Err(Error::other("synthetic CSV read failure"));
+            }
+            self.header_sent = true;
+            let header = b"value\n";
+            buf[..header.len()].copy_from_slice(header);
+            Ok(header.len())
+        }
+    }
 
     fn map_header(bytes: &[u8]) -> (TempDir, Mmap) {
         let dir = TempDir::new().expect("creating a temporary directory");
@@ -380,5 +538,209 @@ mod tests {
 
         assert_eq!(count, 7);
         assert_eq!(timestamp, now - chrono::TimeDelta::seconds(60));
+    }
+
+    #[test]
+    fn pre_epoch_clock_is_clamped_to_the_epoch() {
+        let now = Utc.timestamp_opt(-1, 0).unwrap();
+        let bytes = header(1, 0);
+        let (_dir, mmap) = map_header(&bytes);
+        let (_, timestamp) = validate_table_header(&mmap, Duration::ZERO, now).expect("a pre-epoch clock cannot make an epoch table stale");
+        assert_eq!(timestamp, DateTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn invalid_magic_is_rejected() {
+        let now = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
+        let bytes = [0u8; TABLE_HEADER_SIZE];
+        let (_dir, mmap) = map_header(&bytes);
+
+        let error = validate_table_header(&mmap, Duration::ZERO, now).expect_err("zero is not the table magic");
+
+        assert!(format!("{error:#}").contains("invalid table format"));
+    }
+
+    #[test]
+    fn out_of_range_timestamp_is_returned_with_context() {
+        let bytes = header(1, u64::MAX);
+        let (_dir, mmap) = map_header(&bytes);
+
+        let error = validate_table_header(&mmap, Duration::MAX, DateTime::<Utc>::MAX_UTC)
+            .expect_err("u64::MAX cannot be represented as an i64 timestamp");
+
+        assert!(format!("{error:#}").contains("timestamp out of range for i64"));
+    }
+
+    #[test]
+    fn chrono_rejects_an_i64_timestamp_outside_its_calendar_range() {
+        let bytes = header(1, i64::MAX.cast_unsigned());
+        let (_dir, mmap) = map_header(&bytes);
+
+        let error = validate_table_header(&mmap, Duration::MAX, DateTime::<Utc>::MAX_UTC)
+            .expect_err("chrono cannot represent the largest i64 timestamp");
+
+        assert!(format!("{error:#}").contains("invalid or out-of-range timestamp"));
+    }
+
+    #[test]
+    fn metadata_errors_are_returned_with_context() {
+        let error = table_file_size(Err(Error::new(ErrorKind::PermissionDenied, "synthetic metadata failure")))
+            .expect_err("metadata failures must be returned");
+
+        assert!(format!("{error:#}").contains("getting file metadata"));
+    }
+
+    #[test]
+    fn opening_an_empty_table_returns_the_mapping_error_with_context() {
+        let dir = TempDir::new().expect("creating a temporary directory");
+        fs::write(dir.path().join(TestTable::TABLE_NAME), []).expect("creating an empty table");
+
+        let error =
+            TestTable::open(dir.path(), Duration::ZERO, DateTime::UNIX_EPOCH).expect_err("an empty file cannot be opened as a table");
+
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains("creating memory-map options") || diagnostic.contains("allocating table memory"),
+            "{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn creating_a_table_returns_path_errors_with_context() {
+        let dir = TempDir::new().expect("creating a temporary directory");
+        let missing_root = dir.path().join("missing");
+
+        let error =
+            TestTable::create_table(&missing_root, &b"value\n"[..], DateTime::UNIX_EPOCH).expect_err("the table root does not exist");
+
+        assert!(format!("{error:#}").contains("creating table file"));
+        assert!(format!("{error:#}").contains(TestTable::TABLE_NAME));
+    }
+
+    #[test]
+    fn recreating_a_table_truncates_existing_contents() {
+        let dir = TempDir::new().expect("creating a temporary directory");
+        let path = dir.path().join(TestTable::TABLE_NAME);
+        fs::write(&path, vec![0xAA; 4096]).expect("writing old table contents");
+
+        drop(TestTable::create_table(dir.path(), &b"value\n"[..], DateTime::UNIX_EPOCH).expect("creating the replacement table"));
+
+        assert_eq!(
+            fs::metadata(path).expect("reading replacement metadata").len(),
+            u64::try_from(TABLE_HEADER_SIZE + 10).expect("small fixed size fits in u64")
+        );
+    }
+
+    #[test]
+    fn loaded_table_bytes_do_not_depend_on_the_backing_file_after_open() {
+        let file = tempfile::tempfile().expect("temporary file");
+        file.set_len(4).expect("size temporary file");
+        (&file).write_all(b"data").expect("write temporary file");
+
+        let mmap = map_table_file(&file, 4).expect("load table bytes");
+        file.set_len(0).expect("truncate backing file");
+
+        assert_eq!(&*mmap, b"data");
+    }
+
+    #[test]
+    fn creating_a_table_writes_exact_count_timestamp_and_zero_padding() {
+        let dir = TempDir::new().expect("creating a temporary directory");
+        let now = Utc.with_ymd_and_hms(2026, 9, 28, 12, 34, 56).unwrap();
+
+        drop(TestTable::create_table(dir.path(), &b"value\nhello\n"[..], now).expect("creating the table"));
+        let bytes = fs::read(dir.path().join(TestTable::TABLE_NAME)).expect("reading the table");
+
+        assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), 1);
+        assert_eq!(
+            u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            now.timestamp().cast_unsigned()
+        );
+        assert_eq!(&bytes[bytes.len() - 10..], &[0; 10]);
+    }
+
+    #[test]
+    fn creating_a_table_clamps_pre_epoch_timestamps_to_zero() {
+        let dir = TempDir::new().expect("creating a temporary directory");
+        let before_epoch = Utc.timestamp_opt(-1, 0).unwrap();
+
+        drop(TestTable::create_table(dir.path(), &b"value\n"[..], before_epoch).expect("creating the table"));
+        let bytes = fs::read(dir.path().join(TestTable::TABLE_NAME)).expect("reading the table");
+
+        assert_eq!(u64::from_le_bytes(bytes[16..24].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn table_creation_returns_csv_and_row_conversion_errors() {
+        let dir = TempDir::new().expect("creating a temporary directory");
+
+        let error = TestTable::create_table(dir.path(), &b"value\n\xFF\n"[..], DateTime::UNIX_EPOCH)
+            .expect_err("invalid UTF-8 in the header must be rejected");
+        assert!(format!("{error:#}").contains("reading CSV"));
+
+        let error = write_table_contents::<TestTable>(
+            &mut Cursor::new(Vec::new()),
+            HeaderThenError { header_sent: false },
+            DateTime::UNIX_EPOCH,
+        )
+        .expect_err("reader failures after the header must be returned");
+        assert!(format!("{error:#}").contains("reading CSV row"));
+
+        let error = write_table_contents::<TestTable>(&mut Cursor::new(Vec::new()), &b"other\nvalue\n"[..], DateTime::UNIX_EPOCH)
+            .expect_err("missing required fields must fail deserialization");
+        assert!(format!("{error:#}").contains("deserializing CSV row"));
+
+        let error = TestTable::create_table(dir.path(), &b"value\nreject\n"[..], DateTime::UNIX_EPOCH)
+            .expect_err("row conversion failures must be returned");
+        assert!(format!("{error:#}").contains("converting CSV row"));
+        assert!(format!("{error:#}").contains("synthetic row conversion failure"));
+    }
+
+    #[test]
+    fn table_write_helpers_return_exact_io_contexts() {
+        let placeholder_error = write_table_header_placeholder(&mut FailingIo).expect_err("placeholder writes must return errors");
+        assert!(format!("{placeholder_error:#}").contains("writing table header placeholder"));
+        assert!(format!("{placeholder_error:#}").contains("synthetic table write failure"));
+
+        let finish_error = finish_table_header(&mut FailingIo, 1, 2).expect_err("header finalization must return errors");
+        assert!(format!("{finish_error:#}").contains("synthetic table seek failure"));
+
+        for (successful_writes, expected) in [
+            (0, "writing table magic"),
+            (1, "writing table row count"),
+            (2, "writing table timestamp"),
+        ] {
+            let error = finish_table_header(&mut ScriptedIo::fail_write_after(successful_writes), 1, 2)
+                .expect_err("the selected header write must fail");
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+        }
+
+        let error = finish_table_header(&mut ScriptedIo::fail_flush(), 1, 2).expect_err("header flushing must fail");
+        assert!(format!("{error:#}").contains("flushing table header"));
+    }
+
+    #[test]
+    fn table_content_writes_return_stage_contexts() {
+        let error = write_table_contents::<TestTable>(&mut ScriptedIo::fail_write_after(1), &b"value\nhello\n"[..], DateTime::UNIX_EPOCH)
+            .expect_err("writing the first row must fail");
+        assert!(format!("{error:#}").contains("writing table row"));
+
+        let error = write_table_contents::<TestTable>(&mut ScriptedIo::fail_write_after(2), &b"value\nhello\n"[..], DateTime::UNIX_EPOCH)
+            .expect_err("writing padding must fail");
+        assert!(format!("{error:#}").contains("writing table padding"));
+
+        let error = write_table_contents::<TestTable>(&mut ScriptedIo::fail_write_after(3), &b"value\nhello\n"[..], DateTime::UNIX_EPOCH)
+            .expect_err("finalizing the header must fail");
+        assert!(format!("{error:#}").contains("finalizing table header"));
+        assert!(format!("{error:#}").contains("writing table magic"));
+    }
+
+    #[test]
+    fn buffered_writer_flush_errors_have_exact_context() {
+        let mut writer = BufWriter::new(ScriptedIo::fail_write_after(0));
+        writer.write_all(b"pending").expect("the buffered write does not flush yet");
+
+        let error = finish_buffered_writer(writer).expect_err("flushing the buffered data must fail");
+        assert!(format!("{error:#}").contains("flushing table data"));
     }
 }

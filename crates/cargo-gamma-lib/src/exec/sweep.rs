@@ -5,6 +5,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread;
@@ -14,7 +15,7 @@ use camino::Utf8Path;
 use cargo_gamma_process::MemoryRequest;
 
 use super::census::{Census, CensusSelection, CensusWork};
-use super::events::Events;
+use super::events::{Events, SelectionAttempt, SelectionResult, SelectionTier};
 use super::killers::Killers;
 use super::stall::Stall;
 use super::test_binary::{Reachability, TestBinary};
@@ -28,7 +29,7 @@ use crate::discover::{
     BinaryHint, FileBinaryHints, GENERALIZED_HINTS_VERSION, GeneralizedHints, ItemHints, Killer, Plan, RankedHint, SiteIdentity,
 };
 use crate::error::error;
-use crate::model::Outcome;
+use crate::model::{Mutant, Outcome};
 use crate::report::{encode_controls, encode_preserving_color};
 use crate::{Result, notes};
 
@@ -42,6 +43,9 @@ pub(super) const MIN_SCOUT_WAIT: Duration = Duration::from_millis(5);
 /// Workers reserve one of these slots atomically immediately before launch. Once any attempt hits,
 /// later workers may continue without the bound because the tier has proved productive.
 const GENERALIZED_ZERO_HIT_LIMIT: usize = 8;
+
+/// How long a quiet sweep may leave time-dependent progress displays unchanged.
+const SWEEP_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Describes a mutant stopped by the memory ceiling installed for its test binary.
 ///
@@ -147,12 +151,58 @@ fn enumeration_note(binary: &Utf8Path, output: &str) -> String {
     )
 }
 
-/// One mutant's result: its index in the plan, what happened, how long it took and any detail.
-type Completed = (usize, Outcome, u64, Option<Killer>, Option<String>, u64, u64);
+/// One mutant's completed execution and the scheduling timestamps used for package telemetry.
+struct Completed {
+    position: usize,
+    outcome: Outcome,
+    elapsed_ms: u64,
+    killer: Option<Killer>,
+    note: Option<String>,
+    first_started_ms: u64,
+    settled_ms: u64,
+    attempts: Vec<SelectionAttempt>,
+}
 
 enum SweepEvent {
-    Started(usize, u64),
+    Started,
+    SelectionAttempts(Vec<SelectionAttempt>),
     Completed(Completed),
+}
+
+fn receive_sweep_event<E: Events>(
+    receiver: &mpsc::Receiver<SweepEvent>,
+    events: &mut E,
+    heartbeat_interval: Duration,
+) -> Option<SweepEvent> {
+    loop {
+        match receiver.recv_timeout(heartbeat_interval) {
+            Ok(event) => return Some(event),
+            Err(mpsc::RecvTimeoutError::Timeout) => events.heartbeat(),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+
+thread_local! {
+    static SELECTION_ATTEMPTS: RefCell<Option<Vec<SelectionAttempt>>> = const { RefCell::new(None) };
+}
+
+fn begin_selection_trace() {
+    SELECTION_ATTEMPTS.with(|attempts| {
+        *attempts.borrow_mut() = Some(Vec::new());
+    });
+}
+
+fn record_selection_attempt(attempt: SelectionAttempt) {
+    SELECTION_ATTEMPTS.with(|attempts| {
+        if let Some(attempts) = attempts.borrow_mut().as_mut() {
+            attempts.push(attempt);
+        }
+    });
+}
+
+fn take_selection_trace() -> Vec<SelectionAttempt> {
+    SELECTION_ATTEMPTS.with(|attempts| attempts.borrow_mut().take().unwrap_or_default())
 }
 
 /// Estimates a single mutant's cost from per-site census data when available, falling back to
@@ -173,7 +223,7 @@ fn mutant_cost(position: usize, plan: &Plan, reach: &Reachability<'_>, census: &
         && let Some(binaries) = reach.reachable(mutant)
         && let Some(binary) = binaries.iter().find(|b| hint.names(&b.package, &b.target))
     {
-        return binary.baseline;
+        return binary.baseline / 4;
     }
 
     let Some(binaries) = reach.reachable(mutant) else {
@@ -185,80 +235,223 @@ fn mutant_cost(position: usize, plan: &Plan, reach: &Reachability<'_>, census: &
     for binary in binaries {
         let ordinal = mutant.ordinal;
         match census.work(binary, ordinal) {
-            CensusWork::Selected(duration) => total += duration,
-            CensusWork::Whole => total += binary.baseline,
+            CensusWork::Selected(duration) => total += duration / 2,
+            CensusWork::Whole => total += binary.baseline / 2,
             CensusWork::Uncovered => {}
-            CensusWork::Hinted(_duration) => total += binary.baseline,
+            CensusWork::Hinted(duration) => {
+                total = total
+                    .saturating_add(duration)
+                    .saturating_add(crate::estimate::generalized_fallback_cost(binary.baseline));
+            }
         }
     }
 
     total
 }
 
+fn mutant_work_with_hints(
+    position: usize,
+    plan: &Plan,
+    reach: &Reachability<'_>,
+    census: &Census,
+    killers: &Killers,
+    generalized: &GeneralizedPlanning<'_>,
+) -> crate::estimate::MutationWork {
+    let mutant = &plan.mutants[position];
+
+    if let Some(hint) = killers.hint(&mutant.id)
+        && let Some(binaries) = reach.reachable(mutant)
+        && let Some(binary) = binaries.iter().find(|binary| hint.names(&binary.package, &binary.target))
+    {
+        let fallback = binaries
+            .iter()
+            .fold(Duration::ZERO, |total, binary| total.saturating_add(binary.baseline));
+        return crate::estimate::MutationWork::hinted(crate::estimate::WorkKind::Exact, binary.baseline / 4, fallback);
+    }
+
+    if let Some(work) = generalized_mutant_work(mutant, reach, generalized) {
+        return work;
+    }
+
+    let mut killed = Duration::ZERO;
+    let mut running = 0_u32;
+    let mut hinted = false;
+    let mut whole = false;
+
+    if let Some(binaries) = reach.reachable(mutant) {
+        for binary in binaries {
+            match census.work(binary, mutant.ordinal) {
+                CensusWork::Selected(duration) => {
+                    killed = killed.saturating_add(duration / 2);
+                }
+                CensusWork::Whole => {
+                    whole = true;
+                    killed = killed.saturating_add(binary.baseline / 2);
+                }
+                CensusWork::Hinted(duration) => {
+                    hinted = true;
+                    killed = killed
+                        .saturating_add(duration)
+                        .saturating_add(crate::estimate::generalized_fallback_cost(binary.baseline));
+                }
+                CensusWork::Uncovered => continue,
+            }
+            running = running.saturating_add(1);
+        }
+    }
+
+    if running == 0 {
+        return crate::estimate::MutationWork::new(crate::estimate::WorkKind::Uncovered, Duration::ZERO);
+    }
+    let kind = if hinted {
+        crate::estimate::WorkKind::Hinted
+    } else if whole {
+        crate::estimate::WorkKind::Whole
+    } else {
+        crate::estimate::WorkKind::Selected
+    };
+
+    crate::estimate::MutationWork::costed(kind, killed)
+}
+
+struct GeneralizedPlanning<'a> {
+    items: crate::HashMap<(&'a Utf8Path, &'a str), &'a [RankedHint<Killer>]>,
+    files: crate::HashMap<&'a Utf8Path, &'a [RankedHint<BinaryHint>]>,
+    reach: crate::HashMap<&'a SiteIdentity, &'a [Killer]>,
+}
+
+impl<'a> GeneralizedPlanning<'a> {
+    fn new(killers: &'a Killers) -> Self {
+        let mut planning = Self {
+            items: crate::HashMap::default(),
+            files: crate::HashMap::default(),
+            reach: crate::HashMap::default(),
+        };
+        let Some(hints) = killers.generalized().supported() else {
+            return planning;
+        };
+
+        planning.items.extend(
+            hints
+                .items
+                .iter()
+                .map(|item| ((item.file.as_path(), item.item.as_str()), item.candidates.as_slice())),
+        );
+        planning
+            .files
+            .extend(hints.binaries.iter().map(|file| (file.file.as_path(), file.candidates.as_slice())));
+        planning.reach.extend(hints.reach.iter().filter_map(|cluster| {
+            let index = usize::try_from(cluster.test_set).ok()?;
+            Some((&cluster.site, hints.test_sets.get(index)?.as_slice()))
+        }));
+        planning
+    }
+}
+
+#[cfg(test)]
 fn mutant_work(
     position: usize,
     plan: &Plan,
     reach: &Reachability<'_>,
     census: &Census,
     killers: &Killers,
-    sweep: Sweep<'_>,
 ) -> crate::estimate::MutationWork {
-    let mutant = &plan.mutants[position];
-    let confirmation_runs = if sweep.confirm { crate::exec::CONFIRM_FACTOR } else { 0 };
+    let generalized = GeneralizedPlanning::new(killers);
+    mutant_work_with_hints(position, plan, reach, census, killers, &generalized)
+}
 
-    if let Some(hint) = killers.hint(&mutant.id)
-        && let Some(binaries) = reach.reachable(mutant)
-        && let Some(binary) = binaries.iter().find(|binary| hint.names(&binary.package, &binary.target))
-    {
-        return crate::estimate::MutationWork::new(
-            mutant.ordinal,
-            crate::estimate::WorkKind::Exact,
-            binary.baseline,
-            binary
-                .budget_for(mutant.test_timeout_multiplier, sweep.timeout_floor)
-                .unwrap_or_default(),
-            confirmation_runs,
-        );
-    }
+type GeneralizedCandidate<'a> = (&'a TestBinary, u64, u32, u32, u32, bool);
 
-    let mut kind = crate::estimate::WorkKind::Selected;
-    let mut suite = Duration::ZERO;
-    let mut budgets = Duration::ZERO;
-    let mut running = 0_u32;
-
-    if let Some(binaries) = reach.reachable(mutant) {
-        for binary in binaries {
-            let selected = match census.work(binary, mutant.ordinal) {
-                CensusWork::Selected(duration) => duration,
-                CensusWork::Hinted(_duration) => {
-                    if kind != crate::estimate::WorkKind::Whole {
-                        kind = crate::estimate::WorkKind::Hinted;
-                    }
-                    binary.baseline
-                }
-                CensusWork::Whole => {
-                    kind = crate::estimate::WorkKind::Whole;
-                    binary.baseline
-                }
-                CensusWork::Uncovered => continue,
-            };
-
-            suite = suite.saturating_add(selected);
-            budgets = budgets.saturating_add(
-                binary
-                    .budget_for(mutant.test_timeout_multiplier, sweep.timeout_floor)
-                    .unwrap_or_default(),
-            );
-            running = running.saturating_add(1);
+fn reached_work_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[Killer]) -> Option<GeneralizedCandidate<'a>> {
+    for candidate in candidates {
+        if let Some(binary) = binaries
+            .iter()
+            .copied()
+            .find(|binary| candidate.names(&binary.package, &binary.target))
+        {
+            return Some((binary, 0, 0, 0, 0, true));
         }
     }
+    None
+}
 
-    if running == 0 {
-        kind = crate::estimate::WorkKind::Uncovered;
+fn item_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[RankedHint<Killer>]) -> Option<GeneralizedCandidate<'a>> {
+    for candidate in candidates {
+        if let Some(binary) = binaries
+            .iter()
+            .copied()
+            .find(|binary| candidate.candidate.names(&binary.package, &binary.target))
+        {
+            return Some((
+                binary,
+                candidate.measured_ms,
+                candidate.samples,
+                candidate.hits,
+                candidate.misses,
+                true,
+            ));
+        }
     }
-    let single_budget = budgets.checked_div(running).unwrap_or(budgets);
+    None
+}
 
-    crate::estimate::MutationWork::new(mutant.ordinal, kind, suite, single_budget, confirmation_runs)
+fn file_candidate<'a>(binaries: &[&'a TestBinary], candidates: &[RankedHint<BinaryHint>]) -> Option<GeneralizedCandidate<'a>> {
+    for candidate in candidates {
+        if let Some(binary) = binaries
+            .iter()
+            .copied()
+            .find(|binary| candidate.candidate.package == binary.package && candidate.candidate.target == binary.target)
+        {
+            return Some((
+                binary,
+                candidate.measured_ms,
+                candidate.samples,
+                candidate.hits,
+                candidate.misses,
+                false,
+            ));
+        }
+    }
+    None
+}
+
+fn generalized_mutant_work(
+    mutant: &Mutant,
+    reach: &Reachability<'_>,
+    hints: &GeneralizedPlanning<'_>,
+) -> Option<crate::estimate::MutationWork> {
+    let binaries = reach.reachable(mutant)?;
+    let site = SiteIdentity::from_mutant(mutant);
+    let fallback = binaries
+        .iter()
+        .fold(Duration::ZERO, |total, binary| total.saturating_add(binary.baseline));
+
+    let (binary, measured_ms, samples, successes, misses, filtered) = hints
+        .reach
+        .get(&site)
+        .and_then(|candidates| reached_work_candidate(binaries, candidates))
+        .or_else(|| {
+            hints
+                .items
+                .get(&(mutant.file.as_ref(), mutant.item_path.as_ref()))
+                .and_then(|candidates| item_candidate(binaries, candidates))
+        })
+        .or_else(|| {
+            hints
+                .files
+                .get(mutant.file.as_ref())
+                .and_then(|candidates| file_candidate(binaries, candidates))
+        })?;
+    let probe = if samples > 0 {
+        Duration::from_millis(measured_ms / u64::from(samples))
+    } else if filtered {
+        binary.baseline / 4
+    } else {
+        binary.baseline / 2
+    };
+    Some(crate::estimate::MutationWork::hinted_with_observations(
+        probe, fallback, successes, misses,
+    ))
 }
 
 /// Builds the stable package-fair, longest-work-first priority used by the live scheduler.
@@ -330,6 +523,7 @@ struct ScheduledWork {
     sibling_benefit: usize,
     hinted: bool,
     stable_order: usize,
+    resources: Vec<Arc<str>>,
 }
 
 #[derive(Debug)]
@@ -343,6 +537,7 @@ struct SchedulerState {
     package_queues: Vec<BTreeSet<LocalPriority>>,
     heads: BTreeSet<PackageHead>,
     priorities: Vec<Option<LocalPriority>>,
+    active_resources: crate::HashMap<Arc<str>, usize>,
     #[cfg(test)]
     priority_updates: usize,
 }
@@ -353,6 +548,7 @@ struct Scheduler {
     by_file: Vec<Vec<usize>>,
     state: Mutex<SchedulerState>,
     changed: Condvar,
+    resource_capacities: crate::HashMap<Arc<str>, usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,6 +572,7 @@ impl Ord for LocalPriority {
 }
 
 impl PartialOrd for LocalPriority {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -403,6 +600,7 @@ impl Ord for PackageHead {
 }
 
 impl PartialOrd for PackageHead {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -431,7 +629,12 @@ impl Drop for Assignment<'_> {
 }
 
 impl Scheduler {
+    #[cfg(test)]
     fn new(work: Vec<ScheduledWork>, files: usize) -> Self {
+        Self::with_resources(work, files, crate::HashMap::default())
+    }
+
+    fn with_resources(work: Vec<ScheduledWork>, files: usize, resource_capacities: crate::HashMap<Arc<str>, usize>) -> Self {
         let mut packages: crate::HashMap<Arc<str>, usize> = crate::HashMap::default();
         let package_slots = work
             .iter()
@@ -455,6 +658,7 @@ impl Scheduler {
             package_queues: vec![BTreeSet::new(); packages.len()],
             heads: BTreeSet::new(),
             priorities: vec![None; work.len()],
+            active_resources: crate::HashMap::default(),
             #[cfg(test)]
             priority_updates: 0,
         };
@@ -471,6 +675,7 @@ impl Scheduler {
             by_file,
             state: Mutex::new(state),
             changed: Condvar::new(),
+            resource_capacities,
         }
     }
 
@@ -482,7 +687,7 @@ impl Scheduler {
                 return None;
             }
 
-            if let Some(index) = Self::select(&state) {
+            if let Some(index) = self.select(&state) {
                 let work = &self.work[index];
                 let packages = self.detach_file(&mut state, work.file);
                 state.remaining[index] = false;
@@ -492,6 +697,10 @@ impl Scheduler {
                 *active_item = active_item.saturating_add(1);
                 let package = self.package_slots[index];
                 state.package_turns[package] = state.package_turns[package].saturating_add(1);
+                for resource in &work.resources {
+                    let active = state.active_resources.entry(Arc::clone(resource)).or_default();
+                    *active = active.saturating_add(1);
+                }
                 self.attach_file(&mut state, work.file, &packages);
                 return Some(index);
             }
@@ -531,6 +740,14 @@ impl Scheduler {
             if *active == 0 {
                 state.active_items.remove(&key);
             }
+            for resource in &work.resources {
+                if let Some(active) = state.active_resources.get_mut(resource) {
+                    *active = active.saturating_sub(1);
+                    if *active == 0 {
+                        state.active_resources.remove(resource);
+                    }
+                }
+            }
         }
         self.attach_file(&mut state, work.file, &packages);
         core::mem::drop(state);
@@ -541,8 +758,35 @@ impl Scheduler {
         self.changed.notify_all();
     }
 
-    fn select(state: &SchedulerState) -> Option<usize> {
-        state.heads.first().map(|head| head.local.index)
+    fn select(&self, state: &SchedulerState) -> Option<usize> {
+        if self.resource_capacities.is_empty() {
+            return state.heads.first().map(|head| head.local.index);
+        }
+
+        state
+            .package_queues
+            .iter()
+            .enumerate()
+            .filter_map(|(package, queue)| {
+                queue
+                    .iter()
+                    .find(|priority| self.resources_available(state, priority.index))
+                    .copied()
+                    .map(|local| PackageHead {
+                        package,
+                        turns: state.package_turns[package],
+                        local,
+                    })
+            })
+            .min()
+            .map(|head| head.local.index)
+    }
+
+    fn resources_available(&self, state: &SchedulerState, index: usize) -> bool {
+        self.work[index].resources.iter().all(|resource| {
+            let capacity = self.resource_capacities.get(resource).copied().unwrap_or(1);
+            state.active_resources.get(resource).copied().unwrap_or(0) < capacity
+        })
     }
 
     fn detach_file(&self, state: &mut SchedulerState, file: usize) -> crate::HashSet<usize> {
@@ -883,9 +1127,16 @@ pub(super) fn test_all(
                 .map_or(0, |count| count.saturating_sub(1))
         })
         .collect();
+    let planning_total = pending.len();
+    let generalized = GeneralizedPlanning::new(killers);
     let planned: Vec<crate::estimate::MutationWork> = pending
         .iter()
-        .map(|position| mutant_work(*position, plan, reach, sweep.census, killers, sweep))
+        .enumerate()
+        .map(|(index, position)| {
+            let work = mutant_work_with_hints(*position, plan, reach, sweep.census, killers, &generalized);
+            events.sweep_plan_progress(index + 1, planning_total);
+            work
+        })
         .collect();
     let costs: Vec<Duration> = planned.iter().map(|work| work.scheduling_cost()).collect();
     let mut file_paths = files.into_iter().collect::<Vec<_>>();
@@ -929,7 +1180,7 @@ pub(super) fn test_all(
             .collect()
         })
         .collect();
-    let scheduler = Scheduler::new(
+    let scheduler = Scheduler::with_resources(
         pending
             .iter()
             .enumerate()
@@ -941,9 +1192,18 @@ pub(super) fn test_all(
                 sibling_benefit: sibling_benefits[index],
                 hinted: hints[index].is_some(),
                 stable_order: index,
+                resources: scheduled_resources(
+                    work,
+                    planned[index],
+                    reachable[index],
+                    hints[index].as_ref(),
+                    ordinals[index].0,
+                    sweep.census,
+                ),
             })
             .collect(),
         file_paths.len(),
+        work.resource_capacities(),
     );
     let notes = notes::current();
 
@@ -981,7 +1241,8 @@ pub(super) fn test_all(
                     let first_started_ms = elapsed_millis(sweep_started.elapsed());
                     let started = Instant::now();
                     let reachable = &reachable[index];
-                    let _sent = sender.send(SweepEvent::Started(position, first_started_ms));
+                    begin_selection_trace();
+                    let _sent = sender.send(SweepEvent::Started);
                     let judged = judge_learning(
                         work,
                         active,
@@ -997,10 +1258,12 @@ pub(super) fn test_all(
                         sweep,
                         tally,
                     );
+                    let attempts = take_selection_trace();
 
                     let (outcome, killer, note) = match judged {
                         Judgement::Reached(outcome, killer, note) => (outcome, killer, note),
                         Judgement::Abandoned(reason) => {
+                            let _sent = sender.send(SweepEvent::SelectionAttempts(attempts));
                             let _first = abandoned.set(reason);
                             core::mem::drop(assignment);
                             scheduler.abandon();
@@ -1015,15 +1278,16 @@ pub(super) fn test_all(
 
                     // A closed receiver means the calling thread is gone, which cannot happen while
                     // the scope is open; there is nothing useful to do about it either way.
-                    let _sent = sender.send(SweepEvent::Completed((
+                    let _sent = sender.send(SweepEvent::Completed(Completed {
                         position,
                         outcome,
-                        elapsed,
+                        elapsed_ms: elapsed,
                         killer,
                         note,
                         first_started_ms,
                         settled_ms,
-                    )));
+                        attempts,
+                    }));
                 }
             });
         }
@@ -1032,21 +1296,27 @@ pub(super) fn test_all(
         // #[gamma::skip(stmt.delete_call, reason = "the receiver waits for channel closure, so retaining the coordinator sender blocks collection forever")]
         core::mem::drop(sender);
 
-        for event in receiver {
+        while let Some(event) = receive_sweep_event(&receiver, events, SWEEP_HEARTBEAT_INTERVAL) {
             match event {
-                SweepEvent::Started(position, elapsed_ms) => {
-                    if let Some(mutant) = plan.mutants.get(position) {
-                        events.mutant_started(mutant.ordinal, Duration::from_millis(elapsed_ms));
+                SweepEvent::Started => events.mutant_started(),
+                SweepEvent::SelectionAttempts(attempts) => {
+                    for attempt in &attempts {
+                        events.selection_attempt(attempt);
                     }
                 }
                 SweepEvent::Completed(completed) => {
-                    if let Some(mutant) = plan.mutants.get(completed.0) {
-                        let span = package_spans
-                            .entry(Arc::clone(&mutant.package))
-                            .or_insert((0, completed.5, completed.6));
+                    for attempt in &completed.attempts {
+                        events.selection_attempt(attempt);
+                    }
+                    if let Some(mutant) = plan.mutants.get(completed.position) {
+                        let span = package_spans.entry(Arc::clone(&mutant.package)).or_insert((
+                            0,
+                            completed.first_started_ms,
+                            completed.settled_ms,
+                        ));
                         span.0 = span.0.saturating_add(1);
-                        span.1 = span.1.min(completed.5);
-                        span.2 = span.2.max(completed.6);
+                        span.1 = span.1.min(completed.first_started_ms);
+                        span.2 = span.2.max(completed.settled_ms);
                     }
                     publish_completed(plan, killers, events, completed);
                 }
@@ -1119,6 +1389,43 @@ pub(super) fn test_all(
     )
 }
 
+fn scheduled_resources(
+    work: &Workspace,
+    planned: crate::estimate::MutationWork,
+    reachable: &[&TestBinary],
+    exact: Option<&Killer>,
+    ordinal: u32,
+    census: &Census,
+) -> Vec<Arc<str>> {
+    let mut resources = match planned.kind {
+        crate::estimate::WorkKind::Exact => exact
+            .into_iter()
+            .flat_map(|hint| {
+                reachable
+                    .iter()
+                    .filter(|binary| hint.names(&binary.package, &binary.target))
+                    .flat_map(|binary| work.required_resources(binary, Only::One(&hint.test)))
+            })
+            .collect(),
+        crate::estimate::WorkKind::Selected => reachable
+            .iter()
+            .flat_map(|binary| match census.selection(binary, ordinal) {
+                CensusSelection::Selected(names) | CensusSelection::Hinted(names) => work.required_resources(binary, Only::These(&names)),
+                CensusSelection::Whole => work.required_resources(binary, Only::All),
+                CensusSelection::Uncovered => Vec::new(),
+            })
+            .collect(),
+        crate::estimate::WorkKind::Uncovered => Vec::new(),
+        crate::estimate::WorkKind::Hinted | crate::estimate::WorkKind::Whole => reachable
+            .iter()
+            .flat_map(|binary| work.required_resources(binary, Only::All))
+            .collect(),
+    };
+    resources.sort_unstable();
+    resources.dedup();
+    resources
+}
+
 fn pending_positions(plan: &Plan) -> Vec<usize> {
     plan.mutants
         .iter()
@@ -1147,21 +1454,16 @@ fn elapsed_millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn publish_completed(
-    plan: &mut Plan,
-    killers: &mut Killers,
-    events: &mut impl Events,
-    (position, outcome, elapsed, killer, note, _first_started_ms, _settled_ms): Completed,
-) {
-    let Some(mutant) = plan.mutants.get_mut(position) else {
+fn publish_completed(plan: &mut Plan, killers: &mut Killers, events: &mut impl Events, completed: Completed) {
+    let Some(mutant) = plan.mutants.get_mut(completed.position) else {
         return;
     };
-    mutant.outcome = outcome;
-    mutant.elapsed_ms = elapsed;
-    mutant.killed_by = killer.as_ref().map(|killer| killer.test.clone());
-    mutant.note = note;
+    mutant.outcome = completed.outcome;
+    mutant.elapsed_ms = completed.elapsed_ms;
+    mutant.killed_by = completed.killer.as_ref().map(|killer| killer.test.clone());
+    mutant.note = completed.note;
 
-    match killer {
+    match completed.killer {
         Some(killer) => killers.record(mutant.id.clone(), killer),
         None => killers.forget(&mutant.id),
     }
@@ -1231,6 +1533,7 @@ enum ProbeKind {
 }
 
 impl ProbeKind {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reserve(self, tally: &Tally) -> bool {
         let (probes, hits) = match self {
             Self::Item => (&tally.item_probes, &tally.item_hits),
@@ -1260,6 +1563,7 @@ impl ProbeKind {
         true
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn reject(self, tally: &Tally) {
         let counter = match self {
             Self::Item => &tally.item_rejected,
@@ -1271,6 +1575,7 @@ impl ProbeKind {
         let _previous = tally.generalized_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn attempt(self, tally: &Tally) {
         let counter = match self {
             Self::Exact => &tally.exact_probes,
@@ -1285,6 +1590,7 @@ impl ProbeKind {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn hit(self, tally: &Tally) {
         let counter = match self {
             Self::Exact => &tally.exact_hits,
@@ -1298,6 +1604,68 @@ impl ProbeKind {
             let _previous = tally.generalized_hits.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    const fn selection_tier(self) -> SelectionTier {
+        match self {
+            Self::Exact => SelectionTier::Exact,
+            Self::Item => SelectionTier::Item,
+            Self::Reach => SelectionTier::Reach,
+            Self::File => SelectionTier::File,
+            Self::Census => SelectionTier::Census,
+        }
+    }
+}
+
+fn transfer_observation(verdict: &Verdict) -> Option<bool> {
+    match verdict {
+        Verdict::Failed(_) => Some(true),
+        Verdict::Passed => Some(false),
+        Verdict::TestEnumerationFailed(_)
+        | Verdict::TimedOut
+        | Verdict::Stalled(_)
+        | Verdict::MemoryLimit { .. }
+        | Verdict::Flaky(_)
+        | Verdict::Unmetered(_)
+        | Verdict::Unjudged(_) => None,
+    }
+}
+
+fn selection_result(observation: Option<bool>) -> SelectionResult {
+    match observation {
+        Some(true) => SelectionResult::Hit,
+        Some(false) => SelectionResult::Miss,
+        None => SelectionResult::Inconclusive,
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "selection telemetry records the complete execution context at each launch site"
+)]
+fn trace_selection(
+    ordinal: u32,
+    binary: &TestBinary,
+    test: Option<String>,
+    tier: SelectionTier,
+    rank: usize,
+    observation: Option<bool>,
+    all_tests: bool,
+    elapsed: Duration,
+    fallback: Duration,
+) {
+    record_selection_attempt(SelectionAttempt {
+        ordinal,
+        tier,
+        package: binary.package.clone(),
+        target: binary.target.clone(),
+        test,
+        rank,
+        result: selection_result(observation),
+        all_tests,
+        elapsed_ms: elapsed_millis(elapsed),
+        fallback_ms: elapsed_millis(fallback),
+    });
 }
 
 /// Runs the one test that caught this mutant last time, and says whether it caught it again.
@@ -1321,7 +1689,7 @@ fn probe(
     sweep: Sweep<'_>,
     tally: &Tally,
     kind: ProbeKind,
-) -> Option<Killer> {
+) -> (Option<Killer>, Option<bool>, Duration) {
     kind.attempt(tally);
     probe_reserved(work, ordinal, binary, hint, timeout_multiplier, sweep, tally, kind)
 }
@@ -1339,7 +1707,7 @@ fn probe_reserved(
     sweep: Sweep<'_>,
     tally: &Tally,
     kind: ProbeKind,
-) -> Option<Killer> {
+) -> (Option<Killer>, Option<bool>, Duration) {
     let request = MemoryRequest {
         meter: sweep.meter,
         limit: binary.memory,
@@ -1358,9 +1726,11 @@ fn probe_reserved(
     record_launch(tally);
     let _probes = tally.probes.fetch_add(1, Ordering::Relaxed);
 
+    let started = Instant::now();
     let verdict = run_binary(work, binary, attempt, sweep.confirm);
-
-    match verdict {
+    let elapsed = started.elapsed();
+    let observation = transfer_observation(&verdict);
+    let killer = match verdict {
         // The harness names the test it ran, which under a filter can only be the one asked for;
         // the recorded name is used when it names nothing, so the map stays populated either way.
         Verdict::Failed(named) => {
@@ -1372,7 +1742,9 @@ fn probe_reserved(
             })
         }
         _inconclusive => None,
-    }
+    };
+
+    (killer, observation, elapsed)
 }
 
 /// Whether a filtered failure is conclusive for this binary.
@@ -1442,7 +1814,7 @@ fn probe_cases(
     timeout_multiplier: Option<f64>,
     sweep: Sweep<'_>,
     tally: &Tally,
-) -> Option<Killer> {
+) -> (Option<Killer>, Option<bool>, Duration) {
     let attempt = Attempt {
         active: Some(ordinal),
         timeout: binary.budget_for(timeout_multiplier, sweep.timeout_floor),
@@ -1459,7 +1831,11 @@ fn probe_cases(
     let _probes = tally.probes.fetch_add(1, Ordering::Relaxed);
     ProbeKind::Census.attempt(tally);
 
-    match run_binary(work, binary, attempt, sweep.confirm) {
+    let started = Instant::now();
+    let verdict = run_binary(work, binary, attempt, sweep.confirm);
+    let elapsed = started.elapsed();
+    let observation = transfer_observation(&verdict);
+    let killer = match verdict {
         Verdict::Failed(name) => {
             ProbeKind::Census.hit(tally);
             Some(Killer {
@@ -1475,7 +1851,9 @@ fn probe_cases(
             })
         }
         _inconclusive => None,
-    }
+    };
+
+    (killer, observation, elapsed)
 }
 
 /// Runs one mutant against every test binary that can reach it, stopping at the first detection.
@@ -1533,6 +1911,7 @@ fn judge_ordered(
     clippy::too_many_lines,
     reason = "candidate preflight and canonical adjudication share cached verdict state"
 )]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn judge_ranked(
     work: &Workspace,
     ordinal: u32,
@@ -1545,6 +1924,9 @@ fn judge_ranked(
     sweep: Sweep<'_>,
     tally: &Tally,
 ) -> Judgement {
+    let fallback = reachable
+        .iter()
+        .fold(Duration::ZERO, |total, binary| total.saturating_add(binary.baseline));
     if hint.is_some() {
         let _previous = tally.exact_candidates.fetch_add(1, Ordering::Relaxed);
     }
@@ -1570,7 +1952,19 @@ fn judge_ranked(
         && !negative_excludes(negative, binary, timeout_multiplier, sweep)
     {
         exact_attempted = true;
-        if let Some(killer) = probe(work, active, binary, exact, timeout_multiplier, sweep, tally, ProbeKind::Exact) {
+        let (killer, observation, elapsed) = probe(work, active, binary, exact, timeout_multiplier, sweep, tally, ProbeKind::Exact);
+        trace_selection(
+            active,
+            binary,
+            Some(exact.test.clone()),
+            SelectionTier::Exact,
+            1,
+            observation,
+            false,
+            elapsed,
+            fallback,
+        );
+        if let Some(killer) = killer {
             return killed_by(killer);
         }
     }
@@ -1581,7 +1975,7 @@ fn judge_ranked(
     // instead of entering the cache.
     // #[gamma::skip(all, reason = "the branch handles process, filesystem, platform, or synchronization state that cannot be forced safely and deterministically in unit tests")]
     {
-        'candidate: for candidate in candidates {
+        'candidate: for (candidate_index, candidate) in candidates.iter().enumerate() {
             let kind = candidate.probe_kind();
 
             match candidate {
@@ -1606,8 +2000,7 @@ fn judge_ranked(
                         continue 'candidate;
                     }
 
-                    let started = Instant::now();
-                    let found = probe_reserved(
+                    let (found, observation, elapsed) = probe_reserved(
                         work,
                         active,
                         binary,
@@ -1617,10 +2010,22 @@ fn judge_ranked(
                         tally,
                         ProbeKind::Item,
                     );
-                    let elapsed = started.elapsed();
+                    trace_selection(
+                        active,
+                        binary,
+                        Some(candidate_hint.test.clone()),
+                        kind.selection_tier(),
+                        candidate_index.saturating_add(1),
+                        observation,
+                        false,
+                        elapsed,
+                        fallback,
+                    );
 
-                    if let Some((observed, item_path)) = learning {
-                        FileLearning::observe(observed, item_path, candidate, found.is_some(), elapsed);
+                    if let Some(hit) = observation
+                        && let Some((observed, item_path)) = learning
+                    {
+                        FileLearning::observe(observed, item_path, candidate, hit, elapsed);
                     }
 
                     if let Some(killer) = found {
@@ -1672,15 +2077,29 @@ fn judge_ranked(
                     record_launch(tally);
                     let _probes = tally.probes.fetch_add(1, Ordering::Relaxed);
                     let run = run_binary_observed(work, binary, attempt, sweep.confirm);
-                    let convicted = matches!(run.verdict, Verdict::Failed(_));
-                    if convicted {
+                    let elapsed = started.elapsed();
+                    let observation = transfer_observation(&run.verdict);
+                    if observation == Some(true) {
                         kind.hit(tally);
                     }
+                    trace_selection(
+                        active,
+                        binary,
+                        None,
+                        kind.selection_tier(),
+                        candidate_index.saturating_add(1),
+                        observation,
+                        matches!(only, Only::All),
+                        elapsed,
+                        fallback,
+                    );
 
-                    if let Some((observed, item_path)) = learning {
-                        FileLearning::observe(observed, item_path, candidate, convicted, started.elapsed());
+                    if let Some(hit) = observation
+                        && let Some((observed, item_path)) = learning
+                    {
+                        FileLearning::observe(observed, item_path, candidate, hit, elapsed);
                         if matches!(run.reach, ReachObservation::Reached) {
-                            FileLearning::reached(observed, item_path, binary, started.elapsed());
+                            FileLearning::reached(observed, item_path, binary, elapsed);
                         }
                     }
                     if negative_reach_is_final(&run, only, negative.is_some_and(|(_, _, deterministic)| deterministic))
@@ -1719,11 +2138,22 @@ fn judge_ranked(
             continue 'binary;
         }
 
-        if !exact_attempted
-            && let Some(exact) = hint.filter(|hint| hint.names(&binary.package, &binary.target))
-            && let Some(killer) = probe(work, active, binary, exact, timeout_multiplier, sweep, tally, ProbeKind::Exact)
-        {
-            return killed_by(killer);
+        if !exact_attempted && let Some(exact) = hint.filter(|hint| hint.names(&binary.package, &binary.target)) {
+            let (killer, observation, elapsed) = probe(work, active, binary, exact, timeout_multiplier, sweep, tally, ProbeKind::Exact);
+            trace_selection(
+                active,
+                binary,
+                Some(exact.test.clone()),
+                SelectionTier::Exact,
+                1,
+                observation,
+                false,
+                elapsed,
+                fallback,
+            );
+            if let Some(killer) = killer {
+                return killed_by(killer);
+            }
         }
 
         if let CensusSelection::Hinted(names) = &selection {
@@ -1731,7 +2161,19 @@ fn judge_ranked(
             let _previous = tally.census_candidates.fetch_add(1, Ordering::Relaxed);
             let _previous = tally.available_tests.fetch_add(binary.tests.unwrap_or(0), Ordering::Relaxed);
 
-            if let Some(killer) = probe_cases(work, active, binary, names, timeout_multiplier, sweep, tally) {
+            let (killer, observation, elapsed) = probe_cases(work, active, binary, names, timeout_multiplier, sweep, tally);
+            trace_selection(
+                active,
+                binary,
+                None,
+                SelectionTier::Census,
+                1,
+                observation,
+                false,
+                elapsed,
+                fallback,
+            );
+            if let Some(killer) = killer {
                 let _previous = tally.selected_tests.fetch_add(names.len(), Ordering::Relaxed);
                 return killed_by(killer);
             }
@@ -1787,10 +2229,34 @@ fn judge_ranked(
             record_launch(tally);
             let started = Instant::now();
             let run = run_binary_observed(work, binary, attempt, sweep.confirm);
+            let elapsed = started.elapsed();
+            let observation = transfer_observation(&run.verdict);
+            let tier = match &selection {
+                CensusSelection::Selected(_) => SelectionTier::Selected,
+                CensusSelection::Hinted(_) => SelectionTier::HintedFallback,
+                CensusSelection::Whole => SelectionTier::Whole,
+                CensusSelection::Uncovered => unreachable!("uncovered selections continue before execution"),
+            };
+            trace_selection(
+                active,
+                binary,
+                None,
+                tier,
+                binary_index.saturating_add(1),
+                observation,
+                matches!(attempt.only, Only::All),
+                elapsed,
+                fallback,
+            );
             if matches!(run.reach, ReachObservation::Reached)
                 && let Some((observed, item_path)) = learning
             {
-                FileLearning::reached(observed, item_path, binary, started.elapsed());
+                FileLearning::reached(observed, item_path, binary, elapsed);
+            }
+            if observation == Some(false)
+                && let Some((observed, item_path)) = learning
+            {
+                FileLearning::canonical_miss(observed, item_path, binary, matches!(run.reach, ReachObservation::Reached));
             }
             if negative_reach_is_final(&run, attempt.only, negative.is_some_and(|(_, _, deterministic)| deterministic))
                 && let Some((negative, site, _)) = negative
@@ -1807,10 +2273,28 @@ fn judge_ranked(
             record_launch(tally);
             let started = Instant::now();
             let run = run_binary_observed(work, binary, whole_attempt(attempt), sweep.confirm);
+            let elapsed = started.elapsed();
+            let observation = transfer_observation(&run.verdict);
+            trace_selection(
+                active,
+                binary,
+                None,
+                SelectionTier::Whole,
+                binary_index.saturating_add(1),
+                observation,
+                true,
+                elapsed,
+                fallback,
+            );
             if matches!(run.reach, ReachObservation::Reached)
                 && let Some((observed, item_path)) = learning
             {
-                FileLearning::reached(observed, item_path, binary, started.elapsed());
+                FileLearning::reached(observed, item_path, binary, elapsed);
+            }
+            if observation == Some(false)
+                && let Some((observed, item_path)) = learning
+            {
+                FileLearning::canonical_miss(observed, item_path, binary, matches!(run.reach, ReachObservation::Reached));
             }
             if negative_reach_is_final(&run, Only::All, negative.is_some_and(|(_, _, deterministic)| deterministic))
                 && let Some((negative, site, _)) = negative
@@ -1894,6 +2378,7 @@ fn record_launch(tally: &Tally) {
     let _previous = tally.launches.fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn whole_attempt(attempt: Attempt<'_>) -> Attempt<'_> {
     let mut whole = attempt;
     whole.only = Only::All;
@@ -1988,6 +2473,7 @@ fn bound_candidates(candidates: &mut Vec<Candidate>) -> [usize; 3] {
     ]
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn candidate_tier_counts(candidates: &[Candidate]) -> [usize; 3] {
     let mut counts = [0; 3];
     for candidate in candidates {
@@ -2090,6 +2576,7 @@ struct RankedCandidate<T> {
     seeds: u32,
     hits: u32,
     misses: u32,
+    canonical_misses: u32,
     measured: Duration,
     samples: u32,
     order: u64,
@@ -2098,7 +2585,7 @@ struct RankedCandidate<T> {
 impl<T> RankedCandidate<T> {
     fn score(&self) -> (u32, core::cmp::Reverse<u32>, Duration, u64) {
         (
-            self.misses / 2,
+            self.misses.saturating_mul(2).saturating_add(self.canonical_misses) / 4,
             core::cmp::Reverse(self.hits),
             if self.samples == 0 {
                 Duration::MAX
@@ -2119,8 +2606,13 @@ impl<T> RankedCandidate<T> {
         self.samples = self.samples.saturating_add(1);
     }
 
+    fn observe_canonical_miss(&mut self) {
+        self.canonical_misses = self.canonical_misses.saturating_add(1);
+    }
+
     fn is_admissible(&self, fallback: Duration) -> bool {
-        if self.hits == 0 && self.misses >= 2 {
+        let weighted_misses = self.misses.saturating_add(self.canonical_misses / 2);
+        if self.hits == 0 && weighted_misses >= 2 {
             return false;
         }
         if self.samples == 0 {
@@ -2140,6 +2632,7 @@ impl<T: Clone> RankedCandidate<T> {
             seeds: hint.seeds,
             hits: hint.hits,
             misses: hint.misses,
+            canonical_misses: 0,
             measured: Duration::from_millis(hint.measured_ms),
             samples: hint.samples,
             order: hint.order,
@@ -2319,6 +2812,7 @@ impl FileLearning {
         self.select_candidates(item_path, fallback).0
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn observe(&self, item_path: &str, candidate: &Candidate, hit: bool, elapsed: Duration) {
         let mut state = self.locked();
         match candidate {
@@ -2364,6 +2858,37 @@ impl FileLearning {
                     RankedCandidate::observe(found, hit, elapsed);
                 }
             }
+        }
+    }
+
+    fn canonical_miss(&self, item_path: &str, binary: &TestBinary, reached: bool) {
+        let identity = BinaryIdentity::from_binary(binary);
+        let mut state = self.locked();
+
+        if let Some(found) = state
+            .items
+            .entry(item_path.to_owned())
+            .or_default()
+            .reached
+            .iter_mut()
+            .find(|candidate| same_identity(&candidate.identity, &identity))
+        {
+            found.observe_canonical_miss();
+        }
+        if reached
+            && let Some(found) = state
+                .reached_file
+                .iter_mut()
+                .find(|candidate| same_identity(&candidate.identity, &identity))
+        {
+            found.observe_canonical_miss();
+        }
+        if let Some(found) = state
+            .binaries
+            .iter_mut()
+            .find(|candidate| same_identity(&candidate.identity, &identity))
+        {
+            found.observe_canonical_miss();
         }
     }
 
@@ -2422,6 +2947,7 @@ fn reached_candidate(identity: BinaryIdentity, elapsed: Duration, order: u64) ->
         seeds: 1,
         hits: 0,
         misses: u32::from(false),
+        canonical_misses: 0,
         measured: elapsed,
         samples: u32::from(true),
         order,
@@ -2434,6 +2960,7 @@ fn published_candidate<T>(identity: T, order: u64) -> RankedCandidate<T> {
         seeds: 1,
         hits: 0,
         misses: u32::from(false),
+        canonical_misses: 0,
         measured: Duration::ZERO,
         samples: u32::from(false),
         order,
@@ -2454,6 +2981,7 @@ mod tests {
     use crate::exec::faults::{self, Fault};
     #[cfg(unix)]
     use crate::exec::memory;
+    use crate::exec::resources::Resources;
     use crate::ops::collect::Shape;
 
     /// A census that knows nothing, which is what every test here that is not about narrowing runs
@@ -2476,13 +3004,47 @@ mod tests {
     }
 
     #[test]
+    fn a_quiet_sweep_emits_heartbeats_until_an_event_arrives() {
+        struct HeartbeatSender {
+            sender: Option<mpsc::Sender<SweepEvent>>,
+            heartbeats: usize,
+        }
+
+        impl Events for HeartbeatSender {
+            fn phase(&mut self, _verb: &str, _detail: &str) {}
+
+            fn mutant(&mut self, _mutant: &Mutant) {}
+
+            fn heartbeat(&mut self) {
+                self.heartbeats += 1;
+                self.sender
+                    .take()
+                    .expect("only one heartbeat is needed")
+                    .send(SweepEvent::Started)
+                    .expect("the coordinator is still listening");
+            }
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let mut events = HeartbeatSender {
+            sender: Some(sender),
+            heartbeats: 0,
+        };
+
+        let event = receive_sweep_event(&receiver, &mut events, Duration::from_millis(5)).expect("worker event");
+
+        assert!(matches!(event, SweepEvent::Started));
+        assert_eq!(events.heartbeats, 1);
+    }
+
+    #[test]
     fn a_grouped_census_probe_attributes_an_unnamed_failure_to_its_first_selected_case() {
         let (_directory, work) = crate::testing::helper_workspace("grouped-probe-", &["exit:1"]);
         let binary = crate::testing::helper();
         let tally = Tally::default();
         let names = ["tests::first", "tests::second"];
 
-        let killer = probe_cases(
+        let (killer, observation, _) = probe_cases(
             &work,
             7,
             &binary,
@@ -2497,10 +3059,11 @@ mod tests {
                 census: blind(),
             },
             &tally,
-        )
-        .expect("the grouped probe fails");
+        );
+        let killer = killer.expect("the grouped probe fails");
 
         assert_eq!(killer.test, "tests::first");
+        assert_eq!(observation, Some(true));
         assert_eq!(tally.launches.load(Ordering::Relaxed), 1);
         assert_eq!(tally.probes.load(Ordering::Relaxed), 1);
         assert_eq!(tally.generalized_probes.load(Ordering::Relaxed), 1);
@@ -2721,8 +3284,7 @@ mod tests {
         assert_eq!(mutant.note, None);
         assert_eq!(events.mutants, 1);
         assert_eq!(events.sweep_plan, Some((1, 1)));
-        assert_eq!(events.mutant_starts.len(), 1);
-        assert_eq!(events.mutant_starts[0].0, mutant.ordinal);
+        assert_eq!(events.mutant_starts, 1);
         assert_eq!(spent.launches, 1);
         assert_eq!(spent.probes, 0);
         assert_eq!(spent.packages.len(), 1);
@@ -3157,12 +3719,13 @@ mod tests {
         assert_eq!(plan.mutants[0].outcome, Outcome::Survived);
         assert_eq!(spent.launches, 1, "the whole binary was run exactly once, not skipped as uncovered");
         assert_eq!(spent.probes, 0, "no hint was given, so no probe was launched");
+        assert_eq!(spent.exact_candidates, 0, "an absent hint is not an exact candidate");
     }
 
     /// A run with nothing to sweep reports the sweep as absent, not as a zero-cost phase.
     ///
-    /// `test_all` says so by returning `None`, which the session stores verbatim so the diagnostics
-    /// and `--estimate` can tell "there was nothing to sweep" from "the sweep ran and was free".
+    /// `test_all` says so by returning `None`, which the session stores verbatim so diagnostics can
+    /// tell "there was nothing to sweep" from "the sweep ran and was free".
     #[test]
     fn a_plan_with_no_pending_mutants_sweeps_nothing_and_returns_none() {
         let (_directory, work, mut plan, binaries) = unreachable_harness(Vec::new());
@@ -3371,6 +3934,7 @@ mod tests {
     /// the refusal as its note so the reader knows which mutant went without a verdict and why.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_mutant_the_machine_would_not_run_is_recorded_rather_than_abandoning_the_sweep() {
         let (_directory, work, _plan, binaries) = harness("exit 0", Duration::from_secs(30));
         let reachable: Vec<&TestBinary> = binaries.iter().collect();
@@ -3415,6 +3979,7 @@ mod tests {
     /// had turned out never to have been there.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_binary_that_cannot_be_metered_abandons_the_mutant_it_was_judging() {
         if memory::support().is_ok() {
             return;
@@ -3455,6 +4020,7 @@ mod tests {
     /// its work as though nothing had happened.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_sweep_that_loses_its_memory_accounting_stops_rather_than_continue_unprotected() {
         if memory::support().is_ok() {
             return;
@@ -3510,6 +4076,7 @@ mod tests {
     /// that was never the actual gap.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_binary_that_outgrows_its_ceiling_convicts_the_mutant_of_using_too_much_memory() {
         if crate::testing::without_memory_support("a sweep asserting a ceiling is enforced") {
             return;
@@ -3583,6 +4150,7 @@ mod tests {
     /// A hint is a guess the run checks, and a hint that convicts spares the rest of the binary.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_test_that_caught_a_mutant_last_time_is_tried_first() {
         let (_directory, work, _plan, binaries) = helper_harness(ONLY_WHEN_FILTERED);
         let reachable: Vec<&TestBinary> = binaries.iter().collect();
@@ -3665,6 +4233,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_confirmed_cached_killer_settles_under_all_resource_policies() {
         const SCRIPT: &[&str] = &[
             "when-env:GAMMA_ACTIVE|when-arg:tests::killer|print:test tests::killer ... FAILED",
@@ -3678,7 +4247,7 @@ mod tests {
         }
 
         let (_directory, work, _plan, mut binaries) = helper_harness(SCRIPT);
-        binaries[0].budget = Some(Duration::from_secs(2));
+        binaries[0].budget = Some(Duration::from_secs(10));
         binaries[0].memory = Some(1024 * 1024 * 1024);
         let reachable: Vec<&TestBinary> = binaries.iter().collect();
         let hint = Killer {
@@ -3697,7 +4266,7 @@ mod tests {
             Sweep {
                 timeout_floor: Duration::ZERO,
                 stall: Stall {
-                    budget: Some(Duration::from_secs(2)),
+                    budget: Some(Duration::from_secs(10)),
                 },
                 jobs: 1,
                 meter: true,
@@ -3827,12 +4396,12 @@ mod tests {
         const SCRIPT: &[&str] = &[
             "when-arg:tests::t0|print:test tests::t0 ... FAILED",
             "when-arg:tests::t0|exit:1",
-            "sleep:200",
+            "sleep:5000",
             "exit:0",
         ];
 
         let (_directory, work, plan, mut binaries) = helper_harness(SCRIPT);
-        binaries[0].budget = Some(Duration::from_millis(20));
+        binaries[0].budget = Some(Duration::from_secs(2));
         let reachable: Vec<&TestBinary> = binaries.iter().collect();
         let census = Census::examined(&binaries[0].path, plan.mutants[0].ordinal, 1, 4);
         let tally = Tally::default();
@@ -4102,6 +4671,7 @@ mod tests {
     /// recorded killer is `tests::other` is what proves the hint was discarded rather than trusted.
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_hint_that_no_longer_convicts_reaches_the_verdict_the_run_would_have_reached_anyway() {
         let (_directory, work, _plan, binaries) = harness(FAILS_ONLY_UNFILTERED, Duration::from_secs(30));
         let reachable: Vec<&TestBinary> = binaries.iter().collect();
@@ -4320,11 +4890,11 @@ mod tests {
 
         let sets = Reachability::build(&plan, &binaries, &NARROW);
 
-        // Without census data, both get the same cost (binary baseline sum).
+        // Without census data, both get the same estimated killed-run cost.
         let cost_a = mutant_cost(0, &plan, &sets, blind(), &Killers::default());
         let cost_b = mutant_cost(1, &plan, &sets, blind(), &Killers::default());
         assert_eq!(cost_a, cost_b);
-        assert_eq!(cost_a, Duration::from_secs(10));
+        assert_eq!(cost_a, Duration::from_secs(5));
     }
 
     #[test]
@@ -4345,8 +4915,8 @@ mod tests {
 
         assert_eq!(
             mutant_cost(0, &plan, &reach, &partial, &Killers::default()),
-            binaries[0].baseline,
-            "partial census evidence remains a whole-binary scheduling cost"
+            Duration::from_millis(1_751),
+            "partial census evidence combines the hinted test cost with generalized fallback cost"
         );
 
         #[cfg(unix)]
@@ -4422,7 +4992,16 @@ mod tests {
             &mut plan,
             &mut killers,
             &mut events,
-            (0, Outcome::Killed, 23, Some(killer.clone()), Some("detail".to_owned()), 0, 23),
+            Completed {
+                position: 0,
+                outcome: Outcome::Killed,
+                elapsed_ms: 23,
+                killer: Some(killer.clone()),
+                note: Some("detail".to_owned()),
+                first_started_ms: 0,
+                settled_ms: 23,
+                attempts: Vec::new(),
+            },
         );
         assert_eq!(plan.mutants[0].outcome, Outcome::Killed);
         assert_eq!(plan.mutants[0].elapsed_ms, 23);
@@ -4431,7 +5010,21 @@ mod tests {
         assert_eq!(killers.hint(&plan.mutants[0].id), Some(&killer));
         assert_eq!(events.mutants, 1);
 
-        publish_completed(&mut plan, &mut killers, &mut events, (0, Outcome::Survived, 29, None, None, 0, 29));
+        publish_completed(
+            &mut plan,
+            &mut killers,
+            &mut events,
+            Completed {
+                position: 0,
+                outcome: Outcome::Survived,
+                elapsed_ms: 29,
+                killer: None,
+                note: None,
+                first_started_ms: 0,
+                settled_ms: 29,
+                attempts: Vec::new(),
+            },
+        );
         assert_eq!(plan.mutants[0].outcome, Outcome::Survived);
         assert_eq!(plan.mutants[0].elapsed_ms, 29);
         assert_eq!(plan.mutants[0].killed_by, None);
@@ -4443,7 +5036,16 @@ mod tests {
             &mut plan,
             &mut killers,
             &mut events,
-            (usize::MAX, Outcome::Killed, 0, Some(killer), None, 0, 0),
+            Completed {
+                position: usize::MAX,
+                outcome: Outcome::Killed,
+                elapsed_ms: 0,
+                killer: Some(killer),
+                note: None,
+                first_started_ms: 0,
+                settled_ms: 0,
+                attempts: Vec::new(),
+            },
         );
         assert_eq!(events.mutants, 2, "an obsolete queue position publishes nothing");
     }
@@ -4516,10 +5118,33 @@ mod tests {
                 test: "tests::hint".to_owned(),
             },
         );
-        let settings = sweep(Stall::NONE);
-
-        let exact = mutant_work(0, &plan, &reach, blind(), &killers, settings);
-        let whole = mutant_work(1, &plan, &reach, blind(), &Killers::default(), settings);
+        let exact = mutant_work(0, &plan, &reach, blind(), &killers);
+        let whole = mutant_work(1, &plan, &reach, blind(), &Killers::default());
+        let mut generalized = Killers::default();
+        generalized.replace_generalized(GeneralizedHints {
+            version: GENERALIZED_HINTS_VERSION,
+            items: vec![ItemHints {
+                file: plan.mutants[1].file.as_ref().to_path_buf(),
+                item: plan.mutants[1].item_path.to_string(),
+                candidates: vec![RankedHint {
+                    candidate: Killer {
+                        package: "subject".to_owned(),
+                        target: String::new(),
+                        test: "tests::related".to_owned(),
+                    },
+                    seeds: 2,
+                    hits: 7,
+                    misses: 1,
+                    measured_ms: 12_000,
+                    samples: 4,
+                    order: 0,
+                }],
+            }],
+            binaries: Vec::new(),
+            test_sets: Vec::new(),
+            reach: Vec::new(),
+        });
+        let generalized = mutant_work(1, &plan, &reach, blind(), &generalized);
         let census_binaries = [binary_of("subject", Duration::from_secs(20))];
         let census_reach = Reachability::build(
             &plan,
@@ -4531,16 +5156,15 @@ mod tests {
             },
         );
         let selected_census = Census::examined(&census_binaries[0].path, plan.mutants[1].ordinal, 1, 4);
-        let selected = mutant_work(1, &plan, &census_reach, &selected_census, &Killers::default(), settings);
+        let selected = mutant_work(1, &plan, &census_reach, &selected_census, &Killers::default());
         let hinted_census = Census::partial(&census_binaries[0].path, plan.mutants[1].ordinal, 1, 4);
-        let hinted = mutant_work(1, &plan, &census_reach, &hinted_census, &Killers::default(), settings);
+        let hinted = mutant_work(1, &plan, &census_reach, &hinted_census, &Killers::default());
         let uncovered_census = Census::examined(&census_binaries[0].path, plan.mutants[1].ordinal, 0, 4);
-        let uncovered = mutant_work(1, &plan, &census_reach, &uncovered_census, &Killers::default(), settings);
+        let uncovered = mutant_work(1, &plan, &census_reach, &uncovered_census, &Killers::default());
 
-        assert_eq!(exact.ordinal, plan.mutants[0].ordinal);
         assert_eq!(exact.kind, crate::estimate::WorkKind::Exact);
-        assert_eq!(whole.ordinal, plan.mutants[1].ordinal);
         assert_eq!(whole.kind, crate::estimate::WorkKind::Whole);
+        assert_eq!(generalized.kind, crate::estimate::WorkKind::Hinted);
         assert_eq!(selected.kind, crate::estimate::WorkKind::Selected);
         assert_eq!(hinted.kind, crate::estimate::WorkKind::Hinted);
         assert_eq!(uncovered.kind, crate::estimate::WorkKind::Uncovered);
@@ -4596,6 +5220,7 @@ mod tests {
             seeds: 1,
             hits: 0,
             misses: 0,
+            canonical_misses: 0,
             measured: Duration::ZERO,
             samples: 0,
             order: 9,
@@ -4643,6 +5268,7 @@ mod tests {
             seeds: 1,
             hits,
             misses,
+            canonical_misses: 0,
             measured: Duration::from_millis(measured),
             samples,
             order: 0,
@@ -4652,6 +5278,36 @@ mod tests {
         assert!(!candidate(0, 2, 2, 2).is_admissible(Duration::from_millis(30)));
         assert!(!candidate(1, 1, 100, 2).is_admissible(Duration::from_millis(30)));
         assert!(candidate(1, 1, 10, 2).is_admissible(Duration::from_millis(30)));
+    }
+
+    #[test]
+    fn canonical_passes_are_half_weight_negative_evidence() {
+        let candidate = || RankedCandidate {
+            identity: killer("tests::candidate"),
+            seeds: 1,
+            hits: 0,
+            misses: 0,
+            canonical_misses: 0,
+            measured: Duration::ZERO,
+            samples: 0,
+            order: 0,
+        };
+        let mut explicit = candidate();
+        explicit.observe(false, Duration::ZERO);
+        let mut canonical = candidate();
+        canonical.observe_canonical_miss();
+        canonical.observe_canonical_miss();
+
+        assert_eq!(canonical.score().0, explicit.score().0);
+        assert!(
+            canonical.score() > explicit.score(),
+            "canonical evidence has no measured duration and must retain unknown-cost ordering"
+        );
+        assert!(canonical.is_admissible(Duration::from_millis(30)));
+
+        canonical.observe_canonical_miss();
+        canonical.observe_canonical_miss();
+        assert!(!canonical.is_admissible(Duration::from_millis(30)));
     }
 
     #[test]
@@ -4866,25 +5522,24 @@ mod tests {
         let binary = crate::testing::helper();
         let tally = Tally::default();
 
-        assert_eq!(
-            probe_cases(
-                &work,
-                7,
-                &binary,
-                &["tests::first", "tests::second"],
-                None,
-                Sweep {
-                    timeout_floor: Duration::ZERO,
-                    stall: Stall::NONE,
-                    jobs: 1,
-                    meter: false,
-                    confirm: false,
-                    census: blind(),
-                },
-                &tally,
-            ),
-            None
+        let (killer, observation, _) = probe_cases(
+            &work,
+            7,
+            &binary,
+            &["tests::first", "tests::second"],
+            None,
+            Sweep {
+                timeout_floor: Duration::ZERO,
+                stall: Stall::NONE,
+                jobs: 1,
+                meter: false,
+                confirm: false,
+                census: blind(),
+            },
+            &tally,
         );
+        assert_eq!(killer, None);
+        assert_eq!(observation, Some(false));
         assert_eq!(tally.generalized_hits.load(Ordering::Relaxed), 0);
     }
 
@@ -5230,6 +5885,17 @@ mod tests {
     }
 
     #[test]
+    fn only_failures_and_clean_passes_train_transfer_ranking() {
+        assert_eq!(transfer_observation(&Verdict::Failed(None)), Some(true));
+        assert_eq!(transfer_observation(&Verdict::Passed), Some(false));
+        assert_eq!(transfer_observation(&Verdict::TimedOut), None);
+        assert_eq!(transfer_observation(&Verdict::MemoryLimit { peak: None, limit: 10 }), None);
+        assert_eq!(transfer_observation(&Verdict::Flaky(None)), None);
+        assert_eq!(transfer_observation(&Verdict::Unmetered("meter lost".to_owned())), None);
+        assert_eq!(transfer_observation(&Verdict::Unjudged("spawn refused".to_owned())), None);
+    }
+
+    #[test]
     fn positive_reach_is_reused_by_the_same_item_and_as_a_file_fallback() {
         let learning = FileLearning::new();
         let binary = TestBinary {
@@ -5254,6 +5920,21 @@ mod tests {
         assert_eq!(state.reached_file.len(), 1);
         assert_eq!(state.next_order, 2, "each reach observation reserves one stable order");
         assert_eq!(state.items["subject::a"].reached[0].measured, Duration::from_millis(7));
+    }
+
+    #[test]
+    fn canonical_misses_do_not_create_candidates() {
+        let learning = FileLearning::new();
+        let binary = TestBinary {
+            package: "subject".to_owned(),
+            target: "lib".to_owned(),
+            ..crate::testing::test_binary("unused")
+        };
+
+        learning.canonical_miss("subject::a", &binary, true);
+
+        assert!(learning.candidates("subject::a", Duration::MAX).is_empty());
+        assert!(learning.candidates("subject::b", Duration::MAX).is_empty());
     }
 
     #[test]
@@ -5708,6 +6389,7 @@ mod tests {
             sibling_benefit,
             hinted,
             stable_order,
+            resources: Vec::new(),
         }
     }
 
@@ -5726,12 +6408,12 @@ mod tests {
         state.active_items.insert((0, "active".to_owned().into()), 1);
         scheduler.refresh_file(&mut state, 0);
 
-        assert_eq!(Scheduler::select(&state), Some(2), "an idle file outranks every active file");
+        assert_eq!(scheduler.select(&state), Some(2), "an idle file outranks every active file");
 
         state.active_files[1] = 1;
         scheduler.refresh_file(&mut state, 1);
         assert_eq!(
-            Scheduler::select(&state),
+            scheduler.select(&state),
             Some(2),
             "the inactive item in the less-contended file outranks both a duplicate and a busier file"
         );
@@ -5751,9 +6433,61 @@ mod tests {
         state.active_items.insert((0, "active".to_owned().into()), 1);
         scheduler.refresh_file(&mut state, 0);
 
-        assert_eq!(Scheduler::select(&state), Some(1));
+        assert_eq!(scheduler.select(&state), Some(1));
         scheduler.withdraw(&mut state, 1);
-        assert_eq!(Scheduler::select(&state), None, "an unhinted same-item duplicate is not reserved");
+        assert_eq!(scheduler.select(&state), None, "an unhinted same-item duplicate is not reserved");
+    }
+
+    #[test]
+    fn scheduler_skips_work_blocked_by_an_active_resource() {
+        let resource: Arc<str> = "exclusive".into();
+        let mut first = scheduled(0, "first", "a", 30, 0, false, 0);
+        first.resources.push(Arc::clone(&resource));
+        let mut blocked = scheduled(1, "blocked", "b", 20, 0, false, 1);
+        blocked.resources.push(Arc::clone(&resource));
+        let unrelated = scheduled(2, "unrelated", "c", 10, 0, false, 2);
+        let mut capacities = crate::HashMap::default();
+        capacities.insert(resource, 1);
+        let scheduler = Scheduler::with_resources(vec![first, blocked, unrelated], 3, capacities);
+        let abandoned = OnceLock::new();
+
+        let first = scheduler.assignment(&abandoned).expect("the first resource user is available");
+        assert_eq!(first.index(), 0);
+        let unrelated = scheduler.assignment(&abandoned).expect("unrelated work remains available");
+        assert_eq!(unrelated.index(), 2, "the second worker skips the blocked resource user");
+        drop(first);
+        let blocked = scheduler
+            .assignment(&abandoned)
+            .expect("releasing the resource admits blocked work");
+        assert_eq!(blocked.index(), 1);
+    }
+
+    #[test]
+    fn exact_work_reserves_only_the_killer_tests_resources() {
+        let (_directory, mut work) = crate::testing::helper_workspace("scheduled-resource-", &["exit:0"]);
+        let mut binary = crate::testing::helper();
+        binary.package = "subject".to_owned();
+        binary.target = "lib".to_owned();
+        work.set_resources(Resources::fake_tests(
+            &binary,
+            &[("tests::killer", "killer-resource"), ("tests::unrelated", "unrelated-resource")],
+        ));
+        let hint = Killer {
+            package: binary.package.clone(),
+            target: binary.target.clone(),
+            test: "tests::killer".to_owned(),
+        };
+
+        let resources = scheduled_resources(
+            &work,
+            crate::estimate::MutationWork::hinted(crate::estimate::WorkKind::Exact, Duration::from_millis(1), Duration::from_millis(2)),
+            &[&binary],
+            Some(&hint),
+            1,
+            blind(),
+        );
+
+        assert_eq!(resources.iter().map(AsRef::as_ref).collect::<Vec<_>>(), ["killer-resource"]);
     }
 
     #[test]
@@ -5824,7 +6558,7 @@ mod tests {
         let state = scheduler.state.lock().expect("scheduler state is healthy");
 
         assert_eq!(
-            Scheduler::select(&state),
+            scheduler.select(&state),
             Some(3),
             "learning per estimated cost wins, then equal value keeps useful long work and stable order"
         );

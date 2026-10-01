@@ -63,7 +63,7 @@
 
 mod validation;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::builder::Styles;
@@ -119,10 +119,13 @@ pub fn run() -> Result<ExitCode, AppError> {
     let cli = Cli::parse();
     let Commands::EnsureNoDefaultFeatures { manifest_path, exceptions } = cli.command;
 
-    let content = std::fs::read_to_string(&manifest_path).into_app_err_with(|| format!("Failed to read {}", manifest_path.display()))?;
-    let exceptions = exceptions.unwrap_or_default();
+    check(&manifest_path, &exceptions.unwrap_or_default())
+}
 
-    let (errors, found_deps, checked_sections) = validate_dependencies(&content, &exceptions)?;
+fn check(manifest_path: &Path, exceptions: &[String]) -> Result<ExitCode, AppError> {
+    let content = std::fs::read_to_string(manifest_path).into_app_err_with(|| format!("Failed to read {}", manifest_path.display()))?;
+
+    let (errors, found_deps, checked_sections) = validate_dependencies(&content, exceptions)?;
     if !errors.is_empty() {
         eprintln!("❌ Found {} dependencies without default-features = false:\n", errors.len());
         for error in &errors {
@@ -134,7 +137,7 @@ pub fn run() -> Result<ExitCode, AppError> {
 
     // Warn if any exception was not found in the dependencies
     let sections_label = checked_sections.join(" or ");
-    for exception in &exceptions {
+    for exception in exceptions {
         if !found_deps.contains(exception) {
             eprintln!("⚠️ Warning: exception '{exception}' was not found in {sections_label}");
         }
@@ -143,4 +146,51 @@ pub fn run() -> Result<ExitCode, AppError> {
     println!("✅ All required dependencies have default-features = false");
 
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::check;
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses a temporary directory")]
+    fn check_propagates_manifest_read_errors() {
+        let dir = TempDir::new().expect("temporary directory");
+        let missing = dir.path().join("missing.toml");
+
+        let error = check(&missing, &[]).expect_err("a missing manifest must be reported");
+
+        assert!(error.to_string().contains("Failed to read"), "unexpected error: {error}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses a temporary directory")]
+    fn check_propagates_manifest_parse_errors() {
+        let dir = TempDir::new().expect("temporary directory");
+        let manifest = dir.path().join("Cargo.toml");
+        fs::write(&manifest, "[workspace").expect("write malformed manifest");
+
+        let error = check(&manifest, &[]).expect_err("malformed TOML must be reported");
+
+        assert!(
+            error.to_string().contains("Failed to parse Cargo.toml"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses a temporary directory")]
+    fn check_propagates_validation_errors() {
+        let dir = TempDir::new().expect("temporary directory");
+        let manifest = dir.path().join("Cargo.toml");
+        fs::write(&manifest, "[workspace]\ndependencies = \"invalid\"\n").expect("write invalid manifest");
+
+        let error = check(&manifest, &[]).expect_err("invalid dependency sections must be reported");
+
+        assert_eq!(error.to_string(), "[workspace.dependencies] is not a table");
+    }
 }

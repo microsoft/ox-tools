@@ -24,6 +24,42 @@ pub enum Fault {
 
     /// Terminating a contained subtree reports a cleanup failure.
     Terminate,
+
+    /// Creating the Windows containment job is refused.
+    #[cfg(all(test, windows))]
+    JobCreate,
+
+    /// Assigning the suspended child to its Windows job is refused.
+    #[cfg(all(test, windows))]
+    JobAssign,
+
+    /// Resuming the suspended child after job assignment is refused.
+    #[cfg(all(test, windows))]
+    JobResume,
+
+    /// Starting the stderr capture thread is refused.
+    #[cfg(test)]
+    StderrReader,
+
+    /// Waiting for captured output reports an operating-system failure.
+    #[cfg(test)]
+    OutputWait,
+
+    /// Sweeping a completed subtree reports an operating-system failure.
+    #[cfg(test)]
+    Sweep,
+
+    /// Cleanup after refusing adoption reports an additional failure.
+    #[cfg(test)]
+    AbandonCleanup,
+
+    /// Querying a child status reports an operating-system failure.
+    #[cfg(test)]
+    TryWait,
+
+    /// Killing a child reports an operating-system failure.
+    #[cfg(test)]
+    Kill,
 }
 
 /// Arms `fault` on this thread until the returned value is dropped.
@@ -101,6 +137,18 @@ mod tests {
         assert!(!fired(Fault::Boundary));
         assert!(!fired(Fault::Window));
         assert!(!fired(Fault::Terminate));
+        #[cfg(windows)]
+        {
+            assert!(!fired(Fault::JobCreate));
+            assert!(!fired(Fault::JobAssign));
+            assert!(!fired(Fault::JobResume));
+        }
+        assert!(!fired(Fault::StderrReader));
+        assert!(!fired(Fault::OutputWait));
+        assert!(!fired(Fault::Sweep));
+        assert!(!fired(Fault::AbandonCleanup));
+        assert!(!fired(Fault::TryWait));
+        assert!(!fired(Fault::Kill));
     }
 
     #[test]

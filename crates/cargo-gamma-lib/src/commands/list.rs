@@ -8,7 +8,7 @@ use camino::Utf8PathBuf;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::cli::{ListArgs, ListKind};
+use super::cli::{ListArgs, ListCommand};
 use super::dispatch::EXIT_OK;
 use super::host::Host;
 use crate::error::error;
@@ -17,21 +17,41 @@ use crate::ops::registry;
 use crate::report::{Styler, encode_controls};
 
 /// Implements `list`.
-#[cfg(test)]
 pub(super) fn list<H: Host>(host: &mut H, args: &ListArgs, styler: Styler) -> crate::Result<i32> {
-    let config = crate::config::Config::resolve(&args.select)?;
+    let mut select = selection_args(args);
+    let config = crate::config::Config::resolve(&select)?;
     let cargo = config.cargo_options();
+    config.apply_selection(&mut select)?;
 
-    list_with_cargo(host, args, styler, &cargo)
+    list_with_cargo(host, args, &select, styler, &cargo)
 }
 
 /// Implements `list` with the configuration generation dispatch already resolved.
-pub(super) fn list_with_cargo<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &CargoOptions) -> crate::Result<i32> {
-    match args.what {
-        ListKind::Mutators => list_mutators(host, args),
-        ListKind::Files => list_files(host, args, styler, cargo),
-        ListKind::Mutants => list_mutants(host, args, styler, cargo),
-        ListKind::Presets => list_presets(host, args),
+fn list_with_cargo<H: Host>(
+    host: &mut H,
+    args: &ListArgs,
+    select: &super::cli::SelectArgs,
+    styler: Styler,
+    cargo: &CargoOptions,
+) -> crate::Result<i32> {
+    match &args.command {
+        ListCommand::Mutators(args) => list_mutators(host, select, args.json),
+        ListCommand::Files(args) => list_files(host, select, args.json, styler, cargo),
+        ListCommand::Mutants(args) => list_mutants(host, select, args.json, args.json_report.as_ref(), styler, cargo),
+        ListCommand::Presets(args) => list_presets(host, select, args.json),
+    }
+}
+
+fn selection_args(args: &ListArgs) -> super::cli::SelectArgs {
+    match &args.command {
+        ListCommand::Mutants(args) => args.select.clone(),
+        ListCommand::Files(args) => args.select.clone(),
+        ListCommand::Mutators(args) | ListCommand::Presets(args) => super::cli::SelectArgs {
+            dir: args.dir.clone(),
+            mutators: args.mutators.clone(),
+            config: args.config.clone(),
+            ..super::cli::SelectArgs::default()
+        },
     }
 }
 
@@ -55,11 +75,11 @@ fn write_pretty_json<W: Write, T: Serialize + ?Sized>(stream: &mut W, entries: &
 ///
 /// The selection is resolved against each preset so the listing says which one you are actually
 /// running, rather than making you match `--mutators` against the table by eye.
-fn list_presets<H: Host>(host: &mut H, args: &ListArgs) -> crate::Result<i32> {
-    let selection = args.select.selection()?;
+fn list_presets<H: Host>(host: &mut H, select: &super::cli::SelectArgs, json: bool) -> crate::Result<i32> {
+    let selection = select.selection()?;
     let mut stream = host.results();
 
-    if args.json {
+    if json {
         let entries: Vec<Value> = registry::PRESETS
             .iter()
             .map(|preset| {
@@ -95,11 +115,11 @@ fn list_presets<H: Host>(host: &mut H, args: &ListArgs) -> crate::Result<i32> {
 }
 
 /// Lists the mutator registry.
-fn list_mutators<H: Host>(host: &mut H, args: &ListArgs) -> crate::Result<i32> {
-    let selection = args.select.selection()?;
+fn list_mutators<H: Host>(host: &mut H, select: &super::cli::SelectArgs, json: bool) -> crate::Result<i32> {
+    let selection = select.selection()?;
     let mut stream = host.results();
 
-    if args.json {
+    if json {
         let entries: Vec<Value> = registry::REGISTRY
             .iter()
             .map(|mutator| {
@@ -133,15 +153,21 @@ fn list_mutators<H: Host>(host: &mut H, args: &ListArgs) -> crate::Result<i32> {
 }
 
 /// Lists the files that would be analyzed.
-fn list_files<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &CargoOptions) -> crate::Result<i32> {
-    let selection = args.select.selection()?;
-    let plan = crate::discover::plan_for_build(&args.select, &selection, args.select.shard()?, cargo, &mut |_| {})?;
+fn list_files<H: Host>(
+    host: &mut H,
+    select: &super::cli::SelectArgs,
+    json: bool,
+    styler: Styler,
+    cargo: &CargoOptions,
+) -> crate::Result<i32> {
+    let selection = select.selection()?;
+    let plan = crate::discover::plan_for_build(select, &selection, select.shard()?, cargo, &mut |_| {})?;
 
     crate::report::skipped(host, &plan, styler)?;
 
     let mut stream = host.results();
 
-    if args.json {
+    if json {
         let paths: Vec<&Utf8PathBuf> = plan.files.iter().map(|file| &file.path).collect();
 
         write_pretty_json(&mut stream, &paths, "the file list")?;
@@ -157,20 +183,27 @@ fn list_files<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &Ca
 }
 
 /// Lists the mutants that would be generated.
-fn list_mutants<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &CargoOptions) -> crate::Result<i32> {
-    let selection = args.select.selection()?;
-    let shard = args.select.shard()?;
-    let plan = crate::discover::plan_for_build(&args.select, &selection, shard, cargo, &mut |_| {})?;
+fn list_mutants<H: Host>(
+    host: &mut H,
+    select: &super::cli::SelectArgs,
+    json: bool,
+    json_report: Option<&Utf8PathBuf>,
+    styler: Styler,
+    cargo: &CargoOptions,
+) -> crate::Result<i32> {
+    let selection = select.selection()?;
+    let shard = select.shard()?;
+    let plan = crate::discover::plan_for_build(select, &selection, shard, cargo, &mut |_| {})?;
 
     crate::report::skipped(host, &plan, styler)?;
 
-    if let Some(path) = args.json_report.as_ref() {
+    if let Some(path) = json_report {
         write_population(host, &plan, shard, path)?;
     }
 
     let mut stream = host.results();
 
-    if args.json {
+    if json {
         write_pretty_json(&mut stream, &plan.mutants, "the mutant list")?;
 
         return Ok(EXIT_OK);
@@ -249,22 +282,37 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::commands::{ListFilesArgs, ListKind, ListMutantsArgs, ListRegistryArgs};
     use crate::testing::{Broken, BrokenHost, Sink};
 
     fn crate_dir(name: &str) -> tempfile::TempDir {
         crate::fixtures::crate_dir(name, "pub fn less(a: i32, b: i32) -> bool { a < b }\n").0
     }
 
-    fn args(dir: Utf8PathBuf, what: ListKind, json: bool) -> ListArgs {
-        ListArgs {
-            what,
-            select: crate::commands::SelectArgs {
-                dir,
-                ..crate::commands::SelectArgs::default()
-            },
+    fn args(dir: impl Into<Utf8PathBuf>, what: ListKind, json: bool) -> ListArgs {
+        let dir = dir.into();
+        let select = crate::commands::SelectArgs {
+            dir: dir.clone(),
+            ..crate::commands::SelectArgs::default()
+        };
+        let registry = || ListRegistryArgs {
+            dir: dir.clone(),
+            mutators: None,
+            config: crate::commands::ConfigArgs::default(),
             json,
-            json_report: None,
-        }
+        };
+        let command = match what {
+            ListKind::Mutants => ListCommand::Mutants(ListMutantsArgs {
+                select,
+                json,
+                json_report: None,
+            }),
+            ListKind::Files => ListCommand::Files(ListFilesArgs { select, json }),
+            ListKind::Mutators => ListCommand::Mutators(registry()),
+            ListKind::Presets => ListCommand::Presets(registry()),
+        };
+
+        ListArgs { command }
     }
 
     #[test]
@@ -429,11 +477,15 @@ mod tests {
     /// The preset listing says which presets the current selection actually turns on, which is
     /// the whole reason it exists rather than being a table in the README.
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn presets_can_be_listed_as_json_with_the_selection_resolved_against_each() {
         let mut listing = args(Utf8PathBuf::from("."), ListKind::Presets, true);
         let mut host = Sink::default();
 
-        listing.select.mutators = Some("relational,range".to_owned());
+        let ListCommand::Presets(args) = &mut listing.command else {
+            panic!("expected preset listing");
+        };
+        args.mutators = Some("relational,range".to_owned());
 
         let code = list(&mut host, &listing, Styler::new(false)).expect("list presets");
         let text = String::from_utf8(host.out).expect("utf-8");
@@ -483,13 +535,17 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_text_preset_listing_marks_a_preset_selected_by_its_exact_members() {
         let preset = registry::PRESETS
             .iter()
             .find(|preset| preset.name == "boundary")
             .expect("the boundary preset exists");
         let mut listing = args(Utf8PathBuf::from("."), ListKind::Presets, false);
-        listing.select.mutators = Some(preset.members.join(","));
+        let ListCommand::Presets(args) = &mut listing.command else {
+            panic!("expected preset listing");
+        };
+        args.mutators = Some(preset.members.join(","));
         let mut host = Sink::default();
 
         let code = list(&mut host, &listing, Styler::new(false)).expect("list presets");
@@ -526,6 +582,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn the_population_can_be_written_as_a_report() {
         // `merge` withdraws a retired mutant only against an unsharded population, and a rotation
         // that could afford a full run would not be sharding in the first place.
@@ -535,7 +592,10 @@ mod tests {
         let mut host = Sink::default();
         let mut listing = args(root, ListKind::Mutants, false);
 
-        listing.json_report = Some(path.clone());
+        let ListCommand::Mutants(args) = &mut listing.command else {
+            panic!("expected mutant listing");
+        };
+        args.json_report = Some(path.clone());
 
         let code = list(&mut host, &listing, Styler::new(false)).expect("list");
         let text = fs::read_to_string(&path).expect("report");
@@ -554,6 +614,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn a_sharded_population_says_which_shard_it_is() {
         // A shard's silence about a mutant is not evidence that the mutant is gone, so the merge
         // has to be able to tell the two kinds of listing apart.
@@ -563,9 +624,12 @@ mod tests {
         let mut host = Sink::default();
         let mut listing = args(root, ListKind::Mutants, false);
 
-        listing.json_report = Some(path.clone());
-        listing.select.shard_count = Some(4);
-        listing.select.shard_index = Some(2);
+        let ListCommand::Mutants(args) = &mut listing.command else {
+            panic!("expected mutant listing");
+        };
+        args.json_report = Some(path.clone());
+        args.select.shard_count = Some(4);
+        args.select.shard_index = Some(2);
 
         let code = list(&mut host, &listing, Styler::new(false)).expect("list");
         let text = fs::read_to_string(&path).expect("report");
