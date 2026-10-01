@@ -151,7 +151,9 @@
 //! At a timeout, cargo-each makes one termination request for the Windows job
 //! or Unix process group and returns without waiting for operating-system
 //! teardown to finish. A failed termination request is an infrastructure
-//! failure; otherwise the invocation is reported as timed out.
+//! failure; otherwise the invocation is reported as timed out. On Unix, an
+//! uncollected timed-out leader may remain as a zombie until cargo-each exits,
+//! consuming one temporary process-table entry per timed-out invocation.
 //! Child commands inherit `PATH` explicitly. On Windows this makes relative
 //! program lookup honor the inherited `PATH` order instead of preferring an
 //! unrelated executable beside `cargo-each`.

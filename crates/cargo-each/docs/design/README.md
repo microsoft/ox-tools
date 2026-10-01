@@ -371,7 +371,9 @@ no-op.
   the operating system to finish process teardown. A failed termination request
   is an infrastructure failure. Unix process groups are not sealed containment:
   a descendant can escape by creating a new session, and process termination is
-  asynchronous on every platform, so timeout cleanup is best-effort.
+  asynchronous on every platform, so timeout cleanup is best-effort. On Unix,
+  an uncollected timed-out leader may remain as a zombie until cargo-each exits,
+  consuming one temporary process-table entry per timed-out invocation.
 - **Child executable resolution follows `PATH`.** `cargo-each` explicitly
   copies an inherited `PATH` onto every child command. This is equivalent to
   ordinary inheritance on other platforms and makes Windows resolve a relative
