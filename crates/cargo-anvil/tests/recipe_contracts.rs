@@ -2302,6 +2302,53 @@ fn doc_test_selects_only_doctest_capable_affected_packages() {
 }
 
 #[test]
+fn doc_test_workspace_scope_enumerates_only_doctest_capable_members() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("doc-test.just", DOC_TEST), ("impact.just", IMPACT)],
+        &["anvil-doc-test-validate-prereqs", "anvil-toolchain-stable-install", "anvil-impact"],
+    );
+    seed_include(tmp.path(), "affected", "--workspace");
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-doc-test"],
+        &[
+            ("ANVIL_IMPACT", OsStr::new("consume")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_PACKAGE_NAME", OsStr::new("Foo")),
+            ("FAKE_FIRST_RLIB", OsStr::new("1")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("foo")),
+            ("FAKE_SECOND_BIN_ONLY", OsStr::new("1")),
+            ("FAKE_SECOND_DOCTEST_FALSE", OsStr::new("1")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("macro-package")),
+            ("FAKE_THIRD_PROC_MACRO", OsStr::new("1")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "workspace doctest-capability selection failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = fs::read_to_string(&log).unwrap();
+    let doc_commands = commands.lines().filter(|line| line.contains("test --doc")).collect::<Vec<_>>();
+    assert_eq!(doc_commands.len(), 2, "both feature configurations must run:\n{commands}");
+    for command in doc_commands {
+        assert!(
+            command.contains("--package Foo@0.1.0 --package macro-package@0.1.0"),
+            "workspace selection must emit all capable members in ordinal order:\n{command}"
+        );
+        assert!(
+            !command.contains("--package foo@0.1.0"),
+            "workspace selection must exclude case-distinct bin-only members:\n{command}"
+        );
+    }
+}
+
+#[test]
 fn external_types_checks_every_library_including_non_publishable_ones() {
     if !tools_available() {
         return;
